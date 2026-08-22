@@ -245,6 +245,10 @@ const RUST_SKIP: &[&str] = &[
     // ever answers it. `swiss_german_layout`, `locale_detect` and
     // `locale_detect_unrecognized` drive it.
     "locale_gate",
+    // A victim, not a test: it spins on `SYS_GETPID` so that another CPU's NMIs
+    // have somewhere to land, and on its own it asserts nothing and costs ten
+    // seconds. `syscall_window_nmi` runs it on the kernel that storms it.
+    "nmi_window_spin",
     // Driven, not run: `screen_console_clear` types its name at a console it is
     // watching, and on its own it asks the kernel to paint over a panel nobody
     // is reading and exits 0. A verdict its own exit code cannot carry — the
@@ -442,6 +446,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
+    // Three boots of its own, ten seconds of Ring 3 spinning each, and every
+    // verdict is a count the kernel printed or a line it printed: how many NMIs
+    // landed at CPL 0 with a user `rsp`, against how many landed in Ring 3, and
+    // both come off the same storm. No host clock is in any of it — the
+    // ten seconds are how long the victim spins, not a margin anything is
+    // measured against — so Parallel. Carrying `UNMEASURED_MS` until the shards
+    // price it.
+    ("syscall_window_nmi", Sched::Parallel, Tier::Fast),
     // Its own boot, its own feature, and it drives the guest only through
     // stdin — nothing it touches is shared with another test. Returned to
     // Fast on 2026-08-21: the 2026-08-17 drain fix took it from 52,822 ms to
@@ -551,6 +563,15 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_conservation_smp4", Sched::Parallel, Tier::Fast),
     ("log_conservation_smp8", Sched::Parallel, Tier::Fast),
     ("log_nested_emit", Sched::Parallel, Tier::Fast),
+    // The same interrupt one window earlier — between a record's shard-pointer
+    // read and its `xadd` — and its negative control, which is the only reader
+    // `log-unbracketed-reserve` has ever had. Parallel and Fast for
+    // `log_nested_emit`'s reasons: both verdicts are the guest's ledger over its
+    // own records, one saying the shard kept a single order and the other that
+    // it lost it by name, and no clock is in either. Carrying `UNMEASURED_MS`
+    // until the shards price them.
+    ("log_reserve_window", Sched::Parallel, Tier::Fast),
+    ("log_reserve_window_negative", Sched::Parallel, Tier::Fast),
     // Two processes building a fixed-width line out of two `write`s each, and a
     // count of the lines that carry both of them. Parallel and Fast: the verdict
     // is a count over a fixed number of lines the guest declares, so a loaded
@@ -7676,6 +7697,12 @@ fn run_machine_test(
             common::logread::log_conservation_smp8(test_config, c_bins, rust_bins)
         }
         "log_nested_emit" => common::logread::log_nested_emit(test_config, c_bins, rust_bins),
+        "log_reserve_window" => {
+            common::logread::log_reserve_window(test_config, c_bins, rust_bins)
+        }
+        "log_reserve_window_negative" => {
+            common::logread::log_reserve_window_negative(test_config, c_bins, rust_bins)
+        }
         "log_poll_outlives_a_close" => {
             common::logread::log_poll_outlives_a_close(test_config, c_bins, rust_bins)
         }
@@ -7698,6 +7725,7 @@ fn run_machine_test(
             common::hda::hda_two_live_refused(test_config, c_bins, rust_bins)
         }
         "double_fault_stack" => faults::double_fault_stack(test_config, c_bins, rust_bins),
+        "syscall_window_nmi" => faults::syscall_window_nmi(test_config, c_bins, rust_bins),
         "idle_stack_guard" => faults::idle_stack_guard(test_config, c_bins, rust_bins),
         "dump_nmi_probe" => faults::dump_nmi_probe(test_config, c_bins, rust_bins),
         "diskless_boot" => faults::diskless_boot(test_config, c_bins, rust_bins),
