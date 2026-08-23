@@ -378,6 +378,16 @@ means everywhere, not only here. Three shapes:
    running hooks that can park, which is a redesign of that queue rather than a
    use of it.
 
+**Owner ruling on wall 4, 2026-08-23: shape 1 — the write-back queue chunk
+lands first.** `vfs::VFS`'s conversion is sequenced behind the write-back-queue
+chunk, which is already on the chunk list above. That chunk's invariant — a
+file's dirty pages outlive the handle that dirtied them until write-back
+reports complete — leaves `OpenFileState::drop` releasing only a cache
+reference, which a `Drop` may do, so no new rule ("a `Drop` may take a sleep
+lock") is created and `scheduler::Parkable`'s header sentence stays true as
+written. Shapes 2 and 3 are declined precisely because they would create that
+rule or redesign the zero-handle drain; shape 1 is the one that needs neither.
+
 ### Wall 5: demand paging holds `ProcessData` across the device, and a nested trap is a level above the baseline
 
 Read off the tree 2026-08-20. `process::handle_page_fault` takes
@@ -412,6 +422,15 @@ it across `backing.read_page(...)` at `process.rs:1658`, which for a `/boot` or
   change to the assertion the whole design rests on, which is why it is recorded
   here rather than taken.
 
+**Owner ruling on wall 5, 2026-08-23: both.** The demand-paging fault path is
+restructured so it does not hold `Lock<ProcessData>` across `read_page` and the
+device round trip: what the fill needs — the two `elf` fields — is snapshotted
+and the guard dropped before the fill, the way the function already snapshots
+and drops its address-space guard. **And** `blocking_baseline` stops being a
+constant: each trap entry records the level it raised and `blocking_baseline`
+reads that, so the tripwire means *"a spinlock is held"* for a nested trap as
+well as an unnested one.
+
 ## What the conversion still owes, in the order it has to be done
 
 Read off the tree on 2026-08-20 with wall 3 landed and the TRB half of wall 1
@@ -420,11 +439,19 @@ any split; **items 0a and 0b are owner decisions that come before all of it**,
 and neither is derivable from the rest of this file.
 
 0a. **Wall 4's decision: may a `Drop` impl park?** Until it is answered
-   `vfs::VFS` cannot convert, so nothing below can either.
+   `vfs::VFS` cannot convert, so nothing below can either. **Ruled 2026-08-23:
+   shape 1** — the write-back-queue chunk, already on the chunk list, is the
+   prerequisite, and `vfs::VFS`'s conversion is sequenced behind it; the ruling
+   is recorded at wall 4.
 0b. **Wall 5's decision: does the baseline stop being a constant, or does the
    fault path stop holding `ProcessData` across the device — or both?** Until it
    is answered `fat32_adapter::VOLUMES` cannot be parked under from the
-   demand-paging path.
+   demand-paging path. **Ruled 2026-08-23: both** — the fault path drops the
+   `ProcessData` guard before the fill, and the baseline is read off what each
+   trap entry recorded; the ruling is recorded at wall 5. Once done, this makes
+   `fat32_adapter::VOLUMES` and `page_cache::BLOCK_DEV` — the NVMe pair, behind
+   the same wall by the same route — parkable under from the demand-paging
+   path.
 1. **Wall 2's claim on the pool block**, including the teardown half above.
 2. **Wall 1's session.** Its other half — `Await::Transfer` carrying the TRB
    address — is landed; what is left is the borrow chain.
