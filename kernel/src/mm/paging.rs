@@ -32,6 +32,15 @@
 // A split is one-way: nothing coalesces a window back, and the page table lives
 // in `children` until the address space does.
 //
+// **A window a fault filled is claimed under the lock that installs it.** The
+// demand pager fills 2 MiB with this address space unlocked, so the "is it
+// mapped?" it asked before filling is stale by the whole fill and two threads of
+// one process both pass it. `map_window_if_absent` is where that question is
+// asked the second time, in the same critical section as the write it decides,
+// and the loser's frame is dropped rather than installed over the winner's — a
+// second install would leave the first thread's CPU holding a translation
+// nothing else can see, because what `write_pde` derives reaches this CPU alone.
+//
 // **No mapping in this kernel is global.** There is no `PAGE_GLOBAL` and
 // `CR4.PGE` is not in `arch::control_regs`'s declaration, which is what makes
 // the single-address forms complete here: INVPCID type 0 and INVLPG both leave
@@ -695,11 +704,17 @@ impl AddressSpace {
     /// what the PDE write owes is derived from what was there, as everywhere
     /// else. The split is one way — a window is never coalesced back — and
     /// `children` owns the table for the address space's life, which is why
-    /// this may not be called repeatedly on one address. It is not: the only
-    /// caller is the demand-paging fault, on a PDE it has already proven
-    /// absent.
+    /// this may not be called repeatedly on one address: the second call's PDE
+    /// orphans the first call's table inside `children`, where it stays until
+    /// the address space dies.
+    ///
+    /// Both callers owe that. `dlopen` maps into a range `alloc_region` has
+    /// just handed out and no address is written twice; the demand-paging fault
+    /// goes through [`map_window_if_absent`], which is the same guarantee made
+    /// by asking rather than by argument.
     ///
     /// [`remap`]: Self::remap
+    /// [`map_window_if_absent`]: Self::map_window_if_absent
     pub fn map_window(&mut self, vaddr: UserAddr, phys: u64, prot: &WindowProt) {
         if let Some(uniform) = prot.agreed() {
             self.remap(vaddr, phys, uniform);
@@ -735,6 +750,49 @@ impl AddressSpace {
         // user — `NX` here would make the whole window non-executable whatever
         // the leaves say.
         pd.write_pde(pd_idx, va, table_phys | TABLE_FLAGS).discharge(target);
+    }
+
+    /// Install a demand-filled window, unless this address already has one.
+    /// `true` if this call installed it; `false` leaves the mapping exactly as
+    /// it was found and makes `phys` the caller's to free.
+    ///
+    /// **The question and the write are one critical section, and that is the
+    /// whole method.** The demand pager cannot hold this lock while it fills —
+    /// a fill is a 2 MiB zeroing or up to 512 device reads — so it asks whether
+    /// the window is mapped, releases the lock, fills, and comes back. Two
+    /// threads of one process both get "no" to that first question, and before
+    /// this existed both installed: the PDE named the second frame, the first
+    /// thread's CPU kept a translation to the first (an `Owed` reaches this CPU
+    /// alone, and no shootdown is issued on the fault path), and two threads
+    /// disagreed about the contents of one address. Asking again here makes the
+    /// loser a wasted fill instead.
+    ///
+    /// Exhaustively, for two threads A and B filling one window, with this
+    /// lock's critical sections the only ordering that exists between them:
+    /// either A's section precedes B's or B's precedes A's. The first of the
+    /// two finds the PDE absent — nothing else in this kernel installs a user
+    /// window at an address a region already covers — and installs. The second
+    /// finds what the first wrote, because it reads the same table under the
+    /// same lock, and returns `false`. So exactly one frame is installed per
+    /// window and no install ever lands on a present entry, which is what makes
+    /// the fault path's "no invalidation is owed here" true rather than usually
+    /// true. More than two threads is the same argument: only the first section
+    /// finds an absent PDE.
+    ///
+    /// The check is a walk of three already-hot table lines, paid once per
+    /// *fill* and never on the common already-mapped fault, which
+    /// `handle_page_fault` answers before it allocates anything.
+    pub fn map_window_if_absent(
+        &mut self,
+        vaddr: UserAddr,
+        phys: u64,
+        prot: &WindowProt,
+    ) -> bool {
+        if self.translate(vaddr).is_some() {
+            return false;
+        }
+        self.map_window(vaddr, phys, prot);
+        true
     }
 
     /// Unmap one 2MB page and free its physical memory.
