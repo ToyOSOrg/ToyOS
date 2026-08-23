@@ -401,7 +401,19 @@ fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
                 Err(e) => e.to_u64(),
             }
         }
-        SYS_FSYNC => with_object(RawHandle(a1 as u32), Rights::WRITE, ops::fsync),
+        // The object is cloned out and the call runs **outside** the
+        // process-data lock, unlike `with_object`'s other users: `ops::fsync`
+        // is a blocking call since the slow-vs-failed split — it yields and
+        // parks between flush attempts — and a park under `with_process_data`
+        // is the §6.4 tripwire by construction. Same shape as `sys_read`'s
+        // resolve-then-block loop, taken once because a `File` is never
+        // revoked mid-call by anything but `close`, which the clone outlives.
+        SYS_FSYNC => {
+            match with_object_ref(RawHandle(a1 as u32), Rights::WRITE, KObjectRef::clone) {
+                Ok(object) => ops::fsync(&object),
+                Err(e) => e.refuse(),
+            }
+        }
         SYS_READDIR => {
             let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a3), a4) else { return bad_addr };

@@ -191,10 +191,10 @@ pub fn send_nmi(cpu_id: u32) {
 /// guest on the host and **0 of 30** with eleven, so the expiry is reachable
 /// and host load is not what reaches it. A `/bin/logd` held off its volume for
 /// 3 s reproduces that run exactly, and this volume is known to park for
-/// seconds at a time —
-/// `issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md` has
-/// `USB_TIMEOUT_NS` at 2 s with `block::OPERATION`'s 2 s in series behind it,
-/// reproduced 1 in 73.
+/// seconds at a time — `USB_TIMEOUT_NS` is 2 s with `block::OPERATION`'s 2 s
+/// in series behind it, measured holding one `SYS_FSYNC` for 2.1 s at 1 in 73
+/// full 12-wide suites (2026-08-22), and since 2026-08-23 `object/ops.rs`'s
+/// fsync loop may lawfully retry such a stall for up to `block::DEADMAN`.
 ///
 /// **Lengthening this number is a trade against how long a dead machine takes
 /// to stop, and it is the owner's.** What is not optional is that a machine

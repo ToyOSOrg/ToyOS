@@ -785,6 +785,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("xhci_hid_break", Sched::Parallel, Tier::Nightly),
     ("xhci_descriptor_walk", Sched::Parallel, Tier::Fast),
     ("esp_filesystem", Sched::Parallel, Tier::Fast),
+    // Three boots: a budget-refused flush retried and kept, the deadman's
+    // declared death, and a hung device's failed reset escalation — the three
+    // exits of `object/ops.rs`'s fsync loop. Every verdict is line presence
+    // and host-side bytes, never a wall-clock margin.
+    ("log_flush_retry", Sched::Parallel, Tier::Nightly),
     ("toybox_cp_volume", Sched::Parallel, Tier::Nightly),
     ("kernel_log_file", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is a cadence — heartbeats against a 250 ms period —
@@ -7373,6 +7378,7 @@ fn run_machine_test(
         "usb_disk_index_stable" => usb::usb_disk_index_stable(test_config, c_bins, rust_bins),
         // Body in `tests/common/volumes.rs`, same reason.
         "esp_filesystem" => common::volumes::esp_filesystem(test_config, c_bins, rust_bins),
+        "log_flush_retry" => common::volumes::log_flush_retry(test_config, c_bins, rust_bins),
         // Body in `tests/common/toybox.rs`, same reason.
         "toybox_cp_volume" => common::toybox::cp_volume(test_config, c_bins, rust_bins),
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
@@ -9311,15 +9317,18 @@ fn run_machine_test(
                 .join(format!("test-nvme-{}.img", qemu::NVME_T14_BYTES));
             let _ = fs::remove_file(&stale);
 
-            // `nvme-spent-budget` rides this boot rather than buying a
-            // registered name of its own: it needs the test kernel and a real
-            // NVMe namespace, which is what this test already boots, and what
-            // it costs is one refused read before anything mounts the device —
-            // no command issued, no cache slot taken, and so nothing the
-            // eviction series below can see.
+            // `nvme-spent-budget` and `nvme-command-silent` ride this boot
+            // rather than buying registered names of their own: each needs the
+            // test kernel and a real NVMe namespace, which is what this test
+            // already boots. The first costs one refused read before anything
+            // mounts the device — no command issued, no cache slot taken; the
+            // second costs one abandoned read and the controller reset that
+            // reclaims it, all before the mount, so the eviction series below
+            // runs on the freshly rebuilt queues — which is itself half the
+            // point: a reset that left them out of step reds the series.
             let options = BootOptions {
                 profile: qemu::Profile::MetalDisk,
-                kernel_params: &["test-small-caches", "nvme-spent-budget"],
+                kernel_params: &["test-small-caches", "nvme-spent-budget", "nvme-command-silent"],
                 ..Default::default()
             };
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
@@ -9337,6 +9346,16 @@ fn run_machine_test(
             let console = serial::Serial::named("boot console", boot.as_str());
             console.must_say("nvme-gate: read with a spent budget refused=true budget=true")?;
             console.must_say("nvme-gate: the same block read afterwards ok=true")?;
+
+            // The reset escalation, NVMe 2.0 §3.7.2: a command whose completion
+            // wait was skipped is a live controller owing an answer, and until
+            // 2026-08-23 that single silence was a disk declared dead. Now it
+            // must be one reset, the silence answered as a budget word rather
+            // than a device fact, and the same block readable through the
+            // rebuilt queues.
+            console.must_say("nvme-gate: the silent command's read refused=true budget=true")?;
+            console.must_say("NVMe: controller reset complete")?;
+            console.must_say("nvme-gate: the same block read after the reset ok=true")?;
 
             let Some(file_budget) = parse_cache_budget(&boot, "file cache: budget ") else {
                 return Err(format!("the file cache printed no budget:\n{boot}"));

@@ -257,8 +257,8 @@ fn a_device_that_fails_mid_read_reports_it() {
 /// implementor bounds an operation with `block::OPERATION`, and reaching that
 /// bound is a statement about the caller's clock. Flattening it into
 /// `Error::Io` is what made `/bin/logd` end a boot's log for a stick that was
-/// answering
-/// (`issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md`).
+/// answering — 1 red in 73 full 12-wide suites (2026-08-22), one `SYS_FSYNC`
+/// held for 2.1 s while the guest's peers booted in 1.4 s.
 /// The two `assert_ne!`s are the point of the test: `Error::Io` is exactly the
 /// answer the collapsed version gives.
 #[test]

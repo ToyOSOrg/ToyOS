@@ -1,6 +1,6 @@
 use crate::mm::PAGE_SIZE;
 use crate::scheduler::Operation;
-use crate::time::{Budget, Deadline, Duration};
+use crate::time::{Budget, Cadence, Deadline, Duration};
 
 /// Unique identifier for a block device, used as page cache key.
 pub type DeviceId = u32;
@@ -43,19 +43,28 @@ pub type DeviceId = u32;
 /// it — the same is now recorded one layer down for `USB_TIMEOUT_NS` — and what
 /// the caller is told when it does is the sentence below.
 ///
-/// **The term the two-part derivation is missing is the recovery.** "One whole
+/// **The term the two-part derivation is missing is the recovery, and since
+/// owner ruling 2026-08-23 the recovery lives one level up.** "One whole
 /// `USB_TIMEOUT_NS`" is the allowance for transfers that *complete*; a transfer
 /// that breached its own bound did not, and what the driver does next is a Reset
-/// Recovery and a re-issue (`xhci/wait/msc.rs`'s `scsi`, and its own doc on why
-/// recovering and then reporting failure loses a write the device would have
-/// taken). With this budget equal to that bound, one breached transfer spends
-/// all of it and `MAX_TRANSPORT_ATTEMPTS` is unreachable: the recovery succeeds
-/// and the re-issue is refused unissued. Measured 2026-08-22, 1 red in 73 full
-/// 12-wide suites, `esp_filesystem`'s `fsync` on `/log`; the identical break was
-/// absorbed by the retry on CI on 2026-08-13, before this constant existed.
-/// Sizing it is a trade against `/bin/logd`'s 5 s on one side and the CPU pin in
-/// `issues/audio/disk-wait-pins-a-cpu.md` on the other, so the number is not an
-/// agent's to move.
+/// Recovery (`xhci/wait/msc.rs`'s `scsi`, and its own doc on why recovering and
+/// then reporting failure loses a write the device would have taken). With this
+/// budget equal to that bound, one breached transfer spends all of it, so the
+/// *re-issue* after a timeout-induced break is never this operation's: it is
+/// refused unissued, the operation answers [`BlockError::BudgetExpired`], and
+/// the retry belongs to the caller above the locks — `object/ops.rs`'s `fsync`
+/// loop, bounded by [`DEADMAN`] — where the CPU is not pinned and can yield
+/// between attempts. Measured 2026-08-22, 1 red in 73 full 12-wide suites,
+/// `esp_filesystem`'s `fsync` on `/log`; the identical break was absorbed by
+/// the in-driver retry on CI on 2026-08-13, before this constant existed.
+///
+/// **This number is a slowness detector and never a death sentence, and it is
+/// the pin.** `issues/audio/disk-wait-pins-a-cpu.md`: for the whole of one
+/// operation the CPU sits up to four ticket spinlocks deep with preemption off,
+/// so this constant is the longest a single pinned stretch may grow — raising
+/// it lengthens an audio-path stall directly, which is why the retries a slow
+/// device needs are bought as *more short operations* rather than one long one.
+/// Not an agent's number to move.
 ///
 /// **A [`Budget`] and not a [`crate::time::Tripwire`]**: expiry is a degraded
 /// answer, named. The operation is refused, the device is *not* marked failed —
@@ -69,6 +78,70 @@ pub const OPERATION: Budget = Budget::of(
     Duration::from_secs(2),
     "the block-device operation is refused as one that would block, and the \
      caller's own give-up policy decides whether to ask again",
+);
+
+/// The total a *sequence* of block-device operations may spend making one
+/// durability request true before the volume is declared failed.
+///
+/// **The deadman, and the one legal reader is the retry loop above every
+/// lock** — `object/ops.rs`'s `fsync`. [`OPERATION`] bounds one pinned attempt;
+/// this bounds the run of attempts, taken between them, where no spinlock is
+/// held and the loop yields the CPU. Its job is catching a *hung* device — one
+/// that answers resets and never completes work — not a slow one: a slow device
+/// keeps answering attempts inside their own budgets and never comes near it.
+///
+/// **Expiry is the third of exactly three ways a volume may be declared
+/// failed**, beside a device error status and a reset escalation that itself
+/// failed. A single attempt's elapsed time is never one of them: a timeout
+/// means "not durable *yet*", and only the device's own word means "cannot be
+/// made durable". PostgreSQL post-fsyncgate, ZFS (`zio_slow_io_ms` against its
+/// 300 s hung-I/O deadman) and Linux's SCSI/NVMe error handling all draw the
+/// same line, and this kernel drew it on the other side once: 1 red in 73
+/// suites, a boot's log ended for a stick that answered every transfer.
+///
+/// **120 s, and the derivation is three fences.** Below: it must hold the worst
+/// *recoverable* stall ever recorded on this path with room to spare — the
+/// 2026-08-13 stick answered SYNCHRONIZE CACHE 280 ms after a 2 s transport
+/// break, the 2026-08-22 red spent 2.1 s inside one `SYS_FSYNC`, and the
+/// healthy distribution [`census`] measures sits well under one attempt's
+/// bound (2026-08-23, dev host, full 12-wide `cargo test`, busiest guest's 647
+/// flushes: p50 ≤ 512 µs, p99 ≤ 16 ms, max 87.5 ms — 23× under `OPERATION`) —
+/// so 120 s is ~30 whole hung-attempt cycles at the backoff's ceiling, not a
+/// tuned fit. Above: ZFS ships 300 s for the same job, and a laptop being
+/// flashed from this stick deserves an answer while somebody is still
+/// watching; 120 s is the round number between. It deliberately no longer
+/// fits inside `/bin/logd`'s old 5 s syscall-side bound: that bound's slowness
+/// half moved here, and logd's policy now treats a slow-but-answered round as
+/// degraded rather than dead.
+pub const DEADMAN: Budget = Budget::of(
+    Duration::from_secs(120),
+    "the run of retries ends, the volume is declared failed, and the caller is \
+     told with a device error rather than another ask-again",
+);
+
+/// How soon the retry loop may ask again after its first refused attempt.
+///
+/// One scheduler quantum: the common producer of a refused budget is the
+/// caller's own lost time — lock-wait, or the host descheduling the vCPU — and
+/// both are usually over within one. The first retry is nearly free either
+/// way: a refusal is taken before anything is issued.
+pub const RETRY_SOONEST: Cadence = Cadence::every(
+    Duration::from_millis(10),
+    "one quantum parked between attempts; the refusal itself issued nothing",
+);
+
+/// The ceiling the retry interval doubles up to.
+///
+/// Exactly one [`OPERATION`]: every attempt against a hung-but-resetting
+/// device can pin a CPU for up to that long
+/// (`issues/audio/disk-wait-pins-a-cpu.md`), so a floor of the same width
+/// between attempts caps the pin's duty cycle at half — the audio path is
+/// never held more than every other slice of the run, however long the
+/// deadman lets it go on.
+pub const RETRY_SLOWEST: Cadence = Cadence::every(
+    OPERATION.duration(),
+    "between two pinned attempts the machine gets at least as long as one \
+     attempt may pin",
 );
 
 /// Declare the running context inside one block-device operation, bounded by
@@ -97,10 +170,10 @@ pub fn begin_operation() -> Operation {
 /// of the *buffer* and false of the caller: `/bin/logd` gives its volume up
 /// permanently on any `Err` from `SYS_FSYNC`, which is right for a stick that
 /// cannot flush and wrong for a refusal that means "your budget, not this
-/// stick". `issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md`
-/// carried the measurement: 1 red in 73 full 12-wide suites, a boot whose peers
-/// were up in 1,385 ms spending `syscall_wall=2108ms` inside one `SYS_FSYNC`,
-/// and a boot's log ended for a device that was fine.
+/// stick". The measurement that split them (2026-08-22): 1 red in 73 full
+/// 12-wide suites, a boot whose peers were up in 1,385 ms spending
+/// `syscall_wall=2108ms` inside one `SYS_FSYNC`, and a boot's log ended for a
+/// device that was fine.
 ///
 /// It is still not a *vocabulary*. Which endpoint stalled, what the sense key
 /// was and whether the device answered at all stay in the driver's own log
@@ -236,4 +309,127 @@ pub fn file_cache_pages() -> usize {
     }
     let (total, _) = crate::mm::pmm::stats();
     (((total / 64) / PAGE_SIZE) as usize).clamp(2048, 65536)
+}
+
+/// The flush-latency census: what the machine's device flushes actually cost,
+/// printed so [`OPERATION`] and [`DEADMAN`] are derived from data rather than
+/// from an argument about data.
+///
+/// The `syscall_cost`/interrupt-census shape: counters fed on the path they
+/// measure, one printed line at a moment a running guest reaches — a process
+/// exit — because the harness ends every guest by killing QEMU and a
+/// shutdown-only instrument reaches no capture. The feeding is a handful of
+/// relaxed atomics on the *flush* path only, which no audio-path work shares.
+///
+/// Latency lands in power-of-two microsecond buckets, so the line's `p50`/`p99`
+/// are each bucket ceilings — good to a factor of two, which is what sizing a
+/// two-orders-of-magnitude deadman needs — and `max` is exact.
+pub mod census {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    use super::DeviceId;
+
+    /// Distinct devices the census can hold apart. The machines this kernel
+    /// boots carry at most an NVMe namespace and a couple of sticks; a fifth
+    /// device folds into the last slot and the line says so with its id.
+    const DEVICES: usize = 4;
+    /// log2-µs latency buckets: bucket `i` holds flushes that took under
+    /// `2^i` µs, and the last holds everything from 2 s up.
+    const BUCKETS: usize = 32;
+
+    struct Slot {
+        /// The device id plus one, so zero means empty.
+        id: AtomicU32,
+        flushes: AtomicU64,
+        /// Operations (read, write or flush) this device refused on the
+        /// caller's budget — [`super::BlockError::BudgetExpired`], the count
+        /// the slow-vs-failed split turns on.
+        expiries: AtomicU64,
+    }
+
+    static SLOTS: [Slot; DEVICES] = [const {
+        Slot { id: AtomicU32::new(0), flushes: AtomicU64::new(0), expiries: AtomicU64::new(0) }
+    }; DEVICES];
+    static LATENCY: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
+    static MAX_NS: AtomicU64 = AtomicU64::new(0);
+    /// Everything the print above has already reported, so an exit with no news
+    /// prints nothing.
+    static REPORTED: AtomicU64 = AtomicU64::new(0);
+
+    fn slot(device: DeviceId) -> &'static Slot {
+        let key = device + 1;
+        for slot in &SLOTS {
+            match slot.id.compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return slot,
+                Err(held) if held == key => return slot,
+                Err(_) => {}
+            }
+        }
+        &SLOTS[DEVICES - 1]
+    }
+
+    /// One device flush completed (either way), taking `nanos` of wall clock.
+    pub fn flush_took(device: DeviceId, nanos: u64) {
+        slot(device).flushes.fetch_add(1, Ordering::Relaxed);
+        let micros = nanos / 1_000;
+        let bucket = (64 - u64::leading_zeros(micros | 1) as usize).min(BUCKETS - 1);
+        LATENCY[bucket].fetch_add(1, Ordering::Relaxed);
+        MAX_NS.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// One operation on `device` was refused on the caller's budget.
+    pub fn budget_expired(device: DeviceId) {
+        slot(device).expiries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The latency value at or below which `want` of `total` samples fall,
+    /// as the ceiling of its bucket in microseconds.
+    fn percentile(counts: &[u64; BUCKETS], total: u64, want: u64) -> u64 {
+        let mut seen = 0u64;
+        for (i, &count) in counts.iter().enumerate() {
+            seen += count;
+            if seen * 100 >= total * want {
+                return 1u64 << i;
+            }
+        }
+        1u64 << (BUCKETS - 1)
+    }
+
+    /// Say what has been measured, once per batch of news. Called at process
+    /// exit — the one recurring moment a running guest reaches.
+    pub fn print_if_moved() {
+        let mut counts = [0u64; BUCKETS];
+        let mut total = 0u64;
+        for (bucket, count) in LATENCY.iter().zip(counts.iter_mut()) {
+            *count = bucket.load(Ordering::Relaxed);
+            total += *count;
+        }
+        let mut events = total;
+        for slot in &SLOTS {
+            events += slot.expiries.load(Ordering::Relaxed);
+        }
+        if events == 0 || REPORTED.swap(events, Ordering::Relaxed) == events {
+            return;
+        }
+        for slot in &SLOTS {
+            let id = slot.id.load(Ordering::Relaxed);
+            if id == 0 {
+                continue;
+            }
+            crate::log!(
+                "flush-census: dev={} flushes={} expiries={}",
+                id - 1,
+                slot.flushes.load(Ordering::Relaxed),
+                slot.expiries.load(Ordering::Relaxed),
+            );
+        }
+        if total > 0 {
+            crate::log!(
+                "flush-census: p50<={}us p99<={}us max={}us of {total} flushes",
+                percentile(&counts, total, 50),
+                percentile(&counts, total, 99),
+                MAX_NS.load(Ordering::Relaxed) / 1_000,
+            );
+        }
+    }
 }

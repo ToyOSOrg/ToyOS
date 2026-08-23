@@ -268,6 +268,53 @@ mod transport_break {
     }
 }
 
+/// Make one Reset Recovery run against a device that answers nothing, where
+/// the harness asks for it: the recovery's control transfers — the Bulk-Only
+/// Mass Storage Reset and both CLEAR_FEATUREs — are enqueued, rung and not
+/// waited for, once.
+///
+/// **A kernel feature because nothing on the host side can stage it.** QEMU's
+/// `usb-storage` answers every EP0 request in microseconds and has no device,
+/// drive or machine property that makes it stop, so "the reset escalation
+/// itself failed" — one of the exactly three evidences a volume may be
+/// declared failed on, beside a device error status and the deadman — has no
+/// host-side producer at all. What is replaced is only the waits, which is the
+/// state a device that stopped answering EP0 leaves behind; the recovery then
+/// reports failure off its own shipped checks, [`MscDevice::failed`] is set by
+/// the shipped path, and the disk is never spoken to again — so the late
+/// completions QEMU still delivers answer transfers nothing is waiting on.
+/// Same reason `usb-transport-break` exists, one layer further down the
+/// escalation.
+#[cfg(feature = "boot-actuators")]
+pub(in crate::drivers::xhci) mod reset_break {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static UNSPENT: AtomicBool = AtomicBool::new(true);
+    static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    /// Called at the top of one Reset Recovery. `true` means this recovery is
+    /// the staged one and must call [`end`] on its way out.
+    pub fn begin() -> bool {
+        if !crate::actuator::usb_reset_break() || !UNSPENT.swap(false, Ordering::Relaxed) {
+            return false;
+        }
+        ACTIVE.store(true, Ordering::Relaxed);
+        true
+    }
+
+    pub fn end() {
+        ACTIVE.store(false, Ordering::Relaxed);
+    }
+
+    /// Read where `wait_transfer` would begin waiting. Only the staged
+    /// recovery's own control transfers can see it set: the window is opened
+    /// and closed inside one `reset_recovery` call, on one CPU, under the
+    /// controller lock every transfer wait already holds.
+    pub fn active() -> bool {
+        ACTIVE.load(Ordering::Relaxed)
+    }
+}
+
 /// Make the controller's account of one READ(10) data phase and the device's
 /// own account of it disagree, once, where the harness asks for it.
 ///
@@ -358,15 +405,15 @@ enum Scsi {
     /// budget had already expired when this attempt came up.
     ///
     /// **Apart from [`Self::Broken`], because it is not a fact about the
-    /// disk.** The two were one value until 2026-08-22 and
-    /// `issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md`
-    /// measured what that cost: a stick that answered every transfer, a
-    /// recovery that succeeded in 1 ms, and a log volume given up permanently
-    /// because "your budget expired" arrived at `/bin/logd` as "this disk
-    /// cannot flush". Nothing was on a ring when this is returned, no endpoint
-    /// owes a completion, [`MscDevice::failed`] is clear, and the next
-    /// operation finds the transport exactly as this one left it — which is
-    /// what makes asking again the honest answer.
+    /// disk.** The two were one value until 2026-08-22, and what that cost was
+    /// measured at 1 red in 73 full 12-wide suites: a stick that answered
+    /// every transfer, a recovery that succeeded in 1 ms, and a log volume
+    /// given up permanently because "your budget expired" arrived at
+    /// `/bin/logd` as "this disk cannot flush". Nothing was on a ring when
+    /// this is returned, no endpoint owes a completion, [`MscDevice::failed`]
+    /// is clear, and the next operation finds the transport exactly as this
+    /// one left it — which is what makes asking again the honest answer, and
+    /// `object/ops.rs`'s fsync loop the caller that asks.
     Budget,
 }
 
@@ -534,9 +581,9 @@ impl XhciController {
     ///
     /// **They answer [`BlockResult`] and not `bool`**, because the budget they
     /// recover is also the budget they can *refuse* on, and that refusal is not
-    /// a fact about the disk. One word for both is what
-    /// `issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md`
-    /// measured the cost of; [`Scsi::Budget`] carries the difference up.
+    /// a fact about the disk. One word for both cost a boot's log once in 73
+    /// full 12-wide suites (2026-08-22); [`Scsi::Budget`] carries the
+    /// difference up.
     pub(super) fn msc_read(&mut self, at: usize, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
         let until = Operation::deadline();
         self.with_storage(at, |ctrl, disk| {
@@ -1045,9 +1092,16 @@ impl XhciController {
     /// arguments are the two endpoints' quiesces — so there is no order of
     /// these three lines that speaks first.
     fn reset_recovery(&mut self, dev: &mut MscDevice) -> bool {
+        #[cfg(feature = "boot-actuators")]
+        let staged = reset_break::begin();
         let owed_in = self.quiesce_endpoint(&mut Self::bulk_endpoint(dev, true));
         let owed_out = self.quiesce_endpoint(&mut Self::bulk_endpoint(dev, false));
-        self.reset_the_device(dev, owed_in, owed_out)
+        let recovered = self.reset_the_device(dev, owed_in, owed_out);
+        #[cfg(feature = "boot-actuators")]
+        if staged {
+            reset_break::end();
+        }
+        recovered
     }
 
     /// Every word of Reset Recovery that reaches the device, in BOT §5.3.4's

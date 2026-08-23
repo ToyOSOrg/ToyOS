@@ -177,6 +177,10 @@ fn main() {
     // When the current run of consecutive retries began, or `None` when the
     // last batch was answered. `policy::fate` bounds the run and not the round.
     let mut retrying_since: Option<Instant> = None;
+    // Whether the volume is currently degraded — answering, slower than
+    // `LOG_WRITE_BUDGET` a round — so the state is announced once per episode
+    // rather than once per slow batch.
+    let mut degraded = false;
     loop {
         let batch = match tail.read(&cap, &mut buf) {
             Ok(batch) => batch,
@@ -246,6 +250,10 @@ fn main() {
                 // the case the wait exists for.
                 tail.publish_durable(newest);
                 retrying_since = None;
+                if degraded {
+                    degraded = false;
+                    say!("logd: {DIR} answers at pace again - {}", v.path());
+                }
                 if v.full() {
                     if let Err(e) = v.rotate(|line| say!("{line}")) {
                         say!("logd: {DIR} would not take a continuation ({e}) - {}", v.path());
@@ -290,6 +298,33 @@ fn main() {
                                 step.as_str(),
                                 v.path()
                             );
+                        }
+                    }
+                    // Every call answered, so the batch is durable and is
+                    // published — this is the one refused-shaped outcome that
+                    // is a success. The volume is kept whole: degraded is not
+                    // dead, and slowness is the kernel's to bound now
+                    // (`block::DEADMAN`), not this program's to punish.
+                    Fate::Degraded => {
+                        tail.publish_durable(newest);
+                        retrying_since = None;
+                        if !degraded {
+                            degraded = true;
+                            say!(
+                                "logd: {DIR} answers but slowly ({}: {why}) - degraded, nothing \
+                                 lost, {} is still this boot's log",
+                                step.as_str(),
+                                v.path()
+                            );
+                        }
+                        if v.full() {
+                            if let Err(e) = v.rotate(|line| say!("{line}")) {
+                                say!(
+                                    "logd: {DIR} would not take a continuation ({e}) - {}",
+                                    v.path()
+                                );
+                                volume = None;
+                            }
                         }
                     }
                 }
