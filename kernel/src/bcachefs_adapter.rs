@@ -69,6 +69,7 @@ fn as_syscall_error(err: &FsError) -> SyscallError {
         | FsError::CorruptedKey(_)
         | FsError::CorruptedNode(_)
         | FsError::BlockOffDevice { .. }
+        | FsError::NotEnoughBlocks { .. }
         | FsError::TreeTooDeep(_)
         | FsError::BadSuperblock { .. }
         | FsError::NodeOverfull { .. } => SyscallError::Io,
