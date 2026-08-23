@@ -529,6 +529,15 @@ pub fn block_on(ticket: Ticket<'_>, deadline: Deadline) {
 /// Give the CPU up voluntarily, keeping the claim on it: the pass decides
 /// whether anything else deserves the quantum.
 ///
+/// **The tripwire is the calling context's own baseline, not the trap's.** A
+/// syscall yields one level up (`common_entry`'s `lock add`) and a kernel
+/// thread's body yields at zero — `iod`'s write-back drain retry
+/// (`block::between_attempts`) is the second, and asserting `BASELINE_TRAP`
+/// flat panicked it as "a lock is held". [`blocking_baseline`] reads the
+/// entitlement from the context exactly as [`Parkable::at_entry`] and the park
+/// do, so this stays §6.4's spinlock tripwire for both: a yield holding a
+/// `Lock` still trips it, one level lower for the kernel thread.
+///
 /// **The thirty-three lines that used to stand here were the deleted
 /// `scheduler::wait_until`'s, and the commit that deleted the function left its
 /// doc behind on the next item.** They described a register/re-check/park loop
@@ -539,7 +548,7 @@ pub fn block_on(ticket: Ticket<'_>, deadline: Deadline) {
 /// where the argument belongs; it is not restated here.
 #[track_caller]
 pub fn yield_now() {
-    assert_baseline(BASELINE_TRAP);
+    assert_baseline(blocking_baseline());
     driver::pass(Dispose::Yield);
 }
 
