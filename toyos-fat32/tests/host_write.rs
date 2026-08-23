@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use common::{pattern, read_all, sorted_walk, write_new, Image};
-use toyos_fat32::{Error, Fat32, FatTime};
+use common::{pattern, read_all, sorted_walk, write_new, Image, RefuseOnceInRange};
+use toyos_fat32::{Error, Fat32, FatTime, IoError};
 
 /// 2024-06-01 12:34:56, so every entry this crate stamps is checkable rather
 /// than whatever the clock said.
@@ -219,6 +219,64 @@ fn every_fat_copy_stays_in_step() {
         fs.flush_meta(&mut f, stamp()).expect("flush");
         fs.sync().expect("sync");
         common::assert_fats_agree(&mut fs);
+    }
+    image.fsck();
+}
+
+/// A device budget that expires partway through a cluster allocation's
+/// two-copy FAT write must not leave the copies split at rest: the retry a
+/// budget refusal invites heals them, because the active FAT — written last —
+/// was never touched.
+///
+/// The host-side negative control for `set_fat_entry`'s active-last ordering.
+/// `RefuseOnceInRange` is armed on the **mirror** (FAT 1) region and refuses the
+/// one write landing there with the retryable [`IoError::BudgetExpired`] — the
+/// mid-mirror refusal a starved host produces and QEMU will not. With the active
+/// FAT written last the mirror is the *first* write, so refusing it leaves
+/// nothing durable and the re-drive (what `kernel::writeback`'s drain does on a
+/// `WouldBlock` flush) re-picks the same free cluster and writes both copies.
+/// Revert the ordering — write the active FAT first — and the mirror becomes the
+/// *second* write: the active FAT takes the update, the mirror is left behind,
+/// the re-scan skips the now-allocated cluster, and both `assert_fats_agree`
+/// here and `fsck` on the image go red on the leaked, split entry. That is the
+/// invariant this pins: `set_fat_entry` returning `Err` leaves the active FAT
+/// unchanged.
+#[test]
+fn a_refused_mirror_write_heals_on_the_retry() {
+    let image = image("mirror-refusal");
+    let geom = *Fat32::mount(image.device()).expect("probe mount").geometry();
+    assert_eq!(geom.num_fats, 2, "the corpus has one FAT, so a mirror split is unreachable");
+    assert!(geom.active_fat.is_none(), "the corpus disabled mirroring, so FAT 0 is the active copy");
+    // The mirror (FAT 1) region: refusing a write here catches the active FAT
+    // having *already* taken the update, which is the split only the broken
+    // ordering can produce.
+    let mirror_lo = geom.fat_base_offset(1);
+    let mirror_hi = geom.fat_base_offset(2);
+
+    let data = pattern(200_000, 91); // multi-cluster, so the first write allocates
+    {
+        let mut fs = Fat32::mount(RefuseOnceInRange::new(image.device(), IoError::BudgetExpired))
+            .expect("mount");
+        let mut f = fs.create("log.bin", stamp()).expect("create");
+        // Arm only now: the create (and any directory growth it needed) must
+        // reach the device, so the one refusal falls on the file's own
+        // allocation and not on its entry.
+        fs.device().arm((mirror_lo, mirror_hi));
+
+        let refused = fs.write(&mut f, 0, &data).expect_err("the mirror write was armed to refuse");
+        assert_eq!(
+            refused,
+            Error::BudgetExpired,
+            "a budget refusal must stay the retryable kind, or the drain would give up instead of retrying",
+        );
+
+        // The re-drive, on a fresh budget (the fault is spent) — the same handle,
+        // the same bytes, as the write-back drain re-flushes a still-dirty file.
+        fs.write(&mut f, 0, &data).expect("the retry after a spent budget");
+        fs.flush_meta(&mut f, stamp()).expect("flush");
+        fs.sync().expect("sync");
+        common::assert_fats_agree(&mut fs);
+        assert_eq!(read_all(&mut fs, "log.bin"), data, "the file must read back what was written");
     }
     image.fsck();
 }
