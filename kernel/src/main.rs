@@ -80,6 +80,7 @@ mod sched;
 mod hw;
 mod iommu;
 mod preempt;
+mod irq_census;
 mod irq_ring;
 mod trace;
 mod time;
