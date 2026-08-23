@@ -706,7 +706,7 @@ pub fn fsync(object: &KObjectRef) -> u64 {
                     );
                     return SyscallError::Io.to_u64();
                 }
-                between_attempts(attempt);
+                crate::block::between_attempts(attempt);
             }
             // The device's own word — an error status, or a recovery that
             // gave up. Passed through unchanged: this is the evidence retrying
@@ -715,40 +715,6 @@ pub fn fsync(object: &KObjectRef) -> u64 {
             Err(e) => return e.to_u64(),
         }
     }
-}
-
-/// Give the CPU away between two flush attempts.
-///
-/// The first retry only yields — the budget was usually spent by lock-wait or
-/// a descheduled vCPU, both over by the next slice — and every later one parks,
-/// doubling from [`block::RETRY_SOONEST`] to [`block::RETRY_SLOWEST`] so a
-/// hung-but-resetting device costs the machine a pinned attempt at most every
-/// other attempt-width. Nothing here holds a lock and nothing here is pinned,
-/// which is the whole reason the loop lives at this depth.
-fn between_attempts(attempt: u32) {
-    if attempt == 1 {
-        crate::scheduler::yield_now();
-        return;
-    }
-    let step = crate::block::RETRY_SOONEST
-        .nanos()
-        .saturating_mul(1u64 << (attempt - 2).min(32))
-        .min(crate::block::RETRY_SLOWEST.nanos());
-    // The nanosleep shape: armed on this task's own watch, where nothing
-    // posts, so the park's deadline is the whole of the wait.
-    let parkable = crate::scheduler::Parkable::at_entry();
-    let Some(handle) = crate::sched::driver::current_handle() else {
-        return;
-    };
-    let deadline = Deadline::at(crate::clock::now() + crate::time::Duration::from_nanos(step));
-    let _ = crate::completion::wait_until(
-        &parkable,
-        crate::completion::Subject::of(handle.watch()),
-        crate::completion::Token::new(0),
-        toyos_sched::task::WaitClass::Other,
-        deadline,
-        || false,
-    );
 }
 
 pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
