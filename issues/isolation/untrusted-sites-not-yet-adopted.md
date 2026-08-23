@@ -112,8 +112,8 @@ symbol**, so whoever takes this does not have to re-derive which value is meant.
 
 ## What this type does not answer
 
-Recorded so nobody tries to make it. Two open entries in this area are **not**
-this class, and wrapping something would touch neither:
+Recorded so nobody tries to make it. One open entry in this area is **not**
+this class, and wrapping something would touch it:
 
 - **`issues/isolation/netd-trusts-ring-closed-flags.md`** — a *predicate* a
   peer writes, not an index. `RingHeader::flags` lives in the page `SYS_PIPE_MAP`
@@ -122,16 +122,14 @@ this class, and wrapping something would touch neither:
   reading a publication as a channel: the kernel's own `readers`/`writers` counts
   are the side that knows, and they already surface as EOF on a read and
   `BrokenPipe` on a write.
-- **`issues/isolation/netd-writable-virtqueue.md`** — a *mapping*, not a
-  value. `virtio_net::init` registers the whole 2 MiB `DmaPool` page as one
-  shared region, so the RX descriptor table at offset 0 and the TX virtqueue at
-  `0x3000` are inside what netd maps writable. No read-side type helps while
-  netd can rewrite the descriptors the device DMAs into. The fix is the one
-  `virtio_sound::init` demonstrates one file over: two pools, with the descriptor
-  tables in the one that is never registered. `NicInfo` addresses everything by
-  offset already, so it needs no ABI change.
 
-Both are still open in their own files, and neither is blocked on anything here.
+It is still open in its own file, and it is not blocked on anything here.
+
+A second entry used to stand beside it: virtio-net registering its whole
+`DmaPool` page, so that the claimant mapped the descriptor tables writable. That
+was a *mapping* rather than a value, no read-side type helped while it stood,
+and it was closed on 2026-08-23 by splitting the pool — which is why this
+section names one entry and not two.
 
 Also untouched and deliberately so:
 **`issues/isolation/kernelslice-over-user-memory.md`** — its own text says
