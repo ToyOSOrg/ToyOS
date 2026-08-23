@@ -9,6 +9,13 @@ use crate::btree::{self, Entry, Key, KeyType, Node};
 use crate::superblock::Superblock;
 
 /// Extent: a contiguous run of blocks on disk.
+///
+/// **An extent that came off a disk is a range of the volume, and
+/// [`decode_leaf_value`] is what makes that true of it.** The fields are bare
+/// integers and they cross the crate boundary — `kernel/src/file_backing.rs`
+/// turns `start_block` into a block to read on every page fault — so nothing
+/// downstream has anything to compare them against. The comparison happens
+/// once, at the decode.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Extent {
@@ -30,9 +37,13 @@ const EXTENT_SIZE: usize = 16;
 /// extent, and what remains bounded is the number of *discontiguous runs*.
 fn push_extent(extents: &mut Vec<Extent>, start: u64, count: u32) {
     if let Some(last) = extents.last_mut() {
-        // `checked_add` rather than `+`: block_count is a u32, so a run past
-        // 16 TiB has to become a second extent instead of wrapping.
-        if last.start_block + last.block_count as u64 == start {
+        // `checked_add` on both halves. On the count, because it is a u32 and a
+        // run past 16 TiB has to become a second extent instead of wrapping. On
+        // the address, because the extent list this appends to can have come
+        // off the disk — the kernel's write path resolves a page against the
+        // list `decode_leaf_value` handed it — and `u64::MAX + 1` in a kernel
+        // built with `overflow-checks` is a panic from a number an image chose.
+        if last.start_block.checked_add(last.block_count as u64) == Some(start) {
             if let Some(merged) = last.block_count.checked_add(count) {
                 last.block_count = merged;
                 return;
@@ -50,9 +61,16 @@ pub enum FsError {
     ChecksumMismatch { block: BlockNum, stored: u32, computed: u32 },
     CorruptedKey(u16),
     CorruptedNode(BlockNum),
-    /// A block number off the end of the device it was read from. On-disk
-    /// pointers are the disk's claim about itself; the device is the arbiter.
+    /// A block number off the end of what it was read out of. On-disk pointers
+    /// are the disk's claim about itself; the arbiter is whichever bound is
+    /// smaller — the device for a btree child pointer, the *volume* for a
+    /// file's extents, because the volume is what the allocator's bitmap is
+    /// sized from.
     BlockOffDevice { block: u64, device_blocks: u64 },
+    /// A file claiming more blocks than the volume has — an extent list naming
+    /// them, or a declared size needing them. The disk's arithmetic about
+    /// itself, and it sizes what this crate then allocates.
+    NotEnoughBlocks { needed: u64, available: u64 },
     /// A descent that has gone deeper than any tree over this device can be,
     /// which means it is following a cycle.
     TreeTooDeep(BlockNum),
@@ -266,7 +284,26 @@ impl LeafValue {
     }
 }
 
-fn decode_leaf_value(value: &[u8]) -> Result<LeafValue, FsError> {
+/// Decode a file/symlink leaf value, refusing one that does not fit the volume
+/// it was read out of.
+///
+/// **`volume_blocks` is not decoration, and this is the only place it is
+/// applied.** An extent's `start_block` and `block_count` are numbers off the
+/// disk, and three things downstream take them as read: the kernel's demand
+/// paging turns one into a device block on every page fault
+/// (`kernel/src/file_backing.rs`), [`read_extents`] sizes an allocation from
+/// the file size beside them, and every delete hands them to
+/// [`BitmapAllocator::free_range`] — which turns a block number into a bitmap
+/// block to *read, modify and write*. That last one is why the bound is the
+/// volume's block count and not the device's: `bit_of` derives the bitmap block
+/// as `bitmap_start + block / 32768`, and the superblock guarantees the bitmap
+/// covers the volume and nothing beyond it. On a 128-block volume, block 32769
+/// lands on byte 0 of block 2 — the root node — and freeing it clears bit 1 of
+/// `BTND`'s `B`.
+///
+/// So the refusals are here, at the one place a leaf value becomes typed data,
+/// rather than at each of the sites that consume one.
+fn decode_leaf_value(value: &[u8], volume_blocks: u64) -> Result<LeafValue, FsError> {
     if value.len() < 19 {
         return Err(FsError::CorruptedKey(0));
     }
@@ -287,13 +324,30 @@ fn decode_leaf_value(value: &[u8]) -> Result<LeafValue, FsError> {
     let extent_data = &value[19 + name_len..];
     let extent_count = extent_data.len() / EXTENT_SIZE;
     let mut extents = Vec::with_capacity(extent_count);
+    let mut named_blocks = 0u64;
     for i in 0..extent_count {
         let off = i * EXTENT_SIZE;
-        extents.push(Extent {
-            start_block: u64::from_le_bytes(extent_data[off..off + 8].try_into().unwrap()),
-            block_count: u32::from_le_bytes(extent_data[off + 8..off + 12].try_into().unwrap()),
-            _reserved: 0,
-        });
+        let start_block = u64::from_le_bytes(extent_data[off..off + 8].try_into().unwrap());
+        let block_count = u32::from_le_bytes(extent_data[off + 8..off + 12].try_into().unwrap());
+
+        // Every block the run names has to be a block of this volume, and the
+        // *end* is where that is decided: a start on the last block passes on
+        // its own and still runs off the edge.
+        let end = start_block.checked_add(block_count as u64);
+        if end.is_none_or(|end| end > volume_blocks) {
+            return Err(FsError::BlockOffDevice { block: start_block, device_blocks: volume_blocks });
+        }
+
+        // And a file cannot hold more blocks than the volume has: every block
+        // of a file is one of the volume's, so the total is bounded even where
+        // no single run is out of range. Without this, 254 in-range runs of
+        // 4 GiB each are what `read_extents` sizes its `Vec` against.
+        named_blocks = named_blocks.saturating_add(block_count as u64);
+        if named_blocks > volume_blocks {
+            return Err(FsError::NotEnoughBlocks { needed: named_blocks, available: volume_blocks });
+        }
+
+        extents.push(Extent { start_block, block_count, _reserved: 0 });
     }
 
     match entry_type {
@@ -369,7 +423,31 @@ fn give_back(
 }
 
 /// Read file data from a list of extents.
-fn read_extents(io: &dyn BlockIO, extents: &[Extent], size: u64) -> Result<Vec<u8>, FsError> {
+///
+/// **`size` sizes the `Vec` and `size` is a number off the disk**, so it is
+/// held against the volume: a file cannot be longer than the thing it is
+/// stored on. Without that line a leaf value declaring `u64::MAX` asked the
+/// allocator for `u64::MAX` bytes — in the kernel, from a symlink `read_link`
+/// follows, where anything past `mm::MAX_HEAP_ALLOC` is not an `Err` but an
+/// assertion.
+///
+/// **The volume and not the blocks the file names**, which is the tighter
+/// bound and the wrong one: a file is allowed to end in a hole. `set_len` past
+/// the last block dirties no page, so the flush allocates nothing and records
+/// a size the extents do not reach — `fs_truncate_persist` grows a one-page
+/// `/home` file to 3 MiB — and the loop below is written for exactly that,
+/// leaving the tail as the zeros the hole is.
+fn read_extents(
+    io: &dyn BlockIO,
+    extents: &[Extent],
+    size: u64,
+    volume_blocks: u64,
+) -> Result<Vec<u8>, FsError> {
+    let needed_blocks = size.div_ceil(BLOCK_SIZE as u64);
+    if needed_blocks > volume_blocks {
+        return Err(FsError::NotEnoughBlocks { needed: needed_blocks, available: volume_blocks });
+    }
+
     let mut data = vec![0u8; size as usize];
     let mut offset = 0usize;
     let mut buf = BlockBuf::zeroed();
@@ -537,12 +615,23 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         })
     }
 
+    /// Decode a leaf value against *this volume's* block count.
+    ///
+    /// The one way a leaf value is decoded inside a mount, so the bound cannot
+    /// be forgotten at one of the dozen sites that ask for one. `sb.block_count`
+    /// and not `io.block_count()`: the volume is what the bitmap is sized from,
+    /// and `Superblock::check` has already refused a volume larger than its
+    /// device.
+    fn decode(&self, value: &[u8]) -> Result<LeafValue, FsError> {
+        decode_leaf_value(value, self.sb.block_count)
+    }
+
     /// Find a file entry by name. Tries File key first, then Symlink.
     fn find_by_name(&self, name: &str) -> Result<Option<(Key, Vec<u8>)>, FsError> {
         // Try as File first (most common)
         let key = make_key(&self.sb.hash_seed, name, KeyType::File);
         if let Some(value) = btree::search(&self.io, self.sb.root_node, &key)? {
-            let leaf = decode_leaf_value(&value)?;
+            let leaf = self.decode(&value)?;
             if leaf.name() == name {
                 return Ok(Some((key, value)));
             }
@@ -551,7 +640,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         // Try as Symlink
         let key = make_key(&self.sb.hash_seed, name, KeyType::Symlink);
         if let Some(value) = btree::search(&self.io, self.sb.root_node, &key)? {
-            let leaf = decode_leaf_value(&value)?;
+            let leaf = self.decode(&value)?;
             if leaf.name() == name {
                 return Ok(Some((key, value)));
             }
@@ -563,10 +652,10 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     /// Read a file's contents by name.
     pub fn read_file(&self, name: &str) -> Result<Vec<u8>, FsError> {
         let (_, value) = self.find_by_name(name)?.ok_or(FsError::NotFound)?;
-        let leaf = decode_leaf_value(&value)?;
+        let leaf = self.decode(&value)?;
         match leaf {
             LeafValue::File { size, extents, .. } | LeafValue::Symlink { size, extents, .. } => {
-                read_extents(&self.io, &extents, size)
+                read_extents(&self.io, &extents, size, self.sb.block_count)
             }
         }
     }
@@ -574,9 +663,9 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     /// Read a symlink's target by name. `None` when the name is not a symlink.
     pub fn read_link(&self, name: &str) -> Result<Option<String>, FsError> {
         let Some((_, value)) = self.find_by_name(name)? else { return Ok(None) };
-        match decode_leaf_value(&value)? {
+        match self.decode(&value)? {
             LeafValue::Symlink { size, extents, .. } => {
-                let data = read_extents(&self.io, &extents, size)?;
+                let data = read_extents(&self.io, &extents, size, self.sb.block_count)?;
                 Ok(String::from_utf8(data).ok())
             }
             _ => Ok(None),
@@ -591,7 +680,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     /// The decoded entry `name` answers to, if any.
     fn leaf(&self, name: &str) -> Result<Option<LeafValue>, FsError> {
         match self.find_by_name(name)? {
-            Some((_, value)) => Ok(Some(decode_leaf_value(&value)?)),
+            Some((_, value)) => Ok(Some(self.decode(&value)?)),
             None => Ok(None),
         }
     }
@@ -601,7 +690,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         let entries = btree::collect_all(&self.io, self.sb.root_node)?;
         let mut result = Vec::new();
         for entry in &entries {
-            if let Ok(leaf) = decode_leaf_value(&entry.value) {
+            if let Ok(leaf) = self.decode(&entry.value) {
                 result.push((String::from(leaf.name()), leaf.size()));
             }
         }
@@ -668,7 +757,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         }
 
         let displaced = match self.find_by_name(name)? {
-            Some((key, value)) => Some((key, decode_leaf_value(&value)?.extents().to_vec())),
+            Some((key, value)) => Some((key, self.decode(&value)?.extents().to_vec())),
             None => None,
         };
 
@@ -717,7 +806,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         for entry in &entries {
             // An entry that does not decode cannot be matched against the
             // prefix, so it is not one of the entries this was asked to remove.
-            let Ok(leaf) = decode_leaf_value(&entry.value) else { continue };
+            let Ok(leaf) = self.decode(&entry.value) else { continue };
             if !leaf.name().starts_with(prefix) {
                 continue;
             }
@@ -759,7 +848,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     /// non-matching removal and could take two entries out in one call.
     fn delete_by_name(&mut self, name: &str) -> Result<bool, FsError> {
         let Some((key, value)) = self.find_by_name(name)? else { return Ok(false) };
-        let extents = decode_leaf_value(&value)?.extents().to_vec();
+        let extents = self.decode(&value)?.extents().to_vec();
 
         // `find_by_name` reached this key by the descent `btree::delete` is
         // about to repeat, so an empty removal is not "no such file" — it is a
@@ -791,7 +880,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
 
         let (old_key, old_value) = self.find_by_name(old_name)?
             .ok_or(FsError::NotFound)?;
-        let leaf = decode_leaf_value(&old_value)?;
+        let leaf = self.decode(&old_value)?;
         let new_key = make_key(&self.sb.hash_seed, new_name, old_key.key_type);
 
         // What `new_name` names now. `find_by_name` matches on the decoded
@@ -799,7 +888,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         // onto itself, with nothing to displace and nothing to free.
         let displaced = match self.find_by_name(new_name)? {
             Some((key, _)) if key == old_key => None,
-            Some((key, value)) => Some((key, decode_leaf_value(&value)?.extents().to_vec())),
+            Some((key, value)) => Some((key, self.decode(&value)?.extents().to_vec())),
             None => None,
         };
 
@@ -834,7 +923,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
     ) -> Result<(), FsError> {
         let (old_key, old_value) = self.find_by_name(name)?
             .ok_or(FsError::NotFound)?;
-        let leaf = decode_leaf_value(&old_value)?;
+        let leaf = self.decode(&old_value)?;
 
         let extents = if new_extents.is_empty() { leaf.extents() } else { new_extents };
         let new_value = encode_leaf_value(old_key.key_type, leaf.name(), size, mtime, extents);
@@ -889,12 +978,17 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
 /// The one definition of where a page lives, used both to answer a resolve and
 /// to answer it again after allocating — so an allocation that came up short
 /// cannot produce a block the lookup would not agree with.
+///
+/// Total arithmetic, for the reason [`push_extent`]'s is: the list walked here
+/// can be one a disk wrote, and a `+` that wraps is a panic rather than a
+/// wrong answer. `None` is already "the extents do not reach that page", which
+/// is what a list whose own arithmetic does not close is.
 fn block_for(extents: &[Extent], page_idx: u32) -> Option<u64> {
     let mut cursor = 0u64;
     for ext in extents {
-        let end = cursor + ext.block_count as u64;
+        let end = cursor.checked_add(ext.block_count as u64)?;
         if (page_idx as u64) < end {
-            return Some(ext.start_block + (page_idx as u64 - cursor));
+            return ext.start_block.checked_add(page_idx as u64 - cursor);
         }
         cursor = end;
     }
@@ -1014,6 +1108,45 @@ mod tests {
         for &b in blocks {
             raw[at + (b / 8) as usize] |= 1 << (b % 8);
         }
+    }
+
+    /// Rewrite the root leaf as one `victim.txt` entry with the type, size and
+    /// extents given, and reseal it.
+    ///
+    /// The key bytes are left exactly as [`image`] wrote them, so the name
+    /// still hashes to this entry and every lookup reaches the crafted value.
+    /// The extents go in raw, as `(start_block, block_count)` — that is the
+    /// whole point: these are the numbers a disk gets to choose.
+    fn craft_entry(raw: &mut [u8], root: u64, entry_type: u8, size: u64, extents: &[(u64, u32)]) {
+        const NAME: &[u8] = b"victim.txt";
+        let at = root as usize * BLOCK_SIZE;
+        let entry = at + 32;
+        let value = entry + 24;
+        let val_len = 19 + NAME.len() + extents.len() * EXTENT_SIZE;
+        assert!(
+            value - at + val_len <= BLOCK_SIZE,
+            "a {val_len}-byte value does not fit the block this crafts",
+        );
+
+        // Level 0, one entry: a leaf.
+        raw[at + 8..at + 10].copy_from_slice(&0u16.to_le_bytes());
+        raw[at + 10..at + 12].copy_from_slice(&1u16.to_le_bytes());
+        raw[entry + 18..entry + 22].copy_from_slice(&(val_len as u32).to_le_bytes());
+        raw[value..at + BLOCK_SIZE].fill(0);
+
+        raw[value] = entry_type;
+        raw[value + 1..value + 3].copy_from_slice(&(NAME.len() as u16).to_le_bytes());
+        raw[value + 3..value + 11].copy_from_slice(&size.to_le_bytes());
+        raw[value + 11..value + 19].copy_from_slice(&1u64.to_le_bytes());
+        raw[value + 19..value + 19 + NAME.len()].copy_from_slice(NAME);
+
+        let mut off = value + 19 + NAME.len();
+        for (start_block, block_count) in extents {
+            raw[off..off + 8].copy_from_slice(&start_block.to_le_bytes());
+            raw[off + 8..off + 12].copy_from_slice(&block_count.to_le_bytes());
+            off += EXTENT_SIZE;
+        }
+        seal_node(raw, root);
     }
 
     #[test]
@@ -1209,5 +1342,197 @@ mod tests {
         let blocks = 128;
         let fs = mount(image(blocks)).expect("a volume this crate wrote must mount");
         assert_eq!(fs.read_file("victim.txt").expect("read"), b"a file that was already here");
+    }
+
+    #[test]
+    fn an_extent_past_the_end_of_the_volume_is_refused() {
+        // A run that *begins* on the last block and ends one past it. The
+        // start alone is in range, which is why the comparison is on the end.
+        let blocks = 128;
+        let mut raw = image(blocks);
+        let root = read_u64_at(&raw, 24);
+        craft_entry(&mut raw, root, 1, 2 * BLOCK_SIZE as u64, &[(blocks - 1, 2)]);
+
+        let fs = mount(raw).expect("mount");
+        match fs.read_file("victim.txt") {
+            Err(FsError::BlockOffDevice { block, device_blocks }) => {
+                assert_eq!((block, device_blocks), (blocks - 1, blocks));
+            }
+            // Never `{other:?}` over a read's `Ok`: an unrefused one holds
+            // whatever the crafted size asked for, and the panic message is
+            // where that lands — 2 GB of it, measured, the first time.
+            Err(other) => panic!("expected BlockOffDevice, got {other:?}"),
+            Ok(data) => panic!("a run ending past the volume was read: {} bytes", data.len()),
+        }
+    }
+
+    #[test]
+    fn a_run_ending_on_the_volumes_last_block_is_accepted() {
+        // The other side of the same comparison: a file whose run ends exactly
+        // at the volume's end is a legal file, and a bound that refuses it is
+        // an off-by-one nothing else would catch.
+        let blocks = 128;
+        let mut raw = image(blocks);
+        let root = read_u64_at(&raw, 24);
+        craft_entry(&mut raw, root, 1, BLOCK_SIZE as u64, &[(blocks - 1, 1)]);
+
+        let fs = mount(raw).expect("mount");
+        let data = fs.read_file("victim.txt").expect("a run of the last block is on the volume");
+        assert_eq!(data.len(), BLOCK_SIZE);
+    }
+
+    #[test]
+    fn a_file_naming_more_blocks_than_the_volume_has_is_refused() {
+        // Every run here is inside the volume; there are simply too many of
+        // them. This is the bound that keeps `read_extents`' `Vec` under the
+        // volume's own size — without it, 254 in-range runs of 4 GiB each are
+        // what a declared size is measured against.
+        let blocks = 128;
+        let mut raw = image(blocks);
+        let root = read_u64_at(&raw, 24);
+        let extents: Vec<(u64, u32)> = (0..64).map(|_| (3u64, 4u32)).collect();
+        craft_entry(&mut raw, root, 1, BLOCK_SIZE as u64, &extents);
+
+        let fs = mount(raw).expect("mount");
+        match fs.read_file("victim.txt") {
+            Err(FsError::NotEnoughBlocks { needed, available }) => {
+                // 33 runs of 4 is the first total past 128.
+                assert_eq!((needed, available), (132, blocks));
+            }
+            Err(other) => panic!("expected NotEnoughBlocks, got {other:?}"),
+            Ok(data) => panic!(
+                "a file naming 256 blocks of a {blocks}-block volume was read: {} bytes",
+                data.len(),
+            ),
+        }
+    }
+
+    #[test]
+    fn a_size_longer_than_the_volume_never_reaches_the_allocator() {
+        // The kernel-reachable shape: `read_link` is on the adapter, and the
+        // target it returns is `read_extents(size)` with a `size` that came off
+        // the disk. A gibibyte is small enough that a host allocator hands it
+        // over and 500 times what the kernel's asserts on
+        // (`mm::MAX_HEAP_ALLOC`, 2_093_056), so the peak allocation is the
+        // instrument here and the return value is not.
+        let blocks = 128;
+        let mut raw = image(blocks);
+        let root = read_u64_at(&raw, 24);
+        let size = 1u64 << 30;
+        craft_entry(&mut raw, root, 2, size, &[(3, 1)]);
+
+        let fs = mount(raw).expect("mount");
+        crate::alloc_probe::take_peak();
+        let target = fs.read_link("victim.txt");
+        let peak = crate::alloc_probe::take_peak();
+
+        // The allocation is asserted first: it is the harm, and it happened
+        // before there was a return value to look at.
+        assert!(
+            peak <= BLOCK_SIZE,
+            "a symlink declaring {size} bytes asked the allocator for {peak}",
+        );
+        match target {
+            Err(FsError::NotEnoughBlocks { needed, available }) => {
+                assert_eq!((needed, available), (size / BLOCK_SIZE as u64, blocks));
+            }
+            Err(other) => panic!("expected NotEnoughBlocks, got {other:?}"),
+            Ok(target) => panic!(
+                "a symlink declaring {size} bytes resolved to a {}-byte target",
+                target.map_or(0, |t| t.len()),
+            ),
+        }
+    }
+
+    #[test]
+    fn a_file_ending_in_a_hole_still_reads_as_zeros() {
+        // The legal case the bound above must not take with it. `set_len` past
+        // the last block dirties no page, so a flush records a size the extents
+        // do not reach — `fs_truncate_persist` grows a one-page `/home` file to
+        // 3 MiB — and the tail of that file is a hole, which is zeros and not a
+        // refusal.
+        let blocks = 128;
+        let mut raw = image(blocks);
+        let root = read_u64_at(&raw, 24);
+        craft_entry(&mut raw, root, 1, 4 * BLOCK_SIZE as u64, &[(3, 1)]);
+
+        let fs = mount(raw).expect("mount");
+        let data = fs.read_file("victim.txt").expect("a file may end in a hole");
+        assert_eq!(data.len(), 4 * BLOCK_SIZE);
+        assert!(
+            data[BLOCK_SIZE..].iter().all(|&b| b == 0),
+            "the hole past the file's one block is not zeros",
+        );
+    }
+
+    #[test]
+    fn an_extent_outside_the_volume_is_refused_before_the_bitmap_is_touched() {
+        // What a delete does with an extent: `free_range` → `set_free` →
+        // `bit_of`, which is `bitmap_start + block / 32768` and is held against
+        // nothing. This volume's bitmap is one block, at block 1, so every
+        // block from 32768 up has its "bit" in block 2 — the root node. 32769
+        // picks bit 1 of byte 0, and byte 0 is the `B` of `BTND` (0x42), whose
+        // bit 1 is set: clearing it leaves `@TND` and the volume has no root.
+        let blocks = 128;
+        let mut raw = image(blocks);
+        let root = read_u64_at(&raw, 24);
+        assert_eq!(root, 2, "the bit arithmetic above is keyed to the root's block");
+        craft_entry(&mut raw, root, 1, BLOCK_SIZE as u64, &[(32769, 1)]);
+
+        let at = root as usize * BLOCK_SIZE;
+        let before = raw[at..at + BLOCK_SIZE].to_vec();
+
+        let mut fs = mount_rw(raw).expect("mount");
+        let deleted = fs.delete("victim.txt");
+
+        // The bytes first: what the delete *returned* is the smaller half of
+        // this, and asserting it first would hide the damage behind a panic.
+        let after = fs.into_formatted().into_io().expect("sync").into_vec();
+        assert_eq!(&after[at..at + 4], &NODE_MAGIC[..], "the root node stopped being a node");
+        assert!(
+            after[at..at + BLOCK_SIZE] == before[..],
+            "a delete of an extent outside the volume wrote to the root node",
+        );
+
+        match deleted {
+            Err(FsError::BlockOffDevice { block, device_blocks }) => {
+                assert_eq!((block, device_blocks), (32769, blocks));
+            }
+            other => panic!("expected BlockOffDevice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_page_resolved_against_an_extent_at_the_end_of_the_address_space_is_total() {
+        // Two halves of one hole. The list `resolve_or_alloc_block` extends is
+        // the one `decode_leaf_value` handed out, so the door is where the
+        // refusal belongs — and the arithmetic behind the door is total anyway,
+        // because `u64::MAX + 1` under the kernel's `overflow-checks` is a
+        // panic rather than a wrong answer.
+        let blocks = 128;
+        let mut raw = image(blocks);
+        let root = read_u64_at(&raw, 24);
+        craft_entry(&mut raw, root, 1, BLOCK_SIZE as u64, &[(u64::MAX, 1)]);
+
+        let mut fs = mount_rw(raw).expect("mount");
+
+        // The arithmetic first, on a list handed in directly: past the door,
+        // `push_extent` adds `start_block + block_count` and `block_for`
+        // accumulates the counts, and neither may be a panic.
+        let mut extents = Vec::from([Extent {
+            start_block: u64::MAX,
+            block_count: 1,
+            _reserved: 0,
+        }]);
+        let block = fs.resolve_or_alloc_block(&mut extents, 1).expect("a block for page 1");
+        assert!(block < blocks, "page 1 resolved to block {block}, which is not on this volume");
+
+        // And the door itself: nothing gets to hand that list to the kernel.
+        match fs.file_extents("victim.txt") {
+            Err(FsError::BlockOffDevice { block, device_blocks }) => {
+                assert_eq!((block, device_blocks), (u64::MAX, blocks));
+            }
+            other => panic!("expected BlockOffDevice, got {other:?}"),
+        }
     }
 }

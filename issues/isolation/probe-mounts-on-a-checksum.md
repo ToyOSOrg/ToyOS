@@ -27,9 +27,13 @@ Recommendation, for the owner to decide:
   same property the designation stamp's block count gives a format. It is not
   authentication — an attacker who knows the disk size writes the right number —
   but it costs one character and removes the accidental cases.
-- **Then:** close `bcachefs-untrusted-input-holes`' residuals 1–3. "Mounting a
-  hostile volume is merely rude" is not true while an unchecked extent reaches a
-  block read.
+- **Done, 2026-08-23:** a file's extents are range-checked against the volume
+  in `decode_leaf_value`, so "mounting a hostile volume is merely rude" no
+  longer has an unchecked extent reaching a block read — or a bitmap write —
+  behind it. What that left is
+  `issues/isolation/read-link-allocates-a-volume-sized-vec.md`: the bound on
+  one kernel allocation is the volume's size, and the kernel's heap ceiling is
+  smaller.
 - **The real fix, if the threat model wants one:** read-write requires
   something the attacker cannot compute — a keyed MAC, or a designation-like
   stamp — and everything else mounts read-only. ToyOS has no key store and no
