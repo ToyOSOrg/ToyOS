@@ -14,6 +14,7 @@ use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError};
 
 use crate::drivers::serial;
 use crate::file_cache;
+use crate::time::Deadline;
 use crate::inbox::Source;
 use crate::pipe::{self, PipeId};
 use crate::process::PipeMap;
@@ -602,6 +603,29 @@ pub fn fstat(object: &KObjectRef) -> Stat {
 /// Neither separates *which* level a flush reached, so an `fsync` that went
 /// back to stopping at the page cache would still pass a clean shutdown — the
 /// refusing device is the only instrument that sees it.
+///
+/// # The retry loop: slow is not failed
+///
+/// **This is the operation level `crate::block`'s constants speak of, and the
+/// one depth on the flush path that holds no spinlock** — everything below
+/// `crate::vfs::lock()` runs with preemption off, four ticket locks deep at
+/// the device wait (`issues/audio/disk-wait-pins-a-cpu.md`), so no layer
+/// underneath can wait between attempts without pinning a CPU for the wait.
+/// Here the guard is dropped, the CPU is yielded or parked, and the whole
+/// sequence is retried with a fresh [`block::OPERATION`] per attempt: the
+/// per-attempt bound stays the slowness detector and never grows, and the run
+/// of attempts is what [`block::DEADMAN`] bounds.
+///
+/// A volume is declared failed on exactly three evidences — the device's own
+/// error status (any refusal but `WouldBlock`, passed through unchanged), a
+/// reset escalation that itself failed (the driver turns that into a device
+/// fact: `dev.failed`, `usb-storage: … reset recovery failed`), or this
+/// deadman expiring — and never on the elapsed time of a single attempt. A
+/// timed-out attempt discarded nothing: `Vfs::flush_file` returns before
+/// `clear_dirty` on any refused page and restores the file's `dirty_meta` when
+/// it fails (`file_cache::take_dirty`/`mark_dirty_meta`), and the driver's
+/// budget refusal is taken between commands with nothing in flight, so the
+/// retry re-runs against exactly the state the refusal left.
 pub fn fsync(object: &KObjectRef) -> u64 {
     let KObjectRef::File(file) = object else {
         return SyscallError::PermissionDenied.to_u64();
@@ -614,21 +638,117 @@ pub fn fsync(object: &KObjectRef) -> u64 {
     if !file_cache::dirty_meta(file_id) {
         return 0;
     }
-    // Outside `FileObject`'s own lock, because `flush_file` reaches the file
-    // cache and the two locks must nest in one order.
-    let mut vfs = crate::vfs::lock();
-    if let Err(e) = vfs.flush_file(&path, file_id, mtime) {
-        return e.to_u64();
+    let began = crate::clock::now();
+    let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
+    #[cfg(feature = "boot-actuators")]
+    let deadman = if crate::actuator::fsync_deadman_now() { Deadline::passed() } else { deadman };
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let refused = {
+            // Stage a first attempt whose budget is already spent, where the
+            // harness asked for one. An outer establishment narrows the
+            // operations below it, so what runs is the shipped refusal at the
+            // shipped site (`XhciController::scsi`, NVMe's `may_issue`) —
+            // exactly what a caller that lost its time to lock-wait or host
+            // descheduling looks like, which no host-side option stages
+            // (`usb-slow-device` is 2 ms against a 2 s bound, measured; QEMU
+            // answers everything in microseconds). `nvme_gate` uses the same
+            // shape and says so at more length.
+            #[cfg(feature = "boot-actuators")]
+            let _spent = (attempt == 1 && crate::actuator::fsync_budget_spent())
+                .then(|| crate::scheduler::Operation::begin(Deadline::passed()));
+            // Outside `FileObject`'s own lock: the VFS lock is taken here and
+            // in `OpenFileState::drop`, and holding both in one order here and
+            // the other there is the deadlock this ordering exists to avoid.
+            //
+            // The sync under the same acquisition as the write-back,
+            // deliberately: two acquisitions would let another writer's data
+            // reach the volume between them and be committed by this caller's
+            // flush, which is harmless, and would let this caller's own file
+            // be *unmounted* between them, which is not.
+            let mut vfs = crate::vfs::lock();
+            let done = vfs
+                .flush_file(&path, file_id, mtime)
+                .and_then(|()| vfs.sync_for_path(&path));
+            drop(vfs);
+            done
+        };
+        match refused {
+            Ok(()) => {
+                if attempt > 1 {
+                    crate::log!(
+                        "fsync: {path} durable on attempt {attempt} after {} — a refused \
+                         attempt kept every page dirty and a later one delivered them",
+                        crate::clock::now() - began,
+                    );
+                }
+                // A successful `flush_file` cleared the file's own `dirty_meta`;
+                // there is no per-handle flag left to clear.
+                return 0;
+            }
+            // Not durable *yet* — a budget expired on a live device, never a
+            // device fact. Ask again on a fresh budget, off the pinned path.
+            Err(SyscallError::WouldBlock) => {
+                // A killed caller stops retrying at the first safe point: its
+                // parks come back cancelled, and a loop that kept spending
+                // pinned attempts on a corpse would starve the retire against
+                // its own tripwire. The return value dies with the task.
+                if crate::sched::driver::current_kill_pending() {
+                    return SyscallError::WouldBlock.to_u64();
+                }
+                if deadman.reached(crate::clock::now()) {
+                    crate::log!(
+                        "fsync: {path} is not durable after {attempt} attempt(s) in {} — \
+                         {}",
+                        crate::clock::now() - began,
+                        crate::block::DEADMAN,
+                    );
+                    return SyscallError::Io.to_u64();
+                }
+                between_attempts(attempt);
+            }
+            // The device's own word — an error status, or a recovery that
+            // gave up. Passed through unchanged: this is the evidence retrying
+            // cannot outwait, and the caller's give-up policy is entitled to
+            // it at once.
+            Err(e) => return e.to_u64(),
+        }
     }
-    // Under the same acquisition as the write-back above, deliberately: two
-    // acquisitions would let another writer's data reach the volume between
-    // them and be committed by this caller's flush, which is harmless, and
-    // would let this caller's own file be *unmounted* between them, which is
-    // not.
-    if let Err(e) = vfs.sync_for_path(&path) {
-        return e.to_u64();
+}
+
+/// Give the CPU away between two flush attempts.
+///
+/// The first retry only yields — the budget was usually spent by lock-wait or
+/// a descheduled vCPU, both over by the next slice — and every later one parks,
+/// doubling from [`block::RETRY_SOONEST`] to [`block::RETRY_SLOWEST`] so a
+/// hung-but-resetting device costs the machine a pinned attempt at most every
+/// other attempt-width. Nothing here holds a lock and nothing here is pinned,
+/// which is the whole reason the loop lives at this depth.
+fn between_attempts(attempt: u32) {
+    if attempt == 1 {
+        crate::scheduler::yield_now();
+        return;
     }
-    0
+    let step = crate::block::RETRY_SOONEST
+        .nanos()
+        .saturating_mul(1u64 << (attempt - 2).min(32))
+        .min(crate::block::RETRY_SLOWEST.nanos());
+    // The nanosleep shape: armed on this task's own watch, where nothing
+    // posts, so the park's deadline is the whole of the wait.
+    let parkable = crate::scheduler::Parkable::at_entry();
+    let Some(handle) = crate::sched::driver::current_handle() else {
+        return;
+    };
+    let deadline = Deadline::at(crate::clock::now() + crate::time::Duration::from_nanos(step));
+    let _ = crate::completion::wait_until(
+        &parkable,
+        crate::completion::Subject::of(handle.watch()),
+        crate::completion::Token::new(0),
+        toyos_sched::task::WaitClass::Other,
+        deadline,
+        || false,
+    );
 }
 
 pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {

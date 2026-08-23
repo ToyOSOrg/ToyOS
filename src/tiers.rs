@@ -571,6 +571,28 @@ pub const RELEGATED: &[Relegated] = &[
                  persistent diagnostic the laptop depends on after a freeze.",
     },
     Relegated {
+        // Three Metal boots — retry-keeps-the-volume, deadman-declares, and
+        // hung-device-fails-its-reset — cannot fit the fast ceiling one boot
+        // already strains. A committed derivation rather than an `UNMEASURED`
+        // marker because only a Fast name may carry one: the first boot is
+        // `esp_filesystem`'s workload plus the staged arms, so the label is
+        // three of that name's hosted 6,842 ms — 20,526 — a ceiling, since
+        // boots two and three run no guest binary and wait only on early boot
+        // lines (7 s for all three on the dev host, 2026-08-23, 12-wide at
+        // 1.49x). The first nightly shard re-prices it.
+        test: "log_flush_retry",
+        ci_ms: 20_526,
+        why: Why::Cost,
+        guards: "The three exits of `SYS_FSYNC`'s slow-vs-failed loop: a budget-refused \
+                 flush is retried on a fresh budget and the volume kept, with the blob \
+                 byte-identical on the image afterwards — the fsyncgate control, since a \
+                 kernel that dropped dirty state on the timeout has nothing left to \
+                 deliver; the deadman's expiry is a declared death logd ends the volume \
+                 on; and a hung device whose reset escalation fails is a device fact. \
+                 Host suites gate the fate table and the drivers' refusal words, but no \
+                 other name carries a budget-expired flush end to end to logd.",
+    },
+    Relegated {
         test: "xhci_flap",
         ci_ms: 8_201,
         why: Why::TimerAnchored,

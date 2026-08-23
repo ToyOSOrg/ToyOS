@@ -45,9 +45,9 @@ use crate::symbols::SymbolTable;
 use crate::sched::payload::ThreadSched;
 use crate::time::{Deadline, Duration};
 use crate::{elf, pipe, scheduler};
-use crate::{DirectMap, UserAddr};
+use crate::UserAddr;
 use crate::loader::{
-    setup_tls, setup_combined_tls, alloc_kernel_stack, thread_start,
+    setup_tls, setup_combined_tls, alloc_kernel_stack, thread_start, rebase_block,
 };
 
 pub use toyos_abi::{Pid, Tid};
@@ -60,7 +60,6 @@ pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
 
 // Re-export loader functions so existing callers (via `process::`) keep working.
 pub use crate::loader::{build_child_handles, spawn, spawn_init, INIT_PATH};
-pub(crate) use crate::loader::read_file_range;
 
 /// Page tables shared between a process and all its threads.
 pub type PageTables = Arc<Lock<crate::mm::paging::AddressSpace>>;
@@ -425,9 +424,6 @@ pub enum ThreadLocation {
     Zombie(i32),
 }
 
-impl ThreadLocation {
-}
-
 // ProcessEntry + ThreadEntry — hierarchical process/thread table
 
 /// How much of a process or thread name the table keeps.
@@ -612,8 +608,6 @@ impl PageFaultTrace {
 /// ELF loading artifacts and TLS state.
 pub struct ElfInfo {
     pub elf_alloc: Option<OwnedAlloc>,
-    pub tls_template: Option<crate::mm::KernelSlice>,
-    pub tls_memsz: usize,
     /// Multi-module TLS layout per loaded library.
     pub tls_modules: Vec<crate::elf::TlsModule>,
     /// Total combined TLS size across all modules.
@@ -652,8 +646,6 @@ impl ElfInfo {
     pub fn none() -> Self {
         Self {
             elf_alloc: None,
-            tls_template: None,
-            tls_memsz: 0,
             tls_modules: Vec::new(),
             tls_total_memsz: 0,
             tls_max_align: 0,
@@ -978,18 +970,6 @@ pub fn mark_thread_zombie(table: &mut ProcessTable, pid: Pid, tid: Tid, code: i3
     }
 }
 
-/// Thread join: collect a zombie thread.
-pub fn collect_thread_zombie(table: &mut ProcessTable, tid: Tid, parent_pid: Pid) -> Result<Option<i32>, ()> {
-    let proc = table.get(parent_pid).ok_or(())?;
-    let thread = proc.threads.get(tid).ok_or(())?;
-    if let ThreadLocation::Zombie(code) = thread.state {
-        table.get_mut(parent_pid).unwrap().threads.remove(tid);
-        Ok(Some(code))
-    } else {
-        Ok(None)
-    }
-}
-
 /// What a thread that died in panic recovery leaves to be cleaned up.
 ///
 /// The panic path itself cannot do any of it — it may hold any lock the faulted
@@ -1145,17 +1125,19 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
             .expect("spawn_thread: the spawning thread runs in an address space");
         (addr_space, Arc::clone(&proc.process_data))
     };
-    let (tls_template, tls_memsz, tls_modules, tls_total_memsz, tls_max_align) = {
+    let (tls_modules, tls_total_memsz, tls_max_align) = {
         let data = process_data_arc.lock();
-        (data.elf.tls_template, data.elf.tls_memsz,
-         data.elf.tls_modules.clone(), data.elf.tls_total_memsz, data.elf.tls_max_align)
+        (data.elf.tls_modules.clone(), data.elf.tls_total_memsz, data.elf.tls_max_align)
     };
 
-    // Phase 2: Allocate TLS (outside any lock)
+    // Phase 2: Allocate TLS (outside any lock). An empty module set is a process
+    // with no TLS at all — its threads still get a DTV+TCB block, which
+    // `setup_tls(None, 0, ..)` builds. (The exe's own template rides in
+    // `tls_modules` as module 1, never here.)
     let (tls_alloc, fs_base) = if !tls_modules.is_empty() {
         setup_combined_tls(&tls_modules, tls_total_memsz, tls_max_align)?
     } else {
-        setup_tls(tls_template, tls_memsz, tls_max_align)?
+        setup_tls(None, 0, tls_max_align)?
     };
     let (tls_alloc, fs_base) = {
         let addr_space = &parent_addr_space;
@@ -1168,36 +1150,15 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         // Rebase fs_base and internal TLS pointers from physical to virtual
         let tls_rebase = tls_vaddr.raw() as i64 - tls_phys as i64;
         let fs_base = (fs_base as i64 + tls_rebase) as u64;
-        // SAFETY: `tls_alloc` is the block `setup_tls`/`setup_combined_tls`
-        // just built and this scope still owns it, so every address below is
-        // inside one contiguous allocation reached through the direct map, and
-        // no other CPU can see it — `vma_map` has published the *virtual*
-        // range into an address space whose only thread has not been created
-        // yet. The offsets are the ones the same two functions wrote: `fs_base
-        // - tls_vaddr` is the thread pointer they placed, and the DTV's length
-        // at word 1 is a count they wrote, not one read back from userland.
-        //
-        // Irreducible: what this does is rewrite pointers *stored inside* a
-        // TLS image from physical to virtual, so it walks a self-referential
-        // structure by address. There is no Rust type for a DTV whose entries
-        // point into itself, and building one would be modelling the psABI's
-        // memory layout rather than writing it — the same untyped-by-nature
-        // work `elf::reloc` does one level down.
+        // SAFETY: `tls_alloc` is the block `setup_tls`/`setup_combined_tls` just
+        // built and this scope still owns it — freshly allocated pages no other
+        // path knows, reached through the direct map; `vma_map` has published
+        // only their *virtual* address, which the not-yet-created thread that
+        // will read it does not yet name. This runs under the process-data lock
+        // taken above, `spawn_thread`'s own exclusivity. `fs_base - tls_vaddr` is
+        // the thread-pointer offset those builders placed.
         unsafe {
-            let tls_base_ptr = DirectMap::from_phys(tls_phys).as_mut_ptr::<u8>();
-            let tp_kern = tls_base_ptr.add((fs_base - tls_vaddr.raw()) as usize);
-            let self_ptr = tp_kern as *mut u64;
-            *self_ptr = fs_base;
-            let dtv_phys = *self_ptr.add(1);
-            *self_ptr.add(1) = (dtv_phys as i64 + tls_rebase) as u64;
-            let dtv_kern = tls_base_ptr as *mut u64;
-            let dtv_len = *dtv_kern.add(1) as usize;
-            for i in 0..dtv_len {
-                let entry = *dtv_kern.add(2 + i);
-                if entry != !0u64 && entry != 0 {
-                    *dtv_kern.add(2 + i) = (entry as i64 + tls_rebase) as u64;
-                }
-            }
+            rebase_block(tls_phys, (fs_base - tls_vaddr.raw()) as usize, fs_base, tls_rebase);
         }
         drop(parent_data);
         (MappedPages::new(tls_vaddr, tls_alloc), fs_base)
@@ -1292,6 +1253,14 @@ fn teardown_resources(
         }
         let wall_ms = syscall_total_ns / 1_000_000;
         log!("syscalls: pid={pid} total={} syscall_wall={wall_ms}ms{profile}", syscall_total);
+        // The flush census speaks here because a process exit is the one
+        // recurring moment a running guest reaches (the harness kills QEMU, so
+        // a shutdown-only instrument reaches no capture), and only behind an
+        // exit that called `SYS_FSYNC`, so the machine's flush story is told
+        // beside a process that just depended on it.
+        if syscall_counts[toyos_abi::syscall::SYS_FSYNC as usize] > 0 {
+            crate::block::census::print_if_moved();
+        }
     }
 
     if data.peak_memory > 0 || data.alloc_count > 0 {
@@ -1420,6 +1389,71 @@ pub fn stats_from(
     }
 }
 
+/// Retire a set of threads and fold their scheduler accounting into the
+/// process's, returning the main thread's CPU time if `main_tid` was among them
+/// (else 0).
+///
+/// Each thread is provably out of the scheduler when `retire_task` returns — not
+/// queued, not parked, not mid-steal, not running — which is the ordering the
+/// whole teardown rests on: only a thread no CPU can still run may have the
+/// memory its page tables map freed, or a thread still running writes through
+/// those stale mappings into 2 MiB frames the PMM has already re-issued.
+fn retire_threads(
+    pid: Pid,
+    tids: impl IntoIterator<Item = Tid>,
+    main_tid: Tid,
+    process_data_arc: &Arc<Lock<ProcessData>>,
+) -> u64 {
+    let mut main_cpu_ns = 0u64;
+    for t in tids {
+        let Some(sched) = thread_sched(pid, t) else { continue };
+        scheduler::retire_task(&sched);
+        let cpu_ns = scheduler::task_cpu_ns(&sched);
+        let mut pdata = process_data_arc.lock();
+        sched.handle.merge_into(&mut pdata.accounting);
+        if t == main_tid {
+            main_cpu_ns = cpu_ns;
+        } else {
+            pdata.accounting.child_threads_cpu_ns += cpu_ns;
+        }
+    }
+    main_cpu_ns
+}
+
+/// Phases 3-5 of a process teardown, shared by exit and kill: free resources, do
+/// the table-locked bookkeeping, then publish the exit once the table lock is
+/// given up.
+///
+/// The ordering is load-bearing, and the caller has already met its
+/// precondition — every other thread retired, so none of this process can run.
+/// Publish comes *after* the table lock is released, which is what the wake
+/// inside `teardown_bookkeeping` needs; and once published the entry is
+/// reapable, so nothing may read the table for this pid afterward.
+fn teardown_tail(
+    process_data_arc: &Arc<Lock<ProcessData>>,
+    thread_data_arc: &Arc<Lock<ThreadData>>,
+    pid: Pid,
+    code: i32,
+    main_cpu_ns: u64,
+) {
+    // Phase 3: free resources — no other thread of this process can run.
+    let (syscall_total, syscall_total_ns) =
+        teardown_resources(process_data_arc, thread_data_arc, pid);
+
+    // Phase 4: table bookkeeping (thread zombie marks, symbols released).
+    let object = {
+        let mut guard = PROCESS_TABLE.lock();
+        let table = guard.as_mut().unwrap();
+        teardown_bookkeeping(table, pid, code, main_cpu_ns)
+    };
+
+    // Phase 5: publish the exit. The table lock is given up, which is what the
+    // wake inside it needs — and once it is published the entry is reapable, so
+    // nothing may read the table for this pid after this point.
+    let stats = final_stats(process_data_arc, pid, syscall_total, syscall_total_ns, main_cpu_ns);
+    object.publish_exit(crate::object::process::Exit { code, stats });
+}
+
 pub fn exit(code: i32) -> ! {
     release_process(code);
     scheduler::exit_current(code);
@@ -1469,45 +1503,18 @@ fn release_process(code: i32) {
 
     crate::mm::paging::activate_kernel();
 
-    // Phase 2: retire every other thread. Each one is provably out of the
-    // scheduler when retire_task returns — not queued, not parked, not
-    // mid-steal, not running. Only then may memory their page tables still map
-    // be freed: a thread still running writes through those stale mappings into
-    // 2MB frames the PMM has already re-issued.
-    let mut main_cpu_ns = 0u64;
-    for t in other_tids {
-        let Some(sched) = thread_sched(process_pid, t) else { continue };
-        scheduler::retire_task(&sched);
-        let cpu_ns = scheduler::task_cpu_ns(&sched);
-        let mut pdata = process_data_arc.lock();
-        sched.handle.merge_into(&mut pdata.accounting);
-        if t == main_tid {
-            main_cpu_ns = cpu_ns;
-        } else {
-            pdata.accounting.child_threads_cpu_ns += cpu_ns;
-        }
-    }
+    // Phase 2: retire every *other* thread — the current thread is running this
+    // and cannot retire itself.
+    let mut main_cpu_ns = retire_threads(process_pid, other_tids, main_tid, &process_data_arc);
+    // The current thread was filtered out of the retire set above, so if it is
+    // the main thread its CPU time is picked up here rather than by the sweep.
     if tid == main_tid {
         main_cpu_ns = thread_sched(process_pid, tid)
             .map_or(0, |s| scheduler::task_cpu_ns(&s));
     }
 
-    // Phase 3: free resources — no other thread of this process can run.
-    let (syscall_total, syscall_total_ns) = teardown_resources(&process_data_arc, &thread_data_arc, process_pid);
-
-    // Phase 4: table bookkeeping (thread zombie marks, symbols released)
-    let object = {
-        let mut guard = PROCESS_TABLE.lock();
-        let table = guard.as_mut().unwrap();
-        teardown_bookkeeping(table, process_pid, code, main_cpu_ns)
-    };
-
-    // Phase 5: publish the exit. The table lock is given up, which is what the
-    // wake inside it needs — and once it is published the entry is reapable,
-    // so nothing may read the table for this pid after this point.
-    let stats =
-        final_stats(&process_data_arc, process_pid, syscall_total, syscall_total_ns, main_cpu_ns);
-    object.publish_exit(crate::object::process::Exit { code, stats });
+    // Phases 3-5: free resources, table bookkeeping, publish the exit.
+    teardown_tail(&process_data_arc, &thread_data_arc, process_pid, code, main_cpu_ns);
 }
 
 /// Exit the current thread. If this is the main thread, tears down the entire
@@ -1537,11 +1544,14 @@ pub fn thread_exit(code: i32) -> ! {
     scheduler::exit_current(code);
 }
 
-/// A child thread's own teardown, and the main thread it must wake.
+/// A child thread's own teardown.
 ///
-/// Returns for [`release_process`]'s reason: the address space this clones out
-/// is an `Arc`, and one left live where `exit_current` is called is one nothing
-/// ever drops.
+/// It **returns** rather than diverging, for [`release_process`]'s reason: the
+/// address space it clones out is an `Arc`, and one left live where
+/// `exit_current` is called is one nothing ever drops. The `Tid` it hands back
+/// is the process's main thread — a value [`thread_exit`] once woke by name and
+/// now discards, because a joiner is released by the completion post there
+/// instead.
 fn release_thread(process_pid: Pid, tid: Tid, code: i32) -> Tid {
     // Thread-only exit path: release this thread's mappings, zombify, wake parent.
     let addr_space = current_address_space();
@@ -1671,10 +1681,21 @@ pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
 }
 
 /// Atomically validate parent-thread relationship and collect a zombie thread.
+///
+/// The table lock is the atomicity: the state read and the entry removal are one
+/// critical section, so a joiner cannot observe the zombie and then race another
+/// path to remove it. `Err(())` is a `tid`/`pid` this caller may not join.
 pub fn wait_thread_zombie(tid: Tid, parent_pid: Pid) -> Result<Option<i32>, ()> {
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
-    collect_thread_zombie(table, tid, parent_pid)
+    let proc = table.get(parent_pid).ok_or(())?;
+    let thread = proc.threads.get(tid).ok_or(())?;
+    if let ThreadLocation::Zombie(code) = thread.state {
+        table.get_mut(parent_pid).unwrap().threads.remove(tid);
+        Ok(Some(code))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Handle a page fault at `fault_addr` by looking up the current process's VMAs.
@@ -2026,8 +2047,7 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     }
     dump_region("rip", rip);
 
-    let fs_base_msr = crate::arch::cpu::rdfsbase();
-    let fs_base = fs_base_msr;
+    let fs_base = crate::arch::cpu::rdfsbase();
     if fs_base != 0 {
         log!("  FS base: {:#x}", fs_base);
         if let Some(self_ptr) = read_user(fs_base) {
@@ -2200,36 +2220,12 @@ pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
     };
 
     // Phase 2: retire every thread. A running target is forced to a scheduling
-    // boundary and dropped there, so a running process is never refused.
-    let mut main_cpu_ns = 0u64;
-    for t in tids {
-        let Some(sched) = thread_sched(target_pid, t) else { continue };
-        scheduler::retire_task(&sched);
-        let cpu_ns = scheduler::task_cpu_ns(&sched);
-        let mut pdata = process_data_arc.lock();
-        sched.handle.merge_into(&mut pdata.accounting);
-        if t == main_tid {
-            main_cpu_ns = cpu_ns;
-        } else {
-            pdata.accounting.child_threads_cpu_ns += cpu_ns;
-        }
-    }
+    // boundary and dropped there, so a running process is never refused. Every
+    // thread is another process's, so unlike exit none is the current one.
+    let main_cpu_ns = retire_threads(target_pid, tids, main_tid, &process_data_arc);
 
-    // Phase 3: Resource cleanup (same path as exit)
-    let (syscall_total, syscall_total_ns) = teardown_resources(&process_data_arc, &thread_data_arc, target_pid);
-
-    // Phase 4: Table bookkeeping (same path as exit)
-    let published = {
-        let mut guard = PROCESS_TABLE.lock();
-        let table = guard.as_mut().unwrap();
-        teardown_bookkeeping(table, target_pid, KILLED_EXIT_CODE, main_cpu_ns)
-    };
-
-    // Phase 5: publish the exit, which is what releases every waiter.
-    let stats =
-        final_stats(&process_data_arc, target_pid, syscall_total, syscall_total_ns, main_cpu_ns);
-    published
-        .publish_exit(crate::object::process::Exit { code: KILLED_EXIT_CODE, stats });
+    // Phases 3-5: the same teardown tail as exit.
+    teardown_tail(&process_data_arc, &thread_data_arc, target_pid, KILLED_EXIT_CODE, main_cpu_ns);
 
     0
 }

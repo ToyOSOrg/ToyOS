@@ -365,6 +365,15 @@ impl XhciController {
         if crate::actuator::io_depth_probe() {
             depth_probe::report();
         }
+        // The staged hung recovery: this wait's transfer is one of the Reset
+        // Recovery control transfers `usb-reset-break` covers, and a device
+        // that answers nothing is staged by not waiting for the answer. See
+        // `msc::reset_break` — the window is open only inside the one staged
+        // `reset_recovery` call, on this CPU, under the lock this wait holds.
+        #[cfg(feature = "boot-actuators")]
+        if msc::reset_break::active() {
+            return None;
+        }
         let on = Await::Transfer { slot, dci, trb };
         let deadline = deadline();
         let port = self.port_of_slot(slot);

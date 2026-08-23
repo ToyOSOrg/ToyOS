@@ -58,7 +58,7 @@ fn map<'a>(
 /// it silently.
 pub fn read_symtab(backing: &dyn FileBacking, layout: &Layout) -> Option<(Vec<u8>, Vec<u8>)> {
     let table = layout.section_headers?;
-    let shdrs = crate::process::read_file_range(backing, table.file_offset, table.byte_len());
+    let shdrs = super::read_file_range(backing, table.file_offset, table.byte_len());
     let (syms, strs) = SectionTable::new(&shdrs).symbols(SHT_SYMTAB)?;
 
     let (Some(sym_data), Some(str_data)) = (
@@ -113,7 +113,7 @@ pub fn read_backtrace_table(
     let empty = || SymbolTable::empty_with_bounds(prog_base, prog_end, stack_base, stack_end);
 
     let Some(table) = layout.section_headers else { return empty() };
-    let shdrs = crate::process::read_file_range(backing, table.file_offset, table.byte_len());
+    let shdrs = super::read_file_range(backing, table.file_offset, table.byte_len());
     let Some((syms, strs)) = SectionTable::new(&shdrs).symbols(SHT_SYMTAB) else {
         return empty();
     };

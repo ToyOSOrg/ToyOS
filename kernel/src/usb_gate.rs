@@ -160,8 +160,8 @@ fn check(index: usize, disk: &mut usb_storage::UsbBlockDevice) {
     // `budget=` is the second half of the verdict and the reason the line is
     // not just `refused=`: a refusal that arrives as `BlockError::Device` is a
     // claim about the stick, and `/bin/logd` ends a boot's log on one. The two
-    // were one value until 2026-08-22
-    // (`issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md`),
+    // were one value until 2026-08-22 — measured at 1 red in 73 full 12-wide
+    // suites, a boot's log ended for a stick that answered every transfer —
     // and collapsing them again reds here.
     let spent = {
         let _op = crate::scheduler::Operation::begin(crate::time::Deadline::passed());

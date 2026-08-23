@@ -30,8 +30,10 @@
 //! **The refusal is taken between commands and never inside one**, for the
 //! reason `XhciController::scsi` states at length: ending a wait at the
 //! caller's deadline abandons a command the device is still going to answer.
-//! Here that costs more than it does there, because there is no reset in this
-//! driver to take it back — see [`COMMAND`].
+//! Here that costs more than it does there — what takes an abandoned command
+//! back is a whole controller reset ([`NvmeController::reset`]), spent once
+//! per silence and with one post-reset command as its whole allowance — see
+//! [`COMMAND`].
 
 use core::sync::atomic::{fence, Ordering};
 use toyos_untrusted::{Refused, Untrusted};
@@ -71,21 +73,28 @@ const QUEUE_DEPTH: usize = 16;
 ///
 /// **A [`Budget`] and not a [`crate::time::Bound`].** NVMe 2.0 states no
 /// completion timeout for an I/O command; `CAP.TO` is the one number the device
-/// publishes about waiting and it bounds exactly the `CSTS.RDY` transitions in
-/// [`init`], which are a different wait and a different chunk
-/// (`issues/kernel/driver-waits-without-a-deadline.md` owns those two, and they
-/// still spin unbounded).
+/// publishes about waiting and it bounds exactly the `CSTS.RDY` transitions —
+/// [`init`]'s two still spin unbounded
+/// (`issues/kernel/driver-waits-without-a-deadline.md` owns those), while
+/// [`NvmeController::reset`]'s two are bounded by the register's own value.
 ///
-/// **Its expiry ends this controller, which is why it may be generous.** A
-/// command this driver stops waiting for is a command the device still owns:
-/// its PRP list still names the shared DMA window and its completion still owes
-/// the entry at `cq_head`, so a command issued after it would race a stranger's
-/// DMA and read a stranger's status. There is no controller reset here to take
-/// either back, so the queue is abandoned with the command.
+/// **Its expiry is a slowness verdict about one command, never a death
+/// sentence for the disk.** A command this driver stops waiting for is a
+/// command the device still owns: its PRP list still names the shared DMA
+/// window and its completion still owes the entry at `cq_head`, so a command
+/// issued after it would race a stranger's DMA and read a stranger's status.
+/// What takes both back is a controller reset (NVMe 2.0 §3.7.2: clearing
+/// `CC.EN` aborts every outstanding command and forgets every I/O queue), so
+/// the escalation on expiry is one reset and one post-reset chance — and only
+/// a reset that fails, or a controller that is silent again on the very next
+/// command, marks the disk failed. Until 2026-08-23 there was no reset here
+/// and a single silent command ended the controller for the boot, which is the
+/// declare-death-on-elapsed-time policy this tree measured the cost of on the
+/// USB path.
 const COMMAND: Budget = Budget::of(
     Duration::from_secs(2),
-    "the command is abandoned, the controller is marked failed, and every later \
-     operation on this disk is refused",
+    "the command is abandoned to a controller reset, and one post-reset silence \
+     marks the disk failed",
 );
 
 /// NVMe Identify Namespace data structure (partial — only fields we use).
@@ -111,6 +120,11 @@ const ADMIN_CREATE_IO_CQ: u8 = 0x05;
 const ADMIN_IDENTIFY: u8 = 0x06;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
+
+/// `CC` as this driver enables a controller: EN, with IOSQES/IOCQES naming the
+/// 64- and 16-byte entry sizes above. One constant because [`init`] and
+/// [`NvmeController::reset`] must enable the same controller.
+const CC_ENABLED: u32 = 1 | (6 << 16) | (4 << 20);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -180,6 +194,15 @@ impl NvmeQueue {
         }
     }
 
+    /// This queue's software state back to a freshly created queue's, for the
+    /// controller reset that has just deleted the hardware's half. The views
+    /// and doorbell offsets stand — the reset moves no memory.
+    fn start_over(&mut self) {
+        self.sq_tail = 0;
+        self.cq_head = 0;
+        self.phase = true;
+    }
+
     fn submit(&mut self, bar: &Mmio, cmd: SqEntry) {
         // Bounded by the write itself: `init` gave each queue a whole 4096-byte
         // page, which is `QUEUE_DEPTH * size_of::<SqEntry>()` (16 * 64) exactly,
@@ -222,6 +245,21 @@ impl NvmeQueue {
     /// fourth copy of `settles`' body, and that function's own doc records why
     /// the body may not read `nanos_since_boot` per iteration.
     fn wait_completion(&mut self, bar: &Mmio, expected: u16) -> Result<u16, Unanswered> {
+        // Abandon this one command without waiting for it, where the harness
+        // asked to. **A kernel feature because nothing on the host side can
+        // stage it**: QEMU's NVMe answers every command in microseconds and
+        // `rerror`/`werror` fail a command rather than delaying one, so no
+        // device or drive property makes a completion not arrive. The command
+        // really was submitted and the doorbell really was rung — only the
+        // *wait* is skipped, which is precisely the state a command that ran
+        // out [`COMMAND`] leaves behind: a PRP list the controller still owns
+        // and a completion entry still owed. The reset escalation below then
+        // runs against that real state, which is the whole thing under test.
+        // Same reason `usb-transport-break` exists.
+        #[cfg(feature = "boot-actuators")]
+        if silent_command::take() {
+            return Err(Unanswered::Silent);
+        }
         let (cq, head, phase) = (self.cq, self.cq_head, self.phase);
         let at = |i: u16| i as usize * core::mem::size_of::<CqEntry>();
         let answered = crate::clock::settles(COMMAND.nanos(), || {
@@ -264,6 +302,27 @@ impl NvmeQueue {
     }
 }
 
+/// The arm behind `nvme-command-silent`: one completion wait is skipped, when
+/// `nvme_gate` asks for it. Armed by the gate at its own read and never by the
+/// boot parameter alone — the first wait in a boot belongs to `init`'s
+/// Identify, and abandoning *that* would stage "a controller that never came
+/// up", which is a different machine than the one under test. See the comment
+/// at the one take site, [`NvmeQueue::wait_completion`].
+#[cfg(feature = "boot-actuators")]
+pub mod silent_command {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+
+    pub fn arm() {
+        ARMED.store(true, Ordering::Relaxed);
+    }
+
+    pub(super) fn take() -> bool {
+        ARMED.swap(false, Ordering::Relaxed)
+    }
+}
+
 /// Why a submitted command produced no status this driver may use.
 ///
 /// Two arms and not one, because what they leave behind differs and the
@@ -271,7 +330,8 @@ impl NvmeQueue {
 /// wrong `cid` leaves the queue *consistent* — the entry was consumed, the head
 /// advanced, the doorbell rang — so the next command starts from a known place.
 /// A command that was never answered leaves the queue owed an entry and the DMA
-/// window owed a write, and nothing in this driver can take either back.
+/// window owed a write, and the one thing that can take either back is
+/// [`NvmeController::reset`].
 enum Unanswered {
     /// The completion queue answered a different command.
     Wrong(Refused),
@@ -332,10 +392,16 @@ struct NvmeController {
     next_cid: u16,
     sector_size: u32,
     ns_size: u64,
-    /// Whether a command has been abandoned on this controller. Once it has,
-    /// the queues and the DMA window are the device's and this driver issues
-    /// nothing more on them — see [`COMMAND`].
+    /// Whether this controller has been declared failed. Once it has, this
+    /// driver issues nothing more on it — see [`COMMAND`] for the escalation
+    /// that stands between one silent command and getting here.
     failed: bool,
+    /// Whether the *last* thing that happened on this controller was a reset.
+    /// One post-reset command is the escalation's whole allowance: a
+    /// controller that is silent again with this set is declared failed, and
+    /// any served command clears it — so a reset is never spent twice proving
+    /// the same silence.
+    fresh_reset: bool,
 }
 
 impl NvmeController {
@@ -360,31 +426,118 @@ impl NvmeController {
 
     /// One command on each queue, with the one verdict that outlives the
     /// command folded into the controller's own state.
+    /// An admin command's silence ends the controller at once, with no reset
+    /// between: admin commands run only at bring-up and inside [`Self::reset`]
+    /// itself, and a reset escalation from inside either is the escalation
+    /// recursing into its own failure.
     fn admin_command(&mut self, cmd: SqEntry) -> Result<u16, Unanswered> {
         let out = self.admin.submit_and_wait(&self.bar, cmd);
-        self.note(&out);
-        out
-    }
-
-    fn io_command(&mut self, cmd: SqEntry) -> Result<u16, Unanswered> {
-        let out = self.io.submit_and_wait(&self.bar, cmd);
-        self.note(&out);
-        out
-    }
-
-    /// A command nobody answered ends this controller, once and loudly.
-    ///
-    /// Once, because the line is about the abandonment and not about the caller
-    /// that noticed: the page cache retries, and a line per refused operation
-    /// would bury the one that says what happened. Every later refusal is
-    /// silent by design and carries the caller's own log line above it.
-    fn note(&mut self, out: &Result<u16, Unanswered>) {
         if matches!(out, Err(Unanswered::Silent)) && !self.failed {
             self.failed = true;
-            log!("NVMe: this controller is offline: the command it did not answer still owns \
-                 its PRP list and is still owed a completion entry, and this driver has no \
-                 reset to take either back");
+            log!("NVMe: this controller is offline: an admin command went unanswered, and \
+                 the reset escalation is not spent on a controller that cannot be asked to \
+                 make queues");
         }
+        out
+    }
+
+    /// An I/O command, with the slow-vs-failed escalation applied to its
+    /// silence: one controller reset, one post-reset chance, and only then a
+    /// disk declared failed. [`COMMAND`] carries the argument; a served
+    /// command re-arms the escalation by clearing `fresh_reset`.
+    fn io_command(&mut self, cmd: SqEntry) -> Result<u16, Unanswered> {
+        let out = self.io.submit_and_wait(&self.bar, cmd);
+        match &out {
+            Ok(_) => self.fresh_reset = false,
+            Err(Unanswered::Silent) if !self.failed => {
+                if self.fresh_reset {
+                    self.failed = true;
+                    log!("NVMe: this controller is offline: the first command after its reset \
+                         went unanswered too, and one post-reset command is the escalation's \
+                         whole allowance");
+                } else {
+                    log!("NVMe: no completion in {} — resetting the controller: the abandoned \
+                         command still owns its PRP list and is still owed a completion entry, \
+                         and a reset is the one way to take both back", COMMAND.duration());
+                    if self.reset() {
+                        self.fresh_reset = true;
+                        log!("NVMe: controller reset complete; the disk stays online and the \
+                             caller is told to ask again");
+                    } else {
+                        self.failed = true;
+                        log!("NVMe: this controller is offline: the reset escalation itself \
+                             failed");
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+        out
+    }
+
+    /// What one unanswered I/O command means to [`BlockDevice`]'s caller,
+    /// decided *after* [`Self::io_command`]'s escalation has run.
+    ///
+    /// A silence the reset reclaimed is [`BlockError::BudgetExpired`]: nothing
+    /// is in flight any more, the queues are fresh, the disk is online, and
+    /// asking again on a fresh operation is the honest answer — the same word
+    /// the USB path uses for a break its Reset Recovery absorbed. A silence
+    /// that ended the controller, and a completion carrying the wrong `cid`
+    /// (a device out of step with the driver), are device facts.
+    fn unanswered(&self, why: Unanswered) -> BlockError {
+        match why {
+            Unanswered::Silent if !self.failed => BlockError::BudgetExpired,
+            Unanswered::Silent | Unanswered::Wrong(_) => BlockError::Device,
+        }
+    }
+
+    /// Controller reset: `CC.EN` 0 → 1 plus the I/O queues made afresh, which
+    /// is what takes an abandoned command's PRP list and owed completion entry
+    /// back from the device.
+    ///
+    /// NVMe 2.0 §3.7.2: clearing `CC.EN` resets the controller — every
+    /// outstanding command is aborted, every I/O queue is deleted — and the
+    /// host then waits for `CSTS.RDY` to clear, re-enables, waits for it to
+    /// set, and re-creates the I/O queues before issuing anything. The two
+    /// `RDY` waits are bounded by the controller's own published worst case,
+    /// `CAP.TO` (§3.1.4.1, units of 500 ms), because that register is the one
+    /// number the device states about this exact transition.
+    ///
+    /// The admin queue is *not* re-created by command — §3.7.2 has its base
+    /// and size re-read from `AQA`/`ASQ`/`ACQ` on enable — so those registers
+    /// are rewritten with the same values [`init`] programmed, the rings are
+    /// zeroed, and both queues' software state starts over at zero with the
+    /// phase expectation fresh.
+    fn reset(&mut self) -> bool {
+        let to = ((self.bar.read_u64(REG_CAP) >> 24) & 0xFF).max(1);
+        let ready = crate::time::Bound::from_register(
+            Duration::from_millis(to * 500),
+            "NVMe CAP.TO, the controller's own worst case for a CSTS.RDY transition",
+        );
+        let cc = self.bar.read_u32(REG_CC);
+        self.bar.write_u32(REG_CC, cc & !1);
+        if !crate::clock::settles(ready.nanos(), || self.bar.read_u32(REG_CSTS) & 1 == 0) {
+            log!("NVMe: reset failed: CSTS.RDY would not clear in {ready}");
+            return false;
+        }
+
+        self.zero_dma(OFF_ADMIN_SQ, 4096);
+        self.zero_dma(OFF_ADMIN_CQ, 4096);
+        self.admin.start_over();
+        self.io.start_over();
+        let aqa = ((QUEUE_DEPTH as u32 - 1) << 16) | (QUEUE_DEPTH as u32 - 1);
+        self.bar.write_u32(REG_AQA, aqa);
+        self.bar.write_u64(REG_ASQ, self.dma.phys() + OFF_ADMIN_SQ as u64);
+        self.bar.write_u64(REG_ACQ, self.dma.phys() + OFF_ADMIN_CQ as u64);
+        self.bar.write_u32(REG_CC, CC_ENABLED);
+        if !crate::clock::settles(ready.nanos(), || self.bar.read_u32(REG_CSTS) & 1 != 0) {
+            log!("NVMe: reset failed: CSTS.RDY would not set in {ready}");
+            return false;
+        }
+        // The geometry is not re-asked: the namespace behind NSID 1 did not
+        // move, and `identify_namespace` writing `sector_size` mid-boot would
+        // race every layout the layers above derived from it.
+        self.create_io_cq() && self.create_io_sq()
     }
 
     /// An admin command, with the status the controller returned actually
@@ -562,7 +715,7 @@ impl NvmeController {
             Ok(status) => status,
             Err(why) => {
                 log!("NVMe: read of {sector_count} sectors at {lba}: {why}");
-                return Err(BlockError::Device);
+                return Err(self.unanswered(why));
             }
         };
         if status != 0 {
@@ -622,7 +775,7 @@ impl NvmeController {
             Ok(status) => status,
             Err(why) => {
                 log!("NVMe: write of {sector_count} sectors at {lba}: {why}");
-                return Err(BlockError::Device);
+                return Err(self.unanswered(why));
             }
         };
         if status != 0 {
@@ -690,8 +843,15 @@ impl BlockDevice for NvmeBlockDevice {
             let sector_count = batch * self.sectors_per_block;
             let bytes = batch as usize * 4096;
 
-            self.ctrl
-                .read_sectors(sector_lba, sector_count, &mut buf[offset..offset + bytes], until)?;
+            if let Err(e) = self
+                .ctrl
+                .read_sectors(sector_lba, sector_count, &mut buf[offset..offset + bytes], until)
+            {
+                if e == BlockError::BudgetExpired {
+                    block::census::budget_expired(self.id);
+                }
+                return Err(e);
+            }
 
             block += batch as u64;
             offset += bytes;
@@ -714,8 +874,15 @@ impl BlockDevice for NvmeBlockDevice {
             let sector_count = batch * self.sectors_per_block;
             let bytes = batch as usize * 4096;
 
-            self.ctrl
-                .write_sectors(sector_lba, sector_count, &buf[offset..offset + bytes], until)?;
+            if let Err(e) = self
+                .ctrl
+                .write_sectors(sector_lba, sector_count, &buf[offset..offset + bytes], until)
+            {
+                if e == BlockError::BudgetExpired {
+                    block::census::budget_expired(self.id);
+                }
+                return Err(e);
+            }
 
             block += batch as u64;
             offset += bytes;
@@ -801,8 +968,7 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
     bar.write_u64(REG_ASQ, dma.phys() + OFF_ADMIN_SQ as u64);
     bar.write_u64(REG_ACQ, dma.phys() + OFF_ADMIN_CQ as u64);
 
-    let cc = 1 | (6 << 16) | (4 << 20);
-    bar.write_u32(REG_CC, cc);
+    bar.write_u32(REG_CC, CC_ENABLED);
 
     while bar.read_u32(REG_CSTS) & 1 == 0 {
         core::hint::spin_loop();
@@ -818,6 +984,7 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
         sector_size: 512,
         ns_size: 0,
         failed: false,
+        fresh_reset: false,
     };
 
     // A controller that refuses any of these has not given the driver a

@@ -89,6 +89,17 @@ const STD_PATH_DEPS: [&str; 2] = ["toyos-abi", "toyos"];
 /// The manifest those two paths are written in.
 const STD_MANIFEST: &str = "library/std/Cargo.toml";
 
+/// Every target a guest artifact is built for: ToyOS userland, the kernel's
+/// bare-metal target, and the UEFI bootloader.
+///
+/// One home for the list, because it is read four ways that must agree — the
+/// `stage1-std` cleans in [`full_bootstrap`] and [`rebuild_std`],
+/// [`write_config`]'s bootstrap `target` set, and `src/build.rs`'s external
+/// fingerprint. A fifth spelling would silently leave one of them building or
+/// fingerprinting a different set of targets than the others.
+pub const GUEST_TARGETS: [&str; 3] =
+    ["x86_64-unknown-toyos", "x86_64-unknown-none", "x86_64-unknown-uefi"];
+
 /// Point `library/std`'s two ToyOS dependencies at the worktree doing the
 /// building, for the length of one `x build`.
 ///
@@ -226,11 +237,11 @@ fn assert_std_built_from(root: &Path, rust_dir: &Path) {
     assert!(
         foreign.is_empty(),
         "std was compiled against {} sources that are not this worktree's:\n  {}\n\
-         The directory override in {} did not take effect, so this sysroot's ABI is another \
-         checkout's.",
+         `SourceOverride`'s rewrite of {} did not point std at this checkout, so this \
+         sysroot's ABI is another checkout's.",
         foreign.len(),
         foreign.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("\n  "),
-        rust_dir.join(".cargo/config.toml").display(),
+        rust_dir.join(STD_MANIFEST).display(),
     );
 }
 
@@ -251,13 +262,7 @@ fn claimant_path(rust_dir: &Path) -> PathBuf {
 
 /// Record this checkout as the one the sysroot was built from.
 fn record_claimant(root: &Path, rust_dir: &Path) {
-    let branch = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+    let branch = git_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"])
         .map_or_else(|| "an unknown branch".to_string(), |b| b.trim().to_string());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -364,6 +369,22 @@ enum Standing {
     Unknown,
 }
 
+/// What a claimant is told to do about the fact that a claim blocks everybody.
+///
+/// One sysroot serves N worktrees, so a checkout with a real ABI change takes a
+/// turn during which the others cannot build at all — measured twice on
+/// 2026-08-07 at about 35 and about 50 minutes, both of them a whole task long
+/// because the claim was held for the whole task. It does not have to be: the
+/// ABI half of a change is usually a few lines that compile on their own, and
+/// landing it by itself makes the window one landing instead. Applied once that
+/// day, successfully. Said at the refusal itself, because the refusal is what an
+/// agent in this situation is actually reading.
+const CLAIM_WINDOW: &str = "\
+    The window is yours to make small: land the toyos-abi/toyos change on its own commit \
+    first, before the work that depends on it. Every other worktree is refused for as long \
+    as you hold the sysroot, and holding it for a whole task is what cost ~35 and ~50 \
+    minutes of eight agents' time on 2026-08-07.";
+
 /// **Against the merge base, not against main's tip.** `git diff main` is
 /// symmetric: a worktree that has merely not merged somebody else's landed ABI
 /// change looked exactly like one holding an unlanded change of its own, and
@@ -384,22 +405,6 @@ enum Standing {
 /// The working tree is asked separately and with `status` rather than `diff`,
 /// because a new file in `toyos-abi/src` changes the witness and no `diff`
 /// against a commit reports an untracked one.
-/// What a claimant is told to do about the fact that a claim blocks everybody.
-///
-/// One sysroot serves N worktrees, so a checkout with a real ABI change takes a
-/// turn during which the others cannot build at all — measured twice on
-/// 2026-08-07 at about 35 and about 50 minutes, both of them a whole task long
-/// because the claim was held for the whole task. It does not have to be: the
-/// ABI half of a change is usually a few lines that compile on their own, and
-/// landing it by itself makes the window one landing instead. Applied once that
-/// day, successfully. Said at the refusal itself, because the refusal is what an
-/// agent in this situation is actually reading.
-const CLAIM_WINDOW: &str = "\
-    The window is yours to make small: land the toyos-abi/toyos change on its own commit \
-    first, before the work that depends on it. Every other worktree is refused for as long \
-    as you hold the sysroot, and holding it for a whole task is what cost ~35 and ~50 \
-    minutes of eight agents' time on 2026-08-07.";
-
 fn standing(root: &Path) -> Standing {
     let Some(main) = main_ref(root) else {
         return Standing::Unknown;
@@ -435,11 +440,7 @@ fn standing(root: &Path) -> Standing {
 }
 
 fn merging(root: &Path) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
-        .current_dir(root)
-        .output()
-        .is_ok_and(|out| out.status.success())
+    git_stdout(root, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_some()
 }
 
 /// What a checkout whose sources disagree with the shared sysroot may do about
@@ -565,13 +566,9 @@ fn content_hash(data: &[u8]) -> String {
 /// where [`Standing::Unknown`]'s rule applies: an unanswered question is not
 /// permission.
 fn main_ref(root: &Path) -> Option<&'static str> {
-    ["origin/main", "main"].into_iter().find(|r| {
-        Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", r])
-            .current_dir(root)
-            .output()
-            .is_ok_and(|o| o.status.success())
-    })
+    ["origin/main", "main"]
+        .into_iter()
+        .find(|r| git_stdout(root, &["rev-parse", "--verify", "--quiet", r]).is_some())
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
@@ -886,12 +883,7 @@ fn host_cargo() -> &'static Path {
                 return nightly;
             }
         }
-        let output = Command::new("rustc")
-            .args(["--print", "sysroot"])
-            .output()
-            .expect("Failed to run rustc");
-        let sysroot = String::from_utf8(output.stdout).expect("rustc prints a path");
-        let cargo = Path::new(sysroot.trim()).join("bin/cargo");
+        let cargo = host_sysroot().join("bin/cargo");
         assert!(
             cargo.exists(),
             "there is no cargo at {}, so the toyos toolchain cannot be given one and every \
@@ -1589,7 +1581,7 @@ fn full_bootstrap(root: &Path, rust_dir: &Path) {
 
     // Clean cached std for all ToyOS targets so bootstrap picks up compiler changes
     // (e.g. target spec changes like default_uwtable that affect codegen).
-    for target in ["x86_64-unknown-toyos", "x86_64-unknown-none", "x86_64-unknown-uefi"] {
+    for target in GUEST_TARGETS {
         let stage1_std = rust_dir.join(format!("build/{host}/stage1-std/{target}"));
         if stage1_std.exists() {
             fs::remove_dir_all(&stage1_std).ok();
@@ -1625,7 +1617,7 @@ fn rebuild_std(root: &Path, rust_dir: &Path) {
     // Clean bootstrap's cached std for ToyOS targets so it picks up toyos-abi changes.
     // Bootstrap caches compiled std artifacts and won't notice external dep changes.
     let host = host_triple();
-    for target in ["x86_64-unknown-toyos", "x86_64-unknown-none", "x86_64-unknown-uefi"] {
+    for target in GUEST_TARGETS {
         let stage1_std = rust_dir.join(format!("build/{host}/stage1-std/{target}"));
         if stage1_std.exists() {
             fs::remove_dir_all(&stage1_std).ok();
@@ -1684,13 +1676,18 @@ fn write_config(rust_dir: &Path, host: &str, toyos_ld: &Path, with_hosted_rustc:
     } else {
         ""
     };
+    let targets = std::iter::once(host)
+        .chain(GUEST_TARGETS)
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     let config = format!(
         r#"change-id = "ignore"
 profile = "compiler"
 
 [build]
 {host_line}
-target = ["{host}", "x86_64-unknown-toyos", "x86_64-unknown-none", "x86_64-unknown-uefi"]
+target = [{targets}]
 
 [rust]
 incremental = true
@@ -1772,6 +1769,20 @@ pub fn path_with_toyos_ld(root: &Path) -> String {
     }
 }
 
+/// The stable host toolchain's sysroot, as `rustc --print sysroot` reports it.
+///
+/// Both [`host_cargo`] and [`link_host_target`] resolve their answer through it
+/// for the one reason [`host_cargo`]'s doc gives: it is whatever stable
+/// toolchain this machine has, and that is not a path any artifact can name.
+fn host_sysroot() -> PathBuf {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("Failed to run rustc");
+    let sysroot = String::from_utf8(output.stdout).expect("rustc prints a path");
+    PathBuf::from(sysroot.trim())
+}
+
 /// Whether the ToyOS sysroot is missing the host target proc-macros compile against.
 fn host_target_missing(rust_dir: &Path) -> bool {
     let toyos_sysroot = rust_dir.join("build/x86_64-unknown-toyos/stage2/lib/rustlib");
@@ -1784,13 +1795,7 @@ fn link_host_target(rust_dir: &Path) {
         .join("build/x86_64-unknown-toyos/stage2/lib/rustlib")
         .join(&host);
 
-    let output = Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .output()
-        .expect("Failed to run rustc");
-    let stable_sysroot = String::from_utf8(output.stdout).unwrap();
-    let stable_sysroot = stable_sysroot.trim();
-    let source = Path::new(stable_sysroot).join("lib/rustlib").join(&host);
+    let source = host_sysroot().join("lib/rustlib").join(&host);
     assert!(
         source.exists(),
         "Host target {} not found in stable toolchain at {}",

@@ -219,6 +219,53 @@ actuators! {
     /// leaves behind. See `xhci/wait/msc.rs`'s `transport_break`.
     usb_transport_break = "usb-transport-break";
 
+    /// Skip the waits of the next Reset Recovery's control transfers — the
+    /// Bulk-Only Mass Storage Reset and both CLEAR_FEATUREs — once. A truly
+    /// hung device answers nothing, its recovery included, and QEMU's
+    /// `usb-storage` answers every EP0 request in microseconds with no property
+    /// to stop it — so "the reset escalation itself failed", one of the three
+    /// evidences a volume may be declared failed on, is unreachable from the
+    /// host side. The requests are really enqueued and the doorbell really
+    /// rung; only the waits are skipped, which is the state a device that
+    /// stopped answering EP0 leaves behind. The recovery reports failure, the
+    /// disk goes offline, and nothing speaks to it again — so the completions
+    /// QEMU still delivers land on a device nothing is waiting on. See
+    /// `xhci/wait/msc.rs`'s `reset_break`.
+    usb_reset_break = "usb-reset-break";
+
+    /// Run every `SYS_FSYNC`'s first attempt under an operation that is already
+    /// over, so the flush sequence is refused on the caller's budget at the
+    /// shipped site and the operation-level retry loop's keep-the-volume half
+    /// runs. The state staged is the one a loaded dev host reproduced 1 in 73
+    /// full 12-wide suites (2026-08-22, `esp_filesystem`'s `fsync` on `/log`)
+    /// — a budget spent by lock-wait and
+    /// host descheduling on a stick that answered every transfer — which
+    /// `usb-slow-device`'s 2 ms against a 2 s bound cannot reach (measured,
+    /// three orders of magnitude) and no QEMU option stages. Every attempt
+    /// after the first runs clean, so every staged refusal is followed by the
+    /// retry delivering the same pages. See `object/ops.rs`'s `fsync`.
+    fsync_budget_spent = "fsync-budget-spent";
+
+    /// Make `SYS_FSYNC`'s deadman already expired, so the first budget-refused
+    /// attempt is the last and the declared-failed exit runs. The real deadman
+    /// is minutes by design — its job is a hung device, not a test's clock —
+    /// so no staged boot can wait it out honestly, and what this replaces is
+    /// only *when* it expires: the refusal it acts on is the shipped one and
+    /// arrives armed beside `fsync-budget-spent`. See `object/ops.rs`'s
+    /// `fsync`.
+    fsync_deadman_now = "fsync-deadman-now";
+
+    /// Skip one NVMe completion wait, so a submitted command goes unanswered
+    /// against a live controller and the reset escalation runs. QEMU's NVMe
+    /// answers every command in microseconds and `rerror`/`werror` fail one
+    /// rather than delaying it, so a controller that is silent inside
+    /// `nvme::COMMAND` is unreachable from the host side. The command really
+    /// is submitted and the doorbell really rung — the PRP list really is the
+    /// device's and the completion really is owed, which is the exact state
+    /// the reset must take back. Armed by `cache_eviction` beside
+    /// `nvme-spent-budget`; see `kernel/src/nvme_gate.rs`.
+    nvme_command_silent = "nvme-command-silent";
+
     /// Under-deliver one READ(10) data phase where the gate asks for it, so that
     /// the controller's count of the bytes it moved and the device's own CSW
     /// residue disagree. QEMU derives both from one transfer, so they can never
