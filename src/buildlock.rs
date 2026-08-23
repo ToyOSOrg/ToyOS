@@ -1,12 +1,12 @@
 //! Serialising the build system's stateful phases across the builds running
 //! against this repository.
 //!
-//! Cargo's own build lock cannot do this job. `ensure_fresh` runs `cargo clean`,
-//! which removes the whole `target/`, and cargo's lock lives inside it at
-//! `target/<profile>/.cargo-lock` — the clean deletes the file the other
-//! process's lock is on. So these files live outside every directory the build
-//! system removes: a lock on an inode that can be unlinked and recreated under
-//! a waiter is not a lock.
+//! Cargo's own build lock cannot do this job. `src/build.rs`'s `invalidate_stale`
+//! runs the `clean` that `cargo clean`s a crate's `target/`, and cargo's lock
+//! lives inside it at `target/<profile>/.cargo-lock` — the clean deletes the
+//! file the other process's lock is on. So these files live outside every
+//! directory the build system removes: a lock on an inode that can be unlinked
+//! and recreated under a waiter is not a lock.
 //!
 //! Two modes, because two plain `cargo build`s of different packages are
 //! cargo's business and serialising those would destroy the parallelism the
@@ -76,10 +76,6 @@ const LOCK_DIR: &str = ".build-locks";
 /// Inside the git common directory: the one place every worktree of this
 /// repository names identically, and one the build system never cleans.
 const GLOBAL_LOCK_DIR: &str = "toyos-build-locks";
-
-fn lock_path(dir: &Path, name: &str) -> PathBuf {
-    dir.join(name)
-}
 
 /// The one directory every worktree of this repository names identically.
 fn git_lock_dir(root: &Path) -> PathBuf {
@@ -206,7 +202,7 @@ impl Held {
 /// build lock proper because every builder needs it and builders hold the build
 /// lock in *shared* mode by design.
 pub fn artifact(root: &Path) -> Guard {
-    exclusive(&lock_path(&root.join(LOCK_DIR), "artifact"), "artifact lock", "artifact staging")
+    exclusive(&root.join(LOCK_DIR).join("artifact"), "artifact lock", "artifact staging")
 }
 
 /// The integration lock: one process at a time moves this host's `main`.
@@ -228,7 +224,7 @@ pub fn integration(root: &Path) -> Guard {
 }
 
 fn integration_path(root: &Path) -> PathBuf {
-    lock_path(&git_lock_dir(root), "integration")
+    git_lock_dir(root).join("integration")
 }
 
 /// How many guests may be up on this host at once, across every worktree.
@@ -367,7 +363,7 @@ pub fn claim_sysroot(root: &Path, what: &str) -> Guard {
 const SYSROOT_DIR: &str = "sysroot";
 
 fn slot_path(dir: &Path, index: usize) -> PathBuf {
-    lock_path(dir, &format!("slot-{index}"))
+    dir.join(format!("slot-{index}"))
 }
 
 /// What a counting semaphore counts, in the words its waiting message needs.
@@ -497,8 +493,8 @@ const SYSROOT: Lock = Lock {
 /// dropped as soon as `state` is held, so nothing ever waits on `intent` while
 /// holding `state`.
 fn acquire(dir: &Path, op: i32, what: &str, lock: Lock) -> Guard {
-    let intent_path = lock_path(dir, "intent");
-    let state_path = lock_path(dir, "state");
+    let intent_path = dir.join("intent");
+    let state_path = dir.join("state");
     let intent = open_lock_file(&intent_path);
     let state = open_lock_file(&state_path);
     let label = format!("{}, {what}", if op == LOCK_EX { "exclusive" } else { "shared" });
@@ -791,7 +787,7 @@ mod tests {
     /// A fresh fd per probe: a successful `try_lock` *holds* what it took, and
     /// polling on one fd would itself be the thing keeping the writer out.
     fn intent_is_taken(root: &Path) -> bool {
-        !try_lock(&open_lock_file(&lock_path(&worktree_lock_dir(root), "intent")), LOCK_SH)
+        !try_lock(&open_lock_file(&worktree_lock_dir(root).join("intent")), LOCK_SH)
     }
 
     fn note(root: &Path, line: &str) {
@@ -929,10 +925,10 @@ mod tests {
         let mut kid = child(&root, "hold-exclusive");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
 
-        let state = open_lock_file(&lock_path(&worktree_lock_dir(&root), "state"));
+        let state = open_lock_file(&worktree_lock_dir(&root).join("state"));
         assert!(!try_lock(&state, LOCK_SH), "a build got in while an exclusive phase ran");
         assert!(!try_lock(&state, LOCK_EX), "two exclusive phases at once");
-        let holder = describe_holder(&lock_path(&worktree_lock_dir(&root), "state"))
+        let holder = describe_holder(&worktree_lock_dir(&root).join("state"))
             .expect("no holder note");
         assert!(
             holder.starts_with(&format!("held by pid {} ", kid.id())),
@@ -951,7 +947,7 @@ mod tests {
         let mut kid = child(&root, "hold-exclusive-forever");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
 
-        let state = open_lock_file(&lock_path(&worktree_lock_dir(&root), "state"));
+        let state = open_lock_file(&worktree_lock_dir(&root).join("state"));
         assert!(!try_lock(&state, LOCK_EX), "the lock was not actually held");
 
         kid.kill().unwrap();
@@ -960,7 +956,7 @@ mod tests {
         assert!(try_lock(&state, LOCK_EX), "a SIGKILLed holder stranded the lock");
         // And the note it left behind names a pid that is gone, so nobody is
         // sent to wait on it.
-        assert_eq!(describe_holder(&lock_path(&worktree_lock_dir(&root), "state")), None);
+        assert_eq!(describe_holder(&worktree_lock_dir(&root).join("state")), None);
     }
 
     /// Two processes moving this host's `main` at once is what the lock stops:
@@ -1020,7 +1016,7 @@ mod tests {
         drop(building);
 
         let _landing = integration(&root);
-        let state = open_lock_file(&lock_path(&git_common_lock_dir(&root), "state"));
+        let state = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(try_lock(&state, LOCK_SH), "a landing kept its own gate's build out");
     }
 
@@ -1028,10 +1024,10 @@ mod tests {
     fn shared_admits_shared() {
         let root = scratch("shared");
         let _mine = shared(&root, "parent");
-        let second = open_lock_file(&lock_path(&worktree_lock_dir(&root), "state"));
+        let second = open_lock_file(&worktree_lock_dir(&root).join("state"));
         assert!(try_lock(&second, LOCK_SH), "two builds cannot run at once");
         drop(second);
-        let third = open_lock_file(&lock_path(&worktree_lock_dir(&root), "state"));
+        let third = open_lock_file(&worktree_lock_dir(&root).join("state"));
         assert!(!try_lock(&third, LOCK_EX), "a clean got in while a build was running");
     }
 
@@ -1069,7 +1065,7 @@ mod tests {
         // open file descriptions, so a second handle on the shared file is the
         // question a second process would ask.
         let held = acquire(&root.join(LOCK_DIR), LOCK_SH, "a build in the primary", BUILD);
-        let global = open_lock_file(&lock_path(&git_common_lock_dir(&linked), "state"));
+        let global = open_lock_file(&git_common_lock_dir(&linked).join("state"));
         assert!(
             try_lock(&global, LOCK_EX),
             "the worktree lock excluded a global phase it knows nothing about"
@@ -1078,7 +1074,7 @@ mod tests {
         drop(held);
 
         let building = shared(&linked, "a build in the worktree");
-        let global = open_lock_file(&lock_path(&git_common_lock_dir(&root), "state"));
+        let global = open_lock_file(&git_common_lock_dir(&root).join("state"));
         assert!(
             !try_lock(&global, LOCK_EX),
             "a bootstrap could land inside a build running in another worktree"
@@ -1141,7 +1137,7 @@ mod tests {
         let mut kid = child(&root, "hold-run");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
 
-        let state = lock_path(&sysroot_lock_dir(&root), "state");
+        let state = sysroot_lock_dir(&root).join("state");
         assert!(
             !try_lock(&open_lock_file(&state), LOCK_EX),
             "a claim could land inside a run in flight"
@@ -1168,7 +1164,7 @@ mod tests {
         let mine = run_against_sysroot(&root, "the parent's run");
 
         let mut claimer = child(&root, "want-claim");
-        let intent = lock_path(&sysroot_lock_dir(&root), "intent");
+        let intent = sysroot_lock_dir(&root).join("intent");
         let deadline = Instant::now() + Duration::from_secs(20);
         while try_lock(&open_lock_file(&intent), LOCK_SH) {
             assert!(Instant::now() < deadline, "the claiming child never queued");
@@ -1196,7 +1192,7 @@ mod tests {
         let mut kid = child(&root, "hold-run-forever");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
 
-        let state = lock_path(&sysroot_lock_dir(&root), "state");
+        let state = sysroot_lock_dir(&root).join("state");
         assert!(!try_lock(&open_lock_file(&state), LOCK_EX), "the lock was not actually held");
 
         kid.kill().unwrap();
