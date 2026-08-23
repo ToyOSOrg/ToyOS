@@ -583,10 +583,9 @@ pub fn dns_lookup(hostname: &str, results: &mut [[u8; 4]]) -> Result<usize, NetE
 /// netd leaves quietly or dies loudly.
 ///
 /// **Both directions are asserted and the second is the point.** A guard that
-/// accepted every error would pass the three tests above and would be exactly
-/// the fix `issues/build/sshd-panics-when-netd-exits-before-it-binds.md` says
-/// is wrong: a machine that *has* a NIC and cannot bind must still be loud, so
-/// the refusals that are not a peer's absence have to stay [`NetError::Io`].
+/// accepted every error would pass the three tests above and would be the wrong
+/// fix: a machine that *has* a NIC and cannot bind must still be loud, so the
+/// refusals that are not a peer's absence have to stay [`NetError::Io`].
 #[cfg(test)]
 mod tests {
     use super::*;
