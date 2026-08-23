@@ -782,6 +782,13 @@ impl AddressSpace {
     /// The check is a walk of three already-hot table lines, paid once per
     /// *fill* and never on the common already-mapped fault, which
     /// `handle_page_fault` answers before it allocates anything.
+    ///
+    /// Linux answers the same race the same way at the same granularity:
+    /// `mm/huge_memory.c`'s `__do_huge_pmd_anonymous_page` takes `pmd_lock`,
+    /// re-tests `pmd_none` on a 2 MiB folio it has already allocated and
+    /// zeroed, and `folio_put`s it when another fault got there first. Neither
+    /// kernel holds the address space across the fill, because a fill is device
+    /// I/O.
     pub fn map_window_if_absent(
         &mut self,
         vaddr: UserAddr,
