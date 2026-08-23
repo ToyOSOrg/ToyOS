@@ -24,8 +24,8 @@ mod reloc;
 pub use cache::{cache_loaded_lib, try_clone_cached, CachedRelocs};
 pub use index::{parse_rela_entries, ParsedRelaEntries, RelocationIndex};
 pub use reloc::{
-    apply_dtpmod_relocs, apply_tpoff_relocs, rebase_relative_relocs, resolve_dlopen_relocs,
-    resolve_lib_bind_relocs,
+    apply_dtpmod_relocs, apply_tpoff_relocs, defining_module, rebase_relative_relocs,
+    resolve_dlopen_relocs, resolve_lib_bind_relocs,
 };
 
 use crate::mm::{align_2m_checked, KernelSlice, MAX_HEAP_ALLOC, PAGE_2M};
@@ -44,8 +44,9 @@ const _: () = assert!(toyos_elf::MAX_TLS_ALIGN == PAGE_2M);
 /// format's.
 ///
 /// Four call sites read the section header table whole into one `Vec`,
-/// including one in `process.rs` with no failure path. Refuse the file here
-/// rather than let each of them meet the heap's assert separately.
+/// including `loader::symbols::read_backtrace_table` with no failure path — it
+/// cannot refuse a spawn, only degrade to bare-address backtraces. Refuse the
+/// file here rather than let each of them meet the heap's assert separately.
 pub fn parse_layout(data: &[u8]) -> Result<Layout, &'static str> {
     let layout = Layout::parse(data).map_err(|e| e.as_str())?;
     if layout
@@ -378,7 +379,7 @@ pub fn load_shared_lib(
     backing: &dyn crate::file_backing::FileBacking,
 ) -> Result<(LoadedLib, usize, usize), &'static str> {
     let header_size = 4096.min(backing.file_size() as usize);
-    let header_data = crate::process::read_file_range(backing, 0, header_size);
+    let header_data = crate::loader::read_file_range(backing, 0, header_size);
     let layout = parse_layout(&header_data)?;
 
     let (vaddr_min, vaddr_max) = (layout.vaddr_min, layout.vaddr_max);
@@ -586,7 +587,7 @@ fn dynsym_count_from_sections(
     layout: &Layout,
 ) -> Option<usize> {
     let table = layout.section_headers?;
-    let bytes = crate::process::read_file_range(backing, table.file_offset, table.byte_len());
+    let bytes = crate::loader::read_file_range(backing, table.file_offset, table.byte_len());
     let dynsym = SectionTable::new(&bytes).find(SHT_DYNSYM)?;
     let entry_size = dynsym.entry_size.max(toyos_elf::sym::ENTRY_SIZE as u64);
     Some((dynsym.size / entry_size) as usize)

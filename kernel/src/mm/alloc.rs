@@ -799,7 +799,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
         match self.phase.load(Ordering::Acquire) {
             PHASE_UNINIT => core::ptr::null_mut(),
             PHASE_EARLY => early_alloc(layout),
-            _ => {
+            PHASE_READY => {
                 assert!(layout.align() < PAGE_2M as usize,
                     "GlobalAlloc: {:#x} bytes with {:#x} align — use PageAlloc", layout.size(), layout.align());
                 // Before the lock, deliberately. This is the ceiling every
@@ -835,6 +835,10 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 };
                 tripwire::arm(base, layout)
             }
+            // The three phases are the only bytes `init_early`/`init` ever
+            // store; any other value is a corrupted phase, which is
+            // unrecoverable — fail loudly rather than serve it as READY.
+            other => panic!("KernelAllocator: corrupt phase byte {other:#x}"),
         }
     }
 

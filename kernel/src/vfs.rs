@@ -541,6 +541,16 @@ impl Vfs {
             // A truncate on another CPU can take a page out of the cache
             // between `clone_dirty` and here. Writing whatever the buffer
             // happens to hold would put bytes in the file no writer produced.
+            //
+            // **The `?` before `clear_dirty` is the fsyncgate invariant**: a
+            // refused write-back returns with every page of the set still
+            // dirty and the handle still modified, so a retried flush has the
+            // same pages to deliver — a kernel that marked them clean here
+            // would hand the retry nothing and call the result durable, which
+            // is the exact failure PostgreSQL shipped for twenty years.
+            // `log_flush_retry`'s first boot is the gate, and the mutation
+            // that clears the set on this error path reds it at the blob's
+            // byte comparison.
             if crate::file_cache::copy_page_out(file_id, page_idx, buf) {
                 fs.write_page(file_id, page_idx, buf)?;
             }

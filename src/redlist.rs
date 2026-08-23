@@ -2509,7 +2509,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "esp_filesystem",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "2026-08-23: `SYS_FSYNC` retries a budget-refused flush above every lock \
+             (`object/ops.rs`), bounded by `block::DEADMAN`, so this producer no longer \
+             reaches userland as an error; `log_flush_retry` stages the refusal and gates \
+             the retry, and the row below carries the mechanism",
+        ),
         what: "`fsync the blob: Kind(Other)` at `src/bin/esp_files.rs:130:22` — the five checks \
                before it passed, so only the `/log` write path failed and only at the flush. \
                Which layer refused is not in this evidence: the harness reported the guest's \
@@ -2517,14 +2522,20 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "`wt/toyos-returnrule` at 02a087fd, dev host, 2026-08-21, one full `cargo test` \
                    of 79 guests at `fastest boot 2058 ms … 1.56x width`; the harness's own re-run \
                    answered `ALONE esp_filesystem: GREEN` (4 s)",
-        source: "issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md",
+        source: "tests/common/volumes.rs",
         measured: "2026-08-21",
     },
     Red {
         test: "esp_filesystem",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 73),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "2026-08-23: the timeout-dead retry moved to the operation level — a \
+             budget-refused flush answers `WouldBlock` and `object/ops.rs`'s fsync loop \
+             re-issues it on a fresh budget off the pinned path, `MAX_TRANSPORT_ATTEMPTS` \
+             stays for the cheap breaks, and `log_flush_retry`'s first boot reds if the \
+             retry stops delivering the refused pages",
+        ),
         what: "`fsync the blob: Kind(Other)`, and with the kernel log kept the producer is two \
                2 s deadlines in series: `USB_TIMEOUT_NS` breached on the status phase of a \
                WRITE(10) (`transport broke on SCSI 0x2a: no answer in the status phase in \
@@ -2541,7 +2552,7 @@ pub const KNOWN_RED: &[Red] = &[
                    twelve guest slots for 21 of them, the red among those. The red's own pass \
                    measured `1.05x width` — the loop's median — so the aggregate width does not \
                    predict it; `ALONE esp_filesystem: GREEN` again",
-        source: "issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md",
+        source: "tests/common/volumes.rs",
         measured: "2026-08-22",
     },
     // A boot that had not reached logd's first write inside the test's window,

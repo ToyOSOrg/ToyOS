@@ -223,15 +223,17 @@ pub struct Bound {
 }
 
 impl Bound {
-    // `Bound::from_register` — the NVMe `CAP.TO` shape §3 names beside
-    // `from_spec` — is **not here yet, and that is the tree's dead-code rule
-    // rather than an omission**. `nvme.rs:429` reads `cap` into a local and
-    // never takes the `TO` field out of it, so C10 is the first chunk with a
-    // register to cite; it writes the constructor beside its first caller,
-    // three lines, and the kind does not change.
-
     /// A bound a specification states. `cite` is the section.
     pub const fn from_spec(limit: Duration, cite: &'static str) -> Self {
+        Self { limit, cite }
+    }
+
+    /// A bound a device register publishes. `cite` names the register. Not
+    /// `const`, because the number is read off the hardware at the call site —
+    /// `NvmeController::reset`'s `CAP.TO` is the first caller, exactly the
+    /// shape the taxonomy named beside `from_spec` and left for the first
+    /// chunk with a register to cite.
+    pub fn from_register(limit: Duration, cite: &'static str) -> Self {
         Self { limit, cite }
     }
 

@@ -551,6 +551,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
             if actuator::nvme_spent_budget() {
                 nvme_gate::run();
             }
+            #[cfg(feature = "boot-actuators")]
+            if actuator::nvme_command_silent() {
+                nvme_gate::silent_command();
+            }
             bcachefs_adapter::open_home()
         }
         None => {

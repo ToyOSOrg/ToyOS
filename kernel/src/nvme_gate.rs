@@ -68,3 +68,33 @@ pub fn run() {
     drop(guard);
     log!("nvme-gate: the same block read afterwards ok={served}");
 }
+
+/// The reset-escalation half, behind `nvme-command-silent`: one read is
+/// submitted and its completion wait skipped, so the driver meets a live
+/// controller that owes it an answer — the exact state a command that ran out
+/// `nvme::COMMAND` leaves — and must take the escalation rather than the old
+/// permanent offline. The verdict is two lines with the driver's own reset
+/// lines between them in the log: the abandoned read comes back as a budget
+/// word and not a device fact, and the same block then reads clean through the
+/// rebuilt queues — the one thing a reset that left the queues out of step
+/// could not answer.
+pub fn silent_command() {
+    let mut buf = vec![0u8; 4096];
+    let refused = {
+        // Armed here and not by the boot parameter alone: the wait skipped
+        // must be this read's, not init's Identify.
+        crate::drivers::nvme::silent_command::arm();
+        let mut guard = page_cache::lock();
+        let (_cache, dev) = guard.cache_and_dev();
+        dev.read_blocks(AT, 1, &mut buf)
+    };
+    log!("nvme-gate: the silent command's read refused={} budget={}",
+        refused.is_err(),
+        refused == Err(crate::block::BlockError::BudgetExpired));
+
+    let mut guard = page_cache::lock();
+    let (_cache, dev) = guard.cache_and_dev();
+    let served = dev.read_blocks(AT, 1, &mut buf).is_ok();
+    drop(guard);
+    log!("nvme-gate: the same block read after the reset ok={served}");
+}
