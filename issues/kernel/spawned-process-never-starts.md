@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: defect
 opened: 2026-08-05
 task: 142
@@ -80,6 +80,8 @@ thread that never ran cannot be in `parked`, and the line is printed from the
 idle loop. Both numbers are fixed by where they are printed. `spawn-placement-unlogged`
 carries that elimination, and the one instrument that would settle the split
 the `ps` column was going to.
+
+The assignment was reclaimed 2026-08-23: #142's investigation left no artifact.
 
 Investigation is the scheduler agent's (#142); the shapes are consistent with
 one defect. Ctrl+Alt+D is now machine-wide and process-named (`issues/diagnostics/`), and on the
