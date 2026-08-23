@@ -3824,7 +3824,7 @@ fn run_screen_test(
             // A liveness ceiling on a machine that is halted and paging, so
             // there is no console to read progress off and this is the case
             // `qemu::budget` exists for.
-            let deadline = Instant::now() + qemu::budget(Duration::from_secs(40));
+            let deadline = Instant::now() + qemu.budget(Duration::from_secs(40));
             while Instant::now() < deadline && !(head_seen && report.is_some()) {
                 let text = qemu.screendump().text();
                 let Some(footer) = text.lines().rev().find(|l| l.starts_with("[page ")) else {
@@ -3910,7 +3910,7 @@ fn run_screen_test(
                 }
                 None
             };
-            let deadline = Instant::now() + qemu::budget(Duration::from_secs(30));
+            let deadline = Instant::now() + qemu.budget(Duration::from_secs(30));
             let mut last = loop {
                 if let Some(f) = footer(&mut qemu) {
                     break f;
@@ -3973,7 +3973,7 @@ fn run_screen_test(
             let started = Instant::now();
             for key in 1..=SAMPLES {
                 qemu::qmp_send_keys(&socket, &[("pgdn", true), ("pgdn", false)]);
-                let by = Instant::now() + qemu::budget(Duration::from_secs(20));
+                let by = Instant::now() + qemu.budget(Duration::from_secs(20));
                 loop {
                     let Some(now) = footer(&mut qemu) else {
                         return Err(format!(
@@ -3999,7 +3999,7 @@ fn run_screen_test(
             // page the one before it moved was on the screen — so this asks only
             // that the panel is not mid-repaint before the watch starts.
             const SETTLED: Duration = Duration::from_secs(1);
-            let settle_by = Instant::now() + qemu::budget(Duration::from_secs(20));
+            let settle_by = Instant::now() + qemu.budget(Duration::from_secs(20));
             let mut held = last;
             let mut stable_since = Instant::now();
             loop {
@@ -5660,7 +5660,7 @@ fn shell_answers(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String
 ///
 /// **Two waits, because the two ways this fails are different questions.** The
 /// first is "has the terminal come up", and it used to be answered by retyping
-/// against `qemu::budget(20 s)` — a guess at how long a desktop takes to come up
+/// against `qemu.budget(20 s)` — a guess at how long a desktop takes to come up
 /// on the host of the day, which is exactly the shape `issues/design-debt/`
 /// bills for: `desktop_audio_client` 385 s wide against 13 s alone, and a
 /// landing gate that is a coin toss. The terminal knows when it is up and now
@@ -5746,7 +5746,7 @@ fn shell_echoes(qemu: &mut QemuInstance, log: &mut String, nonce: &str) -> Resul
 /// The ceiling is the guest's own liveness rather than a phase-scaled clock,
 /// and here that cuts both ways: #156 is a *freeze*, so the machine this
 /// retries against goes silent, and the wait ends in fifteen seconds instead of
-/// spending `qemu::budget(20 s)` — up to four minutes at width 12 — hammering
+/// spending `qemu.budget(20 s)` — up to four minutes at width 12 — hammering
 /// GUI+Q at a desktop that has stopped. `issues/design-debt/` names that
 /// cost as a lane this test holds for a quarter of every run, which is what puts
 /// whichever desktop is dispatched beside it into a red nobody acts on.
@@ -5959,7 +5959,8 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
         let mut input = qemu::QmpInput::open(qemu.qmp_socket());
         type_line(&mut input, "test_rs_window_child exit");
     }
-    if !serial_until(qemu, log, "WINDOW-CHILD-GONE", qemu::budget(Duration::from_secs(20))) {
+    let by = qemu.budget(Duration::from_secs(20));
+    if !serial_until(qemu, log, "WINDOW-CHILD-GONE", by) {
         return Err(format!("the windowed child never reported leaving:\n{log}"));
     }
     if let Err(why) = shell_echoes(qemu, log, "after-own-exit-zqjxk") {
@@ -5976,12 +5977,13 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
         type_line(&mut input, "test_rs_window_child");
     }
     // Its own marker, not the one the probe above already printed.
+    let by = qemu.budget(Duration::from_secs(20));
     if !serial_until_new(
         qemu,
         log,
         "WINDOW-CHILD-UP",
         started,
-        qemu::budget(Duration::from_secs(20)),
+        by,
     ) {
         return Err(format!("the windowed child never got a window:\n{log}"));
     }
@@ -5997,7 +5999,8 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
             &log[before.min(log.len())..]
         ));
     }
-    if !serial_until_new(qemu, log, "WINDOW-CHILD-GONE", before, qemu::budget(Duration::from_secs(20))) {
+    let by = qemu.budget(Duration::from_secs(20));
+    if !serial_until_new(qemu, log, "WINDOW-CHILD-GONE", before, by) {
         return Err(format!(
             "the compositor closed the window and the client did not leave:\n{}",
             &log[before.min(log.len())..]
@@ -6032,7 +6035,8 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
         // is what says it is up — and a window it has just created is the
         // focused one, which is what GUI+Q then closes.
         let opened = log.len();
-        if !serial_until_new(qemu, log, "windows=2", opened, qemu::budget(Duration::from_secs(20))) {
+        let by = qemu.budget(Duration::from_secs(20));
+        if !serial_until_new(qemu, log, "windows=2", opened, by) {
             return Err(format!("snake never got a window in round {round}:\n{log}"));
         }
         if round + 1 == SNAKE_ROUNDS {
@@ -6051,7 +6055,8 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
                 &log[before.min(log.len())..]
             ));
         }
-        if !serial_until_new(qemu, log, "exit: snake", before, qemu::budget(Duration::from_secs(20))) {
+        let by = qemu.budget(Duration::from_secs(20));
+        if !serial_until_new(qemu, log, "exit: snake", before, by) {
             return Err(format!(
                 "snake did not leave when its window was closed in round {round}:\n{}",
                 &log[before.min(log.len())..]
@@ -8600,6 +8605,7 @@ fn run_machine_test(
         "serial_vocabulary" => {
             serial::self_check()?;
             qemu::ceiling_self_check()?;
+            qemu::host_scale_self_check()?;
             one_vocabulary()
         }
         "suspend_detector" => common::clock::self_check(),
@@ -10736,7 +10742,7 @@ fn run_machine_test(
 
             // A baseline first: churn against a compositor that was never
             // drawing would be a green run proving nothing.
-            let deadline = std::time::Instant::now() + qemu::budget(Duration::from_secs(20));
+            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
             while std::time::Instant::now() < deadline && frames(&console) < 1 {
                 console.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
@@ -10788,7 +10794,7 @@ fn run_machine_test(
             // changed is that a console behind the guest costs wall clock instead
             // of a verdict.
             let bindings = |text: &str| text.matches("merges as source").count();
-            let deadline = std::time::Instant::now() + qemu::budget(Duration::from_secs(20));
+            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
             while std::time::Instant::now() < deadline && bindings(&console) < CYCLES {
                 console.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
@@ -10822,7 +10828,7 @@ fn run_machine_test(
             // reporting interval is 2 s, so two of them cannot be satisfied by
             // frames the compositor produced before the first cycle.
             let mut after = String::new();
-            let deadline = std::time::Instant::now() + qemu::budget(Duration::from_secs(20));
+            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
             while std::time::Instant::now() < deadline && frames(&after) < 2 {
                 after.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
@@ -12699,6 +12705,14 @@ impl Tally {
                 f64::from(num) / f64::from(den)
             ));
         }
+        // The other half of the liveness correction is per guest, not host-wide:
+        // a guest with more vCPUs than the host has cores waits `vcpus/cores`
+        // longer again before its ceiling calls it wedged. Reported so a reader
+        // knows whether it was ever in play — it never is once cores >= 8.
+        say(format!(
+            "host: {} core(s); a guest wider than that waits vcpus/cores longer again",
+            qemu::host_cores()
+        ));
         if suspended >= common::clock::SUSPENDED_AT_LEAST {
             // The elapsed figure below is monotonic and therefore already
             // excludes it, which is worth saying: the two numbers do not add up

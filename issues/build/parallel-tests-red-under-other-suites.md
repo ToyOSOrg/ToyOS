@@ -386,3 +386,52 @@ green cannot be produced by load. `ALONE: red again` means nothing on its own
 and must be confirmed against `main` in the same session before it is believed —
 which is the A/B the audio rules already require and which this line currently
 invites an agent to skip.
+
+**2026-08-23 — the host-speed correction was blind to wide-SMP oversubscription,
+and now is not.** Each CI `guest` shard is its own four-core `ubuntu-24.04`
+runner (AMD EPYC, nested KVM) running one guest at `--jobs 1`, so there is no
+sibling contention — but several tests boot `smp: 8` guests (`desktop_*`,
+`log_conservation_smp8`, the `screen_*` metal ones), and eight vCPU threads on
+four host cores is `8/4 = 2x` oversubscribed. `qemu::budget` and
+`wait_for_ready` already scale their liveness ceilings by `host_scale`, the
+ratio of this run's fastest boot to a reference — but a boot is a mostly-serial
+workload (the BSP brings the APs up and they idle), so it never shows the
+lock-holder preemption a wide-SMP guest pays, and the boot-derived factor
+undercounts. That is what put ~25% of merge-queue compositions on green-alone
+liveness flakes (`launcher_refusals` timed out at 192s "still talking 1s ago";
+`screen_console_clear` "0 of 2073600 pixels", the paint never arriving in the
+window — both `ALONE: GREEN`, neither a wrong value).
+
+The fix is a second, per-guest factor keyed on `vcpus/cores`
+(`qemu::oversubscription`), multiplied into `budget_smp`, `QemuInstance::budget`
+and the boot timeout, and applied to **liveness/wedge ceilings only** — never to
+a pixel value, a log content, a conservation count, or the `STALL`-classifying
+`GUEST_QUIET`/`GUEST_WEDGED` bounds. The derivation is `smp/cores` and nothing
+tuned: `smp` vCPU threads time-sharing `cores` cores each run at `cores/smp` of
+a core, so a vCPU-bound stretch takes `smp/cores` longer. `smp <= cores` is not
+oversubscription and the factor is exactly 1, which is every guest on the
+fourteen-core dev host — so this widens nothing locally and only ever fires on a
+runner with fewer cores than a guest has vCPUs. `qemu::host_scale_self_check`
+gates the derivation (8-on-4 → 2, 8-on-14 → 1, finite at 8-on-1), and
+`TOYOS_HOST_CORES` lets a large host reproduce a small one's factor for a
+measurement (`log_conservation_smp8` PASS at 3s under `TOYOS_HOST_CORES=4`,
+oversub 2 active). Worst case stays bounded: for an `smp:8` guest on the
+`--jobs 1` runner the per-test ceiling is `timeout * host_scale(≤8) * 2`, so a
+120s-timeout test's genuine hang is still reported in ≤ a few minutes, and the
+boot timeout at `10s * 2 * host_scale(≤8) * 2` similarly.
+
+**What this does *not* fix, stated because it is a live weakness.**
+`launcher_refusals` and `screen_console_clear` both boot the default `smp: 2`,
+so `2/4 < 1` clamps their oversubscription factor to 1 and their ceilings are
+unchanged by this. Their green-alone timeouts are therefore *not* per-guest
+oversubscription; they are host-wide contention on the shared runner that the
+fastest-boot `host_scale` undercounts for a later moment in the run — a separate
+axis this correction does not touch. The wide-SMP tests (the majority of the
+flaking names above) are the ones this widens. A further honest step, not taken
+here to stay scoped to the host-speed correction, is that
+`run_test_paced`'s total ceiling fires on wall-clock `elapsed > budget`
+regardless of whether the guest is still talking — unlike `await_guest`, which
+ends on `GUEST_QUIET` silence — so a still-progressing `smp:2` guest ("still
+talking 1s ago") is called wedged the moment its budgeted wall clock passes;
+making that total silence-aware would catch the `smp:2` case the `vcpus/cores`
+factor cannot.
