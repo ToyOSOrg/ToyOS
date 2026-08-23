@@ -666,16 +666,44 @@ pub enum Dispose {
 
 /// The environment every pass runs against.
 ///
-/// `balance` is the one policy value in it, and it is [`Balance::Pull`]: an idle
-/// pass probes the busiest CPU for work and a loaded pass answers probes from
-/// surplus (spec §7.7, §9.4's pull half). Without it a task woken onto a busy
-/// CPU waits there until the owner yields.
+/// `balance` is the one policy value in it, and it is
+/// [`Balance::PushOnSurplus`] at [`toyos_sched::cpu::PUSH_THRESHOLD`] (owner
+/// decision 2026-08-23): the pull half of spec §7.7/§9.4 — an idle pass probes
+/// the busiest CPU, a loaded pass answers probes from surplus — plus a push
+/// that closes the pull's one hole, a CPU that halted before any sibling
+/// published surplus and was never probed again. The whole mechanism is the
+/// core's ([`toyos_sched::cpu`]); what this kernel supplies is real:
 ///
-/// The other settings of that knob are the simulator's, and deliberately not
-/// this line's: [`Balance::PullWithRearm`] and [`Balance::PushOnSurplus`] both
-/// add wakes to the idle path, which `kernel/CLAUDE.md` makes an audio change,
-/// and what they buy and cost is measured in `toyos-sched/sim/tests/policy.rs`
-/// rather than decided here.
+/// * **The idle mask** is the per-CPU `Doorbell` SLEEPING bit in [`cpus`],
+///   published by the idle disposition before its final mailbox check.
+/// * **The wake** is the ordinary kick IPI ([`crate::hw::KernelHw::kick`] →
+///   `apic::kick_cpu`), sent to **one** sleeping CPU per surplus-publishing
+///   pass, cursor-walked so consecutive pushes reach different sleepers, and
+///   edge-coalesced by the doorbell so a CPU with an IPI already coming is not
+///   kicked twice. The woken CPU posts an ordinary steal probe — the push adds
+///   no second way to move a task.
+/// * **The lost-wakeup race** is closed two-sided: the idler publishes
+///   SLEEPING, then re-reads the surplus behind `cpu::balance_fence` (a
+///   `SeqCst` fence, `mfence`) and stays awake if it sees any; the producer
+///   publishes its surplus, then reads SLEEPING behind the same fence. The
+///   final look runs under `cli` in [`execute`] and [`crate::hw::KernelHw::halt`]
+///   is one `sti; hlt` atom, so a kick between the check and the halt is taken,
+///   not slept through. `toyos-sched/loom/tests/loom_push.rs` is the model, and
+///   its `push-fence-relaxed` feature is the control that reds without the
+///   fence.
+/// * **The backstop** for imbalance with no enqueue behind it is the busy
+///   CPU's own timer tick: a CPU running a task always has its quantum armed,
+///   every tick reaches a pass, and every pass exit re-runs the push — so all
+///   periodic cost lives on already-awake CPUs and an idle CPU sleeps
+///   unbounded.
+///
+/// A machine with no surplus never pushes, which is what keeps the policy off
+/// the idle path's audio budget (`kernel/CLAUDE.md`): the sim prices it at
+/// **zero** added idle wakes on every workload without surplus and full
+/// recovery of the lopsided machine at every width, where plain
+/// [`Balance::Pull`] left 0 of 20 seeds reaching every CPU at eight
+/// (`toyos-sched/sim/tests/policy.rs`). [`Balance::PullWithRearm`] was measured
+/// against it and declined — a periodic tick on every idle CPU, surplus or not.
 ///
 /// The guard comes in by reference because its lifetime is the pass's and it
 /// belongs to the caller that raised the count.
@@ -685,7 +713,9 @@ fn env(preempt: &PreemptOff) -> Env<'_, crate::hw::KernelHw, PreemptOff> {
         cpus: cpus(),
         frontier: &FRONTIER,
         preempt,
-        balance: Balance::Pull,
+        balance: Balance::PushOnSurplus {
+            threshold: toyos_sched::cpu::PUSH_THRESHOLD,
+        },
     }
 }
 

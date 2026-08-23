@@ -286,10 +286,11 @@ pub struct Scenario {
     pub placement: PlacementShape,
     /// What the balance path does. A scenario dimension for [`PlacementShape`]'s
     /// reason and with the same roles: the shipped answer
-    /// ([`Balance::Pull`], which is what `kernel::sched::driver::env` selects),
-    /// the control that says what the measurement would be without it
-    /// ([`Balance::None`]), and the two candidate cures for the one-shot probe
-    /// that neither the kernel nor any default here selects.
+    /// ([`Balance::PushOnSurplus`], which is what `kernel::sched::driver::env`
+    /// selects and the scenario default names), the control that says what the
+    /// measurement would be without it ([`Balance::None`]), and the two
+    /// policies the decision was priced across ([`Balance::Pull`], the pull
+    /// half alone, and [`Balance::PullWithRearm`], the declined cure).
     ///
     /// **The core's own type rather than a parallel copy of it**, exactly as
     /// [`Scenario::order`] carries `FairOrder`: every setting is a policy the

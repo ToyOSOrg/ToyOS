@@ -625,34 +625,34 @@ impl<X: SchedPayload> CpuSched<X> {
 
 /// What the balance path does — the one policy value in [`Env`].
 ///
-/// [`Balance::Pull`] is what ships and what spec §7.7 and §9.4's pull half
-/// describe: an idle pass probes the CPU publishing the most surplus, a loaded
-/// pass answers a probe out of `pop_surplus`, and nothing else moves a task
-/// between CPUs. [`Balance::None`] is the control that says what the rest of the
-/// protocol does without it.
-///
-/// **The other two are candidate cures, and neither is shipped.** The pull path
-/// is one-shot: [`SchedPass::post_steal_probe`] posts at most one probe per idle
+/// **[`Balance::PushOnSurplus`] at [`PUSH_THRESHOLD`] is what ships** (owner
+/// decision 2026-08-23): spec §7.7 and §9.4's pull half — an idle pass probes
+/// the CPU publishing the most surplus, a loaded pass answers a probe out of
+/// `pop_surplus` — plus a push that closes the pull's one hole. The pull is
+/// one-shot: [`SchedPass::post_steal_probe`] posts at most one probe per idle
 /// trip and returns without posting anything if no CPU publishes a surplus of
-/// two, so a CPU that reached its idle pass while every sibling still published
-/// zero halts with no probe outstanding and nothing in this protocol wakes it —
-/// there is no push half, and a loaded CPU never announces that it has surplus.
-/// Measured on a lopsided machine at 20 seeds per width, 0 of 20 seeds reach
-/// every CPU at eight; `sim/tests/policy.rs` carries the tables and
-/// `issues/kernel/an-idle-cpu-that-slept-before-the-surplus-is-never-probed.md`
-/// carries the decision the two below are owed against.
+/// [`PUSH_THRESHOLD`], so a CPU that reached its idle pass while every sibling
+/// still published zero halted with no probe outstanding, and under plain
+/// [`Balance::Pull`] nothing in this protocol woke it. Measured on a lopsided
+/// machine at 20 seeds per width, 0 of 20 seeds reached every CPU at eight
+/// under pull and 20 of 20 under the push, whose whole cost on a machine
+/// without surplus is nothing — a quiet machine never pushes, which is what
+/// keeps it off the idle path's audio budget (`kernel/CLAUDE.md`).
+/// `sim/tests/policy.rs` carries the tables.
 ///
-/// Both cost an idle CPU wakes it is currently right to be without
-/// (`kernel/CLAUDE.md`: anything added to the idle loop is an audio change), so
-/// they exist here to be **measured**, behind a knob the simulator selects and
-/// the kernel does not.
+/// [`Balance::None`] is the control that says what the rest of the protocol
+/// does without a balance path at all. [`Balance::PullWithRearm`] was measured
+/// against the push and declined: it buys the same recovery with a periodic
+/// tick on every idle CPU whether or not anything has surplus — on the audio
+/// workload, 154 wakes per second bought for nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Balance {
     /// No probe and no answer. A task woken or placed onto a busy CPU waits
     /// there until that CPU's own queue reaches it.
     None,
     /// Spec §7.7 and §9.4's pull half, one-shot — what `kernel::sched::driver`
-    /// selects.
+    /// selected until 2026-08-23, kept as the baseline the push's costs are
+    /// priced against.
     Pull,
     /// Pull, plus a **bounded re-arm**: a CPU that halts with nothing to run
     /// programs its one-shot timer `every_ns` ahead so it wakes and probes
@@ -667,7 +667,8 @@ pub enum Balance {
     PullWithRearm { every_ns: u64, times: u32 },
     /// Pull, plus a **push**: a pass that publishes a surplus of at least
     /// `threshold` rings the doorbell of one CPU that reads SLEEPING, which
-    /// makes that CPU's own idle pass run again and probe.
+    /// makes that CPU's own idle pass run again and probe. The shipped policy,
+    /// at `threshold:` [`PUSH_THRESHOLD`].
     ///
     /// **It rests on an observation, and the observation is one half of
     /// Dekker's pair** — see [`balance_fence`]. The pusher stores its surplus
@@ -678,6 +679,15 @@ pub enum Balance {
     /// same defect. `toyos-sched/loom/tests/loom_push.rs` is the model.
     PushOnSurplus { threshold: u32 },
 }
+
+/// The surplus at which the balance path acts — [`SchedPass::best_victim`]'s
+/// floor on a probe and the `threshold` the kernel selects for the shipped
+/// [`Balance::PushOnSurplus`], stated once so the two cannot drift: a push at a
+/// lower threshold would wake a CPU whose probe the victim then refuses
+/// (`answer_steal_requests` hands over nothing at `fair_len() <= 1`), and one
+/// at a higher threshold would leave surplus the probe is willing to take
+/// unannounced.
+pub const PUSH_THRESHOLD: u32 = 2;
 
 impl Balance {
     /// Does the pull half run at all? Every cure is built on it — a push and a
@@ -2070,7 +2080,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             .filter(|&cpu| cpu != self.cpu.id)
             .map(|cpu| (cpu, self.env.cpus.get(cpu).surplus()))
             .max_by_key(|&(_, surplus)| surplus)?;
-        (surplus >= 2).then_some(victim)
+        (surplus >= PUSH_THRESHOLD).then_some(victim)
     }
 
     /// [`Balance::PushOnSurplus`]: this pass has just published `surplus`, so

@@ -71,17 +71,17 @@
 //! form of "processes own fair share", and it is measured here rather than
 //! asserted anywhere.
 //!
-//! **The balance path is pull-only and one-shot, and both cures for that work.**
-//! An idle CPU posts one probe on its way to `hlt` and nothing re-posts it, so a
-//! CPU that halted before any neighbour published surplus is never probed again:
-//! 0 of 20 seeds reach every CPU at eight. A bounded re-arm of the probe and a
-//! push on surplus each take that to 20 of 20 at every width, and they cost
-//! opposite things — the timer ticks whether or not there is anything to come
-//! for, the push fires only where there is. On the audio pipeline that is 154
-//! extra idle wakes per second against **zero**. Neither is shipped;
-//! `issues/kernel/an-idle-cpu-that-slept-before-the-surplus-is-never-probed.md`
-//! is where the decision sits, and these three cases are the numbers it is owed
-//! against.
+//! **The pull half is one-shot, and the shipped push is what closes it.** An
+//! idle CPU posts one probe on its way to `hlt` and nothing re-posts it, so
+//! under plain `Balance::Pull` a CPU that halted before any neighbour published
+//! surplus was never probed again: 0 of 20 seeds reach every CPU at eight. A
+//! bounded re-arm of the probe and a push on surplus each take that to 20 of 20
+//! at every width, and they cost opposite things — the timer ticks whether or
+//! not there is anything to come for, the push fires only where there is. On
+//! the audio pipeline that is 154 extra idle wakes per second against **zero**,
+//! which is why `Balance::PushOnSurplus` ships (owner decision 2026-08-23) and
+//! the re-arm was declined; these three cases are the numbers the decision was
+//! made on.
 //!
 //! # Determinism, seeds, and what varies
 //!
@@ -616,7 +616,11 @@ fn stealable(threads: usize) -> u64 {
 /// every runnable thread on cpu0, every other CPU with nothing, and no wake, no
 /// block and no second placement anywhere in the run.
 ///
-/// **What it found**, 20 seeds per point at 60 ms of work per thread:
+/// Run under the scenario default, which is the shipped policy —
+/// [`Balance::PushOnSurplus`] since the owner's 2026-08-23 decision.
+///
+/// **What it found under plain `Balance::Pull`**, 20 seeds per point at 60 ms
+/// of work per thread — the state the push was shipped to cure:
 ///
 /// | cpus | threads | seeds reaching every CPU | seeds reaching a second CPU | best seed's migrations | the floor |
 /// |---|---|---|---|---|---|
@@ -625,24 +629,26 @@ fn stealable(threads: usize) -> u64 {
 /// | 4 | 64 | 2/20 | 13/20 | 62 | 62 |
 /// | 8 | 64 | 0/20 | 15/20 | 62 | 62 |
 ///
-/// **Two findings, and the second is the one nobody had written down.**
+/// **Two findings.** Where the balance path runs at all it drains the loaded
+/// CPU *completely*: the best seed at every width moves exactly [`stealable`]
+/// tasks — all but the one cpu0 is running and the one queued behind it — so a
+/// machine an adversary piled onto one CPU is emptied to the protocol's own
+/// floor, one task per answered probe.
 ///
-/// Where the balance path runs at all it drains the loaded CPU *completely*:
-/// the best seed at every width moves exactly [`stealable`] tasks — all but the
-/// one cpu0 is running and the one queued behind it — so a machine an adversary
-/// piled onto one CPU is emptied to the protocol's own floor, one task per
-/// answered probe.
-///
-/// And **it only ever reaches the CPUs that are still awake.** The probe is
-/// posted from an idle pass, one per idle trip, and only against a victim that
-/// has already *published* a surplus of two; a CPU whose idle pass ran before
-/// the loaded one published halts with no probe outstanding, and nothing in this
-/// protocol wakes it — there is no push half, and a loaded CPU never announces
-/// that it has surplus. That is why the first column falls with width: at eight
-/// CPUs all seven have to lose the same race and none of the twenty seeds
-/// did. `issues/kernel/an-idle-cpu-that-slept-before-the-surplus-is-never-probed.md`
-/// carries it; the assertions below are about what the path does when it runs,
-/// which is the half that is a law.
+/// And the pull alone **only ever reaches the CPUs that are still awake.** The
+/// probe is posted from an idle pass, one per idle trip, and only against a
+/// victim that has already *published* a surplus of two; a CPU whose idle pass
+/// ran before the loaded one published halted with no probe outstanding, and
+/// without the push nothing in this protocol woke it — that is why the first
+/// column falls with width. Under the shipped push every width recovers in
+/// full (20/20, the tables in
+/// [`a_push_on_surplus_reaches_every_cpu_the_pull_path_left_asleep`]), and the
+/// assertion below holds the shipped default to it: dropping the producer-side
+/// poke reds it at the first width (verified 2026-08-23, 9 against 20). The
+/// idler's re-read behind the fence is *not* held here — this model runs a
+/// pass atomically, so nothing can publish a surplus inside the window that
+/// re-read closes — it is held by `loom/tests/loom_push.rs`, whose
+/// `push-fence-relaxed` control reds.
 #[test]
 fn the_balance_path_drains_the_cpu_an_adversary_loaded() {
     let mut table = Vec::new();
@@ -696,6 +702,22 @@ fn the_balance_path_drains_the_cpu_an_adversary_loaded() {
              schedules moved {best} tasks and the surplus floor leaves {floor} stealable. A \
              machine with a thief awake for the whole run must be drained to that floor: one \
              task per answered probe, until `fair_len() > 1` stops being true",
+        );
+        // **The shipped default reaches every CPU in every schedule.** This is
+        // the push's whole reason to ship: under plain `Balance::Pull` this
+        // number was 9, 2, 2 and 0 of 20 across the widths, because a CPU that
+        // halted before cpu0 published its surplus was never probed again.
+        // cpu0 publishes threads − 1 at its first pass and pushes to one
+        // sleeping CPU per pass, cursor-walking them, so every sleeper is rung.
+        // Dropping the producer-side poke reds here (verified 2026-08-23); the
+        // idler's re-read behind `balance_fence` is loom's to hold, because
+        // this model cannot interleave inside a pass.
+        assert_eq!(
+            full, LOPSIDED_SEEDS as usize,
+            "at {cpus} cpus and {threads} threads on cpu0, {} of {LOPSIDED_SEEDS} schedules \
+             under the shipped balance policy left at least one CPU asleep beside a published \
+             surplus — the push half is not reaching every sleeper",
+            LOPSIDED_SEEDS as usize - full,
         );
         table.push((cpus, threads, full, reached, best, floor));
     }
@@ -764,13 +786,14 @@ const REARM_EVERY_NS: u64 = QUANTUM_NS;
 const REARM_TIMES: u32 = 4;
 
 /// The surplus a push fires at: `SchedPass::post_steal_probe`'s own inequality,
-/// so a push never wakes a CPU whose victim would refuse it.
-const PUSH_THRESHOLD: u32 = 2;
+/// so a push never wakes a CPU whose victim would refuse it. The core's
+/// constant, which is also the kernel's shipped `threshold`.
+const PUSH_THRESHOLD: u32 = toyos_sched::cpu::PUSH_THRESHOLD;
 
 /// The four policies the two cure cases and the cost table are read across.
 fn policies() -> [(&'static str, Balance); 4] {
     [
-        ("pull (ships)", Balance::Pull),
+        ("pull", Balance::Pull),
         (
             "re-arm ×1",
             Balance::PullWithRearm {
@@ -786,7 +809,7 @@ fn policies() -> [(&'static str, Balance); 4] {
             },
         ),
         (
-            "push ≥2",
+            "push ≥2 (ships)",
             Balance::PushOnSurplus {
                 threshold: PUSH_THRESHOLD,
             },
@@ -878,10 +901,10 @@ fn enough_to_go_round(cpus: usize, threads: usize) {
     );
 }
 
-/// **Cure one, measured: a bounded re-arm of the probe.**
+/// **Cure one, measured: a bounded re-arm of the probe.** The one the owner
+/// declined (2026-08-23) in favour of the push below.
 ///
-/// `issues/kernel/an-idle-cpu-that-slept-before-the-surplus-is-never-probed.md`
-/// names two ways out of the one-shot probe, and this is the one that needs no
+/// Of the two ways out of the one-shot probe, this is the one that needs no
 /// observation of anything: a CPU that halts with nothing to run programs its
 /// one-shot timer [`REARM_EVERY_NS`] ahead and probes again when it fires, up to
 /// [`REARM_TIMES`] times per idle period. Nothing has to notice it, nothing has

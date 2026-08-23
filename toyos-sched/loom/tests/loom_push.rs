@@ -20,8 +20,8 @@
 //! Each side stores to one location and loads the other, and with anything
 //! weaker than a `SeqCst` fence between the two, **both loads may miss**: the
 //! pusher decides nobody is asleep, the sleeper decides there is nothing to come
-//! for, and the machine is back in
-//! `issues/kernel/an-idle-cpu-that-slept-before-the-surplus-is-never-probed.md`
+//! for, and the machine is back at the pull path's one-shot defect — a CPU
+//! asleep beside a published surplus that nothing will ever probe —
 //! in a window nanoseconds wide instead of milliseconds. Nothing in a guest test
 //! can find that — on x86 the sleeper's side of it is a `lock or`, a full fence
 //! already, so only the pusher's half is even reorderable and only under a
@@ -51,8 +51,9 @@ use toyos_sched_loom::mailbox::{mailbox, Kick, MailboxConsumer};
 use toyos_sched_loom::model::{model, Msg};
 
 /// The surplus at which a pass pushes and at which an idle pass probes — one
-/// inequality, `SchedPass::best_victim`'s.
-const THRESHOLD: u32 = 2;
+/// inequality, `SchedPass::best_victim`'s, taken from the core so the model
+/// stages the shipped threshold.
+const THRESHOLD: u32 = toyos_sched_loom::cpu::PUSH_THRESHOLD;
 
 /// Two CPUs' shared faces: the one that gains surplus, and the one going to
 /// sleep. The `CpuHandle` is the real one, so `publish_surplus`, `surplus`,
@@ -140,8 +141,8 @@ fn a_cpu_that_halts_without_seeing_the_surplus_was_pushed() {
         assert!(
             !blind || world.pokes.load(Ordering::SeqCst) >= 1,
             "cpu1 halted with cpu0's surplus of {THRESHOLD} published and no push behind it — \
-             both sides of the store-buffer pair missed, which is \
-             `an-idle-cpu-that-slept-before-the-surplus-is-never-probed` in a window a fence \
+             both sides of the store-buffer pair missed, which is the pull path's \
+             slept-before-the-surplus defect back again, in a window a fence \
              would have closed",
         );
     });
