@@ -1,5 +1,5 @@
-//! The i8042 PS/2 controller: the ThinkPad's built-in keyboard, and (from
-//! the next commit) its TrackPoint.
+//! The i8042 PS/2 controller: the ThinkPad's built-in keyboard, and its
+//! TrackPoint on the aux port.
 //!
 //! **Init treats the machine as untrusted.** Firmware and an embedded
 //! controller are not kernel code; CLAUDE.md's corollary applies literally.
@@ -928,8 +928,6 @@ fn drain() -> Drained {
         // scheduler pass. It costs a gesture, not the framing, which is what
         // the decoder resets below are for.
         log!("i8042: ring overflow, {} bytes dropped — resyncing", dropped);
-    }
-    if dropped > 0 {
         // A hole in a framed stream: both decoders' partial state is
         // meaningless now, and the pointer would stay one byte off forever.
         state.keys.reset();
@@ -1069,10 +1067,14 @@ fn trace_drain(bytes: usize, keys: usize, motion: usize, woke_kb: bool, woke_ms:
     );
 }
 
-// Polled init.
+// Polled port I/O.
 //
-// Nothing below runs after `ACTIVE` is set, and all of it runs with the
-// controller's interrupt bits clear, so the ISR cannot be racing it.
+// Everything below reads the controller's one-byte output buffer by polling,
+// and each read is done as its sole reader — never merely because `ACTIVE` is
+// clear. Init polls before the vector is armed and with interrupts off (its
+// closing `handler_poll` runs after `ACTIVE` is set); the runtime aux
+// re-enable polls on the pinned CPU under `IrqGuard::close`; the panic pager's
+// `poll_byte` polls with every CPU halted. So no ISR can be racing any of it.
 
 fn deadline(millis: u64) -> u64 {
     crate::clock::nanos_since_boot() + millis * 1_000_000
@@ -1248,27 +1250,36 @@ fn flush() -> bool {
     status().is_some_and(|s| s & OBF == 0)
 }
 
-/// Send a device command byte by byte, each acknowledged with 0xFA.
+/// Send a device command byte by byte, each acknowledged with 0xFA. `aux`
+/// prefixes every byte with the controller command that redirects the next
+/// write to port 2 (the pointing device); without it the bytes go to the
+/// keyboard.
 ///
 /// No retry on 0xFE (resend): it is a wire-error recovery this driver has
 /// never seen QEMU produce and cannot exercise, and a silent retry would
 /// hide the one case worth knowing about. The byte that came back instead of
 /// the ack is logged, which is what makes it diagnosable on metal.
-fn device_command(bytes: &[u8], deadline: u64) -> bool {
+fn port_command(bytes: &[u8], deadline: u64, aux: bool) -> bool {
+    let tag = if aux { "aux" } else { "kbd" };
     for &byte in bytes {
-        if !write_data(byte, deadline) {
-            log!("i8042: kbd cmd {:#04x} — input buffer never cleared", byte);
+        if (aux && !command(CMD_WRITE_AUX, deadline)) || !write_data(byte, deadline) {
+            log!("i8042: {tag} cmd {:#04x} — input buffer never cleared", byte);
             return false;
         }
         match read_data(deadline) {
             Some(0xFA) => {}
             other => {
-                log!("i8042: kbd cmd {:#04x} answered {:?}, not ack", byte, other);
+                log!("i8042: {tag} cmd {:#04x} answered {:?}, not ack", byte, other);
                 return false;
             }
         }
     }
     true
+}
+
+/// The keyboard port, unprefixed.
+fn device_command(bytes: &[u8], deadline: u64) -> bool {
+    port_command(bytes, deadline, false)
 }
 
 /// What `0xF0 0x00` established.
@@ -1333,23 +1344,10 @@ fn echo_the_argument(real: Option<u8>) -> Option<u8> {
     }
 }
 
-/// Same, for the aux port: every byte has to be prefixed with the controller
-/// command that redirects the next write to port 2.
+/// Same, for the aux port: every byte is prefixed with the controller command
+/// that redirects the next write to port 2.
 fn aux_command(bytes: &[u8], deadline: u64) -> bool {
-    for &byte in bytes {
-        if !command(CMD_WRITE_AUX, deadline) || !write_data(byte, deadline) {
-            log!("i8042: aux cmd {:#04x} — input buffer never cleared", byte);
-            return false;
-        }
-        match read_data(deadline) {
-            Some(0xFA) => {}
-            other => {
-                log!("i8042: aux cmd {:#04x} answered {:?}, not ack", byte, other);
-                return false;
-            }
-        }
-    }
-    true
+    port_command(bytes, deadline, true)
 }
 
 /// Re-enable data reporting after the device reset itself. The EC does this

@@ -5,9 +5,10 @@
 //
 // **An invalidation is derived from the entry that was replaced, never chosen
 // by the caller.** Every write into a paging structure the hardware may already
-// be walking goes through `PageTablePage::write` or `widen`, both of which
-// return the `Owed` their prior value implies; `Owed` is `#[must_use]` and the
-// three ways to end one are the three answers there are. The rule is the SDM's:
+// be walking goes through `PageTablePage::write`, `write_pde` — the writer every
+// leaf-mapping path uses — or `widen`, each of which returns the `Owed` their
+// prior value implies; `Owed` is `#[must_use]` and the three ways to end one are
+// the three answers there are. The rule is the SDM's:
 // a not-present entry creates no TLB entry and no paging-structure-cache entry
 // (Vol. 3A §4.10.2.3), so a write over one can leave nothing stale and an
 // `invlpg` there is pure cost — §4.10.4.3 says so as a permission. A write over
@@ -73,6 +74,13 @@ const PAGE_PAT_2M: u64 = 1 << 12;
 const PAGE_NX: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
+
+/// The flags an upper-level table entry carries: present, writable, user. Every
+/// PML4E, PDPTE and page-table-pointing PDE is created with exactly these, and
+/// `ensure_table` masks whatever leaf flags a caller hands it down to this set —
+/// bit 12 of an upper entry is part of the next table's address, not the PDE's
+/// PAT bit, so leaf flags cannot move a page table 4 KiB.
+const TABLE_FLAGS: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
 
 /// 4 KiB pages in one 2 MiB page.
 const PAGES_PER_2M: usize = (PAGE_2M / 4096) as usize;
@@ -621,8 +629,7 @@ impl AddressSpace {
             let pa = phys + offset;
             let flags = prot.leaf_bits() | cache.pde_bits();
             let pd_idx = indices(va).2;
-            let user_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
-            let pd = self.ensure_table(va, user_flags, user_flags);
+            let pd = self.ensure_table(va, TABLE_FLAGS);
             pd.write_pde(pd_idx, va, pa | flags | PAGE_SIZE_BIT)
                 .expect_install("map_range");
             offset += PAGE_2M;
@@ -665,9 +672,8 @@ impl AddressSpace {
         );
 
         let pd_idx = indices(va).2;
-        let user_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
         let target = self.cr3();
-        let pd = self.ensure_table(va, user_flags, user_flags);
+        let pd = self.ensure_table(va, TABLE_FLAGS);
         pd.write_pde(pd_idx, va, phys | prot.leaf_bits() | PAGE_SIZE_BIT)
             .discharge(target);
     }
@@ -721,15 +727,14 @@ impl AddressSpace {
         self.children.push(table);
 
         let pd_idx = indices(va).2;
-        let user_flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
         let target = self.cr3();
-        let pd = self.ensure_table(va, user_flags, user_flags);
+        let pd = self.ensure_table(va, TABLE_FLAGS);
         // The PDE carries no `Prot` of its own: an upper-level entry must be at
         // least as permissive as any leaf below it, so the permissions live in
         // the 512 entries and this one only has to be present, writable and
         // user — `NX` here would make the whole window non-executable whatever
         // the leaves say.
-        pd.write_pde(pd_idx, va, table_phys | user_flags).discharge(target);
+        pd.write_pde(pd_idx, va, table_phys | TABLE_FLAGS).discharge(target);
     }
 
     /// Unmap one 2MB page and free its physical memory.
@@ -1108,7 +1113,7 @@ impl AddressSpace {
     fn map_2m(&mut self, phys: u64, flags: u64) {
         let virt = super::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
         let pd_idx = indices(virt).2;
-        let pd = self.ensure_table(virt, flags, flags);
+        let pd = self.ensure_table(virt, flags);
         let entry = phys | flags | PAGE_SIZE_BIT;
         let existing = pd[pd_idx];
         assert!(
@@ -1128,23 +1133,26 @@ impl AddressSpace {
     /// Everything an upper-level entry may carry besides the address of the
     /// table below it. A leaf's remaining flags are address bits here — bit 12
     /// of a PML4E or PDPTE is part of the next table's physical address, not
-    /// the PAT bit it is in a 2 MiB PDE — so both branches below mask, and a
-    /// caller passing leaf flags cannot move a page table 4 KiB.
-    fn ensure_table(&mut self, va: u64, pml4_flags: u64, pdpt_flags: u64) -> &mut PageTablePage {
-        const TABLE_FLAGS: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+    /// the PAT bit it is in a 2 MiB PDE — so the mask below applies at both
+    /// levels, and a caller passing leaf flags cannot move a page table 4 KiB.
+    ///
+    /// `flags` is one value, not a per-level pair: no caller has ever wanted a
+    /// PML4E to carry bits its PDPTE below does not.
+    fn ensure_table(&mut self, va: u64, flags: u64) -> &mut PageTablePage {
+        let flags = flags & TABLE_FLAGS;
         let (pml4_idx, pdpt_idx, _) = indices(va);
         let target = self.cr3();
 
         if self.root[pml4_idx] & PAGE_PRESENT == 0 {
             let child = Box::new(PageTablePage([0; 512]));
             self.root
-                .write(pml4_idx, va, child.phys() | (pml4_flags & TABLE_FLAGS))
+                .write(pml4_idx, va, child.phys() | flags)
                 .expect_install("ensure_table: pml4");
             self.children.push(child);
         } else {
             // x86-64: upper-level entries must be at least as permissive as any
             // leaf entry below them. Widen only (OR), never narrow.
-            self.root.widen(pml4_idx, pml4_flags & TABLE_FLAGS).discharge(target);
+            self.root.widen(pml4_idx, flags).discharge(target);
         }
 
         // SAFETY: the branch above just guaranteed `self.root[pml4_idx]` is
@@ -1157,11 +1165,11 @@ impl AddressSpace {
 
         if pdpt[pdpt_idx] & PAGE_PRESENT == 0 {
             let child = Box::new(PageTablePage([0; 512]));
-            pdpt.write(pdpt_idx, va, child.phys() | (pdpt_flags & TABLE_FLAGS))
+            pdpt.write(pdpt_idx, va, child.phys() | flags)
                 .expect_install("ensure_table: pdpt");
             self.children.push(child);
         } else {
-            pdpt.widen(pdpt_idx, pdpt_flags & TABLE_FLAGS).discharge(target);
+            pdpt.widen(pdpt_idx, flags).discharge(target);
         }
 
         // SAFETY: same argument as the `pdpt` binding above, one level down —
@@ -1383,9 +1391,7 @@ pub fn debug_page_walk(addr: u64) {
     // "for crash safety"); a diagnostic dump accepts a stale-but-consistent
     // read the same way `present_in_current_cr3` does.
     let pml4 = unsafe { PageTablePage::from_phys(cr3.phys()) };
-    let pml4_idx = ((addr >> 39) & 0x1FF) as usize;
-    let pdpt_idx = ((addr >> 30) & 0x1FF) as usize;
-    let pd_idx = ((addr >> 21) & 0x1FF) as usize;
+    let (pml4_idx, pdpt_idx, pd_idx) = indices(addr);
     let pt_idx = ((addr >> 12) & 0x1FF) as usize;
 
     log!(
