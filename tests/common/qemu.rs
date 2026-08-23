@@ -225,6 +225,13 @@ pub fn set_width(width: u32) {
 /// takes longer to report. The cost in the other direction is a red run that
 /// says a guest hung when it was only sharing a machine, which is the failure
 /// mode that put the whole shared block in the serial tail.
+///
+/// This corrects for width and for how fast the host is, both host-wide facts.
+/// It does not correct for a guest being wider than the host — an `smp:8` guest
+/// on a four-core runner is oversubscribed and a mostly-serial boot never
+/// showed it — which is [`budget_smp`]'s job and [`QemuInstance::budget`]'s
+/// default. Callers that hold a guest want that one, so its ceiling reflects
+/// the vCPUs it actually asked for.
 pub fn budget(one_guest: Duration) -> Duration {
     let (num, den) = host_scale();
     one_guest * WIDTH.load(Ordering::SeqCst) * num / den
@@ -286,6 +293,122 @@ pub fn host_speed() -> (Option<u32>, u32, u32, u32) {
     let (num, den) = host_scale();
     let fastest = FASTEST_BOOT_MS.load(Ordering::SeqCst);
     ((fastest != u32::MAX).then_some(fastest), REFERENCE_BOOT_MS, num, den)
+}
+
+/// The host cores this process may run on, read once.
+///
+/// [`std::thread::available_parallelism`] is the Rust-native reading of what
+/// `.github/instrument.sh` prints as `N core(s)`: it needs no host binary and
+/// respects any affinity the runner imposed. The CI `guest` shard is a
+/// four-core AMD EPYC; the dev host has fourteen, and that gap is the whole of
+/// why the oversubscription factor below widens a ceiling on the runner and is
+/// a no-op locally.
+///
+/// `TOYOS_HOST_CORES` overrides the reading, and only ever downward in effect —
+/// it exists so a large host can reproduce a small one's oversubscription for a
+/// measurement, and so a run can pin the number a verdict was read against. It
+/// can only *widen* a liveness ceiling, never shorten one, so a stale value
+/// costs a slower wedge report and never a false pass.
+pub fn host_cores() -> u32 {
+    static CORES: AtomicU32 = AtomicU32::new(0);
+    let cached = CORES.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let detected = std::env::var("TOYOS_HOST_CORES")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1)
+        });
+    CORES.store(detected, Ordering::Relaxed);
+    detected
+}
+
+/// How much an `smp`-vCPU guest is oversubscribed on `cores` host cores, as a
+/// fraction — pure, so [`host_scale_self_check`] can stage it with no guest.
+///
+/// The derivation, and nothing tuned: `smp` vCPU threads time-sharing `cores`
+/// cores each get `cores/smp` of a core, so a vCPU-bound stretch of guest work
+/// takes `smp/cores` as long as the same work with a core per vCPU. When
+/// `smp <= cores` there is no oversubscription and the factor is exactly 1 —
+/// the guest is not competing with itself. So the factor is `vcpus/cores`, and
+/// on the four-core runner an eight-vCPU guest is `8/4 = 2`.
+fn oversub_ratio(smp: u32, cores: u32) -> (u32, u32) {
+    if smp > cores {
+        (smp, cores)
+    } else {
+        (1, 1)
+    }
+}
+
+/// [`oversub_ratio`] for this host's core count.
+///
+/// [`host_scale`] corrects a ceiling for how slow this host's *boot* is, and a
+/// boot is mostly one CPU — the BSP does the bring-up while the APs idle — so
+/// the boot-derived factor is honest for a single-threaded workload and blind
+/// to the one thing a wide-SMP guest pays that a boot never does. This is the
+/// other half of the same correction, keyed on `vcpus/cores`: 307 bare
+/// timeouts in one CI run and green alone were the boot-scaled ceiling
+/// undercounting a starved-but-progressing eight-on-four guest.
+fn oversubscription(smp: u32) -> (u32, u32) {
+    oversub_ratio(smp, host_cores())
+}
+
+/// [`budget`] widened by a guest's own vCPU oversubscription.
+///
+/// The guest-agnostic [`budget`] scales by phase width and boot-derived host
+/// speed; this multiplies in `smp/cores` on top, so a wide-SMP guest that a
+/// mostly-serial boot said little about is given the extra room the derivation
+/// above says it needs. `smp <= cores` leaves it exactly [`budget`], which is
+/// every guest on the dev host.
+pub fn budget_smp(one_guest: Duration, smp: u32) -> Duration {
+    let (onum, oden) = oversubscription(smp);
+    budget(one_guest) * onum / oden
+}
+
+/// The oversubscription derivation, staged against known `(vcpus, cores)` pairs
+/// with no guest at all — the oracle for [`budget_smp`]'s widening.
+///
+/// A measured bound is asserted against the derivation, never the other way
+/// round (`tests/CLAUDE.md`): the numbers here are `vcpus/cores` and each case
+/// says which host it is. It also pins the two ends that matter — the runner
+/// widens and the dev host does not — and that the factor is finite, so a real
+/// hang is still caught in bounded time.
+pub fn host_scale_self_check() -> Result<(), String> {
+    // The runner: eight vCPUs on four cores waits 8/4 = 2x longer before the
+    // ceiling calls a still-progressing guest wedged.
+    if oversub_ratio(8, 4) != (8, 4) {
+        return Err(format!(
+            "an eight-vCPU guest on the four-core runner must widen by 8/4, got {:?}",
+            oversub_ratio(8, 4)
+        ));
+    }
+    // The dev host: fourteen cores, so nothing in the suite (smp<=8) is
+    // oversubscribed and the factor is 1 — this widens nothing locally.
+    for (smp, cores) in [(2u32, 4u32), (8, 14), (2, 14), (8, 8)] {
+        if oversub_ratio(smp, cores) != (1, 1) {
+            return Err(format!(
+                "smp={smp} on {cores} cores is not oversubscription (smp<=cores), yet the factor \
+                 is {:?} rather than 1",
+                oversub_ratio(smp, cores)
+            ));
+        }
+    }
+    // Finite in the worst case the suite can reach: eight vCPUs on a single
+    // core is 8x, not unbounded — so a genuine hang still reports in bounded
+    // time. `budget_smp` composes this with `budget`'s own capped host_scale
+    // (<=8x) and phase width, and on the `--jobs 1` runner width is 1.
+    if oversub_ratio(8, 1) != (8, 1) {
+        return Err(format!("the worst suite case must stay finite at 8x, got {:?}", oversub_ratio(8, 1)));
+    }
+    eprintln!(
+        "  [host-scale] oversubscription is vcpus/cores: 8-on-4 widens 2x, 8-on-14 not at all; \
+         this host reports {} core(s)",
+        host_cores()
+    );
+    Ok(())
 }
 
 /// A liveness guard that watches the guest instead of the host's clock.
@@ -1882,6 +2005,12 @@ pub struct QemuInstance {
     /// and is often read back after the guest is gone.
     own_boot_image: Option<PathBuf>,
     boot_log: String,
+    /// This guest's vCPU count, kept so its liveness ceilings can be widened by
+    /// its own oversubscription on a host with fewer cores than vCPUs — see
+    /// [`oversubscription`] and [`QemuInstance::budget`]. Boot-derived
+    /// [`host_scale`] cannot see this: a boot is a mostly-serial workload and a
+    /// wide-SMP guest pays lock-holder preemption a boot never does.
+    smp: u32,
 }
 
 /// The bootable disk image a boot with these arguments would use.
@@ -2298,7 +2427,7 @@ impl QemuInstance {
         interval: Duration,
         done: impl Fn(&super::screen::Ppm) -> bool,
     ) -> super::screen::Ppm {
-        let deadline = Instant::now() + budget(timeout);
+        let deadline = Instant::now() + budget_smp(timeout, self.smp);
         loop {
             let dump = self.screendump();
             if done(&dump) || Instant::now() >= deadline {
@@ -2398,7 +2527,7 @@ impl QemuInstance {
     /// Here the duration *is* a liveness ceiling — the marker is what ends
     /// it — so it scales.
     pub fn drain_until(&mut self, dur: Duration, line: impl Fn(&str) -> bool) -> String {
-        self.drain_for(budget(dur), line)
+        self.drain_for(budget_smp(dur, self.smp), line)
     }
 
     fn drain_for(&mut self, dur: Duration, line: impl Fn(&str) -> bool) -> String {
@@ -2427,7 +2556,7 @@ impl QemuInstance {
     /// A console is a stream and this consumes it: every line up to and
     /// including the marker is taken from whatever reads next.
     pub fn wait_for_console(&mut self, marker: &str, timeout: Duration) -> bool {
-        let deadline = Instant::now() + budget(timeout);
+        let deadline = Instant::now() + budget_smp(timeout, self.smp);
         loop {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 return false;
@@ -2455,6 +2584,19 @@ impl QemuInstance {
     /// `BootOptions { qmp: true }`.
     pub fn qmp_socket(&self) -> &Path {
         self.qmp_socket.as_ref().expect("qmp_socket needs BootOptions { qmp: true }")
+    }
+
+    /// [`budget`] for a host-side wait on *this* guest, widened by the guest's
+    /// own vCPU oversubscription.
+    ///
+    /// A test that polls the framebuffer or drains serial in its own loop —
+    /// rather than through [`Self::run_test_paced`] — reaches for a deadline,
+    /// and a deadline is a claim about the host. The free [`budget`] cannot see
+    /// how wide this guest is; this can, so an `smp:8` guest's poll loop is
+    /// given the `smp/cores` extra room a mostly-serial boot never priced. On a
+    /// host with a core per vCPU it is exactly [`budget`].
+    pub fn budget(&self, one_guest: Duration) -> Duration {
+        budget_smp(one_guest, self.smp)
     }
 
     pub fn run_test(&mut self, name: &str, timeout: Duration) -> TestResult {
@@ -2507,7 +2649,7 @@ impl QemuInstance {
         // `run <name> [args...]`, and the markers carry only the binary name.
         let want = name.split_whitespace().next().unwrap_or(name);
 
-        let timeout = budget(timeout);
+        let timeout = budget_smp(timeout, self.smp);
         let start = Instant::now();
         let mut stdout = String::new();
         let mut serial = String::new();
@@ -3363,6 +3505,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         screendump,
         own_boot_image,
         boot_log,
+        smp: options.smp,
     }
 }
 
@@ -3393,8 +3536,16 @@ fn wait_for_ready(
     // every boot after it gets the corrected one. Two boot timeouts in CI run
     // `31233476555` were this — `console: ready` and `compositor: ready`, on a
     // runner where the same boots take twice what they take here.
+    //
+    // And by this guest's own oversubscription: an `smp:8` guest brings up all
+    // eight vCPUs during boot, so on the four-core runner even the boot is
+    // `8/4` oversubscribed, which the boot-derived `host_scale` cannot fold in
+    // because it *is* what boot measured. `oversubscription` says why in terms
+    // of `vcpus/cores`; on a host with a core per vCPU it multiplies by one.
     let (num, den) = host_scale();
-    let boot_timeout = Duration::from_secs(10) * WIDTH.load(Ordering::SeqCst).max(2) * num / den;
+    let (onum, oden) = oversubscription(options.smp);
+    let boot_timeout =
+        Duration::from_secs(10) * WIDTH.load(Ordering::SeqCst).max(2) * num / den * onum / oden;
     let start = Instant::now();
     let mut seen = String::new();
     loop {
