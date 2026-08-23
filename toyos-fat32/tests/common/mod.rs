@@ -247,6 +247,61 @@ impl BlockAccess for SparseDevice {
     }
 }
 
+/// A device that refuses the next write touching a chosen byte range, once, and
+/// passes everything else straight through to `inner`.
+///
+/// It stages the one failure QEMU will not produce and no host option can inject
+/// (`kernel/src/block.rs`'s `OPERATION` budget note): a mirror write taken and
+/// the active-FAT write of the *same* `set_fat_entry` refused on the device's
+/// own budget after the first is durable. `set_fat_entry` writes the active FAT
+/// last for exactly this, so armed on the active FAT's region this refuses that
+/// second write and leaves the split a re-drive must heal.
+pub struct RefuseOnceInRange<D> {
+    inner: D,
+    /// `Some(lo, hi)` while armed. A write overlapping `[lo, hi)` is refused and
+    /// disarms this, so only one write is lost — the way one expired budget
+    /// refuses one operation and the next runs on a fresh one.
+    armed: Option<(u64, u64)>,
+    refusal: IoError,
+}
+
+impl<D: BlockAccess> RefuseOnceInRange<D> {
+    /// Disarmed: wrap now, arm with [`Self::arm`] once the setup writes that
+    /// must succeed (the create, any directory growth) are done.
+    pub fn new(inner: D, refusal: IoError) -> RefuseOnceInRange<D> {
+        RefuseOnceInRange { inner, armed: None, refusal }
+    }
+
+    pub fn arm(&mut self, range: (u64, u64)) {
+        self.armed = Some(range);
+    }
+}
+
+impl<D: BlockAccess> BlockAccess for RefuseOnceInRange<D> {
+    fn capacity(&self) -> u64 {
+        self.inner.capacity()
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
+        self.inner.read_at(offset, buf)
+    }
+
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
+        if let Some((lo, hi)) = self.armed {
+            let end = offset + buf.len() as u64;
+            if offset < hi && end > lo {
+                self.armed = None;
+                return Err(self.refusal);
+            }
+        }
+        self.inner.write_at(offset, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        self.inner.flush()
+    }
+}
+
 // ----------------------------------------------------------------- images
 
 pub struct Image {

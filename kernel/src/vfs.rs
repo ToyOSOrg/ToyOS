@@ -773,8 +773,27 @@ impl Vfs {
     }
 
     /// Open a file backing for demand-paged ELF loading.
-    /// This is separate from handle-based I/O and doesn't use the file cache.
+    ///
+    /// This is separate from handle-based I/O and does not use the file cache:
+    /// what it hands back is a *device* view — the extent list and the length a
+    /// filesystem has recorded — so it is only true while the device is current.
+    ///
+    /// **The write-back queue is the standing statement that it is not**, and
+    /// settling it is this call's own job. A file's last close hands its dirty
+    /// pages to `iod` and returns (`crate::writeback`), so `fs::write` followed
+    /// by a spawn of the same path read a btree inode that still said length 0
+    /// and the loader answered `ELF: fewer bytes than a file header` — a
+    /// read-your-writes hole in exactly the sequence a compiler performs. The
+    /// queue is drained here rather than waited on, so no writer pays for it and
+    /// the deferred close stays deferred; the reader that needs the device to be
+    /// current is the one that makes it so. Whole and not by path: the queue is
+    /// keyed by the name a handle was opened under, and a symlink, a rename or a
+    /// relative open name the same file differently.
+    ///
+    /// `flush_taken` re-derives a backing through [`FileSystem::open_backing`]
+    /// directly, so the drain below cannot re-enter this.
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
+        crate::writeback::drain_held(self);
         self.open_backing_depth(path, 0)
     }
 

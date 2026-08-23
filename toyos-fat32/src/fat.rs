@@ -26,17 +26,48 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(u32::from_le_bytes(raw) & ENTRY_MASK)
     }
 
-    /// Set one FAT entry in every live FAT.
+    /// Set one FAT entry in every live FAT, **writing the active FAT last**.
+    ///
+    /// The copies are separate device writes, and the device may refuse the
+    /// second on its own bound ([`crate::device::IoError::BudgetExpired`]) after
+    /// the first is durable — a starved host descheduling the vCPU past the
+    /// block layer's operation budget mid-update. Written in storage order the
+    /// active FAT would take the update while a mirror was left behind, and the
+    /// split would survive at rest: a volume that reads differently the moment
+    /// firmware consults the other copy, which is what mirroring exists to
+    /// prevent.
+    ///
+    /// So the active FAT — the one [`Self::fat_entry`] and the allocator's scan
+    /// read — is written last. A refusal partway leaves it exactly as it was, so
+    /// the read path and a re-scan see the pre-update state and a retry re-drives
+    /// the identical update: an allocator re-picks the same still-free cluster,
+    /// and the rewrite reaches both copies. The invariant is **`set_fat_entry`
+    /// returning `Err` ⟹ the active FAT for this entry is unchanged**, which is
+    /// what makes the caller's budget retry idempotent — it heals the mirror an
+    /// interrupted write left stale rather than accumulating splits, and leaks no
+    /// cluster in the active FAT. It is the ordering discipline of
+    /// [`Self::append_cluster`] (terminate before link) in the mirror dimension:
+    /// commit the copy a reader trusts last, so a partial failure is invisible
+    /// and redoable.
     pub(crate) fn set_fat_entry(&mut self, cluster: Cluster, value: u32) -> Result<(), Error> {
         self.invalidate_sector();
+        let active = self.geom.active_fat.unwrap_or(0);
         for fat in self.geom.fat_mirrors() {
-            let offset = self.geom.fat_entry_offset(fat, cluster);
-            let mut raw = [0u8; 4];
-            self.dev.read_at(offset, &mut raw)?;
-            let reserved = u32::from_le_bytes(raw) & !ENTRY_MASK;
-            self.dev.write_at(offset, &(reserved | (value & ENTRY_MASK)).to_le_bytes())?;
+            if fat != active {
+                self.write_fat_entry(fat, cluster, value)?;
+            }
         }
-        Ok(())
+        self.write_fat_entry(active, cluster, value)
+    }
+
+    /// One FAT copy's entry, preserving the four reserved high bits the format
+    /// leaves to whoever made the volume.
+    fn write_fat_entry(&mut self, fat: u32, cluster: Cluster, value: u32) -> Result<(), Error> {
+        let offset = self.geom.fat_entry_offset(fat, cluster);
+        let mut raw = [0u8; 4];
+        self.dev.read_at(offset, &mut raw)?;
+        let reserved = u32::from_le_bytes(raw) & !ENTRY_MASK;
+        Ok(self.dev.write_at(offset, &(reserved | (value & ENTRY_MASK)).to_le_bytes())?)
     }
 
     /// The next cluster in a chain, or `None` at the end.

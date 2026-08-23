@@ -368,6 +368,19 @@ impl BlockAccess for FatVolume {
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
+        // The `fat-mirror-write-refuse` actuator: a budget expiry on the mirror
+        // write of a drain flush's cluster allocation, which no host option can
+        // stage. Refused before the write is issued, exactly as a spent
+        // `block::OPERATION` refuses one with nothing in flight — the volume is
+        // untouched and the caller may ask again.
+        #[cfg(feature = "boot-actuators")]
+        if self.role == Role::Log && mirror_refuse::should_refuse(offset, buf.len()) {
+            log!(
+                "log-volume: fat-mirror-write-refuse: refusing the FAT-1 mirror write of a \
+                 drain flush at volume offset {offset} once, as a budget expiry"
+            );
+            return Err(IoError::BudgetExpired);
+        }
         let mut guard = device(self.role).lock();
         guard.as_mut().ok_or(IoError::Device)?.write_at(offset, buf)
     }
@@ -432,6 +445,70 @@ static BOOT_MOUNTED: AtomicBool = AtomicBool::new(false);
 
 fn injected_read_failure(role: Role) -> bool {
     !boot_volume_reads() && role == Role::Boot && BOOT_MOUNTED.load(Ordering::Relaxed)
+}
+
+/// The `fat-mirror-write-refuse` actuator: refuse the first FAT-1 (mirror) write
+/// of a write-back drain flush on the log volume, once, as a budget expiry.
+///
+/// Scoped to the drain flush (`writeback::drain_pass` brackets its `flush_file`
+/// with [`enter_drain_flush`]/[`leave_drain_flush`]) so it lands on the path the
+/// fix is about and not on `SYS_FSYNC`, which already retries. The mirror region
+/// is captured at mount; a write overlapping it while a drain flush is in
+/// progress is refused once. Everything folds to nothing without
+/// `boot-actuators`.
+#[cfg(feature = "boot-actuators")]
+mod mirror_refuse {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// The log volume's FAT-1 byte range, volume-relative, captured at mount.
+    static LO: AtomicU64 = AtomicU64::new(0);
+    static HI: AtomicU64 = AtomicU64::new(0);
+    /// Set while `writeback`'s drain holds a `flush_file` open, so the refusal
+    /// falls on the drain path and not on a `SYS_FSYNC` flush.
+    static IN_DRAIN: AtomicBool = AtomicBool::new(false);
+    /// One expiry, then a fresh budget — the retry heals it.
+    static FIRED: AtomicBool = AtomicBool::new(false);
+
+    pub fn capture(lo: u64, hi: u64) {
+        LO.store(lo, Ordering::Relaxed);
+        HI.store(hi, Ordering::Relaxed);
+    }
+
+    pub fn set_in_drain(on: bool) {
+        IN_DRAIN.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether this log-volume write is the one to refuse: the actuator is armed,
+    /// a drain flush is in progress, none has fired yet, and the bytes overlap
+    /// the mirror FAT. Consumes the one shot.
+    pub fn should_refuse(offset: u64, len: usize) -> bool {
+        if !crate::actuator::fat_mirror_write_refuse()
+            || !IN_DRAIN.load(Ordering::Relaxed)
+            || FIRED.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        let (lo, hi) = (LO.load(Ordering::Relaxed), HI.load(Ordering::Relaxed));
+        let end = offset + len as u64;
+        if hi > lo && offset < hi && end > lo {
+            FIRED.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+}
+
+/// Mark whether a write-back drain flush is in progress, so the
+/// `fat-mirror-write-refuse` actuator refuses a mirror write on the drain path
+/// and not on `SYS_FSYNC`. Folds to nothing without `boot-actuators`.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn enter_drain_flush() {
+    mirror_refuse::set_in_drain(true);
+}
+
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn leave_drain_flush() {
+    mirror_refuse::set_in_drain(false);
 }
 
 /// A file on one of these volumes, as byte ranges the page-fault path can read
@@ -1005,6 +1082,16 @@ pub fn mount(role: Role) -> Option<FatFs> {
     volume.bytes = volume_bytes;
     if let Some(mounted) = device(role).lock().as_mut() {
         mounted.len = volume_bytes;
+    }
+
+    // The log volume's FAT-1 (mirror) byte range, for the
+    // `fat-mirror-write-refuse` actuator. A one-FAT volume has no mirror, so the
+    // range stays empty and the actuator can never fire.
+    #[cfg(feature = "boot-actuators")]
+    if role == Role::Log && geom.num_fats >= 2 {
+        let one_fat = geom.fat_sectors as u64 * geom.bytes_per_sector as u64;
+        let lo = geom.fat_base_offset(1);
+        mirror_refuse::capture(lo, lo + one_fat);
     }
 
     match Fat32::mount(volume) {
