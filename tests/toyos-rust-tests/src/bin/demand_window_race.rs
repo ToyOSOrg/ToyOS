@@ -29,7 +29,8 @@
 //! fills, and that is the evidence the test still stages the race it was
 //! written for — without it a scheduling change could stop the threads
 //! overlapping and leave every assertion here passing on a run that raced
-//! nothing.
+//! nothing. Whether they overlap is the host's to decide and not the guest's,
+//! so it is retried rather than asserted once: see [`RACE_ATTEMPTS`].
 //!
 //! The counters come from `SYS_PROCESS_STATS`, which is a question about a
 //! process object rather than about the caller — so the racing is done by a
@@ -276,13 +277,47 @@ fn stats_of(child: &std::process::Child) -> ProcessStats {
     stats
 }
 
+/// The fills a process paid for, kept or not. Nothing but the demand pager
+/// moves either counter, so this is the fault path's own work and does not
+/// carry mappings or TLS blocks the way `alloc_count` does.
+fn fills(s: &ProcessStats) -> u64 {
+    u64::from(s.fault_demand_count) + u64::from(s.fault_zero_count)
+}
+
 /// Run one child to completion and take its accounting off its object.
+///
+/// The reading is printed before the child's exit status is judged, so a run
+/// where the content check fired still says what the kernel did — the numbers
+/// are the instrument, and a failing arm is exactly when they are wanted.
 fn run(exe: &std::path::Path, arg: &str) -> ProcessStats {
     let mut child = Command::new(exe).arg(arg).spawn().unwrap_or_else(|e| panic!("spawn {arg}: {e}"));
     let status = child.wait().unwrap_or_else(|e| panic!("wait {arg}: {e}"));
+    let stats = stats_of(&child);
+    println!(
+        "  {arg}: {} fills, {} kept, {} ns in faults ({} ns/fill)",
+        fills(&stats),
+        stats.alloc_count,
+        stats.fault_ns,
+        stats.fault_ns / fills(&stats).max(1),
+    );
     assert!(status.success(), "the {arg} child exited with {status}");
-    stats_of(&child)
+    stats
 }
+
+/// How many race children are run before "the threads never overlapped" is a
+/// failure rather than a retry.
+///
+/// **The staging is not guaranteed by construction and no guest can make it
+/// so.** Whether the second thread reaches its check while the first is filling
+/// is decided by whether the host is running the other vCPU just then, and a
+/// guest has no lever on that. On an idle dev host every one of the sixty-four
+/// windows raced on eight runs out of eight; under 28-way load on fourteen
+/// cores, fifty to fifty-seven of them did. But one run in a batch staged
+/// nothing at all, so the honest shape is to attempt it again rather than to
+/// call a scheduling accident a kernel defect — or to drop the witness and let
+/// this test go quietly vacuous. Four attempts, because each is a fraction of a
+/// second and the correctness assertions run on every one of them.
+const RACE_ATTEMPTS: usize = 4;
 
 fn main() {
     if let Some(mode) = std::env::args().nth(1).as_deref().and_then(Mode::parse) {
@@ -291,23 +326,7 @@ fn main() {
 
     let exe = std::env::current_exe().expect("current_exe");
     let solo = run(&exe, "solo");
-    let race = run(&exe, "race");
-
-    let fills = |s: &ProcessStats| u64::from(s.fault_demand_count) + u64::from(s.fault_zero_count);
     let solo_fills = fills(&solo);
-    let race_fills = fills(&race);
-    println!(
-        "  solo: {solo_fills} fills, {} kept, {} ns in faults ({} ns/fill)",
-        solo.alloc_count,
-        solo.fault_ns,
-        solo.fault_ns / solo_fills.max(1),
-    );
-    println!(
-        "  race: {race_fills} fills, {} kept, {} ns in faults ({} ns/fill)",
-        race.alloc_count,
-        race.fault_ns,
-        race.fault_ns / race_fills.max(1),
-    );
 
     assert!(
         solo_fills >= WINDOWS as u64,
@@ -315,30 +334,46 @@ fn main() {
          did not do the work this test compares against"
     );
 
-    // The correctness assertion, and the one that fails on a kernel that
-    // installs both fills: the two children keep the same pages and make the
-    // same mappings, so a race child holding more is a window it paid for
-    // twice.
-    assert!(
-        race.alloc_count <= solo.alloc_count,
-        "the race child kept {} pages where the solo child kept {} — {} window(s) were filled \
-         twice and both fills installed",
-        race.alloc_count,
-        solo.alloc_count,
-        race.alloc_count - solo.alloc_count,
-    );
+    let mut staged = None;
+    for attempt in 1..=RACE_ATTEMPTS {
+        let race = run(&exe, "race");
 
-    // And the liveness witness: the discarded fills are the proof that the two
-    // threads really did meet inside one window. Widen this if a guest's
-    // scheduling ever makes it marginal — never the assertion above it.
-    assert!(
-        race_fills > solo_fills,
-        "the race child filled {race_fills} windows and the solo child {solo_fills}: no fill \
-         was ever discarded, so the two threads never overlapped and nothing here was staged"
-    );
+        // The correctness assertion, and the one a kernel that installs both
+        // fills fails: the two children keep the same pages and make the same
+        // mappings, so a race child holding more is a window it paid for twice.
+        // It is asked of every attempt, staged or not.
+        assert!(
+            race.alloc_count <= solo.alloc_count,
+            "the race child kept {} pages where the solo child kept {} — {} window(s) were \
+             filled twice and both fills installed",
+            race.alloc_count,
+            solo.alloc_count,
+            race.alloc_count - solo.alloc_count,
+        );
+
+        // The witness: a fill this child paid for and did not keep is two
+        // threads having met inside one window.
+        if fills(&race) > solo_fills {
+            staged = Some((attempt, fills(&race) - solo_fills));
+            break;
+        }
+        println!(
+            "  attempt {attempt}: {} fills against the solo child's {solo_fills}, so no fill was \
+             discarded and the two threads never overlapped",
+            fills(&race)
+        );
+    }
+
+    let Some((attempts, lost)) = staged else {
+        panic!(
+            "{RACE_ATTEMPTS} race children each filled exactly what the solo child did, so not \
+             one of them ever had two threads inside one window: this test staged nothing and \
+             its correctness assertions proved nothing"
+        )
+    };
 
     println!(
-        "one window, one page: {} fill(s) lost the race and were dropped rather than installed",
-        race_fills - solo_fills
+        "one window, one page: {lost} fill(s) lost the race and were dropped rather than \
+         installed (attempt {attempts} of {RACE_ATTEMPTS})"
     );
 }
