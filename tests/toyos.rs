@@ -289,6 +289,11 @@ const RUST_SKIP: &[&str] = &[
     //
     // `cache_eviction` needs the small NVMe that makes the cache evict at all.
     "cache_eviction",
+    // `writeback_reopen` needs its own boot with `writeback-stall` armed;
+    // `writeback_durability` writes `/log` and is judged host-side off the image
+    // after a shutdown. Both run as `MACHINE_TESTS`, not on the shared boot.
+    "writeback_reopen",
+    "writeback_durability",
     // Needs an HDA controller, which `tests/testcases` has none of.
     "hda_client_stall",
     // Gate A's two, whose verdict is the wav the device captured — which the
@@ -814,6 +819,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
     ("log_partition_identity", Sched::Parallel, Tier::Fast),
     ("cache_eviction", Sched::Parallel, Tier::Fast),
+    // The write-back queue's two negative controls (wall 4 of
+    // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
+    // arms `writeback-stall`, so it needs its own actuator boot; `writeback_durability`
+    // is a host-side volume oracle that shuts the guest down and reads `/log` back
+    // with `toyos-fat32-check`.
+    ("writeback_reopen", Sched::Parallel, Tier::Fast),
+    ("writeback_durability", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
@@ -7387,6 +7399,30 @@ fn run_machine_test(
         // Body in `tests/common/toybox.rs`, same reason.
         "toybox_cp_volume" => common::toybox::cp_volume(test_config, c_bins, rust_bins),
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
+        // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
+        // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
+        "writeback_durability" => common::volumes::writeback_durability(test_config, c_bins, rust_bins),
+        // The write-back queue's re-open control: `writeback-stall` parks `iod`
+        // before it drains, so the guest can prove a re-open before the flush
+        // reads the pinned pages and not the NVMe `/home` device.
+        "writeback_reopen" => {
+            let options = BootOptions {
+                kernel_params: &["writeback-stall"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let boot = qemu.boot_log().to_string();
+            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+            let result = qemu.run_test("test_rs_writeback_reopen", Duration::from_secs(30));
+            if !check_rust_result(&result) {
+                return Err(format!(
+                    "writeback_reopen failed:\n{}\nkernel log while it ran:\n{}{}",
+                    result.stdout, result.before, result.serial
+                ));
+            }
+            Ok(())
+        }
         "kernel_heartbeat" => {
             // The instrument for a machine whose log cannot say whether it was
             // alive: ten of the owner's boots are byte-identical between the
