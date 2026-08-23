@@ -388,6 +388,27 @@ lock") is created and `scheduler::Parkable`'s header sentence stays true as
 written. Shapes 2 and 3 are declined precisely because they would create that
 rule or redesign the zero-handle drain; shape 1 is the one that needs neither.
 
+**Landed 2026-08-23: the write-back queue chunk.** `crate::writeback` is the
+queue; the last close pins the file (`file_cache`'s `teardown_owed`) and
+`writeback::enqueue`s it, and `OpenFileState::drop` now calls only
+`file_cache::release_to_writeback` + `enqueue` — no VFS lock, no device, exactly
+the cache-reference release wall 4 needs. `iod` (`iod.rs`) and `SYS_SHUTDOWN`
+both drain it through `writeback::drain_all`, which pops each entry under the
+VFS lock and runs the teardown the `Drop` used to (flush the dirty pages, drop
+the file, `close_file`). The per-handle `OpenFileState.modified` flag is gone:
+the file owns its dirty state (`file_cache`'s `dirty_meta`), so a reader closing
+last still flushes what a writer dirtied, and `fsync` reads that same bit. **No
+lock converted** — `vfs::VFS` stays a spinlock, `iod` spins in the driver, and
+the drain pops under the VFS lock so `sync_all` cannot commit a device ahead of
+a file's flush. This is the state that unblocks `vfs::VFS`'s conversion (the
+next chunk): a `Drop` reaching this release site now touches neither a sleep
+lock nor a device. Negative controls: `writeback_reopen` (an `iod` stalled by
+`writeback-stall`, a re-open reads the pinned pages) and `writeback_durability`
+(a close with no fsync reaches the `/log` volume through the drain,
+`toyos-fat32-check` the oracle). Measured, and recorded in `iod.rs`'s header: a
+360-file close burst on NVMe `/home` drove worst close-to-drained latency to
+~72 ms, the single `iod` thread draining the backlog serially.
+
 ### Wall 5: demand paging holds `ProcessData` across the device, and a nested trap is a level above the baseline
 
 Read off the tree 2026-08-20. `process::handle_page_fault` takes
@@ -442,7 +463,10 @@ and neither is derivable from the rest of this file.
    `vfs::VFS` cannot convert, so nothing below can either. **Ruled 2026-08-23:
    shape 1** — the write-back-queue chunk, already on the chunk list, is the
    prerequisite, and `vfs::VFS`'s conversion is sequenced behind it; the ruling
-   is recorded at wall 4.
+   is recorded at wall 4. **Landed 2026-08-23** (`crate::writeback`):
+   `OpenFileState::drop` now releases only a cache reference, so this
+   prerequisite is met and `vfs::VFS` is free to convert. See the "Landed"
+   note at wall 4.
 0b. **Wall 5's decision: does the baseline stop being a constant, or does the
    fault path stop holding `ProcessData` across the device — or both?** Until it
    is answered `fat32_adapter::VOLUMES` cannot be parked under from the

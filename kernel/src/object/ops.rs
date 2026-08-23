@@ -146,7 +146,6 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         path: String::from(path),
         file_id,
         position,
-        modified: false,
         mtime,
     }));
     // **`writable` is a right, not a field.** A write to a read-only file
@@ -480,7 +479,8 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
                 return Some(SyscallError::Io.to_u64());
             }
             state.position += written;
-            state.modified = true;
+            // The file's dirty state is the cache's now, set in `write_page`;
+            // the handle keeps only the mtime to stamp on the eventual flush.
             state.mtime = crate::clock::nanos_since_boot();
             Some(written as u64)
         }),
@@ -606,15 +606,16 @@ pub fn fsync(object: &KObjectRef) -> u64 {
     let KObjectRef::File(file) = object else {
         return SyscallError::PermissionDenied.to_u64();
     };
-    let flush = file.with(|state| {
-        state
-            .modified
-            .then(|| (state.path.clone(), state.file_id, state.mtime))
-    });
-    let Some((path, file_id, mtime)) = flush else { return 0 };
-    // Outside `FileObject`'s own lock: the VFS lock is taken here and in
-    // `OpenFileState::drop`, and holding both in one order here and the other
-    // there is the deadlock this ordering exists to avoid.
+    let (path, file_id, mtime) =
+        file.with(|state| (state.path.clone(), state.file_id, state.mtime));
+    // The file's dirty state, not the handle's: a handle that did not itself
+    // write still makes durable what another handle to the same file dirtied.
+    // Nothing owed → nothing to make durable, and no device flush to pay for.
+    if !file_cache::dirty_meta(file_id) {
+        return 0;
+    }
+    // Outside `FileObject`'s own lock, because `flush_file` reaches the file
+    // cache and the two locks must nest in one order.
     let mut vfs = crate::vfs::lock();
     if let Err(e) = vfs.flush_file(&path, file_id, mtime) {
         return e.to_u64();
@@ -627,8 +628,6 @@ pub fn fsync(object: &KObjectRef) -> u64 {
     if let Err(e) = vfs.sync_for_path(&path) {
         return e.to_u64();
     }
-    drop(vfs);
-    file.with(|state| state.modified = false);
     0
 }
 
@@ -637,11 +636,13 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
         return SyscallError::PermissionDenied.to_u64();
     };
     file.with(|state| {
-        file_cache::set_size(state.file_id, size);
+        // `resize`, not `set_size`: a truncate changes the size the filesystem
+        // must record even when it dirties no page, so it marks the file's own
+        // dirty state so the flush is not skipped.
+        file_cache::resize(state.file_id, size);
         if state.position > size as usize {
             state.position = size as usize;
         }
-        state.modified = true;
         state.mtime = crate::clock::nanos_since_boot();
         0
     })

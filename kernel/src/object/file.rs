@@ -8,7 +8,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 
-use crate::file_cache::{self, FileId};
+use crate::file_cache::{self, FileId, Release};
 use crate::sync::Lock;
 
 use super::{KObjectVariant, ObjectCore};
@@ -17,23 +17,23 @@ pub struct OpenFileState {
     pub path: String,
     pub file_id: FileId,
     pub position: usize,
-    pub modified: bool,
     pub mtime: u64,
 }
 
-/// **This takes the VFS lock** — flushing needs it — which is why nothing in
-/// the handle layer accepts a `&mut Vfs`: a caller still holding that guard
-/// when the last reference to a file drops would deadlock against itself.
+/// **VFS-free and device-free by design.** It releases one cache reference and,
+/// if that was the last, hands the file to the write-back queue — it does not
+/// flush and does not take the VFS lock. That is what a `Drop` may do: it runs
+/// in contexts that hold `Lock<ProcessData>` (`ops::close`, `ops::close_all`)
+/// and cannot take a sleep lock or wait on a device, and the flush the last
+/// close owes now rides `iod` instead of this `Drop` (`crate::writeback`,
+/// wall 4 of `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). There is
+/// no per-handle `modified` flag any more: the file owns its own dirty state
+/// (`file_cache`'s `dirty_meta`), so a reader closing last still flushes what a
+/// writer dirtied.
 impl Drop for OpenFileState {
     fn drop(&mut self) {
-        let mut vfs = crate::vfs::lock();
-        if self.modified {
-            if let Err(e) = vfs.flush_file(&self.path, self.file_id, self.mtime) {
-                crate::log!("warning: flush failed on close: {}: {}", self.path, e);
-            }
-        }
-        if file_cache::release(self.file_id) {
-            vfs.close_file(&self.path, self.file_id);
+        if let Release::TeardownOwed = file_cache::release_to_writeback(self.file_id) {
+            crate::writeback::enqueue(self.file_id, core::mem::take(&mut self.path), self.mtime);
         }
     }
 }

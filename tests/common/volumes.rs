@@ -793,6 +793,132 @@ fn rotation(
     Ok(())
 }
 
+/// A file closed **without** an fsync still reaches the volume — by the
+/// write-back queue and the shutdown drain — and leaves the volume parsable.
+///
+/// `OpenFileState::drop` no longer flushes on the closing thread; it pins the
+/// file and hands it to `iod`, and `SYS_SHUTDOWN` drains that queue before it
+/// commits the devices' write caches (`kernel::writeback`). The guest
+/// (`test_rs_writeback_durability`) writes a blob to `/log`, drops the handle
+/// with no sync, and reads it back after `iod` drains — the in-guest half of the
+/// no-loss claim. This is the **independent oracle**: after `run shutdown` the
+/// `/log` volume is read off the image by the `fatfs` crate and checked by
+/// `toyos-fat32-check`, neither the kernel's own cache logic, so both the bytes
+/// on the device and the structure around them are judged by something that is
+/// not the code under test.
+pub fn writeback_durability(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/writeback_durability.rs`.
+    const BLOB_NAME: &str = "wb-durable.bin";
+    const BLOB_LEN: usize = 5 * 4096 + 91;
+    fn blob() -> Vec<u8> {
+        (0..BLOB_LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
+    }
+
+    let image_path = test_dir().join("writeback-durability.img");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = log_extent(&image, &image_path)?;
+
+    // Born clean, asserted rather than assumed, so a complaint after the run is
+    // the guest's and not one it inherited.
+    let complaints_before = check(&image[start..start + len]);
+    if !complaints_before.is_empty() {
+        return Err(format!(
+            "the log partition was not born clean, so this gate cannot tell a complaint the \
+             guest caused from one it inherited:\n{}",
+            describe(&complaints_before)
+        ));
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+    if !boot.contains("log-volume: partition mounted") {
+        return Err(format!(
+            "the log partition did not mount, so the guest had nowhere to write:\n{}",
+            volume_lines(&boot)
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_writeback_durability", Duration::from_secs(60));
+    if let Some(err) = &result.error {
+        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        // The kernel's own lines too: a refused write on the log path reaches
+        // userland as one `Io`, and which layer refused is only in a `log!`.
+        return Err(format!(
+            "writeback_durability guest failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
+
+    // The shutdown drains the write-back queue and then commits the device's own
+    // write cache: it is what makes the host's view of the backing file the
+    // device's view of it.
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    if after.len() != image.len() {
+        return Err(format!("the image is {} bytes, was {}", after.len(), image.len()));
+    }
+    let volume = &after[start..start + len];
+
+    // The strongest claim first: the volume is still a volume. A driver that
+    // wrote the right bytes into a broken FAT would pass the byte comparison
+    // below and leave a stick that cannot boot.
+    let complaints_after = check(volume);
+    if !complaints_after.is_empty() {
+        return Err(format!(
+            "the write-back left the log volume breaking the format:\n{}",
+            describe(&complaints_after)
+        ));
+    }
+
+    // Ground truth: the bytes on the device, against the bytes the guest wrote,
+    // read by the host's own FAT implementation and never by the kernel.
+    let got = need(read_files(volume, &[BLOB_NAME])?.pop().flatten(), BLOB_NAME)?;
+    if got.len() != BLOB_LEN {
+        return Err(format!(
+            "{BLOB_NAME} is {} bytes on the volume; the guest wrote {BLOB_LEN} and never fsynced — \
+             a write-back closed but not drained is a lost write",
+            got.len()
+        ));
+    }
+    if let Some(at) = got.iter().zip(blob()).position(|(a, b)| *a != b) {
+        return Err(format!("{BLOB_NAME} differs on the volume from what the guest wrote at byte {at}"));
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!(
+        "  [wb] {BLOB_LEN} bytes closed without fsync reached the log volume through the \
+         write-back queue and the shutdown drain; the checker is silent"
+    );
+    Ok(())
+}
+
 /// The boot disk arrives *after* the port scan, and both mounts still happen.
 ///
 /// The machine the T14 was on the boot it lost `/boot` and `/log`, and the one

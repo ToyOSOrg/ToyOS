@@ -32,6 +32,22 @@ struct CachedFile {
     backing: Option<Arc<dyn FileBacking>>,
     ref_count: u32,
     deleted: bool,
+    /// This file owes the filesystem a write-back and nothing yet holds it
+    /// for one. Set when the last handle drops
+    /// ([`release_to_writeback`]); it is the write-back queue's single
+    /// reference to the file and pins it alive at `ref_count == 0`, so neither
+    /// [`mark_deleted`] nor [`finish_writeback`] may drop the file while it is
+    /// set — the pinned pages are what a re-open before the drain reads instead
+    /// of the device. Cleared by [`finish_writeback`], the one drainer.
+    teardown_owed: bool,
+    /// The file — not any one handle — owes a metadata/data flush. Set on every
+    /// write ([`apply_write`]) and on a size change that dirties no page
+    /// ([`resize`]); cleared when a flush takes the dirty set ([`take_dirty`])
+    /// and re-set if that flush fails. It moved here from
+    /// `object::file::OpenFileState.modified` because two handles to one path
+    /// share one `CachedFile` but had independent flags — a reader closing last
+    /// would skip a flush the file still owed.
+    dirty_meta: bool,
 }
 
 impl CachedFile {
@@ -87,6 +103,8 @@ pub fn create_file(evictable: bool) -> FileId {
         backing: None,
         ref_count: 1,
         deleted: false,
+        teardown_owed: false,
+        dirty_meta: false,
     });
     id
 }
@@ -113,6 +131,16 @@ pub fn has_backing(file_id: FileId) -> bool {
 }
 
 /// Increment ref_count for one more open handle.
+///
+/// **`ref_count` is only ever bumped from under the VFS lock**, and that is
+/// load-bearing: every caller reaches here through `Vfs::open_file`/`create_file`
+/// (the adapters call this) while the VFS lock is held, and
+/// [`finish_writeback`]'s decision to drop a file whose last handle went reads
+/// `ref_count` under that same lock — so a re-open racing a write-back teardown
+/// cannot bump the count between the read and the drop. A future caller that
+/// bumps `ref_count` without the VFS lock breaks the write-back queue's re-open
+/// serialisation (see `crate::writeback` and
+/// `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`).
 pub fn open(file_id: FileId) {
     let mut cache = FILE_CACHE.lock();
     if let Some(file) = cache.files.get_mut(&file_id) {
@@ -120,20 +148,108 @@ pub fn open(file_id: FileId) {
     }
 }
 
-/// Decrement ref_count. Returns true if this was the last reference.
-pub fn release(file_id: FileId) -> bool {
+/// The verdict [`release_to_writeback`] hands its caller.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    /// Other handles still hold the file. Nothing is owed.
+    StillHeld,
+    /// This was the last handle: the file has been pinned for a write-back
+    /// teardown and the caller must [`crate::writeback::enqueue`] it.
+    TeardownOwed,
+    /// This was the last handle, but a teardown was already owed and already
+    /// enqueued — a re-open adopted the file and dropped it again before the
+    /// drain ran. Nothing to enqueue.
+    AlreadyOwed,
+}
+
+/// Drop one open reference and, if it was the last, **pin the file for
+/// write-back rather than dropping it here**.
+///
+/// This is the last-ref half of what `release` used to do, split so that
+/// `object::file::OpenFileState::drop` touches neither the VFS lock nor the
+/// device: it decrements, and a file that reaches `ref_count == 0` is left
+/// alive with `teardown_owed` set for `iod`/shutdown to flush and drop under the
+/// VFS lock. The pin is what makes a closed file's dirty pages outlive the
+/// handle that dirtied them — eviction never takes a dirty page — so a re-open
+/// before the drain reads the buffered pages and not the device.
+///
+/// `AlreadyOwed` (an already-pinned file reaching zero a second time) is what
+/// stops one file being enqueued twice: the single queue entry drives the whole
+/// lifecycle, and [`finish_writeback`] re-reads the final `ref_count`.
+pub fn release_to_writeback(file_id: FileId) -> Release {
     let mut cache = FILE_CACHE.lock();
-    let Some(file) = cache.files.get_mut(&file_id) else { return false };
+    let Some(file) = cache.files.get_mut(&file_id) else { return Release::StillHeld };
     file.ref_count = file.ref_count.saturating_sub(1);
-    if file.ref_count == 0 {
-        if file.deleted || file.evictable {
-            drop_file(&mut cache, file_id);
-        }
-        // Non-evictable (tmpfs) files with ref_count 0 keep their pages.
-        true
-    } else {
-        false
+    if file.ref_count != 0 {
+        return Release::StillHeld;
     }
+    if file.teardown_owed {
+        return Release::AlreadyOwed;
+    }
+    file.teardown_owed = true;
+    Release::TeardownOwed
+}
+
+/// What [`finish_writeback`] found, and what the drainer does with the
+/// filesystem-side handle.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Teardown {
+    /// The file left the cache (or is a live tmpfs file whose pages stay):
+    /// release the filesystem-side handle with `Vfs::close_file`.
+    Released,
+    /// A re-open adopted the file (`ref_count > 0`) between the enqueue and the
+    /// drain, so it is left alive and its filesystem handle stays.
+    Adopted,
+    /// The file is already gone from the cache. Nothing to close.
+    Vanished,
+}
+
+/// What `iod`/shutdown needs to know before it flushes a queued file, read in
+/// one lock: whether the file still owes a flush, and whether it was deleted
+/// (in which case there is nothing worth flushing — its data is going away).
+#[derive(Clone, Copy)]
+pub struct WritebackProbe {
+    pub dirty_meta: bool,
+    pub deleted: bool,
+}
+
+/// Read a queued file's flush state. A file the queue pinned is always present,
+/// so `None`-shaped absence is answered as "nothing to flush" rather than
+/// panicking.
+pub fn writeback_probe(file_id: FileId) -> WritebackProbe {
+    let cache = FILE_CACHE.lock();
+    match cache.files.get(&file_id) {
+        Some(file) => WritebackProbe { dirty_meta: file.dirty_meta, deleted: file.deleted },
+        None => WritebackProbe { dirty_meta: false, deleted: false },
+    }
+}
+
+/// The FILE_CACHE half of a write-back teardown, run by `iod`/shutdown **under
+/// the VFS lock** after the flush.
+///
+/// Re-reading `ref_count` here, under the VFS lock a re-open would need, is what
+/// serialises the drain against a re-open: either the re-open won
+/// (`ref_count > 0` → [`Teardown::Adopted`], leave the file) or this drain won
+/// (drop it, and `Vfs::close_file` removes the name — a re-open then opens
+/// fresh and reads what the flush already wrote). A live tmpfs file (not
+/// evictable, not deleted) keeps its pages exactly as the old `release` did.
+pub fn finish_writeback(file_id: FileId) -> Teardown {
+    let mut cache = FILE_CACHE.lock();
+    let Some(file) = cache.files.get_mut(&file_id) else { return Teardown::Vanished };
+    if !file.teardown_owed {
+        // A re-open's own release already cleared it; nothing owed here.
+        return Teardown::Adopted;
+    }
+    file.teardown_owed = false;
+    if file.ref_count != 0 {
+        // A re-open adopted the file between the enqueue and now.
+        return Teardown::Adopted;
+    }
+    if file.deleted || file.evictable {
+        drop_file(&mut cache, file_id);
+    }
+    // else: a live tmpfs file keeps its (non-evictable) pages.
+    Teardown::Released
 }
 
 /// Read from a file page into `buf`. Handles cache miss via the file's backing.
@@ -284,6 +400,10 @@ fn apply_write<S: ByteSource + ?Sized>(
     data.read_at(0, &mut page.data[offset..end]);
     page.dirty = true;
     page.referenced = true;
+    // Both under the one FILE_CACHE lock, so a flush that takes the dirty set
+    // sees this page's `dirty` bit and this file's `dirty_meta` bit together —
+    // never one without the other.
+    file.dirty_meta = true;
 
     let write_end = page_idx as u64 * PAGE_SIZE as u64 + end as u64;
     if write_end > file.size {
@@ -297,7 +417,7 @@ fn apply_write<S: ByteSource + ?Sized>(
 /// The answer is a return value and not a zero-filled buffer because the two
 /// callers want opposite things from an absent page: a tmpfs read is looking at
 /// a hole, and a flush is looking at a page a truncate took away between
-/// `clone_dirty` and here. Zeros would be a page of data to both of them, and
+/// `take_dirty` and here. Zeros would be a page of data to both of them, and
 /// the flush would put them on the device.
 #[must_use]
 pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) -> bool {
@@ -308,12 +428,36 @@ pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) 
     true
 }
 
-/// Clone the dirty set (non-destructive). Used by fsync to iterate.
-pub fn clone_dirty(file_id: FileId) -> BTreeSet<u32> {
-    let cache = FILE_CACHE.lock();
-    cache.files.get(&file_id)
-        .map(|f| f.pages.iter().filter(|(_, p)| p.dirty).map(|(&i, _)| i).collect())
-        .unwrap_or_default()
+/// Take the dirty page set for a flush and clear the file's `dirty_meta` flag,
+/// in one lock.
+///
+/// Clearing here rather than at the end of the flush is what makes the flag
+/// race-safe: a write that lands after this re-sets `dirty_meta` (and marks its
+/// page dirty) and is caught by the next flush, instead of being cleared by a
+/// flush that never saw it. The page `dirty` bits are **not** cleared here —
+/// `clear_dirty` does that per page the flush actually wrote — and a failed
+/// flush restores `dirty_meta` (see [`mark_dirty_meta`], called by
+/// `Vfs::flush_file`).
+pub fn take_dirty(file_id: FileId) -> BTreeSet<u32> {
+    let mut cache = FILE_CACHE.lock();
+    let Some(file) = cache.files.get_mut(&file_id) else { return BTreeSet::new() };
+    file.dirty_meta = false;
+    file.pages.iter().filter(|(_, p)| p.dirty).map(|(&i, _)| i).collect()
+}
+
+/// Whether a file owes a write-back. `fsync` reads this in place of the handle
+/// flag it used to keep, so a handle that did not itself write still flushes a
+/// file another handle dirtied.
+pub fn dirty_meta(file_id: FileId) -> bool {
+    FILE_CACHE.lock().files.get(&file_id).is_some_and(|f| f.dirty_meta)
+}
+
+/// Re-mark a file as owing a write-back: used to restore the flag when a flush
+/// fails, so pages that are still dirty are not stranded with a clear flag.
+pub fn mark_dirty_meta(file_id: FileId) {
+    if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
+        file.dirty_meta = true;
+    }
 }
 
 /// Mark the pages a flush actually wrote as clean.
@@ -339,8 +483,27 @@ pub fn size(file_id: FileId) -> u64 {
 }
 
 /// Set file size. Removes pages past the new size on truncation.
+///
+/// This is the *establishing* form — a mount telling the cache the size a file
+/// already has on disk — and does not mark the file dirty. A user truncate is
+/// [`resize`].
 pub fn set_size(file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
+    set_size_locked(&mut cache, file_id, new_size);
+}
+
+/// A user truncate: [`set_size`], and mark the file as owing a write-back even
+/// when it dirtied no page — a shrink, or a grow into a hole, changes the size
+/// the filesystem must record without touching a `CachedPage`.
+pub fn resize(file_id: FileId, new_size: u64) {
+    let mut cache = FILE_CACHE.lock();
+    set_size_locked(&mut cache, file_id, new_size);
+    if let Some(file) = cache.files.get_mut(&file_id) {
+        file.dirty_meta = true;
+    }
+}
+
+fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
     let dropped;
     {
         let Some(file) = cache.files.get_mut(&file_id) else { return };
@@ -364,7 +527,10 @@ pub fn set_size(file_id: FileId, new_size: u64) {
 /// What the cache holds for a file after an operation that may have freed it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Residency {
-    /// Open handles still hold it, so its pages and its id are still live.
+    /// Something still holds it — an open handle, or the write-back queue
+    /// (`teardown_owed`) — so its pages and its id are still live and the
+    /// filesystem-side handle must survive until that holder's teardown calls
+    /// `close_file`.
     Held,
     /// The cache holds nothing for this id, and a filesystem may drop whatever
     /// it keeps alongside.
@@ -381,7 +547,12 @@ pub fn mark_deleted(file_id: FileId) -> Residency {
     let mut cache = FILE_CACHE.lock();
     let Some(file) = cache.files.get_mut(&file_id) else { return Residency::Gone };
     file.deleted = true;
-    if file.ref_count > 0 {
+    // A file the write-back queue holds (`teardown_owed`, last handle gone) is
+    // pinned: it is dropped by `finish_writeback` and by nothing else, so this
+    // marks it deleted — the drain skips flushing a deleted file — and leaves
+    // it. `Held` because the cache does still hold it and its filesystem-side
+    // handle must survive until the drain's `close_file`.
+    if file.ref_count > 0 || file.teardown_owed {
         return Residency::Held;
     }
     drop_file(&mut cache, file_id);

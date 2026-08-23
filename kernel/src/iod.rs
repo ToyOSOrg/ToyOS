@@ -7,29 +7,38 @@
 //! a closed file's dirty pages owe, and page-cache eviction's.
 //!
 //! **Why the write-back cannot stay where it is.** `OpenFileState::drop`
-//! (`object/file.rs`) takes the VFS lock and flushes. Once that lock is a
+//! (`object/file.rs`) used to take the VFS lock and flush. Once that lock is a
 //! `SleepLock` the flush needs a [`crate::scheduler::Parkable`], and a `Drop`
 //! impl cannot take one — which is §6.1's compile-time property stated from the
 //! other end, and the reason this thread exists rather than a rule saying
-//! "don't block in `Drop`". So the flush becomes a queue and a closed file is
-//! pushed onto it; `SYS_FSYNC` submits and parks on the completion, because a
-//! caller asked; `SYS_CLOSE` does not, because it never promised durability.
+//! "don't block in `Drop`". So the flush became a queue (`crate::writeback`):
+//! the last close pins the file and pushes it, and this thread drains it and
+//! runs the teardown the `Drop` used to. `SYS_CLOSE` never promised durability,
+//! so it does not wait; `SYS_FSYNC` did, so it still flushes inline — while the
+//! VFS is a spinlock a caller that asked for durability takes it directly, and
+//! only once it is a sleep lock does `fsync` too have to submit here and park.
 //!
 //! **The queue is C12's and the thread is C6's**, which is what §21 means by
-//! "`iod`'s body is C12's". What lands here now is the context: a task with no
-//! address space of its own, a process-table row that makes it nameable, a park
-//! that gives the CPU back, and a panic row. The loop below is where C12's
-//! drain goes.
+//! "`iod`'s body is C12's". The drain landed with the write-back queue (wall 4
+//! of `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`); the loop below
+//! calls `writeback::drain_all`, and `SYS_SHUTDOWN` calls the same function
+//! before `sync_all` so a file closed but not yet drained is still made durable
+//! on the way down. This chunk converts no lock: the VFS is still a spinlock and
+//! this thread spins in the driver like any other.
 //!
-//! **One `iod`, machine-wide, and that is a decision with a measurement owed.**
-//! At the 128-core target the root `CLAUDE.md` sets, one thread draining the
-//! write-back of 128 cores' closed files is a serialisation point nobody has
-//! sized — §10 says so in terms and leaves per-CPU as the obvious escape. It
-//! costs nothing to leave open because the producers do not exist yet: at C6
-//! nothing pushes, so there is nothing to serialise and no measurement a
-//! honest number could come from. **C12 is where it is measured**, against real
-//! producers, and this paragraph is the record that the question was asked
-//! rather than missed.
+//! **One `iod`, machine-wide, is a serialisation point, and now it has a
+//! number.** At the 128-core target the root `CLAUDE.md` sets, one thread
+//! draining the write-back of 128 cores' closed files is a serialisation point
+//! §10 leaves per-CPU as the obvious escape from. With the write-back queue
+//! landed (C12) the producers exist, so it was measured: a 6-thread burst that
+//! closes 360 modified files on NVMe `/home` at once drove the worst
+//! close-to-drained latency to **~72 ms** — the whole backlog drained serially
+//! at ~200 µs a file, because each drain holds the VFS spinlock across an NVMe
+//! round trip and `iod` is one thread. That is the serialisation, quantified: a
+//! burst of N closes has a tail of N times the per-file drain, and per-CPU
+//! `iod`s (§10) are the answer if that tail ever matters. The lock conversion
+//! this chunk unblocks turns the held spinlock into a park, which shortens the
+//! per-file cost but not the one-thread serialisation.
 //!
 //! **Its panic is recoverable.** A killed `iod` costs the machine its deferred
 //! write-back — dirty pages stop reaching the device — and that is a loss
@@ -39,7 +48,7 @@
 
 use toyos_sched::task::WaitClass;
 
-use crate::completion::{self, Subject, Token};
+use crate::completion::{self, Subject};
 use crate::sched::kthread::{self, OnPanic};
 use crate::scheduler;
 use crate::time::Deadline;
@@ -54,7 +63,6 @@ pub fn start() {
 
 extern "C" fn body(_arg: u64) -> ! {
     let parkable = scheduler::Parkable::at_entry();
-    let handle = crate::sched::driver::current_handle().expect("iod runs as a task");
     // The task half of the operation-nesting gate, and this thread is where it
     // lives because of the sentence above: `iod` is the one context in this
     // kernel that is a task, exists on every boot, and reaches its loop with
@@ -69,23 +77,35 @@ extern "C" fn body(_arg: u64) -> ! {
     }
     // Armed once and held across the loop — §5.3a's edge contract: a producer
     // that pushes while this thread is draining must find the watch still
-    // armed.
+    // armed. The subject is the write-back queue's own watch, which is where a
+    // closed file's `writeback::enqueue` posts.
     let armed = completion::arm(
-        Subject::of(handle.watch()),
-        Token::new(0),
+        Subject::of(&crate::writeback::WORK),
+        crate::writeback::TOKEN,
         WaitClass::Io,
     )
     .expect("a kernel thread is a task and can arm");
     loop {
-        // C12's drain goes here: take the queue's head, flush it under the VFS
-        // sleep lock with this thread's own `Parkable`, and post the completion
-        // whoever called `SYS_FSYNC` is parked on. Nothing pushes yet.
-        //
+        // A test can hold a closed file's write-back pending — so it can prove a
+        // re-open before the drain reads the buffered pages and not the device —
+        // by parking this thread before any teardown. `SYS_SHUTDOWN`'s own drain
+        // is not on this thread and is never stalled, so a stalled boot still
+        // shuts down. The accessor folds to `false` in a shipping kernel.
+        #[cfg(feature = "boot-actuators")]
+        if crate::actuator::writeback_stall() {
+            let _ = completion::wait(&parkable, &armed, Deadline::never());
+            continue;
+        }
+        // Drain every file a close has pinned, flushing each under the VFS lock
+        // with this thread's own `Parkable`. At this chunk the VFS is still a
+        // spinlock, so this drive spins like any thread's disk wait — legal for a
+        // dedicated housekeeping thread, and the lock conversion is a later
+        // chunk that needs no change here.
+        crate::writeback::drain_all();
         // No deadline: what ends this wait is a push, and a periodic wake on a
         // machine with nothing to write back is an audio change (root
-        // `CLAUDE.md`).
-        //
-        // The cancel arm is unreachable: nothing retires a kernel thread.
+        // `CLAUDE.md`). The cancel arm is unreachable: nothing retires a kernel
+        // thread.
         let _ = completion::wait(&parkable, &armed, Deadline::never());
     }
 }

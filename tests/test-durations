@@ -318,6 +318,8 @@ wall_clock_file 4642
 wall_clock_now 13
 wall_clock_refusals 25658
 window_refusal 16
+writeback_durability 18446744073709551615
+writeback_reopen 18446744073709551615
 xhci_deaf_registers 21244
 xhci_descriptor_walk 5186
 xhci_flap 8220
