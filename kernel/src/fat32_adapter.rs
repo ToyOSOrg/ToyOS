@@ -51,6 +51,15 @@
 //! mounted once at boot. A third FAT32 partition on the same disk is not
 //! reachable from here and should not become reachable without the same three
 //! gates.
+//!
+//! # Freeing a cluster gives up the extent lists naming it first
+//!
+//! A [`FatBacking`] reads the volume directly, holds no lock the filesystem
+//! takes, and outlives the call that made it — so between a freed cluster and a
+//! stale list still naming it there is nothing but the next allocation, and the
+//! next allocation is where another file's bytes come from. Every path that
+//! frees ([`FatFs::revoke`]) or shortens ([`FatExtents::truncate_to`]) does it
+//! before the FAT is written, not after.
 
 use alloc::boxed::Box;
 use alloc::string::String;
