@@ -388,7 +388,7 @@ lock") is created and `scheduler::Parkable`'s header sentence stays true as
 written. Shapes 2 and 3 are declined precisely because they would create that
 rule or redesign the zero-handle drain; shape 1 is the one that needs neither.
 
-**Landed 2026-08-23: the write-back queue chunk.** `crate::writeback` is the
+**Landed 2026-08-23 (#257): the write-back queue chunk.** `crate::writeback` is the
 queue; the last close pins the file (`file_cache`'s `teardown_owed`) and
 `writeback::enqueue`s it, and `OpenFileState::drop` now calls only
 `file_cache::release_to_writeback` + `enqueue` — no VFS lock, no device, exactly
@@ -463,7 +463,7 @@ and neither is derivable from the rest of this file.
    `vfs::VFS` cannot convert, so nothing below can either. **Ruled 2026-08-23:
    shape 1** — the write-back-queue chunk, already on the chunk list, is the
    prerequisite, and `vfs::VFS`'s conversion is sequenced behind it; the ruling
-   is recorded at wall 4. **Landed 2026-08-23** (`crate::writeback`):
+   is recorded at wall 4. **Landed 2026-08-23 (#257)** (`crate::writeback`):
    `OpenFileState::drop` now releases only a cache reference, so this
    prerequisite is met and `vfs::VFS` is free to convert. See the "Landed"
    note at wall 4.
