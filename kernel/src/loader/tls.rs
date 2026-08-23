@@ -145,6 +145,53 @@ pub fn setup_combined_tls(
     Some((page_alloc, tp_user))
 }
 
+/// Rebase a freshly built TLS block's self-referential pointers from physical
+/// to virtual, in place, through the kernel's direct map.
+///
+/// A TLS block is filled with *physical* addresses because it has no virtual
+/// address until it is mapped; this shifts the thread-pointer self-word, the DTV
+/// pointer and every allocated DTV entry by `rebase = vaddr - phys`. `phys` is
+/// the block's physical base, `tp_offset` the byte offset from it to the thread
+/// pointer, and `fs_base` the block's *virtual* thread pointer — what the TP
+/// self-word must end up holding.
+///
+/// Irreducible: there is no Rust type for a DTV whose entries point into itself,
+/// and building one would be modelling the psABI's memory layout rather than
+/// writing it — the same untyped-by-nature work `elf::reloc` does one level
+/// down.
+///
+/// # Safety
+///
+/// `phys` must be the physical base of a TLS block `setup_combined_tls`/
+/// `setup_tls` just built, and the caller must exclusively own it for the
+/// duration: no other CPU may read or write the block while this runs. The two
+/// callers satisfy that two ways — [`map_block`] runs before the block's thread
+/// exists (an unscheduled child, not yet handed to the scheduler), and
+/// `process::spawn_thread` runs under the process-data lock that serialises
+/// every thread of the process that could touch it. `tp_offset` and the DTV
+/// length word are the ones those builders wrote, both bounded inside the
+/// block's allocation, so every write below lands in it.
+pub(crate) unsafe fn rebase_block(phys: u64, tp_offset: usize, fs_base: u64, rebase: i64) {
+    // SAFETY: the caller's contract above — an exclusively-owned block whose
+    // layout `setup_combined_tls`/`setup_tls` fixed, reached through the
+    // kernel's own direct map. The DTV length at word 1 is a count those
+    // builders wrote, not one read back from userland.
+    unsafe {
+        let block = DirectMap::from_phys(phys).as_mut_ptr::<u8>();
+        let tp = block.add(tp_offset) as *mut u64;
+        *tp = fs_base;
+        *tp.add(1) = (*tp.add(1) as i64 + rebase) as u64;
+        let dtv = block as *mut u64;
+        let dtv_len = *dtv.add(1) as usize;
+        for i in 0..dtv_len {
+            let entry = *dtv.add(2 + i);
+            if entry != DTV_UNALLOCATED && entry != 0 {
+                *dtv.add(2 + i) = (entry as i64 + rebase) as u64;
+            }
+        }
+    }
+}
+
 /// Build one thread's TLS block and map it into the child address space.
 ///
 /// The block is filled with *physical* addresses because it has no virtual
@@ -168,32 +215,17 @@ pub fn map_block(
         crate::mm::paging::Prot::ReadWrite)?;
     let rebase = vaddr.raw() as i64 - phys as i64;
     let fs_base = (fs_base as i64 + rebase) as u64;
-    // SAFETY: `phys`/`alloc` are the block `setup_combined_tls`/`setup_tls`
-    // just built and zeroed — `(fs_base - vaddr.raw())` reduces to the same
-    // `plan.tp_offset` that function already bounded against `alloc_size`
-    // (algebraically: `fs_base = block_phys + plan.tp_offset + rebase`,
-    // `rebase = vaddr - phys`, and `block_phys == phys`, so `fs_base -
-    // vaddr.raw() == plan.tp_offset`), and `dtv`/its length-prefixed entries
-    // are the same `[0, DTV_BYTES)` region that function wrote. The direct
-    // map (`DirectMap::from_phys`) is the kernel's own view of these
-    // physical pages; `vma_map` just mapped the same pages into the child's
-    // address space, but the child has not been scheduled yet (this runs on
-    // the spawning thread, before `SYS_SPAWN` hands the new process to the
-    // scheduler), so nothing else can be reading or writing through either
-    // view concurrently.
+    // SAFETY: `phys`/`alloc` are the block `setup_combined_tls`/`setup_tls` just
+    // built and zeroed; `vma_map` mapped the same pages into the child, but the
+    // child has not been scheduled yet (this runs on the spawning thread, before
+    // `SYS_SPAWN` hands the new process to the scheduler), so nothing else can
+    // read or write the block — the exclusivity `rebase_block` requires. The
+    // thread-pointer offset `fs_base - vaddr.raw()` reduces to the same
+    // `plan.tp_offset` those builders already bounded against `alloc_size`
+    // (algebraically: `fs_base = block_phys + plan.tp_offset + rebase`, `rebase =
+    // vaddr - phys`, `block_phys == phys`).
     unsafe {
-        let block = DirectMap::from_phys(phys).as_mut_ptr::<u8>();
-        let tp = block.add((fs_base - vaddr.raw()) as usize) as *mut u64;
-        *tp = fs_base;
-        *tp.add(1) = (*tp.add(1) as i64 + rebase) as u64;
-        let dtv = block as *mut u64;
-        let dtv_len = *dtv.add(1) as usize;
-        for i in 0..dtv_len {
-            let entry = *dtv.add(2 + i);
-            if entry != DTV_UNALLOCATED && entry != 0 {
-                *dtv.add(2 + i) = (entry as i64 + rebase) as u64;
-            }
-        }
+        rebase_block(phys, (fs_base - vaddr.raw()) as usize, fs_base, rebase);
     }
     Some((crate::process::MappedPages::new(vaddr, alloc), fs_base))
 }

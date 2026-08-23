@@ -26,6 +26,7 @@ mod tls;
 pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
 pub(crate) use start::{alloc_kernel_stack, kernel_start, process_start, thread_start};
 pub use tls::{setup_combined_tls, setup_tls, DTV_INITIAL_CAPACITY};
+pub(crate) use tls::rebase_block;
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -624,11 +625,6 @@ pub fn spawn(
         None
     };
 
-    let (tls_template, tls_memsz) = match tls_modules.first() {
-        Some(m) => (m.template, m.memsz),
-        None => (None, 0),
-    };
-
     log!("spawn: TLS {} modules, total_memsz={}", tls_modules.len(), tls_total_memsz);
     let Some((tls_pages, fs_base)) =
         tls::map_block(&child_pt, &tls_modules, tls_total_memsz, max_tls_align)
@@ -673,8 +669,6 @@ pub fn spawn(
         env,
         elf: ElfInfo {
             elf_alloc: exe_tls_template,
-            tls_template,
-            tls_memsz,
             tls_modules,
             tls_total_memsz,
             tls_max_align: max_tls_align,
@@ -920,21 +914,24 @@ fn exe_tpoff(
     }
 
     let name = toyos_elf::cstr(&exe.dynstr, sym.name as u64);
-    for lib in tls_info.libs {
-        if lib.tls_memsz == 0 {
-            continue;
+    // The same cross-module fallback `compute_tpoff` uses: the symbol's offset
+    // within the module that *defines* it, made thread-pointer-relative.
+    // `defining_module` answers `None` — the log-and-0 path below — when a lib
+    // resolves the symbol but has no module in the combined block, where this
+    // used to reach for base_offset 0 and compute a wrong TPOFF silently. Every
+    // lib with TLS has a module (`build_tls_layout` pushes one per lib with
+    // `tls_memsz > 0`, matched by template), so the two agree on every
+    // well-formed program and differ only on that inconsistency — where the
+    // refusal is the correct answer.
+    match elf::defining_module(name, tls_info) {
+        Some((module, sym_offset)) => {
+            module.base_offset as i64 + sym_offset as i64 - total_memsz as i64
         }
-        if let Some(sym_tls_offset) = lib.resolve_tls(name) {
-            let other_base = tls_info
-                .modules
-                .iter()
-                .find(|m| m.template == lib.tls_template)
-                .map_or(0, |m| m.base_offset);
-            return other_base as i64 + sym_tls_offset as i64 - total_memsz as i64;
+        None => {
+            log!("tpoff: unresolved exe TLS symbol: {}", name);
+            0
         }
     }
-    log!("tpoff: unresolved exe TLS symbol: {}", name);
-    0
 }
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every

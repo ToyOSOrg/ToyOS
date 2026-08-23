@@ -232,7 +232,11 @@ pub fn apply_dtpmod_relocs(lib: &LoadedLib, module_id: u64, tls_info: &TlsModule
 
 /// The module in `tls_info` that defines a TLS symbol, matched by template
 /// pointer — unique per module, since each points into a distinct image.
-fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&'a TlsModule, u64)> {
+///
+/// `None` when no module defines it — including the inconsistency where a lib
+/// resolves the symbol but has no module in the combined block; callers turn
+/// that into their unresolved-symbol path rather than a silently wrong offset.
+pub fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&'a TlsModule, u64)> {
     for lib in tls_info.libs {
         if lib.tls_memsz == 0 {
             continue;
