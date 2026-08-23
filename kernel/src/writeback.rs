@@ -29,6 +29,22 @@
 //! each entry is popped from the queue while the VFS lock is held: a pending
 //! file is always either still on the queue or being flushed under that lock,
 //! never in a gap `sync_all` can pass through.
+//!
+//! **The pin covers the file cache and nothing else, so a reader that goes
+//! round the cache has to settle the queue itself.** `Vfs::open_backing` hands
+//! out a view of the *device* — the extent list and the length a filesystem has
+//! recorded — and the whole point of this queue is that the device is not
+//! current while an entry is on it. A `/home` file written, closed and then
+//! spawned answered `ELF: fewer bytes than a file header`, because
+//! `loader::spawn` read a btree inode that still said length 0. So
+//! [`drain_held`] runs the queue out from `Vfs::open_backing` before any backing
+//! is derived, and the invariant it restores is stated once: **no device view is
+//! taken while this queue owes that device anything.** All of it and not the one
+//! path, because the queue is keyed by the path a handle was opened under and a
+//! symlink, a rename or a `cwd`-relative open name the same file differently —
+//! a matcher would answer "nothing owed" for exactly the cases nobody would
+//! test. What it costs the reader is the backlog: `iod`'s header records ~200 µs
+//! a file, measured, and it is the same work in either thread.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -73,33 +89,52 @@ pub const TOKEN: Token = Token::new(0);
 /// Run every pending teardown now. Called by `iod` on each wake and by
 /// `SYS_SHUTDOWN` before `Vfs::sync_all`.
 ///
-/// Each entry is popped **while the VFS lock is held** (see the module header):
-/// the teardown the old `Drop` ran, relocated here — flush the dirty pages,
-/// re-check the last reference, drop the file and release its filesystem handle
-/// — all under one VFS-lock hold per entry.
+/// Each entry is popped **while the VFS lock is held** (see the module header),
+/// and the lock is given up between entries so a backlog does not shut every
+/// other VFS caller out for its whole length.
 pub fn drain_all() {
-    loop {
-        let mut vfs = crate::vfs::lock();
-        let Some(Pending { file_id, path, mtime }) = QUEUE.lock().pop_front() else {
-            return;
-        };
+    while drain_one(&mut crate::vfs::lock()) {}
+}
 
-        // (a) The flush, relocated from `OpenFileState::drop`. A deleted file
-        // has nothing worth flushing — its data is going away and its
-        // filesystem handle is already torn down — so it is skipped.
-        let probe = file_cache::writeback_probe(file_id);
-        if probe.dirty_meta && !probe.deleted {
-            if let Err(e) = vfs.flush_file(&path, file_id, mtime) {
-                crate::log!("writeback: flush of {path} on close failed: {e}");
-            }
-        }
+/// The same, for a caller that already holds the VFS.
+///
+/// `Vfs::open_backing` is the caller and the module header says why: a backing
+/// is a view of the device, and an entry on this queue is the statement that
+/// the device is behind. The lock is held across the whole backlog here because
+/// the caller's own hold is what makes its next read coherent — releasing it
+/// between entries would let another close enqueue a file the caller is about
+/// to derive a backing for.
+pub fn drain_held(vfs: &mut crate::vfs::Vfs) {
+    while drain_one(vfs) {}
+}
 
-        // (b)/(c) The last-ref half of the old `release`, re-checked under the
-        // VFS lock a re-open would need — so either the re-open won (the file is
-        // adopted and left) or this drain won and removes the name too.
-        match file_cache::finish_writeback(file_id) {
-            Teardown::Released => vfs.close_file(&path, file_id),
-            Teardown::Adopted | Teardown::Vanished => {}
+/// One entry, popped and torn down under the VFS lock the caller holds.
+/// `false` when the queue was empty.
+///
+/// The teardown the old `Drop` ran, relocated here — flush the dirty pages,
+/// re-check the last reference, drop the file and release its filesystem
+/// handle.
+fn drain_one(vfs: &mut crate::vfs::Vfs) -> bool {
+    let Some(Pending { file_id, path, mtime }) = QUEUE.lock().pop_front() else {
+        return false;
+    };
+
+    // (a) The flush, relocated from `OpenFileState::drop`. A deleted file
+    // has nothing worth flushing — its data is going away and its
+    // filesystem handle is already torn down — so it is skipped.
+    let probe = file_cache::writeback_probe(file_id);
+    if probe.dirty_meta && !probe.deleted {
+        if let Err(e) = vfs.flush_file(&path, file_id, mtime) {
+            crate::log!("writeback: flush of {path} on close failed: {e}");
         }
     }
+
+    // (b)/(c) The last-ref half of the old `release`, re-checked under the
+    // VFS lock a re-open would need — so either the re-open won (the file is
+    // adopted and left) or this drain won and removes the name too.
+    match file_cache::finish_writeback(file_id) {
+        Teardown::Released => vfs.close_file(&path, file_id),
+        Teardown::Adopted | Teardown::Vanished => {}
+    }
+    true
 }
