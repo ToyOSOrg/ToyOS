@@ -1358,7 +1358,11 @@ mod tests {
             Err(FsError::BlockOffDevice { block, device_blocks }) => {
                 assert_eq!((block, device_blocks), (blocks - 1, blocks));
             }
-            other => panic!("expected BlockOffDevice, got {other:?}"),
+            // Never `{other:?}` over a read's `Ok`: an unrefused one holds
+            // whatever the crafted size asked for, and the panic message is
+            // where that lands — 2 GB of it, measured, the first time.
+            Err(other) => panic!("expected BlockOffDevice, got {other:?}"),
+            Ok(data) => panic!("a run ending past the volume was read: {} bytes", data.len()),
         }
     }
 
@@ -1395,7 +1399,11 @@ mod tests {
                 // 33 runs of 4 is the first total past 128.
                 assert_eq!((needed, available), (132, blocks));
             }
-            other => panic!("expected NotEnoughBlocks, got {other:?}"),
+            Err(other) => panic!("expected NotEnoughBlocks, got {other:?}"),
+            Ok(data) => panic!(
+                "a file naming 256 blocks of a {blocks}-block volume was read: {} bytes",
+                data.len(),
+            ),
         }
     }
 
@@ -1418,16 +1426,22 @@ mod tests {
         let target = fs.read_link("victim.txt");
         let peak = crate::alloc_probe::take_peak();
 
-        match target {
-            Err(FsError::NotEnoughBlocks { needed, available }) => {
-                assert_eq!((needed, available), (size / BLOCK_SIZE as u64, blocks));
-            }
-            other => panic!("expected NotEnoughBlocks, got {other:?}"),
-        }
+        // The allocation is asserted first: it is the harm, and it happened
+        // before there was a return value to look at.
         assert!(
             peak <= BLOCK_SIZE,
             "a symlink declaring {size} bytes asked the allocator for {peak}",
         );
+        match target {
+            Err(FsError::NotEnoughBlocks { needed, available }) => {
+                assert_eq!((needed, available), (size / BLOCK_SIZE as u64, blocks));
+            }
+            Err(other) => panic!("expected NotEnoughBlocks, got {other:?}"),
+            Ok(target) => panic!(
+                "a symlink declaring {size} bytes resolved to a {}-byte target",
+                target.map_or(0, |t| t.len()),
+            ),
+        }
     }
 
     #[test]
@@ -1469,19 +1483,23 @@ mod tests {
         let before = raw[at..at + BLOCK_SIZE].to_vec();
 
         let mut fs = mount_rw(raw).expect("mount");
-        match fs.delete("victim.txt") {
+        let deleted = fs.delete("victim.txt");
+
+        // The bytes first: what the delete *returned* is the smaller half of
+        // this, and asserting it first would hide the damage behind a panic.
+        let after = fs.into_formatted().into_io().expect("sync").into_vec();
+        assert_eq!(&after[at..at + 4], &NODE_MAGIC[..], "the root node stopped being a node");
+        assert!(
+            after[at..at + BLOCK_SIZE] == before[..],
+            "a delete of an extent outside the volume wrote to the root node",
+        );
+
+        match deleted {
             Err(FsError::BlockOffDevice { block, device_blocks }) => {
                 assert_eq!((block, device_blocks), (32769, blocks));
             }
             other => panic!("expected BlockOffDevice, got {other:?}"),
         }
-
-        let after = fs.into_formatted().into_io().expect("sync").into_vec();
-        assert_eq!(&after[at..at + 4], &NODE_MAGIC[..], "the root node stopped being a node");
-        assert!(
-            after[at..at + BLOCK_SIZE] == before[..],
-            "a refused delete wrote to the root node",
-        );
     }
 
     #[test]
@@ -1497,13 +1515,10 @@ mod tests {
         craft_entry(&mut raw, root, 1, BLOCK_SIZE as u64, &[(u64::MAX, 1)]);
 
         let mut fs = mount_rw(raw).expect("mount");
-        match fs.file_extents("victim.txt") {
-            Err(FsError::BlockOffDevice { block, device_blocks }) => {
-                assert_eq!((block, device_blocks), (u64::MAX, blocks));
-            }
-            other => panic!("expected BlockOffDevice, got {other:?}"),
-        }
 
+        // The arithmetic first, on a list handed in directly: past the door,
+        // `push_extent` adds `start_block + block_count` and `block_for`
+        // accumulates the counts, and neither may be a panic.
         let mut extents = Vec::from([Extent {
             start_block: u64::MAX,
             block_count: 1,
@@ -1511,5 +1526,13 @@ mod tests {
         }]);
         let block = fs.resolve_or_alloc_block(&mut extents, 1).expect("a block for page 1");
         assert!(block < blocks, "page 1 resolved to block {block}, which is not on this volume");
+
+        // And the door itself: nothing gets to hand that list to the kernel.
+        match fs.file_extents("victim.txt") {
+            Err(FsError::BlockOffDevice { block, device_blocks }) => {
+                assert_eq!((block, device_blocks), (u64::MAX, blocks));
+            }
+            other => panic!("expected BlockOffDevice, got {other:?}"),
+        }
     }
 }
