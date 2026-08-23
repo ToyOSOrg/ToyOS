@@ -1588,3 +1588,268 @@ pub fn log_partition_identity(
     );
     Ok(())
 }
+
+/// The slow-vs-failed policy, staged end to end: a budget-refused flush is
+/// retried and keeps the volume, the deadman declares a volume that never
+/// comes durable, and a hung device whose reset escalation fails is a device
+/// fact that ends it — the three exits of `object/ops.rs`'s `fsync` loop, each
+/// observed from outside the machine.
+///
+/// Three boots, because the three verdicts are mutually exclusive states of
+/// one volume:
+///
+/// 1. **Retry keeps the volume, and a refused attempt discarded nothing.**
+///    `fsync-budget-spent` runs every `SYS_FSYNC`'s first attempt under an
+///    already-spent operation — the state a loaded dev host reproduced 1 in
+///    73 full 12-wide suites (2026-08-22, this test's own blob fsync on
+///    `/log`) — so every flush in the boot is refused once
+///    at the shipped site and retried on a fresh budget. The guest's own
+///    fsync must succeed, logd must never give its volume up, and the blob is
+///    then read off the *image* by the host: the safety invariant is that the
+///    refused attempt left every un-flushed page dirty, so the retry delivered
+///    them, and a kernel that marked them clean on the timeout (the fsyncgate
+///    failure mode) has nothing left to deliver and reds the byte comparison.
+///    `toyos-fat32-check`'s silence over the volume is the outside judge that
+///    the retry also left a consistent filesystem.
+/// 2. **The deadman is the third failure evidence.** `fsync-deadman-now`
+///    expires it at once, so the first refused attempt is the last: the kernel
+///    declares the volume failed with `SyscallError::Io`, and logd — which
+///    keeps a volume across any number of `WouldBlock`s — ends it on what is
+///    now a device word, exactly as it would for an error status.
+/// 3. **A failed reset escalation is the second.** `usb-transport-break`
+///    abandons the first WRITE(10)'s data phase and `usb-reset-break` makes
+///    the Reset Recovery meet a device that answers nothing on EP0 — a truly
+///    hung device, which QEMU cannot otherwise be. The recovery must report
+///    failure, the disk must go offline, and the boot's log ends on the
+///    console — while the machine itself stays up and clean.
+pub fn log_flush_retry(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    // --- Boot 1: slow but live retries, keeps the volume, loses nothing. ---
+    let image_path = test_dir().join("log-flush-retry.img");
+    let mut image =
+        qemu::build_boot_image(test_config, c_bins, rust_bins, &["fsync-budget-spent"]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = esp_extent(&image, &image_path)?;
+    {
+        // The fixture `esp_files` asserts against, same as `esp_filesystem`.
+        let volume = &mut image[start..start + len];
+        let fs = fatfs::FileSystem::new(Cursor::new(&mut *volume), FsOptions::new())
+            .map_err(|e| format!("the built ESP does not mount on the host: {e}"))?;
+        let dir = fs
+            .root_dir()
+            .open_dir("toyos")
+            .map_err(|e| format!("the built ESP has no toyos directory: {e}"))?;
+        let mut file = dir
+            .create_file(HOST_NOTE)
+            .map_err(|e| format!("creating {HOST_NOTE} on the ESP: {e}"))?;
+        file.write_all(HOST_TEXT.as_bytes()).map_err(|e| format!("writing {HOST_NOTE}: {e}"))?;
+    }
+    std::fs::write(&image_path, &image).map_err(|e| format!("rewrite the boot image: {e}"))?;
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            kernel_params: &["fsync-budget-spent"],
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+
+    let result = qemu.run_test("test_rs_esp_files", Duration::from_secs(60));
+    if let Some(err) = &result.error {
+        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "esp_files failed under a once-refused flush, so a budget-expired attempt was \
+             not retried into a durable one:\n{}\nkernel log while the test ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    let log = format!("{boot}\n{}{}", result.before, result.serial);
+    // The staged refusal really ran at the shipped site, and the retry is what
+    // answered: both halves, or the arm proved nothing.
+    if !log.contains("not issued") && !log.contains("ran out of its operation budget") {
+        return Err(format!(
+            "no budget refusal in the log, so `fsync-budget-spent` staged nothing:\n{}",
+            volume_lines(&log)
+        ));
+    }
+    let retried = log
+        .lines()
+        .find(|l| l.contains("fsync: ") && l.contains("durable on attempt"))
+        .ok_or_else(|| {
+            format!(
+                "no `fsync: … durable on attempt` line, so the operation-level retry never \
+                 ran:\n{}",
+                volume_lines(&log)
+            )
+        })?
+        .trim()
+        .to_string();
+    if log.contains("on the console only") {
+        return Err(format!(
+            "logd gave its volume up under refusals that were only budget words:\n{}",
+            volume_lines(&log)
+        ));
+    }
+
+    // The device's view, after a clean shutdown: what the retried flushes left.
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    let (log_start, log_len) = log_extent(&after, &image_path)?;
+    let volume = &after[log_start..log_start + log_len];
+    let complaints = check(volume);
+    if !complaints.is_empty() {
+        return Err(format!(
+            "the retried flushes left the log volume breaking the format:\n{}",
+            describe(&complaints)
+        ));
+    }
+    let got = need(read_files(volume, &[GUEST_BLOB])?.remove(0), GUEST_BLOB)?;
+    if got.len() != BLOB_LEN {
+        return Err(format!(
+            "{GUEST_BLOB} is {} bytes on the volume, wrote {BLOB_LEN} — a refused attempt's \
+             pages were dropped instead of kept dirty",
+            got.len()
+        ));
+    }
+    if let Some(at) = got.iter().zip(blob()).position(|(a, b)| *a != b) {
+        return Err(format!(
+            "{GUEST_BLOB} differs from what the guest wrote at byte {at} — a page the refused \
+             attempt should have kept dirty never reached the device"
+        ));
+    }
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!("  [retry] {retried}");
+    eprintln!(
+        "  [retry] volume kept, checker silent, {BLOB_LEN} blob bytes byte-identical after a \
+         once-refused flush"
+    );
+
+    // --- Boot 2: the deadman expires, and that is a declared death. ---
+    let image_path = test_dir().join("log-flush-deadman.img");
+    let image = qemu::build_boot_image(
+        test_config,
+        c_bins,
+        rust_bins,
+        &["fsync-budget-spent", "fsync-deadman-now"],
+    );
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            kernel_params: &["fsync-budget-spent", "fsync-deadman-now"],
+            ..Default::default()
+        },
+    );
+    let mut log = qemu.boot_log().to_string();
+    if !log.contains("on the console only") {
+        log.push_str(&qemu.drain_until(Duration::from_secs(30), |l| {
+            l.contains("on the console only")
+        }));
+    }
+    drop(qemu);
+    serial::Serial::named("deadman boot console", log.as_str()).must_be_clean()?;
+    let declared = log
+        .lines()
+        .find(|l| l.contains("fsync: ") && l.contains("is not durable after"))
+        .ok_or_else(|| {
+            format!("the deadman never declared the volume failed:\n{}", volume_lines(&log))
+        })?
+        .trim()
+        .to_string();
+    let gave_up = log
+        .lines()
+        .find(|l| l.contains("logd:") && l.contains("on the console only"))
+        .ok_or_else(|| {
+            format!(
+                "logd kept a volume the deadman had declared failed:\n{}",
+                volume_lines(&log)
+            )
+        })?
+        .trim()
+        .to_string();
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!("  [deadman] {declared}");
+    eprintln!("  [deadman] {gave_up}");
+
+    // --- Boot 3: a hung device fails its reset, which is a device fact. ---
+    let image_path = test_dir().join("log-flush-hung.img");
+    let image = qemu::build_boot_image(
+        test_config,
+        c_bins,
+        rust_bins,
+        &["usb-transport-break", "usb-reset-break"],
+    );
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            kernel_params: &["usb-transport-break", "usb-reset-break"],
+            ..Default::default()
+        },
+    );
+    let mut log = qemu.boot_log().to_string();
+    if !log.contains("on the console only") {
+        log.push_str(&qemu.drain_until(Duration::from_secs(30), |l| {
+            l.contains("on the console only")
+        }));
+    }
+    drop(qemu);
+    serial::Serial::named("hung boot console", log.as_str()).must_be_clean()?;
+    for needed in ["transport broke on SCSI", "reset recovery failed; disk is offline"] {
+        if !log.contains(needed) {
+            return Err(format!(
+                "no {needed:?} in the log, so the staged hung device never met its \
+                 recovery:\n{}",
+                volume_lines(&log)
+            ));
+        }
+    }
+    let offline = log
+        .lines()
+        .find(|l| l.contains("reset recovery failed; disk is offline"))
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let gave_up = log
+        .lines()
+        .find(|l| l.contains("logd:") && l.contains("on the console only"))
+        .ok_or_else(|| {
+            format!(
+                "logd never reported losing a volume whose device went offline:\n{}",
+                volume_lines(&log)
+            )
+        })?
+        .trim()
+        .to_string();
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!("  [hung] {offline}");
+    eprintln!("  [hung] {gave_up}");
+    Ok(())
+}
