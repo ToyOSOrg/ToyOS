@@ -3148,7 +3148,13 @@ fn run_screen_test(
                 QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
             let font = screen::ConsoleFont::load();
 
-            let before = qemu.screendump_while(
+            // `_rendering`, not the plain wait: on a loaded `smp:2` runner the
+            // console paints slowly and the budget-scaled 30s window undercounts
+            // a later moment in the run, so a guest still drawing was called
+            // wedged (`0 of 2073600 pixels`, the paint never arriving). The
+            // console freezes when idle, so a real failure still ends the wait a
+            // `GUEST_QUIET` after the deadline.
+            let before = qemu.screendump_while_rendering(
                 Duration::from_secs(30),
                 Duration::from_millis(200),
                 |d| d.console_text(&font).contains(CONSOLE_PROMPT),
@@ -3187,7 +3193,7 @@ fn run_screen_test(
                 m > 0
                     && d.pixels[(d.height - m) * d.width..].iter().all(|p| *p == c)
             };
-            let painted_over = qemu.screendump_while(
+            let painted_over = qemu.screendump_while_rendering(
                 Duration::from_secs(30),
                 Duration::from_millis(200),
                 |d| margin_is(d, GRAFFITI),
@@ -3231,7 +3237,7 @@ fn run_screen_test(
                 rows.first().is_some_and(|r| r.trim() == CONSOLE_PROMPT)
                     && rows[1..].iter().all(|r| r.is_empty())
             };
-            let dump = qemu.screendump_while(
+            let dump = qemu.screendump_while_rendering(
                 Duration::from_secs(30),
                 Duration::from_millis(200),
                 only_prompt,
