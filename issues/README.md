@@ -112,6 +112,18 @@ that goes to the module header or the doc comment at the site that owns the
 subject, stated as what is true there and citing nothing. The story does not go
 with it.
 
+**Every citation goes in the same merge, so search before you delete — for the
+slug as well as the path.** The slug is the identity, and a pointer written as a
+bare name is invisible to a path search. Search the *tree* rather than the
+checkout (`git grep <rev>`): `rg` skips dotfile directories without `--hidden`,
+and `.github/` holds citations too. Then read where the hits are. One under
+`toyos-abi/src`, `toyos/src` or `userland/libc/src` belongs in the branch's
+**first** commit — those are the shared sysroot's sources, the abi-split gate
+reads commits and not the tree, and a later revert does not undo the refusal.
+One in `src/redlist.rs` is a `source` that must both resolve and name its test,
+so retire the row against whatever closed the issue rather than leaving it
+pointing at nothing.
+
 ## Two area notes, carried over from the file this replaced
 
 **`filesystem`** — `toyos-fat32/` is new (host tests: `cargo test` inside it) and
