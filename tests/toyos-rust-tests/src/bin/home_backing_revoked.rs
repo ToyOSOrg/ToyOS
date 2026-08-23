@@ -12,6 +12,8 @@
 
 use std::fs;
 use std::io::{Read, Write};
+use std::thread;
+use std::time::Duration;
 
 const VICTIM: &str = "/home/revoke_victim.bin";
 const ATTACKER: &str = "/home/revoke_attacker.bin";
@@ -25,9 +27,18 @@ const VICTIM_BYTE: u8 = 0xA7;
 const ATTACKER_BYTE: u8 = 0x5C;
 
 fn write_file(path: &str, byte: u8) {
-    let mut f = fs::File::create(path).unwrap_or_else(|e| panic!("create {path}: {e}"));
-    f.write_all(&vec![byte; LEN]).unwrap_or_else(|e| panic!("write {path}: {e}"));
-    f.sync_all().unwrap_or_else(|e| panic!("fsync {path}: {e}"));
+    {
+        let mut f = fs::File::create(path).unwrap_or_else(|e| panic!("create {path}: {e}"));
+        f.write_all(&vec![byte; LEN]).unwrap_or_else(|e| panic!("write {path}: {e}"));
+        f.sync_all().unwrap_or_else(|e| panic!("fsync {path}: {e}"));
+    } // close: the last handle drops here.
+    // The last close no longer drops the file from the cache on this thread —
+    // it pins it and hands the teardown to `iod` (`kernel::writeback`). Let that
+    // drain, so a later open of this name is served by the backing rather than
+    // adopting the pages this write left cached; the revocation this test checks
+    // lives in the backing, and a cache-served read would never reach it. The
+    // margin is enormous: the drain is microseconds of work.
+    thread::sleep(Duration::from_millis(200));
 }
 
 fn read_all(f: &mut fs::File) -> std::io::Result<Vec<u8>> {
@@ -37,9 +48,10 @@ fn read_all(f: &mut fs::File) -> std::io::Result<Vec<u8>> {
 }
 
 fn main() {
-    // The control. Closing the file drops its cached pages, so this open is
-    // served by the backing and not by anything left over from the write — if
-    // it were not, the attack below would prove nothing about that path.
+    // The control. `write_file` drains the write-back so the file leaves the
+    // cache, so this open is served by the backing and not by pages the write
+    // left cached — if it were not, the attack below would prove nothing about
+    // that path.
     write_file(CONTROL, VICTIM_BYTE);
     let control = read_all(&mut fs::File::open(CONTROL).expect("open the control"))
         .expect("read the control");
@@ -51,8 +63,9 @@ fn main() {
 
     write_file(VICTIM, VICTIM_BYTE);
 
-    // Held open, and deliberately not read: every page is absent from the file
-    // cache, so each one is a fault the backing has to answer.
+    // Held open, and deliberately not read: `write_file` drained the victim out
+    // of the cache, so every page is absent and each one is a fault the backing
+    // has to answer.
     let mut held = fs::File::open(VICTIM).expect("open the victim");
 
     fs::remove_file(VICTIM).expect("unlink the victim");

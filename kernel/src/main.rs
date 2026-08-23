@@ -64,6 +64,7 @@ mod block;
 mod gpt;
 mod page_cache;
 mod file_cache;
+mod writeback;
 mod tmpfs;
 mod file_backing;
 mod bcachefs_adapter;

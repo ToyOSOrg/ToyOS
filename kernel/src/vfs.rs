@@ -517,8 +517,28 @@ impl Vfs {
     /// closed and the cached size went with it. Callers reach this only when
     /// the handle is marked modified, so there is always something to record.
     pub fn flush_file(&mut self, path: &str, file_id: FileId, mtime: u64) -> Result<(), SyscallError> {
-        let dirty = crate::file_cache::clone_dirty(file_id);
+        // Take the dirty page set and clear the file's `dirty_meta` flag
+        // together (`take_dirty`), so a write that lands mid-flush re-sets the
+        // flag and is caught by the next flush rather than cleared by this one.
+        // A failed flush puts the flag back: the pages are still dirty and the
+        // file still owes a write-back, so `iod`/`fsync` will try again.
+        let dirty = crate::file_cache::take_dirty(file_id);
+        match self.flush_taken(path, file_id, mtime, &dirty) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                crate::file_cache::mark_dirty_meta(file_id);
+                Err(e)
+            }
+        }
+    }
 
+    fn flush_taken(
+        &mut self,
+        path: &str,
+        file_id: FileId,
+        mtime: u64,
+        dirty: &alloc::collections::BTreeSet<u32>,
+    ) -> Result<(), SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
         if mount.is_empty() { return Err(SyscallError::InvalidArgument); }
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
@@ -537,9 +557,9 @@ impl Vfs {
         // stack if the optimiser feels like it.
         let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
         let buf: &mut [u8; 4096] = (&mut heap[..]).try_into().expect("4096 bytes");
-        for &page_idx in &dirty {
+        for &page_idx in dirty {
             // A truncate on another CPU can take a page out of the cache
-            // between `clone_dirty` and here. Writing whatever the buffer
+            // between `take_dirty` and here. Writing whatever the buffer
             // happens to hold would put bytes in the file no writer produced.
             //
             // **The `?` before `clear_dirty` is the fsyncgate invariant**: a
@@ -555,7 +575,7 @@ impl Vfs {
                 fs.write_page(file_id, page_idx, buf)?;
             }
         }
-        crate::file_cache::clear_dirty(file_id, &dirty);
+        crate::file_cache::clear_dirty(file_id, dirty);
 
         let size = crate::file_cache::size(file_id);
         fs.update_metadata(file_id, size, mtime)?;

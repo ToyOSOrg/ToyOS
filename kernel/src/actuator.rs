@@ -297,6 +297,19 @@ actuators! {
     /// changes with it on.
     io_depth_probe = "io-depth-probe";
 
+    /// Park `iod` before it drains, so the write-back a closed file owes stays
+    /// pending while a test re-opens the file.
+    ///
+    /// **Which thread drains the write-back queue and when is decided inside the
+    /// guest**, and no QEMU device or machine property delays a kernel thread —
+    /// so nothing on the host can hold the window open. Armed, `iod` never
+    /// flushes; `SYS_SHUTDOWN`'s own drain is not on this thread and is never
+    /// stalled, so a stalled boot still shuts down. What it drives is whether a
+    /// re-open before the flush reads the buffered pages (the pin the queue
+    /// holds) or the device (the pin discarded). It stages and measures nothing
+    /// else. See `kernel/src/iod.rs`.
+    writeback_stall = "writeback-stall";
+
     /// Starve the four xHCI bring-up register waits in `init_one` on a
     /// controller that is otherwise answering. QEMU's xHC halts, resets, clears
     /// CNR and starts in microseconds; no device or machine property makes a

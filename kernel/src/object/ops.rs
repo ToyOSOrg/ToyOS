@@ -147,7 +147,6 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         path: String::from(path),
         file_id,
         position,
-        modified: false,
         mtime,
     }));
     // **`writable` is a right, not a field.** A write to a read-only file
@@ -481,7 +480,8 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
                 return Some(SyscallError::Io.to_u64());
             }
             state.position += written;
-            state.modified = true;
+            // The file's dirty state is the cache's now, set in `write_page`;
+            // the handle keeps only the mtime to stamp on the eventual flush.
             state.mtime = crate::clock::nanos_since_boot();
             Some(written as u64)
         }),
@@ -622,20 +622,22 @@ pub fn fstat(object: &KObjectRef) -> Stat {
 /// fact: `dev.failed`, `usb-storage: … reset recovery failed`), or this
 /// deadman expiring — and never on the elapsed time of a single attempt. A
 /// timed-out attempt discarded nothing: `Vfs::flush_file` returns before
-/// `clear_dirty` on any refused page, `state.modified` is cleared only on the
-/// success path below, and the driver's budget refusal is taken between
-/// commands with nothing in flight, so the retry re-runs against exactly the
-/// state the refusal left.
+/// `clear_dirty` on any refused page and restores the file's `dirty_meta` when
+/// it fails (`file_cache::take_dirty`/`mark_dirty_meta`), and the driver's
+/// budget refusal is taken between commands with nothing in flight, so the
+/// retry re-runs against exactly the state the refusal left.
 pub fn fsync(object: &KObjectRef) -> u64 {
     let KObjectRef::File(file) = object else {
         return SyscallError::PermissionDenied.to_u64();
     };
-    let flush = file.with(|state| {
-        state
-            .modified
-            .then(|| (state.path.clone(), state.file_id, state.mtime))
-    });
-    let Some((path, file_id, mtime)) = flush else { return 0 };
+    let (path, file_id, mtime) =
+        file.with(|state| (state.path.clone(), state.file_id, state.mtime));
+    // The file's dirty state, not the handle's: a handle that did not itself
+    // write still makes durable what another handle to the same file dirtied.
+    // Nothing owed → nothing to make durable, and no device flush to pay for.
+    if !file_cache::dirty_meta(file_id) {
+        return 0;
+    }
     let began = crate::clock::now();
     let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
     #[cfg(feature = "boot-actuators")]
@@ -681,7 +683,8 @@ pub fn fsync(object: &KObjectRef) -> u64 {
                         crate::clock::now() - began,
                     );
                 }
-                file.with(|state| state.modified = false);
+                // A successful `flush_file` cleared the file's own `dirty_meta`;
+                // there is no per-handle flag left to clear.
                 return 0;
             }
             // Not durable *yet* — a budget expired on a live device, never a
@@ -753,11 +756,13 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
         return SyscallError::PermissionDenied.to_u64();
     };
     file.with(|state| {
-        file_cache::set_size(state.file_id, size);
+        // `resize`, not `set_size`: a truncate changes the size the filesystem
+        // must record even when it dirties no page, so it marks the file's own
+        // dirty state so the flush is not skipped.
+        file_cache::resize(state.file_id, size);
         if state.position > size as usize {
             state.position = size as usize;
         }
-        state.modified = true;
         state.mtime = crate::clock::nanos_since_boot();
         0
     })

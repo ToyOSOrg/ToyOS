@@ -1890,6 +1890,13 @@ fn sys_shutdown(syscap: RawHandle) -> u64 {
         return e.refuse();
     }
     log!("Syncing filesystems...");
+    // Drain the write-back queue first: a file closed but not yet drained has
+    // its dirty pages only in the cache, so `sync_all` — which commits the
+    // devices' own write caches — would miss it. `drain_all` puts every pending
+    // file's bytes and metadata on its volume under the VFS lock before this,
+    // and pops each entry under that lock so `sync_all` cannot slip into a gap
+    // ahead of a flush (`crate::writeback`).
+    crate::writeback::drain_all();
     crate::vfs::lock().sync_all();
     // The machine's whole interrupt census, before the last process on it stops
     // being able to say anything. Every other site prints a running total; this
