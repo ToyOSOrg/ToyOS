@@ -217,6 +217,8 @@ log_nested_emit 5008
 log_partition_identity 7207
 log_partition_layout 477
 log_poll_outlives_a_close 4738
+log_reserve_window 7022
+log_reserve_window_negative 6791
 log_volume_reread 12
 metal_sim_client_death 4126
 metal_sim_compositor 8986
@@ -293,6 +295,8 @@ suspend_detector 20
 suspend_invalidates_a_verdict 0
 swiss_german_layout 5355
 syscall_cost 92
+syscall_window_nmi 6825
+syscall_window_nmi_controls 13090
 tlb_shootdown_waits 107
 toybox_cp_volume 18616
 toybox_file_tools 205
