@@ -169,6 +169,7 @@ pub(super) extern "sysv64" fn nmi_entry() {
 /// Ctrl+Alt+D reaches — so that the observer and the shipping handler take the
 /// same frame. What the shipping kernel does with `cs` and `rsp` is nothing.
 extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64) {
+    crate::irq_census::irq_took!(Nmi);
     #[cfg(not(feature = "boot-actuators"))]
     let _ = (cs, rsp);
     #[cfg(feature = "boot-actuators")]
