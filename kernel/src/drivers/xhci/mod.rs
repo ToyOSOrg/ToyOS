@@ -379,10 +379,13 @@ const MAX_HID_FAILURES: u8 = 8;
 /// SYNCHRONIZE CACHE: `transport broke on SCSI 0x35: no answer in the status
 /// phase in 2000 ms`, then `SCSI 0x35 completed on attempt 2` 280 ms later —
 /// `issues/hardware/usb-transport-break-counts-the-boot-sticks-recovery.md`
-/// carries the log. `MAX_TRANSPORT_ATTEMPTS` absorbed it that time; three
-/// breaches in one command do not get absorbed, and what the caller is then told
-/// is indistinguishable from a stick that cannot flush
-/// (`issues/boot-media/fsync-on-log-returns-other-under-a-loaded-host.md`).
+/// carries the log. `MAX_TRANSPORT_ATTEMPTS` absorbed it that time. A *single*
+/// breach spends the whole of `block::OPERATION` — the two are the same 2 s —
+/// so since 2026-08-23 it is answered as the caller's budget
+/// (`Scsi::Budget` → `BlockError::BudgetExpired`) and the re-issue belongs to
+/// `object/ops.rs`'s retry loop, off the pinned path; only three breaches in
+/// one command remain a device fact, indistinguishable from a stick that
+/// cannot flush.
 const USB_TIMEOUT_NS: u64 = 2_000_000_000;
 
 /// When a wait started now would give up. Before `clock::init` this is 0 plus

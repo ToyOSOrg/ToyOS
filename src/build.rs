@@ -158,7 +158,7 @@ fn external_fingerprint(root: &Path) -> String {
     let sysroot = toolchain::rust_dir(root).join(format!("build/{host}/stage2/lib/rustlib"));
     let mut entries = Vec::new();
 
-    for triple in ["x86_64-unknown-toyos", "x86_64-unknown-none", "x86_64-unknown-uefi"] {
+    for triple in toolchain::GUEST_TARGETS {
         let lib_dir = sysroot.join(format!("{triple}/lib"));
         let Ok(rd) = fs::read_dir(&lib_dir) else {
             continue;
@@ -466,6 +466,23 @@ fn assert_kernel_is_softfloat(path_env: &str) {
     });
 }
 
+/// Whether `haystack` contains `needle` as a contiguous subslice.
+///
+/// The one form every artifact search here uses. `filter` on the first byte and
+/// then `starts_with` rather than `windows(needle.len()).any(|w| w == needle)`:
+/// `windows` builds and compares a slice at every offset, while this compares
+/// past the first byte only where the first byte matched — the difference that
+/// mattered on a multi-megabyte kernel scanned once per build. An empty needle
+/// is contained by everything, which the first-byte guard returns directly.
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    let Some(&first) = needle.first() else { return true };
+    haystack
+        .iter()
+        .enumerate()
+        .filter(|&(_, &b)| b == first)
+        .any(|(at, _)| haystack[at..].starts_with(needle))
+}
+
 /// Refuse to build an image whose kernel does not carry its overflow checks.
 ///
 /// [`PROFILE`] states them and `--release` is gone from this build system, so
@@ -475,11 +492,7 @@ fn assert_kernel_is_softfloat(path_env: &str) {
 /// *found* by an overflow check, and one of them had no configuration in which
 /// it was an error return.
 fn assert_overflow_checked(what: &str, image: &[u8]) {
-    let found = image
-        .iter()
-        .enumerate()
-        .filter(|&(_, &b)| b == OVERFLOW_CHECK_MARKER[0])
-        .any(|(at, _)| image[at..].starts_with(OVERFLOW_CHECK_MARKER));
+    let found = contains_subslice(image, OVERFLOW_CHECK_MARKER);
     assert!(
         found,
         "the {what} was built without overflow checks: nothing in {} bytes references \
@@ -902,10 +915,7 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
         _ => return,
     };
     let names = declared_actuators(root);
-    let named = |name: &String| {
-        let needle = name.as_bytes();
-        kernel.windows(needle.len()).any(|w| w == needle)
-    };
+    let named = |name: &String| contains_subslice(kernel, name.as_bytes());
     let wrong: Vec<&String> = names.iter().filter(|n| named(n) != want).collect();
     assert!(
         wrong.is_empty(),
@@ -960,10 +970,7 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
         f if f == SCHED_CHECK_KERNEL.join(",") => true,
         _ => return,
     };
-    let named = |needle: &&str| {
-        let needle = needle.as_bytes();
-        kernel.windows(needle.len()).any(|w| w == needle)
-    };
+    let named = |needle: &&str| contains_subslice(kernel, needle.as_bytes());
     let wrong: Vec<&&str> = SCHED_CHECK_LITERALS.iter().filter(|a| named(a) != want).collect();
     assert!(
         wrong.is_empty(),
@@ -976,6 +983,32 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
         wrong.len(),
         SCHED_CHECK_LITERALS.len(),
     );
+}
+
+/// Stage the freshly built kernel under its feature key, read it back, and run
+/// every artifact assertion against it — returning the certified bytes.
+///
+/// **Both build paths route their kernel through here, which is the whole of
+/// the guarantee that they certify the same set.** This stage→read→assert
+/// sequence was hand-matched between [`build`] and [`build_test_image`], so an
+/// assertion added to one certified only that path's kernel while the other
+/// shipped uncertified. There is now one place to add an assertion, and it is
+/// the kernel of every image this build system produces that gets it. The
+/// caller has already run `cargo_build` on the kernel crate and must hold
+/// [`buildlock::artifact`], since the stage below copies the shared cargo path.
+fn stage_and_certify_kernel(root: &Path, features: &str, path_env: &str) -> Vec<u8> {
+    let staged = stage_artifact(
+        root,
+        &root.join(format!("kernel/target/x86_64-unknown-none/{PROFILE}/kernel")),
+        "kernel",
+        kernel_key(features),
+    );
+    let bytes = fs::read(&staged).expect("Failed to read staged kernel");
+    assert_overflow_checked("kernel", &bytes);
+    assert_actuators_match_features(root, features, &bytes);
+    assert_sched_check_matches_features(features, &bytes);
+    assert_kernel_is_softfloat(path_env);
+    bytes
 }
 
 /// Full build: kernel, bootloader, all programs, boot image. Returns the image.
@@ -1017,8 +1050,10 @@ pub fn build(
     invalidate_stale(root, &mut lock, &config_targets(root, &config));
 
     // Same lock-and-stage as `build_test_image`: `cargo run --build-only` and
-    // `cargo test` share these paths, so this races the harness too.
-    let (kernel_art, bl_art) = {
+    // `cargo test` share these paths, so this races the harness too. The kernel
+    // is staged and certified through the same [`stage_and_certify_kernel`] that
+    // path uses, so neither can grow an assertion the other lacks.
+    let (kernel_bytes, bl_art) = {
         let _artifact = buildlock::artifact(root);
         let kernel_handle = {
             let root = root.to_path_buf();
@@ -1052,12 +1087,7 @@ pub fn build(
         }
         kernel_handle.join().expect("kernel build thread panicked");
         (
-            stage_artifact(
-                root,
-                &root.join(format!("kernel/target/x86_64-unknown-none/{PROFILE}/kernel")),
-                "kernel",
-                kernel_key(&kernel_features),
-            ),
+            stage_and_certify_kernel(root, &kernel_features, &path_env),
             stage_artifact(
                 root,
                 &root.join(format!(
@@ -1072,11 +1102,6 @@ pub fn build(
     let initrd_bytes =
         build_and_assemble(root, &config, &path_env, &[], false);
 
-    let kernel_bytes = fs::read(&kernel_art).expect("Failed to read staged kernel");
-    assert_overflow_checked("kernel", &kernel_bytes);
-    assert_actuators_match_features(root, &kernel_features, &kernel_bytes);
-    assert_sched_check_matches_features(&kernel_features, &kernel_bytes);
-    assert_kernel_is_softfloat(&path_env);
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
     let disk_bytes = image::create_boot_image(&kernel_bytes, &bl_bytes, &initrd_bytes, &cmdline);
     let image_path = root.join(boot.image());
@@ -1266,9 +1291,12 @@ pub fn build_test_image(
 
     invalidate_stale(root, &mut lock, &config_targets(root, &config));
 
-    // Build and stage under one lock. Releasing before `build_and_assemble` is
-    // deliberate: the userland build is long, takes no shared artifact path, and
-    // the staged copies below are already immune to another config's rebuild.
+    // Build and stage under one lock, released before `build_and_assemble`.
+    // Releasing it there is deliberate and required: that build takes its own
+    // `buildlock::artifact` across its build→read window (it reads shared cargo
+    // paths too), so holding this one across the long userland build would
+    // deadlock the process against itself — and the staged copies below are
+    // already immune to another config's rebuild.
     let (kernel_bytes, bl_bytes) = {
         let _artifact = buildlock::artifact(root);
         let kernel = KERNEL.get_or_build(kernel_key, || {
@@ -1285,20 +1313,7 @@ pub fn build_test_image(
                 &[],
                 quiet,
             );
-            let staged = stage_artifact(
-                root,
-                &root.join(format!("kernel/target/x86_64-unknown-none/{PROFILE}/kernel")),
-                "kernel",
-                kernel_key,
-            );
-            {
-                let bytes = fs::read(&staged).expect("Failed to read staged kernel");
-                assert_overflow_checked("kernel", &bytes);
-                assert_actuators_match_features(root, &features, &bytes);
-                assert_sched_check_matches_features(&features, &bytes);
-                assert_kernel_is_softfloat(&path_env);
-                bytes
-            }
+            stage_and_certify_kernel(root, &features, &path_env)
         });
         let bl = BOOTLOADER.get_or_build(bl_key, || {
             cargo_build(

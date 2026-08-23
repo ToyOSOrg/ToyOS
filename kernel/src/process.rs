@@ -1253,6 +1253,14 @@ fn teardown_resources(
         }
         let wall_ms = syscall_total_ns / 1_000_000;
         log!("syscalls: pid={pid} total={} syscall_wall={wall_ms}ms{profile}", syscall_total);
+        // The flush census speaks here because a process exit is the one
+        // recurring moment a running guest reaches (the harness kills QEMU, so
+        // a shutdown-only instrument reaches no capture), and only behind an
+        // exit that called `SYS_FSYNC`, so the machine's flush story is told
+        // beside a process that just depended on it.
+        if syscall_counts[toyos_abi::syscall::SYS_FSYNC as usize] > 0 {
+            crate::block::census::print_if_moved();
+        }
     }
 
     if data.peak_memory > 0 || data.alloc_count > 0 {

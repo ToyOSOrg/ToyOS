@@ -85,7 +85,16 @@ pub struct PerCpu {
     current_tid: u32,    // offset 136: TID of thread running on this CPU (u32::MAX = idle)
     current_pid: u32,    // offset 140: PID of process running on this CPU (u32::MAX = idle)
     gdt: [u64; 7],      // offset 144 (56 bytes)
-    idle_rsp: u64,       // offset 200: saved RSP for idle context (for context_switch)
+    // offset 200: `idle_rsp` was here — write-only dead state nothing read.
+    // Removing it looks mechanical but is not: every field below is reached by a
+    // `gs:[NNN]` *literal* in a naked stub this change does not own —
+    // `syscall_rip`/`syscall_num`/`syscall_rbp` at 216/224/232 and
+    // `preempt_count` at 240 (`arch::syscall`), and `need_resched` at 244,
+    // `ring0_timer_fires` at 248 and `last_armed_ticks` at 260 (`arch::idt`'s
+    // timer/tlb stubs). Dropping these 8 bytes shifts all of them, so the range
+    // stays as named padding rather than a live field until that removal can be
+    // made across the stubs on its own change.
+    _pad200: [u8; 8],   // offset 200
     idle_stack_top: u64, // offset 208: top of per-CPU idle stack
     /// Saved user RIP at last syscall entry (for panic diagnostics).
     pub syscall_rip: u64,  // offset 216
@@ -216,11 +225,12 @@ impl PerCpu {
 // Where each field this kernel reaches through `gs:` sits inside `PerCpu`.
 //
 // **Derived from the type and asserted against the number the assembly
-// hardcodes.** `arch::entry`'s stubs, `arch::syscall`'s entry and the Ring 0
-// timer stub all write the displacement as a literal, so the assertion is the
-// whole of what keeps the two sides in step — a reordered or resized field
-// would otherwise move only the Rust half. Every GS access written in Rust
-// names one of these constants; none of them names a number.
+// hardcodes.** `arch::syscall`'s entry and `arch::idt`'s stubs — the Ring 0
+// timer's re-arm and the preempt-count opens and closes among them — write the
+// displacement as a literal, so the assertion is the whole of what keeps the
+// two sides in step — a reordered or resized field would otherwise move only
+// the Rust half. Every GS access written in Rust names one of these constants;
+// none of them names a number.
 const OFF_SELF_PTR: u32 = offset_of!(PerCpu, self_ptr) as u32;
 const OFF_CPU_ID: u32 = offset_of!(PerCpu, cpu_id) as u32;
 const OFF_USER_RSP: u32 = offset_of!(PerCpu, user_rsp) as u32;
@@ -233,6 +243,9 @@ const OFF_SYSCALL_RBP: u32 = offset_of!(PerCpu, syscall_rbp) as u32;
 const OFF_RING0_TIMER_FIRES: u32 = offset_of!(PerCpu, ring0_timer_fires) as u32;
 const OFF_LAST_SEEN_RING0_FIRES: u32 = offset_of!(PerCpu, last_seen_ring0_fires) as u32;
 const OFF_LAST_ARMED_TICKS: u32 = offset_of!(PerCpu, last_armed_ticks) as u32;
+/// `reserve_log_slot`'s naked read of this CPU's [`log::Shard`] pointer names
+/// this rather than an inline `offset_of!`, so no GS access spells a raw field.
+const OFF_LOG_SHARD: u32 = offset_of!(PerCpu, log_shard) as u32;
 /// `arch::syscall`'s and `arch::idt`'s entry stubs open and close this count in
 /// naked assembly, and `preempt` is the Rust half of the same word.
 pub(crate) const OFF_PREEMPT_COUNT: u32 = offset_of!(PerCpu, preempt_count) as u32;
@@ -241,8 +254,9 @@ pub(crate) const OFF_NEED_RESCHED: u32 = offset_of!(PerCpu, need_resched) as u32
 /// Read by `preempt::enable`'s slow path, which declines to reschedule a CPU
 /// that is inside a fault or panic report.
 pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
-/// Set and cleared by `arch::idt::nmi`'s naked entry, which is the only writer
-/// and hardcodes this displacement like every other stub.
+/// Set and cleared by `arch::idt::nmi`'s naked entry, which is the only writer.
+/// Its stub reaches the word through this constant (`active = const
+/// OFF_NMI_ACTIVE`), not a hardcoded displacement.
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// Where this CPU's interrupt counters start. `irq_census::slot_offset` derives
 /// every `add qword ptr gs:[…]` in the interrupt handlers from it, so the
@@ -266,7 +280,7 @@ const _: () = assert!(OFF_RING0_TIMER_FIRES == 248);
 const _: () = assert!(OFF_LAST_SEEN_RING0_FIRES == 252);
 const _: () = assert!(OFF_FAULT_STATE == 256);
 const _: () = assert!(OFF_LAST_ARMED_TICKS == 260);
-const _: () = assert!(offset_of!(PerCpu, log_shard) == 264);
+const _: () = assert!(OFF_LOG_SHARD == 264);
 const _: () = assert!(OFF_NMI_ACTIVE == 272);
 const _: () = assert!(OFF_IRQ_COUNTS == 280);
 
@@ -662,7 +676,7 @@ pub fn reserve_log_slot(
             cpu = out(reg) cpu,
             tid = out(reg) tid,
             pid = out(reg) pid,
-            shard_off = const offset_of!(PerCpu, log_shard),
+            shard_off = const OFF_LOG_SHARD,
             cpu_off = const OFF_CPU_ID,
             tid_off = const OFF_CURRENT_TID,
             pid_off = const OFF_CURRENT_PID,
@@ -757,7 +771,6 @@ fn alloc_idle_stack(percpu: &mut PerCpu) {
         )
     };
     percpu.idle_stack_top = base + IDLE_SLOT as u64;
-    percpu.idle_rsp = percpu.idle_stack_top;
 }
 
 /// How big one idle stack is. Read by `SYS_DEBUG`, so the high water below is

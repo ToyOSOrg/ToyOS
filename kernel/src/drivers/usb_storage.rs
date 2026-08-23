@@ -77,6 +77,16 @@ impl UsbBlockDevice {
         self.lba_bytes
     }
 
+    /// Count a budget refusal into the flush census on the way through. The
+    /// slow-vs-failed policy is sized off these counts, so they are fed where
+    /// the refusal is already being matched on for the log line.
+    fn noted(&self, done: BlockResult) -> BlockResult {
+        if done == Err(BlockError::BudgetExpired) {
+            block::census::budget_expired(self.id);
+        }
+        done
+    }
+
     /// Whether the controller will still speak to the disk under this index.
     ///
     /// Distinct from a failed transfer, which the trait reports: this answers
@@ -108,7 +118,7 @@ impl BlockDevice for UsbBlockDevice {
             log!("usb-storage: read of {count} blocks at {lba} {} on disk {}",
                 gave_up(done), self.index);
         }
-        done
+        self.noted(done)
     }
 
     fn write_blocks(&mut self, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
@@ -118,16 +128,18 @@ impl BlockDevice for UsbBlockDevice {
             log!("usb-storage: write of {count} blocks at {lba} {} on disk {}",
                 gave_up(done), self.index);
         }
-        done
+        self.noted(done)
     }
 
     fn flush(&mut self) -> BlockResult {
         let _op = block::begin_operation();
+        let began = crate::clock::now();
         let done = xhci::storage_flush(self.index);
+        block::census::flush_took(self.id, (crate::clock::now() - began).nanos());
         if done.is_err() {
             log!("usb-storage: cache flush {} on disk {}", gave_up(done), self.index);
         }
-        done
+        self.noted(done)
     }
 }
 
