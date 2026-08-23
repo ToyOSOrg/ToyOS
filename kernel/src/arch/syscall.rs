@@ -973,7 +973,7 @@ fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     // syscall was holding when the last handle went (`object::drain_zero_handles`).
     crate::object::drain_zero_handles();
 
-    // Track wall-clock syscall time (includes preemption — see plan for documented limitation)
+    // Track wall-clock syscall time (includes preemption)
     let elapsed = crate::clock::nanos_since_boot() - t0;
     process::with_current_data(|data| {
         data.syscall_total_ns += elapsed;
@@ -993,6 +993,24 @@ fn with_object_ref<R>(
     f: impl FnOnce(&KObjectRef) -> R,
 ) -> Result<R, crate::object::HandleError> {
     process::with_process_data(|data| data.handles.get_ref(h, need).map(f))
+}
+
+/// Demand that `syscap` resolves to a `SysCap` carrying `need`, and nothing more.
+///
+/// The prologue every authority-bearing syscall shares — `SYS_PROCESS_OPEN`,
+/// `SYS_DEVICE_CLAIM`, `SYS_RT_ENTER`, `SYS_LOG_READ`, `SYS_SHUTDOWN` and the
+/// roster half of `SYS_SYSINFO`: resolve the handle, require the one right, and
+/// hand the error *out* of the table's guard so the caller refuses after the
+/// lock is gone — `HandleError::refuse` may take the process down and needs that
+/// lock itself. The resolved cap is discarded; the bit is the whole of the
+/// question. A caller with an ordering constraint — `sys_sysinfo` demands before
+/// it takes the process table lock — keeps that in the caller.
+fn demand_syscap(syscap: RawHandle, need: Rights) -> Result<(), crate::object::HandleError> {
+    process::with_process_data(|data| {
+        data.handles
+            .get::<crate::object::syscap::SysCap>(syscap, need)
+            .map(|_| ())
+    })
 }
 
 /// The gate on every syscall that drives a claimed device.
@@ -1339,12 +1357,54 @@ fn open_modifies(flags: OpenFlags) -> bool {
         || flags.contains(OpenFlags::APPEND)
 }
 
+/// Resolve `path` against `cwd` on `vfs` and — when `demand` — require the
+/// caller may modify what it names, refusing with `PermissionDenied` otherwise.
+///
+/// The prologue every write-side filesystem syscall shares, resolve and check on
+/// one guard. **The check rides the guard the mutation will run on**, so nothing
+/// about the mount table can shift between deciding and acting — a resolve on one
+/// `vfs::lock()` and a `user_may_modify` on a second could disagree if a mount
+/// moved between them. Nothing moves one after boot regardless (`Vfs::mount`
+/// runs only from `main.rs`; no mount syscall exists), so the single guard is a
+/// structural guarantee rather than a fix for a live race. `demand` is the whole
+/// of what varies: `sys_open` demands only for a modifying open, every other
+/// caller always.
+fn resolve_and_check(
+    vfs: &vfs::Vfs,
+    cwd: &str,
+    path: &str,
+    demand: bool,
+) -> Result<alloc::string::String, u64> {
+    let resolved = vfs.resolve_absolute(cwd, path);
+    if demand && !vfs.user_may_modify(&resolved) {
+        return Err(SyscallError::PermissionDenied.to_u64());
+    }
+    Ok(resolved)
+}
+
+/// Clone the cwd, take the vfs lock, and [`resolve_and_check`] one path with the
+/// modify demand on — the prologue every single-path mutating syscall shares.
+///
+/// The guard comes back held with the resolved path, so the mutation runs under
+/// the same lock the check was made on. `sys_open` (a conditional demand) and
+/// `sys_rename` (two paths under one guard) call [`resolve_and_check`] directly
+/// instead, for the parts of the shape they do not fit.
+fn resolve_for_modify(path: &str) -> Result<(vfs::VfsGuard, alloc::string::String), u64> {
+    let cwd = process::with_process_data(|d| d.cwd.clone());
+    let vfs = vfs::lock();
+    let resolved = resolve_and_check(&vfs, &cwd, path, true)?;
+    Ok((vfs, resolved))
+}
+
 fn sys_open(path: &str, flags: OpenFlags) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
-    let resolved = vfs::lock().resolve_absolute(&cwd, path);
-    if open_modifies(flags) && !vfs::lock().user_may_modify(&resolved) {
-        return SyscallError::PermissionDenied.to_u64();
-    }
+    let resolved = {
+        let vfs = vfs::lock();
+        match resolve_and_check(&vfs, &cwd, path, open_modifies(flags)) {
+            Ok(resolved) => resolved,
+            Err(refusal) => return refusal,
+        }
+    };
     process::with_process_data(|data| ops::open(&mut data.handles, &resolved, flags))
 }
 
@@ -1434,12 +1494,10 @@ fn sys_readdir(path: &str, out: &mut UserBytesMut) -> u64 {
 }
 
 fn sys_delete(path: &str) -> u64 {
-    let cwd = process::with_process_data(|d| d.cwd.clone());
-    let mut vfs = vfs::lock();
-    let resolved = vfs.resolve_absolute(&cwd, path);
-    if !vfs.user_may_modify(&resolved) {
-        return SyscallError::PermissionDenied.to_u64();
-    }
+    let (mut vfs, resolved) = match resolve_for_modify(path) {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
     match vfs.delete(&resolved) {
         Ok(()) => 0,
         Err(e) => e.to_u64(),
@@ -1707,9 +1765,7 @@ fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
 /// exactly one cap that carries the right — so what can reach a process it did
 /// not start is exactly what init endowed.
 fn sys_process_open(syscap: RawHandle, pid: process::Pid) -> u64 {
-    if let Err(e) = process::with_process_data(|data| {
-        data.handles.get::<crate::object::syscap::SysCap>(syscap, Rights::MANAGE)
-    }) {
+    if let Err(e) = demand_syscap(syscap, Rights::MANAGE) {
         return e.refuse();
     }
     let Some(object) = process::process_object(pid) else {
@@ -1732,9 +1788,7 @@ fn sys_device_claim(syscap: RawHandle, class: u64) -> u64 {
     let Some(class) = device::DeviceType::from_raw(class) else {
         return SyscallError::InvalidArgument.to_u64();
     };
-    if let Err(e) = process::with_process_data(|data| {
-        data.handles.get::<crate::object::syscap::SysCap>(syscap, Rights::DEVICE)
-    }) {
+    if let Err(e) = demand_syscap(syscap, Rights::DEVICE) {
         return e.refuse();
     }
     // `NotFound` is a machine with no such device and nothing else: init endows
@@ -1760,9 +1814,7 @@ fn sys_device_claim(syscap: RawHandle, class: u64) -> u64 {
 /// with it. This is the privilege that comment asked for, and it is endowed
 /// per manifest rather than won.
 fn sys_rt_enter(syscap: RawHandle) -> u64 {
-    if let Err(e) = process::with_process_data(|data| {
-        data.handles.get::<crate::object::syscap::SysCap>(syscap, Rights::RT)
-    }) {
+    if let Err(e) = demand_syscap(syscap, Rights::RT) {
         return e.refuse();
     }
     crate::scheduler::set_current_rt(true);
@@ -1788,9 +1840,7 @@ fn sys_log_read(
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> u64 {
-    if let Err(e) = process::with_process_data(|data| {
-        data.handles.get::<crate::object::syscap::SysCap>(syscap, Rights::LOG)
-    }) {
+    if let Err(e) = demand_syscap(syscap, Rights::LOG) {
         return e.refuse();
     }
     let mut cursor = match ctx.copy_in::<toyos_abi::log::LogCursor>(cursor_ptr) {
@@ -1813,10 +1863,10 @@ fn sys_log_read(
 /// **The largest authority this kernel has, and the last one that was free.**
 /// It took no argument at all: any process that could make a syscall could end
 /// every other one, and a daemon endowed exactly one connector held this too.
-/// It is checked the way the five beside it are — resolve the handle, demand
-/// the right, refuse otherwise — so what can cut the power is exactly what
-/// `/bin/init` endowed from `system.toml`, as minting a device claim, entering
-/// the RT band, opening a process by pid and reading the log already were.
+/// It goes through `demand_syscap`, the prologue the five beside it share, so
+/// what can cut the power is exactly what `/bin/init` endowed from
+/// `system.toml`, as minting a device claim, entering the RT band, opening a
+/// process by pid and reading the log already were.
 ///
 /// The refusal is `HandleError`'s ordinary one and not a special case: a
 /// capability that resolves without the bit is `PermissionDenied` and the
@@ -1824,9 +1874,7 @@ fn sys_log_read(
 ///
 /// Everything below the check is unchanged and does not come back.
 fn sys_shutdown(syscap: RawHandle) -> u64 {
-    if let Err(e) = process::with_process_data(|data| {
-        data.handles.get::<crate::object::syscap::SysCap>(syscap, Rights::POWER)
-    }) {
+    if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
     }
     log!("Syncing filesystems...");
@@ -2598,7 +2646,8 @@ fn sys_thread_join(tid: u64) -> u64 {
 /// kernel panic — the bound is policy, the ceiling it is derived from is not.
 const MAX_SYSINFO_THREADS: usize = 65_536;
 
-/// The bound `SYS_DEBUG` action 14 puts in its place, so the refusal has a gate.
+/// The bound `SYS_DEBUG`'s `DA::LOWER_SYSINFO_BOUND` action puts in its place,
+/// so the refusal has a gate.
 ///
 /// Nothing in this harness can make 65,536 threads — each carries a 128 KiB
 /// kernel stack, which is 8 GiB of a guest given 128 MiB — so only the number
@@ -2646,11 +2695,11 @@ fn sysinfo_thread_bound() -> usize {
 /// that decision and it is taken here, above the demand, so the two can never
 /// disagree about which call this is.
 ///
-/// The refusal is `HandleError`'s ordinary one, as at the five arms beside
-/// this: a capability that resolves without the bit is `PermissionDenied` and
-/// the caller carries on, and a handle the caller does not hold ends it. It is
-/// demanded before the table lock, because `refuse` takes the process down and
-/// needs that lock itself.
+/// The demand goes through `demand_syscap`, as at the five arms beside this, and
+/// its refusal is `HandleError`'s ordinary one: a capability that resolves
+/// without the bit is `PermissionDenied` and the caller carries on, and a handle
+/// the caller does not hold ends it. It is demanded here, before the table lock,
+/// because `refuse` takes the process down and needs that lock itself.
 ///
 /// [`Rights::ROSTER`]: toyos_abi::handle::Rights::ROSTER
 fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
@@ -2661,9 +2710,7 @@ fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     }
     let max_entries = (out.len() - HEADER_SIZE) / ENTRY_SIZE;
     if max_entries > 0 {
-        if let Err(e) = process::with_process_data(|data| {
-            data.handles.get::<crate::object::syscap::SysCap>(syscap, Rights::ROSTER)
-        }) {
+        if let Err(e) = demand_syscap(syscap, Rights::ROSTER) {
             return e.refuse();
         }
     }
@@ -2867,11 +2914,14 @@ struct Displaced(Option<crate::object::HandleEntry>);
 fn sys_rename(old: &str, new: &str) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
     let mut vfs = vfs::lock();
-    let old_abs = vfs.resolve_absolute(&cwd, old);
-    let new_abs = vfs.resolve_absolute(&cwd, new);
-    if !vfs.user_may_modify(&old_abs) || !vfs.user_may_modify(&new_abs) {
-        return SyscallError::PermissionDenied.to_u64();
-    }
+    let old_abs = match resolve_and_check(&vfs, &cwd, old, true) {
+        Ok(resolved) => resolved,
+        Err(refusal) => return refusal,
+    };
+    let new_abs = match resolve_and_check(&vfs, &cwd, new, true) {
+        Ok(resolved) => resolved,
+        Err(refusal) => return refusal,
+    };
     match vfs.rename(&old_abs, &new_abs) {
         Ok(()) => 0,
         Err(e) => e.to_u64(),
@@ -2879,12 +2929,10 @@ fn sys_rename(old: &str, new: &str) -> u64 {
 }
 
 fn sys_mkdir(path: &str) -> u64 {
-    let cwd = process::with_process_data(|d| d.cwd.clone());
-    let mut vfs = vfs::lock();
-    let resolved = vfs.resolve_absolute(&cwd, path);
-    if !vfs.user_may_modify(&resolved) {
-        return SyscallError::PermissionDenied.to_u64();
-    }
+    let (mut vfs, resolved) = match resolve_for_modify(path) {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
     match vfs.create_dir(&resolved) {
         Ok(()) => 0,
         Err(e) => e.to_u64(),
@@ -2892,23 +2940,19 @@ fn sys_mkdir(path: &str) -> u64 {
 }
 
 fn sys_rmdir(path: &str) -> u64 {
-    let cwd = process::with_process_data(|d| d.cwd.clone());
-    let mut vfs = vfs::lock();
-    let resolved = vfs.resolve_absolute(&cwd, path);
-    if !vfs.user_may_modify(&resolved) {
-        return SyscallError::PermissionDenied.to_u64();
-    }
+    let (mut vfs, resolved) = match resolve_for_modify(path) {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
     vfs.remove_dir(&resolved);
     0
 }
 
 fn sys_symlink(target: &str, link: &str) -> u64 {
-    let cwd = process::with_process_data(|d| d.cwd.clone());
-    let mut vfs = vfs::lock();
-    let resolved = vfs.resolve_absolute(&cwd, link);
-    if !vfs.user_may_modify(&resolved) {
-        return SyscallError::PermissionDenied.to_u64();
-    }
+    let (mut vfs, resolved) = match resolve_for_modify(link) {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
     match vfs.create_symlink(&resolved, target) {
         Ok(()) => 0,
         Err(e) => {
