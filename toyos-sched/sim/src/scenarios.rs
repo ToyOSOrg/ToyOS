@@ -42,7 +42,11 @@ fn scenario(
         share: ShareShape::PerProcess,
         charge: ChargeShape::Honest,
         placement: PlacementShape::LeastLoadedRotating,
-        balance: Balance::Pull,
+        // The shipped policy (owner decision 2026-08-23), so every scenario
+        // that does not name its own drives the balance path the kernel runs.
+        balance: Balance::PushOnSurplus {
+            threshold: toyos_sched::cpu::PUSH_THRESHOLD,
+        },
         order: FairOrder::InsertSequence,
         pass_cost_ns: 0,
         fair_allowance_ns: 0,

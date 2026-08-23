@@ -505,9 +505,9 @@ pub struct Vm<'q> {
     /// The longest any one CPU sat **halted, with a sibling publishing a surplus
     /// of two or more, and no probe of its own outstanding**.
     ///
-    /// This is the defect
-    /// `issues/kernel/an-idle-cpu-that-slept-before-the-surplus-is-never-probed.md`
-    /// names, as a duration. Under [`Balance::Pull`] the interval ends only when
+    /// This is the pull path's one-shot defect — a CPU that slept before the
+    /// surplus appeared was never probed again, the state the shipped push
+    /// exists to cure — as a duration. Under [`Balance::Pull`] the interval ends only when
     /// the surplus does, because nothing in that protocol can end it; under a
     /// cure it is bounded by the cure's own period. Both bounds are derived in
     /// `sim/tests/policy.rs`, and it is the quantity those derivations are
@@ -524,9 +524,9 @@ pub struct Vm<'q> {
 }
 
 /// The surplus at which a victim is worth probing —
-/// `SchedPass::post_steal_probe`'s own inequality, restated here because
+/// `SchedPass::post_steal_probe`'s own inequality, the core's constant because
 /// [`Vm::probe_gap_ns`] has to ask the same question from outside the core.
-const PROBE_WORTH_IT: u32 = 2;
+const PROBE_WORTH_IT: u32 = toyos_sched::cpu::PUSH_THRESHOLD;
 
 /// One contention window: a maximal interval over which the same set of
 /// fair-band processes was continuously runnable.
