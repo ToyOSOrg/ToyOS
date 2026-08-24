@@ -192,10 +192,8 @@ and the dev host's own `rust/build/cache/llvm-ad3d0bc1...-false/` holds
 `rust-dev-nightly-aarch64-apple-darwin.tar.xz`, 52,324,936 bytes, downloaded
 2026-07-31. Upstream serves this artifact for aarch64 macOS; the fork's own
 bootstrap on a dev host fetches it. So neither red was ever about cmake, ninja,
-or a host triple, and the question this file has always carried — does the
-bootstrap need cmake, ninja or libssl-dev on a machine that lacks them — is
-still unanswered, because no run has reached the point where it could be asked.
-Both jobs now unset the two variables.
+or a host triple. Both jobs now unset the two variables, and the section below
+is what happened when they did.
 
 **The Homebrew pin finding is confirmed on the instrument, and its predicted
 disagreement has already fired.** Every run prints
@@ -213,9 +211,11 @@ standing weakness with the exit condition "upstream publishes the dev-nightly
 artifact for aarch64-apple-darwin", and the job removed from the workflow so the
 nightly stops burning a guaranteed red. That ruling rests on this file's own
 reading of the macOS logs, and the evidence above refutes the reading: the
-artifact **is** published for that triple, the exit condition is already met,
-and the red is a one-line harness bug shared with the Linux job rather than a
-dependency-rule gap. Recording a weakness whose exit condition is already
+artifact **is** published for that triple, the exit condition is already met —
+run 32749539353's macOS job then downloaded and extracted it, so this is
+measured twice — and the red is a one-line harness bug shared with the Linux
+job rather than a dependency-rule gap. Recording a weakness whose exit
+condition is already
 satisfied would put a silently-false sentence in the tracker, which is the one
 thing this directory exists not to hold, so the macOS job stays and is fixed the
 same way Linux's is. **The ruling is back with the owner**: if a red on this
