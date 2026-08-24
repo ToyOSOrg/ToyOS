@@ -616,10 +616,10 @@ actuators! {
     /// frame without polling either, and the bracket contains no preemption
     /// point — so no Ring 0 producer can be switched out inside that window at
     /// any rate, and only a task that is Ready ever migrates.
-    /// `log::storm`'s header carries the same finding from the other end,
+    /// `log::storm`'s header carries the same rule from the other end,
     /// measured: 0 of 8 and 0 of 16 producers with records on a second shard.
-    /// `issues/kernel/a-ring-0-loop-is-never-preempted.md`
-    /// is the entry. See `arch::LogCommitGuard::close`.
+    /// `sched::kthread`'s header is where the rule itself lives. See
+    /// `arch::LogCommitGuard::close`.
     log_unbracketed_reserve = "log-unbracketed-reserve";
 
     /// Send this CPU its own IPI from halfway through a log record's body copy,

@@ -24,8 +24,8 @@
 //! producers with records on a second shard**. That is not bad luck and no
 //! workload improves on it: nothing in this kernel switches a Ring 0 context
 //! out between two instructions, so no producer can be moved off its CPU inside
-//! the reservation window at any rate
-//! (`issues/kernel/a-ring-0-loop-is-never-preempted.md`).
+//! the reservation window at any rate (`sched::kthread`'s header states the
+//! rule; this is the measurement under it).
 //! `log-nested-reserve`'s gate reaches that window instead, on one CPU, where
 //! an interrupt is a stimulus a test can actually aim.
 //!
