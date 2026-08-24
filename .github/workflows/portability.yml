@@ -232,13 +232,16 @@ jobs:
   # Nothing installed but Homebrew's QEMU and `rustup` is also what this job
   # found the premise on. Dispatch 32749539353 (2026-08-24) got both toolchain
   # stages through and then failed linking `/bin/doom`: `toyos-ld: undefined
-  # symbol: DG_ScreenBuffer`, because `userland/doom/build.rs` archives
-  # doomgeneric through the `cc` crate and the archiver it reaches for is
-  # whatever `ar` is in `PATH` — GNU binutils on the dev host, Apple's cctools
-  # on a stock one, two archive formats.
-  # issues/build/doom-does-not-link-on-a-stock-macos-host.md is that finding,
-  # and this job reds on it until it closes. It is the first thing this
-  # workflow has ever found, which is what the workflow is for.
+  # symbol: DG_ScreenBuffer`. `userland/doom/build.rs` archived doomgeneric
+  # through `cc::Build::compile`, which reaches for whatever `ar` is in `PATH`
+  # — Homebrew's GNU binutils on the dev host, Apple's cctools archiver on a
+  # stock one. That archiver builds *Mach-O* static libraries: handed ELF
+  # objects it warns on stderr, writes an archive whose only member is an empty
+  # `__.SYMDEF SORTED`, and exits 0. Fixed 2026-08-24 by writing the archive in
+  # that build script instead of shelling out; its `write_archive` carries the
+  # account. It is the first thing this workflow has ever found, which is what
+  # the workflow is for — and a green macOS run here is that fix's end-to-end
+  # proof, which no run has taken yet.
   #
   # No macOS-specific FAT tooling here despite the standing "four macOS FAT
   # tools" exception (root CLAUDE.md): `--build-only` runs no test, and
