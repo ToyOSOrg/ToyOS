@@ -7,12 +7,11 @@
 //! merges — which is the one code path a failed read can silently turn into a
 //! page of zeros written back over real data.
 //!
-//! The kernel's log sink used to reach this path by itself, when a boot reopened
-//! the `kernel.log` the boot before it left. One file per boot ended that: the
-//! sink now always creates, its own pages stay resident for the whole boot, and
-//! nothing it does re-reads from the stick. The hazard in `write_page` is
-//! unchanged and reachable by anything that appends to an existing file, which
-//! is what this is.
+//! The machine's own log reaches this path too — `/bin/logd` appends to an
+//! ordinary file and `fsync`s every batch, so its tail page is an ordinary
+//! eviction candidate and the append after it loses one is this same re-fetch.
+//! A host-written file is staged instead because it makes the trigger certain
+//! rather than a matter of which page happened to be evicted.
 //!
 //! The *read* of the same page is the other half and is the sharper of the two:
 //! `file_cache::read_page` returned `()`, so a page the device would not give
