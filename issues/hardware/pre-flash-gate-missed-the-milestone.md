@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-01
 ---
 
@@ -80,3 +80,10 @@ What was actually established, and what was not:
   as under QEMU; the unit covers both GSIs; and 120/120 masked read-backs prove
   the MMIO window is a real redirection table. `route`'s destination check is
   satisfied by the BSP's `LAPIC: x2APIC enabled (ID 0)`.
+
+## Promoted 2026-08-25
+
+A real, actionable gate coverage gap — no input section, teeth unproved since
+the pixel-to-event rewrite, `smp` never varied, the blocking `sys_read`/
+`Poller::wait` path never exercised by an i8042 test. Owed to whoever owns
+`issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md`'s checklist.

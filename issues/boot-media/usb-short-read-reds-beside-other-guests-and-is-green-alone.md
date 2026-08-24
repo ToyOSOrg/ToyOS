@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-22
 ---
 
@@ -32,3 +32,10 @@ whether the sweep's continuation depends on timing the host can stretch.
 Not the diff it was seen from: that branch changes `syscall_window_nmi`'s
 assertions and two kernel doc headers, and touches nothing under `xhci/` or
 `usb_gate`.
+
+## Promoted 2026-08-25
+
+A flaky test under load with no known-red row and no rate is real, owed work
+(verified 2026-08-25: `cargo run -- --known-red usb_short_read` still answers
+`NOT ON THE LIST`). Owed to whoever next runs a session free to measure it
+and, if it reproduces, to file the `src/redlist.rs` row.

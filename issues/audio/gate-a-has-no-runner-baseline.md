@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-10
 ---
 
@@ -96,3 +96,11 @@ still holds and the T14 reproduces it: 1185-1432 fresh against 846-905 recorded,
 a KVM guest waking about 1.6x as often as the same guest under cross-arch TCG.
 That artifact expired on 2026-09-16; the T14 arrays above are in this branch's
 commit message.
+
+## Promoted 2026-08-25
+
+Real, actionable work remains even though harm was null on this measurement: a
+per-host baseline needs a schema change (`AudioBaseline`'s host dimension,
+`tests/toyos.rs`'s `config_baseline` selection) and the T14's bimodal mixing
+weight has to be understood before a sample is worth recording. Owed to
+whoever owns `tests/audio-baseline.toml` and `gate-a.yml`'s runner routing.

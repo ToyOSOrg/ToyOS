@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-07
 ---
 
@@ -112,3 +112,10 @@ fixes nothing.
 load-coincident failure is a real defect, and this one reproduced across two
 full runs with seven different victims. That ruling is what produced this entry
 instead of seven re-runs, and it is what the fix came out of.
+
+## Promoted 2026-08-25
+
+The shootdown cause is closed but the wide phase's own reds are real,
+reproducible test flakiness under host load — a landing is still a coin toss.
+Owed to whoever holds `issues/build/parallel-tests-red-under-other-suites.md`,
+which this entry's own reds now point to.

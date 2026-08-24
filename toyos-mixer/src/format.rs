@@ -101,6 +101,10 @@ pub fn quantize_period(dst: &mut [i16], mix: &[f32], rng: &mut Xorshift32) {
 /// Infinities and NaN pass through, which is what `f32::round` does with them
 /// too; the clamp in [`quantize`] is what turns the first into a rail and the
 /// cast is what turns the second into silence.
+///
+/// It also costs no `roundf` libcall: this target does not enable SSE4.1's
+/// `roundss`, so `f32::round` would be one call per sample — 256 per period,
+/// roughly 88k a second — and this bit-manipulation path is none.
 pub fn round_ties_away(x: f32) -> f32 {
     let t = trunc_toward_zero(x);
     // Exact: `x` and `t` agree above the binary point, so the difference is

@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-08
 ---
 
@@ -55,3 +55,9 @@ retry that looks like boot cost and is not — `toyos/src/net.rs:271`'s 100 retr
 at 10 ms run *after* `Boot: complete` (see *Every network client pays a second of
 boot retry on a machine with no NIC*), and `READY_BUDGET_NS` bounds retries
 rather than boot time (`issues/filesystem/`).
+
+## Promoted 2026-08-25
+
+A live, actionable measurement table for boot-time task #65 to consume,
+correcting a stale ~17x figure another finding still cites as its owner's
+number. Owed to whoever picks up #65.

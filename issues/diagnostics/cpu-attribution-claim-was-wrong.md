@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-07-30
 ---
 
@@ -30,3 +30,10 @@ measurable today with no kernel change. Real unattributed windows do exist — t
 scheduler's pick-and-arm window (deliberate, documented) and the whole idle-loop
 body, which does substantial work and is counted as idle — but they are smaller
 and different from what the old entry claimed.
+
+## Promoted 2026-08-25
+
+A real, located bug remains (verified 2026-08-25, still at the described
+site): `ps`'s `%CPU` divides a lifetime cumulative by boot uptime instead of a
+windowed delta, unlike the compositor taskbar's correct one-second delta.
+Owed to whoever next touches `userland/toybox/src/ps.rs`.

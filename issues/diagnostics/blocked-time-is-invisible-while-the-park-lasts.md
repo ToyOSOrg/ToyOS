@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-16
 ---
 
@@ -39,3 +39,10 @@ the park's `since` stamp and its class from the owning CPU, and a `CpuSched` is
 park the way it publishes `running_since` at the dispatch, which is two relaxed
 stores on the park path. Whether that is worth two stores per park is the
 measurement whoever takes this owes.
+
+## Promoted 2026-08-25
+
+Still true (verified 2026-08-25 against `kernel/src/sched/payload.rs`): a
+parked thread's blocked time is invisible until the park ends, exactly
+backwards for reading a wedge in progress. A scoped fix is named. Owed to
+whoever next extends the diagnostics the T14 wedge investigation started.

@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-03
 ---
 
@@ -35,3 +35,10 @@ path does **not** send, where Linux's `usbhid_parse` sends it unconditionally
 and ignores the result; its absence leaves the device on its default idle rate,
 which is chattier and not silent, so it is not a candidate for this — but a
 device that expects it is a real class of hardware and nothing here has one.
+
+## Promoted 2026-08-25
+
+The fix (max_packet in both endpoint-context dword-4 halves) is in the tree
+and only the next metal boot can tell the two remaining candidates apart.
+Owed to whoever runs the next T14 session with the mouse plugged in: read
+whether a completion-error line names the endpoint, or stays silent.

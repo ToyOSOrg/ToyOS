@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-03
 ---
 
@@ -36,3 +36,10 @@ the others is the same shape of change: compose through `Screen`, hand
 1920x1080, on top of the window buffers `issues/isolation/`'s window-cap note already covers.
 Same root: there is no per-process memory limit, no pressure signal and no OOM
 killer, so a compositor's own working set is bounded by nothing but its code.
+
+## Promoted 2026-08-25
+
+Still reproduces (verified 2026-08-25): `paint`, `files`, `editor` and
+`filepicker` still present their whole window — only `userland/terminal` composes
+through `window::Screen`. A real, scoped fix is named per client. Owed to
+whoever next touches those clients' present path.

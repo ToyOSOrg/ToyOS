@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-22
 ---
 
@@ -47,3 +47,10 @@ deletion of an unreachable `if rflags & TF != 0` branch in
 `arch::LogCommitGuard::close`, which removes instructions and adds none, and
 `kernel_log_file` is Nightly for `Why::Cost` rather than for flakiness
 (`src/tiers.rs`).
+
+## Promoted 2026-08-25
+
+A known-red test with a `Seen`-and-no-rate row is real, owed work: the
+`src/redlist.rs` row still records the single observation this file does.
+Owed to whoever next runs a session free to measure the rate against an
+unchanged tree.

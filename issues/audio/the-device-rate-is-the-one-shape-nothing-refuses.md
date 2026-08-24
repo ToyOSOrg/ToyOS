@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-20
 ---
 
@@ -48,3 +48,10 @@ where the host test would go.
 Found while extracting `toyos-mixer/` from `userland/soundd/src/main.rs`; not
 fixed there, because a new refusal arm changes which machines get the null sink
 and that is a behaviour change rather than an extraction.
+
+## Promoted 2026-08-25
+
+Still reproduces (verified 2026-08-25): `toyos-mixer/src/shape.rs`'s `Shape`
+has no `Rate` arm, and `period_nanos`/`ramp_frames` still take an unchecked
+rate. A real, scoped fix is named — `Shape::Rate(u32)`, one arm and one check.
+Owed to whoever next touches `toyos-mixer/src/shape.rs`.

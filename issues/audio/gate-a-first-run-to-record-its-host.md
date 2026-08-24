@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-07
 ---
 
@@ -46,3 +46,11 @@ investigation starts from a measured host state instead of a guess.
 Whoever takes it: the thorough tier is the instrument for the rate, and it now
 prints `host conditions over N runs` so its own arm's conditions can be stated.
 The recorded arm's cannot — see `tests/audio-baseline.toml`.
+
+## Promoted 2026-08-25
+
+A measured ceiling breach (86862us, 8.6x the recorded worst, past the 56000us
+ceiling, with three periods of silence behind it) on a passing invocation is
+harm under the audio law. Owed to whoever runs gate A's thorough tier next:
+read the `host conditions over N runs` line and decide whether the ceilings
+need a host-load term.
