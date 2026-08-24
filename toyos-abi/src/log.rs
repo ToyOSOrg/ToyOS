@@ -17,8 +17,8 @@
 /// Message bytes a record carries.
 ///
 /// **Sized to the next power-of-two record that holds the measured maximum
-/// line.** Across 12,497 committed T14 boot-log lines, message length after the
-/// `[kernel … ] ` prefix measured: min 14, p50 59, p90 111, p99 154, p999 857,
+/// line.** Across 12,497 committed real-hardware boot-log lines, message length
+/// after the `[kernel … ] ` prefix measured: min 14, p50 59, p90 111, p99 154, p999 857,
 /// max 863. The record's other fields are 32 bytes fixed, so [`RECORD_BYTES`] —
 /// a power of two by its own derivation — is 32 plus this constant; 1024 is the
 /// smallest power of two past 32 + 863, which makes this 992, covering the
