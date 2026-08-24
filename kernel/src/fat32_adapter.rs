@@ -1143,7 +1143,7 @@ impl FileSystem for FatFs {
 /// that is **not final at that point**. `xhci::await_connect_settle` returns as
 /// soon as the root hub's connect set has held still for the USB debounce and is
 /// non-empty, so a machine whose *other* devices are up scans without whatever
-/// is still arriving — and the T14 has four internal USB devices beside the
+/// is still arriving — and the laptop has four internal USB devices beside the
 /// stick it boots from. That machine reached a working compositor desktop with
 /// neither `/boot` nor `/log` on one boot and mounted both on the next, off the
 /// same stick and the same image, which is a race and not a defect in anything
@@ -1151,7 +1151,7 @@ impl FileSystem for FatFs {
 ///
 /// The asymmetry is the same one `xhci::EMPTY_BUS` is written around, and it
 /// is what keeps this free: a machine whose boot volume has already been
-/// resolved — every QEMU boot, every machine that boots off NVMe, and the T14 on
+/// resolved — every QEMU boot, every machine that boots off NVMe, and the laptop on
 /// a good boot — leaves after one pass, because `gpt::boot_volume()` answers.
 /// Only a machine that would otherwise report no boot volume at all pays
 /// anything, and that is the outcome this exists to prevent.

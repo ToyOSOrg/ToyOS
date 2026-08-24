@@ -4,7 +4,7 @@
 //! keyboard emulation, so a pre-boot menu works without a USB stack — and the
 //! mechanism it uses is SMM: an SMI fires on the events named in USBLEGCTLSTS
 //! and the handler drives the controller behind the OS's back. Resetting a
-//! controller SMM still owns does not fail loudly. It fails the way the T14
+//! controller SMM still owns does not fail loudly. It fails the way the laptop
 //! fails: the firmware and the kernel take turns programming the same
 //! registers, and the machine reaches userland with something dead and no line
 //! anywhere saying why.
@@ -49,7 +49,7 @@ const SMI_STATUS: u32 = (1 << 29) | (1 << 30) | (1 << 31);
 /// How long firmware gets to let go.
 ///
 /// A policy number and not a measurement — nothing in reach can make this wait,
-/// and no Lenovo firmware has been timed. One second is the conventional
+/// and no vendor firmware has been timed. One second is the conventional
 /// handoff wait: long enough that a machine which was going to release has,
 /// short enough that one which never will costs the boot a second rather than
 /// the controller.

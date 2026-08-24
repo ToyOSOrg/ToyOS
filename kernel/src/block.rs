@@ -334,7 +334,7 @@ pub trait BlockDevice: Send {
 /// Blocks the filesystem metadata cache may hold.
 ///
 /// Metadata residency is a property of the filesystem, not of the machine:
-/// formatting the T14's 244 GB namespace leaves ~1900 blocks resident (the
+/// formatting the laptop's 244 GB namespace leaves ~1900 blocks resident (the
 /// number `nvme_large_device` writes back at shutdown), and a mounted
 /// filesystem touches far fewer. 4096 blocks is 16 MiB — a little over 2x
 /// that peak — so the steady state never evicts, and a cold walk of a btree

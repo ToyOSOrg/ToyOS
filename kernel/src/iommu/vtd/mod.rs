@@ -154,7 +154,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
             // one is refused for userspace handoff. Both are I4's decisions;
             // here the region is reported so that a machine which has one says
             // so on its first boot. QEMU publishes none, so this arm is
-            // untestable in the harness and the T14 is its first exercise.
+            // untestable in the harness and the laptop is its first exercise.
             Ok(Structure::Rmrr(rmrr)) => {
                 log!(
                     "iommu: rmrr{regions} seg={} {:#018x}..{:#018x}",

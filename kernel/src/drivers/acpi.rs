@@ -563,7 +563,7 @@ pub fn init_power(rsdp_addr: u64) {
 /// Bit 1 of the flags is "the motherboard has a port 60/64 keyboard
 /// controller", defined from revision 3. It is a vendor's summary and this
 /// kernel treats it as one: the i8042 driver logs it and probes regardless,
-/// because its own handshake observes the hardware directly and the T14 clears
+/// because its own handshake observes the hardware directly and the laptop clears
 /// the bit on a machine whose keyboard is PS/2. The revision comes back with
 /// the flags so the line can say how much the claim is worth.
 ///

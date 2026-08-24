@@ -193,7 +193,7 @@ enum Bot {
 /// Why a Bulk-Only round trip could not be completed.
 ///
 /// One word used to stand for all of these, and `scsi` threw the rest away. On
-/// a machine with no serial port that is the whole diagnosis: a T14 booting off
+/// a machine with no serial port that is the whole diagnosis: a laptop booting off
 /// a stick said `transport broke on SCSI 0x2a` and nothing whatever about how,
 /// on the one path where *what happened* is what decides which recovery command
 /// is even legal.
@@ -763,7 +763,7 @@ impl XhciController {
     ///
     /// **Reset Recovery restores the transport and says nothing about the
     /// command**, so a driver that recovers and then reports failure has thrown
-    /// away a write it could have completed — the T14's boot disk losing a
+    /// away a write it could have completed — the laptop's boot disk losing a
     /// block to one transport hiccup. Every CDB this file issues is
     /// idempotent, and the caller's bytes are still in the same DMA window
     /// nothing between two attempts touches, so an attempt is a genuine

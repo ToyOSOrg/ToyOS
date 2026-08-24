@@ -265,7 +265,7 @@ impl<'a> Iterator for CapabilityIter<'a> {
 /// The address space allows 65536 of them — 256 buses of 32 devices of 8
 /// functions — and which of those firmware leaves decoded is not the kernel's
 /// choice, so the walk needs a ceiling that is not the address space's. The
-/// T14 Gen 2 presents 30; QEMU's q35 with every profile's devices presents
+/// owner's laptop presents 30; QEMU's q35 with every profile's devices presents
 /// fewer. A machine past this loses only the functions past it, and says so.
 const MAX_DEVICES: usize = 256;
 

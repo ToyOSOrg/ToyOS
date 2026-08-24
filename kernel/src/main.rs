@@ -331,7 +331,7 @@ fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
 /// **It has to be the kernel's, because the panel is the kernel's.**
 /// `panic_console` paints records, so a userland line reaches a console and
 /// never the screen — and this line's whole audience is somebody looking at a
-/// T14 with no serial port. `/bin/logd` says the half only it knows, on its own
+/// laptop with no serial port. `/bin/logd` says the half only it knows, on its own
 /// console handle: which file, or that it could not open one.
 ///
 /// `alert!` is what says the row is red, and it is used for the two states in

@@ -249,7 +249,7 @@ pub fn drain_locked(guard: &mut BackendGuard) {
 /// it; and a backend arriving later rewinds it whole ([`backend_changed`]).
 /// What it buys is a `klogd` that can park armed, so a commit wakes it, so a
 /// reader watching `Source::Log` hears about records on a machine with no
-/// console — which is every T14 and every `--diag-boot` image.
+/// console — which is every laptop and every `--diag-boot` image.
 ///
 /// It is deliberately **not** in [`drain_inline`], whose other two callers are a
 /// producer mid-`emit` and a panicking machine: a `Drain::Inline` boot with no
@@ -309,7 +309,7 @@ static SPOKEN_TO: AtomicU8 = AtomicU8::new(serial::Backend::None as u8);
 /// **Both channels then carry the early boot and neither carries it twice**,
 /// because `BackendGuard::write_raw` writes to exactly one backend and this
 /// only fires when that choice changes. A machine whose backend never changes —
-/// metal-sim, or a T14 with no console at all — replays nothing.
+/// metal-sim, or a laptop with no console at all — replays nothing.
 pub fn backend_changed() {
     let now = serial::backend() as u8;
     if SPOKEN_TO.swap(now, Ordering::Relaxed) != now {

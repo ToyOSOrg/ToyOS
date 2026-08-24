@@ -469,7 +469,7 @@ pub enum Storage {
 /// indistinguishable from each other and all three arrive here as "mount
 /// returned None". The kernel used to format on that, which meant the first
 /// boot on any machine with a disk in it would take the disk. The only reason
-/// the T14's first boot did not is that an unrelated panic in `page_cache::init`
+/// the laptop's first boot did not is that an unrelated panic in `page_cache::init`
 /// happened to come first, and that panic has since been fixed — so the bug we
 /// removed was the interlock.
 ///

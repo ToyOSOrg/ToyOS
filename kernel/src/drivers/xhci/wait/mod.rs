@@ -5,7 +5,7 @@
 //! type.** `poll_if_pending` runs at the top of every scheduler pass on every
 //! CPU, so nothing it reaches may spin on a device: a `USB_TIMEOUT_NS` spent
 //! there is spent by every CPU that enters a pass, and pulling the boot stick
-//! out of a T14 aims a filesystem sync, a page-cache fill and the scheduler at
+//! out of a laptop aims a filesystem sync, a page-cache fill and the scheduler at
 //! the same dead device.
 //!
 //! A view handed to the poll would not have enforced it. Rust makes a module's
@@ -108,7 +108,7 @@ use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
 /// code cannot say: the Status Stage reports Success whether the Data Stage
 /// filled the buffer or left it untouched. A `GET_DESCRIPTOR` that returned
 /// nothing and one that returned all 18 bytes were the same value here, and the
-/// caller printed the buffer either way — which is how a T14 port that answered
+/// caller printed the buffer either way — which is how a laptop port that answered
 /// no descriptor at all was logged as `class=0x0 vendor=0000 product=0000`.
 ///
 /// Three variants and no `Option`: the old `Option<u32>` had no code to carry

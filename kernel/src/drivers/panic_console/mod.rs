@@ -421,7 +421,7 @@ pub fn probe_due() -> bool {
 /// goes on writing glyphs for as long as a full-panel paint takes — and that
 /// is not a short time on the machine this matters on. `paint` writes one
 /// `write_volatile` per pixel into a mapping firmware left uncached, measured
-/// at ~460 ms for 1920x1080 on the T14, against microseconds under QEMU where
+/// at ~460 ms for 1920x1080 on real hardware, against microseconds under QEMU where
 /// the framebuffer is host RAM. So the window is invisible to every test in
 /// the suite and half a second wide on the laptop.
 ///
@@ -709,7 +709,7 @@ pub fn discard_capture() {
 /// **One caller and it is why this exists**: `apic::wait_for_log_file` says on
 /// the record ring that its budget is spent and the panel is the only copy —
 /// and it says it after [`capture`] has already run, so on the one machine that
-/// wait exists for the sentence reached no channel at all. The T14 has no
+/// wait exists for the sentence reached no channel at all. The laptop has no
 /// serial port, and `/log` is the thing that did not answer. A promise the
 /// kernel makes in a doc comment and delivers nowhere is not a promise.
 ///

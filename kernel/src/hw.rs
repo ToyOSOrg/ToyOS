@@ -156,7 +156,7 @@ impl Machine for KernelHw {
     /// `diag-tick`, and the whole difference between the two builds.
     ///
     /// The default is to sleep until something arrives, which is correct for a
-    /// shipping kernel and is what the owner's T14 does: eight boots halted
+    /// shipping kernel and is what the owner's laptop does: eight boots halted
     /// every CPU at 1.8 s and took no interrupt for as long as 102 s. Everything
     /// the kernel says to whoever is watching it is emitted from the idle loop,
     /// so across that window it said nothing, and the boots that survived wrote
