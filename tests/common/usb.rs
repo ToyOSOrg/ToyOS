@@ -1248,6 +1248,17 @@ pub fn xhci_slow_connect(
     // driver that only reached its ports after the window closed read a
     // populated bus on its first look, and the wait it then did was the ordinary
     // debounce every boot does.
+    //
+    // **This is the one bound in the file that a faster boot cannot break and a
+    // slower one can, so what it has is clearance rather than slack**, and the
+    // clearance is measured rather than assumed. It was 4 ms once — the
+    // controller started at 0.296-0.311 s on a quiet host in 2026-08, so ten
+    // milliseconds of movement anywhere in the boot decided this verdict, which
+    // is how a log-ring regression no other gate in the suite noticed was caught
+    // here. Four boots alone on the dev host on 2026-08-24 put it at 0.109,
+    // 0.117, 0.122 and 0.227 s, i.e. 73-191 ms, at 2.31x-4.45x measured host
+    // width. Re-measure before believing either number; the failure's own
+    // message names the fix, and it is not this gate.
     if started >= HELD_EMPTY_S {
         return Err(format!(
             "the controller started at {started:.3} s, past the {HELD_EMPTY_S} s the ports are \
@@ -1291,12 +1302,19 @@ pub fn xhci_slow_connect(
     // test that *is* it.** What it is for is an interleaved A/B of that cost
     // against this boot's `Boot: complete`, and the stamp reached only the
     // per-run UART file, which goes when the guest does. So the measurement had
-    // to instrument something — and the lesson
-    // `issues/hardware/one-rmw-per-log-line-cost-350ms.md` leaves is that
-    // the reading taken on an instrumented build is the one that misleads. One
-    // line of output, `i8042_absent`'s arrangement, and the obligation is
-    // re-runnable by anybody. It decides nothing: what is asserted is that the
-    // boot finished, which is the `else` below.
+    // to instrument something, and **the reading taken on an instrumented build
+    // is the one that misleads**: measuring the 2026-08-08 log-ring regression,
+    // an uninstrumented A/B reproduced it 5 times out of 5 (497-504 ms against
+    // 812-839), and a third build — the same source with a timing `log!` added
+    // to `boot_checkpoint` — measured 500 ms and no regression at all, because
+    // the extra call changed inlining enough to move the cost where the
+    // instrument could not see it. **Bisect the source when that happens, and
+    // interleave the arms**: the first uncontrolled A/B there ran all of one arm
+    // and then all of the other, the host settled in between, and a reproducible
+    // 350 ms regression read as host noise. One line of output,
+    // `i8042_absent`'s arrangement, and the obligation is re-runnable by
+    // anybody. It decides nothing: what is asserted is that the boot finished,
+    // which is the `else` below.
     let Some(boot_ms) = log
         .split("Boot: complete (")
         .nth(1)

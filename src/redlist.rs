@@ -238,6 +238,17 @@ pub struct Red {
 /// them green.
 pub const SHELF_LIFE_DAYS: i64 = 31;
 
+/// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
+///
+/// The number in the second row was the whole finding, and it no longer holds.
+const SLOW_CONNECT_CLEARS: &str = "a later measurement. Re-run four times alone on the dev host \
+    on 2026-08-24, the controller starts at 0.109, 0.117, 0.122 and 0.227 s against the 300 ms \
+    held-empty window — 73 to 191 ms of clearance, not the 1 ms the row is about — on hosts the \
+    harness independently measured at 2.31x to 4.45x width, and every boot bound both sticks and \
+    named its first port at 0.400-0.418 s. The loaded-host half is answered structurally rather \
+    than by the number: `src/tiers.rs` relegates this name `Why::TimerAnchored`, because a slower \
+    machine changes its verdict rather than its price";
+
 /// What retired all three `xhci_hid_break` endpoint-count rows, written once
 /// because it is one landing and not three: three measurements of one
 /// assertion, and repeating the sentence is how two of them would drift.
@@ -588,26 +599,26 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_slow_connect",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
-        what: "0 of 5 in the probe — which the write-up says is not the reassurance it looks like, \
-               because the margin is inside the *guest's* boot and running alone moves it by \
-               milliseconds rather than by a verdict",
+        standing: Standing::Retired(SLOW_CONNECT_CLEARS),
+        what: "0 of 5 in the probe — which the write-up said was not the reassurance it looks \
+               like, because the margin was inside the *guest's* boot and running alone moved it \
+               by milliseconds rather than by a verdict",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
-        source: "issues/hardware/xhci-slow-connect-has-a-1ms-margin.md",
+        source: "tests/common/usb.rs xhci_slow_connect",
         measured: "2026-08-08",
     },
     Red {
         test: "xhci_slow_connect",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(SLOW_CONNECT_CLEARS),
         what: "`ALONE: red again — the defect is real`. `SLOW_CONNECT_NS` holds the ports empty for \
-               0.3 s and the controller starts at 0.296–0.311 s on a quiet host, so the gate reds \
-               whenever anything moves boot by ten milliseconds. That sensitivity is why the \
+               0.3 s and the controller started at 0.296–0.311 s on a quiet host, so the gate red \
+               whenever anything moved boot by ten milliseconds. That sensitivity is why the \
                log-ring regression was caught at all — no other gate in the suite noticed 350 ms — \
                and its own message names the fix: widen `SLOW_CONNECT_NS`, not the gate",
         evidence: "run 31261669826, the first on a tree carrying the harness's re-run-alone work",
-        source: "issues/hardware/xhci-slow-connect-has-a-1ms-margin.md",
+        source: "tests/common/usb.rs xhci_slow_connect",
         measured: "2026-08-08",
     },
     // ---------------------------------------------------------------------
