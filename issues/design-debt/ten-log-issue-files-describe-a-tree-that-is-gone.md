@@ -16,6 +16,11 @@ Verified against the tree on 2026-08-18. Each row says what makes it closable;
 none was closed here, because each needs its own reading of what durable rule it
 carries before it is deleted (`issues/README.md`).
 
+All eleven files named below were **still present on 2026-08-24**, checked by
+path and frontmatter and nothing more — no row's "what answers it" was re-argued
+that day. The one row whose *blocking concern* had moved is
+`redesign-the-log-subsystem`, and it is rewritten below.
+
 | slug | area | what answers it |
 |---|---|---|
 | `log-flush-is-unbounded` | boot-media | the idle loop has no filesystem statement and no log condition; the kernel writes no file at all |
@@ -27,7 +32,7 @@ carries before it is deleted (`issues/README.md`).
 | `rotation-leaves-the-newest-in-the-older-name` | boot-media | stale rather than fixed: it describes a two-generation `kernel.log`/`kernel.log.1` scheme at 4 MiB that one-file-per-boot with `_NNNN` continuations replaced. Re-check that `kernel_log_file` no longer accepts "either of the two files" before deleting |
 | `the-panic-path-does-not-write-the-log` | boot-media | `kind: rejected`, and its argument is a property of the architecture now rather than a decision: the panic path writes the backend and never an object, so it depends on no daemon and no lock the dying thread might hold |
 | `idle-machine-looks-wedged` | kernel | already superseded by a defect that was found and closed; and after the record ring the last line before a quiet period *does* reach the wire, so "the log stops here" is evidence rather than an artefact of the drain |
-| `redesign-the-log-subsystem` | design-debt | `kind: question`, and **only its design half is answered** — the `kernel/src` layout half is untouched and is nobody's to answer but the owner's. It is not closable as it stands; it wants splitting, and the split is his call |
+| `redesign-the-log-subsystem` | design-debt | **Not a closing candidate, and the split it wanted has happened.** It is `kind: track`, `decided: 2026-08-19`, both halves approved as staged work — so it is open work rather than a stale description, and this pass leaves it alone. What it *does* carry is this entry's own defect: its six-row evidence table still lists `log.rs` (64 lines), `drivers/log_ring.rs` (549) and `log_file.rs` (564), none of which exist — `kernel/src/log/` is a directory of eight files — and its layout half prices `kernel/src` at 39 flat `.rs` beside seven directories, measured 2026-08-24 as 44 beside ten, three of them (`log/`, `object/`, `completion/`) already on its target list. Re-measuring that table is the track owner's, not a closing pass's |
 
 **Re-scoped rather than closed.** `log-is-userland-writable` (boot-media) keeps
 its residuals, and its first one changes character rather than being half-done:
