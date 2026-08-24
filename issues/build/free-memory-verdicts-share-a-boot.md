@@ -16,8 +16,8 @@ opened: 2026-08-10
 > measurements, and it does.
 
 > **The test was called `fd_lifetime` until 2026-08-20**, when the fd/inbox
-> wave (`issues/design-debt/fd-is-libc-jargon-and-the-tree-still-speaks-it.md`)
-> renamed it `handle_lifetime`. Every reading below was taken under the old
+> naming wave — the owner's 2026-08-19 ruling that fds belong only in libc
+> jargon — renamed it `handle_lifetime`. Every reading below was taken under the old
 > name, including the harness line quoted verbatim; all of them are re-spelled
 > to the live one, because a record naming a test that does not exist sends the
 > next reader nowhere.

@@ -1223,9 +1223,9 @@ pub const KNOWN_RED: &[Red] = &[
         measured: "2026-08-07",
     },
     // ---------------------------------------------------------------------
-    // **`fd_lifetime` is `handle_lifetime` since 2026-08-20.** The rename is
-    // the fd/inbox wave's
-    // (`issues/design-debt/fd-is-libc-jargon-and-the-tree-still-speaks-it.md`).
+    // **`fd_lifetime` is `handle_lifetime` since 2026-08-20.** The rename is the
+    // fd/inbox naming wave's — owner ruling of 2026-08-19, "fds belong only in
+    // libc jargon", which `kernel/src/object/handle.rs` states where it binds.
     // Every reading in the three rows below was taken before it, so the harness
     // lines they quote and the command they name printed and spelled
     // `fd_lifetime` at the time; all three have been re-spelled to the live

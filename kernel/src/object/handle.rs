@@ -6,6 +6,12 @@
 //! syscall holding a reference into a table another thread of the same process
 //! is editing.
 //!
+//! **This is not a file-descriptor table and the word does not appear here.**
+//! A process holds typed handles; `fd` names the interface of exactly one layer,
+//! `userland/libc`, and std's POSIX surface keeps it by charter. Anywhere else
+//! in this tree — kernel, ABI, SDK, a test binary — the word is wrong (owner
+//! ruling, 2026-08-19), and so is `io_uring`: that mechanism is an inbox.
+//!
 //! **A slot's generations are finite and what happens at the end of them is a
 //! security decision, not an overflow.** A handle carries twelve bits of slot
 //! and twenty of generation, so a slot has 1,048,575 lifecycles; a table that
