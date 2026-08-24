@@ -238,6 +238,24 @@ pub struct Red {
 /// them green.
 pub const SHELF_LIFE_DAYS: i64 = 31;
 
+/// What retired both `screen_pager_keys` rows about the page-move count.
+///
+/// **The verdict was the defect, and the rows are the evidence for that**, which
+/// is why they are retired rather than deleted: two agents read this arithmetic
+/// as a kernel regression and bisected it to a merge, and a reader who meets the
+/// same message needs to find that here rather than repeat it.
+const PAGER_ARITHMETIC: &str = "the verdict was the defect. It injected all thirty keys at the \
+    host's own speed and compared the moves it saw against what the pager's 3 s unattended \
+    deadline could have produced in the elapsed time, so a host that got through the thirty in \
+    0.3 s was asked for 3.3 moves and reported `0 page moves over 30 keystrokes` — the symptom of \
+    a guest that had not been given time to repaint once. Unpaced it was wrong about the wire too: \
+    thirty press/release pairs is sixty scancodes into QEMU's 16-byte `PS2_QUEUE_SIZE`, so keys a \
+    full-panel repaint had no room for were never delivered. The verdict is now one key, then its \
+    page, then the next key, with a guest-budgeted wait and no host clock in it, and the \
+    unattended window is measured on the guest before the first key retires it. Re-measured \
+    2026-08-24: PASS 6 of 6 alone on the dev host at 2.00x-8.00x width, 16-31 s each, against \
+    every recorded red's 6-10 s";
+
 /// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
 ///
 /// The number in the second row was the whole finding, and it no longer holds.
@@ -843,11 +861,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_pager_keys",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(PAGER_ARITHMETIC),
         what: "keystroke 14 of 30. Bisected on the dev host to `f96d52e`, a merge whose two parents \
-               are both green — see `issues/diagnostics/screen-pager-keys-red-on-main.md`",
+               are both green — and that bisect is the thing the retirement below is about",
         evidence: "run 31287853270, `main` at 53d29d5",
-        source: "issues/diagnostics/screen-pager-keys-red-on-main.md",
+        source: "tests/toyos.rs screen_pager_keys",
         measured: "2026-08-09",
     },
     // ---------------------------------------------------------------------
@@ -1094,13 +1112,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_pager_keys",
         instrument: Instrument::DevHostAlone,
         finding: Finding::fires(3, 3),
-        standing: Standing::Stands,
+        standing: Standing::Retired(PAGER_ARITHMETIC),
         what: "`0 page moves over 30 keystrokes in 0.4s — an unattended deadline alone could have \
                produced 1.1 of them`. Not load: the landing gate that produced one of them ran at \
                1.05× the reference boot and the failure was byte-identical to the ones taken at \
                load 11–16. Bisected to `f96d52e`, a merge whose two parents are both green",
         evidence: "`main` at b36cf64, three runs alone in one session; seven boots across the bisect",
-        source: "issues/diagnostics/screen-pager-keys-red-on-main.md",
+        source: "tests/toyos.rs screen_pager_keys",
         measured: "2026-08-08",
     },
     Red {
