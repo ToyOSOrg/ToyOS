@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-24
 ---
 
@@ -44,3 +44,12 @@ establish, by re-running 32 at a larger seed count and by measuring 64.
 
 Not measured: whether the move is a change in the tree or in the sample. Nobody
 has bisected it, and this entry does not claim a regression.
+
+**2026-08-25, promoted to `defect`.** The number is the stated entry criterion
+for the per-share-FIFO redesign, and 1.03× against a 60 ms bound is not a margin
+anyone may enter on — that makes it work owed rather than something noticed.
+Two runs answer it and both are cheap: `fairness_storm:32` at a seed count well
+above 500, which decides whether 58 is the tree or the sample, and
+`fairness_storm:64`, which is inside the scheduler's staged 1–128 target and has
+never been run. Owed by whoever picks up the per-share-FIFO work, before
+starting it rather than after.

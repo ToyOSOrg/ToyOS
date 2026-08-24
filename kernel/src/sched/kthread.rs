@@ -9,9 +9,22 @@
 //! **A kernel thread is not a special kind of task.** It is an ordinary task
 //! that names `mm::paging::kernel` as its address space — the one every CPU is
 //! already in between two user threads — reached through a trampoline that
-//! never issues an `iretq` (`loader::start::kernel_start`). It is preemptible,
-//! it is stealable, it shows up in `ps` and in Ctrl+Alt+D, and it logs like
-//! anything else.
+//! never issues an `iretq` (`loader::start::kernel_start`). It shows up in `ps`
+//! and in Ctrl+Alt+D, and it logs like anything else.
+//!
+//! **It is preemptible and stealable only where its body reaches a preemption
+//! point, and a Ring 0 loop does not.** `need_resched` is set by the timer's
+//! Ring 0 stub on every tick and read in exactly two places: the Ring 3 exit
+//! check, and `preempt::enable`'s slow path when the count reaches zero. A body
+//! that never returns to Ring 3 and takes no `Lock` reaches neither, so the
+//! byte is set on every tick and nothing ever consumes it. Migration follows
+//! from that and not from a second mechanism — only a *Ready* task is stolen,
+//! so a task that is never switched out never moves, and a park that does reach
+//! the scheduler comes back to the CPU it left. `log::storm`'s header carries
+//! the measurement: three workload shapes at `--smp 8`, and 0 of 8 and 0 of 16
+//! producers ever wrote to a second CPU's shard. Anything that needs a kernel
+//! thread to run on two CPUs has to be given a preemption point, and a body
+//! like these three is not one.
 //!
 //! It gets a process-table entry rather than a bare task, and that is what
 //! makes it nameable: `share_for` is keyed by `Pid`, `sched::dump`'s census
@@ -48,8 +61,8 @@ use super::payload::ThreadSched;
 /// rule above is untouched where it applies. It used to say the storm is what
 /// exercises the migration §2.3a's bracket exists to survive, and that was
 /// never true of any workload here: a task is stealable while it is *Ready*,
-/// and nothing switches a Ring 0 context out between two instructions
-/// (`issues/kernel/a-ring-0-loop-is-never-preempted.md`).
+/// and nothing switches a Ring 0 context out between two instructions (this
+/// module's header states the rule and points at the measurement).
 #[cfg(not(feature = "boot-actuators"))]
 const MAX_KERNEL_TASKS: usize = 3;
 #[cfg(feature = "boot-actuators")]

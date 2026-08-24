@@ -2,8 +2,8 @@
 //! tree has ever modelled.
 //!
 //! `Lock::lock`'s spin is unreachable by loom — the model checker explores a
-//! `core::hint::spin_loop` as an unbounded branch and gives up, which is what
-//! `issues/kernel/lock-spin-unreachable-by-loom.md` records, so
+//! `core::hint::spin_loop` as an unbounded branch and gives up, which this
+//! crate's own scope note and `kernel::sync`'s `ACQUIRED` both state, so
 //! `ticket_lock.rs` can only drive `try_lock`. A parking acquire has no
 //! unbounded branch: the contender gives the CPU back and loom's own
 //! `yield_now` is a branch it can bound. So the path `ticket_lock.rs` cannot

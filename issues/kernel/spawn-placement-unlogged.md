@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-05
 ---
 
@@ -56,3 +56,11 @@ dispatch, and therefore cannot correlate a never-ran spawn against that CPU's
 never delivered" from "the destination never completed a pass". Fold `dst` into
 that line rather than adding a second one; the log ring is itself one of the
 conditions that keeps a CPU awake.
+
+**2026-08-25, promoted to `defect`.** Re-verified after the loader moved: the
+`spawn:` line is `kernel/src/loader/mod.rs:741` and still records pid, tid,
+base, entry, cr3, symbols and five timings — and not the destination CPU. This
+is a missing instrument with a one-field fix, and it is the only thing that
+separates "the adopt was never delivered" from "the destination never completed
+a pass"; `issues/kernel/spawned-process-never-starts.md` names it as what it is
+waiting on. Owed by whoever next works that entry.

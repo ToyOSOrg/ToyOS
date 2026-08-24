@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-23
 ---
 
@@ -30,3 +30,13 @@ rate measured on a host whose company is recorded (`tests/CLAUDE.md`).
 
 Not `Sched::Parallel` being wrong. The harness suggests that on every alone-green
 red, and re-classifying a red whose mechanism is unknown answers nothing.
+
+**2026-08-25, promoted to `defect`.** A test that reds on a loaded host with no
+rate written down is an unadjudicated red, and CLAUDE.md's rule is that such a
+red is fixed at its owner rather than re-run away. The act is a measurement: a
+window-arrival rate taken across widths on hosts whose company is recorded, so
+the host reading can be excluded before the classification reading is
+investigated. Until that exists nothing can decide whether the assertion bounds
+this kernel or the dev host. Owed by whoever next runs a load sweep on this
+instrument; `cargo run -- --known-red syscall_window_nmi` still answers `NOT ON
+THE LIST`.

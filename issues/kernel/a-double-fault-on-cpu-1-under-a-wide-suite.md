@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-18
 ---
 
@@ -199,3 +199,10 @@ get 79 of them.
 
 Do not close this on green runs. What retires it is a second sighting that names
 its own cause — which it now will.
+
+**2026-08-25, promoted to `defect`.** `src/redlist.rs` carries a live
+`Standing::Stands` row against `console_line_atomicity` whose `source` is this
+file, and that row states an owed count: nine loaded suites of the post-`cld`
+tree with no red under this name, refused behind `wt/toyos-census`'s sysroot
+claim on 2026-08-22 and not run since. Running that count is the act, and it is
+the harness owner's.

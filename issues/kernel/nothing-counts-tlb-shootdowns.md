@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-19
 ---
 
@@ -30,3 +30,12 @@ The lever for that path is not waiting at all, which is
 
 An instrument, not a decision: nobody has to rule on this, somebody has to
 count.
+
+**2026-08-25, promoted to `defect`.** That last sentence is a defect's shape and
+not a finding's — "somebody has to count" is owed work with no decision in front
+of it. Re-verified on this tree: `kernel/src/arch/tlb.rs` still carries no
+counter of any kind, so an ordinary boot's shootdown rate remains unknown and
+both proposals above stay unjudgeable. Owed by whoever next opens
+`issues/kernel/every-wait-in-this-kernel-is-a-spin.md`'s memory chunk: build
+the counter first, because it is what decides whether the chunk is worth
+building at all.

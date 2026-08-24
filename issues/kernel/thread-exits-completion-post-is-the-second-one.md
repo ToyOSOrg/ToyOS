@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-24
 ---
 
@@ -51,3 +51,14 @@ opposite is what a reader of `thread_exit` would assume.
 Do not answer it by deleting the post and running the suite green: `std_threading`
 and every other join in the tree would pass either way, which is the whole
 content of this entry.
+
+**2026-08-25, promoted to `defect`.** Both posts are still there on this tree:
+`process::thread_exit` posts `Gone(Closed)` through `handle.watch()`
+(`kernel/src/process.rs`, now under a `debug_assert_eq!` that the subject is
+`Watch::Thread(pid, tid)`), and `TaskHandle::publish_released` posts the same
+outcome on the same watch at `kernel/src/sched/payload.rs:222`. Two posts to one
+subject where the second is load-bearing regardless is either an undocumented
+promptness guarantee or dead code on the exit path — "one of two sentences and
+the evidence for it" is owed work, not an observation. Owed by the lifecycle
+work in `toyos-proclife`, which is the only machine that can enumerate the
+interleaving either answer rests on.

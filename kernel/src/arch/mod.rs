@@ -64,8 +64,8 @@ pub mod tlb;
 /// nothing between `close` and the guard's drop reaches `preempt::enable` — so
 /// no Ring 0 producer is switched out inside this bracket at any rate, and only
 /// a Ready task ever migrates. The `cli` still buys it, and it buys it for a
-/// scheduler that does not exist yet.
-/// `issues/kernel/a-ring-0-loop-is-never-preempted.md`.
+/// scheduler that does not exist yet. `sched::kthread`'s header is where that
+/// rule lives, with the measurement it rests on.
 #[must_use = "dropping the log commit guard reopens interrupts and single-step traps"]
 pub(crate) struct LogCommitGuard {
     rflags: u64,

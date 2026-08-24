@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: track
 opened: 2026-08-16
 ---
 

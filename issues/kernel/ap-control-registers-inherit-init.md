@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-09
 ---
 
@@ -75,3 +75,12 @@ survivor** — an unmasked x87 exception signalled on FERR# instead of raising
 way to pin the arm to an AP. It is no longer owed: `NE` is declared set and
 asserted on every CPU, the `mf` arm asserts a kill rather than tolerating a
 survivor, and a recurrence is a red naming the test instead of a line in a log.
+
+**2026-08-25, promoted to `defect`.** What is left is a measurement, not an
+observation, and it already has a named executor:
+`issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md` carries it as
+the first row of that session's measurement table — one boot with AP
+control-register inheritance armed against one without, same image, same
+session. The instrument is built (`--diag-boot --kernel-param
+control-regs-bench`) and has never run on silicon. Owed by the owner's next
+metal session.

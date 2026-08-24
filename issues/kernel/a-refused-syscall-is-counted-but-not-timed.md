@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-24
 ---
 
@@ -52,3 +52,12 @@ fields disagreeing about which question they answer. Deciding that is cheaper
 than the change: the mechanical part is one scope — the match's result and the
 epilogue in a closure, or the refusals returning a value the epilogue sees
 instead of returning past it.
+
+**2026-08-25, promoted to `defect`.** Re-verified on this tree after the split
+finished: `kernel/src/arch/syscall/dispatch.rs` increments the counter at line
+137 and adds the elapsed nanoseconds at line 779, and `grep -c 'return '` over
+the file still answers **58**. Two `ProcessStats` fields describing different
+sets of calls is a wrong number a reader cannot detect from the outside, which
+is a defect rather than an observation. Owed by whoever next touches the
+dispatch epilogue: decide whether a refused call is work, and make both fields
+answer that one question.

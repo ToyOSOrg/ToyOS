@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-15
 ---
 
@@ -49,3 +49,14 @@ Not urgent: with both writers correct the ledgers agree, and the panic that
 found this is gated by `mmap_stress`. Filed because the fix that deletes the
 second ledger is better than the fix that keeps them in step, and because the
 next person to add a placement path should find this before writing it.
+
+**2026-08-25, promoted to `defect`.** Both ledgers are still live and still
+agree only because two functions are read carefully: `ProcessData::mmap_regions`
+at `kernel/src/process.rs:742` and `AddressSpace::regions` at
+`kernel/src/mm/paging.rs:546`. The paths in this file predate the syscall split —
+the writers are now `kernel/src/arch/syscall/vm.rs` and the `SYS_SYSINFO`
+accounting sum is `kernel/src/arch/syscall/machine.rs:266`, not
+`kernel/src/arch/syscall.rs`. An invariant with no checker and an open extension
+point is a defect in the shape and it already produced one kernel panic; the
+consolidation this file specifies is the fix. Owed by whoever next adds a
+placement path or a fourth `sys_mmap` arm.
