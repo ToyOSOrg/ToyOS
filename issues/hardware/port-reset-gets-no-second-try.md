@@ -20,8 +20,7 @@ there is no path to one. Linux retries either way — `PORT_RESET_TRIES` is 5 an
 `PORT_INIT_TRIES` 4 in `drivers/usb/core/hub.c`, and `hub_port_reset` escalates
 a failed hot reset to a warm one.
 
-Doing this properly needs the Supported Protocol capability
-`xhci-legacy-handoff-unstageable` names as unbuilt, because
+Doing this properly needs the Supported Protocol capability, because
 "retry as a warm reset" is only correct on a USB3 port and WPR is RsvdZ on a
 USB2 one. It costs a device on a receptacle whose link does not train first
 time; on the T14 the receptacle in question is the one the boot stick is in.
@@ -29,3 +28,16 @@ Nothing in QEMU can fail a reset — `xhci_port_reset` sets PED for every speed 
 knows and never takes the failure path — so this needs an actuator of its own,
 and `xhci-portsc-rw1c`'s shape (replace what the register reads) is the one that
 fits.
+
+**2026-08-25: the capability this named as unbuilt is now built.**
+`kernel/src/drivers/xhci/wait/boot.rs`'s `read_protocols` decodes the
+Supported Protocol capability, `toyos-xhci/src/port.rs`'s `reset_needed`
+consults it, and both `kernel/src/drivers/xhci/wait/boot.rs`'s `init_device`
+and the hot-plug port state machine in `kernel/src/drivers/xhci/mod.rs` now
+dispatch `Reset::Warm` and retry a failed hot reset on a USB3 port before
+giving up (`GaveUp::LinkNeverTrained`). Whether that closes this entry or only
+narrows it — `device::begin`'s own PORTSC check in `kernel/src/drivers/xhci/device.rs`
+still has no retry of its own — was not verified further; found while folding
+`issues/hardware/xhci-legacy-handoff-unstageable.md`, the finding this
+paragraph used to cite for "unbuilt", and left for whoever next reviews this
+entry.
