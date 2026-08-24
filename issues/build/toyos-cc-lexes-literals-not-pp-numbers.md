@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-09
 ---
 
@@ -36,3 +36,9 @@ in something already implemented. It is not taken because the change is to how
 *every* number lexes, `preprocess/consteval.rs` reads those same tokens to
 evaluate `#if`, and there is nothing in the tree today that can tell whether
 the new rule is right. Declared here rather than left as a third silent year.
+
+**2026-08-25: promoted.** Verified unchanged: `tokenize_pp`
+(`toyos-cc/src/preprocess/expand.rs`) still recognises literal shapes rather
+than C99 pp-numbers. Real conformance bug, narrow and currently unobservable,
+but still real; whoever next gives `toyos-cc` an oracle for `#if` evaluation
+should take it.
