@@ -654,10 +654,17 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     //
     // The boot volume is `KernelOnly`: firmware and the bootloader read the
     // machine out of it, so a process that can write it can make the machine
-    // unbootable. The log volume is not — it is a diagnostic partition whose
-    // worst loss is the diagnostic, and `toybox` writes to it. That the log
-    // file itself is unprotected is the residual; see
-    // `issues/boot-media/log-is-userland-writable.md`.
+    // unbootable — `esp_files` replays the attack that proved it, a guest
+    // `fs::write("/boot/toyos/kernel.elf", "TEETH")` that truncated the kernel
+    // image to five bytes. This mount guard is the one restriction the ambient
+    // path space carries, and it is deliberately not a capability: the
+    // filesystem sits outside the capability model by ruling, so there is no
+    // handle to hold for `/boot` and none is owed.
+    //
+    // The log volume is `ReadWrite` on purpose rather than by omission. `/log`
+    // is a userland file: `/bin/logd` owns it as an ordinary process writing an
+    // ordinary file, `toybox` writes there beside it, and the worst a process
+    // can do to the volume is cost the machine its diagnostic.
     match fat32_adapter::mount(Role::Boot) {
         Some(fs) => vfs::lock().mount(Role::Boot.mount(), Box::new(fs), UserAccess::KernelOnly),
         None => log!("boot-volume: not mounted; the kernel has no /boot this boot"),

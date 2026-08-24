@@ -9,8 +9,8 @@ opened: 2026-08-18
 The log architecture landed on 2026-08-15: the kernel keeps a per-CPU record
 ring and the console, `/bin/logd` owns `/log`, `kernel/src/log_file.rs` and
 `kernel/src/drivers/log_ring.rs` are gone. The closing pass that was to retire
-the entries that work answers never ran, so ten files still describe the byte
-ring, the idle-loop flush and the kernel file sink as live.
+the entries that work answers never ran, so on that day ten files still
+described the byte ring, the idle-loop flush and the kernel file sink as live.
 
 Verified against the tree on 2026-08-18. Each row says what makes it closable;
 none was closed here, because each needs its own reading of what durable rule it
@@ -27,8 +27,3 @@ than what was found on the audit day.
 | `the-panic-path-does-not-write-the-log` | boot-media | `kind: rejected`, and its argument is a property of the architecture now rather than a decision: the panic path writes the backend and never an object, so it depends on no daemon and no lock the dying thread might hold |
 | `idle-machine-looks-wedged` | kernel | already superseded by a defect that was found and closed; and after the record ring the last line before a quiet period *does* reach the wire, so "the log stops here" is evidence rather than an artefact of the drain |
 | `redesign-the-log-subsystem` | design-debt | `kind: question`, and **only its design half is answered** — the `kernel/src` layout half is untouched and is nobody's to answer but the owner's. It is not closable as it stands; it wants splitting, and the split is his call |
-
-**Re-scoped rather than closed.** `log-is-userland-writable` (boot-media) keeps
-its residuals, and its first one changes character rather than being half-done:
-`/log` is written by a userland daemon on purpose now, which is the opposite
-decision rather than an unfinished one.
