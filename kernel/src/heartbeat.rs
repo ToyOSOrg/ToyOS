@@ -116,6 +116,19 @@
 //! a line that got switched off; above a clean one with the counters flat it is
 //! a machine whose EC has stopped talking, and this kernel is out of it.
 //!
+//! # What is deliberately not here
+//!
+//! A heartbeat that **summons the dump by itself** when a CPU has been missing
+//! from the mask for several periods. It is the obvious next step for the
+//! deaf-CPU reading — it would turn `cpu0 last reached one 4.2s ago` into a
+//! symbolised `rip` through `dump::probe_silent`'s NMI with no keystroke needed
+//! — and `dump::request` is reachable from here as written, at preempt count 0
+//! holding nothing. It is not built because it cannot be gated: `dump-deaf-cpu`
+//! stages a 400 ms window and calls `request()` itself, so it can neither reach
+//! a multi-period threshold nor let a test attribute the resulting dump. The
+//! owner reflashes once, and an ungated path in that image is worth less than
+//! the resolution it would add. Whoever picks it up builds the actuator first.
+//!
 //! # Cost
 //!
 //! Four lines a second, about 60 bytes each, each of which `/bin/logd` writes
