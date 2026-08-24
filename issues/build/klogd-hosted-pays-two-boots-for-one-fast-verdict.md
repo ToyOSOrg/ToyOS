@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-15
 ---
 
@@ -29,3 +29,9 @@ more time; the nightly half keeps the measured 11,805 minus whatever
 the fast half turns out to cost. Until then, what still runs per pull
 request: every boot's console output is klogd's drain, so the thread
 starving or dying is visible in any test that reads a line.
+
+**2026-08-25: promoted.** Unsplit and unchanged in `tests/toyos.rs`: one
+`klogd_hosted` registration, `Tier::Nightly`, still two boots, now also
+naming `usbd` and `iod` in the spawn half (`src/tiers.rs`'s `RELEGATED` entry
+tracks the current shape). Whoever next has a nightly-tier boot to spend
+should do the split this describes.
