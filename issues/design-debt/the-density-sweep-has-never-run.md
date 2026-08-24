@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-24
 ---
 
@@ -66,3 +66,10 @@ practiced) slop rule, an invariant restates as the one clause that is true
 rather than the paragraph that proved it — and re-run this measurement after
 to say whether the density actually fell. None of that is designed here: a
 design that is right is written as code, and this is not yet code.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). The owner asked
+five times over one review and nothing has acted, and the measurement in this
+file is the evidence that not acting has a cost: `kernel/src` went from 27% to
+39.7% comment lines while the entry sat. Owed by whoever runs the sweep, whose
+first step is giving the three-kinds rule a written home — it is recorded
+nowhere else in the tree, so this file is currently load-bearing for it.

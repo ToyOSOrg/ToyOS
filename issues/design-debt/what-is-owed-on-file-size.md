@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-08
 ---
 
@@ -70,3 +70,9 @@ next reader does not re-measure.
   `TableError`, named bounds, packed structs only for `offset_of!`), and it is
   stage 0 of the ACPI/AML track, whose interpreter is the most host-testable
   component this kernel will ever have.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling; promoted **in
+place** — this is the owner's review ledger and stays as the record of what the
+nine notes asked and what answered them, rather than folding into any one
+module). One entry is still owed and it is real work, not a note: `drivers/acpi.rs`
+has no `toyos-acpi`. Owed by the ACPI/AML track, whose stage 0 this is.

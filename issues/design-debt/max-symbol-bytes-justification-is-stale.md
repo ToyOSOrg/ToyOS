@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-17
 ---
 
@@ -40,3 +40,11 @@ is only as good as the measurement, and the next agent asked to move this bound
 will re-derive it from the stale figure.
 
 Found while scoping the loader's symbol handling, 2026-08-17.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling: a measurement is
+owed, which is exactly what a defect records). A policy constant is only as good
+as the measurement defending it, and the next agent asked to move this bound
+would re-derive it from figures no current build produces. Owed by whoever
+re-measures `syms.size + strs.size` on a current build — settling the
+build-configuration question this entry leaves open — and then either rewrites
+the comment or moves the bound.
