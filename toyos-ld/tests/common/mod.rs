@@ -7,8 +7,8 @@
 
 use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};
 use object::{
-    elf, Architecture, BinaryFormat, Endianness, RelocationFlags, SymbolFlags, SymbolKind,
-    SymbolScope,
+    elf, Architecture, BinaryFormat, Endianness, Object as _, ObjectSymbol as _, RelocationFlags,
+    SymbolFlags, SymbolKind, SymbolScope,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -154,27 +154,216 @@ impl ObjBuilder {
     }
 }
 
-/// `ar` archive with the given members, in the format `collect` parses.
+/// A GNU (System V) `ar` archive with the given members.
+///
+/// The member's name lives in the header's 16-byte name field, terminated by a
+/// slash so it may contain spaces, and the data follows the header directly.
+/// A name too long for the field goes in a `//` member instead and the header
+/// carries `/<byte offset into it>`; the symbol table is a first member named
+/// `/`, holding big-endian offsets of the member headers. Members are padded to
+/// an even byte.
 pub fn archive(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
-    let mut out = b"!<arch>\n".to_vec();
-    for (name, data) in members {
-        let header = format!(
-            "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
-            format!("{name}/"),
-            0,
-            0,
-            0,
-            "100644",
-            data.len()
-        );
-        assert_eq!(header.len(), 60);
-        out.extend_from_slice(header.as_bytes());
-        out.extend_from_slice(data);
-        if data.len() % 2 == 1 {
-            out.push(b'\n');
+    // GNU's long-name table: every name too long for the header field, each
+    // terminated by "/\n", and the offset each header will point at.
+    let mut long_names: Vec<u8> = Vec::new();
+    let mut name_field: Vec<String> = Vec::new();
+    for (name, _) in members {
+        if name.len() < 16 {
+            name_field.push(format!("{name}/"));
+        } else {
+            name_field.push(format!("/{}", long_names.len()));
+            long_names.extend_from_slice(name.as_bytes());
+            long_names.extend_from_slice(b"/\n");
         }
     }
+
+    let mut symbols: Vec<(String, usize)> = Vec::new();
+    for (i, (_, data)) in members.iter().enumerate() {
+        for name in global_definitions(data) {
+            symbols.push((name, i));
+        }
+    }
+
+    let symtab_len = 4 + 4 * symbols.len() + symbols.iter().map(|(n, _)| n.len() + 1).sum::<usize>();
+    let mut pos = 8 + 60 + symtab_len + symtab_len % 2;
+    if !long_names.is_empty() {
+        pos += 60 + long_names.len() + long_names.len() % 2;
+    }
+    let mut member_offsets = Vec::with_capacity(members.len());
+    for (_, data) in members {
+        member_offsets.push(pos as u32);
+        pos += 60 + data.len() + data.len() % 2;
+    }
+
+    // The GNU index is in member order and big-endian, where BSD's is sorted
+    // and little-endian. Neither is read by toyos-ld, which scans the members.
+    let mut symtab: Vec<u8> = (symbols.len() as u32).to_be_bytes().to_vec();
+    for (_, member) in &symbols {
+        symtab.extend_from_slice(&member_offsets[*member].to_be_bytes());
+    }
+    for (name, _) in &symbols {
+        symtab.extend_from_slice(name.as_bytes());
+        symtab.push(0);
+    }
+    assert_eq!(symtab.len(), symtab_len);
+
+    let mut out = b"!<arch>\n".to_vec();
+    push_gnu_member(&mut out, "/", &symtab);
+    if !long_names.is_empty() {
+        push_gnu_member(&mut out, "//", &long_names);
+    }
+    for (i, ((_, data), field)) in members.iter().zip(&name_field).enumerate() {
+        assert_eq!(
+            out.len(),
+            member_offsets[i] as usize,
+            "member {i} is not where the symbol table says it is",
+        );
+        push_gnu_member(&mut out, field, data);
+    }
     out
+}
+
+fn push_gnu_member(out: &mut Vec<u8>, name_field: &str, data: &[u8]) {
+    out.extend_from_slice(&member_header(name_field, data.len()));
+    out.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        out.push(b'\n');
+    }
+}
+
+/// Every global a member defines — what an archive's symbol table indexes.
+fn global_definitions(data: &[u8]) -> Vec<String> {
+    let obj = object::File::parse(data).unwrap();
+    obj.symbols()
+        .filter(|s| s.is_global() && !s.is_undefined())
+        .filter_map(|s| s.name().ok().filter(|n| !n.is_empty()).map(str::to_string))
+        .collect()
+}
+
+/// A BSD (cctools/Darwin) `ar` archive with the same members `archive` takes.
+///
+/// The two dialects share `!<arch>\n` and the 60-byte member header and agree
+/// on nothing else that a reader has to know:
+///
+/// * **`#1/<n>`** in the name field means the real name is the first `n` bytes
+///   of the *member data*, NUL-padded, and `n` is counted inside the member's
+///   size — so both the data pointer and the data length move. A reader that
+///   takes the header field as the name sees `#1/24` and a member whose first
+///   bytes are its own name.
+/// * **`__.SYMDEF SORTED`** (or `__.SYMDEF`) is the symbol table, where GNU
+///   writes a member named `/`. It is not an object and carries a name long
+///   enough that it arrives through `#1/` as well.
+/// * Padding is to 8 bytes, not 2: the name is padded so the data that follows
+///   starts 8-aligned, and the member is padded so the next header does.
+///
+/// The paddings are LLVM's `printBSDMemberHeader`
+/// (`llvm/lib/Object/ArchiveWriter.cpp`): `#1/` carries
+/// `name.len() + pad_to_8(pos + 60 + name.len())`. Apple's `ar` pads the name
+/// differently — it rounds `60 + name.len()` up to 8 — and both land the data
+/// on the same alignment; a reader that stops the name at its first NUL takes
+/// either. Measured against `/usr/bin/ar` on macOS 26 (cctools, the same inode
+/// as `/usr/bin/libtool` and `/usr/bin/ranlib`): `ar cr m.a f.o` over one
+/// 512-byte Mach-O object wrote `#1/20` + `__.SYMDEF SORTED` at offset 8 and
+/// `#1/12` + `f.o` at offset 0x70, member data at 0x58 and 0xb8 — both
+/// 8-aligned, name lengths 20 and 12 for names of 16 and 3.
+///
+/// The symbol table this writes is a real one — `__.SYMDEF SORTED`'s ranlib
+/// array over every global the members define, sorted by name, each entry
+/// naming the offset of its member's header. toyos-ld does not read it (it
+/// scans the members itself), which is exactly why it is written correctly
+/// here: a table nothing checks is a fixture that could rot into a shape no
+/// archiver produces.
+pub fn bsd_archive(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    // (symbol, index of the member defining it), sorted — `SORTED` is a claim
+    // about this order and a reader may binary-search on it.
+    let mut symbols: Vec<(String, usize)> = Vec::new();
+    for (i, (_, data)) in members.iter().enumerate() {
+        for name in global_definitions(data) {
+            symbols.push((name, i));
+        }
+    }
+    symbols.sort();
+
+    // The string table, and each symbol's offset into it.
+    let mut strtab: Vec<u8> = Vec::new();
+    let mut str_offsets: Vec<u32> = Vec::new();
+    for (name, _) in &symbols {
+        str_offsets.push(strtab.len() as u32);
+        strtab.extend_from_slice(name.as_bytes());
+        strtab.push(0);
+    }
+    while strtab.len() % 8 != 0 {
+        strtab.push(0);
+    }
+
+    // The table's own size is fixed before any member is placed, so the member
+    // offsets it has to carry can be computed ahead of writing it.
+    let ranlib_bytes = symbols.len() * 8;
+    let symdef_payload = 4 + ranlib_bytes + 4 + strtab.len();
+    let symdef_name = b"__.SYMDEF SORTED";
+    let symdef_name_len = bsd_name_len(8, symdef_name.len());
+    let mut pos = 8 + 60 + symdef_name_len + symdef_payload;
+    pos += pad_to(pos, 8);
+
+    let mut member_offsets = Vec::with_capacity(members.len());
+    for (name, data) in members {
+        member_offsets.push(pos as u32);
+        let name_len = bsd_name_len(pos, name.len());
+        pos += 60 + name_len + data.len();
+        pos += pad_to(pos, 8);
+    }
+
+    let mut symdef: Vec<u8> = Vec::new();
+    symdef.extend_from_slice(&(ranlib_bytes as u32).to_le_bytes());
+    for (str_off, (_, member)) in str_offsets.iter().zip(&symbols) {
+        symdef.extend_from_slice(&str_off.to_le_bytes());
+        symdef.extend_from_slice(&member_offsets[*member].to_le_bytes());
+    }
+    symdef.extend_from_slice(&(strtab.len() as u32).to_le_bytes());
+    symdef.extend_from_slice(&strtab);
+    assert_eq!(symdef.len(), symdef_payload);
+
+    let mut out = b"!<arch>\n".to_vec();
+    push_bsd_member(&mut out, symdef_name, &symdef);
+    for (name, data) in members {
+        push_bsd_member(&mut out, name.as_bytes(), data);
+    }
+    for (i, offset) in member_offsets.iter().enumerate() {
+        assert_eq!(
+            &out[*offset as usize..*offset as usize + 3],
+            b"#1/",
+            "member {i} is not where __.SYMDEF says it is",
+        );
+    }
+    out
+}
+
+/// The 60-byte header every `ar` dialect shares: name, mtime, uid, gid, mode,
+/// size, and the `` `\n `` terminator that lets a reader tell it found one.
+fn member_header(name: &str, size: usize) -> [u8; 60] {
+    let header =
+        format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", name, 0, 0, 0, "100644", size);
+    header.as_bytes().try_into().expect("an ar member header is 60 bytes")
+}
+
+fn pad_to(pos: usize, align: usize) -> usize {
+    (align - pos % align) % align
+}
+
+/// `#1/<n>`'s `n`: the name, padded so that the data behind it starts 8-aligned.
+fn bsd_name_len(pos: usize, name_len: usize) -> usize {
+    name_len + pad_to(pos + 60 + name_len, 8)
+}
+
+fn push_bsd_member(out: &mut Vec<u8>, name: &[u8], data: &[u8]) {
+    let name_len = bsd_name_len(out.len(), name.len());
+    out.extend_from_slice(&member_header(&format!("#1/{name_len}"), name_len + data.len()));
+    out.extend_from_slice(name);
+    out.resize(out.len() + (name_len - name.len()), 0);
+    assert_eq!(out.len() % 8, 0, "BSD member data must start 8-aligned");
+    out.extend_from_slice(data);
+    let pad = pad_to(out.len(), 8);
+    out.resize(out.len() + pad, 0);
 }
 
 // ── Harness ──────────────────────────────────────────────────────────────
