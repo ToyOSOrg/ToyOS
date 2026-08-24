@@ -11,9 +11,9 @@ places it was used — `src/image.rs`, `tests/common/volumes.rs` and
 `toyos-fat32/tests/common/mod.rs` — replaced by `toyos-fat32-check/`, written
 from fatgen103 and derived from neither our writer nor our reader. The owner's
 rule that made that mandatory: "no dependencies on binaries that dont come with
-rust or qemu". `what-fsck-msdos-does-not-check` — the FAT mirror and duplicate 8.3 names,
-both of which `fsck_msdos` silently accepted — are among the twelve corruptions
-the new checker catches and it did not.
+rust or qemu". The stale FAT mirror and duplicate 8.3 names, both of which
+`fsck_msdos` silently accepted, are among the twelve corruptions the new
+checker catches and it did not.
 
 **What is left is `newfs_msdos` and `hdiutil`**, and they are the harder half
 because they are not a judge. `Image::formatted` shells out to
