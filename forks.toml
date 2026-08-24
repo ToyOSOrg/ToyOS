@@ -26,7 +26,11 @@
 # blocked on publishing ToyOS's own crates (toyos-abi, toyos, window): a fork
 # cannot reference them by path once cargo checks it out alone. The exceptions
 # are the forks whose ToyOS code depends on nothing of ours — a target triple, a
-# handle type — and those are the ones already sent.
+# handle type — and those are the ones already sent. A git dependency on
+# toyos-abi or toyos is the same violation and worse: unlike a path dependency
+# it resolves, silently, against whatever revision the git ref last pointed to
+# — a frozen snapshot standing in for the monorepo's copy rather than a build
+# error.
 #
 # A fork being sendable is not the same as it being *worth* sending. See memmap2
 # below: purely additive, unblocked, and still a bad PR.
