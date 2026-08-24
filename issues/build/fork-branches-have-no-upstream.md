@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-07
 ---
 
@@ -20,3 +20,8 @@ to be in sync on 2026-08-07, established by comparing `rev-parse HEAD` against
 `rev-parse origin/<branch>` rather than by reading `git status`. One
 `git branch -u origin/<branch> <branch>` per clone fixes it; outside the repo,
 so the owner's hands.
+
+**2026-08-25: promoted.** Not re-measured (external clones, outside this
+worktree's reach) but real and reproducible as filed, and the fix is a named,
+bounded command the owner has not yet run. Stays open until the thirteen
+clones are set to track.
