@@ -964,6 +964,13 @@ fn assert_toolchain_is_honest(stage2: &Path) {
 /// Only the primary checkout runs the steps that write the shared tree. A
 /// linked worktree checks that what is there is the sysroot its sources belong
 /// to, and says so by name when it is not.
+///
+/// **The lock only covers builds routed through here.** A `./x.py build` typed
+/// by hand in `rust/` takes no lock at all, and can still lose the race this
+/// serialises: one builder's bootstrap removes and recreates
+/// `stage1-std/<target>/dist/deps` while another's `rustc` creates a temp file
+/// inside it, and the loser dies compiling `core` with `couldn't create a temp
+/// dir: No such file or directory`.
 pub fn ensure(
     root: &Path,
     force_rebuild: bool,
