@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-09
 ---
 
@@ -45,3 +45,9 @@ hung lane, which is why this is filed rather than answered.
 
 Answer it one case at a time. A case that runs and matches its `.expect` is a
 test the suite gains; one that does not is an entry with a real reason at last.
+
+**2026-08-25: promoted.** All sixteen entries are unchanged in `NOT_RUN`
+(`tests/toyos.rs`), still `Stage::Built` with no measurement behind any of
+them. Whoever next has a free guest slot should run `78_vla_label` and
+`79_vla_continue` first against the predictions above, then the other
+fourteen, one at a time.
