@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-10
 ---
 
@@ -37,3 +37,9 @@ Not fixed here, and not obviously worth fixing: turning incremental off would
 trade dev-loop rebuild time for an inlining pass that LLVM already performs, and
 nobody has measured what that trade costs. What is owed is the measurement, not
 the edit.
+
+**2026-08-25: promoted.** Verified unchanged: every `[profile.toyos]` in the
+tree still inherits `dev` with no `incremental` override. The measurement —
+what turning incremental off costs the dev loop, weighed against the day
+`rustc_codegen_cranelift` is attempted for real — is still owed and still
+nobody's.
