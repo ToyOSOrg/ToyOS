@@ -9,6 +9,17 @@
 //! a failure; the explicit assertions are about *which* error and about the
 //! operation having actually happened.
 //!
+//! **This file exists because mutating the implementation tests the paths you
+//! wrote and says nothing about the states you did not think to construct.**
+//! Sixteen deliberate breakages of this crate's code caught fourteen defects.
+//! An auditor attacking the *state space* instead — a file that is empty, a
+//! chain that is cyclic, an entry that is crafted — found six more, on a volume
+//! the suite already had and through the public API, four of them on the write
+//! path and one that wrote 256 GiB outside the volume and returned `Ok(())`.
+//! Both are needed and the second is the one a green suite hides, so a new
+//! refusal is gated here as a state somebody can construct rather than only as
+//! a line somebody can delete.
+//!
 //! The corpus is held sparsely (see `common::SparseDevice`) because a valid
 //! FAT32 volume cannot have fewer than 65,525 clusters, and materialising one
 //! per test would be gigabytes of zeroes.

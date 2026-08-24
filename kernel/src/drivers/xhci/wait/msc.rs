@@ -44,8 +44,19 @@ const HOST_BLOCK: u32 = 4096;
 /// A wall-clock budget rather than an attempt count, because the two bound
 /// different things: a stick that answers NOT READY quickly deserves several
 /// tries, and one that answers nothing at all has already spent the transfer
-/// timeout and must not be given three more of them. Boot time is what is
-/// being protected, and boot time is what this measures.
+/// timeout and must not be given three more of them.
+///
+/// **It bounds when [`bring_up`] stops *starting* attempts, and nothing about
+/// the attempt already running.** Boot time is what is being protected, and
+/// this is one of the two numbers that decide it — the other is
+/// [`USB_TIMEOUT_NS`], which bounds each transfer an attempt waits out, and the
+/// boot-time figure is their product. The loop tests the budget after an
+/// attempt, so at least one always runs in full: against a device that answers
+/// nothing that is the command phase and then Reset Recovery's class request
+/// and a `CLEAR_FEATURE` per halted endpoint — four transfers, so up to 8 s
+/// (`4 * USB_TIMEOUT_NS`, arithmetic on the two constants and not a
+/// measurement) against this 500 ms, and again for every further mass-storage
+/// device on the bus that behaves the same way.
 const READY_BUDGET: Budget = Budget::of(
     Duration::from_millis(500),
     "the device is reported as not becoming ready and the boot goes on without it",
