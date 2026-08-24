@@ -18,6 +18,17 @@
 //! to loom rather than to a kernel that really does spin. The shootdown's spins
 //! *are* modelled, because they live in the caller — `arch::tlb` — and the model
 //! writes its own.
+//!
+//! **What that scope leaves certified by reading alone: contention on `lock()`
+//! — the ticket ordering, and the FIFO fairness the ticket exists to buy.** The
+//! *release* edge is shared, since both acquire paths end at the guard's
+//! `now.fetch_add(1, Release)`, so publication is driven from either side; the
+//! waiting side is not driven at all. Nothing in the guest suite substitutes for
+//! it: x86's TSO gives every load acquire and every store release semantics, so
+//! a missing edge in this primitive is invisible on the only architecture ToyOS
+//! boots and becomes observable on ARM64, which is planned and not built. That
+//! is why `try_lock`'s acquire edge sat on the wrong atomic through every green
+//! suite run until a model checker was pointed at it.
 
 /// Loom's cell with the `get(&self) -> *mut T` shape `Lock` uses.
 ///

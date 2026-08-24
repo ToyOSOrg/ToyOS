@@ -49,7 +49,7 @@ shard-publish-relaxed = []
 # `now` — the ones that decide whose turn it is — go `Relaxed`, so the previous
 # holder's writes are unordered against the next holder's reads, and
 # `kernel-loom/tests/sleep_lock.rs` reds. `Lock::lock`'s spin is unreachable by
-# loom (`issues/kernel/lock-spin-unreachable-by-loom.md`); a parking acquire has
+# loom (`src/sync.rs`'s `ACQUIRED` says so at the site); a parking acquire has
 # no unbounded branch, which is what makes this one modellable at all.
 sleeplock-acquire-off = []
 # **Every actuator, and which one is armed comes from the boot parameter.**
