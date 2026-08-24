@@ -120,6 +120,21 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # `actions/checkout` does add this — into a *temporary* global git config
+      # it then takes away again ("Temporarily overriding HOME" in its own log),
+      # so no later step inherits it. This container runs as root over a
+      # workspace the host's `runner` uid owns, so git refuses the checkout as
+      # dubiously owned, `git rev-parse --git-common-dir` exits non-zero, and
+      # `src/lib.rs`'s `git_common_dir` panics on the assertion that reads it.
+      # Every other container job in this repository already carries this line
+      # — `ci.yml`'s and `gate-a.yml`'s `key` steps, `probe-green.yml`,
+      # `.github/install-toolchain.sh` — and this job was written without it.
+      # Four of the first five nightlies died right here, 2m10s in, having
+      # measured nothing at all: runs 32445393024, 32550339777, 32616781843 and
+      # 32688698547, the last of them 2026-08-24T04:07:16Z.
+      - name: the checkout is this uid's
+        run: git config --global --add safe.directory "$PWD"
+
       - name: rustup
         run: |
           # To a file first, never `curl | sh` — `ci.yml`'s `rust` step says why.
@@ -144,12 +159,31 @@ jobs:
           echo "declared QEMU (.github/qemu-version): $(grep -v '^#' .github/qemu-version | tr -d '[:space:]')"
           df -h /
 
+      # `env -u GITHUB_ACTIONS -u CI`, the same thing `toolchain.yml`'s own
+      # `build` step does, and it is what makes this job ask the premise's
+      # question rather than a GitHub Actions one — a fresh machine has neither
+      # variable set. The fork's own bootstrap is why:
+      # `rust/src/build_helper/src/git.rs`'s `get_closest_upstream_commit`
+      # returns `HEAD^1` outright under `CiEnv::GitHubActions` ("on CI, we
+      # should always have a non-upstream merge commit at the tip"), with no
+      # author filter — and in this fork `HEAD^1` is one of our own `toyos:`
+      # commits, which rust-lang's CI never built, so `download-ci-llvm` 404s on
+      # every triple. Measured 2026-08-24 against the fork at aab2f4de: `HEAD^1`
+      # is 87971e6d ("toyos: fix Command::output, empty-directory stat, and
+      # FileAttr::file_type"), the exact sha the macOS job asked
+      # ci-artifacts.rust-lang.org for on all five nightlies and the
+      # pre-container 08-20 Linux job asked for on x86_64 — four 404s each,
+      # then `ERROR: failed to download llvm from ci`. With the variables
+      # unset the same walk answers ad3d0bc1 (`bors`, 2026-07-31), and
+      # `rust-dev-nightly-x86_64-unknown-linux-gnu.tar.xz` and
+      # `rust-dev-nightly-aarch64-apple-darwin.tar.xz` both answer 200 for it.
+      # So neither red was ever about cmake, ninja or a host triple.
       - name: cargo run -- --build-only
         id: build
         run: |
           set -o pipefail
           t0=$(date +%s)
-          cargo run -- --build-only 2>&1 | tee /tmp/build.log
+          env -u GITHUB_ACTIONS -u CI cargo run -- --build-only 2>&1 | tee /tmp/build.log
           echo "seconds=$(( $(date +%s) - t0 ))" >> "$GITHUB_OUTPUT"
 
       - name: summary
@@ -249,12 +283,19 @@ jobs:
           echo "declared QEMU (.github/qemu-version): $(grep -v '^#' .github/qemu-version | tr -d '[:space:]')"
           df -h /
 
+      # The same `env -u GITHUB_ACTIONS -u CI` the Linux job carries, for the
+      # same reason and with the same evidence — that comment is the one to
+      # read. This job's five nightly 404s on
+      # `rust-dev-nightly-aarch64-apple-darwin` were never the host triple
+      # being unserved: the artifact answers 200 at the sha the non-CI walk
+      # picks, and the dev host's own `rust/build/cache` holds a 52,324,936-byte
+      # copy of it downloaded 2026-07-31.
       - name: cargo run -- --build-only
         id: build
         run: |
           set -o pipefail
           t0=$(date +%s)
-          cargo run -- --build-only 2>&1 | tee /tmp/build.log
+          env -u GITHUB_ACTIONS -u CI cargo run -- --build-only 2>&1 | tee /tmp/build.log
           echo "seconds=$(( $(date +%s) - t0 ))" >> "$GITHUB_OUTPUT"
 
       - name: summary
