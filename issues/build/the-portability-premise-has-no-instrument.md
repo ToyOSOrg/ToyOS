@@ -56,11 +56,13 @@ What each proves today:
   never in a `--build-only` path. The five nightly deaths were the same harness
   bug Linux's were, not a portability gap — the dated section below retracts
   the reading this file carried on 2026-08-24 morning. Fixed, the job builds
-  both toolchain stages and then **refutes the premise for real**, on a gap
-  with its own file:
-  `issues/build/doom-does-not-link-on-a-stock-macos-host.md`. No run has
-  reached the end of `--build-only` here yet, so `timeout-minutes: 350` still
-  borrows Linux's ceiling rather than a real number.
+  both toolchain stages and then **refuted the premise for real**, on a gap
+  that has since been closed (`/bin/doom`'s archive; the dated section below
+  is the account, and `userland/doom/build.rs`'s `write_archive` is where it
+  now lives). No run has reached the end of `--build-only` here yet, so
+  `timeout-minutes: 350` still borrows Linux's ceiling rather than a real
+  number — and the first green macOS run is also the end-to-end proof that
+  that fix holds on a machine nobody groomed.
 - **Windows** (`windows` job) — unchanged. `cargo build -p toyos-build` only,
   `cargo run` being unreachable: `src/toolchain.rs`'s `link_host_target` calls
   `std::os::unix::fs::symlink` with no `#[cfg(unix)]` guard
@@ -87,17 +89,17 @@ declared.
   reach (add the file to that test's `GATES` list and run
   `.github/instrument.sh`), which the current build-only jobs correctly do
   not do — neither calls `qemu::launch`.
-- **`macos` is now the second job whose red is a tracked frontier, and it is
-  still wired into `nightly-red-portability`.** Windows is hand-excluded by a
-  workflow comment on the reasoning that a red already carried by its own filed
-  issue is noise rather than news; macOS's red now has exactly that shape —
-  `issues/build/doom-does-not-link-on-a-stock-macos-host.md` — and by the same
-  reasoning would be excluded too. It is left reacting deliberately: excluding
-  it would also silence a *different* macOS red, and `.github/nightly-red.sh`
-  costs one comment a night on one standing issue rather than a new issue. That
-  the rule is applied by hand, per job, one comment at a time, is the thing that
-  does not generalise, and it is what a workflow-level answer to "declared, not
-  absorbed" would replace.
+- **Whether a job whose red is a tracked frontier belongs in
+  `nightly-red-portability` is still decided by hand, per job.** Windows is
+  hand-excluded by a workflow comment on the reasoning that a red already
+  carried by its own filed issue is noise rather than news. macOS briefly had
+  exactly that shape — one filed issue, one standing red — and the question
+  answered itself when that issue closed rather than by any rule, which is the
+  point: excluding a job also silences every *other* red it could carry, and
+  `.github/nightly-red.sh` costs one comment a night either way. That the rule
+  is applied by hand, per job, one comment at a time, is the thing that does not
+  generalise, and it is what a workflow-level answer to "declared, not absorbed"
+  would replace.
 
 ## 2026-08-24 — five nightlies have run, and the instrument reads
 
@@ -261,13 +263,18 @@ error: linking with `toyos-ld` failed: exit status: 1
 error: could not compile `doom` (bin "doom") due to 1 previous error
 ```
 
-That is a genuine finding and it has its own file:
-`issues/build/doom-does-not-link-on-a-stock-macos-host.md`. In one sentence:
-`userland/doom/build.rs` archives doomgeneric through the `cc` crate, which
-reaches for whatever `ar` is in `PATH`; this dev host has Homebrew's GNU
-binutils and writes a GNU-format archive, `macos-latest` has only Apple's
-cctools `ar` and writes a BSD one, and only the first has ever been linked.
-A host binary the doctrine does not declare decides whether the build works.
+That is a genuine finding, and it was root-caused and fixed the same day.
+`userland/doom/build.rs` archived doomgeneric through `cc::Build::compile`,
+which reaches for whatever `ar` is in `PATH`: Homebrew's GNU binutils on this
+dev host, Apple's cctools archiver on a stock macOS. The second builds *Mach-O*
+static libraries — handed the ELF objects `toyos-cc` produces it prints a
+`ranlib: warning: ... not a mach-o file`, writes a 96-byte archive whose only
+member is an empty `__.SYMDEF SORTED`, and exits 0. Every object was dropped
+and nothing said so. Reproduced exactly on the dev host with
+`AR=/usr/bin/ar cargo run -- --build-only`, and fixed by writing the archive in
+that build script rather than shelling out — so no host `ar` decides whether
+the build works. **The end-to-end proof is the first macOS run of this workflow
+that gets past the userland build; none has yet.**
 
 **Windows is unchanged and still the declared frontier** — `cargo build -p
 toyos-build` failed in 1 m 53 s, as
