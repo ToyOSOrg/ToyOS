@@ -1251,16 +1251,15 @@ pub fn log_on_device(
 ///   the bytes the host itself wrote. This is the claim the other two exist to
 ///   serve, and the one that stays meaningful if the log lines are reworded.
 ///
-/// **The trigger moved with task #140 and the coverage narrowed with it.** The
-/// kernel's log sink used to reach this path on its own: a boot reopened the
-/// `kernel.log` the boot before it left, and the first append was a partial
-/// write into a page that had to come off the stick. One file per boot ended
-/// that — the sink always creates now, and its own pages stay resident for the
-/// whole boot because every append sets the CLOCK reference bit on the page it
-/// is appending to. So `Sink::append`'s error return is still correct and is no
-/// longer reachable from a boot; what is exercised here is the same
-/// `write_page` hazard through the path that *can* still reach it, which is any
-/// process appending to a file that already has bytes on the volume.
+/// **What stages it is a host-written file, and that is the deterministic form
+/// rather than the only one.** The log's own writer reaches the same hazard:
+/// `/bin/logd` is an ordinary process appending to an ordinary file and
+/// `fsync`s every batch, which clears the dirty bit and leaves its tail page an
+/// ordinary eviction candidate — so a boot that loses that page re-fetches it
+/// on the next append, exactly as this does. Staging it from the guest's own
+/// log would make the trigger a matter of which page happened to be evicted;
+/// a file the host wrote before the machine existed can have no resident page
+/// at all.
 pub fn log_backing_read_error(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

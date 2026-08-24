@@ -332,6 +332,16 @@ pub fn read_page(
 /// that was fine — or to refuse. It refuses. The caller decides what to do
 /// about a write that did not happen, which is a decision this layer does not
 /// have the standing to make silently.
+///
+/// **The machine's own log arrives here, and a resident tail page is no
+/// defence.** `/bin/logd` is an ordinary process appending to an ordinary file,
+/// and it `fsync`s every batch — which clears the dirty bit and makes its tail
+/// page an ordinary eviction candidate. Once that page is off the stick the
+/// next append is a partial write that has to fetch it back, so the refusal
+/// above is the only thing standing between a device that has stopped
+/// answering and a boot's log merged into zeros and flushed over what was
+/// already written. `fat-backing-read-fails` stages exactly that, on a file the
+/// host put on the volume before the machine existed.
 pub fn write_page<S: ByteSource + ?Sized>(
     file_id: FileId,
     page_idx: u32,
