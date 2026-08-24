@@ -46,7 +46,16 @@ this name, with the boot width recorded per run. If it fires at a rate, it earns
 a `src/redlist.rs` row on `Instrument::DevHostLoaded` and the question becomes
 whether the missing tail is the guest's typing or the host's capture window.
 
-**2026-08-25: promoted.** Still `NOT ON THE LIST` in `src/redlist.rs` and no
-`Instrument::DevHostLoaded` row exists for it. One sighting is not yet a rate,
-but the denominator this file specifies has not been collected either; stays
-open until someone runs loaded suites of an unmutated tree and counts.
+## Second sighting, 2026-08-24 — the unmutated-tree half of that denominator
+
+During #283's pre-merge Fast run on the dev host (a tree whose diff touches
+only `userland/doom/build.rs` and `toyos-ld` tests — nothing near input or
+layouts): typed `zyüöäà@` of `zyüöäà@€[<>\êÊÜ^é^q§` in 13 s, red; green alone
+in 4.2 s the same session, green again in the post-merge run. Same shape as
+the first sighting — the head of the string arrives, the tail is lost. The
+count now stands at two firings, both on loaded dev-host suites, zero alone;
+the denominator (total loaded runs of this name between them) is still
+unrecorded, which remains the number this file asks for. Note the mechanism
+family `console-tests-still-type-on-a-wall-clock.md` names: this test types
+its string on a wall clock too, so the PS/2-queue loss `console_type_line`
+closed for `screen_console_panic` is a live candidate here.
