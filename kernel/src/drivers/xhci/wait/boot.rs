@@ -41,7 +41,7 @@ use toyos_xhci::Protocol;
 /// keep looking.
 ///
 /// The asymmetry is deliberate: this is paid **only** by a machine that would
-/// otherwise report an empty bus, which is the outcome that cost the T14 its
+/// otherwise report an empty bus, which is the outcome that cost the laptop its
 /// `/boot`. Any machine with one USB device anywhere settles on the debounce.
 ///
 /// One second is policy, not physics. It covers the longest detection path a
@@ -82,7 +82,7 @@ pub const PORT_POLL: Cadence = Cadence::every(
 /// port power settling, a USB2 pull-up being debounced, a USB3 link running
 /// receiver detection and training. A scan issued in the same microsecond as
 /// `USBCMD.R/S` reports an empty bus on any machine whose ports are real. That
-/// is what the T14 did on both of its controllers while booting off a stick
+/// is what the laptop did on both of its controllers while booting off a stick
 /// plugged into one of them: `controller started` and `no HID devices` share a
 /// millisecond in its log and no `port N connected` line sits between them.
 ///
@@ -95,7 +95,7 @@ pub const PORT_POLL: Cadence = Cadence::every(
 ///
 /// Machine-wide rather than per controller because the wait is wall-clock: a
 /// laptop with two xHCs would otherwise pay for an interval both of them were
-/// already inside. On the T14 that is the difference between one debounce and
+/// already inside. On this laptop that is the difference between one debounce and
 /// two.
 fn await_connect_settle(controllers: &[XhciController]) {
     let Some(powered_at) = controllers.iter().map(|c| c.powered_at).max() else { return };
@@ -158,7 +158,7 @@ fn arm_interrupt(pci_dev: &PciDevice) -> Option<&'static str> {
 /// Every one, not the first: a Tiger Lake laptop has two — the Thunderbolt
 /// block's at 00:0d.0 and the PCH's at 00:14.0, identical in class, subclass
 /// and prog_if — and its keyboard and USB-A ports are on the second. Taking
-/// the first match reported that the T14 had no USB HID at all, which was true
+/// the first match reported that the laptop had no USB HID at all, which was true
 /// of that controller and false of the machine.
 pub fn init(devices: &[PciDevice]) {
     // Once for the machine, not once per controller: it reads no register and
@@ -260,7 +260,7 @@ fn read_protocols(
     }
     let (usb2, usb3) = protocols.counts(max_ports);
     // The line that says whether this machine's SuperSpeed ports are known to
-    // be SuperSpeed. A zero here on a controller that has them is the T14's
+    // be SuperSpeed. A zero here on a controller that has them is the laptop's
     // failure waiting to happen, and it used to be invisible.
     log!("xHCI: {usb2} USB2 and {usb3} USB3 port register(s) of {max_ports} named, \
          {refused} capability(ies) refused");
@@ -562,7 +562,7 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
 
     // A hot reset a SuperSpeed link could not take leaves it Inactive, and
     // §4.19.1.2.4 has exactly one way out of that. Without this the port is
-    // lost for the boot, which on the T14 is a USB-A socket that mounts
+    // lost for the boot, which on the laptop is a USB-A socket that mounts
     // nothing, two boots out of two.
     if kind == Reset::Hot && protocol == Some(Protocol::Usb3) {
         log!("xHCI: port {} did not take a hot reset (link {:?}); warm resetting it",

@@ -54,6 +54,12 @@ pub fn kvm_usable() -> bool {
 /// checkout and absolutely from a linked worktree, so the answer is resolved
 /// against `root` before it is canonicalised. Two worktrees must arrive at one
 /// byte-identical path or the locks keyed on it serialise nothing.
+///
+/// **Git's own refusal is carried into the panic.** "Not a repository" and
+/// "this repository is somebody else's" are one exit status and two entirely
+/// different problems, and the second is what a container running as root over
+/// a checkout another uid owns hits. Four nightly `portability.yml` runs
+/// printed only the assertion and named neither.
 pub fn git_common_dir(root: &Path) -> PathBuf {
     let output = Command::new("git")
         .args(["rev-parse", "--git-common-dir"])
@@ -62,8 +68,9 @@ pub fn git_common_dir(root: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("git rev-parse in {}: {e}", root.display()));
     assert!(
         output.status.success(),
-        "{} is not inside a git repository",
-        root.display()
+        "{} is not inside a git repository. git said: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
     );
     let raw = String::from_utf8(output.stdout).expect("git printed non-UTF-8");
     let answer = Path::new(raw.trim());

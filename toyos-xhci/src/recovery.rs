@@ -5,8 +5,8 @@
 //! endpoint (xHCI 1.2 §4.6.8), Stop Endpoint only for a Running one (§4.6.9),
 //! and Set TR Dequeue Pointer for an endpoint already Stopped or in Error
 //! (§4.6.10). A recovery that opens with Reset Endpoint every time gets Context
-//! State Error whenever the break was not a halt, which the T14 answered twice
-//! before calling its own boot disk offline.
+//! State Error whenever the break was not a halt, which the laptop answered
+//! twice before calling its own boot disk offline.
 //!
 //! The sequence is here and its effects are the driver's, because it has two
 //! drivers: a blocking loop for a disk's bulk pair, which runs on a faulting

@@ -177,7 +177,7 @@ pub fn send_nmi(cpu_id: u32) {
 /// It stays at half a second, and the reason is what the number is *for* rather
 /// than what it now contains: it is not a prediction of how long the write
 /// takes, it is what a machine with nobody left to do the writing pays on its
-/// way down. Half a second against the ~460 ms the panel paint costs on the T14
+/// way down. Half a second against the ~460 ms the panel paint costs on the laptop
 /// anyway, and a machine whose logd is alive and schedulable finishes far
 /// inside it.
 ///
@@ -269,7 +269,7 @@ fn owed(want: u64) -> bool {
 /// Placed before the halt IPI rather than after, because after it there is
 /// nobody left to do the writing.
 fn wait_for_log_file() {
-    // **Only where the panel is the only channel.** This exists because a T14
+    // **Only where the panel is the only channel.** This exists because a laptop
     // has no serial port, so the file is the sole copy of a fatal report. A
     // machine with a working console has already got that report off the box
     // through `panic_flush`, and making it wait here buys a duplicate at the
@@ -409,7 +409,7 @@ pub fn init_timer() {
 /// count too small to outlast the interrupt it schedules is not one late tick
 /// but a livelock nothing recomputes its way out of. Ring 3 can ask for one — a
 /// deadline already past when the pass arms it — and did (`#156`, observed on
-/// the owner's T14).
+/// the owner's laptop).
 ///
 /// Policy, not physics, and it sits between two bounds. Below: an interrupt
 /// entry and `iretq`, which is what the interval has to be worth more than for

@@ -19,8 +19,9 @@
 //! reaches no reader would ship in every program.
 //!
 //! Pure: `core::fmt` and nothing else — no allocation, no `unsafe`, and no
-//! record. The one caller is `kernel/src/symbols.rs`, which spends the budget
-//! `MAX_RECORD_MESSAGE` leaves a backtrace frame, and everything it decides is
+//! record. The one caller is `toyos-symbols`, which spends the budget
+//! `MAX_RECORD_MESSAGE` leaves a backtrace frame on behalf of
+//! `kernel/src/symbols.rs`, and everything it decides is
 //! checked here on the host, where a seam falling inside a four-byte character
 //! costs milliseconds and no guest at all — the tree's own widest symbol is
 //! under a third of what triggers the elision, so no boot reaches it.

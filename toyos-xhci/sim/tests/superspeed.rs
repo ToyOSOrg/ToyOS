@@ -60,7 +60,7 @@ fn a_usb2_port_is_reset_as_before() {
     assert!(driver.did.contains(&Did::Enumerated { slot: Some(1), trained: false }));
 }
 
-/// **The T14's USB-A ports.** A SuperSpeed port that is *not* enabled when the
+/// **The laptop's USB-A ports.** A SuperSpeed port that is *not* enabled when the
 /// device appears needs a reset — and the hot one takes the link down into
 /// Inactive, which §4.19.1.2.4 says only a warm reset leaves. A driver with no
 /// warm reset spends the deadline and refuses the port, which is a USB-A socket

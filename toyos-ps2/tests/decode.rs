@@ -70,7 +70,7 @@ fn every_usage_the_rest_of_the_tree_names_is_reachable() {
 
 #[test]
 fn the_iso_key_is_the_one_the_layouts_carry() {
-    // Between left Shift and Y on the German/Swiss board a ThinkPad has.
+    // Between left Shift and Y on the German/Swiss board a laptop has.
     // Getting this wrong is the difference between `<>|` working and not.
     assert_eq!(SET1[0x56], 0x64);
 }
@@ -345,7 +345,7 @@ fn a_stale_partial_is_abandoned_rather_than_completed() {
     );
 }
 
-/// The distinction the ThinkPad T14's log could not make.
+/// The distinction the laptop's log could not make.
 ///
 /// Its i8042 reported `6 bytes, 0 keys, 2 motion, no event from [aux 0x08,
 /// aux 0x06, aux 0x08, aux 0x0e]` — two whole, correctly framed packets, whose
@@ -356,7 +356,7 @@ fn a_stale_partial_is_abandoned_rather_than_completed() {
 #[test]
 fn a_healthy_stream_discards_nothing_and_leaves_no_byte_unaccounted() {
     let mut d = MouseDecoder::new();
-    // The T14's own two packets, at the pace they arrived on its wire.
+    // The laptop's own two packets, at the pace they arrived on its wire.
     for (p, dx) in [6i16, 14].into_iter().enumerate() {
         let good = packet(0, dx, 0);
         let mut outcomes = Vec::new();

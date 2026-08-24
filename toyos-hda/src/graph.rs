@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn the_t14_s_headphone_pin_names_two_converters() {
+    fn the_laptop_s_headphone_pin_names_two_converters() {
         // node 0x21 conn-len=0x00000002, list [2, 3].
         let len = ConnectionListLen::decode(response(0x0000_0002));
         assert_eq!(len, short(2));
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn the_t14_s_speaker_pin_names_one() {
+    fn the_laptop_s_speaker_pin_names_one() {
         let len = ConnectionListLen::decode(response(0x0000_0001));
         let list = decode_connections(len, &[response(0x0000_0002)]).unwrap();
         assert_eq!(list, [Node(2)]);

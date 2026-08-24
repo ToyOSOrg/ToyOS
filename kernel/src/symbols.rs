@@ -1,78 +1,24 @@
+//! The raw-pointer half of a kernel backtrace frame, and the boot-time and
+//! per-process state that owns it.
+//!
+//! `toyos-symbols` holds the other half — where an ELF's symbol tables live
+//! in its bytes, and how much of a record's budget a demangled name gets —
+//! as pure functions tested on the host against a real binary. What stays
+//! here is what cannot move there: [`SymbolTable`] is read from the fault
+//! handler, the panic handler and a double fault, so it may not allocate,
+//! take a lock or do I/O, and its two tables are raw pointers rather than
+//! borrowed slices because nothing with a lifetime can be threaded through
+//! that path. The boot-time globals (`KERNEL_SYMS`, `load_kernel`) and the
+//! `log!` integration are boot policy, not a decision about bytes, so they
+//! stay here too.
+
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use alloc::boxed::Box;
-use toyos_abi::log::MAX_RECORD_MESSAGE;
-use toyos_elf::section::{SectionTable, SHT_SYMTAB};
 use toyos_elf::sym::SymTab;
-
-use toyos_elide::{widest, Elided, MARKER_MAX};
+use toyos_symbols::symbol_text;
 
 use crate::process::PageAlloc;
-
-/// A backtrace frame's own text: `    ` + `{addr:#x}` + `  ` + `+` +
-/// `{offset:#x}`, with both numbers at their widest — `0x` and sixteen hex
-/// digits is every `u64` there is.
-const FRAME_TEXT: usize = 4 + 18 + 2 + 1 + 18;
-
-/// What is left of a record's message for the symbol, once the frame's own text
-/// has taken its share. The slack is deliberate and it is in the safe
-/// direction: a symbol a byte over this loses a byte from its middle, where a
-/// *line* a byte over the record's bound loses its tail.
-const FRAME_OVERHEAD: usize = 48;
-const _: () = assert!(FRAME_OVERHEAD >= FRAME_TEXT);
-const SYMBOL_BUDGET: usize = MAX_RECORD_MESSAGE - FRAME_OVERHEAD;
-
-/// How much of the budget the head keeps; [`SYMBOL_TAIL`] is the rest.
-///
-/// **The marker comes out of the budget first**, because it is part of what
-/// gets rendered: an earlier split spent the whole budget on head and tail and
-/// then wrote `...[N bytes elided]...` between them, which put the line back
-/// over the record's bound and cost it the tail this exists to keep.
-///
-/// An even split of what is left, because a backtrace with only one end of a
-/// name in it names nothing either way: the head is the crate and the module
-/// path, the tail is the function, and `screen_late_panic` asserts on the tail
-/// for that reason.
-const SYMBOL_KEPT: usize = SYMBOL_BUDGET - MARKER_MAX;
-const SYMBOL_HEAD: usize = SYMBOL_KEPT / 2;
-const SYMBOL_TAIL: usize = SYMBOL_KEPT - SYMBOL_HEAD;
-
-/// The whole of the claim, in one place a compiler checks: a frame line fits a
-/// record whatever the symbol was.
-const _: () = assert!(widest(SYMBOL_HEAD, SYMBOL_TAIL) + FRAME_TEXT <= MAX_RECORD_MESSAGE);
-
-/// And the three numbers the prose around here states, pinned so it cannot
-/// drift from them again — which it did the first time `FRAME_OVERHEAD` moved.
-const _: () = assert!(SYMBOL_BUDGET == 944 && SYMBOL_HEAD == 451 && SYMBOL_TAIL == 452);
-
-/// A demangled symbol, rendered head-and-tail when it is wider than a record
-/// can carry. `toyos-elide` is the mechanism and the argument.
-///
-/// **Nothing in the guest suite reaches this at the shipped bound, and saying
-/// so is the point of this comment.** `screen_late_panic`'s
-/// `late_panic::Nest` demangles to 288 bytes against a budget of 944, so
-/// that gate proves the panel keeps a symbol's tail and proves nothing about
-/// the elision — the tree's own widest symbol is under a third of what
-/// triggers it.
-/// `toyos-elide`'s own tests are where the seams are checked, on the host,
-/// against characters that straddle both of them.
-fn symbol_text<D>(name: D) -> Elided<D, SYMBOL_HEAD, SYMBOL_TAIL> {
-    Elided(name)
-}
-
-/// `[offset, offset + len)` of `data`, or `None` when that is not wholly inside
-/// it. Both numbers came out of the file, so the addition is checked.
-fn file_range(data: &[u8], offset: u64, len: u64) -> Option<&[u8]> {
-    let start = usize::try_from(offset).ok()?;
-    let end = usize::try_from(offset.checked_add(len)?).ok()?;
-    data.get(start..end)
-}
-
-/// Bytes the section header table occupies. Cannot overflow: both factors are
-/// `u16`, and `e_shentsize` is honoured rather than assumed.
-fn shdr_table_len(ehdr: &toyos_elf::FileHeader) -> u64 {
-    ehdr.shnum as u64 * ehdr.shentsize as u64
-}
 
 /// Zero-allocation symbol table. Points directly into ELF sections in memory.
 /// Resolution is a linear scan over raw Elf64_Sym entries — O(n) but lock-free,
@@ -190,28 +136,14 @@ impl SymbolTable {
     /// Find `.symtab` and its `.strtab` in an ELF already in memory, and point
     /// at them. No copying — only pointers into `data`.
     ///
-    /// Decoded through `toyos-elf`, which is the tree's one ELF decoder: this
-    /// file used to hold the second, on crates.io `elf` 0.8, reached from two
-    /// lines of the whole kernel. Every refusal below answers with a table that
-    /// names nothing, because a kernel that cannot find its symbols still
-    /// boots — it prints bare addresses.
+    /// Located through `toyos-symbols::locate`, which decodes through
+    /// `toyos-elf` in turn — the tree's one ELF decoder: this file used to
+    /// hold the second, on crates.io `elf` 0.8, reached from two lines of the
+    /// whole kernel. A refusal from `locate` answers with a table that names
+    /// nothing, because a kernel that cannot find its symbols still boots —
+    /// it prints bare addresses.
     fn from_elf(data: &[u8], base: u64) -> Self {
-        let Ok(ehdr) = toyos_elf::FileHeader::parse(data) else { return Self::empty() };
-        let Some(shdrs) = file_range(data, ehdr.shoff, shdr_table_len(&ehdr)) else {
-            return Self::empty();
-        };
-        let Some((syms, strs)) = SectionTable::new(shdrs).symbols(SHT_SYMTAB) else {
-            return Self::empty();
-        };
-        // Both extents came out of the file, so both are bounded against it
-        // rather than trusted. A section running past EOF would otherwise be
-        // read as whatever follows the image in the direct map.
-        let (Some(symtab), Some(strtab)) = (
-            file_range(data, syms.offset, syms.size),
-            file_range(data, strs.offset, strs.size),
-        ) else {
-            return Self::empty();
-        };
+        let Some((symtab, strtab)) = toyos_symbols::locate(data) else { return Self::empty() };
 
         Self {
             pages: None,

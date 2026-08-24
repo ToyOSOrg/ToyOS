@@ -897,7 +897,7 @@ pub fn retire_task(sched: &ThreadSched) {
     ///   boot, and `wait/mod.rs` names it "the one door, and the only blocking
     ///   thing a scheduler pass can still reach" — on `xhci::USB_TIMEOUT_NS` =
     ///   2,000,000,000 ns while holding `XHCI`. This is the term that made the
-    ///   struck 1 s fire on the owner's T14 at 949 s of uptime with doom
+    ///   struck 1 s fire on the owner's laptop at 949 s of uptime with doom
     ///   exiting, and it has nothing to do with §7.2:
     ///   `issues/kernel/scheduler-pass-blocks-in-xhci.md` is open and says
     ///   in terms that "`retire_task`'s bound is measuring the USB bus".

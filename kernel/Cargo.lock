@@ -49,13 +49,14 @@ dependencies = [
  "toyos-abi",
  "toyos-dma",
  "toyos-elf",
- "toyos-elide",
  "toyos-fat32",
  "toyos-gpt",
  "toyos-hda",
  "toyos-pci",
+ "toyos-proclife",
  "toyos-ps2",
  "toyos-sched",
+ "toyos-symbols",
  "toyos-untrusted",
  "toyos-userbound",
  "toyos-wallclock",
@@ -110,12 +111,28 @@ name = "toyos-pci"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-proclife"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-ps2"
 version = "0.1.0"
 
 [[package]]
 name = "toyos-sched"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-symbols"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+ "toyos-elf",
+ "toyos-elide",
+]
 
 [[package]]
 name = "toyos-untrusted"

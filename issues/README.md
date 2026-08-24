@@ -123,9 +123,14 @@ slug as well as the path.** The slug is the identity, and a pointer written as a
 bare name is invisible to a path search. Search the *tree* rather than the
 checkout (`git grep <rev>`): `rg` skips dotfile directories without `--hidden`,
 and `.github/` holds citations too. Then read where the hits are. One under
-`toyos-abi/src`, `toyos/src` or `userland/libc/src` belongs in the branch's
-**first** commit — those are the shared sysroot's sources, the abi-split gate
-reads commits and not the tree, and a later revert does not undo the refusal.
+`toyos-abi/src`, `toyos/src` or `userland/libc/src` belongs on its **own
+single-commit branch** — those are the shared sysroot's sources, and the
+abi-split gate refuses any branch that mixes sysroot-touching commits with
+others *regardless of order* (`abi_lands_alone` accepts only a branch whose
+non-sysroot rest is empty, or an `Abi-Inseparable:` trailer declaring a split
+that genuinely cannot be made). The gate reads commits and not the tree, so a
+later revert does not undo the refusal — and an edit there also claims the
+machine-wide sysroot until it lands, so every sibling worktree waits on it.
 One in `src/redlist.rs` is a `source` that must both resolve and name its test,
 so retire the row against whatever closed the issue rather than leaving it
 pointing at nothing.

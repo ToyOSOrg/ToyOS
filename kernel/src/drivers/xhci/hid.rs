@@ -190,7 +190,7 @@ impl HidDevice {
 /// reason `usb-transport-break` skips a wait rather than forging a CSW.
 #[cfg(feature = "boot-actuators")]
 impl HidDevice {
-    /// Which completion is taken. The first is the shape the T14 showed — a
+    /// Which completion is taken. The first is the shape the laptop showed — a
     /// freshly configured endpoint whose very first transfer fails, before the
     /// device has ever delivered — and the fourth is the mid-stream shape,
     /// where a device that has been working stops. They are different states
