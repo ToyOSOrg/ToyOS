@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-22
 ---
 
@@ -41,3 +41,10 @@ and no run on record is missing it.
 Found while removing the symbol lookup's dependency on the same table (PR #239,
 `kernel/src/process.rs`'s module header). Not fixed there: that change is about
 names, and this is a different line with no measurement behind it.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). A report that
+drops a line it owed without saying so is the shape `dump_crash_diagnostics`
+already refuses to have one function over, and the fix the entry names is two
+lines — an `else` that says the table was held. That no run on record has lost
+the line is why it is small, not why it is not owed. Owed by whoever next
+touches `crash_report_panic` in `kernel/src/arch/idt/exceptions.rs`.
