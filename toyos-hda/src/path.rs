@@ -30,7 +30,7 @@ pub struct Hop {
 pub struct PinSetup {
     pub node: Node,
     /// From the pin inward to the converter. Empty when every widget on the
-    /// way has a single connection, which is both of the T14's output paths.
+    /// way has a single connection, which is both of the laptop's output paths.
     pub route: Vec<Hop>,
     pub amp: Option<AmpCaps>,
     /// This pin powers an external amplifier and **must be told to**: a
@@ -65,7 +65,7 @@ pub struct OutputPath {
     ///
     /// Beside [`PinSetup::amp`] and never instead of it: the two halves of one
     /// control live on different widgets and which half is where is the codec's
-    /// choice. The T14 puts 88 steps of gain here and no mute bit, and its mute
+    /// choice. The laptop puts 88 steps of gain here and no mute bit, and its mute
     /// on the pin; QEMU's codec puts both here and gives its pin no amplifier
     /// at all. A driver that assumed either arrangement would write a field
     /// that does not exist, and the store would succeed and do nothing.
@@ -184,7 +184,7 @@ fn association(group: &FunctionGroup, node: Node) -> Option<u8> {
 /// Pins of one default device that sound can actually leave by.
 ///
 /// The connectivity check is the load-bearing one and the default device is
-/// not: four pins on the T14's codec call themselves speakers with no physical
+/// not: four pins on the laptop's codec call themselves speakers with no physical
 /// connection, one of them with a valid connection list and an output
 /// amplifier behind it.
 pub fn outputs(group: &FunctionGroup, device: DefaultDevice) -> impl Iterator<Item = Node> + '_ {
@@ -264,9 +264,9 @@ mod tests {
     use crate::fixture;
 
     #[test]
-    fn the_t14_picks_its_internal_speaker_and_the_jack_that_shares_a_converter() {
-        let codecs = fixture::t14();
-        let path = find_output_path(&codecs).expect("the T14 has a speaker");
+    fn the_laptop_picks_its_internal_speaker_and_the_jack_that_shares_a_converter() {
+        let codecs = fixture::laptop();
+        let path = find_output_path(&codecs).expect("the laptop has a speaker");
 
         assert_eq!(path.codec, Address::new(0).unwrap());
         assert_eq!(path.converter, Node(0x02));
@@ -277,7 +277,7 @@ mod tests {
         assert!(path.output.eapd);
         assert!(!path.output.headphone_drive);
 
-        let headphone = path.headphone.expect("the T14 has a headphone jack");
+        let headphone = path.headphone.expect("the laptop has a headphone jack");
         assert_eq!(headphone.node, Node(0x21));
         // Two connections, and the converter is the first.
         assert_eq!(headphone.route, [Hop { node: Node(0x21), select: 0 }]);
@@ -286,8 +286,8 @@ mod tests {
     }
 
     #[test]
-    fn the_pin_amp_the_t14_offers_is_the_one_that_can_mute() {
-        let path = find_output_path(&fixture::t14()).unwrap();
+    fn the_pin_amp_the_laptop_offers_is_the_one_that_can_mute() {
+        let path = find_output_path(&fixture::laptop()).unwrap();
         let amp = path.output.amp.expect("the speaker pin has an output amp");
         assert!(amp.mute);
         assert_eq!(amp.gain, None);
@@ -299,11 +299,11 @@ mod tests {
 
     #[test]
     fn display_audio_alone_is_a_refusal_naming_it() {
-        // The T14's second codec on its own: a valid output path, a digital
+        // The laptop's second codec on its own: a valid output path, a digital
         // pin, no speaker. This is the machine a first-match driver configures
         // perfectly and hears nothing from.
         let display: Vec<Codec> =
-            fixture::t14().into_iter().filter(|c| c.address.raw() == 2).collect();
+            fixture::laptop().into_iter().filter(|c| c.address.raw() == 2).collect();
         match find_output_path(&display) {
             Err(PathError::NoOutputPin { codecs }) => {
                 assert_eq!(codecs, [Address::new(2).unwrap()]);
@@ -315,9 +315,9 @@ mod tests {
     #[test]
     fn the_display_codec_does_not_win_when_it_comes_first() {
         // Order reversed, so a walk that stopped at the first codec would bind
-        // the wrong one. The T14 puts the analogue codec at the lower address,
+        // the wrong one. The laptop puts the analogue codec at the lower address,
         // so this is the arm the machine itself cannot exercise.
-        let mut codecs = fixture::t14();
+        let mut codecs = fixture::laptop();
         codecs.reverse();
         let path = find_output_path(&codecs).unwrap();
         assert_eq!(path.codec, Address::new(0).unwrap());
@@ -325,13 +325,13 @@ mod tests {
     }
 
     #[test]
-    fn only_one_of_the_t14_s_five_speaker_labelled_pins_is_a_candidate() {
+    fn only_one_of_the_laptop_s_five_speaker_labelled_pins_is_a_candidate() {
         // Asserted on the candidate *set* and not on the chosen pin: the real
         // speaker is 0x14 and the unwired ones are 0x12, 0x18, 0x1a and 0x1b,
         // so the pin that wins comes first in node order anyway and deleting
         // the connectivity check leaves the choice unchanged. This is what
         // makes the check tested rather than merely present.
-        let codecs = fixture::t14();
+        let codecs = fixture::laptop();
         let group = &codecs[0].groups[0];
         let candidates: Vec<Node> = outputs(group, DefaultDevice::Speaker).collect();
         assert_eq!(candidates, [Node(0x14)]);
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn an_unwired_speaker_pin_does_not_win_by_coming_first() {
-        // The ordering the T14 does not have. Without the connectivity check
+        // The ordering the laptop does not have. Without the connectivity check
         // the unwired pin is reached first and configured, and the machine is
         // silent with nothing in the log to say why.
         let codecs = fixture::synthetic_unwired_first();

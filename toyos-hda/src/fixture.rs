@@ -13,10 +13,10 @@ use crate::caps::{AmpCaps, ConfigDefault, PcmCaps, PinCaps, WidgetCaps};
 use crate::graph::{Codec, FunctionGroup, FunctionKind, Pin, Widget};
 use crate::verb::{Address, Node, Response, Subordinates};
 
-/// The ThinkPad T14 Gen 2's ALC257 and its display audio, as the probe read
+/// The laptop's ALC257 and its display audio, as the probe read
 /// them on 2026-08-05.
-pub fn t14() -> Vec<Codec> {
-    parse(include_str!("../fixtures/alc257-t14.txt"))
+pub fn laptop() -> Vec<Codec> {
+    parse(include_str!("../fixtures/laptop.txt"))
 }
 
 /// QEMU's `intel-hda` with an `hda-output` and an `hda-duplex` behind it, as
@@ -210,7 +210,7 @@ pub fn synthetic_selector() -> Vec<Codec> {
 }
 
 /// Two speaker-labelled pins with a converter behind each, the *unwired* one
-/// first — the ordering the T14 happens not to have, and the only arrangement
+/// first — the ordering the laptop happens not to have, and the only arrangement
 /// in which the port-connectivity check changes which pin is chosen.
 pub fn synthetic_unwired_first() -> Vec<Codec> {
     let mut unwired = speaker_pin(0x20, &[0x10]);
@@ -243,8 +243,8 @@ mod tests {
     use crate::caps::{Connectivity, DefaultDevice, WidgetKind};
 
     #[test]
-    fn the_t14_fixture_carries_both_codecs_and_every_widget() {
-        let codecs = t14();
+    fn the_laptop_fixture_carries_both_codecs_and_every_widget() {
+        let codecs = laptop();
         assert_eq!(codecs.len(), 2);
 
         let alc = &codecs[0];
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn the_speaker_pin_round_trips_through_the_log_format() {
-        let codecs = t14();
+        let codecs = laptop();
         let group = &codecs[0].groups[0];
         let speaker = group.widget(Node(0x14)).unwrap();
         assert_eq!(speaker.caps.kind, WidgetKind::PinComplex);
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn the_converters_keep_their_rates() {
-        let codecs = t14();
+        let codecs = laptop();
         let dac = codecs[0].groups[0].widget(Node(0x02)).unwrap();
         assert!(dac.pcm.unwrap().supports(44100, 16));
     }
@@ -289,7 +289,7 @@ mod tests {
         // A pin whose `cfgdef` line failed to parse would decode as
         // connectivity `Jack` and device `LineOut` — a plausible pin nobody
         // wired, which is exactly the value this crate must never invent.
-        for codec in t14() {
+        for codec in laptop() {
             for group in &codec.groups {
                 for widget in &group.widgets {
                     if widget.caps.kind == WidgetKind::PinComplex {

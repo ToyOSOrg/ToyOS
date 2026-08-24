@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn the_rate_this_pipeline_plays_encodes_as_the_forty_four_one_base() {
-        // 44.1 kHz, S16, stereo — soundd's grid, and what both the T14's
+        // 44.1 kHz, S16, stereo — soundd's grid, and what both the laptop's
         // converter and QEMU's offer.
         assert_eq!(stream_format(44_100, 16, 2), Some(0x4011));
     }
