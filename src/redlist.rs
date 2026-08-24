@@ -2095,7 +2095,19 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_console_panic",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "**the panic path was never in it, and the row's own capture says so.** The job log \
+             prints the panel, and the line at the prompt reads `test_rs_TESTpanic_child 3` — the \
+             shell answered `not found`, so no panic was ever asked for and there was no report \
+             to take any screen. What mangled the command is QEMU's 16-byte PS/2 queue, which \
+             drops what a guest that is not draining cannot take, silently and one byte at a \
+             time: the lost shift break is why four letters came back capitalised. The host was \
+             typing on a wall clock, which `QEMU_PS2_QUEUE`'s own doc had already ruled out for \
+             every other injection in this suite. `console_type_line` now sends the line in \
+             bursts no wider than that queue and waits for the panel to echo each one, so a burst \
+             always starts against an empty queue: staged at the limit (the whole line in one \
+             transmission) that is 5 of 5 red before and 0 of 5 after",
+        ),
         what: "`the fatal report never took the screen back from the console — which would make \
                /bin/console a downgrade on the machine it is for`, at 96 s against the suite's \
                usual seconds, so the shape is a handoff waited for and never observed. First \
@@ -2106,8 +2118,28 @@ pub const KNOWN_RED: &[Red] = &[
                a rate and not a classification`",
         evidence: "PR #141 run 32306139422, job 96239259411 (`guest (3)`), 2026-08-19; the \
                    isolated re-run in the same job was green",
-        source: "issues/panic-path/the-fatal-report-once-left-the-screen-to-the-console.md",
+        source: "tests/toyos.rs console_type_line",
         measured: "2026-08-19",
+    },
+    Red {
+        test: "screen_console_panic",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Retired(
+            "the same keystroke loss as the row above, and the capture that settles it: the panel \
+             read `/home/root> test_rspanic_child 3`, which is the first sixteen set-1 bytes of \
+             what was typed and then a hole exactly one queue wide. Two sightings, two mangled \
+             command lines, no panic in either",
+        ),
+        what: "`the fatal report never took the screen back from the console`, at 181 s. Never on \
+               the list — recorded here because it is the sighting whose capture names the cause, \
+               and because a row that retires a name has to account for every red under it. \
+               **Not about the diff it was found on**, a FAT32 cluster-release change. `ALONE: \
+               GREEN`",
+        evidence: "PR #262 run 32667714627, job 97263796784 (`guest (10)`), 2026-08-23; the \
+                   isolated re-run in the same job was green in 6 s",
+        source: "tests/toyos.rs console_type_line",
+        measured: "2026-08-23",
     },
     Red {
         test: "log_poll_outlives_a_close",

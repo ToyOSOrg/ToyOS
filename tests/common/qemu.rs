@@ -3164,12 +3164,47 @@ impl QmpInput {
         self.send(&body);
     }
 
+    /// Type `text` as one batch of transitions, with no wait anywhere in it.
+    ///
+    /// **The caller owns the bound, and there is no version of this that does
+    /// not need one.** QEMU's PS/2 keyboard queue holds `QEMU_PS2_QUEUE` set-1
+    /// bytes and drops what does not fit silently, one byte at a time, so a
+    /// batch wider than that queue is a hole in the middle of a word whatever
+    /// the guest is doing. Use [`scancode_bytes`] to measure a batch, and send
+    /// the next one only once the guest has shown it consumed this one —
+    /// `console_type_line` in `tests/toyos.rs` is the pattern.
+    ///
+    /// The gap [`Self::type_text`] leaves between characters is the same bound
+    /// bet on a wall clock, and this exists because that bet loses: see that
+    /// function.
+    pub fn type_burst(&mut self, text: &str) {
+        let mut events: Vec<(&str, bool)> = Vec::new();
+        for ch in text.chars() {
+            let (qcode, shift) = qcode(ch);
+            if shift {
+                events.extend([("shift", true), (qcode, true), (qcode, false), ("shift", false)]);
+            } else {
+                events.extend([(qcode, true), (qcode, false)]);
+            }
+        }
+        self.keys(&events);
+    }
+
     /// Type `text` on the guest's keyboard, one character at a time.
     ///
-    /// The gap between characters is the wire's, not a settling delay for the
-    /// assertion: the i8042 carries one scancode per interrupt and the guest
-    /// has to drain each before the next, which is the same reason
-    /// `metal_sim_input` spaces its five keys.
+    /// **The gap between characters is a bet, and a loaded host takes it.** The
+    /// i8042 carries one scancode per interrupt and the guest has to drain each
+    /// before the next; 15 ms is a guess at how long that takes, and a guest
+    /// whose vCPU the host has not scheduled for a couple of hundred
+    /// milliseconds drains none of them — at which point QEMU's 16-byte queue
+    /// starts dropping, silently and one byte at a time, and the guest receives
+    /// the line with a hole in it. Both times `screen_console_panic` has ever
+    /// gone red that is what happened, and neither side of the wire says a word
+    /// about it.
+    ///
+    /// So this is for a caller with **no** channel to pace against. One that
+    /// can see what the guest received pairs [`Self::type_burst`] with that
+    /// channel instead and cannot lose a byte at all.
     pub fn type_text(&mut self, text: &str) {
         for ch in text.chars() {
             let (qcode, shift) = qcode(ch);
@@ -3212,6 +3247,18 @@ impl QmpInput {
         }
         self.send(&body);
     }
+}
+
+/// What one character costs on the wire, in set-1 bytes.
+///
+/// Every qcode [`qcode`] maps is a one-byte make and its break, and none of
+/// them is `0xE0`-prefixed; a shifted one carries the modifier's pair around
+/// it. This exists because a caller that has to bound what it puts in flight
+/// against QEMU's PS/2 queue cannot do it without knowing what a character
+/// weighs — an unmapped character panics in `qcode` rather than being counted
+/// as anything, which is the same refusal typing one would get.
+pub fn scancode_bytes(ch: char) -> usize {
+    if qcode(ch).1 { 4 } else { 2 }
 }
 
 /// The QEMU qcode for `ch`, and whether Shift is held to produce it.

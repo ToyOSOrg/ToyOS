@@ -3600,10 +3600,12 @@ fn run_screen_test(
                 ));
             }
 
-            {
-                let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                input.type_text("test_rs_test_panic_child 3\n");
-            }
+            // Confirmed keystroke by keystroke, because the two times this test
+            // has ever gone red the command never reached the shell: QEMU's
+            // PS/2 queue had dropped part of it and the assertion below then
+            // reported the panic path for a panic nobody had asked for. See
+            // `console_type_line`.
+            console_type_line(&mut qemu, &font, "test_rs_test_panic_child 3")?;
 
             let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(40));
             let text = dump.text();
@@ -5656,9 +5658,152 @@ fn serial_until_new(
 const SWISS_ANSWERS: [&str; 3] = ["y", "grave_accent", "ret"];
 
 /// Type `line` and press Enter, at whatever prompt is in front of the guest.
+///
+/// Paced on a wall clock, because a caller with no view of the guest has
+/// nothing else — [`console_type_line`] is the form for one that has the panel,
+/// and its doc is where the cost of the bet is written down.
 fn type_line(input: &mut qemu::QmpInput, line: &str) {
     input.type_text(line);
     input.keys(&[("ret", true), ("ret", false)]);
+}
+
+/// How long one burst of typing has to reach the panel.
+///
+/// The same ceiling every console test already gives the prompt itself, and for
+/// the same guest: a `/bin/console` that has painted a prompt and then stops
+/// echoing for this long has stopped, it is not slow. Nothing expires on the
+/// healthy path — the wait ends the instant the echo is there, and
+/// `screendump_while_rendering` keeps waiting past the deadline while the panel
+/// is still changing.
+const CONSOLE_ECHO: Duration = Duration::from_secs(30);
+
+/// The console's input line as the panel shows it: the last row that begins
+/// with the prompt, trailing blanks off.
+///
+/// The *last*, because a command that has already run leaves its own prompt row
+/// above the live one.
+fn console_input_row(dump: &screen::Ppm, font: &screen::ConsoleFont) -> Option<String> {
+    dump.console_rows(font)
+        .into_iter()
+        .rev()
+        .map(|row| row.trim_end().to_string())
+        .find(|row| row.starts_with(CONSOLE_PROMPT))
+}
+
+/// `line` split into bursts no wider than [`QEMU_PS2_QUEUE`].
+///
+/// The split is on the wire cost of each character, not on its count: a shifted
+/// one is four set-1 bytes and an unshifted one is two, so eight characters and
+/// four characters can be the same burst.
+fn ps2_bursts(line: &str) -> Vec<String> {
+    let mut bursts: Vec<String> = Vec::new();
+    let mut burst = String::new();
+    let mut bytes = 0usize;
+    for ch in line.chars() {
+        let cost = qemu::scancode_bytes(ch);
+        assert!(
+            cost <= QEMU_PS2_QUEUE,
+            "one {ch:?} is {cost} set-1 bytes against a {QEMU_PS2_QUEUE}-byte device queue, so \
+             no burst can carry it whole"
+        );
+        if bytes + cost > QEMU_PS2_QUEUE {
+            bursts.push(std::mem::take(&mut burst));
+            bytes = 0;
+        }
+        burst.push(ch);
+        bytes += cost;
+    }
+    if !burst.is_empty() {
+        bursts.push(burst);
+    }
+    // The two postconditions, checked rather than argued. A burst that outruns
+    // the queue is the hole this function exists to close, and a split that
+    // loses a character is the same hole reached from the other side — and both
+    // would show up downstream as "the guest did not do what it was told",
+    // which is the misreading that put this code here.
+    assert_eq!(
+        bursts.concat(),
+        line,
+        "the burst split lost or reordered characters of {line:?}"
+    );
+    for burst in &bursts {
+        let bytes: usize = burst.chars().map(qemu::scancode_bytes).sum();
+        assert!(
+            bytes <= QEMU_PS2_QUEUE,
+            "the burst {burst:?} is {bytes} set-1 bytes against a {QEMU_PS2_QUEUE}-byte device \
+             queue, which drops the excess one byte at a time and says nothing"
+        );
+    }
+    bursts
+}
+
+/// Type `line` at `/bin/console`'s prompt and press Enter, **paced against the
+/// guest's own echo and never against a wall clock**.
+///
+/// [`QEMU_PS2_QUEUE`] holds sixteen set-1 bytes and drops the seventeenth
+/// silently, one byte at a time; nothing on either side of the wire is told. A
+/// host that keeps typing while the guest is not draining therefore hands the
+/// shell a command with a hole in it, and every assertion below that point is
+/// about a question the guest was never asked. Both recorded
+/// `screen_console_panic` failures are exactly that and nothing else: the panel
+/// carried `/home/root> test_rs_TESTpanic_child 3` on 2026-08-19 (a lost shift
+/// break, so four letters came back capitalised, and a lost make) and
+/// `/home/root> test_rspanic_child 3` on 2026-08-23 (sixteen bytes gone in one
+/// run — one queue's worth, exactly), and in both the shell answered
+/// `not found` and the test blamed the panic path for a report nothing had
+/// asked for.
+///
+/// So the line goes out in bursts no wider than that queue, and the next burst
+/// waits until the panel shows the shell echoed the last one. An echoed
+/// character is a byte the guest has already read out of the device, so every
+/// burst starts against an empty queue and cannot overfill it: the loss is
+/// closed rather than made less likely. This is the rule [`QEMU_PS2_QUEUE`]'s
+/// own doc has stated since the i8042 tests learned it — every injection paced
+/// against the guest's own report — applied to the one injection path that had
+/// never adopted it.
+///
+/// The Enter is separate and unconfirmed on purpose: what it produces is the
+/// caller's assertion, and a prompt that has scrolled is not an echo to match.
+fn console_type_line(
+    qemu: &mut QemuInstance,
+    font: &screen::ConsoleFont,
+    line: &str,
+) -> Result<(), String> {
+    assert!(
+        !line.contains('\n'),
+        "console_type_line presses Enter itself; {line:?} carries its own"
+    );
+    let mut typed = String::new();
+    for burst in ps2_bursts(line) {
+        {
+            // Opened and dropped around each burst: a `-qmp …,server` socket
+            // serves one monitor at a time, and the wait below is a screendump,
+            // which needs the socket back.
+            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+            input.type_burst(&burst);
+        }
+        typed.push_str(&burst);
+        let want = format!("{CONSOLE_PROMPT} {typed}").trim_end().to_string();
+        let echoed =
+            |dump: &screen::Ppm| console_input_row(dump, font).as_deref() == Some(want.as_str());
+        let dump =
+            qemu.screendump_while_rendering(CONSOLE_ECHO, Duration::from_millis(50), echoed);
+        if !echoed(&dump) {
+            return Err(format!(
+                "the console never echoed what was typed at it: its input line reads {:?} and \
+                 not {:?}. A keystroke was lost between the host and the shell — QEMU's \
+                 {QEMU_PS2_QUEUE}-byte PS/2 queue drops what a guest that is not draining \
+                 cannot take, silently — so nothing below this would have been asking the \
+                 guest the question it was written to ask\ndecoded screen:\n{}",
+                console_input_row(&dump, font).unwrap_or_default(),
+                want,
+                dump.console_text(font)
+            ));
+        }
+    }
+    let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+    input.keys(&[("ret", true), ("ret", false)]);
+    Ok(())
 }
 
 /// Wait until keys typed at the guest reach a shell and come back out.
