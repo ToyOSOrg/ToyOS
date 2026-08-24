@@ -177,6 +177,30 @@ actuators! {
     /// See `kernel/src/nvme_gate.rs`.
     nvme_spent_budget = "nvme-spent-budget";
 
+    /// Refuse the first **two** FAT-1 (mirror) writes of a **write-back drain**
+    /// flush on the log volume, as a budget expiry — the mid-mirror refusal a
+    /// starved host produces partway through a cluster allocation, after the
+    /// active-FAT write is durable and before the mirror is.
+    ///
+    /// It is `block::OPERATION` expiring on the second of `set_fat_entry`'s two
+    /// device writes, and nothing on the host side reaches it: QEMU's usb-storage
+    /// answers every write in microseconds, and `rerror`/`werror` fail the whole
+    /// drive rather than one write of a pair — so a device that takes a mirror's
+    /// sibling and refuses it on its own budget cannot be staged from outside.
+    /// The write is really skipped and the operation really answers
+    /// `BudgetExpired`, which is the state the write-back drain's retry must heal
+    /// (`kernel/src/writeback.rs`) and `set_fat_entry`'s active-last order makes
+    /// redoable.
+    ///
+    /// **Two, not one, so the drain's retry ladder reaches attempt 2.** One
+    /// refusal reaches only attempt 1, which merely yields; attempt 2 is the
+    /// first that parks, and the park is where the standing-`WORK`-arm double-arm
+    /// panic lived (`writeback::drain_all_iod`). A single refusal passed the
+    /// broken kernel, which is why CI missed it. Scoped to the drain flush (not
+    /// `SYS_FSYNC`, which already retries) so it lands on exactly the path under
+    /// test. See `kernel/src/fat32_adapter.rs`.
+    fat_mirror_write_refuse = "fat-mirror-write-refuse";
+
     /// Establish three nested `scheduler::Operation`s with known deadlines and
     /// report what every level observed and what each drop restored — once from
     /// a boot phase, which has no task, and once from `iod`'s body, which is

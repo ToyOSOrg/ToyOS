@@ -18,21 +18,16 @@ holding a physical address is an arbitrary read/write primitive over all of
 memory. `issues/kernel/the-iommu-stops-at-translation.md` is that prerequisite,
 and it is at translation only.
 
-Four pieces are explicitly *not* blocked on that and can run in parallel:
+Three pieces are explicitly *not* blocked on that and can run in parallel:
 
 1. **The kernel's audio registry is a concrete match on a device type.** The
    file this was scoped against has since been deleted, so this needs re-scoping
    before it can start; the GPU and NIC traits are the models to copy.
-2. **netd is handed a writable mapping of the whole 2 MiB page containing the
-   virtqueue descriptor, available and used rings.** This is a live isolation
-   defect with the reproduction already written
-   (`issues/isolation/netd-writable-virtqueue.md`), and it should land first
-   regardless of everything else here.
-3. **BAR sizing and re-assignment onto 2 MiB boundaries.** ToyOS maps at 2 MiB
+2. **BAR sizing and re-assignment onto 2 MiB boundaries.** ToyOS maps at 2 MiB
    and nothing else, so both BAR mapping and DMA are 2 MiB-grained where every
    other IOMMU system is page-grained. Re-assign userspace-bound BARs; keep the
    overlap refusal as the assertion that it worked, not as the mechanism.
-4. **The capability itself** — enumerating functions, reading config space,
+3. **The capability itself** — enumerating functions, reading config space,
    mapping a BAR, mapping DMA, receiving an interrupt. Adding syscalls needs the
    owner, and the tree has since moved the *other* way, growing a per-register
    read/write pair on a claimed device.

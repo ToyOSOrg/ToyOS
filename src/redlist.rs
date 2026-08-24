@@ -1651,14 +1651,23 @@ pub const KNOWN_RED: &[Red] = &[
         test: "boot_partition_identity",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 10),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the producer was read out of the code and fixed, 2026-08-22: `toyos::net::hangup` \
+             covered only `IpcError::Disconnected`, which `ipc::read_exact` raises on a read that \
+             answered zero — so it reached the netd that left while this endpoint was waiting for \
+             the *response*, and neither of the two writes ahead of it. Both now map to \
+             `NetError::NetdNotFound`, which is `ErrorKind::NotConnected`, which is sshd's quiet \
+             arm. Landed `f12b684f`, PR #217, with the guest sequence `netd_gone_mid_bind` \
+             (PR #218) staging all three refusals against a port of its own and no timing at all. \
+             Retired 2026-08-23; the rate's cause is gone, so the rate is not re-measurable",
+        ),
         what: "`\"panicked at\" during the boot` — and the panic is sshd's, not the kernel's: \
                `sshd: cannot bind 0.0.0.0:22: netd error`, on a boot where netd had already said \
                there is no NIC and exited 0. This test refuses any boot whose console carries a \
                panic, so its own subject is untouched and the red names the workload. \
                `ALONE: GREEN`",
         evidence: "the same ten consecutive suites as the row above, loads 6.4-9.7",
-        source: "issues/build/sshd-panics-when-netd-exits-before-it-binds.md",
+        source: "tests/toyos-rust-tests/src/bin/netd_gone_mid_bind.rs",
         measured: "2026-08-15",
     },
     // ---------------------------------------------------------------------
@@ -1759,7 +1768,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "boot_partition_identity",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the same fix as the dev-host row above, `f12b684f` / PR #217, retired 2026-08-23. \
+             This capture is the one that took the load qualifier off the race — one guest on the \
+             machine, `--jobs 1` — and the reading that replaced it explains this shard as well \
+             as that session: sshd bound into a teardown already in progress and `hangup` had no \
+             arm for either kernel word it met",
+        ),
         what: "`\"panicked at\" during the boot` — `sshd: cannot bind 0.0.0.0:22: netd error`, the \
                same panic the dev-host row above carries, on a KVM shard with one guest on the \
                machine. So the \"only above load average 6\" qualifier belongs to that session and \
@@ -1768,14 +1783,26 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "run 31900050723, job 95049280131 (`guest (3)`), `wt/toyos-ciwall`; green in the \
                    sibling dispatch 31900045901 minutes earlier on the same names and the same \
                    image",
-        source: "issues/build/sshd-panics-when-netd-exits-before-it-binds.md",
+        source: "tests/toyos-rust-tests/src/bin/netd_gone_mid_bind.rs",
         measured: "2026-08-15",
     },
     Red {
         test: "boot_partition_identity",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 4),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "**the producer was established after this row was written, and by reading rather \
+             than by capturing** — which is why the row's own \"no capture of it can say which \
+             one ran\" was right and still did not settle it. `toyos::net::hangup` mapped \
+             everything that was not `IpcError::Disconnected` to `NetError::Io`, and the two \
+             writes a `tcp_bind` makes ahead of its response read meet \
+             `SyscallError::Gone` at `SYS_HANDLE_SEND` and `SyscallError::NotFound` at \
+             `SYS_WRITE` once `port::Acceptor::on_zero_handles` has run. Both are now \
+             `NetError::NetdNotFound`. Which of the two ran is still not decidable and no longer \
+             needs to be: they are two syscalls of one `send_with_handles`, microseconds apart, \
+             and one change fixes both. Landed `f12b684f`, PR #217; gated by `netd_gone_mid_bind` \
+             (PR #218), whose second and third arms are red without it. Retired 2026-08-23",
+        ),
         what: "**the same signature, and the producer is not established** — `sshd: cannot bind \
                0.0.0.0:22: netd error` at `sshd/src/main.rs:359:23`, the identical bytes to the \
                row above. That is as far as the message goes and this row goes no further: the \
@@ -1796,7 +1823,7 @@ pub const KNOWN_RED: &[Red] = &[
                    32043101865, 32044008591, 32044756253 and 32047352064 — of which only the \
                    second was red under this name; a fifth (32044676027) was cancelled and says \
                    nothing",
-        source: "issues/build/sshd-panics-when-netd-exits-before-it-binds.md",
+        source: "tests/toyos-rust-tests/src/bin/netd_gone_mid_bind.rs",
         measured: "2026-08-17",
     },
     Red {

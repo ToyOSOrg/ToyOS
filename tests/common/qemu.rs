@@ -3722,9 +3722,9 @@ fn wait_for_ready(
             // reach the marker.
             //
             // A process that ended *itself* is not on that list, and the
-            // difference is not academic: `sshd` panics across boots that then
-            // come up perfectly
-            // (`issues/build/sshd-panics-when-netd-exits-before-it-binds.md`).
+            // difference is not academic: `sshd` panicked across four recorded
+            // boots that then came up perfectly, losing a race with `netd`'s
+            // teardown on a machine with no NIC.
             // The words are the same words — `panicked at` — and who wrote the
             // line is the whole of what tells them apart. `super::serial::died`
             // is where that is decided, for this wait and for [`await_guest`]

@@ -5,6 +5,12 @@ use crate::fs::FsError;
 pub const BLOCK_SIZE: usize = 4096;
 
 /// A block number on disk. Cannot be confused with a byte offset.
+///
+/// It cannot be *turned into* one here either: the conversion this type used to
+/// carry was `self.0 * BLOCK_SIZE`, an unchecked multiply on a number a btree
+/// inside the image chose, and nothing in the tree ever called it. [`byte_range`]
+/// is the one way a block becomes bytes, and it is `checked_mul` for the reason
+/// its own doc gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockNum(u64);
 
@@ -15,17 +21,6 @@ impl BlockNum {
 
     pub const fn raw(self) -> u64 {
         self.0
-    }
-
-    pub const fn to_byte_offset(self) -> u64 {
-        self.0 * BLOCK_SIZE as u64
-    }
-
-    pub const fn checked_add(self, n: u64) -> Option<Self> {
-        match self.0.checked_add(n) {
-            Some(v) => Some(Self(v)),
-            None => None,
-        }
     }
 }
 

@@ -289,11 +289,19 @@ const RUST_SKIP: &[&str] = &[
     //
     // `cache_eviction` needs the small NVMe that makes the cache evict at all.
     "cache_eviction",
-    // `writeback_reopen` needs its own boot with `writeback-stall` armed;
-    // `writeback_durability` writes `/log` and is judged host-side off the image
-    // after a shutdown. Both run as `MACHINE_TESTS`, not on the shared boot.
+    // `writeback_reopen` and `writeback_spawn` each need their own boot with
+    // `writeback-stall` armed; `writeback_durability` writes `/log` and is judged
+    // host-side off the image after a shutdown. All three run as `MACHINE_TESTS`,
+    // not on the shared boot.
     "writeback_reopen",
+    "writeback_spawn",
     "writeback_durability",
+    // Same shape as `writeback_durability`: what it stages on `/log` — a file
+    // unlinked out from under a held descriptor, its clusters handed to the next
+    // writer — is only half the claim, and the other half is the volume read
+    // back off the image after a shutdown by a FAT implementation that is not
+    // the kernel's. `fat_backing_revoked` runs it.
+    "fat_backing_revoked",
     // Needs an HDA controller, which `tests/testcases` has none of.
     "hda_client_stall",
     // Gate A's two, whose verdict is the wav the device captured — which the
@@ -819,13 +827,21 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
     ("log_partition_identity", Sched::Parallel, Tier::Fast),
     ("cache_eviction", Sched::Parallel, Tier::Fast),
-    // The write-back queue's two negative controls (wall 4 of
+    // The write-back queue's three negative controls (wall 4 of
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
-    // arms `writeback-stall`, so it needs its own actuator boot; `writeback_durability`
-    // is a host-side volume oracle that shuts the guest down and reads `/log` back
-    // with `toyos-fat32-check`.
+    // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator
+    // boot: one holds the queue open across a *handle* re-open, which the file
+    // cache answers, and the other across a *spawn*, which is a device view and
+    // does not. `writeback_durability` is a host-side volume oracle that shuts the
+    // guest down and reads `/log` back with `toyos-fat32-check`.
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
+    ("writeback_spawn", Sched::Parallel, Tier::Fast),
     ("writeback_durability", Sched::Parallel, Tier::Fast),
+    // The FAT32 read side's revocation gate, and a host-side volume oracle for
+    // the same reason `writeback_durability` is one: whether the clusters the
+    // unlink freed were really reissued, and whether the cycle left a volume, are
+    // both questions the guest that staged them cannot answer about itself.
+    ("fat_backing_revoked", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
@@ -7408,6 +7424,9 @@ fn run_machine_test(
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
         "writeback_durability" => common::volumes::writeback_durability(test_config, c_bins, rust_bins),
+        // Same again: the FAT32 read side's revocation, judged off the volume the
+        // guest's unlink-and-reallocate cycle left behind.
+        "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.
@@ -7424,6 +7443,29 @@ fn run_machine_test(
             if !check_rust_result(&result) {
                 return Err(format!(
                     "writeback_reopen failed:\n{}\nkernel log while it ran:\n{}{}",
+                    result.stdout, result.before, result.serial
+                ));
+            }
+            Ok(())
+        }
+        // The other half of the same stall, on the path the file cache does not
+        // answer: a spawn reads a *device* view (`Vfs::open_backing`), so a
+        // binary written and closed with the write-back still owed used to load
+        // as `ELF: fewer bytes than a file header`. Same actuator, and the same
+        // reason it needs its own boot.
+        "writeback_spawn" => {
+            let options = BootOptions {
+                kernel_params: &["writeback-stall"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let boot = qemu.boot_log().to_string();
+            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+            let result = qemu.run_test("test_rs_writeback_spawn", Duration::from_secs(30));
+            if !check_rust_result(&result) {
+                return Err(format!(
+                    "writeback_spawn failed:\n{}\nkernel log while it ran:\n{}{}",
                     result.stdout, result.before, result.serial
                 ));
             }

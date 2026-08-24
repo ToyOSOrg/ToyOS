@@ -51,10 +51,19 @@
 //! mounted once at boot. A third FAT32 partition on the same disk is not
 //! reachable from here and should not become reachable without the same three
 //! gates.
+//!
+//! # Freeing a cluster gives up the extent lists naming it first
+//!
+//! A [`FatBacking`] reads the volume directly, holds no lock the filesystem
+//! takes, and outlives the call that made it — so between a freed cluster and a
+//! stale list still naming it there is nothing but the next allocation, and the
+//! next allocation is where another file's bytes come from. Every path that
+//! frees ([`FatFs::revoke`]) or shortens ([`FatExtents::truncate_to`]) does it
+//! before the FAT is written, not after.
 
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -368,6 +377,19 @@ impl BlockAccess for FatVolume {
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
+        // The `fat-mirror-write-refuse` actuator: a budget expiry on the mirror
+        // write of a drain flush's cluster allocation, which no host option can
+        // stage. Refused before the write is issued, exactly as a spent
+        // `block::OPERATION` refuses one with nothing in flight — the volume is
+        // untouched and the caller may ask again.
+        #[cfg(feature = "boot-actuators")]
+        if self.role == Role::Log && mirror_refuse::should_refuse(offset, buf.len()) {
+            log!(
+                "log-volume: fat-mirror-write-refuse: refusing the FAT-1 mirror write of a \
+                 drain flush at volume offset {offset} as a budget expiry"
+            );
+            return Err(IoError::BudgetExpired);
+        }
         let mut guard = device(self.role).lock();
         guard.as_mut().ok_or(IoError::Device)?.write_at(offset, buf)
     }
@@ -434,11 +456,181 @@ fn injected_read_failure(role: Role) -> bool {
     !boot_volume_reads() && role == Role::Boot && BOOT_MOUNTED.load(Ordering::Relaxed)
 }
 
+/// Which byte ranges of the volume one file's data lives in, and whether they
+/// are still that file's.
+///
+/// Every [`FatBacking`] for one name reads through the same one of these rather
+/// than a copy taken when it was handed out, so unlinking the file is a single
+/// store that every outstanding backing sees — the one the file cache re-fetches
+/// evicted pages through, the one a spawned program's text is demand-paged from,
+/// and any handed out since. It is `/home`'s [`crate::file_backing::FileBlocks`]
+/// in this volume's units: a FAT extent is a device byte range and a bcachefs
+/// one is a block number, and nothing else about the two differs.
+///
+/// It keeps nothing alive. `Fat32::remove` puts the clusters back in the FAT the
+/// moment the entry is erased and the next file takes them — `free_chain` even
+/// walks FSInfo's `next_free` *down* to the lowest cluster it frees, so the very
+/// next allocation on the volume is the one that reissues them — which is
+/// exactly why a read after that has to *fail*: the clusters are still readable
+/// and what is in them belongs to somebody else.
+struct FatExtents {
+    /// `None` once the volume has the clusters back.
+    runs: Lock<Option<Vec<Extent>>>,
+}
+
+/// Where one file offset is, once [`FatExtents`] has been asked.
+enum Located {
+    /// The volume byte offset, and how many bytes of that contiguous run follow
+    /// it.
+    Run(u64, u64),
+    /// Past the end of the extent list: the file has no data there, and zeros
+    /// are its own bytes.
+    Hole,
+}
+
+impl FatExtents {
+    fn new(runs: Vec<Extent>) -> Arc<Self> {
+        Arc::new(Self { runs: Lock::new(Some(runs)) })
+    }
+
+    /// Give the ranges up. Every read through every backing that shares this
+    /// fails from here on.
+    fn revoke(&self) {
+        *self.runs.lock() = None;
+    }
+
+    /// Take the list a fresh [`Fat32::extents`] just produced.
+    ///
+    /// Write-through and not a new cell: a backing handed out at an earlier open
+    /// must not keep the ranges the file had before somebody else appended to
+    /// it, and it is the *cell* the sharers hold.
+    fn refresh(&self, runs: Vec<Extent>) {
+        *self.runs.lock() = Some(runs);
+    }
+
+    /// Give up everything past `len` bytes, keeping the prefix.
+    ///
+    /// Pure arithmetic on the list already here, so it can run *before*
+    /// `Fat32::set_len` hands the tail clusters back to the allocator rather
+    /// than after: there is no window in which a sharer's backing names a
+    /// cluster the next file has taken. A revoked file has no tail to give up.
+    fn truncate_to(&self, len: u64) {
+        let mut guard = self.runs.lock();
+        let Some(runs) = guard.as_mut() else { return };
+        let mut kept = 0u64;
+        runs.retain_mut(|run| {
+            let room = len.saturating_sub(kept);
+            run.len = run.len.min(room);
+            kept += run.len;
+            run.len != 0
+        });
+    }
+
+    /// Where `file_offset` is on the volume, or `None` once the file is gone.
+    ///
+    /// One acquisition per run and never one held across the device read below:
+    /// this lock is a leaf above the volume's, and a page on a volume with
+    /// 512-byte clusters is up to eight runs and eight transfers. The walk is
+    /// from the front of the list, which is what the loop it replaced did once
+    /// per page rather than once per run.
+    fn locate(&self, file_offset: u64) -> Option<Located> {
+        let guard = self.runs.lock();
+        let runs = guard.as_ref()?;
+        // Where the run under consideration starts, in file bytes.
+        let mut base = 0u64;
+        for run in runs {
+            if file_offset < base + run.len {
+                let within = file_offset - base;
+                return Some(Located::Run(run.offset + within, run.len - within));
+            }
+            base += run.len;
+        }
+        Some(Located::Hole)
+    }
+}
+
+/// The `fat-mirror-write-refuse` actuator: refuse the first two FAT-1 (mirror)
+/// writes of a write-back drain flush on the log volume, as a budget expiry.
+///
+/// Scoped to the drain flush (`writeback::drain_one` brackets its `flush_file`
+/// with [`enter_drain_flush`]/[`leave_drain_flush`]) so it lands on the path the
+/// fix is about and not on `SYS_FSYNC`, which already retries. The mirror region
+/// is captured at mount; a write overlapping it while a drain flush is in
+/// progress is refused, twice, so the drain's retry ladder reaches the attempt
+/// that parks. Everything folds to nothing without `boot-actuators`.
+#[cfg(feature = "boot-actuators")]
+mod mirror_refuse {
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    /// The log volume's FAT-1 byte range, volume-relative, captured at mount.
+    static LO: AtomicU64 = AtomicU64::new(0);
+    static HI: AtomicU64 = AtomicU64::new(0);
+    /// Set while `writeback`'s drain holds a `flush_file` open, so the refusal
+    /// falls on the drain path and not on a `SYS_FSYNC` flush.
+    static IN_DRAIN: AtomicBool = AtomicBool::new(false);
+    /// How many drain-flush mirror writes have been refused so far.
+    static REFUSED: AtomicU32 = AtomicU32::new(0);
+
+    /// Refuse the first **two**, not one. One refusal makes the drain's retry
+    /// ladder reach only attempt 1, which merely yields; attempt 2 is the first
+    /// that parks, and the park is where the `iod` one-arm-per-task panic lived
+    /// (`writeback::drain_all_iod`). So a single-refusal control passes a broken
+    /// kernel — exactly what CI missed. Two refusals force attempt 2; the third
+    /// flush (spent) heals the mirror.
+    const REFUSALS: u32 = 2;
+
+    pub fn capture(lo: u64, hi: u64) {
+        LO.store(lo, Ordering::Relaxed);
+        HI.store(hi, Ordering::Relaxed);
+    }
+
+    pub fn set_in_drain(on: bool) {
+        IN_DRAIN.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether this log-volume write is one to refuse: the actuator is armed, a
+    /// drain flush is in progress, fewer than [`REFUSALS`] have been refused, and
+    /// the bytes overlap the mirror FAT. Counts the refusal.
+    pub fn should_refuse(offset: u64, len: usize) -> bool {
+        if !crate::actuator::fat_mirror_write_refuse()
+            || !IN_DRAIN.load(Ordering::Relaxed)
+            || REFUSED.load(Ordering::Relaxed) >= REFUSALS
+        {
+            return false;
+        }
+        let (lo, hi) = (LO.load(Ordering::Relaxed), HI.load(Ordering::Relaxed));
+        let end = offset + len as u64;
+        if hi > lo && offset < hi && end > lo {
+            REFUSED.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+}
+
+/// Mark whether a write-back drain flush is in progress, so the
+/// `fat-mirror-write-refuse` actuator refuses a mirror write on the drain path
+/// and not on `SYS_FSYNC`. Folds to nothing without `boot-actuators`.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn enter_drain_flush() {
+    mirror_refuse::set_in_drain(true);
+}
+
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn leave_drain_flush() {
+    mirror_refuse::set_in_drain(false);
+}
+
 /// A file on one of these volumes, as byte ranges the page-fault path can read
 /// without going back through the filesystem.
+///
+/// `size` is the file's length when this backing was made and not a view of the
+/// shared cell, exactly as [`crate::file_backing::NvmeBacking`]'s is: it bounds
+/// how many bytes are copied out, and a caller that wants the current length
+/// asks the file cache.
 struct FatBacking {
     role: Role,
-    extents: Vec<Extent>,
+    extents: Arc<FatExtents>,
     size: u64,
 }
 
@@ -450,21 +642,24 @@ impl FileBacking for FatBacking {
         }
         let valid = (4096u64).min(self.size - file_offset) as usize;
         let mut done = 0usize;
-        // Where the extent under consideration starts, in file bytes. A page
-        // can span two of them whenever the volume's cluster is smaller than
-        // 4096, which a volume a few tens of megabytes across usually is.
-        let mut base = 0u64;
-        for extent in &self.extents {
-            if done >= valid {
+        // A page can span two runs whenever the volume's cluster is smaller
+        // than 4096, which a volume a few tens of megabytes across usually is.
+        while done < valid {
+            // Asked again for every run, so a revocation that lands halfway
+            // through a page stops the rest of it: the file is gone either way.
+            let Some(found) = self.extents.locate(file_offset + done as u64) else {
+                // The clusters went back to the allocator when the file was
+                // unlinked, and the next file has them. Reading them would
+                // serve its contents to whoever still holds this backing.
+                log!("{}-volume: read through a backing whose file was deleted", self.role);
+                return Err(crate::block::BlockError::Device);
+            };
+            let Located::Run(at, run) = found else {
+                // Past the extent list: a hole, and the zeros already in `buf`
+                // are the file's own bytes.
                 return Ok(());
-            }
-            let want = file_offset + done as u64;
-            if want >= base + extent.len {
-                base += extent.len;
-                continue;
-            }
-            let within = want - base;
-            let n = ((extent.len - within) as usize).min(valid - done);
+            };
+            let n = (run as usize).min(valid - done);
             let mut guard = device(self.role).lock();
             let Some(dev) = guard.as_mut() else {
                 // Only reachable if a mount failed after installing the device
@@ -473,7 +668,7 @@ impl FileBacking for FatBacking {
                 log!("{}-volume: not mounted; serving zeros", self.role);
                 return Err(crate::block::BlockError::Device);
             };
-            let served = dev.read_at(extent.offset + within, &mut buf[done..done + n]);
+            let served = dev.read_at(at, &mut buf[done..done + n]);
             if !fat_backing_reads() {
                 // The read above was issued and is the shipped one, so a
                 // transport that really broke is still what `served` says —
@@ -485,13 +680,12 @@ impl FileBacking for FatBacking {
                 buf[done..done + n].fill(0);
             }
             if served.is_err() || !fat_backing_reads() {
-                log!("{}-volume: read of {n} B at volume offset {} failed; serving zeros",
-                    self.role, extent.offset + within);
+                log!("{}-volume: read of {n} B at volume offset {at} failed; serving zeros",
+                    self.role);
                 return Err(crate::block::BlockError::Device);
             }
             drop(guard);
             done += n;
-            base += extent.len;
         }
         Ok(())
     }
@@ -525,8 +719,9 @@ struct OpenFile {
 ///
 /// Path identity makes delete-and-recreate produce a *new* `FileId`, because
 /// `delete` drops the name; and it survives a rename, because `rename`
-/// re-keys. What it cannot survive is a handle held across an unlink — see
-/// [`FileSystem::delete`].
+/// re-keys. A handle held across an unlink keeps its `FileId` and its cached
+/// pages, and reads nothing new: [`FatFs::revoke`] takes the byte ranges away
+/// from every backing that named them.
 ///
 /// [`by_name`]: FatFs::by_name
 pub struct FatFs {
@@ -534,6 +729,13 @@ pub struct FatFs {
     fs: Fat32<FatVolume>,
     open: HashMap<FileId, OpenFile>,
     by_name: HashMap<String, FileId>,
+    /// The one [`FatExtents`] every backing for a name shares.
+    ///
+    /// Keyed by name and not by `FileId` because `open_backing` hands out a
+    /// backing without opening a file at all — that is the one a spawned
+    /// program's text lives behind, and it outlives every handle. `Weak` so the
+    /// entry costs nothing once the last backing is dropped.
+    extents: HashMap<String, Weak<FatExtents>>,
 }
 
 /// What to stamp on an entry this adapter is writing.
@@ -613,17 +815,70 @@ fn refused(role: Role, op: &str, name: &str, e: Error) -> SyscallError {
 
 impl FatFs {
     fn new(role: Role, fs: Fat32<FatVolume>) -> Self {
-        Self { role, fs, open: HashMap::new(), by_name: HashMap::new() }
+        Self {
+            role,
+            fs,
+            open: HashMap::new(),
+            by_name: HashMap::new(),
+            extents: HashMap::new(),
+        }
     }
 
     fn backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         let role = self.role;
         let size = self.fs.metadata(name).map_err(|e| refused(role, "metadata", name, e))?.len;
-        let extents = self
+        let runs = self
             .fs
             .extents(name, MAX_EXTENTS)
             .map_err(|e| refused(role, "extents", name, e))?;
+        let extents = self.extents_for(name, runs);
         Ok(Arc::new(FatBacking { role, extents, size }))
+    }
+
+    /// The cell every backing for `name` reads through, carrying the extent
+    /// list just read off the volume.
+    fn extents_for(&mut self, name: &str, runs: Vec<Extent>) -> Arc<FatExtents> {
+        // Names whose last backing has gone are swept here rather than on a
+        // timer: the map is only ever grown by this call, so this is the one
+        // place where dropping them costs nothing extra.
+        self.extents.retain(|_, weak| weak.strong_count() > 0);
+
+        if let Some(live) = self.extents.get(name).and_then(Weak::upgrade) {
+            live.refresh(runs);
+            return live;
+        }
+        let cell = FatExtents::new(runs);
+        self.extents.insert(String::from(name), Arc::downgrade(&cell));
+        cell
+    }
+
+    /// The live cell for `name`, if some backing still holds one.
+    fn live_extents(&self, name: &str) -> Option<Arc<FatExtents>> {
+        self.extents.get(name).and_then(Weak::upgrade)
+    }
+
+    /// Give up every backing that reads `name`'s clusters.
+    ///
+    /// Called wherever the volume hands those clusters back to the FAT — an
+    /// unlink, and a rename over an existing name. The next file takes them, so
+    /// a backing that still names them reads that file's data: an information
+    /// disclosure through ordinary filesystem operations, with nothing crafted
+    /// about it.
+    ///
+    /// **Before the clusters are freed and not after**, because
+    /// [`FatBacking::read_page`] takes no VFS lock: a read on another CPU
+    /// between the free and the revocation would name clusters the allocator
+    /// has already reissued. The cost of that order is that a `remove` which
+    /// then fails leaves a live file's outstanding backings dead — the name
+    /// re-opens and gets a fresh cell, and refusing to read a file the volume
+    /// would not delete is the safe half of the trade.
+    ///
+    /// The map entry goes too, so a name created again after this gets a new
+    /// cell rather than re-arming the one a stale backing still holds.
+    fn revoke(&mut self, name: &str) {
+        if let Some(cell) = self.extents.remove(name).as_ref().and_then(Weak::upgrade) {
+            cell.revoke();
+        }
     }
 
     /// Make sure every directory on the way to `name` exists.
@@ -716,30 +971,30 @@ impl FileSystem for FatFs {
         }
     }
 
-    /// Unlink, and drop the write handle whether or not a process still holds
-    /// the file open.
+    /// Unlink, and give up both sides of the file whether or not a process
+    /// still holds it open.
     ///
     /// Unconditionally, unlike the bcachefs adapters, and that is the point.
-    /// `remove` below frees the chain and erases the entry, so the cached
-    /// `toyos_fat32::File` now names clusters the allocator is free to hand to
-    /// the next file — and a later `write_page` through it would put one
-    /// process's bytes inside another's. Dropping it turns that into
-    /// `NotFound` from `write_page`, so a handle held across an unlink can no
-    /// longer write the file back — and closing it says so in the log rather
-    /// than discarding the error. That is the right answer: the file it would
-    /// write back does not exist.
+    /// `remove` below frees the chain and erases the entry, so everything that
+    /// still names those clusters names the next file's data:
     ///
-    /// The read side is not closed here — the `FatBacking` an open handle
-    /// already
-    /// holds still names those byte ranges, which is the same live
-    /// cross-process leak `issues/isolation/tmpfs-backing-outlives-deletion.md`
-    /// records for `/home`. This closes the
-    /// destructive half only.
+    /// - the **write** side is the cached `toyos_fat32::File`, and a later
+    ///   `write_page` through it would put one process's bytes inside
+    ///   another's. Dropping it turns that into `NotFound` from `write_page`,
+    ///   so a handle held across an unlink can no longer write the file back.
+    ///   That is the right answer: the file it would write back does not exist.
+    /// - the **read** side is every [`FatBacking`] already handed out, and
+    ///   [`FatFs::revoke`] is what takes the byte ranges away from all of them
+    ///   at once. Without it, a process holding a descriptor across somebody
+    ///   else's `rm` demand-paged whatever the volume put in those clusters
+    ///   next — a cross-process disclosure through `open`, `rm` and a write,
+    ///   with no privilege and nothing crafted about it.
     fn delete(&mut self, name: &str) -> Result<(), SyscallError> {
         if let Some(file_id) = self.by_name.remove(name) {
             let _ = file_cache::mark_deleted(file_id);
             self.open.remove(&file_id);
         }
+        self.revoke(name);
         let role = self.role;
         self.fs.remove(name).map_err(|e| refused(role, "delete", name, e))
     }
@@ -753,6 +1008,9 @@ impl FileSystem for FatFs {
     /// below, neither name names the old file's data.
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError> {
         let role = self.role;
+        // The destination's clusters are freed by this; the source's are
+        // carried over to the new name, so only the destination is revoked —
+        // and `delete` is what does it.
         if self.fs.exists(new).map_err(|e| refused(role, "exists", new, e))? {
             self.delete(new)?;
         }
@@ -762,6 +1020,12 @@ impl FileSystem for FatFs {
             if let Some(info) = self.open.get_mut(&file_id) {
                 info.name = String::from(new);
             }
+        }
+        // Re-keyed rather than revoked: the file's data did not move, so a
+        // backing handed out under the old name still names this file's own
+        // clusters and must keep reading them.
+        if let Some(cell) = self.extents.remove(old) {
+            self.extents.insert(String::from(new), cell);
         }
         Ok(())
     }
@@ -789,7 +1053,15 @@ impl FileSystem for FatFs {
     /// flush just wrote are now evictable, and the extents captured when the
     /// file was opened do not cover the clusters this write allocated —
     /// evicting one of those pages against a stale extent list reads back
-    /// zeroes.
+    /// zeroes. `backing` writes the fresh list *through* the cell every sharer
+    /// holds, so an earlier opener's backing is re-pointed rather than left
+    /// behind.
+    ///
+    /// A shrink gives the tail up first. `set_len` releases those clusters to
+    /// the FAT, so between it and the re-derivation below a sharer's backing
+    /// would name clusters the next file can already have —
+    /// [`FatExtents::truncate_to`] closes that window with arithmetic on the
+    /// list that is already here, before a single FAT entry is written.
     fn update_metadata(
         &mut self,
         file_id: FileId,
@@ -799,6 +1071,13 @@ impl FileSystem for FatFs {
         let role = self.role;
         let time = now();
         let name = {
+            let known = self.open.get(&file_id).ok_or(SyscallError::NotFound)?;
+            let (name, was) = (known.name.clone(), known.file.len());
+            if was > size {
+                if let Some(cell) = self.live_extents(&name) {
+                    cell.truncate_to(size);
+                }
+            }
             let Self { fs, open, .. } = self;
             let info = open.get_mut(&file_id).ok_or(SyscallError::NotFound)?;
             if info.file.len() != size {
@@ -807,7 +1086,7 @@ impl FileSystem for FatFs {
             }
             fs.flush_meta(&mut info.file, time)
                 .map_err(|e| refused(role, "flush_meta", &info.name, e))?;
-            info.name.clone()
+            name
         };
         // The bytes and the entry are both on the volume by here, so a volume
         // that will not re-derive the extent list has not lost the write. What
@@ -1005,6 +1284,16 @@ pub fn mount(role: Role) -> Option<FatFs> {
     volume.bytes = volume_bytes;
     if let Some(mounted) = device(role).lock().as_mut() {
         mounted.len = volume_bytes;
+    }
+
+    // The log volume's FAT-1 (mirror) byte range, for the
+    // `fat-mirror-write-refuse` actuator. A one-FAT volume has no mirror, so the
+    // range stays empty and the actuator can never fire.
+    #[cfg(feature = "boot-actuators")]
+    if role == Role::Log && geom.num_fats >= 2 {
+        let one_fat = geom.fat_sectors as u64 * geom.bytes_per_sector as u64;
+        let lo = geom.fat_base_offset(1);
+        mirror_refuse::capture(lo, lo + one_fat);
     }
 
     match Fat32::mount(volume) {

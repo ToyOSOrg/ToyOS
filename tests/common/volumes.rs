@@ -818,8 +818,17 @@ pub fn writeback_durability(
         (0..BLOB_LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
     }
 
+    // Stage the one failure QEMU will not produce: a budget expiry on the FAT-1
+    // mirror write of the blob's cluster allocation, on the write-back drain path
+    // (`fat-mirror-write-refuse`). Without the drain's retry and
+    // `set_fat_entry`'s active-last order the volume is left with the FATs split;
+    // with them the drain re-drives the flush and heals it, and the checker below
+    // is the independent judge either way. The image is built with the parameter
+    // so the guest boots the test kernel that carries the actuator.
+    const PARAMS: &[&str] = &["fat-mirror-write-refuse"];
+
     let image_path = test_dir().join("writeback-durability.img");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
     std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
     let (start, len) = log_extent(&image, &image_path)?;
 
@@ -841,6 +850,7 @@ pub fn writeback_durability(
         BootOptions {
             profile: qemu::Profile::Metal,
             boot_image: Some(image_path.clone()),
+            kernel_params: PARAMS,
             ..Default::default()
         },
     );
@@ -880,6 +890,34 @@ pub fn writeback_durability(
         }
     }
 
+    // The actuator must have fired **twice**, or this gate proves nothing: a
+    // green run with an inert arm is the worst harness defect
+    // (`tests/common/qemu.rs`'s `refuse_a_staged_image_this_boot_did_not_ask_for`).
+    // Two refusals are what drive the drain's retry ladder to attempt 2 — the
+    // first depth that *parks* between attempts, where `iod`'s standing `WORK`
+    // arm made `between_attempts` a double-arm and panicked the machine. One
+    // refusal reaches only attempt 1 (a yield), which is why the machine passed
+    // the single-refusal control while broken. So this gate proves both halves of
+    // the durability fix: `set_fat_entry`'s active-last order heals the mirror
+    // (checker silent, below), and `drain_all_iod`'s arm-reusing backoff survives
+    // the attempt-2 park (`must_be_clean` above and the `PANIC` scan of the
+    // shutdown tail catch the double-arm). It fires on `iod`'s drain during the
+    // run, or on the shutdown drain if `iod` was late, so the whole capture is
+    // searched.
+    const FIRED: &str = "fat-mirror-write-refuse: refusing the FAT-1 mirror write";
+    let fired = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
+        .iter()
+        .map(|cap| cap.matches(FIRED).count())
+        .sum::<usize>();
+    if fired < 2 {
+        return Err(format!(
+            "the fat-mirror-write-refuse actuator fired {fired} time(s), not the 2 that drive the \
+             drain's retry ladder to the attempt that parks — the gate never reached the path \
+             that panicked, so it proves nothing\nkernel log:\n{}{}\nshutdown:\n{}",
+            result.before, result.serial, tail
+        ));
+    }
+
     let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
     if after.len() != image.len() {
         return Err(format!("the image is {} bytes, was {}", after.len(), image.len()));
@@ -915,6 +953,153 @@ pub fn writeback_durability(
     eprintln!(
         "  [wb] {BLOB_LEN} bytes closed without fsync reached the log volume through the \
          write-back queue and the shutdown drain; the checker is silent"
+    );
+    Ok(())
+}
+
+/// A `FatBacking` handed out before an unlink reads nothing after it, and the
+/// delete-and-reallocate cycle leaves the volume a volume.
+///
+/// `FatFs::delete` frees the file's clusters, and FSInfo's `next_free` is walked
+/// down to the lowest one freed — so the next allocation on the volume takes
+/// them. Until `FatFs::revoke` existed, a process holding a descriptor across
+/// somebody else's `rm` demand-paged whatever went into those clusters next.
+/// The guest (`test_rs_fat_backing_revoked`) stages exactly that and asserts the
+/// read is **refused**.
+///
+/// This is the **independent oracle**, and it answers the two questions the
+/// guest cannot ask about itself:
+///
+/// - **were the clusters really reissued?** The attacker file is read off the
+///   image by the `fatfs` crate and must hold its own bytes end to end, and the
+///   victim's name must be gone from the directory. A run in which the volume
+///   simply had room elsewhere is not a run in which the refusal proved
+///   anything, and only the host's own FAT implementation can say.
+/// - **did the cycle break the format?** `toyos-fat32-check` (fatgen103) reads
+///   the volume after it, against a partition asserted clean before the boot.
+///   A revocation that also corrupted the FAT would pass every assertion the
+///   guest can make and leave a stick that does not boot.
+pub fn fat_backing_revoked(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs`.
+    const VICTIM: &str = "fat-revoke-victim.bin";
+    const ATTACKER: &str = "fat-revoke-attacker.bin";
+    const CONTROL: &str = "fat-revoke-control.bin";
+    const LEN: usize = 8 * 4096;
+    const VICTIM_BYTE: u8 = 0xA7;
+    const ATTACKER_BYTE: u8 = 0x5C;
+
+    let image_path = test_dir().join("fat-backing-revoked.img");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = log_extent(&image, &image_path)?;
+
+    // Born clean, asserted rather than assumed, so a complaint after the run is
+    // the guest's and not one it inherited.
+    let complaints_before = check(&image[start..start + len]);
+    if !complaints_before.is_empty() {
+        return Err(format!(
+            "the log partition was not born clean, so this gate cannot tell a complaint the \
+             guest caused from one it inherited:\n{}",
+            describe(&complaints_before)
+        ));
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+    if !boot.contains("log-volume: partition mounted") {
+        return Err(format!(
+            "the log partition did not mount, so the guest had nowhere to stage the unlink:\n{}",
+            volume_lines(&boot)
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_fat_backing_revoked", Duration::from_secs(60));
+    if let Some(err) = &result.error {
+        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        // The kernel's own lines too: the refusal reaches userland as one `Io`,
+        // and which layer refused is only in a `log!`.
+        return Err(format!(
+            "fat_backing_revoked guest failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    if after.len() != image.len() {
+        return Err(format!("the image is {} bytes, was {}", after.len(), image.len()));
+    }
+    let volume = &after[start..start + len];
+
+    // The strongest claim first: the volume is still a volume. A revocation that
+    // freed the chain wrongly would pass every byte comparison below and leave a
+    // stick that cannot boot.
+    let complaints_after = check(volume);
+    if !complaints_after.is_empty() {
+        return Err(format!(
+            "the unlink-and-reallocate cycle left the log volume breaking the format:\n{}",
+            describe(&complaints_after)
+        ));
+    }
+
+    let mut files = read_files(volume, &[VICTIM, ATTACKER, CONTROL])?;
+    let control = need(files.pop().flatten(), CONTROL)?;
+    let attacker = need(files.pop().flatten(), ATTACKER)?;
+    if files.pop().flatten().is_some() {
+        return Err(format!(
+            "{VICTIM} is still on the volume after the guest unlinked it — the delete never \
+             reached the directory, so nothing about a reissued cluster was staged"
+        ));
+    }
+
+    for (name, bytes, want) in
+        [(ATTACKER, &attacker, ATTACKER_BYTE), (CONTROL, &control, VICTIM_BYTE)]
+    {
+        if bytes.len() != LEN {
+            return Err(format!(
+                "{name} is {} bytes on the volume; the guest wrote {LEN}",
+                bytes.len()
+            ));
+        }
+        if let Some(at) = bytes.iter().position(|&b| b != want) {
+            return Err(format!(
+                "{name} holds {:#04x} at byte {at} on the volume, not {want:#04x} — the host's \
+                 own FAT implementation does not see the file the guest wrote",
+                bytes[at]
+            ));
+        }
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!(
+        "  [fat] the victim is gone from the volume, the {LEN}-byte file written into its place \
+         holds {ATTACKER_BYTE:#04x} end to end on the host's own reader, and the checker is silent"
     );
     Ok(())
 }

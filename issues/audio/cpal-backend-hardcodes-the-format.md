@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: defect
 opened: 2026-08-01
 ---
@@ -23,3 +23,6 @@ told about. No change confined to soundd can separate the two, and landing the
 soundd and SDK halves alone would kill every paused cpal client. The
 **protocol**, not the implementation, is what needs to change;
 `issues/audio/a-client-cannot-tell-soundd-it-paused.md` is that change.
+
+The assignment was reclaimed 2026-08-23: nobody holds it, and the block above is
+what it is waiting on.
