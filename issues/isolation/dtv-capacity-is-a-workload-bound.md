@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-17
 ---
 
@@ -40,3 +40,12 @@ naked fast path indexes directly, and the honest fix may be that the kernel
 should not own the DTV at all: moving the loader out to Ring 3 puts the DTV in
 the process's own address space, where that address space is the bound. This
 came out of the 2026-08-17 scoping of exactly that move.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). The body already
+argues it: a fixed bound over a quantity the workload sets is a defect rather
+than a policy by this tree's own rule, and this one's refusal has no recoverable
+form — the 65th TLS-carrying module is an `rtabort!` at an arbitrary point, not
+an error a `dlopen` caller can handle. The syscall split moved the refusal: it
+is `kernel/src/arch/syscall/vm.rs`'s `tls_alloc_block`, not `arch/syscall.rs:2724`.
+Owed by the Ring-3 loader move, which is where the DTV stops being the kernel's
+to size.

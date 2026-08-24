@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-20
 ---
 
@@ -39,3 +39,11 @@ path first (`row(path)` before `read_link`), so a row keyed `shutdown` with
 `[symlinks]` entry with no crate behind it. Making the build able to declare an
 authority row over an existing binary is the work, and it is worth doing only
 if the union keeps growing.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). `/bin/echo` in
+the shipped image holds `Rights::POWER` because `/bin/shutdown` is behind the
+same binary — an authority over-grant that is true of the image as built, not a
+hypothetical. Owed by whoever makes the build able to declare a `[programs]`
+row over an existing binary keyed by the invoked path; `declared` already tries
+`row(path)` before `read_link`, so the resolution half exists and the build half
+does not.

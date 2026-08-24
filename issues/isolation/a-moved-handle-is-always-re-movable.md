@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-10
 ---
 
@@ -43,3 +43,12 @@ express a set without `TRANSFER`, because the move needs it.
 Not done because doing it on the send path alone would make the two move
 verbs disagree, and doing it on both is an ABI change to a struct already
 shipped.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling: an isolation
+finding recording an unproven-but-plausible boundary weakness is promoted, not
+folded). The rights model cannot spell "you may map this and nobody else may",
+so the property the capability design claims is not the property the code has —
+soundd's per-client ring is re-sendable by its client. Owed by whoever next
+opens the handle ABI: a rights word on `EndowEntry` **and** on
+`SYS_HANDLE_SEND`, on one ABI-only PR, since doing either alone makes the two
+move verbs disagree.

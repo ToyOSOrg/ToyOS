@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-06
 ---
 
@@ -19,3 +19,12 @@ wiring between russh's auth callbacks and that decision — `auth_publickey`,
 offered at all — is certified by reading. Closing it needs an SSH client on the
 host talking to the guest through `hostfwd`, which belongs with the network gate
 (`issues/build/there-is-no-network-gate.md`).
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling: an instrument
+that is owed is what a defect is for, and this one guards a network-facing
+authentication boundary). What is certified by reading is exactly the wiring
+between russh's callbacks and the tested decision — `auth_publickey`,
+`auth_publickey_offered` and the `MethodSet` that keeps password auth from being
+offered — so a mis-wiring there passes every test in the tree. Owed with the
+network gate (`issues/build/there-is-no-network-gate.md`), which is what puts a
+client on the host.
