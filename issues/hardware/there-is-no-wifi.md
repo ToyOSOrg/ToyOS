@@ -37,6 +37,6 @@ Facts that cost real time to establish:
   firmware API headers need **6** distinct Linux headers and the device configs
   **2**, against **44** for the op-mode and 75 for the subset as a whole.
 - toyos-cc's packed-bitfield gap is no longer silent — it asserts by name rather
-  than misaligning a firmware command. The residual is how many of the 635
-  `__packed` uses carry bitfields
-  (`issues/build/toyos-cc-no-packed-bitfields.md`).
+  than misaligning a firmware command (`toyos-cc/src/codegen/resolve.rs`'s
+  `resolve_struct`). The residual is how many of the 635 `__packed` uses carry
+  bitfields.

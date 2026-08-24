@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-07
 ---
 
@@ -32,3 +32,8 @@ honest answer to whether the estate is clean and pushed, and it is what makes
 branches is the obvious close — outside the repo and the owner's call, and
 explicitly not something an agent should do on its own, since a fork's history
 is what an upstream PR is made of.
+
+**2026-08-25: promoted.** Not re-measured (external clones, outside this
+worktree's reach) but real and reproducible as filed, with a named close the
+owner has not yet taken. Stays open until the local `master` branches are
+deleted or the owner declares the dead history acceptable to keep.

@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-20
 ---
 
@@ -41,3 +41,19 @@ relaxed-atomic byte access (or a type that says "outside memory" explicitly)
 rather than `&[u8]`; if it isn't shared, the safety comments already written
 should say so plainly instead of citing the header-only trust boundary and
 the reader should not have had to ask.
+
+**2026-08-25: promoted, and the open question answered.** The data region is
+shared: `kernel/src/pipe.rs`'s `Backing` holds one physical page for the whole
+ring, `SYS_PIPE_MAP` maps that page (not a header-only sub-window) writable
+into the process, and `Pipe`'s own `unsafe impl Send` comment already says so
+— "`Ring`'s base cannot become a `&mut [u8]`: `SYS_PIPE_MAP` maps the same
+page into the process." `toyos-abi/src/ring.rs`'s current safety comments
+(added in the same 2026-08-20 pass this finding came out of) now say
+plainly that the data region is not exclusive, so the documentation half of
+this is done. The code half is not: `Ring::read`/`Ring::write` still build
+`core::slice::from_raw_parts[_mut]` into ordinary `&[u8]`/`&mut [u8]` over
+that shared page. This falls in the finding's first branch — the fix is
+routing these copies through volatile or relaxed-atomic byte access, or a
+type that says "outside memory" explicitly — and is real, unresolved work on
+a foundational IPC primitive. Sysroot law: the site is `toyos-abi/src`, so
+any fix lands on its own single-commit branch per `abi_lands_alone`.

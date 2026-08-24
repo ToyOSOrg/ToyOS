@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-17
 ---
 
@@ -118,3 +118,11 @@ kernel panic was found under a verdict that named a wait.**
 Nothing in the tree. The instrument is fixed going forward, and what is owed is
 that the next `STALL` is read as a stall because a wait that can see a panic
 said so, rather than because nothing was looking.
+
+**2026-08-25: promoted.** One concrete correction is still owed and unmade:
+`issues/hardware/four-runner-reds-unclassified.md` still says "Nothing here is
+diagnosed" and still holds `hda_client_stall` as "the one still standing", but
+this file's own `hda_client_stall` entry above names its diagnosis — a
+`DEADLOCK` panic between the idle loop's log-file flush and the xHCI disk lock,
+found in the same run's capture. Whoever next touches that file should correct
+it.

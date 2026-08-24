@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-16
 ---
 
@@ -51,3 +51,11 @@ searched, and none of ours search:
 
 `forks.toml` is the estate's inventory and could be the list a check walks.
 Until something walks it, an ABI deletion is verified by hand or not at all.
+
+**2026-08-25: promoted.** Verified unchanged: `SYS_STACK_INFO` (61) is still
+declared (`toyos-abi/src/syscall.rs:89`), the fork still calls it at the pinned
+revision (`rust/Cargo.lock`), and `rust/bootstrap.toml`'s `host` is still
+`["aarch64-apple-darwin"]`, so the call remains real, wired and uncompiled.
+Whoever next runs a "zero callers" sweep of an ABI item should build the
+`forks.toml`-driven check described above rather than trust a monorepo-only
+grep.

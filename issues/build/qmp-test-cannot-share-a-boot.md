@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-03
 ---
 
@@ -28,3 +28,8 @@ two reasons a re-measurement has to separate: `===TEST_END===` is a userland
 and nothing has re-run a shared boot with the keys removed. `keep_the_ring_moving`'s
 own doc comment still describes the ring as sitting one line behind, and is one
 of the two things to fix or confirm.
+
+**2026-08-25: promoted.** Verified unchanged: `keep_the_ring_moving`'s doc
+comment still says the ring "sits one line behind" and the four layout tests
+still boot alone. Whoever next has a guest slot free should re-run a shared
+boot with the keys removed and confirm or fix the comment.

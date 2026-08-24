@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-08
 ---
 
@@ -34,3 +34,7 @@ so the ordering cannot help here.
 so five registrations build exactly the five kernels the one registration already
 builds — and the parallel phase gets five jobs it can place instead of one it
 cannot.
+
+**2026-08-25: promoted.** Verified unchanged: `wall_clock_refusals` is still
+one `Sched::Parallel` registration running all five helpers serially. The
+split is specified and free; nobody has done it.

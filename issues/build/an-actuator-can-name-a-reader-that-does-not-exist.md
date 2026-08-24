@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-22
 ---
 
@@ -33,3 +33,12 @@ removed. A gate for *that* is a different and much harder thing, and the honest
 substitute is the negative-control arm: a registered test that arms the actuator
 and asserts the failure by name, which is what `log_reserve_window_negative` now
 is.
+
+**2026-08-25: promoted.** The narrow gate described above still does not exist
+— nothing in `src/redlist.rs` or `src/build.rs` cross-checks a backticked
+identifier in an actuator's doc comment against `tests/toyos.rs`'s registration
+table, verified against the current tree. Whoever next touches
+`kernel/src/actuator.rs`'s macro header or `src/redlist.rs`'s doc-path
+resolution should build it; `src/build.rs`'s `declared_actuators` is the
+closest existing parser and the likely place to add the registration-table
+cross-check.

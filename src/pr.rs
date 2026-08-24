@@ -368,7 +368,7 @@ fn merge_base_into_branch(root: &Path, branch: &str) -> Result<String, String> {
 /// `toyos/src` or `userland/libc/src` puts that change in its first commit or
 /// on its own branch from the start; a later revert leaves the commit in
 /// history and the only remedy is rebuilding the branch. Cost one full rebuild
-/// on 2026-08-19 (`issues/build/abi-split-reads-commits-not-the-tree.md`).
+/// on 2026-08-19.
 ///
 /// **The ABI half is not always a pure declaration.** A syscall that gains a
 /// capability argument gains it in the ABI PR with the kernel accepting and

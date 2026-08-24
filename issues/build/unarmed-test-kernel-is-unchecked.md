@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-10
 ---
 
@@ -44,3 +44,8 @@ Two shapes that would answer it, neither costed:
 Filed rather than fixed: the landing it comes out of is already large, and which
 of the two is worth a boot is a judgement the next agent should make with the
 suite's own numbers in front of it.
+
+**2026-08-25: promoted.** Verified unchanged: neither shape exists.
+`assert_actuators_match_features` (`src/build.rs`) still only checks declared
+names against the binary, not behaviour. Whoever next has a guest slot and the
+suite's numbers in front of them should pick one of the two shapes.

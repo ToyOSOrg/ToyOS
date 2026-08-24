@@ -44,9 +44,12 @@ updated. Pick one.
 
 This is one instance of a wider shape: the estate is outside every check the
 tree runs on itself. It is also invisible to ABI signature changes until a build
-breaks, and it can hold frozen copies of first-party crates
-(`issues/build/a-fork-depended-on-toyos-abi-by-git.md`). Each instance was found
-by accident or by a build breaking; none by a check. **"I enumerated the call
-sites" is only true if the enumeration covered `~/.cargo/git/checkouts/`** —
-grepping the monorepo is a partial enumeration that reads as complete, and it
-cost every agent a blocked workspace once already.
+breaks, and it can hold frozen copies of first-party crates — a fork was found
+depending on `toyos-abi` by git rather than by version on 2026-08-01, a
+substantially different ABI (seven files the monorepo lacked, two the monorepo
+had that it lacked) sitting inert in a cargo cache, never live but never
+reported either. Each instance was found by accident or by a build breaking;
+none by a check. **"I enumerated the call sites" is only true if the
+enumeration covered `~/.cargo/git/checkouts/`** — grepping the monorepo is a
+partial enumeration that reads as complete, and it cost every agent a blocked
+workspace once already.
