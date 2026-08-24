@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-15
 ---
 
@@ -31,3 +31,10 @@ Not attempted here: it is a registry, a publish step and a second thing to keep
 current, and the CI wall-clock task of 2026-08-15 that measured it was landing
 the shard partition. The number is written down so the next person deciding
 whether it is worth that machinery has one.
+
+**2026-08-25: promoted.** `.github/workflows/ci.yml`'s `guest`, `tcg` and
+`cache-writer` jobs still run the same `apt-get install` on every job, verified
+against the current tree. Whoever owns CI wall-clock should build the pinned,
+published image this describes — a `Dockerfile` in this repository, published
+once per change to it, pinned by digest the same way `.github/qemu-version`
+pins QEMU — and cut it over.
