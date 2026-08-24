@@ -165,6 +165,24 @@ impl KeyDecoder {
                 // neither its make (0x00) nor 0x7F's break (0xFF) can be a
                 // key. `0xAA` is NOT in this list — under translation it is
                 // left Shift's break code, and the two are indistinguishable.
+                //
+                // **So a keyboard that resets itself is undetectable on this
+                // wire, and that is a property of the mode rather than of this
+                // decoder.** The driver runs the keyboard in set 2 with the
+                // controller translating to set 1 — Linux's default and the
+                // best-trodden EC path — and `0xAA`, the BAT-complete byte a
+                // self-reset sends, is bit-identical to `0x2A | 0x80`. The
+                // T14's EC does reset the keyboard after suspend and after a
+                // lid event, so this is reached on real hardware rather than in
+                // theory. It is survivable rather than silent breakage: the
+                // keyboard comes back in set 2 with translation still on, so
+                // the wire format is unchanged, and the `0xAA` decodes as a
+                // Shift *release*, which is accidentally the right direction
+                // for the one state that could stick. Untested on metal. If it
+                // does bite, the answer is a controller-side reconnect probe —
+                // `0xF2` identify on a timer, from `kernel/src/drivers/i8042/`
+                // — and never a wire heuristic, because no wire heuristic
+                // exists.
                 0x00 | 0xFF => KeyOutcome::Lost,
                 _ => emit(SET1[(byte & 0x7F) as usize], byte & 0x80 == 0),
             },
