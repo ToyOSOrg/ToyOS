@@ -19,7 +19,9 @@ soundd: wakes=389 completions=690 submitted=690 underruns=1 drains=2 max_wake_la
 ```
 
 Nine periods — 26 ms — submitted with a client streaming and no client audio
-behind them (`main.rs:954`). `tests/audio-baseline.toml` records `underruns` 0
+behind them (`MixStats::period` in `toyos-mixer/src/stats.rs`, which is where
+that counter moved when the mixer's decisions became a pure crate).
+`tests/audio-baseline.toml` records `underruns` 0
 on all 120 runs of its sample, and the fast tier's verdict is exactly this
 counter. There is no capture to corroborate it: `--dump-audio` was not on.
 
@@ -41,7 +43,8 @@ past the `audio_tone_load.smp8` ceiling of 80000 (this guest is `--smp 8`).
 **Whose lateness it is, is not the same question in the two phases, and the
 `deferred` column separates them.** `deferred` counts a mix cycle declining to
 submit because a streaming client's ring was empty and there was still playout
-margin (`main.rs:894-901`) — soundd's restraint, waiting for a producer:
+margin (the `mid_refill` arm of `mix_thread`, `userland/soundd/src/mix.rs`) —
+soundd's restraint, waiting for a producer:
 
 ```
 doom phase   173 deferrals across 14 of 31 windows
@@ -76,14 +79,33 @@ gate A reddening on its own configuration:
 too tight to be scheduling noise (min 18116, p50 21896, p90 24079 over 88
 windows, one per stream start). One candidate mechanism, offered as a
 hypothesis and not a measurement: `signal_clients`' caller arms its wait on
-`target` — the *next future* grid point when the DLL estimate is past due
-(`userland/soundd/src/main.rs:773-783`) — but records `armed_on = Some(t_est)`,
-the stale estimate. `lateness` at :827 is then measured from an instant soundd
-deliberately did not ask to be woken at, and includes every whole period it
-skipped. The comment at :819-825 says the sample is taken "against the
-prediction this wait was *armed* on"; `target` is what it was armed on.
-Whoever takes this should settle that before reading any of the numbers above
-as a property of the scheduler.
+`target` — the *next future* grid point when the DLL estimate is past due — but
+records `armed_on = Some(t_est)`, the stale estimate, so the sample is taken
+from an instant soundd deliberately did not ask to be woken at and includes
+every whole period it skipped.
+
+**Where that code is now, and what has moved under it.** The mix loop left
+`userland/soundd/src/main.rs` for `mix_thread` in `userland/soundd/src/mix.rs`;
+the arming block and `armed_on = Some(t_est)` survive there unchanged, and so
+does the sample taken against `armed_on`. Two things have changed around it and
+neither settles the question:
+
+- The site now argues the choice rather than only asserting it: reading the DLL
+  estimate at wake would score a window's first wake — armed while soundd was
+  idle and asking for no wake time at all — as a missed deadline, so the sample
+  is deliberately the distance from the prediction, "however large". That is an
+  answer about `t_est` versus the DLL's later estimate. It is not an answer
+  about `t_est` versus `target`, which is the instant the timer was actually
+  armed for, and which is what this entry asks about.
+- Since 2026-08-21 the statistic is recorded in two halves, split at the oldest
+  record's ISR timestamp: `worst_irq_late_us` is the device failing to complete
+  when it was due and `worst_pickup_us` is soundd failing to run once it had.
+  Both are clamped to the same `t_est`, so the split re-attributes the number
+  above without changing what it is measured from — and the `max_wake_lat_us`
+  distribution quoted in this entry is a pre-split statistic.
+
+Whoever takes this should settle `t_est` against `target` before reading any of
+the numbers above as a property of the scheduler.
 
 **Reproduction.** `cargo run`, `doom` in the terminal, wait for the demo loop,
 quit, then `tone` repeatedly. Add `--dump-audio` so the wav can corroborate the

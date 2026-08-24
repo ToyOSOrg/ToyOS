@@ -296,6 +296,22 @@ macro_rules! direct_gate {
 // nothing can deliver them, and `from_raw`'s panic is the honest answer if one
 // ever arrives. Every gate is DPL 0, so `int n` from Ring 3 raises #GP against
 // the gate rather than entering it.
+//
+// **Six of these gates nothing in this tree can raise, and each for its own
+// reason** — the list a later change makes reachable, so a change that reaches
+// one is a change to this comment. Four are unreachable by construction: #NM (7)
+// needs `CR0.TS` or `CR0.EM`, and `arch::control_regs` declares both clear on
+// every CPU, so only a lazy-FPU scheme would raise it and there is none; #TS
+// (10) needs a task switch or an `iretq` to a bad TSS, and this kernel does
+// neither; #NP (11) needs a descriptor with `P = 0` inside the GDT limit, which
+// this seven-entry GDT does not have; #MC (18) is a machine check no guest can
+// stage, and `machine_check_handler` treats it as the abort it is rather than
+// killing a process over a machine that stopped being trustworthy. The other
+// two are architectural on metal and absent under TCG: QEMU raises `EXCP0D_GPF`
+// for every non-canonical access and models #SS (12) for none, and it delivers
+// no #XM (19) whatever `MXCSR` says. `fault_gates` spawns both of those arms
+// anyway and its child prints the status word that says why each came back
+// alive.
 idt_vectors! {
     dispatched {
         DivideError        = 0x00, stub_de, no_error_code;

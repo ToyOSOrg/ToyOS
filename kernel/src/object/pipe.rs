@@ -22,8 +22,8 @@ pub struct PipeReadEnd {
     pub(super) core: ObjectCore,
     /// A plain copy, because every read reaches for it and an `Arc` clone or a
     /// second lock on that path is an atomic read-modify-write TCG cannot emit
-    /// inline
-    /// (`issues/hardware/one-rmw-per-log-line-cost-350ms.md`). It names
+    /// inline — a few hundred a boot of one was measured at 350 ms of boot on
+    /// the log path. It names
     /// nothing once the reference below is given back: `IdMap` never reissues
     /// a `PipeId`.
     id: PipeId,

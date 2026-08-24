@@ -9,10 +9,23 @@
 //!
 //! It is deliberately stronger than the host `fsck_msdos` it stands in for, in
 //! two places where that binary is silent and each of which cost this project a
-//! defect every other gate passed (`issues/`): a **stale FAT
-//! mirror**, which fsck does not compare and a mount never reads, and
-//! **duplicate 8.3 short names**, which neither fsck nor a mount looks at
-//! because both use the long names.
+//! defect every other gate passed: a **stale FAT mirror**, which fsck does not
+//! compare and a mount never reads, and **duplicate 8.3 short names**, which
+//! neither fsck nor a mount looks at because both use the long names. Dropping
+//! short-name uniquification entirely was invisible to every gate there was.
+//!
+//! **A validator's silence is evidence about the validator, not only about the
+//! code**, and that is the rule this crate exists to enforce rather than a
+//! remark about one binary. Sixteen deliberate breakages of the writer were run
+//! against the suite when it was judged by `fsck_msdos -n`; fourteen went red
+//! and the two above did not. A gate whose green means "the judge had nothing
+//! to say" is only as strong as the judge, so the judge is ours and its own
+//! teeth are gated (`tests/teeth.rs`, a mutation per complaint). Exit codes are
+//! not part of it either: `fsck_msdos -n` exits 0 while printing `Fix?` for
+//! problems it declined to repair, and exits 0 on a volume it has just declared
+//! dirty, so the gate a reader would write first would have been green on a
+//! corrupt volume. [`check`] answers with the list instead, and silence is the
+//! whole verdict.
 //!
 //! ```no_run
 //! # let volume: &[u8] = &[];

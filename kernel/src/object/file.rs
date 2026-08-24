@@ -4,6 +4,17 @@
 //! the descriptor table, where `dup` cloned the `OpenFile` and the two moved
 //! apart; it is what an object model means, and it is POSIX's answer for `dup`
 //! as well. A caller that wants an independent cursor opens the path again.
+//!
+//! **`SYS_CLOSE` is not an error channel, and a program that needs one calls
+//! `SYS_FSYNC`.** Closing a file returns before its dirty pages have reached
+//! any device: the last handle's drop hands them to the write-back queue and
+//! returns, so the only thing that could refuse them runs on `iod` long after
+//! the closing thread is gone, with no caller left to answer. A refusal there
+//! is logged and the pages are lost (`crate::writeback`'s `drain_one`). Every
+//! other way of asking is honest — `SYS_FSYNC` flushes inline and returns the
+//! device's own word, and a `write` whose page was refused says so — so a
+//! program whose durability claim rests on the bytes having landed asks with
+//! one of those and never with a close.
 
 use alloc::string::String;
 use alloc::sync::Arc;

@@ -25,9 +25,9 @@
 //! release removed, the model must red.
 //!
 //! **No read-modify-write on the post path, and that is a measured
-//! constraint.** One `fetch_add` per log line cost 350 ms of boot under TCG
-//! (`issues/hardware/one-rmw-per-log-line-cost-350ms.md`), because QEMU
-//! cannot always emit an inline host atomic for a guest RMW. So `tail` is a
+//! constraint.** One `fetch_add` per log line was measured at 350 ms of boot
+//! under TCG, because QEMU cannot always emit an inline host atomic for a guest
+//! RMW and leaves the translation block to run it exclusively. So `tail` is a
 //! plain load and a plain store made under the lock the poster already holds
 //! (§16.2 rule 1), `head` is the same in the taker's hand, and the overflow
 //! count is a load and a store rather than an increment. What makes the plain

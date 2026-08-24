@@ -106,6 +106,12 @@ reason this is a directory and not a document.
 **Delete the file.** Git keeps the story, and the commit message is where
 evidence, measurements and what-the-code-used-to-do belong.
 
+**Verify a close with `cargo test --lib`, not the workspace run** — the
+tracker's own gates (`issuegate`, `redlist`, `sourcegate`, the durations gates)
+live in the root package, which `cargo test --workspace --exclude toyos-build`
+excludes, so that command is green on a branch whose frontmatter or citation is
+broken and proves nothing about it.
+
 Before you delete it, ask what durable rule it carries — an invariant a future
 agent could violate again, independent of the bug that revealed it. One line of
 that goes to the module header or the doc comment at the site that owns the

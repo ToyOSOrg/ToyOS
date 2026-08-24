@@ -21,9 +21,8 @@ contention: parallel suites, lock storms, scheduler collapse | vendor
 semantics; run-to-run comparability" — and that row is what found the
 `ALONE: GREEN` verdict family and the load-coincident audio failures this
 tree's history is full of (`issues/build/parallel-tests-red-under-other-suites.md`,
-`issues/build/parallel-phase-starved-by-another-build.md`, the owner's
-2026-08-04 ruling that a load-coincident audio failure is a real defect and
-not noise). The row left when the table was rewritten to four instruments;
+the owner's 2026-08-04 ruling that a load-coincident audio failure is a real
+defect and not noise). The row left when the table was rewritten to four instruments;
 nothing replaced it, and the class it owned has carried no instrument since.
 
 This is the record that rule requires. It stays open until something owns the

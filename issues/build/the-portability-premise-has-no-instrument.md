@@ -22,16 +22,13 @@ What each proves today:
   here now means the declared package list was the whole of what this needed,
   not that the hosted image's own tens-of-GB contents quietly covered the
   rest — the same move `ci.yml`'s guest shards already made, for the same
-  reason. **Not yet re-measured**: the previous `ubuntu-latest` version's cost
-  (four from-scratch runs inside `toolchain.yml`'s own `build` step,
-  2026-08-15/19, 3864-4048 s / ~65 min for the command alone) is not a number
-  about this container — a from-scratch `apt-get install` inside a freshly
-  pulled `debian:sid` is a different cost than a pre-provisioned VM image, and
-  the workflow's own `timeout-minutes: 350` is carried over rather than
-  re-derived. The first real number is whatever the first nightly run reports.
-  Still open, as before: whether the bootstrap genuinely needs cmake or ninja
-  (neither is installed here) has never been tested against a machine that
-  lacks them.
+  reason. **Still not measured, and now for a reason of its own**: four of the
+  five nightlies to date die in the job's own setup, before a line of the
+  premise is exercised — see the dated section below. The previous
+  `ubuntu-latest` version's cost (four from-scratch runs inside
+  `toolchain.yml`'s own `build` step, 2026-08-15/19, 3864-4048 s / ~65 min for
+  the command alone) is not a number about this container, and the workflow's
+  own `timeout-minutes: 350` is still carried over rather than re-derived.
 - **macOS** (`macos` job) — added. `host-tests.yml` already proved
   `macos-latest` reachable on this plan; this job points a `--build-only` at a
   fresh one for the first time. QEMU comes from Homebrew, and the workflow
@@ -55,9 +52,11 @@ What each proves today:
   `src/image.rs`'s `format_fat32` builds both volumes this build writes with
   the pure-Rust `fatfs` crate — `newfs_msdos`/`hdiutil` are exercised only by
   `toyos-fat32`/`toyos-fat32-check`'s host test fixtures, in `host-tests.yml`,
-  never in a `--build-only` path. Cost is entirely unmeasured — this job has
-  never run — so its `timeout-minutes: 350` borrows Linux's ceiling rather
-  than a real number.
+  never in a `--build-only` path. It has run five times now and never got far
+  enough to cost anything: it reaches the toolchain bootstrap and dies there in
+  under five minutes, so `timeout-minutes: 350` still borrows Linux's ceiling
+  rather than a real number. What it did establish is below, and it is the
+  first thing on this page to actually contradict the premise.
 - **Windows** (`windows` job) — unchanged. `cargo build -p toyos-build` only,
   `cargo run` being unreachable: `src/toolchain.rs`'s `link_host_target` calls
   `std::os::unix::fs::symlink` with no `#[cfg(unix)]` guard
@@ -90,17 +89,87 @@ declared.
   a *workflow-level* red — today `nightly-red-portability` reacts to a
   `linux` or `macos` red and Windows is hand-excluded by a workflow comment,
   which does not generalise past one known case.
-- The Linux container move and the macOS job are both unmeasured against a
-  real nightly run as of this writing — the numbers above are constructed
-  from the workflow's own logic and a local Homebrew check, not from a
-  completed GitHub Actions run. The first scheduled run (or a
-  `workflow_dispatch`) is what turns "should prove" into "proved"; if either
-  job reds for a reason its own comment does not already predict (Linux
-  missing a package the bootstrap turns out to need beyond git/curl/
-  ca-certificates/build-essential/python3/qemu-system-x86, or macOS lacking
-  disk, cores, or something else Xcode's command-line tools do not provide),
-  that is new information for this file, not a workflow bug to silently work
-  around.
+- Both jobs have now run, both are red, and neither red is the one their own
+  comments predicted. The measurements and what they mean are the dated
+  section below; the two things owed out of them are a Linux job that can
+  reach the build at all, and an answer for the fork bootstrap's LLVM on a
+  host `download-ci-llvm` does not serve.
+
+## 2026-08-24 — five nightlies have run, and the instrument reads
+
+`gh run list --workflow portability.yml` gives five scheduled runs, 2026-08-20
+through 2026-08-24, **all five `failure`**, each 5-6 minutes wall clock.
+`nightly-red-portability` concluded `success` on every one, so the reporting
+half works. Per-job, from `gh run view <id> --log-failed`:
+
+| night | linux | macos | windows |
+|---|---|---|---|
+| 08-20 | `failed to download llvm from ci` | same, plus the brew pin | E0433/E0599 |
+| 08-21 | `is not inside a git repository` | same | same |
+| 08-22 | `is not inside a git repository` | same | same |
+| 08-23 | `is not inside a git repository` | same | same |
+| 08-24 | `is not inside a git repository` | same | same |
+
+**Windows is the one red this file already predicted** and it is unchanged:
+`error[E0433]: cannot find 'unix' in 'os'` and `no method named 'as_raw_fd'`,
+five errors, `could not compile 'toyos-build' (lib)` — exactly
+`issues/build/the-build-system-does-not-compile-on-windows.md`, still the
+declared frontier.
+
+**Linux has never measured the premise: it dies in its own setup.** Since
+08-21 the job reaches `Running target/debug/toyos-build --build-only` and then
+panics at `src/lib.rs`'s `git_common_dir`:
+
+```
+thread 'main' (8423) panicked at src/lib.rs:63:5:
+/__w/ToyOS/ToyOS is not inside a git repository
+```
+
+`git rev-parse --git-common-dir` fails in the `debian:sid` container against a
+checkout `actions/checkout` made — the ownership refusal a container hits when
+the workspace is not owned by the uid running git; the same job's `rustup` step
+prints `$HOME differs from euid-obtained home directory` beside it. Every step
+before it is green (`deps`, `checkout`, `rustup`), the whole job takes ~2m10s,
+and no line of the build runs. So the "first real number" this file has been
+waiting for is still not taken, and the reason is the harness rather than the
+premise. **This is the first thing owed.** It is not a reason to loosen
+`git_common_dir`: that assertion is right, and two worktrees arriving at one
+byte-identical path is what the locks keyed on it depend on.
+
+**macOS contradicts the premise, and this is the finding.** Every night:
+
+```
+downloading https://ci-artifacts.rust-lang.org/rustc-builds/
+  87971e6d0ed0320b6c0c8df8b519583b3387fa53/rust-dev-nightly-aarch64-apple-darwin.tar.xz
+curl: (56) The requested URL returned error: 404   (x4)
+ERROR: failed to download llvm from ci
+    HELP: 1) The host triple is not supported for `download-ci-llvm`.
+          2) Old builds get deleted after a certain time.
+Bootstrap failed while executing `build --stage 2 --warnings warn`
+  llvm::Llvm { target: aarch64-apple-darwin }
+```
+
+then `src/toolchain.rs`'s panic: `the toolchain build failed and
+rust/build/aarch64-apple-darwin/stage2/bin/rustc is not there.` So on a fresh
+`macos-latest` (aarch64), Rust and QEMU are **not** everything you need: the
+fork's bootstrap wants a prebuilt CI LLVM that does not exist for this host at
+the pinned commit, and the only fallback is building LLVM locally — which wants
+cmake and ninja, neither installed. That is precisely the question this file
+recorded as never having been tested against a machine that lacks them, and the
+answer is that the machine cannot proceed. **This is the second thing owed**,
+and it is a real gap in the dependency claim, not a workflow bug: either the
+bootstrap gets `download-ci-llvm = false` plus a declared cmake/ninja (which
+widens the dependency set and needs the owner), or the fork's pinned commit has
+to be one whose `rust-dev` artifact is served for `aarch64-apple-darwin`.
+
+**The Homebrew pin finding is confirmed on the instrument, and its predicted
+disagreement has already fired.** Every run prints
+`##[error]No formulae or casks found for qemu@11.1.0.` — the same answer the
+local check got while the job was written, now taken on the runner. And the
+runner's unpinned QEMU is **11.0.3** against `.github/qemu-version`'s declared
+**11.1.0**, so the "future disagreement is expected eventually" this file
+allowed for is present on every run to date. It correctly does not fail the job:
+`--build-only` boots no guest.
 
 ## What this is not
 
