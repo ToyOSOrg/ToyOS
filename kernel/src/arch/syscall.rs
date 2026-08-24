@@ -1917,6 +1917,11 @@ fn sys_shutdown(syscap: RawHandle) -> u64 {
     // 2. The console, after logd has answered, so the last record — including
     //    logd's own — is on the wire before the power goes. Inline, because
     //    `klogd` has no guarantee of another turn.
+    //
+    // `nvme_large_device` is the gate: it drives `run shutdown` and requires
+    // both lines above on the host's serial capture, so a shutdown that went
+    // back to leaving them in the ring reds a test rather than going unnoticed
+    // on the one machine that has no other channel out.
     crate::log::console::drain_inline();
     acpi::shutdown();
 }
