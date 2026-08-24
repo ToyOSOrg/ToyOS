@@ -118,17 +118,19 @@ jobs:
               *) echo "::error::main has no \`$want\` rule"; bad=1 ;;
             esac
           done
-          # What a merge's checks are about is the owner's law, and it eased on
-          # 2026-08-20: strict up-to-date branches taxed every landing with one
-          # fresh CI cycle for every other open PR, and GitHub's merge queue —
-          # the configuration that keeps the merged-result property without the
-          # tax — exists only for organization-owned repositories, which this
-          # one is not yet. So a branch's checks are its own, `main`'s
-          # push-triggered run is the merged-result check, and a red on
-          # `main`'s tip is adjudicated at once like any other red. The gate
-          # still reads the regime back and reports it; a required merge
-          # queue, when the repository can carry one, restores the stronger
-          # property for free and this gate already recognises it.
+          # What a merge's checks are about is the owner's law, and it has been
+          # a required merge queue since 2026-08-20. Strict up-to-date branches
+          # taxed every landing with one fresh CI cycle for every other open
+          # PR; the queue keeps the merged-result property without that tax by
+          # validating one speculative merge per queued entry instead of every
+          # branch per intervening landing. It needs an organization-owned
+          # repository, which is what the move to `ToyOSOrg` bought — the
+          # interlude between the two, when a branch's checks were merely its
+          # own and `main`'s push-triggered run was the merged-result check, is
+          # history the tracker carries and not this gate's business. What this
+          # gate does is read the regime back rather than assume it: `queued`
+          # below is a fact about `main`'s rules today, and it stays here so
+          # that a queue silently removed is reported rather than unnoticed.
           queued=$(case " $rules " in *" merge_queue "*) echo true;; *) echo false;; esac)
           # CLAUDE.md's "never rewrite history", said at the remote.
           [ "$methods" = merge ] \
