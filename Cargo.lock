@@ -1138,6 +1138,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-symbols"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+ "toyos-elf",
+ "toyos-elide",
+]
+
+[[package]]
 name = "toyos-untrusted"
 version = "0.1.0"
 

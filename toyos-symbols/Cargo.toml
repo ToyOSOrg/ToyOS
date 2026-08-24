@@ -1,0 +1,20 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-elf and
+# toyos-gpt: the kernel depends on it by path and its tests run on the host,
+# with no target-triple juggling. What lives here is every pure decision
+# `kernel/src/symbols.rs` makes over bytes: where in an ELF file its symbol
+# tables live, how a return address maps back onto the call it followed, and
+# how much of the backtrace record's budget a demangled name gets. The kernel
+# keeps the raw-pointer table itself — it has to be readable from a panic, a
+# double fault and an NMI, which is a `PageAlloc` this crate cannot own and an
+# `unsafe` this crate does not need.
+
+[package]
+name = "toyos-symbols"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../toyos-abi" }
+toyos-elf = { path = "../toyos-elf" }
+toyos-elide = { path = "../toyos-elide" }
