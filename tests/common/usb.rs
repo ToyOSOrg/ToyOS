@@ -2045,10 +2045,10 @@ fn hid_break_boot(
     // *every* USB device — the boot disk's bulk IN as much as a HID interrupt
     // endpoint — so one transport recovery on the boot disk anywhere in the boot
     // used to red this test with a failure about HID: three CI runs did exactly
-    // that, e.g. `31405969578` shard 10, where the disk's own
-    // `slot 1 endpoint 3` and `slot 1 endpoint 4` at 2.639 s were counted beside
-    // the mouse's and the keyboard's
-    // (`issues/hardware/xhci-hid-break-counts-any-endpoint-3.md`).
+    // that (`31405969578` shard 10, `31424496450`, `31601325987`), and in the
+    // first the disk's own `slot 1 endpoint 3` and `slot 1 endpoint 4` at
+    // 2.639 s — a `SCSI 0x35` status-phase break on a shard measured at 2.16x
+    // boot width — were counted beside the mouse's and the keyboard's.
     let mut recovered: Vec<(&str, usize)> = Vec::new();
     for (_, who) in &broken {
         let running = format!("xHCI: {who} endpoint 3 is Running, recovering");

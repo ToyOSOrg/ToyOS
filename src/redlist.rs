@@ -238,6 +238,16 @@ pub struct Red {
 /// them green.
 pub const SHELF_LIFE_DAYS: i64 = 31;
 
+/// What retired all three `xhci_hid_break` endpoint-count rows, written once
+/// because it is one landing and not three: three measurements of one
+/// assertion, and repeating the sentence is how two of them would drift.
+const HID_SCOPED: &str = "the count is per device now. The verdict pairs each broken completion \
+    with the device it names — `hid_broke_on` reads `<bdf> slot <n>` off it, because a slot id is \
+    one controller's numbering and this machine has two — and requires `endpoint 3 is Running, \
+    recovering` exactly once for each of the two, so the boot disk's own bulk endpoints are no \
+    longer counted and a missing recovery still reds. A completion that stops naming its device \
+    is refused rather than widened back to every dci 3 on the machine";
+
 /// Every measurement, grouped by the campaign that took it.
 ///
 /// Adding a row means answering all eight fields; there is no default and no
@@ -839,7 +849,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::fires(2, 15),
-        standing: Standing::Stands,
+        standing: Standing::Retired(HID_SCOPED),
         what: "`3 endpoint(s) were found Running after the break, want 2` — dci 3 is the first IN \
                endpoint of every USB device, so one transport recovery on the boot USB disk \
                anywhere in the boot reds a test whose failure is about HID. `ALONE: GREEN` both \
@@ -847,7 +857,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "`main`'s fifteen most recent completed `ci` runs, 2026-08-09 to 2026-08-11: red \
                    in 31289459932 (a76a078) and 31331494794 (0e48d2e), read with \
                    `gh run view --log-failed`",
-        source: "issues/hardware/xhci-hid-break-counts-any-endpoint-3.md",
+        source: "tests/common/usb.rs hid_broke_on",
         measured: "2026-08-11",
     },
     Red {
@@ -873,7 +883,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(HID_SCOPED),
         what: "`3 endpoint(s) were found Running after the break, want 2` — the wide run's message. \
                The harness's re-run-alone failed too, but on a *different* assertion, the \
                `input never came back` shape `parallel-tests-red-under-other-suites.md` records on \
@@ -881,21 +891,21 @@ pub const KNOWN_RED: &[Red] = &[
                the wide run's message regardless, because that line always carries the original text",
         evidence: "PR #22 (`wt/toyos-endow`), run 31424496450 attempt 1, job 93586744461 \
                    (\"guest (5)\"), sha 73d0761b",
-        source: "issues/hardware/xhci-hid-break-counts-any-endpoint-3.md",
+        source: "tests/common/usb.rs hid_broke_on",
         measured: "2026-08-10",
     },
     Red {
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(HID_SCOPED),
         what: "`3 endpoint(s) were found Running after the break, want 2`, byte-identical between \
                the wide run (51s) and the alone re-run (9s) — the first occurrence where isolation \
                reproduces this exact assertion rather than going green or landing on the other \
                shape. 9s alone rules out host contention for this instance",
         evidence: "PR #35 (`codex/debug-wait-census`), run 31601325987, job 94129283847 \
                    (\"guest (5)\"), sha d522424e",
-        source: "issues/hardware/xhci-hid-break-counts-any-endpoint-3.md",
+        source: "tests/common/usb.rs hid_broke_on",
         measured: "2026-08-12",
     },
     Red {

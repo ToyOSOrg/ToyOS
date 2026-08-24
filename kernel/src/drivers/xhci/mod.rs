@@ -223,9 +223,8 @@ impl core::fmt::Display for Answer {
 /// `slot 1` names two different devices and nothing reading the log can tell
 /// which. That is not hypothetical: a harness assertion counting endpoint
 /// recoveries counted the boot disk's as a mouse's on three CI runs
-/// (`issues/hardware/xhci-hid-break-counts-any-endpoint-3.md`), and the
-/// same shape counted the boot stick's transport recovery as the disk under
-/// test's (run 31684437719).
+/// (31405969578, 31424496450, 31601325987), and the same shape counted the
+/// boot stick's transport recovery as the disk under test's (31684437719).
 ///
 /// So every line the recovery path writes carries this, and `pci` on
 /// [`XhciController`] is the field that makes it available.
