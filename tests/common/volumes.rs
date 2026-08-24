@@ -818,8 +818,17 @@ pub fn writeback_durability(
         (0..BLOB_LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
     }
 
+    // Stage the one failure QEMU will not produce: a budget expiry on the FAT-1
+    // mirror write of the blob's cluster allocation, on the write-back drain path
+    // (`fat-mirror-write-refuse`). Without the drain's retry and
+    // `set_fat_entry`'s active-last order the volume is left with the FATs split;
+    // with them the drain re-drives the flush and heals it, and the checker below
+    // is the independent judge either way. The image is built with the parameter
+    // so the guest boots the test kernel that carries the actuator.
+    const PARAMS: &[&str] = &["fat-mirror-write-refuse"];
+
     let image_path = test_dir().join("writeback-durability.img");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
     std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
     let (start, len) = log_extent(&image, &image_path)?;
 
@@ -841,6 +850,7 @@ pub fn writeback_durability(
         BootOptions {
             profile: qemu::Profile::Metal,
             boot_image: Some(image_path.clone()),
+            kernel_params: PARAMS,
             ..Default::default()
         },
     );
@@ -878,6 +888,22 @@ pub fn writeback_durability(
         if tail.contains(bad) {
             return Err(format!("{bad:?} on the way down\n{tail}"));
         }
+    }
+
+    // The actuator must have fired, or this gate proves nothing: a green run with
+    // an inert arm is the worst harness defect (`tests/common/qemu.rs`'s
+    // `refuse_a_staged_image_this_boot_did_not_ask_for`). The refusal is the whole
+    // point — it is what makes the checker below a test of the drain's retry
+    // rather than of an ordinary flush. It fires on `iod`'s drain during the run,
+    // or on the shutdown drain if `iod` was late, so the whole capture is
+    // searched.
+    const FIRED: &str = "fat-mirror-write-refuse: refusing the FAT-1 mirror write";
+    if !result.before.contains(FIRED) && !result.serial.contains(FIRED) && !tail.contains(FIRED) {
+        return Err(format!(
+            "the fat-mirror-write-refuse actuator never fired, so the write-back drain's retry \
+             was never exercised and this gate proves nothing\nkernel log:\n{}{}\nshutdown:\n{}",
+            result.before, result.serial, tail
+        ));
     }
 
     let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
