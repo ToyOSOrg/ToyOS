@@ -7,9 +7,10 @@
 //! machine that *has* a NIC and cannot bind must be loud. On a NIC-less machine
 //! netd prints its line and exits, and whether sshd took the quiet arm or put a
 //! tokio backtrace across the boot depended on which side of netd's teardown
-//! its bind landed:
-//! `issues/build/sshd-panics-when-netd-exits-before-it-binds.md`, four sightings,
-//! victim `boot_partition_identity`.
+//! its bind landed. Four recorded sightings, on the dev host and on CI alike,
+//! and the victim was `boot_partition_identity` every time — a test that
+//! refuses any boot whose console carries `panicked at`, so its own subject
+//! was untouched and the red named the workload rather than the cause.
 //!
 //! **The race is not staged here. The sequence is.** What made the defect hard
 //! to see is that it is a handful of instructions wide in a real boot; what
