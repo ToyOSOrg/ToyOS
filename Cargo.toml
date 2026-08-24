@@ -37,6 +37,7 @@ members = [
     "toyos-sched",
     "toyos-sched/loom",
     "toyos-sched/sim",
+    "toyos-symbols",
     "toyos-untrusted",
     "toyos-userbound",
     "toyos-wallclock",
