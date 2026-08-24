@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-22
 ---
 
@@ -45,3 +45,8 @@ A denominator on this instrument: loaded suites of an unmutated tree, counting
 this name, with the boot width recorded per run. If it fires at a rate, it earns
 a `src/redlist.rs` row on `Instrument::DevHostLoaded` and the question becomes
 whether the missing tail is the guest's typing or the host's capture window.
+
+**2026-08-25: promoted.** Still `NOT ON THE LIST` in `src/redlist.rs` and no
+`Instrument::DevHostLoaded` row exists for it. One sighting is not yet a rate,
+but the denominator this file specifies has not been collected either; stays
+open until someone runs loaded suites of an unmutated tree and counts.
