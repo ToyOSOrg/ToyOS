@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-09
 ---
 
@@ -30,3 +30,9 @@ had a reason to write down. The corpus is the only broad instrument and it is a
 proxy: it asks whether a program printed the right thing when it ran, which is
 worth more than any assertion here and covers only what its 156 files happen to
 do. Everything else this compiler emits is checked by nothing.
+
+**2026-08-25: promoted.** Verified unchanged: `toyos-cc/tests/emission.rs`
+still covers exactly the four shapes the two found miscompilations named, not
+a systematic source-to-codegen correspondence. Whoever next finds a third
+miscompilation in the gap should weigh building the gate against adding a
+fifth named case.
