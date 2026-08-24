@@ -3,7 +3,7 @@
 //! The kernel reads PORTSC, asks [`port::PortState::step`] what to do, and does
 //! it; nothing here touches a register, a ring or a slot. That split is what
 //! lets a host simulator explore the port state space, which is where the
-//! T14's SuperSpeed wedge lives — a state QEMU cannot produce.
+//! laptop's SuperSpeed wedge lives — a state QEMU cannot produce.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
