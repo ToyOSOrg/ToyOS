@@ -1083,7 +1083,7 @@ const T14_COLS: usize = 1920 / 8;
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
 /// It exists only on a `test-actuators` kernel — every other action costs the
 /// caller its own process, this one costs the machine. Kept in sync with
-/// `kernel/src/arch/syscall.rs` by this comment and by screen_fatal_halt
+/// `kernel/src/arch/syscall/debug.rs` by this comment and by screen_fatal_halt
 /// failing loudly if it drifts.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 
@@ -1717,7 +1717,7 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
 /// that held the lock rather than the scheduler that caught it — which is the
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
-/// A whole-buffer `contains("arch/syscall.rs")` certifies none of that: the
+/// A whole-buffer `contains("arch/syscall/dispatch.rs")` certifies none of that: the
 /// same boot's `test_syscall_panic` panics in that file too, so the needle is
 /// already present before the tripwire runs. Scope it instead to the window
 /// between this panic's header and its message — `panicked at <location>` is
@@ -1733,7 +1733,7 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
         .rfind(HEADER)
         .ok_or("tripwire message with no panic header before it")?;
     let location = &serial[header_at..msg_at];
-    if !location.contains("arch/syscall.rs") {
+    if !location.contains("arch/syscall/dispatch.rs") {
         return Err(format!(
             "expected the tripwire to name the guilty call site, not scheduler.rs; got: {}",
             location.trim()
@@ -9479,7 +9479,7 @@ fn run_machine_test(
             // touching it. With one CPU there is nowhere else.
             //
             // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
-            // an ordinary workload is beside them in `arch/syscall.rs`: routes
+            // an ordinary workload is beside them in `arch/syscall/dispatch.rs`: routes
             // past the ceiling do still exist,
             // and each of them holds the VFS lock when it dies, so the
             // machine wedges either way and the allocator's recovery cannot
