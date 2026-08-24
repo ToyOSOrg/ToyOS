@@ -102,6 +102,14 @@ pub enum Instrument {
     DevHostAlone,
     /// The dev host in the wide phase, or under another worktree's suite or
     /// build. The only instrument that can produce a contention red at all.
+    ///
+    /// **Two guests failing in one phase is not by itself a claim about the
+    /// host.** Simultaneity only argues for a common cause while no per-guest
+    /// mechanism has a rate; once one does, the arithmetic decides. At the
+    /// direction-flag class's measured 37 silent deaths in 13,960 loaded boots,
+    /// a suite of ~140 boots pays `P(>=2) ~ 5%` — so a pair in one run is an
+    /// ordinary coincidence, and reading it as a host-level event is a
+    /// conclusion the evidence never supported.
     DevHostLoaded,
 }
 

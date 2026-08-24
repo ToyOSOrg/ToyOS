@@ -1346,6 +1346,12 @@ pub fn build_test_image(
 
 /// Build all binaries in a multi-binary crate. Returns vec of (binary_name, bytes).
 /// Also builds any cdylib subcrates and includes their .so files.
+///
+/// **The test binaries are enumerated from `src/bin`, never from the target
+/// directory**: cargo does not remove a binary when its source is deleted, so a
+/// target-directory scan keeps shipping a renamed or merged test from an artifact
+/// nothing in the tree can produce any more — into the initrd, into the test list,
+/// and over the name of whatever gets it next.
 pub fn build_toyos_bins(root: &Path, crate_path: &Path, quiet: bool) -> Vec<(String, Vec<u8>)> {
     let _slot = buildlock::build_slot(root, "the test binaries");
     let mut lock = buildlock::shared(root, "test binaries");
