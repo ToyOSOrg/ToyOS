@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-08
 ---
 
@@ -24,3 +24,8 @@ The fix is per-config asset selection — `assets` naming files as well as
 directories — and it changes what five configs ship, under screen tests that
 read pixels off four of them. Not worth 40 ms; worth doing when something else
 touches that code.
+
+**2026-08-25: promoted.** Verified unchanged: all four configs still declare
+`assets = ["assets"]` whole. Real, still-current 15.5 MB of dead weight per
+image with a specified fix; low priority until someone is already touching
+that code, as the finding says.
