@@ -1340,8 +1340,11 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
 /// The accounting a process leaves behind, for `SYS_PROCESS_STATS` to answer
 /// after it is gone.
 ///
-/// Must run after `teardown_scheduling`, which is what flushes the child
-/// threads' counters into `ProcessData`.
+/// Must run after [`retire_threads`], which is what folds each retired
+/// thread's scheduler accounting into `ProcessData` — `merge_into` for the
+/// counters and `child_threads_cpu_ns` for the CPU time. Both teardowns do:
+/// `exit`'s phase 2 and `kill_process`'s, each immediately before
+/// [`teardown_tail`], which is this function's only caller.
 fn final_stats(
     process_data_arc: &Arc<Lock<ProcessData>>,
     pid: Pid,

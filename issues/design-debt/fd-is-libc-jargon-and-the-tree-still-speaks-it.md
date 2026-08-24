@@ -60,12 +60,12 @@ is below, and none of it is the sweep.
   two.
 - **Done.** ~~Four issue files cite the deleted `kernel/src/fd.rs`~~, two of
   them by line number: `issues/filesystem/close-cannot-report-io-error.md`,
-  `issues/kernel/ftruncate-takes-no-vfs-lock.md`,
-  `issues/kernel/sys-read-doc-comments-describe-nothing.md` and
-  `issues/audio/disk-wait-pins-a-cpu.md` (the fourth, found by grepping the
-  bare filename rather than the full path — `disk-wait-pins-a-cpu.md` names it
-  `fd.rs:644` with no `kernel/src/` prefix). Each now cites where its content
-  lives today; the file itself has not existed since the ruling.
+  `issues/kernel/ftruncate-takes-no-vfs-lock.md` and
+  `issues/audio/disk-wait-pins-a-cpu.md` (that last one found by grepping the
+  bare filename rather than the full path — it names it `fd.rs:644` with no
+  `kernel/src/` prefix); the fourth was itself closed on 2026-08-24. Each now
+  cites where its content lives today; the file itself has not existed since
+  the ruling.
 
 ## The closing check, and what it is allowed to find
 
