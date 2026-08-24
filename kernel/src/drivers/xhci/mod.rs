@@ -177,7 +177,7 @@ impl core::fmt::Display for Completion {
 /// What the controller's answer to the one outstanding operation is *for*.
 ///
 /// Every variant is work the driver used to do by spinning inside a scheduler
-/// pass, which is what pulling the boot stick out of a T14 runs.
+/// pass, which is what pulling the boot stick out of a laptop runs.
 enum What {
     /// Disable Slot, and what stops being reachable once it has completed.
     SlotGone { slot: u8, then: AfterSlot },
@@ -425,7 +425,7 @@ fn port_answers() -> bool {
 /// does not reach the USB transport's completion at all. A USB flash stick's
 /// 4 KiB write, on the other hand, is tens of milliseconds — the erase block is
 /// the reason and every stick has one — and that is the whole of what the
-/// T14's audio pops are made of (`issues/audio/disk-wait-pins-a-cpu.md`).
+/// laptop's audio pops are made of (`issues/audio/disk-wait-pins-a-cpu.md`).
 ///
 /// What is replaced is *when the controller publishes the event*, not the
 /// event. The TRB really ran, the completion code is the controller's own and
@@ -437,7 +437,7 @@ fn port_answers() -> bool {
 /// Two milliseconds: a Bulk-Only round trip is three transfers, and one of
 /// `/bin/logd`'s flushes is a page write, a FAT entry, a directory entry and a
 /// SYNCHRONIZE CACHE — so about ten round trips, which puts a flush at the ~50
-/// ms the T14 measured. It is deliberately *not* one stick's number: what the
+/// ms the laptop measured. It is deliberately *not* one stick's number: what the
 /// gate asserts is that the machine stays responsive while a device is slow,
 /// and any value large against a 2.902 ms audio period asks that question.
 const SLOW_TRANSFER_NS: u64 = 2_000_000;
@@ -474,7 +474,7 @@ const SLOW_CONNECT_NS: u64 = 300_000_000;
 /// every other port on the machine reads normally.
 ///
 /// The machine [`xhci-slow-connect`](SLOW_CONNECT_NS) cannot stage, and the one
-/// the T14 is. [`await_connect_settle`] stops looking as soon as the connect set
+/// the laptop is. [`await_connect_settle`] stops looking as soon as the connect set
 /// has held still for [`PORT_DEBOUNCE_NS`] **and is non-empty**, so a bus whose
 /// other devices have settled settles on them — and the laptop has four internal
 /// USB devices (camera, Bluetooth, card reader, fingerprint reader) that come up
@@ -541,7 +541,7 @@ pub fn port_work_pending() -> bool {
 /// [`await_connect_settle`] returns as soon as the connect set has held still
 /// for [`PORT_DEBOUNCE_NS`] and is non-empty, so a machine whose other devices
 /// are up settles on *them* and [`device::scan_ports`] runs without whatever is
-/// still coming. The T14 has four internal USB devices beside the stick it boots
+/// still coming. The laptop has four internal USB devices beside the stick it boots
 /// from, which is how that machine reached a working desktop with no `/boot` and
 /// no `/log` on one boot and mounted both on the next.
 ///
@@ -929,7 +929,7 @@ struct Disk {
 /// `usb_storage::open` indexes by and what a mount holds for its whole life,
 /// so it has to be a fact about *that disk* — and a position in any list is a
 /// fact about every other disk's history instead. Summing `storage.len()`
-/// across controllers made a stick plugged into the T14's Thunderbolt xHC
+/// across controllers made a stick plugged into the laptop's Thunderbolt xHC
 /// renumber the PCH's boot stick underneath the mount holding it: `/log`
 /// appended into the middle of the new drive and `/boot` served its bytes as
 /// the ESP's.
@@ -1060,7 +1060,7 @@ pub struct XhciController {
     /// state and a different diagnosis.
     ///
     /// What this replaces is the *register*, not a verdict — after the write the
-    /// port reads PED clear for every reader, which is the state the T14 showed
+    /// port reads PED clear for every reader, which is the state the laptop showed
     /// on all five of its ports — and only a reset clears it, because a reset is
     /// the one thing that takes a real port out of Disabled (§4.19.1.1.3). Same
     /// reason `xhci-slow-connect` and `xhci-deaf-port` exist.
@@ -1264,7 +1264,7 @@ impl XhciController {
     ///
     /// **A completion code other than Success or Short Packet is the same
     /// defect wearing a different hat**, and it is the one a Logitech mouse
-    /// hot-plugged into the T14 hit: every bind-time line read perfectly and
+    /// hot-plugged into the laptop hit: every bind-time line read perfectly and
     /// the device delivered nothing for the 28 seconds it stayed in the port.
     /// So a code this driver did not expect is *recorded* here rather than
     /// dropped, and [`Self::recover_endpoints`] acts on it.
@@ -1384,7 +1384,7 @@ impl XhciController {
         // below is aimed at a device that is still on the bus: it spends a
         // failure out of the budget, issues Reset Endpoint and a
         // CLEAR_FEATURE(HALT) control transfer against a device the owner is
-        // holding in their hand, and then tells them to unplug it. The T14 did
+        // holding in their hand, and then tells them to unplug it. The laptop did
         // all of that four times over, once per ordinary unplug.
         //
         // CSC as well as CCS, for the reason `service_port` reads it: a device
@@ -1599,7 +1599,7 @@ impl XhciController {
     /// One step per call and no wait anywhere in it — see [`PortWork`]. The
     /// enumeration it eventually runs *is* blocking, and it is the same
     /// `wait::boot::configure` the boot path runs; what this removes from the
-    /// blocking part is the debounce and the port reset, which on the T14 are
+    /// blocking part is the debounce and the port reset, which on the laptop are
     /// 100 ms and 55 ms against roughly 14 ms for everything else.
     fn service_ports(&mut self) -> Option<u64> {
         let now = crate::clock::nanos_since_boot();
@@ -1684,7 +1684,7 @@ impl XhciController {
                 Step::Reset(kind, write) => {
                     match kind {
                         Reset::Hot => log!("xHCI: port {} connected", port_idx + 1),
-                        // The line the T14 could not produce, because the
+                        // The line the laptop could not produce, because the
                         // driver had no such command.
                         Reset::Warm => log!(
                             "xHCI: port {} warm reset, link was {:?}",
@@ -1966,7 +1966,7 @@ impl XhciController {
 /// A `Vec` and not an `Option`, because the machine this project targets has
 /// two: Tiger Lake carries a USB4 xHCI in the Thunderbolt block *ahead* of the
 /// PCH's on the bus, and the laptop's own ports hang off the second one. The
-/// driver that kept one controller reported that the T14 had no USB input.
+/// driver that kept one controller reported that the laptop had no USB input.
 static XHCI: Lock<Vec<XhciController>> = Lock::new(Vec::new());
 
 /// Process xHCI events if this CPU has an unserviced interrupt record, or if a
@@ -1999,7 +1999,7 @@ static XHCI: Lock<Vec<XhciController>> = Lock::new(Vec::new());
 /// whole life. Called from a syscall, it makes that syscall's thread the
 /// driver's engine and stops the CPU rescheduling for as long as the bus takes.
 /// The read path called it for the keyboard and mouse claims so a read would
-/// see a report that had just landed; on the T14 that made the compositor's own
+/// see a report that had just landed; on the laptop that made the compositor's own
 /// mouse read the hot-plug engine and froze the desktop for seconds at a time,
 /// with a live kernel and nothing dropped. A caller that wants fresh input
 /// wants the scheduler pass that is already about to run, not this.

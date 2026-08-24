@@ -97,7 +97,7 @@ pub fn uart_present() -> bool {
     UART_PRESENT.load(Ordering::Relaxed)
 }
 
-/// Whether anything can carry a byte off this machine. False is the T14's
+/// Whether anything can carry a byte off this machine. False is the laptop's
 /// shape: the shards still fill and still hold their tails, but nothing drains
 /// them off the machine, so the framebuffer is the only surface a diagnostic
 /// can reach.
@@ -118,7 +118,7 @@ pub fn has_console() -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Backend {
-    /// Nothing can carry a byte off this machine. The T14's shape: records
+    /// Nothing can carry a byte off this machine. The laptop's shape: records
     /// stay in their shards, where the panel can still read them.
     None = 0,
     Uart = 1,

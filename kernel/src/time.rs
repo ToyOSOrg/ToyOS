@@ -295,7 +295,7 @@ impl fmt::Display for Cadence {
 /// but working machine may spend on the way has to fit inside it, and the
 /// largest of those is usually a device's. `scheduler::retire_task`'s `GIVE_UP`
 /// is the worked example — 1 s against a path containing two of xHCI's own 2 s
-/// deadlines, and it fired on the owner's T14 at 949 s of uptime.
+/// deadlines, and it fired on the owner's laptop at 949 s of uptime.
 #[derive(Clone, Copy)]
 pub struct Tripwire {
     limit: Duration,
@@ -361,7 +361,7 @@ impl fmt::Display for Budget {
 /// why this kind has to exist: it is the LAPIC one-shot floor every arm is
 /// clamped to, its own doc says "Policy, not physics", and an implementer
 /// applying RT7 with only four kinds finds it unconstructible and deletes it —
-/// which reopens #156, a CPU gone off the T14 on eight boots of eight.
+/// which reopens #156, a CPU gone off the laptop on eight boots of eight.
 #[derive(Clone, Copy)]
 pub struct Floor {
     least: Duration,

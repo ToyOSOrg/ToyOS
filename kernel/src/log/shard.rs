@@ -27,7 +27,7 @@ use toyos_abi::log::RECORD_BYTES;
 ///
 /// **Sized by records emitted before a reader exists**, which is the only
 /// quantity this bound has to cover — after that `klogd` and `/bin/logd` are
-/// draining. Measured over all eighteen committed T14 logs, cpu0 and `boot`
+/// draining. Measured over all eighteen committed real-hardware logs, cpu0 and `boot`
 /// records up to and including `Boot: complete`: **184 to 186**, and 185 in
 /// fifteen of the eighteen. This is that with 2.7x of headroom.
 ///

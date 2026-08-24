@@ -313,7 +313,7 @@ impl Scope {
     /// is not in the table: it needs each bridge's secondary bus number read
     /// out of that bridge's own config space, and a function that guessed
     /// instead would hand back a number naming a different device. Every scope
-    /// QEMU publishes and every one the T14 is expected to publish has a
+    /// QEMU publishes and every one the laptop is expected to publish has a
     /// single-element path; the bridge walk belongs to stage I2, where there
     /// is an ECAM window to walk it with.
     pub fn stream_id(&self) -> Option<StreamId> {

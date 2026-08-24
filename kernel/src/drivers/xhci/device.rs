@@ -292,7 +292,7 @@ fn parse_config(buf: &[u8]) -> Option<(u8, Function)> {
 /// The controller answers by setting PRC, which is a Port Status Change Event
 /// as much as it is a register bit — so the boot path spins on the register
 /// ([`init_device`]) while the runtime path comes back when the event arrives,
-/// and neither is a second implementation of the other. The T14's own root
+/// and neither is a second implementation of the other. The laptop's own root
 /// ports take 55 ms over this, measured, which is the whole reason the runtime
 /// path must not hold a scheduler pass across it.
 pub fn reset_port(ctrl: &mut XhciController, port_idx: u8, kind: Reset) {
@@ -644,7 +644,7 @@ fn read_back(
 ///
 /// The completion code cannot say on its own: the status stage reports Success
 /// whether the data stage filled the buffer or left it untouched, which is how
-/// a T14 port that answered no descriptor at all was logged as `class=0x0
+/// a laptop port that answered no descriptor at all was logged as `class=0x0
 /// vendor=0000 product=0000`.
 fn delivered(outcome: Outcome, want: u16) -> Option<u16> {
     let Outcome::Transfer { code: CC_SUCCESS, residue } = outcome else { return None };

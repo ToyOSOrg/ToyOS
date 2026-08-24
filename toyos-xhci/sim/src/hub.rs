@@ -6,7 +6,7 @@
 //! write-1-to-clear, PR is write-1-to-set and the *controller* clears it, PED
 //! is set by a reset that finds a device and cleared by a write of '1'. The
 //! last of those is what QEMU does not implement and what disabled every port
-//! on the T14.
+//! on the laptop.
 
 use toyos_xhci::port::Nanos;
 use toyos_xhci::Portsc;
@@ -39,7 +39,7 @@ pub enum ResetBehaviour {
     /// **A SuperSpeed port given a hot reset it cannot take.** PR is accepted
     /// and the link falls over: no PRC ever comes, and the link state goes
     /// Inactive, which §4.19.1.2.4 says only a warm reset leaves. This is what
-    /// the T14's USB-A ports do and the state QEMU has no way to produce.
+    /// the laptop's USB-A ports do and the state QEMU has no way to produce.
     HotResetKillsTheLink { warm_works: bool },
 }
 

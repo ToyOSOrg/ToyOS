@@ -32,9 +32,9 @@ pub const RESET_DEADLINE_NS: Nanos = 2_000_000_000;
 /// or `None` when its link is already up and there is nothing to do.
 ///
 /// **The one place that question is answered**, because the boot scan and the
-/// hot-plug machine must answer it the same way: the T14's stick is in the port
-/// when the machine boots, so a fix that only reached the hot-plug path would
-/// not reach the machine it is for.
+/// hot-plug machine must answer it the same way: the laptop's stick is in the
+/// port when the machine boots, so a fix that only reached the hot-plug path
+/// would not reach the machine it is for.
 pub fn reset_needed(protocol: Option<Protocol>, portsc: Portsc) -> Option<Reset> {
     if protocol != Some(Protocol::Usb3) {
         // USB2, or a port the controller did not describe. A reset is how a

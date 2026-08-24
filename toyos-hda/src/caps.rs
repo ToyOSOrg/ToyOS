@@ -126,7 +126,7 @@ pub struct GainRange {
 
 /// What an amplifier can be told to do.
 ///
-/// `gain` is an `Option` because the absence is the point: the T14's pin
+/// `gain` is an `Option` because the absence is the point: the laptop's pin
 /// amplifiers report one step, so there is no 0 dB index to write and a driver
 /// that computed one would be writing a field the codec does not implement.
 /// Its converter amplifier is the other half — 88 steps and **no mute bit** —
@@ -160,7 +160,7 @@ pub struct PinCaps {
     pub headphone_drive: bool,
     pub presence_detect: bool,
     /// The pin can power an external amplifier. **A speaker pin that has this
-    /// and is not told to use it stays silent**: the T14 reports EAPD capable
+    /// and is not told to use it stays silent**: the laptop reports EAPD capable
     /// on both its output pins and reads the bit back clear at boot.
     pub eapd: bool,
     pub high_bit_rate: bool,
@@ -183,7 +183,7 @@ impl PinCaps {
 /// Whether a pin goes anywhere physical.
 ///
 /// The one field that decides whether a pin is a candidate at all, and it is
-/// not the default device: four pins on the T14's codec call themselves
+/// not the default device: four pins on the laptop's codec call themselves
 /// speakers and are `NoPhysicalConnection`, one of them with a valid
 /// connection list and an output amplifier behind it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -274,7 +274,7 @@ impl DefaultDevice {
 pub struct ConfigDefault {
     pub connectivity: Connectivity,
     pub device: DefaultDevice,
-    /// The codec's own statement that two pins are one output: the T14 puts
+    /// The codec's own statement that two pins are one output: the laptop puts
     /// its speaker and its headphone jack in association 1, the jack last by
     /// sequence, which is how a graph says "these share a converter and the
     /// jack wins when something is plugged into it".
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn the_t14_s_speaker_dac_decodes_as_a_stereo_converter() {
+    fn the_laptop_s_speaker_dac_decodes_as_a_stereo_converter() {
         let caps = WidgetCaps::decode(response(0x0000_041d));
         assert_eq!(caps.kind, WidgetKind::AudioOutput);
         assert_eq!(caps.channels, 2);
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn the_t14_s_speaker_pin_has_a_connection_list_and_an_output_amp() {
+    fn the_laptop_s_speaker_pin_has_a_connection_list_and_an_output_amp() {
         let caps = WidgetCaps::decode(response(0x0040_058d));
         assert_eq!(caps.kind, WidgetKind::PinComplex);
         assert!(caps.connection_list);
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn the_t14_s_vendor_widget_is_the_one_with_processing_coefficients() {
+    fn the_laptop_s_vendor_widget_is_the_one_with_processing_coefficients() {
         // node 0x20, the only widget on that codec whose Proc Widget bit is
         // set, and the only one the probe asks for processing caps.
         assert!(WidgetCaps::decode(response(0x00f0_0040)).proc_widget);
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn eight_channel_display_audio_decodes_its_channel_count() {
-        // The T14's display codec, node 0x03: `channels=8`.
+        // The laptop's display codec, node 0x03: `channels=8`.
         assert_eq!(WidgetCaps::decode(response(0x0000_6611)).channels, 8);
     }
 
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn both_t14_output_pins_can_power_an_external_amplifier() {
+    fn both_laptop_output_pins_can_power_an_external_amplifier() {
         let speaker = PinCaps::decode(response(0x0001_0014));
         assert!(speaker.output && speaker.eapd && speaker.presence_detect);
         assert!(!speaker.headphone_drive);
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn the_t14_s_converter_offers_what_this_pipeline_plays() {
+    fn the_laptop_s_converter_offers_what_this_pipeline_plays() {
         // node 0x02 pcm=0x000e0060, and soundd's period grid is 44.1 kHz S16.
         let pcm = PcmCaps::decode(response(0x000e_0060));
         let rates: Vec<u32> = pcm.rates().collect();

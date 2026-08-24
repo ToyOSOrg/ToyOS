@@ -191,7 +191,7 @@ extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64) {
 ///
 /// `panic_raw` is an `outb` loop with no lock in it, so it cannot be blocked by
 /// whatever either interrupted context was holding. The cost is that a machine
-/// with no 16550 — the T14 as the owner flashes it — halts here with the panel
+/// with no 16550 — the laptop as the owner flashes it — halts here with the panel
 /// showing whatever the ring already had. That is the honest trade: this path is
 /// unreachable in a correct kernel, and the alternative is corrupting the report
 /// on every machine to have a sentence on one.

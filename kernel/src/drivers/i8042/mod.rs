@@ -1,4 +1,4 @@
-//! The i8042 PS/2 controller: the ThinkPad's built-in keyboard, and its
+//! The i8042 PS/2 controller: the laptop's built-in keyboard, and its
 //! TrackPoint on the aux port.
 //!
 //! **Init treats the machine as untrusted.** Firmware and an embedded
@@ -235,7 +235,7 @@ static ARMED_NS: AtomicU64 = AtomicU64::new(0);
 
 // The counters, after the verdict.
 //
-// The verdict was the last word the driver ever said. The ThinkPad T14 lost its
+// The verdict was the last word the driver ever said. The laptop lost its
 // keyboard, TrackPoint and touchpad 6.6 s into a session — all three are behind
 // this controller — and the log's final `i8042:` line is the verdict, printed
 // 15 ms before the input died and never revised for the remaining 54 s. What
@@ -292,7 +292,7 @@ static REPORTED_IRQS: AtomicU32 = AtomicU32::new(0);
 /// flag rides along because a lone pointer byte frames no packet and is
 /// equally invisible in `0 motion`.
 ///
-/// **A byte a decoder is still holding is not one of these**, and the T14 is
+/// **A byte a decoder is still holding is not one of these**, and the laptop is
 /// why the distinction is written down here rather than left to arithmetic.
 /// It reported `6 bytes, 0 keys, 2 motion, no event from [aux 0x08, aux 0x06,
 /// aux 0x08, aux 0x0e]` while its pointer was framing perfectly: two whole
@@ -1316,7 +1316,7 @@ fn query_scancode_set(deadline: u64) -> SetQuery {
     if !write_data(0x00, deadline) {
         return SetQuery::Silent;
     }
-    // The T14 refused here, on the argument, having acked the command byte.
+    // The laptop refused here, on the argument, having acked the command byte.
     match echo_the_argument(read_data(deadline)) {
         Some(0xFA) => {}
         Some(other) => return SetQuery::Refused(other),
@@ -1329,7 +1329,7 @@ fn query_scancode_set(deadline: u64) -> SetQuery {
 }
 
 /// Under `i8042-kbd-echo`, the argument byte is answered `0xEE` — ECHO's own
-/// reply, and what the ThinkPad T14 Gen 2's EC answered on its own screen.
+/// reply, and what the laptop's EC answered on its own screen.
 /// QEMU's PS/2 keyboard implements `0xF0` to the letter and no device or
 /// machine property makes it stop, so nothing on the host side can hand the
 /// driver a keyboard that will not report its set. Only the verdict is
@@ -1401,7 +1401,7 @@ fn aux_reenable() {
 
 /// What firmware claims about the 8042, which is never what decides.
 ///
-/// The substitute is the ThinkPad T14 Gen 2's own answer, printed on its own
+/// The substitute is the laptop's own answer, printed on its own
 /// screen: FADT revision 6, `iapc_boot_arch=0x0011` — `LEGACY_DEVICES` set,
 /// **8042 clear**, `NO_ASPM` set — on a machine whose integrated keyboard is
 /// PS/2. It exists because QEMU cannot stage the disagreement: `i8042=off`
@@ -1423,7 +1423,7 @@ pub fn init(rsdp_addr: u64) {
     // test and a `0xF0 0x00` scancode-set query checked against `0x41` — three
     // direct observations of the machine in front of us, each of which is
     // strictly better evidence than the claim. Gating the strong check on the
-    // weak one is backwards, and it cost the T14 its keyboard: bit 1 clear on a
+    // weak one is backwards, and it cost the laptop its keyboard: bit 1 clear on a
     // laptop whose integrated keyboard is PS/2, so the controller was never
     // given a chance to answer.
     //
@@ -1541,8 +1541,8 @@ pub fn init(rsdp_addr: u64) {
     // point: one loud line naming the observed byte beats a keyboard that types
     // nonsense on a machine we cannot single-step.
     //
-    // A device that will not answer at all — the ThinkPad T14 Gen 2's EC, which
-    // returns ECHO — is not a device that answers wrongly. There the
+    // A device that will not answer at all — real hardware whose EC returns
+    // ECHO — is not a device that answers wrongly. There the
     // wire format falls back to the *only* other evidence there is: the
     // translate bit firmware itself left in the config byte. That is not a
     // weaker version of the read-back, it is Linux's entire test — `i8042.c`

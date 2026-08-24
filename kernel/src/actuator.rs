@@ -101,7 +101,7 @@ actuators! {
     /// reach them.
     i8042_budget_expired = "i8042-budget-expired";
 
-    /// Hand the i8042 probe the T14's own FADT answer — revision 6,
+    /// Hand the i8042 probe the laptop's own FADT answer — revision 6,
     /// `iapc_boot_arch=0x0011`, the 8042 bit clear — on a machine that has a
     /// working controller. QEMU cannot stage that disagreement:
     /// `-machine q35,i8042=off` clears the bit by removing the device and
@@ -110,7 +110,7 @@ actuators! {
     i8042_fadt_denial = "i8042-fadt-denial";
 
     /// Answer the i8042 probe's `0xF0 0x00` scancode-set query with `0xEE` —
-    /// ECHO's own reply, and what the T14's EC answered on the laptop's own
+    /// ECHO's own reply, and what the laptop's EC answered on its own
     /// screen — on a keyboard that is otherwise working. QEMU's PS/2 keyboard
     /// implements `0xF0` to the letter (`hw/input/ps2.c`, `KBD_CMD_SCANCODE`)
     /// and no device or machine property makes it stop. Only the verdict is
@@ -303,7 +303,7 @@ actuators! {
 
     /// Hold every mass-storage bulk completion back for 2 ms before the driver
     /// may see it, which is what a USB flash stick's erase block does to a 4 KiB
-    /// write and what the T14's audio pops are made of. QEMU's `usb-storage`
+    /// write and what the laptop's audio pops are made of. QEMU's `usb-storage`
     /// answers in microseconds and has no property that delays a transfer, so
     /// this is the only way the suite can ask what the machine does while a
     /// device is slow. The event is the controller's own and the bytes really
@@ -412,7 +412,7 @@ actuators! {
     /// other port on the machine reading normally. A different machine from the
     /// one above and not a weaker version of it: `await_connect_settle` ends as
     /// soon as the connect set has held still and is non-empty, so a bus whose
-    /// other devices have settled settles on them — which is the T14, with four
+    /// other devices have settled settles on them — which is the laptop, with four
     /// internal USB devices beside the stick it boots from. Hiding the whole bus
     /// can never reach it. See `xhci/mod.rs`'s `SLOW_STORAGE_PORT`.
     xhci_slow_storage_connect = "xhci-slow-storage-connect";
@@ -422,13 +422,13 @@ actuators! {
     /// (§4.19.1.1.6) and reads PED clear until it is reset again. QEMU's
     /// `xhci_port_write` clears only CSC|PEC|WRC|OCC|PRC|PLC|CEC on a written
     /// '1' and PED is in neither that set nor its read/write set. The register
-    /// is replaced, not a verdict: the port reads exactly what the T14's five
+    /// is replaced, not a verdict: the port reads exactly what the laptop's five
     /// ports read. See `XhciController::software_disabled`.
     xhci_portsc_rw1c = "xhci-portsc-rw1c";
 
     /// Take a bound HID device's very first completion away and hand the driver
     /// a stall in its place, which is the shape a Logitech mouse hot-plugged
-    /// into the T14 showed. QEMU's `usb-hid` completes every interrupt TRB it is
+    /// into the laptop showed. QEMU's `usb-hid` completes every interrupt TRB it is
     /// given — `usb_hid_handle_data` answers an IN token on endpoint 1 with a
     /// report or with NAK and has no path to `USB_RET_STALL` for it. What is
     /// replaced is the code *and the report that transfer delivered*: without
@@ -530,9 +530,9 @@ actuators! {
     /// the report reaches `halt_all_cpus`.
     ///
     /// What nothing else reaches: whether a fatal report lands on the panel of
-    /// the owner's T14 while his desktop owns the scanout.
+    /// the owner's laptop while his desktop owns the scanout.
     /// `screen_fatal_halt_composited` certifies the software half and cannot
-    /// certify more — QEMU's framebuffer is host RAM, while the T14's is a
+    /// certify more — QEMU's framebuffer is host RAM, while the laptop's is a
     /// write-combining MMIO mapping the compositor is also writing, and a full
     /// paint measures ~460 ms there. Three investigations into the machine
     /// freeze have assumed a fatal panic would have been seen if one had
@@ -542,7 +542,7 @@ actuators! {
     ///
     /// Implies `diag-tick`, because the probe's deadline is read from the idle
     /// loop; without it the probe fires on the first interrupt after the
-    /// deadline rather than at the deadline, which on the owner's T14 was 99
+    /// deadline rather than at the deadline, which on the owner's laptop was 99
     /// seconds late and looked like a probe that never fired.
     metal_panic_probe = "metal-panic-probe";
 
@@ -554,7 +554,7 @@ actuators! {
     /// which is correct and is good power management. But everything the kernel
     /// does *for the person watching it* lives in the idle loop — the heartbeat,
     /// the probe's deadline, the log sink's flush — so on a machine that has
-    /// gone quiet none of it runs. Eight boots of the owner's T14 produced two
+    /// gone quiet none of it runs. Eight boots of the owner's laptop produced two
     /// heartbeats each, at 1.15 s and 1.78 s, then nothing for as long as 102 s
     /// until a keypress.
     ///

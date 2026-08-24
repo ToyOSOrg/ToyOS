@@ -346,7 +346,7 @@ pub fn read_device(
         // **A read of an input device reads the queue and drives no
         // hardware.** Both of these polled xHCI first, which made whichever
         // thread happened to read the mouse into the driver's enumeration and
-        // recovery engine — on the T14 that was the compositor's own mouse
+        // recovery engine — on the laptop that was the compositor's own mouse
         // read, and the desktop froze for multi-second stretches with a live
         // kernel and nothing dropped. `drain_irqs` calls the same function at
         // the top of every scheduler pass, so a reader gives up at most one

@@ -191,7 +191,7 @@ mod tests {
     /// The point of driving the walk from the log rather than from a
     /// hand-written table is that every word below is one a real machine sent,
     /// so a wrong verb identifier or a wrong parameter number fails against the
-    /// T14 rather than against prose.
+    /// laptop rather than against prose.
     struct Fake {
         text: &'static str,
     }
@@ -327,10 +327,10 @@ mod tests {
     }
 
     #[test]
-    fn walking_the_t14_reaches_the_graph_its_own_log_describes() {
+    fn walking_the_laptop_reaches_the_graph_its_own_log_describes() {
         // `STATESTS=0x0005`: the ALC257 at 0 and Intel display audio at 2.
-        let walked = walk(include_str!("../fixtures/alc257-t14.txt"), 0x0005);
-        let parsed = fixture::t14();
+        let walked = walk(include_str!("../fixtures/laptop.txt"), 0x0005);
+        let parsed = fixture::laptop();
         assert_eq!(walked.len(), parsed.len());
         for (walked, parsed) in walked.iter().zip(&parsed) {
             assert_eq!(walked.address, parsed.address);
@@ -342,12 +342,12 @@ mod tests {
     }
 
     #[test]
-    fn the_walked_t14_binds_the_same_speaker_the_parsed_one_does() {
+    fn the_walked_laptop_binds_the_same_speaker_the_parsed_one_does() {
         // The whole point of the walk: what it produces has to be the input
         // `find_output_path` was verified against, or the crate's coverage
         // describes a graph no driver ever builds.
-        let walked = walk(include_str!("../fixtures/alc257-t14.txt"), 0x0005);
-        let path = find_output_path(&walked).expect("the T14 has a speaker");
+        let walked = walk(include_str!("../fixtures/laptop.txt"), 0x0005);
+        let path = find_output_path(&walked).expect("the laptop has a speaker");
         assert_eq!(path.output.node, Node(0x14));
         assert_eq!(path.converter, Node(0x02));
         assert_eq!(path.headphone.expect("the jack").node, Node(0x21));
@@ -364,7 +364,7 @@ mod tests {
         let path = find_output_path(&walked).expect("line-out is an output");
         assert_eq!(path.converter, Node(0x02));
         // The other arrangement of §6.4 item 2: this pin has no amplifier at
-        // all and the converter carries both halves, where the T14 splits them.
+        // all and the converter carries both halves, where the laptop splits them.
         assert_eq!(path.output.amp, None);
         let amp = path.converter_amp.expect("QEMU's converter has an output amp");
         assert!(amp.mute);
@@ -376,7 +376,7 @@ mod tests {
         // Bit 3 of `STATESTS` with nothing behind it. A walk that dropped it
         // would report a machine with fewer codecs than the register named,
         // which is the report §2.3 forbids.
-        let found = enumerate(&mut Fake { text: include_str!("../fixtures/alc257-t14.txt") }, 0x000d);
+        let found = enumerate(&mut Fake { text: include_str!("../fixtures/laptop.txt") }, 0x000d);
         assert_eq!(found.len(), 3);
         assert_eq!(found[2].as_ref().err(), Some(&(Address::new(3).unwrap(), CodecFault::Silent)));
     }

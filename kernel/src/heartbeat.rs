@@ -3,7 +3,7 @@
 //!
 //! # The gap this closes
 //!
-//! A T14 that freezes at boot leaves a log **byte-identical** to a healthy
+//! A laptop that freezes at boot leaves a log **byte-identical** to a healthy
 //! one's. Ten logs off the owner's stick: seven of 214 lines and three of 216,
 //! the three long ones differing only by two `compositor: frames=` reports, and
 //! every log's last kernel line at ~1.33 s whether that boot lived or died.
@@ -63,7 +63,7 @@
 //! be a counter.
 //!
 //! What `ran=0` does **not** mean on its own: a machine with genuinely nothing
-//! to do also runs nothing. It is diagnostic because the T14's desktop always
+//! to do also runs nothing. It is diagnostic because the laptop's desktop always
 //! has something — the compositor wakes about twice a second to blink a cursor,
 //! and every one of those is a dispatch — so a run of `ran=0` there is a
 //! machine that has stopped doing what it was doing. Cross-check it against the
@@ -80,7 +80,7 @@
 //! The hole it does **not** close: if every CPU's LAPIC timer stopped at once —
 //! a C-state that parks the APIC timer, an SMI storm — the log would go silent
 //! and read as death. The kernel only ever executes `hlt`, never `MWAIT`, and
-//! programs no C-state MSR, so the timers should keep counting; but the T14's
+//! programs no C-state MSR, so the timers should keep counting; but the laptop's
 //! firmware is not ours. So a log that stops means *the machine stopped taking
 //! timer interrupts*, which is weaker than *the machine died* and should be
 //! written down as the weaker claim. `gap=` is what tells the two apart after
@@ -104,7 +104,7 @@
 //! # The line beside it
 //!
 //! `alive=` and `ran=` answer *is the machine running* and *is it running
-//! anything*. On the T14 they leave one question they cannot reach: a desktop
+//! anything*. On the laptop they leave one question they cannot reach: a desktop
 //! that is alive, has nothing to do and never will again, because the one
 //! channel that could give it something has stopped. Four boots of 2026-08-07
 //! end at the same `spawn:` line with every CPU quiescent, and a fifth had no
@@ -245,7 +245,7 @@ pub fn poll() {
     // Beside the heartbeat rather than on a cadence of its own, so a reader can
     // pair the two by eye. `alive=8/8 ran=0` says the machine is running and
     // running nothing; whether that is a machine with nothing to do or a machine
-    // whose input died is what the next line answers, and on the T14 there is no
+    // whose input died is what the next line answers, and on the laptop there is no
     // third channel to ask it on.
     crate::drivers::i8042::report_line();
 

@@ -127,8 +127,8 @@ fn a_recovery_the_controller_refuses_lets_the_device_go() {
 }
 
 // ---------------------------------------------------------------------------
-// The disconnect against the recovery, which is the T14's own event: a device
-// pulled while a transfer on its endpoint has just errored.
+// The disconnect against the recovery, which is the laptop's own event: a
+// device pulled while a transfer on its endpoint has just errored.
 // ---------------------------------------------------------------------------
 
 /// The recovery is abandoned and the teardown runs at once, so the port costs

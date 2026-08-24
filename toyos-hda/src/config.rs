@@ -103,7 +103,7 @@ pub fn verbs(
 /// Unmuted, and at the amplifier's own 0 dB index where it has one.
 ///
 /// The two halves are independent because the codec makes them independent:
-/// the T14's pin amplifier is mute-only with no gain field to write, and its
+/// the laptop's pin amplifier is mute-only with no gain field to write, and its
 /// converter has 88 steps and no mute bit. Writing the absent half is a store
 /// that succeeds and does nothing, which is worse than not writing it.
 fn amp_verb(codec: Address, node: Node, amp: AmpCaps) -> Verb {
@@ -147,7 +147,7 @@ fn nodes(path: &OutputPath) -> Vec<Node> {
 /// One rate, because soundd's mixer, its resampler and gate A's recorded
 /// counters are all sized against it, and a converter that cannot play it is a
 /// refusal the driver reports rather than a rate it substitutes. Both machines
-/// in reach offer it: the T14's converter does 44.1 and 48 kHz at 16/20/24, and
+/// in reach offer it: the laptop's converter does 44.1 and 48 kHz at 16/20/24, and
 /// QEMU's does 16 k–96 k at 16.
 pub const RATE: u32 = 44_100;
 pub const WIDTH: u8 = 16;
@@ -183,18 +183,18 @@ mod tests {
     /// The bit this sequence never sets, which is why it lives only here.
     const AMP_MUTE: u16 = 1 << 7;
 
-    fn t14() -> (Vec<Codec>, OutputPath) {
-        let codecs = fixture::t14();
+    fn laptop() -> (Vec<Codec>, OutputPath) {
+        let codecs = fixture::laptop();
         let path = find_output_path(&codecs).unwrap();
         (codecs, path)
     }
 
     #[test]
-    fn the_t14_s_speaker_is_told_to_power_its_external_amplifier() {
+    fn the_laptop_s_speaker_is_told_to_power_its_external_amplifier() {
         // §6.4 item 1: both output pins report EAPD capable and read the bit
         // back clear at boot, so a path configured without this is correct and
         // silent. Removing the `pin.eapd` arm reds here and nowhere else.
-        let (codecs, path) = t14();
+        let (codecs, path) = laptop();
         let sent = verbs(&codecs, &path, 0x4011, 1).unwrap();
         let eapd: Vec<u32> = sent
             .iter()
@@ -206,10 +206,10 @@ mod tests {
     }
 
     #[test]
-    fn the_two_halves_of_the_t14_s_volume_control_are_written_where_they_exist() {
+    fn the_two_halves_of_the_laptop_s_volume_control_are_written_where_they_exist() {
         // §6.4 item 2: mute on the pin, gain on the converter, and neither
         // widget implements the other's field.
-        let (codecs, path) = t14();
+        let (codecs, path) = laptop();
         let sent = verbs(&codecs, &path, 0x4011, 1).unwrap();
         let amps: Vec<u32> = sent
             .iter()
@@ -226,7 +226,7 @@ mod tests {
     fn nothing_in_the_sequence_ever_sets_the_mute_bit() {
         // The whole sequence exists to make a path audible. A mute here is the
         // defect that looks exactly like a driver that never ran.
-        let (codecs, path) = t14();
+        let (codecs, path) = laptop();
         for verb in verbs(&codecs, &path, 0x4011, 1).unwrap() {
             let raw = verb.raw();
             if (raw >> 16) & 0xF == verb::SET_AMP_GAIN_MUTE as u32 {
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn the_jack_is_told_to_drive_headphones_and_the_speaker_is_not() {
-        let (codecs, path) = t14();
+        let (codecs, path) = laptop();
         let sent = verbs(&codecs, &path, 0x4011, 1).unwrap();
         let control: Vec<u32> = sent
             .iter()
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn the_converter_learns_the_format_and_the_tag_last() {
-        let (codecs, path) = t14();
+        let (codecs, path) = laptop();
         let sent = verbs(&codecs, &path, 0x4011, 3).unwrap();
         let tail: Vec<u32> = sent[sent.len() - 2..].iter().map(|v| v.raw()).collect();
         // Set Converter Format on node 0x02 with 44.1 kHz S16 stereo, then
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn every_widget_on_the_path_that_has_a_power_state_is_told_d0() {
-        let (codecs, path) = t14();
+        let (codecs, path) = laptop();
         let sent = verbs(&codecs, &path, 0x4011, 1).unwrap();
         let powered: Vec<u8> = sent
             .iter()
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_hop_shared_by_two_pins_is_powered_once() {
-        // The T14 cannot produce this: both its routes are empty. The synthetic
+        // The laptop cannot produce this: both its routes are empty. The synthetic
         // selector graph is the only place a hop exists at all.
         let codecs = fixture::synthetic_selector();
         let path = find_output_path(&codecs).unwrap();
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn both_machines_offer_the_one_rate_this_driver_asks_for() {
-        let (codecs, path) = t14();
+        let (codecs, path) = laptop();
         assert_eq!(format(&codecs, &path), Some((0x4011, 2)));
 
         let codecs = fixture::qemu();
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn a_converter_that_does_not_offer_the_rate_is_a_refusal_and_not_a_substitution() {
-        let mut codecs = fixture::t14();
+        let mut codecs = fixture::laptop();
         // 48 kHz only, at 16 bits: a converter that exists and cannot play the
         // one rate this pipeline runs at.
         let group = &mut codecs[0].groups[0];

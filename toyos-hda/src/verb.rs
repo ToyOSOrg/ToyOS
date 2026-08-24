@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn short_verb_is_the_probe_s_encoding() {
-        // The encoding H0 sent to the T14 and got answers from, so this is
+        // The encoding H0 sent to the laptop and got answers from, so this is
         // checked against a machine rather than against the specification's
         // prose: codec 0, node 0x14, GET_PARAMETER, widget caps.
         let verb = Verb::short(Address::new(0).unwrap(), Node(0x14), GET_PARAMETER, PARAM_WIDGET_CAPS);
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn present_reports_every_codec_and_not_the_first() {
-        // The T14's own STATESTS: the analogue codec at 0 and display audio at
+        // The laptop's own STATESTS: the analogue codec at 0 and display audio at
         // 2. A `first()` here is the defect §2.3 exists to prevent.
         let found: Vec<u8> = present(0x0005).map(Address::raw).collect();
         assert_eq!(found, [0, 2]);
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn the_t14_s_widget_range_decodes_to_its_own_nodes() {
+    fn the_laptop_s_widget_range_decodes_to_its_own_nodes() {
         // `hda: codec0 fg=0x01 widgets=0x02..0x24`, from the boot.
         let range = Subordinates::decode(Response::new(0x0002_0023).unwrap()).unwrap();
         assert_eq!(range.first, Node(0x02));
