@@ -116,8 +116,6 @@ pub(super) fn sys_connection_join(rx_h: RawHandle, tx_h: RawHandle) -> u64 {
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
 }
 
-// Ports and namespaces
-
 /// Make a port and install both ends.
 ///
 /// Needs no right and grants none: a port with no clients is not authority.
