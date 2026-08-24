@@ -85,6 +85,7 @@ toyos-keymap/      Layouts, dead-key composition, key translation, layout detect
 toyos-fat32/       FAT32 driver, read + write; no format path by design
 toyos-fat32-check/ FAT32 checker from Microsoft's fatgen103 — the outside judge
 toyos-elf/         ELF64 decoding (no_std, no alloc, forbid(unsafe_code))
+toyos-symbols/     Backtrace symbol lookup: locating an ELF's symbol tables and budgeting the demangled name (no_std, no alloc, forbid(unsafe_code))
 toyos-gpt/         GPT parser (no_std, no alloc, forbid(unsafe_code))
 toyos-hda/         HDA codec decoding and output-path selection, pure
 toyos-mixer/       The mixer's decisions — samples, gain, dither, quantize — pure, corpus-certified
