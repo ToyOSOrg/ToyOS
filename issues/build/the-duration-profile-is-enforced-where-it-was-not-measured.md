@@ -186,9 +186,9 @@ Prospective until the first hosted nightly actually runs, 2026-08-22 03:00Z.
 ## 2026-08-22: the enforcing instrument is the measuring one again
 
 The routing was moved for a different reason — the T14's one worker had
-thirteen runs of branch traffic queued behind one nightly gate A, and
-`issues/build/the-t14-has-one-lane-and-the-nightly-wants-three.md` carries that
-measurement — and this file is downstream of it. `route.yml`'s `HOSTED` now
+thirteen runs of branch traffic queued behind one nightly gate A, measured
+2026-08-22T05:03Z and recorded in `route.yml`'s own header — and this file is
+downstream of it. `route.yml`'s `HOSTED` now
 covers `merge_group`, `pull_request` from anywhere, `push`, and `ci.yml`'s
 `schedule`; only a `workflow_dispatch` and a non-`ci.yml` `schedule` reach the
 T14.
