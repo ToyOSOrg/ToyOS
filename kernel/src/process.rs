@@ -30,6 +30,32 @@
 //! supplement: the report above it is complete without it. Anything that stops
 //! being true of that — anything a reader could not reconstruct — has to leave
 //! this table the way the names did.
+//!
+//! ## Where the lifecycle's decisions live, and why they are not here
+//!
+//! **`toyos-proclife` decides and this file performs.** Who wins a teardown
+//! claim, which threads a claimant must retire, what code each thread is marked
+//! with, whose watch a thread's exit posts on, which entries an idle pass may
+//! take — every one of those is a pure function of two words per process and
+//! one per thread, and every one of them used to be a few lines in the middle
+//! of a function that also took locks, freed pages and retired tasks.
+//!
+//! The reason for the split is that this file's defects are **interleavings**.
+//! The table lock is given up between every phase of a teardown and between
+//! both halves of a spawn, and what goes wrong goes wrong in those windows:
+//! a thread inserted behind a retire sweep, two paths publishing one exit, a
+//! join armed on a subject nothing will post to. Nothing but a booted guest
+//! could reach one, and
+//! `issues/kernel/spawned-process-never-starts.md` has been open since August
+//! without a QEMU reproduction. `toyos-proclife`'s `interleave` module
+//! enumerates every ordering of a scripted pair of these paths and checks the
+//! laws at each state, in milliseconds.
+//!
+//! What that costs this file is two trait impls — [`Lifecycle`] over a
+//! [`ProcessEntry`] and [`Processes`] over the table — and the rule that comes
+//! with them: **a lifecycle decision is made there and never restated here.**
+//! A second copy of "the main thread gets the code and every sibling gets -1"
+//! is a second thing to get wrong, and the host model would not be holding it.
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::string::String;
@@ -53,6 +79,11 @@ use crate::loader::{
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
 use toyos_abi::syscall::EndowEntry;
+
+/// The lifecycle's decisions. This file is their effects shell — see the module
+/// header for the split and what it is worth.
+pub use toyos_proclife::{ThreadLocation, Watch};
+use toyos_proclife::{join, poison, reap, spawn as proclife_spawn, teardown as proclife, Lifecycle, Processes};
 
 /// One `EndowEntry` on the wire. Named once, because both the reader in
 /// `loader::start` and the writer in [`Endowments::encode`] index by it.
@@ -404,26 +435,6 @@ impl UserStack {
     }
 }
 
-/// Where a *thread* is in its lifecycle.
-///
-/// **A process has no such state.** Its exit code lives on its
-/// [`ProcessObject`], published once and readable for ever after, so the table
-/// never holds a corpse waiting for somebody entitled to claim it. A thread
-/// still has one, because `SYS_THREAD_JOIN` reads it out of the table and a
-/// `Tid` names nothing outside its own process.
-///
-/// For a live thread the scheduler is authoritative about running, ready or
-/// blocked — `scheduler::task_sched_state()` has that detail.
-///
-/// [`ProcessObject`]: crate::object::process::ProcessObject
-#[derive(Clone, Copy, PartialEq)]
-pub enum ThreadLocation {
-    /// Alive: running, ready, or blocked. The scheduler owns the detail.
-    Scheduled,
-    /// Exited with the given code, waiting for its joiner.
-    Zombie(i32),
-}
-
 // ProcessEntry + ThreadEntry — hierarchical process/thread table
 
 /// How much of a process or thread name the table keeps.
@@ -530,18 +541,70 @@ impl ProcessEntry {
 }
 
 impl ProcessEntry {
-    /// Claim exclusive teardown of this process. Exactly one exit/kill path
-    /// wins; later callers must simply exit their own thread — the claimant's
-    /// retire sweep handles them like any other thread.
-    pub fn claim_teardown(&mut self) -> bool {
-        if self.tearing_down {
-            return false;
-        }
-        self.tearing_down = true;
-        true
-    }
-
+    /// The same field [`Lifecycle::tearing_down`] answers, spelled inherently
+    /// so a reader outside the lifecycle — the crash report's process line —
+    /// needs no trait in scope for one bool.
     pub fn tearing_down(&self) -> bool { self.tearing_down }
+}
+
+/// The lifecycle face of an entry: the four fields `toyos-proclife` decides
+/// against, and nothing else this type carries.
+///
+/// Deliberately the whole of what a decision may reach. An address space, a
+/// handle table, a symbol table and a scheduler record are all in
+/// [`ProcessEntry`] and none of them is nameable from a decision, which is why
+/// the host model of this is a `BTreeMap` and not a simulated kernel.
+impl Lifecycle for ProcessEntry {
+    fn main_tid(&self) -> Tid { self.main_tid }
+    fn tearing_down(&self) -> bool { self.tearing_down }
+    fn begin_teardown(&mut self) { self.tearing_down = true; }
+    fn location(&self, tid: Tid) -> Option<ThreadLocation> {
+        self.threads.get(tid).map(|t| t.state)
+    }
+    fn set_location(&mut self, tid: Tid, to: ThreadLocation) {
+        if let Some(thread) = self.threads.get_mut(tid) {
+            thread.state = to;
+        }
+    }
+    fn forget_thread(&mut self, tid: Tid) {
+        self.threads.remove(tid);
+    }
+    fn each_thread(&self, f: &mut dyn FnMut(Tid, ThreadLocation)) {
+        for (tid, thread) in self.threads.iter() {
+            f(tid, thread.state);
+        }
+    }
+}
+
+/// The lifecycle face of the table.
+///
+/// `published_exit` is the one answer that is not in the table at all: it comes
+/// off the [`ProcessObject`], which outlives its entry for as long as somebody
+/// holds a handle. That is the whole reason the trait has it rather than
+/// [`Lifecycle`].
+///
+/// [`ProcessObject`]: crate::object::process::ProcessObject
+impl Processes for ProcessTable {
+    type Proc = ProcessEntry;
+
+    // Spelled through `IdMap` rather than as `self.get(pid)`: an inherent
+    // method and a trait method of the same name resolve to the inherent one,
+    // so the short spelling is correct here and one rename away from being
+    // infinite recursion.
+    fn get(&self, pid: Pid) -> Option<&ProcessEntry> {
+        crate::id_map::IdMap::get(self, pid)
+    }
+    fn get_mut(&mut self, pid: Pid) -> Option<&mut ProcessEntry> {
+        crate::id_map::IdMap::get_mut(self, pid)
+    }
+    fn published_exit(&self, pid: Pid) -> bool {
+        crate::id_map::IdMap::get(self, pid).is_some_and(|p| p.object.finished())
+    }
+    fn each_pid(&self, f: &mut dyn FnMut(Pid)) {
+        for (pid, _) in self.iter() {
+            f(pid);
+        }
+    }
 }
 
 impl Drop for ProcessEntry {
@@ -957,17 +1020,10 @@ pub fn stats_of(
     Some(stats_from(&data, pid, cpu_ns, syscall_total, syscall_total_ns))
 }
 
-/// Mark one thread dead.
-///
-/// Idempotent, and silent about an entry that has gone: a main thread reaches
-/// this after its own process published its exit, by which point any idle pass
-/// may already have reaped the entry.
+/// Mark one thread dead — `toyos_proclife::teardown::mark_zombie`, which
+/// carries what it is idempotent about and why it is silent.
 pub fn mark_thread_zombie(table: &mut ProcessTable, pid: Pid, tid: Tid, code: i32) {
-    let Some(proc) = table.get_mut(pid) else { return };
-    let Some(thread) = proc.threads.get_mut(tid) else { return };
-    if !matches!(thread.state, ThreadLocation::Zombie(_)) {
-        thread.state = ThreadLocation::Zombie(code);
-    }
+    proclife::mark_zombie(table, pid, tid, code);
 }
 
 /// What a thread that died in panic recovery leaves to be cleaned up.
@@ -989,35 +1045,36 @@ pub enum PoisonWake {
     Process(Arc<crate::object::process::ProcessObject>),
 }
 
-/// Mark a poisoned thread dead and name what must be woken for it.
+/// Mark a poisoned thread dead and name what must be woken for it —
+/// `toyos_proclife::poison::zombify_poisoned` decides, this turns its answer
+/// into the two things the idle loop can perform.
 ///
 /// `None` means there is nothing to do: the entry is gone, or another path
 /// already owns this process's teardown and will publish its exit.
+///
+/// No `teardown_resources` runs on this path, so the process's mappings and
+/// handles go with the table entry rather than before it. That is the
+/// pre-existing cost of a panic recovery: this is reached from the idle loop
+/// and every release below it wants a lock the faulted thread may still be
+/// recorded as holding.
 #[must_use = "a poisoned thread's waiter must be woken"]
 pub fn zombify_poisoned(table: &mut ProcessTable, pid: Pid, tid: Tid) -> Option<PoisonWake> {
-    let proc = table.get_mut(pid)?;
-    if tid != proc.main_tid {
-        let thread = proc.threads.get_mut(tid)?;
-        if !matches!(thread.state, ThreadLocation::Zombie(_)) {
-            thread.state = ThreadLocation::Zombie(-1);
+    match poison::zombify_poisoned(table, pid, tid) {
+        poison::PoisonOutcome::Nothing => None,
+        poison::PoisonOutcome::Joiner(watch) => {
+            let (pid, tid) = watch.thread()?;
+            Some(PoisonWake::Joiner(pid, tid))
         }
-        return Some(PoisonWake::Joiner(pid, tid));
+        poison::PoisonOutcome::Process(pid) => {
+            let proc = Processes::get(table, pid)
+                .expect("zombify_poisoned: the entry it just claimed and marked");
+            Some(PoisonWake::Process(Arc::clone(&proc.object)))
+        }
     }
-    // The same claim every exit and kill takes, for the same reason: exactly
-    // one path publishes one exit.
-    if !proc.claim_teardown() {
-        return None;
-    }
-    proc.threads.get_mut(tid)?.state = ThreadLocation::Zombie(-1);
-    // No `teardown_resources` runs on this path, so the process's mappings and
-    // handles go with the table entry rather than before it. That is the
-    // pre-existing cost of a panic recovery: this is reached from the idle loop
-    // and every release below it wants a lock the faulted thread may still be
-    // recorded as holding.
-    Some(PoisonWake::Process(Arc::clone(&proc.object)))
 }
 
-/// Take every entry whose process has published its exit.
+/// Take every entry whose process has published its exit —
+/// `toyos_proclife::reap::finished_pids` is which ones.
 ///
 /// **The whole of what replaced reaping.** Nobody has to be entitled to this,
 /// there is no orphan to adopt and nothing is kept for anyone to read later:
@@ -1031,12 +1088,7 @@ pub fn zombify_poisoned(table: &mut ProcessTable, pid: Pid, tid: Tid) -> Option<
 /// a process whose teardown never ran — the whole of its `ProcessData`.
 #[must_use = "the reaped entries must be dropped outside the table lock"]
 pub fn reap_finished(table: &mut ProcessTable, _proof: IdleProof) -> Vec<ProcessEntry> {
-    let finished: Vec<Pid> = table
-        .iter()
-        .filter(|(_, p)| p.object.finished())
-        .map(|(pid, _)| pid)
-        .collect();
-    finished.into_iter().filter_map(|pid| table.remove(pid)).collect()
+    reap::finished_pids(table).into_iter().filter_map(|pid| table.remove(pid)).collect()
 }
 
 pub fn current_tid() -> Tid {
@@ -1115,10 +1167,22 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     let (parent_addr_space, process_data_arc) = {
         let guard = PROCESS_TABLE.lock();
         let table = guard.as_ref().unwrap();
-        let proc = table.get(parent_process).unwrap();
-        if proc.tearing_down() {
-            return None;
+        // Not `is_yes()`, because the three answers are three different things
+        // here and were before this was a decision: a claimed teardown refuses
+        // the spawn, and a *missing* entry is the spawning thread's own process
+        // reaped out from under it, which is the `.unwrap()` this replaced and
+        // still is. Phase 3 below answers `None` to the same state, and the two
+        // have disagreed since they were written
+        // (`issues/kernel/spawn-thread-disagrees-about-a-reaped-parent.md`).
+        match proclife_spawn::admit_thread_start(table, parent_process) {
+            proclife_spawn::Admit::Yes => {}
+            proclife_spawn::Admit::TearingDown => return None,
+            proclife_spawn::Admit::NoSuchProcess => {
+                panic!("spawn_thread: pid {parent_process} is spawning and is not in the table")
+            }
         }
+        let proc = table.get(parent_process)
+            .expect("spawn_thread: the entry the admission just answered for");
         // A thread is spawned by a running thread, which by construction has an
         // address space: `None` here is "no task is running", and this is one.
         let addr_space = scheduler::current_address_space()
@@ -1186,12 +1250,15 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
 
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
-    let proc = table.get_mut(parent_process)?;
-    if proc.tearing_down() {
-        // Teardown claimed the process between Phase 1 and here — a thread
-        // enqueued now would be invisible to its retire sweep.
+    // The same question, under the lock that inserts. Teardown claims the
+    // process under this lock, so a thread refused here is one that would have
+    // been invisible to a retire sweep already under way — and
+    // `toyos_proclife::interleave` enumerates the orderings that reach it.
+    if !proclife_spawn::admit_thread_insert(table, parent_process).is_yes() {
         return None;
     }
+    let proc = table.get_mut(parent_process)
+        .expect("spawn_thread: the entry the insert admission just answered for");
     // Every thread of a process names the same symbols, so a crash report on any
     // of them reads its own process's names without asking this table.
     let symbols = Arc::clone(&proc.symbols);
@@ -1305,15 +1372,8 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
                         -> Arc<crate::object::process::ProcessObject> {
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
-    let main_tid = proc.main_tid;
 
-    let tids: Vec<Tid> = proc.threads.iter().map(|(tid, _)| tid).collect();
-    for tid in tids {
-        let thread = proc.threads.get_mut(tid).unwrap();
-        if !matches!(thread.state, ThreadLocation::Zombie(_)) {
-            thread.state = ThreadLocation::Zombie(if tid == main_tid { code } else { -1 });
-        }
-    }
+    proclife::mark_all_zombie(proc, code);
 
     // The symbol table is megabytes of the process's own pages now that it is
     // read off the binary rather than pointed at in the initrd, and a dead
@@ -1414,10 +1474,11 @@ fn retire_threads(
         let cpu_ns = scheduler::task_cpu_ns(&sched);
         let mut pdata = process_data_arc.lock();
         sched.handle.merge_into(&mut pdata.accounting);
-        if t == main_tid {
-            main_cpu_ns = cpu_ns;
-        } else {
-            pdata.accounting.child_threads_cpu_ns += cpu_ns;
+        match proclife::charge(t, main_tid) {
+            proclife::CpuCharge::MainThread => main_cpu_ns = cpu_ns,
+            proclife::CpuCharge::ChildThreads => {
+                pdata.accounting.child_threads_cpu_ns += cpu_ns;
+            }
         }
     }
     main_cpu_ns
@@ -1482,36 +1543,36 @@ fn release_process(code: i32) {
     // Phase 1: claim teardown. Exactly one exit/kill path tears a process
     // down; later arrivals just exit their own thread — the claimant's
     // retire sweep accounts for them like any other thread.
-    let (process_data_arc, thread_data_arc, main_tid, other_tids) = {
+    let (process_data_arc, thread_data_arc, main_tid, set) = {
         let mut guard = PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
-        let Some(proc) = table.get_mut(process_pid) else {
-            drop(guard);
-            crate::mm::paging::activate_kernel();
-            return;
-        };
-        if proc.threads.get(tid).is_none() || !proc.claim_teardown() {
+        // The thread is checked before the claim and the claim is not taken
+        // when it is missing, which is the short circuit this expression is:
+        // a thread that is not in its own process's entry has nothing to tear
+        // down.
+        let present = Processes::get(table, process_pid)
+            .is_some_and(|proc| Lifecycle::location(proc, tid).is_some());
+        if !present || !proclife::claim_teardown(table, process_pid) {
             drop(guard);
             crate::mm::paging::activate_kernel();
             return;
         }
-        let other_tids: Vec<Tid> = proc.threads.iter()
-            .map(|(t, _)| t)
-            .filter(|&t| t != tid)
-            .collect();
-        let thread = proc.threads.get(tid).unwrap();
+        let proc = Processes::get(table, process_pid)
+            .expect("release_process: the entry the claim just succeeded on");
+        let set = proclife::exit_set(proc, tid);
+        let thread = proc.threads.get(tid).expect("checked present above");
         (Arc::clone(&proc.process_data), Arc::clone(&thread.thread_data),
-         proc.main_tid, other_tids)
+         proc.main_tid, set)
     };
 
     crate::mm::paging::activate_kernel();
 
     // Phase 2: retire every *other* thread — the current thread is running this
     // and cannot retire itself.
-    let mut main_cpu_ns = retire_threads(process_pid, other_tids, main_tid, &process_data_arc);
+    let mut main_cpu_ns = retire_threads(process_pid, set.others, main_tid, &process_data_arc);
     // The current thread was filtered out of the retire set above, so if it is
     // the main thread its CPU time is picked up here rather than by the sweep.
-    if tid == main_tid {
+    if set.current_is_main {
         main_cpu_ns = thread_sched(process_pid, tid)
             .map_or(0, |s| scheduler::task_cpu_ns(&s));
     }
@@ -1525,20 +1586,42 @@ fn release_process(code: i32) {
 pub fn thread_exit(code: i32) -> ! {
     let process_pid = current_process();
     let tid = current_tid();
-    let is_main_thread = {
+    let route = {
         let guard = PROCESS_TABLE.lock();
         let table = guard.as_ref().unwrap();
-        table.get(process_pid).unwrap().main_tid == tid
+        proclife::route_thread_exit(table, process_pid, tid)
     };
 
-    if is_main_thread {
-        exit(code);
-    }
+    let post = match route {
+        proclife::ThreadExit::Process => exit(code),
+        proclife::ThreadExit::Sibling { post } => post,
+        // **A standing defect, and this is the `.unwrap()` that was here
+        // before**: a thread whose process another CPU's kill has already
+        // reaped panics the kernel, where its neighbour `mark_thread_zombie`
+        // documents the same race and tolerates it.
+        // `issues/kernel/main-thread-exit-unwraps-a-reaped-entry.md` is open
+        // against it and says what a fix owes;
+        // `toyos_proclife::interleave::tests::a_thread_exit_can_reach_a_reaped_entry`
+        // holds the schedule that gets here, so the entry cannot be closed by
+        // an argument that the state is unreachable.
+        proclife::ThreadExit::NoEntry => {
+            panic!("thread_exit: pid {process_pid} tid {tid} has no process-table entry")
+        }
+    };
 
     let _parent_main_tid = release_thread(process_pid, tid, code);
     // Whoever joined this thread armed on it. Posted before the exit pass,
     // because after it this thread does not run again.
     if let Some(handle) = crate::sched::driver::current_handle() {
+        // The decision names a subject and this performs it through the
+        // handle this CPU already has, which costs no lock — so the two are
+        // held together by an assertion rather than by a reader's memory.
+        debug_assert_eq!(
+            post,
+            Watch::Thread(process_pid, tid),
+            "thread_exit posts through its own task handle, so the decision must have \
+             named its own watch",
+        );
         crate::completion::post(
             crate::completion::Subject::of(handle.watch()),
             crate::completion::Outcome::Gone(crate::completion::Reason::Closed),
@@ -1691,14 +1774,10 @@ pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
 pub fn wait_thread_zombie(tid: Tid, parent_pid: Pid) -> Result<Option<i32>, ()> {
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
-    let proc = table.get(parent_pid).ok_or(())?;
-    let thread = proc.threads.get(tid).ok_or(())?;
-    if let ThreadLocation::Zombie(code) = thread.state {
-        table.get_mut(parent_pid).unwrap().threads.remove(tid);
-        Ok(Some(code))
-    } else {
-        Ok(None)
-    }
+    // The two refusals are one answer to this caller — `SyscallError::NotFound`
+    // either way — and `toyos_proclife::join::JoinRefused` keeps them apart
+    // because they are not the same fact about the machine.
+    join::collect_zombie(table, parent_pid, tid).map_err(|_| ())
 }
 
 /// Handle a page fault at `fault_addr` by looking up the current process's VMAs.
@@ -2260,11 +2339,14 @@ pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
         let mut guard = PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
 
-        let Some(proc) = table.get_mut(target_pid) else { return 0 };
-        if !proc.claim_teardown() {
-            return 0; // already dead or dying
+        // A process that is gone and one another path is already tearing down
+        // are the same answer here: the caller asked for it to be dead.
+        if !proclife::claim_teardown(table, target_pid) {
+            return 0;
         }
-        let tids: Vec<Tid> = proc.threads.iter().map(|(t, _)| t).collect();
+        let proc = Processes::get(table, target_pid)
+            .expect("kill_process: the entry the claim just succeeded on");
+        let tids = proclife::kill_set(proc);
         let main_thread = proc.threads.get(proc.main_tid).unwrap();
         (Arc::clone(&proc.process_data), Arc::clone(&main_thread.thread_data), proc.main_tid, tids)
     };

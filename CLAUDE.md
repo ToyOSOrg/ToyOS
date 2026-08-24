@@ -75,6 +75,7 @@ kernel/            Kernel
 kernel-loom/       Loom models of the kernel's lock-free concurrency, beside the kernel and not in it
 toyos-userbound/   Every decision the kernel makes about the user/kernel boundary, pure
 toyos-elide/       Log elision decisions, pure
+toyos-proclife/    The process/thread lifecycle's decisions — pure, interleaving-checked
 bootloader/        UEFI bootloader
 userland/          All userland programs
 toyos-abi/         Kernel ABI (types, constants, syscall numbers, syscall wrappers)

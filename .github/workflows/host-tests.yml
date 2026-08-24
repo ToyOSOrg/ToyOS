@@ -587,6 +587,66 @@ jobs:
             exit 1
           fi
 
+      # **The process lifecycle's two controls.** Not loom, and the reason is
+      # worth stating: nothing in `toyos-proclife` is lock-free — every decision
+      # it makes is made under `PROCESS_TABLE` — so what the model explores is
+      # which CPU takes that lock next, not which store another CPU has seen.
+      # The steps have `wake-fence-off`'s shape all the same, and for its
+      # reason: a control nothing runs is a control nobody has shown can fail.
+      #
+      # `mutate-spawn-skips-the-insert-recheck` asks `spawn_thread`'s teardown
+      # question once instead of twice, so a thread lands in the table behind a
+      # retire sweep already under way — the process publishes an exit with a
+      # thread of its own still schedulable, and the address space that thread's
+      # page tables map is freed under it. That is the shape
+      # `issues/kernel/spawned-process-never-starts.md` has been open on since
+      # August with no QEMU reproduction; the model reaches it in milliseconds
+      # and prints the schedule that did it.
+      - name: toyos-proclife spawn's second teardown check has teeth
+        run: |
+          set -o pipefail
+          echo "=== toyos-proclife --features mutate-spawn-skips-the-insert-recheck (must red)" \
+            | tee -a /tmp/host.log
+          if cargo test -p toyos-proclife \
+               --features mutate-spawn-skips-the-insert-recheck 2>&1 \
+               | tee /tmp/proclife-spawn.log | tee -a /tmp/host.log; then
+            echo "toyos-proclife passed with the insert's teardown check gone: the model has no teeth" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'a_published_exit_leaves_no_unretired_thread \.\.\. FAILED' \
+               /tmp/proclife-spawn.log \
+             || ! grep -q 'a_kill_racing_a_spawn_leaves_no_unretired_thread \.\.\. FAILED' \
+               /tmp/proclife-spawn.log; then
+            echo "the spawn-recheck build failed without both interleaving models reaching a verdict: this step proved nothing, and whatever stopped them from running is what to fix" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
+      # `mutate-claim-teardown-always-wins` takes the exclusion out of
+      # `claim_teardown`, so an exit and a kill both tear one process down and
+      # both publish. `ProcessObject::publish_exit` asserts against the second
+      # publish at run time — in a guest, on whichever boot the two happen to
+      # meet — and the model asserts it in every ordering of the two paths.
+      - name: toyos-proclife teardown claim has teeth
+        run: |
+          set -o pipefail
+          echo "=== toyos-proclife --features mutate-claim-teardown-always-wins (must red)" \
+            | tee -a /tmp/host.log
+          if cargo test -p toyos-proclife \
+               --features mutate-claim-teardown-always-wins 2>&1 \
+               | tee /tmp/proclife-claim.log | tee -a /tmp/host.log; then
+            echo "toyos-proclife passed with the teardown claim shared: the model has no teeth" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'an_exit_and_a_kill_never_both_tear_a_process_down \.\.\. FAILED' \
+               /tmp/proclife-claim.log; then
+            echo "the claim-always-wins build failed without an_exit_and_a_kill_never_both_tear_a_process_down reaching a verdict: this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
       # `userland/.cargo/config.toml` cross-compiles by default, so a userland
       # crate's host tests have to name the host. `calc` is here for the reason
       # the pure crates above are: its arithmetic is decided without a guest,
@@ -644,10 +704,11 @@ jobs:
             | tee -a /tmp/host.log
 
       # The root package's `--lib`, one `--workspace` over the other host-tested
-      # members, `kernel-loom`'s no-loom command, nine negative-control runs
-      # (`wake-fence-off` plus the five `kernel-loom` gained 2026-08-17, and
-      # `toyos-sched-loom`'s `no-preempt-guard`, `doorbell-kick-relaxed` and
-      # `push-fence-relaxed`),
+      # members, `kernel-loom`'s no-loom command, one negative-control run per
+      # control any model crate declares — `cargo test --lib`'s
+      # `every_model_control_is_wired_into_host_tests` is what holds the two
+      # lists together, and no count is restated here because a landing in
+      # another area moves it —
       # the three userland crates and the SDK. A red is still one line somewhere among them,
       # and `--workspace` prints a `Running ...` line naming the binary rather
       # than the `=== <crate>` the other steps echo, so the summary matches both

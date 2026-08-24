@@ -357,6 +357,7 @@ toyos-elide = { path = "../toyos-elide" }
 toyos-gpt = { path = "../toyos-gpt" }
 toyos-hda = { path = "../toyos-hda" }
 toyos-pci = { path = "../toyos-pci" }
+toyos-proclife = { path = "../toyos-proclife" }
 toyos-ps2 = { path = "../toyos-ps2" }
 toyos-sched = { path = "../toyos-sched" }
 toyos-untrusted = { path = "../toyos-untrusted" }

@@ -1115,6 +1115,13 @@ name = "toyos-pci"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-proclife"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-ps2"
 version = "0.1.0"
 
