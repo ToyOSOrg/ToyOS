@@ -25,17 +25,20 @@ name: route
 # cache that is reached through a queue is not a speed-up.
 #
 # What stays on the T14 is what needs the machine: every `schedule` except
-# `ci.yml`'s — gate A's audio measurement and portability — and
-# `workflow_dispatch`, which is every workflow's manual T14 lane, on purpose.
+# `ci.yml`'s, and `workflow_dispatch`, which is every workflow's manual T14
+# lane, on purpose. Among the workflows that actually ask this one, that is gate
+# A's audio measurement and nothing else — `portability.yml` names
+# `ubuntu-24.04`, `macos-latest` and `windows-latest` directly and never calls
+# here, since its whole subject is a fresh machine of each major OS and the T14
+# is neither fresh nor three OSes. So the T14 carries one scheduled job a night.
 # `ci.yml`'s nightly `schedule` is hosted because it is the run that has to
 # refresh `tests/test-durations`, and that profile has one instrument — twelve
 # GitHub-hosted shards, never the T14's 1/1 lane
 # (issues/build/the-duration-profile-is-enforced-where-it-was-not-measured.md).
 # `github.workflow` is the caller's name even from inside this reusable
 # workflow, which is the one signal that tells `ci.yml`'s `schedule` apart from
-# gate A's or portability's — both of those stay trusted, gate A because its
-# own baseline has no attested runner instrument either way
-# (issues/audio/gate-a-has-no-runner-baseline.md).
+# gate A's — that one stays trusted, because its own baseline has no attested
+# runner instrument either way (issues/audio/gate-a-has-no-runner-baseline.md).
 #
 # Trust is no longer what decides this, and the runner's own admission hook
 # (`.github/runner/accept-trusted.sh`) is unchanged: it still refuses a fork's

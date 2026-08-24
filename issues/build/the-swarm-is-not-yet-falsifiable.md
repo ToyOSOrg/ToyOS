@@ -196,7 +196,7 @@ range): **76 standing (`Standing::Stands`), 32 retired (`Standing::Retired`),
 4 disputed (`Standing::Disputed`)**. Standing rows by instrument: Ci 50,
 `DevHostLoaded` 21, `DevHostAlone` 5.<sup>5</sup>
 
-**Open `kind: track` files** — 32 at `status: open`, 1 at `status: assigned`
+**Open `kind: track` files** — 31 at `status: open`, 1 at `status: assigned`
 (`issues/kernel/every-wait-in-this-kernel-is-a-spin.md`):<sup>6</sup>
 
 ```
@@ -205,7 +205,6 @@ issues/audio/client-ring-depth-is-the-devices-pipeline-depth.md
 issues/audio/hda-has-no-jack-detection-volume-or-keys.md
 issues/build/defect-events.md
 issues/build/soundds-mix-pass-has-no-host-test.md
-issues/build/strict-required-checks-price-a-full-rerun-per-queued-landing.md
 issues/build/the-eased-merge-law-carries-a-threshold.md
 issues/build/the-initrd-is-still-the-root-filesystem.md
 issues/build/the-swarm-is-not-yet-falsifiable.md

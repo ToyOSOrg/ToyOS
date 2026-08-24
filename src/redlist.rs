@@ -45,6 +45,11 @@
 //! re-measure is not something anyone should be trusting, and an index that
 //! shrinks to nothing is a true statement about how much is known.
 //!
+//! **A `Red::source` may point at a code site as readily as a write-up.**
+//! Retiring a row against the commit that fixed it means repointing its source
+//! at the site that now enforces the rule — never leaving it aimed at a deleted
+//! file, which `every_row_can_say_what_it_claims` refuses.
+//!
 //! **What is deliberately not a row.** Gate A's thorough tier compares
 //! distributions against a recorded sample (`tests/audio-baseline.toml`) and its
 //! verdicts are `Fisher p=…`, not "this test went red"; those live with the
@@ -102,6 +107,14 @@ pub enum Instrument {
     DevHostAlone,
     /// The dev host in the wide phase, or under another worktree's suite or
     /// build. The only instrument that can produce a contention red at all.
+    ///
+    /// **Two guests failing in one phase is not by itself a claim about the
+    /// host.** Simultaneity only argues for a common cause while no per-guest
+    /// mechanism has a rate; once one does, the arithmetic decides. At the
+    /// direction-flag class's measured 37 silent deaths in 13,960 loaded boots,
+    /// a suite of ~140 boots pays `P(>=2) ~ 5%` — so a pair in one run is an
+    /// ordinary coincidence, and reading it as a host-level event is a
+    /// conclusion the evidence never supported.
     DevHostLoaded,
 }
 
@@ -238,6 +251,45 @@ pub struct Red {
 /// them green.
 pub const SHELF_LIFE_DAYS: i64 = 31;
 
+/// What retired both `screen_pager_keys` rows about the page-move count.
+///
+/// **The verdict was the defect, and the rows are the evidence for that**, which
+/// is why they are retired rather than deleted: two agents read this arithmetic
+/// as a kernel regression and bisected it to a merge, and a reader who meets the
+/// same message needs to find that here rather than repeat it.
+const PAGER_ARITHMETIC: &str = "the verdict was the defect. It injected all thirty keys at the \
+    host's own speed and compared the moves it saw against what the pager's 3 s unattended \
+    deadline could have produced in the elapsed time, so a host that got through the thirty in \
+    0.3 s was asked for 3.3 moves and reported `0 page moves over 30 keystrokes` — the symptom of \
+    a guest that had not been given time to repaint once. Unpaced it was wrong about the wire too: \
+    thirty press/release pairs is sixty scancodes into QEMU's 16-byte `PS2_QUEUE_SIZE`, so keys a \
+    full-panel repaint had no room for were never delivered. The verdict is now one key, then its \
+    page, then the next key, with a guest-budgeted wait and no host clock in it, and the \
+    unattended window is measured on the guest before the first key retires it. Re-measured \
+    2026-08-24: PASS 6 of 6 alone on the dev host at 2.00x-8.00x width, 16-31 s each, against \
+    every recorded red's 6-10 s";
+
+/// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
+///
+/// The number in the second row was the whole finding, and it no longer holds.
+const SLOW_CONNECT_CLEARS: &str = "a later measurement. Re-run four times alone on the dev host \
+    on 2026-08-24, the controller starts at 0.109, 0.117, 0.122 and 0.227 s against the 300 ms \
+    held-empty window — 73 to 191 ms of clearance, not the 1 ms the row is about — on hosts the \
+    harness independently measured at 2.31x to 4.45x width, and every boot bound both sticks and \
+    named its first port at 0.400-0.418 s. The loaded-host half is answered structurally rather \
+    than by the number: `src/tiers.rs` relegates this name `Why::TimerAnchored`, because a slower \
+    machine changes its verdict rather than its price";
+
+/// What retired all three `xhci_hid_break` endpoint-count rows, written once
+/// because it is one landing and not three: three measurements of one
+/// assertion, and repeating the sentence is how two of them would drift.
+const HID_SCOPED: &str = "the count is per device now. The verdict pairs each broken completion \
+    with the device it names — `hid_broke_on` reads `<bdf> slot <n>` off it, because a slot id is \
+    one controller's numbering and this machine has two — and requires `endpoint 3 is Running, \
+    recovering` exactly once for each of the two, so the boot disk's own bulk endpoints are no \
+    longer counted and a missing recovery still reds. A completion that stops naming its device \
+    is refused rather than widened back to every dci 3 on the machine";
+
 /// Every measurement, grouped by the campaign that took it.
 ///
 /// Adding a row means answering all eight fields; there is no default and no
@@ -267,19 +319,25 @@ pub const KNOWN_RED: &[Red] = &[
     // ---------------------------------------------------------------------
     // A different assertion (`breaks > 2`, not the retired `breaks != 1`) on the
     // same test, `1cb11e7`'s re-issue budget. The injected disk never left its
-    // two-break budget; the third line is the boot stick's own unrelated,
-    // cleanly-recovered transport break, which the count does not scope out.
+    // two-break budget; the third line was the boot stick's own unrelated,
+    // cleanly-recovered transport break, which the count did not scope out.
     // ---------------------------------------------------------------------
     Red {
         test: "usb_transport_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the count is per device now. `broke_on` reads the device off the staged break's \
+             own line and the verdict counts `usb-storage: <bdf> slot <n> transport broke` for \
+             that device alone, so the boot stick's clean recovery is no longer summed into the \
+             injected disk's budget — and a line that stops naming a device is refused rather \
+             than widened back to every disk on the machine",
+        ),
         what: "the transport broke 3 times off one abandoned transfer, which can undo one \
                recovery and no more",
         evidence: "PR #41 (`wt/toyos-i8042tier`), run 31684437719, job 94397136494 \
                    (\"guest (4)\"), sha 711730204800d7173558f7dd96644c5910fb8cf0",
-        source: "issues/hardware/usb-transport-break-counts-the-boot-sticks-recovery.md",
+        source: "tests/common/usb.rs broke_on",
         measured: "2026-08-13",
     },
     Red {
@@ -572,26 +630,26 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_slow_connect",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
-        what: "0 of 5 in the probe — which the write-up says is not the reassurance it looks like, \
-               because the margin is inside the *guest's* boot and running alone moves it by \
-               milliseconds rather than by a verdict",
+        standing: Standing::Retired(SLOW_CONNECT_CLEARS),
+        what: "0 of 5 in the probe — which the write-up said was not the reassurance it looks \
+               like, because the margin was inside the *guest's* boot and running alone moved it \
+               by milliseconds rather than by a verdict",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
-        source: "issues/hardware/xhci-slow-connect-has-a-1ms-margin.md",
+        source: "tests/common/usb.rs xhci_slow_connect",
         measured: "2026-08-08",
     },
     Red {
         test: "xhci_slow_connect",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(SLOW_CONNECT_CLEARS),
         what: "`ALONE: red again — the defect is real`. `SLOW_CONNECT_NS` holds the ports empty for \
-               0.3 s and the controller starts at 0.296–0.311 s on a quiet host, so the gate reds \
-               whenever anything moves boot by ten milliseconds. That sensitivity is why the \
+               0.3 s and the controller started at 0.296–0.311 s on a quiet host, so the gate red \
+               whenever anything moved boot by ten milliseconds. That sensitivity is why the \
                log-ring regression was caught at all — no other gate in the suite noticed 350 ms — \
                and its own message names the fix: widen `SLOW_CONNECT_NS`, not the gate",
         evidence: "run 31261669826, the first on a tree carrying the harness's re-run-alone work",
-        source: "issues/hardware/xhci-slow-connect-has-a-1ms-margin.md",
+        source: "tests/common/usb.rs xhci_slow_connect",
         measured: "2026-08-08",
     },
     // ---------------------------------------------------------------------
@@ -816,11 +874,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_pager_keys",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(PAGER_ARITHMETIC),
         what: "keystroke 14 of 30. Bisected on the dev host to `f96d52e`, a merge whose two parents \
-               are both green — see `issues/diagnostics/screen-pager-keys-red-on-main.md`",
+               are both green — and that bisect is the thing the retirement below is about",
         evidence: "run 31287853270, `main` at 53d29d5",
-        source: "issues/diagnostics/screen-pager-keys-red-on-main.md",
+        source: "tests/toyos.rs screen_pager_keys",
         measured: "2026-08-09",
     },
     // ---------------------------------------------------------------------
@@ -833,7 +891,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::fires(2, 15),
-        standing: Standing::Stands,
+        standing: Standing::Retired(HID_SCOPED),
         what: "`3 endpoint(s) were found Running after the break, want 2` — dci 3 is the first IN \
                endpoint of every USB device, so one transport recovery on the boot USB disk \
                anywhere in the boot reds a test whose failure is about HID. `ALONE: GREEN` both \
@@ -841,7 +899,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "`main`'s fifteen most recent completed `ci` runs, 2026-08-09 to 2026-08-11: red \
                    in 31289459932 (a76a078) and 31331494794 (0e48d2e), read with \
                    `gh run view --log-failed`",
-        source: "issues/hardware/xhci-hid-break-counts-any-endpoint-3.md",
+        source: "tests/common/usb.rs hid_broke_on",
         measured: "2026-08-11",
     },
     Red {
@@ -867,7 +925,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(HID_SCOPED),
         what: "`3 endpoint(s) were found Running after the break, want 2` — the wide run's message. \
                The harness's re-run-alone failed too, but on a *different* assertion, the \
                `input never came back` shape `parallel-tests-red-under-other-suites.md` records on \
@@ -875,21 +933,21 @@ pub const KNOWN_RED: &[Red] = &[
                the wide run's message regardless, because that line always carries the original text",
         evidence: "PR #22 (`wt/toyos-endow`), run 31424496450 attempt 1, job 93586744461 \
                    (\"guest (5)\"), sha 73d0761b",
-        source: "issues/hardware/xhci-hid-break-counts-any-endpoint-3.md",
+        source: "tests/common/usb.rs hid_broke_on",
         measured: "2026-08-10",
     },
     Red {
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(HID_SCOPED),
         what: "`3 endpoint(s) were found Running after the break, want 2`, byte-identical between \
                the wide run (51s) and the alone re-run (9s) — the first occurrence where isolation \
                reproduces this exact assertion rather than going green or landing on the other \
                shape. 9s alone rules out host contention for this instance",
         evidence: "PR #35 (`codex/debug-wait-census`), run 31601325987, job 94129283847 \
                    (\"guest (5)\"), sha d522424e",
-        source: "issues/hardware/xhci-hid-break-counts-any-endpoint-3.md",
+        source: "tests/common/usb.rs hid_broke_on",
         measured: "2026-08-12",
     },
     Red {
@@ -1067,13 +1125,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_pager_keys",
         instrument: Instrument::DevHostAlone,
         finding: Finding::fires(3, 3),
-        standing: Standing::Stands,
+        standing: Standing::Retired(PAGER_ARITHMETIC),
         what: "`0 page moves over 30 keystrokes in 0.4s — an unattended deadline alone could have \
                produced 1.1 of them`. Not load: the landing gate that produced one of them ran at \
                1.05× the reference boot and the failure was byte-identical to the ones taken at \
                load 11–16. Bisected to `f96d52e`, a merge whose two parents are both green",
         evidence: "`main` at b36cf64, three runs alone in one session; seven boots across the bisect",
-        source: "issues/diagnostics/screen-pager-keys-red-on-main.md",
+        source: "tests/toyos.rs screen_pager_keys",
         measured: "2026-08-08",
     },
     Red {
@@ -1223,9 +1281,9 @@ pub const KNOWN_RED: &[Red] = &[
         measured: "2026-08-07",
     },
     // ---------------------------------------------------------------------
-    // **`fd_lifetime` is `handle_lifetime` since 2026-08-20.** The rename is
-    // the fd/inbox wave's
-    // (`issues/design-debt/fd-is-libc-jargon-and-the-tree-still-speaks-it.md`).
+    // **`fd_lifetime` is `handle_lifetime` since 2026-08-20.** The rename is the
+    // fd/inbox naming wave's — owner ruling of 2026-08-19, "fds belong only in
+    // libc jargon", which `kernel/src/object/handle.rs` states where it binds.
     // Every reading in the three rows below was taken before it, so the harness
     // lines they quote and the command they name printed and spelled
     // `fd_lifetime` at the time; all three have been re-spelled to the live

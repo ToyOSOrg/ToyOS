@@ -36,13 +36,13 @@ follows is the evidence that made it decidable.
 | `drivers/panic_console/mod.rs` | 1,188 | the screen sink, panic-only |
 | `drivers/virtio_console.rs` | 221 | the second serial-shaped sink |
 
-Its known sins are already entries here and are the argument for the question:
-the flush is unbounded, uninterruptible and in front of the scheduler pass, and
-userland `println!` shares the ring — both
-`issues/boot-media/log-flush-is-unbounded.md`; a boot that wedges before
-the idle loop produces no output at all because the ring's only drains are the
-timer tick and the idle loop
-(`issues/diagnostics/pre-idle-wedge-says-nothing.md`); the ring's occupancy
+Its known sins were the argument for the question, and this records them as the
+subsystem above had them: the flush was unbounded, uninterruptible and in front
+of the scheduler pass, and userland `println!` shared the ring — both answered
+by the architecture that landed on 2026-08-15, which removed the file sink; a
+boot that wedged before the idle loop produced no output at all because the
+ring's only drains were the timer tick and the idle loop (answered since by
+`Drain::Inline`, gated by `pre_idle_wedge_speaks`); the ring's occupancy
 is one of the pre-`hlt` recheck's conditions, so a CPU with bytes pending
 declines to sleep; and `drain_serial`'s `BackendGuard::lock` spins with
 interrupts disabled with no bound and no deadlock panic (both, CLAUDE.md's

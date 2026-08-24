@@ -146,3 +146,41 @@ log ring retains what serial has collected, the console paginates it, and
 `page_forever` cycles those pages on a halted machine, with
 `screen_paged_scrollback` as the gate. Nothing does any of that for a boot that
 succeeds, which is this entry.
+
+## Re-read 2026-08-24: the named answer landed, the headline did not
+
+**The durable answer this entry names has landed.** "A log sink that survives
+userland" is `/bin/logd`: the kernel keeps the record ring and the console and
+writes no file at all, logd owns `/log` and puts one file per boot there named
+for the wall clock, and `src/build.rs`'s `every_boot_config_runs_logd` refuses a
+boot config that omits it. `kernel/src/log_file.rs` is deleted. So the boot log
+now survives the compositor's claim, on the disk, on the shipping image.
+
+**What that does not do is put it back on the glass**, which is the sentence at
+the top of this entry and is still true: `panic_console::boot_checkpoint` returns
+immediately when `SCREEN_OWNED_BY_USERLAND` is set, so `bootable.img` still
+paints its last kernel screenful at `Boot: complete` and the desktop overwrites
+it. Two ways to read it that did not exist before, and what each costs:
+
+- **Pull the stick.** The file is on the `TOYOS-LOG` partition and readable on
+  another machine. No reboot of the machine under test, but it is off it.
+- **Ask from the desktop.** The shipping `system.toml` carries `terminal`,
+  `shell` and `toybox` (with `bin/cat`), all reachable from the compositor's
+  launcher, so `cat /log/<newest>` answers on the machine itself. **This is
+  exactly what the T14's failure mode denies**: the case this entry was opened
+  for is a dead keyboard and a dead TrackPoint, and nothing can be launched or
+  typed. So the residual is narrower than the heading but not empty — *live
+  readability, on the machine, with no working input and no reflash*.
+
+**Its structural citations have drifted and this pass did not re-derive them.**
+`panic_console/mod.rs:478` is `:885`; `:778`'s `draw_glyph` is `:1470`;
+`compositor/src/main.rs:719`'s `device::try_claim(DeviceType::Framebuffer)` is
+gone — that file names no framebuffer at all now, and the kernel side is
+`panic_console::screen_claimed_by_userland`, which waits out an in-flight
+checkpoint rather than only latching; and `kernel/src/main.rs:463`'s non-empty
+init-list assert is gone, `main.rs` having one assert left (`No initrd
+provided`). The console-boot paragraph's `/log/kernel.log` is now the newest
+`SEED_FILES` files, and its "the ring `log_file` drains" names a deleted module —
+`userland/console/src/main.rs`'s own doc carries the live version of that
+residual: the seed is a file read rather than a cursor, and reading the cursor
+would need `logread` on the console's manifest row.

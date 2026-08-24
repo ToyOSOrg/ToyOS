@@ -31,6 +31,14 @@ pub const MSIX_ENTRY: u16 = 0;
 /// on the boot CPU and is spread from there by `irq_ring` plus the scheduler
 /// rather than by the interrupt controller. Written once because MSI and
 /// MSI-X differ in where the address is configured and not in what it is.
+///
+/// **What that costs, so nobody reads the simplicity as free.** Whatever
+/// thread cpu0 is running is preempted for every ISR in the machine, however
+/// far from cpu0 the work is finally done; one CPU's ISR throughput is the
+/// machine's whole device-interrupt ceiling; and a cpu0 wedged with `IF`
+/// clear stops every device interrupt at once, which couples "one CPU is
+/// stuck" to "all I/O is stuck" in a way no other CPU's wedge does.
+/// `kernel/src/irq_census.rs` is what measures the concentration.
 const MSG_ADDR: u32 = 0xFEE0_0000;
 
 pub struct Capability<'a> {

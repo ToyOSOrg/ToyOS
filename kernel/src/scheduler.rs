@@ -838,6 +838,17 @@ pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
 ///
 /// The short block deadline is a liveness backstop, not a poll: the wake is a
 /// message like any other, and a lost one must fail loudly rather than hang.
+///
+/// **Both callers are reached from the suite**, which was not true while this
+/// was instrumented in July 2026 and is worth stating because a thread that
+/// joins is removed by `collect_thread_zombie` and never gets here — so the
+/// only way in is an unjoined thread at teardown or a kill.
+/// `process::retire_threads` is the one loop, shared by `process::exit`'s
+/// phase 2 and by `kill_process`, and `kill_while_blocked` drives the second
+/// against a live process in four states (parked on a pipe, on a connection,
+/// mid-accept, and spinning in Ring 3 with an empty kernel stack); its arm 4 is
+/// built around the fact that a killer *is* this function and does not come
+/// back on a tree where the victim never releases.
 #[track_caller]
 pub fn retire_task(sched: &ThreadSched) {
     // Also on the early-return path below, where no park happens and the two

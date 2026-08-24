@@ -9228,8 +9228,10 @@ fn run_machine_test(
             // produced nothing at all on the console — not "less", *nothing*,
             // including every line it had logged — because the only two things
             // that drained the byte ring were the timer tick and the idle loop,
-            // and the machine reaches neither
-            // (`issues/diagnostics/pre-idle-wedge-says-nothing.md`).
+            // and the machine reaches neither. It cost an hour the first time
+            // it was met: a mis-programmed IOMMU stopped NVMe mid-`init`, the
+            // guest had logged sixty lines, and the harness saw the
+            // bootloader's output and then a ten-second timeout.
             // `Drain::Inline` puts every record on the wire as it is committed,
             // for the whole boot, so the end of the log is now where the
             // machine stopped rather than where it last drained.
@@ -11616,9 +11618,8 @@ fn control_regs_verdict() -> Result<(), String> {
     // answers by name; `PGE` is named nowhere, which is the case the whole
     // never-named rule exists for — `TSD` and `PKE` are the same case. `UMIP`
     // used to be this file's example of the same thing, until it joined
-    // `CR4_MAY` (`issues/isolation/cr4-umip-undeclared.md`) — a bit that
-    // moves from unnamed to optional is exactly the migration this gate exists
-    // to force a diff for.
+    // `CR4_MAY` — a bit that moves from unnamed to optional is exactly the
+    // migration this gate exists to force a diff for.
     refused("every CPU with AM set", &[(DECLARED.0 | (1 << 18), DECLARED.1); 4], "AM")?;
     refused(
         "every CPU with PGE set",
@@ -12264,7 +12265,7 @@ fn headline(reason: Option<&str>) -> String {
 /// run's sentence — so an adjudicator read one assertion's evidence for
 /// another's. Two different assertions in one job is not a weaker finding than
 /// one twice; it is a different and larger one, and the line now says which it
-/// was (`issues/hardware/xhci-hid-break-counts-any-endpoint-3.md`).
+/// was.
 ///
 /// The green arms are untouched. They are a classification the whole redlist is
 /// written against, and nothing about them was wrong.

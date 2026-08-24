@@ -134,9 +134,8 @@ impl Drop for LogCommitGuard {
 /// One `xadd` with **no `lock` prefix**. That is the whole point: a locked
 /// read-modify-write is not one instruction under TCG — QEMU leaves the
 /// translation block to run it exclusively — and one `fetch_add` per log line
-/// cost 350 ms of boot
-/// (`issues/hardware/one-rmw-per-log-line-cost-350ms.md`). An unlocked
-/// `xadd` still retires whole, so an interrupt on this CPU cannot split it.
+/// was measured at 350 ms of boot. An unlocked `xadd` still retires whole, so
+/// an interrupt on this CPU cannot split it.
 ///
 /// [`LogCommitGuard`] is the bracket. It lives at the call site because the
 /// reservation and the body publication are one operation: reopening IF after

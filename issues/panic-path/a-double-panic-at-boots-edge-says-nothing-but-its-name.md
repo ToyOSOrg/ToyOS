@@ -49,3 +49,21 @@ the state the CPU was in when it arrived. What this sighting still does not
 establish is what that first crash was. The capture is
 `scratchpad/hkpfix-harness.log` in the 2026-08-20 orchestrator session; the
 durable evidence is quoted here and in the redlist row.
+
+## What closes it is a count, and the count is owed
+
+There is a leading explanation and it is not this entry's to argue: the
+`log_poll_outlives_a_close` row in `src/redlist.rs` records it as the
+already-fixed missing-`cld` class, with the before/after boot counts that make
+the case, and reasons that a machine-wide death at boot's edge under two suites
+on a branch carrying no kernel byte is that class's shape. It is not shown here,
+so the row stands and so does this.
+
+**Nothing about it is a decision.** The row names its own retirement condition —
+three loaded suites of the fixed tree with no red under this name — and that is
+an instrument run: `cargo test` in two worktrees at once, three times, with the
+result read rather than argued. Checked 2026-08-24 and still owed; the row's own
+note records why the first attempt did not happen on 2026-08-22. A closing pass
+cannot supply it, because a suite run beside five other agents' suites is a
+loaded host that nobody can characterise afterwards — the instrument needs the
+machine, not a spare slot on it.

@@ -40,6 +40,13 @@
 //!    byte need not be 4 KiB-aligned in general, so a write to it is a
 //!    read-modify-write of a device block it shares with whatever is next to
 //!    it — which preserves those bytes rather than authoring them.
+//!
+//!    **What this does not do is re-check the partition table.** Whether an
+//!    extent is *right* is [`gpt`]'s question and this cannot answer it; whether
+//!    an extent is being *respected* is this one's and nothing else answers it.
+//!    A second copy of a table rule here would be two rules that can disagree,
+//!    which is worse than one — so a residual found in the parser is fixed in
+//!    the parser.
 //! 3. **Whether it is already ours.** `toyos-fat32` contains no code that can
 //!    write a BPB. A volume that does not parse as FAT32 makes [`mount`] return
 //!    `None` after nothing but reads, and there is no path from there to a
