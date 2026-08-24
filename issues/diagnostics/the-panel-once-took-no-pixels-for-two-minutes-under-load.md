@@ -20,12 +20,19 @@ First sighting, CI, one red against one green isolated re-run in the same job.
 > against the 10,000 ms fast line — correctly: that number is this stall, not
 > the test's price, and it must never be committed as one.
 
-**The family**: the same evening's `screen_console_panic` sighting (its issue
-sits beside this one in the tracker) watched a fatal report lose the screen
-under load; this watched an ordinary write lose it. Two tests, one shape —
-composition under a loaded host delays or drops the panel's update past any
-bound the test grants — and whether the loss is the compositor's, the
-actuator's, or TCG starvation is exactly what neither sighting establishes.
+**The family, and what half of it turned out to be.** The same evening's
+`screen_console_panic` sighting looked like a fatal report losing the screen
+under load, and this looked like an ordinary write losing it — one shape,
+composition under a loaded host. That reading is dead for the other half: on
+2026-08-24 both `screen_console_panic` captures were re-read and the command had
+never reached the shell, because QEMU's 16-byte PS/2 queue drops what a guest
+that is not draining cannot take, silently. Nothing about the panel was
+involved. **This test types `test_rs_test_screen_graffiti` the same way**, and a
+mangled command name is exactly what `0 of 2073600 pixels are [0, 192, 0]` looks
+like — so read the panel out of the failing job before assuming a pixel was
+lost. `issues/build/console-tests-still-type-on-a-wall-clock.md` carries the
+mechanism, the fix that closed it for `screen_console_panic`, and why that
+helper does not transfer here unchanged.
 
 The diff each rode on could not have caused it: PR #135 changes a tier
 declaration and a duration table.
