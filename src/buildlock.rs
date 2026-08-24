@@ -35,6 +35,13 @@
 //! [`build_slot`] adds and what twelve simultaneous kernel builds on fourteen
 //! cores cost.
 //!
+//! **Neither count reaches work that does not go through `src/build.rs`** — a
+//! `toyos-sched-sim measure`, a `cargo build` typed by hand in a fork clone,
+//! `./x.py` run directly in `rust/`. Those spend the same cores and are counted
+//! by nothing, so a phase can still be starved with every slot honestly free;
+//! what separates that from an ordinary slow one is that no `[host-slots]` or
+//! `[host-builds] waiting …` line was printed.
+//!
 //! **The order between all four is a constraint, not a preference:** sysroot →
 //! host slot (guest or build) → build lock → artifact. A build slot is taken
 //! before any build lock and never while one is held, and after the sysroot lock
