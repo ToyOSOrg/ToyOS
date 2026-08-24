@@ -32,6 +32,7 @@ members = [
     "toyos-manifest",
     "toyos-mixer",
     "toyos-pci",
+    "toyos-proclife",
     "toyos-ps2",
     "toyos-sched",
     "toyos-sched/loom",

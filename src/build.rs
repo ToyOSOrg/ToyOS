@@ -1780,22 +1780,30 @@ mod tests {
         );
     }
 
-    /// Every negative control `kernel-loom/Cargo.toml` and
-    /// `toyos-sched/loom/Cargo.toml` declare — every feature name besides the
-    /// structural ones both crates carry for other reasons.
+    /// Every negative control the model crates declare — every feature name
+    /// besides the structural ones they carry for other reasons.
+    ///
+    /// **The list is the crates that hold a model of the kernel, not the crates
+    /// that use loom.** `kernel-loom` and `toyos-sched-loom` swap in loom's
+    /// instrumented atomics because their subjects are memory orderings;
+    /// `toyos-proclife`'s subject is which CPU takes the process table lock
+    /// next, and every decision in it is made under that lock. Both kinds are
+    /// a model with controls, and a control with no step behind it is the same
+    /// hole either way.
     ///
     /// `loom` selects loom's instrumented atomics; `check`, `protocol-port` and
     /// `tripwire` mirror `toyos-sched`'s own features so the shared sources
     /// compile identically and name nothing a model turns on. Everything else
-    /// declared in either file is, by construction, a `--features <name>`
+    /// declared in any of these files is, by construction, a `--features <name>`
     /// command that must red a named model — each file's own comment beside the
     /// name carries the argument for why.
-    fn declared_loom_controls(root: &Path) -> Vec<(&'static str, String)> {
+    fn declared_model_controls(root: &Path) -> Vec<(&'static str, String)> {
         const NOT_A_CONTROL: &[&str] = &["loom", "check", "protocol-port", "tripwire", "default"];
         let mut out = Vec::new();
         for (crate_name, manifest) in [
             ("kernel-loom", "kernel-loom/Cargo.toml"),
             ("toyos-sched-loom", "toyos-sched/loom/Cargo.toml"),
+            ("toyos-proclife", "toyos-proclife/Cargo.toml"),
         ] {
             let path = root.join(manifest);
             let text = fs::read_to_string(&path)
@@ -1812,7 +1820,7 @@ mod tests {
     }
 
     /// **A control nobody runs is a control nobody has shown can fail.** Every
-    /// name [`declared_loom_controls`] finds must appear as `--features <name>`
+    /// name [`declared_model_controls`] finds must appear as `--features <name>`
     /// somewhere in `host-tests.yml` — the one place these are wired, by every
     /// existing comment's own account — or a new control can be declared and
     /// run nowhere, silently, which is exactly how five of `kernel-loom`'s six
@@ -1824,12 +1832,12 @@ mod tests {
     /// reason: the shape a step's command line has is fixed, and a real parse
     /// would have to reconstruct multi-line `run:` blocks to find it in.
     #[test]
-    fn every_loom_control_is_wired_into_host_tests() {
+    fn every_model_control_is_wired_into_host_tests() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workflow = fs::read_to_string(root.join(".github/workflows/host-tests.yml"))
             .expect("host-tests.yml is readable");
         let mut missing = Vec::new();
-        for (crate_name, control) in declared_loom_controls(root) {
+        for (crate_name, control) in declared_model_controls(root) {
             let needle = format!("--features {control}");
             if !workflow.contains(&needle) {
                 missing.push(format!("{crate_name}: {control} ({needle:?} not found in host-tests.yml)"));
@@ -1837,7 +1845,7 @@ mod tests {
         }
         assert!(
             missing.is_empty(),
-            "a loom negative control is declared with no CI step running it — \
+            "a model's negative control is declared with no CI step running it — \
              wire it into .github/workflows/host-tests.yml beside the others:\n  {}",
             missing.join("\n  ")
         );

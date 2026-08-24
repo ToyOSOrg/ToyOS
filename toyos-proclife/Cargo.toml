@@ -1,0 +1,51 @@
+# A member of the host workspace (root `Cargo.toml`), like `toyos-sched`,
+# `toyos-userbound` and `toyos-desktop`: the kernel depends on it by path and
+# its tests run on the host, with no target-triple juggling.
+#
+# What lives here is every decision `kernel/src/process.rs` makes about where a
+# process or a thread is in its life — who may claim a teardown, which threads
+# a claimant must retire, what a thread's exit marks and whose watch it posts
+# on, which entries an idle pass may take. None of it reads a clock, takes a
+# lock, retires a task or frees a page: the kernel gathers the facts under
+# `PROCESS_TABLE`, asks here, and performs what it is handed.
+#
+# It is a crate rather than a module of the kernel because the bugs this
+# subject has are **interleaving** bugs — two CPUs inside one process's
+# lifecycle — and until it moved, the only machine that could reach one was a
+# booted guest. `src/interleave.rs` enumerates every interleaving of a scripted
+# pair of operations in milliseconds.
+
+[package]
+name = "toyos-proclife"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[features]
+# Declared, never enabled here, and never enabled by any kernel build: each
+# reverts one decision to the form this kernel really had, so the host model
+# that refuses it is shown able to red at all. `host-tests.yml` runs each and
+# demands the named test's own FAILED line; `src/build.rs`'s
+# `every_model_control_is_wired_into_host_tests` reds on a control declared
+# with no step behind it.
+#
+# `teardown::claim_teardown` stops being exclusive: every arrival wins. An exit
+# and a kill then both tear one process down, both retire its threads and both
+# publish an exit — which `ProcessObject::publish_exit` asserts against at run
+# time, in a guest, on whichever boot the two happen to meet.
+# `interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down` must
+# red under this, and it does so in every ordering rather than in one.
+mutate-claim-teardown-always-wins = []
+# `spawn::admit_thread_insert` stops re-reading the teardown claim, so the
+# question is asked once — at the top of `process::spawn_thread`, before the
+# TLS block, the kernel stack and the scheduler record are built. Everything
+# that makes a thread happens in that window, and teardown claims the process
+# under the very lock the insert takes. `interleave::tests::a_published_exit_
+# leaves_no_unretired_thread` must red under this.
+mutate-spawn-skips-the-insert-recheck = []
+
+[dependencies]
+toyos-abi = { path = "../toyos-abi" }
+
+[lints.rust]
+warnings = "deny"
