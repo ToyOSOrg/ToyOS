@@ -62,22 +62,29 @@ jobs:
   # green run on `ubuntu-latest` could not distinguish "the three packages
   # this job installed were enough" from "the image's own contents quietly
   # covered the rest". `debian:sid` is the same image `ci.yml`'s guest shards
-  # already run in for the identical reason. This job's timing below is not
-  # comparable to the `ubuntu-latest` version's own measurement — a
-  # from-scratch container pull and `apt-get install` is a different cost
-  # than a pre-provisioned VM image — and nobody has re-measured this job
-  # since the move; its first number is whatever the first real run reports.
+  # already run in for the identical reason.
+  #
+  # **Measured, finally**: dispatch 32749539353, 2026-08-24 — the first run of
+  # this workflow that ever got past its own setup — went green in 4247 s
+  # (1 h 10 m 47 s) for the command, 72 m 04 s for the job, on QEMU 11.1.0
+  # (Debian 1:11.1.0+ds-2) and stable rustc 1.98.0, ending `Build finished.` /
+  # `Boot image: target/bootable.img`. That is not comparable to the
+  # `ubuntu-latest` version's own number (3864-4048 s for the command alone) —
+  # a container pull and `apt-get install` are a different cost than a
+  # pre-provisioned VM image — but it is this container's own.
   #
   # Still deliberately not `toolchain.yml`'s own dep list: cmake, ninja-build,
   # pkg-config, libssl-dev and ovmf are not installed here either. `ovmf/` is
   # committed to this repository and read directly by `src/qemu.rs`'s
   # `launch` — `--build-only` never calls it, so the ovmf package is moot
   # here regardless. Whether the bootstrap genuinely needs cmake, ninja or
-  # libssl-dev (rustc's LLVM step can download a prebuilt LLVM instead of
-  # building one, when the submodule is unchanged from upstream) has still
-  # never been tested against a machine that lacks them — the question this
-  # job has always carried. If it does, this job reds on exactly that, which
-  # is the gap the premise has today and the reason this file exists.
+  # libssl-dev — the question this job has always carried, never tested
+  # against a machine that lacks them — was answered by that same run: **it
+  # does not.** The bootstrap fetched
+  # `rust-dev-nightly-x86_64-unknown-linux-gnu.tar.xz` at `ad3d0bc1` into
+  # `rust/build/x86_64-unknown-linux-gnu/ci-llvm` and built no LLVM at all.
+  # The answer holds only while `download-ci-llvm` can find an artifact; the
+  # day it cannot, this job reds on exactly that, which is the whole point.
   #
   # No `actions/cache`: caching a "fresh machine" build is a contradiction —
   # what is measured below is what a from-scratch run costs, every time.
@@ -85,11 +92,9 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: debian:sid
-    # A wedge guard, not a fresh measurement: this ceiling is carried over
-    # from the `ubuntu-latest` version's own from-scratch runs (see that
-    # job's history), which is not the same cost as a container pull plus
-    # `apt-get install` on top of a from-scratch bootstrap. Nobody has
-    # measured this version yet.
+    # A wedge guard, not a budget: the one measured run took 72 minutes of the
+    # 350, and the ceiling exists to stop a wedged bootstrap holding a lane for
+    # six hours rather than to price this job.
     timeout-minutes: 350
     steps:
       # Before the checkout: `actions/checkout` wants git and this image has
@@ -221,6 +226,19 @@ jobs:
   # reason to fail this job: `src/main.rs`'s `check_prerequisites` only
   # *notes* a QEMU version other than declared everywhere outside
   # `ci.yml`/`gate-a.yml`'s guest boots, and this job boots no guest either.
+  # That disagreement has since fired: every run to date installs 11.0.3
+  # against the declared 11.1.0.
+  #
+  # Nothing installed but Homebrew's QEMU and `rustup` is also what this job
+  # found the premise on. Dispatch 32749539353 (2026-08-24) got both toolchain
+  # stages through and then failed linking `/bin/doom`: `toyos-ld: undefined
+  # symbol: DG_ScreenBuffer`, because `userland/doom/build.rs` archives
+  # doomgeneric through the `cc` crate and the archiver it reaches for is
+  # whatever `ar` is in `PATH` — GNU binutils on the dev host, Apple's cctools
+  # on a stock one, two archive formats.
+  # issues/build/doom-does-not-link-on-a-stock-macos-host.md is that finding,
+  # and this job reds on it until it closes. It is the first thing this
+  # workflow has ever found, which is what the workflow is for.
   #
   # No macOS-specific FAT tooling here despite the standing "four macOS FAT
   # tools" exception (root CLAUDE.md): `--build-only` runs no test, and
@@ -240,11 +258,11 @@ jobs:
   # is "install Rust and QEMU on a fresh machine", not "this image already
   # has a working one".
   #
-  # No `actions/cache`, same reason as Linux. This job has never run, so
-  # `timeout-minutes` borrows Linux's own ceiling rather than inventing a
-  # tighter one — a macOS free-tier runner has fewer cores than Linux's, so
-  # the real number may run longer, and the first nightly run is what answers
-  # that, not this comment.
+  # No `actions/cache`, same reason as Linux. `timeout-minutes` borrows
+  # Linux's ceiling and stays a wedge guard rather than a budget: the one run
+  # that reached the build spent 43 m 11 s of it before failing, and no run has
+  # yet reached the end, so what a green macOS `--build-only` costs is still
+  # unknown.
   macos:
     runs-on: macos-latest
     timeout-minutes: 350
