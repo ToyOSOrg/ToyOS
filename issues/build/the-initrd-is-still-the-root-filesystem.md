@@ -24,8 +24,10 @@ booting off an internal disk gets neither `/boot` nor `/log`
 a page-cache change first: a `BlockIO` over an arbitrary `BlockDevice` at a
 partition offset with a cache of its own. Only then the third GPT partition, the
 root GUID in the kernel arguments, and the deletion of the initrd adapter and
-its slice-backed `BlockIO`. `issues/kernel/boot-image-split-r2-would-fail.md`
-records what the refactor breaks as written.
+its slice-backed `BlockIO`. Whatever replaces the medium answers to
+`Profile::Metal` first: its defining claim is that it carries no virtio device
+anywhere (`src/qemu.rs`), so a virtio-blk root is not a shape that profile can
+take.
 
 Two facts worth keeping when the image is next re-costed:
 
