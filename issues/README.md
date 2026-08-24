@@ -31,7 +31,7 @@ Four fields, all required, no defaults.
 | | `owner` | it is the owner's to decide, and nobody else may |
 | | `none` | nothing is owed |
 | `kind` | `defect` | real, reproducible, someone should fix it |
-| | `finding` | noticed in passing; may never be worth fixing |
+| | `finding` | noticed in passing — and bounded: at its next review it is promoted to a `defect` or folded into the owning module header and closed (owner ruling 2026-08-25) |
 | | `track` | staged work — something to build that nobody has built |
 | | `question` | blocked on the owner, and nobody else can decide it |
 | | `rejected` | considered and declined, recorded so nobody re-proposes it |
@@ -59,6 +59,15 @@ day re-deriving an answer the owner already gave. Nothing in a `rejected` file
 is owed — and if the body says otherwise, the *kind* is what is wrong. A ruling
 that declared a standing failure rather than removing it deferred the work; it
 did not decline it, so the entry is a `defect` and stays open.
+
+**`kind: finding` does not accumulate** (owner ruling 2026-08-25). A finding
+has a bounded life: whoever next reviews it either promotes it to a `defect`
+(something real that someone should act on — a fix, a measurement, an
+instrument) or moves its one durable line to the module header or doc comment
+at the site that owns the subject and deletes the file by the closing
+procedure below. "May never be worth fixing" is a reason to fold it to the
+site, never a reason to keep the file; when unsure, promote — a wrong
+promotion costs a later demotion, a wrong fold loses tracked truth.
 
 **`kind: question` is not work either** — not yours. It is owed by the owner,
 and an agent that "fixes" one has decided something that was his to decide. But
