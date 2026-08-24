@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-19
 ---
 
@@ -34,3 +34,12 @@ cargo clippy --workspace --all-targets --keep-going -- -D warnings
 (cd kernel     && cargo clippy --target x86_64-unknown-none -- -D warnings)
 (cd bootloader && cargo clippy --target x86_64-unknown-uefi -- -D warnings)
 ```
+
+**2026-08-25: promoted, and the commands above are now stale.** The `clippy`
+step in `.github/workflows/host-tests.yml` grew an `$ADOPTED` per-area lint
+list, a fourth invocation (kernel with `boot-actuators,test-actuators`), a
+fifth (`toyos-abi` unsafe blocks), and an extra
+`-W clippy::undocumented_unsafe_blocks` on the bootloader's — none of which
+this file's copy-paste block carries. Whoever next runs the local half by hand
+should copy the five commands from the workflow step directly rather than from
+here, and the no-local-half decision itself is unchanged and still open.
