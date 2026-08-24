@@ -59,3 +59,10 @@ unrecorded, which remains the number this file asks for. Note the mechanism
 family `console-tests-still-type-on-a-wall-clock.md` names: this test types
 its string on a wall clock too, so the PS/2-queue loss `console_type_line`
 closed for `screen_console_panic` is a live candidate here.
+
+**2026-08-25: promoted.** Two firings now, both on loaded dev-host suites,
+zero alone — still `NOT ON THE LIST` in `src/redlist.rs` and no
+`Instrument::DevHostLoaded` row exists for it. The denominator this file
+specifies (total loaded runs of this name, counted) is still uncollected;
+stays open until someone runs it and either prices a rate or closes this as
+noise.
