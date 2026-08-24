@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-14
 ---
 
@@ -58,3 +58,12 @@ are open:
 
 Filed as a `finding` rather than a `defect` because on the machines this tree
 targets it may never occur; what is certain is that nothing would tell us.
+
+**2026-08-25, promoted to `defect`.** "Nothing would tell us" is the defect:
+`kernel/src/clock.rs` cites this file for the assumption its whole arithmetic
+rests on, and the instrument that would confirm or refute it does not exist —
+one `rdtsc` per CPU logged at the end of `init_ap` is the entire measurement.
+QEMU synthesises every guest TSC from one host clock and cannot answer, so this
+belongs on the metal session's table beside the control-register delta
+(`issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md`). Owed by
+whoever prepares that session: build the log line first, then read it.

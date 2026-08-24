@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-20
 ---
 
@@ -28,3 +28,13 @@ Nothing depends on the answer today: a bad one does not send the design back to
 2 MiB granularity, since 2 MiB granularity does not protect anything. It would
 send it to 2 MiB-aligning `toyos-ld`'s segments, which was measured at +4 MiB of
 physical memory per process.
+
+**2026-08-25, promoted to `defect`.** Checked at the site: `WindowProt`'s doc
+comment in `kernel/src/mm/paging.rs` carries the design measurement — 20
+binaries, 33 windows, 20 mixed, 48.9 % and 0 % — and says nothing about what the
+512 4 KiB entries cost the TLB, so the number lives nowhere in the tree. That
+makes it a measurement owed, in the same class as the AP control-register delta
+and the AP TSC trail, and it belongs on the metal session's table with them
+(`issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md`). Owed by
+whoever prepares that session: it needs a boundary-straddling workload and a
+kernel built before the change to compare against.

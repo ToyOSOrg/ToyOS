@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-15
 ---
 
@@ -44,3 +44,11 @@ handing the binary a page it had not finished relocating (`relocs=2600` is on th
 trace). Capture the guest with QMP rather than letting the harness kill it —
 `BootOptions { qmp: true }` leaves the socket, and `info registers -a` says
 whether any other CPU is still running.
+
+**2026-08-25, promoted to `defect`.** A guest died taking 147 tests with it and
+nothing in the tree explains why; a dereference of `1` in `/bin/echo` is not an
+observation about the host. The act is not a fix — it is the capture, because
+the two candidate readings cannot be separated without it, and letting the
+harness kill the guest destroys the only evidence there is. Owed by whoever next
+sees a `fault_gates` red naming `/bin/echo`: boot that lane with `BootOptions {
+qmp: true, .. }` before doing anything else.
