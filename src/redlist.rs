@@ -267,19 +267,25 @@ pub const KNOWN_RED: &[Red] = &[
     // ---------------------------------------------------------------------
     // A different assertion (`breaks > 2`, not the retired `breaks != 1`) on the
     // same test, `1cb11e7`'s re-issue budget. The injected disk never left its
-    // two-break budget; the third line is the boot stick's own unrelated,
-    // cleanly-recovered transport break, which the count does not scope out.
+    // two-break budget; the third line was the boot stick's own unrelated,
+    // cleanly-recovered transport break, which the count did not scope out.
     // ---------------------------------------------------------------------
     Red {
         test: "usb_transport_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the count is per device now. `broke_on` reads the device off the staged break's \
+             own line and the verdict counts `usb-storage: <bdf> slot <n> transport broke` for \
+             that device alone, so the boot stick's clean recovery is no longer summed into the \
+             injected disk's budget — and a line that stops naming a device is refused rather \
+             than widened back to every disk on the machine",
+        ),
         what: "the transport broke 3 times off one abandoned transfer, which can undo one \
                recovery and no more",
         evidence: "PR #41 (`wt/toyos-i8042tier`), run 31684437719, job 94397136494 \
                    (\"guest (4)\"), sha 711730204800d7173558f7dd96644c5910fb8cf0",
-        source: "issues/hardware/usb-transport-break-counts-the-boot-sticks-recovery.md",
+        source: "tests/common/usb.rs broke_on",
         measured: "2026-08-13",
     },
     Red {

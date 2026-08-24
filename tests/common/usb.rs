@@ -1524,10 +1524,11 @@ pub fn usb_transport_break(
     // test; this profile carries a second one — the stick the machine booted
     // from — whose own transport can break in the same boot for reasons that
     // have nothing to do with the injection. `log.matches("transport broke")`
-    // summed both, and on CI run 31684437719 the boot stick's clean
-    // status-phase recovery at 2.616 s (one break, one retry, `SCSI 0x35`,
-    // slot 1) pushed the total from the injected disk's real 2 to 3 and reddened
-    // the run (`issues/hardware/usb-transport-break-counts-the-boot-sticks-recovery.md`).
+    // summed both, and on CI run 31684437719 (job 94397136494) the boot
+    // stick's clean status-phase recovery at 2.616 s — one break, one retry,
+    // `SCSI 0x35`, slot 1, 2.3 s after the gate had swept — pushed the total
+    // from the injected disk's real 2 to 3 and reddened a run in which the
+    // disk under test never left its budget.
     let under_test = broke_on(staged[0])?;
 
     // And the driver got over it. Two attempts are explained by the fault — the
