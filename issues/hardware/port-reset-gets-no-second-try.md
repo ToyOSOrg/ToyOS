@@ -37,7 +37,6 @@ and the hot-plug port state machine in `kernel/src/drivers/xhci/mod.rs` now
 dispatch `Reset::Warm` and retry a failed hot reset on a USB3 port before
 giving up (`GaveUp::LinkNeverTrained`). Whether that closes this entry or only
 narrows it — `device::begin`'s own PORTSC check in `kernel/src/drivers/xhci/device.rs`
-still has no retry of its own — was not verified further; found while folding
-`issues/hardware/xhci-legacy-handoff-unstageable.md`, the finding this
-paragraph used to cite for "unbuilt", and left for whoever next reviews this
-entry.
+still has no retry of its own — was not verified further; found while closing
+the finding that used to be this paragraph's source for "unbuilt", and left
+for whoever next reviews this entry.
