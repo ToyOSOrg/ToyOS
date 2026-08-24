@@ -144,36 +144,53 @@ pub const RETRY_SLOWEST: Cadence = Cadence::every(
      attempt may pin",
 );
 
+/// How long the park after attempt `attempt` (>= 2) lasts: doubling from
+/// [`RETRY_SOONEST`] to [`RETRY_SLOWEST`], so a hung-but-resetting device costs
+/// the machine a pinned attempt at most every other attempt-width.
+///
+/// Split out so the two backoff sites agree on the ladder: [`between_attempts`]
+/// parks on the task's own watch, and `writeback`'s `iod` drain — which already
+/// holds a completion arm and so may not take a second (`completion::arm`'s
+/// one-arm-per-task rule) — waits that same span on the arm it holds.
+pub(crate) fn backoff_step(attempt: u32) -> Duration {
+    Duration::from_nanos(
+        RETRY_SOONEST
+            .nanos()
+            .saturating_mul(1u64 << (attempt - 2).min(32))
+            .min(RETRY_SLOWEST.nanos()),
+    )
+}
+
 /// Give the CPU away between two refused block-operation attempts.
 ///
-/// The one place the retry cadence is spent, shared by every loop that turns a
-/// [`BlockError::BudgetExpired`] into another attempt on a fresh budget:
-/// `object/ops.rs`'s `SYS_FSYNC` and `writeback`'s close-time drain. The first
-/// retry only yields — the budget was usually spent by lock-wait or a
-/// descheduled vCPU, both over by the next slice — and every later one parks,
-/// doubling from [`RETRY_SOONEST`] to [`RETRY_SLOWEST`] so a hung-but-resetting
-/// device costs the machine a pinned attempt at most every other attempt-width.
+/// The one place the retry cadence is spent by a caller that holds **no**
+/// completion arm: `object/ops.rs`'s `SYS_FSYNC` and `SYS_SHUTDOWN`'s drain. The
+/// first retry only yields — the budget was usually spent by lock-wait or a
+/// descheduled vCPU, both over by the next slice — and every later one parks for
+/// [`backoff_step`].
 ///
 /// **Nothing here holds a lock and nothing here is pinned**, which is the whole
 /// reason the loop that calls it lives above every lock: `attempt` is this run's
 /// count, and the park is on the caller's own task watch, where nothing posts,
 /// so the deadline is the whole of the wait. A context with no task handle (a
-/// boot phase) cannot park and returns at once — its caller must be a task, and
-/// both callers are.
+/// boot phase) cannot park and returns at once.
+///
+/// **A caller that already holds a completion arm must not call this** — the
+/// park below arms the task's own watch, and `completion::arm` refuses a second
+/// arm on one task. `iod` holds a standing `writeback::WORK` arm across its
+/// loop, so its drain waits on that arm for [`backoff_step`] instead of coming
+/// here (`writeback::drain_all_iod`); routing it here panicked the machine under
+/// contention, the one path that reaches attempt >= 2.
 pub(crate) fn between_attempts(attempt: u32) {
     if attempt <= 1 {
         crate::scheduler::yield_now();
         return;
     }
-    let step = RETRY_SOONEST
-        .nanos()
-        .saturating_mul(1u64 << (attempt - 2).min(32))
-        .min(RETRY_SLOWEST.nanos());
     let parkable = crate::scheduler::Parkable::at_entry();
     let Some(handle) = crate::sched::driver::current_handle() else {
         return;
     };
-    let deadline = Deadline::at(crate::clock::now() + Duration::from_nanos(step));
+    let deadline = Deadline::at(crate::clock::now() + backoff_step(attempt));
     let _ = crate::completion::wait_until(
         &parkable,
         crate::completion::Subject::of(handle.watch()),

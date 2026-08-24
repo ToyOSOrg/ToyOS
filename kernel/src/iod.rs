@@ -101,7 +101,11 @@ extern "C" fn body(_arg: u64) -> ! {
         // spinlock, so this drive spins like any thread's disk wait — legal for a
         // dedicated housekeeping thread, and the lock conversion is a later
         // chunk that needs no change here.
-        crate::writeback::drain_all();
+        //
+        // `drain_all_iod`, not `drain_all`: this thread holds the `WORK` arm
+        // across the loop, and the drain's inter-attempt backoff waits on that
+        // same arm rather than arming a second (which `completion::arm` refuses).
+        crate::writeback::drain_all_iod(&parkable, &armed);
         // No deadline: what ends this wait is a push, and a periodic wake on a
         // machine with nothing to write back is an audio change (root
         // `CLAUDE.md`). The cancel arm is unreachable: nothing retires a kernel
