@@ -40,17 +40,32 @@ next reader does not re-measure.
   executor applies — is **not** built, and #159 changes what a mapping's
   protection is, so its shape is not settled.
 
+**Answered 2026-08-24, in the review-completion wave:**
+
+- `arch/syscall.rs` → `kernel/src/arch/syscall/` (12 files; `dispatch.rs` is
+  where every user pointer the ABI takes is decoded — the seam the note asked
+  for). A move-proof regenerated every new file from the original's line ranges;
+  no function body changed. The split made two facts visible and filed:
+  58 refusal `return`s exit past the epilogue, and a refused syscall is counted
+  but not timed.
+- `process.rs` — the lifecycle state machine is `toyos-proclife/` (pure,
+  `forbid(unsafe_code)`, every interleaving of a scripted pair of paths
+  enumerated; #142's mechanism class now has a host reproduction). Three
+  subjects are still decided inside the file and reachable only by a booted
+  guest: the handle/endowment build (`build_child_handles` +
+  `Endowments::encode`, a crafted-input corpus's natural subject — the natural
+  second chunk), `handle_page_fault`'s window arithmetic (~290 pure lines
+  inside a function that also does device I/O), and the accounting
+  (`stats_from`, `retire_threads`' merge, `PageFaultTrace`). #142 and #156
+  remain the standing evidence; the shell did not shrink (2,317 → 2,399 lines),
+  the same criticism this file already makes of `xhci/mod.rs`.
+- `symbols.rs` → `toyos-symbols/` (`no_std`, no alloc, `forbid(unsafe_code)` —
+  stricter than the "core + alloc" expected; a real 1.6 MB ToyOS binary is the
+  fixture, cross-checked against GNU readelf/nm). The raw-pointer `SymbolTable`
+  read from fault handlers stays in the kernel, 318 lines, by design.
+
 **Still owed:**
 
-- `arch/syscall.rs` — 2,061 lines at review, **2,248 now**. The biggest file in
-  the kernel and the one holding three unrelated things (entry asm, ABI
-  register mapping, every handler). The user-pointer decode being invisible
-  inside it is where the cwd-accumulation and derived-allocation bug classes
-  both lived.
-- `process.rs` — 1,743 lines, no host model. #142 and #156 are the standing
-  evidence that its bugs are interleaving bugs.
-- `symbols.rs` — 293 lines, `core` + `alloc` only, no crate. The smallest and
-  cheapest of the five; a real symbol blob is the fixture.
 - `drivers/acpi.rs` — no `toyos-acpi`. Better than the note feared (typed
   `TableError`, named bounds, packed structs only for `offset_of!`), and it is
   stage 0 of the ACPI/AML track, whose interpreter is the most host-testable
