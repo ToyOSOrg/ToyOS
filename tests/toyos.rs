@@ -11616,9 +11616,8 @@ fn control_regs_verdict() -> Result<(), String> {
     // answers by name; `PGE` is named nowhere, which is the case the whole
     // never-named rule exists for — `TSD` and `PKE` are the same case. `UMIP`
     // used to be this file's example of the same thing, until it joined
-    // `CR4_MAY` (`issues/isolation/cr4-umip-undeclared.md`) — a bit that
-    // moves from unnamed to optional is exactly the migration this gate exists
-    // to force a diff for.
+    // `CR4_MAY` — a bit that moves from unnamed to optional is exactly the
+    // migration this gate exists to force a diff for.
     refused("every CPU with AM set", &[(DECLARED.0 | (1 << 18), DECLARED.1); 4], "AM")?;
     refused(
         "every CPU with PGE set",
