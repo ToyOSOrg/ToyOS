@@ -166,6 +166,7 @@ exit_wait_storm 178
 expected_failure_entries 0
 expected_failure_exit_status 0
 expected_failure_verdicts 0
+fat_backing_revoked 6418
 fault_gates 31
 foreign_disk_untouched 4688
 fpu_isolation 14662

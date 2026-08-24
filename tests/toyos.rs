@@ -296,6 +296,12 @@ const RUST_SKIP: &[&str] = &[
     "writeback_reopen",
     "writeback_spawn",
     "writeback_durability",
+    // Same shape as `writeback_durability`: what it stages on `/log` — a file
+    // unlinked out from under a held descriptor, its clusters handed to the next
+    // writer — is only half the claim, and the other half is the volume read
+    // back off the image after a shutdown by a FAT implementation that is not
+    // the kernel's. `fat_backing_revoked` runs it.
+    "fat_backing_revoked",
     // Needs an HDA controller, which `tests/testcases` has none of.
     "hda_client_stall",
     // Gate A's two, whose verdict is the wav the device captured — which the
@@ -831,6 +837,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Fast),
     ("writeback_durability", Sched::Parallel, Tier::Fast),
+    // The FAT32 read side's revocation gate, and a host-side volume oracle for
+    // the same reason `writeback_durability` is one: whether the clusters the
+    // unlink freed were really reissued, and whether the cycle left a volume, are
+    // both questions the guest that staged them cannot answer about itself.
+    ("fat_backing_revoked", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
@@ -7407,6 +7418,9 @@ fn run_machine_test(
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
         "writeback_durability" => common::volumes::writeback_durability(test_config, c_bins, rust_bins),
+        // Same again: the FAT32 read side's revocation, judged off the volume the
+        // guest's unlink-and-reallocate cycle left behind.
+        "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.
