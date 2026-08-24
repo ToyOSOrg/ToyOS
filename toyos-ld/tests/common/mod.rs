@@ -292,7 +292,7 @@ pub fn bsd_archive(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
         strtab.extend_from_slice(name.as_bytes());
         strtab.push(0);
     }
-    while strtab.len() % 8 != 0 {
+    while !strtab.len().is_multiple_of(8) {
         strtab.push(0);
     }
 
