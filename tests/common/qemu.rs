@@ -639,8 +639,27 @@ impl std::fmt::Display for WaitVerdict {
 /// `panic_recovery`, `heap_ceiling` and `screen_recoverable_untouched` assert.
 /// Silence is what separates the two, and it is the separation the harness
 /// already trusts everywhere else ([`GUEST_QUIET`]): a recovering guest keeps
-/// talking — it has a periodic speaker on every config and the test's own
-/// `===TEST_END` arrives in milliseconds — and a halted one cannot.
+/// talking — the test's own `===TEST_END` arrives in milliseconds — and a
+/// halted one cannot.
+///
+/// **The wall clock is not the wedge; silence is.** A test's `ceiling` is the
+/// budgeted wall clock (`budget_smp`-scaled, so it already carries #256's
+/// `vcpus/cores` oversubscription widening), and until this it ended the wait
+/// the instant it passed — so a merely-slow guest reported exactly what a wedged
+/// one did. `launcher_refusals` was killed at `192s "still talking 1s ago"` on a
+/// loaded `smp:2` runner its `vcpus/cores` factor clamps to 1, a guest making
+/// steady progress called wedged by a clock. So a guest still *talking* is now
+/// never ended by `ceiling`: the per-test budget bites only a guest that has
+/// *also* gone quiet for [`GUEST_QUIET`], and a talking one runs to the
+/// [`GUEST_WEDGED`] backstop below.
+///
+/// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
+/// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
+/// but idle guest on a config with no live periodic speaker — no compositor, an
+/// idle soundd, and the kernel's own ~10 s line halting with the idle loop — was
+/// measured quiet for as long as 102 s, so a guard that fired on 15 s of silence
+/// by itself would red a working machine. A guest's own budget is what says how
+/// long its silence is allowed; only past *that* does quiet mean stopped.
 pub fn ceiling_verdict(
     dying: Option<&str>,
     elapsed: Duration,
@@ -653,22 +672,33 @@ pub fn ceiling_verdict(
             return Some(kernel_died_here(line));
         }
     }
-    if elapsed <= ceiling {
-        return None;
-    }
-    let secs = ceiling.as_secs();
-    Some(if quiet >= GUEST_QUIET {
-        format!(
-            "{STALLED} {secs}s of guard expired, and the guest had said nothing for the last \
+    // The per-test ceiling, now a silence guard rather than a wall-clock one: it
+    // ends the wait only when the guest has run past its budget *and* fallen
+    // silent for [`GUEST_QUIET`]. A guest still talking past its budget is slow,
+    // not wedged, and is given until the backstop.
+    if elapsed > ceiling && quiet >= GUEST_QUIET {
+        return Some(format!(
+            "{STALLED} {}s of guard expired, and the guest had said nothing for the last \
              {quiet:.0?} of it — the ceiling caught a machine that had stopped, which is not an \
-             answer to what this test asked"
-        )
-    } else {
-        format!(
-            "timed out after {secs}s, with the guest still talking {quiet:.0?} ago ({lines} \
-             console line(s) while it ran) — it was working and did not finish"
-        )
-    })
+             answer to what this test asked",
+            ceiling.as_secs()
+        ));
+    }
+    // The absolute backstop, for a guest that is stuck *and* chatty and so never
+    // trips the silence guard — a suite that never ends is worse than one that
+    // reds. Never below the per-test ceiling, so a long test whose own budget
+    // already exceeds it is not cut short; never below [`GUEST_WEDGED`], the
+    // vetted stuck-and-chatty number a talking guest is judged by everywhere
+    // else. Not itself oversubscription-scaled — `ceiling` already carries that.
+    let backstop = ceiling.max(GUEST_WEDGED);
+    if elapsed > backstop {
+        return Some(format!(
+            "timed out after {}s, with the guest still talking {quiet:.0?} ago ({lines} \
+             console line(s) while it ran) — it was working and did not finish",
+            backstop.as_secs()
+        ));
+    }
+    None
 }
 
 /// The three verdicts a ceiling reaches and what each carries, staged with no
@@ -774,6 +804,62 @@ pub fn ceiling_self_check() -> Result<(), String> {
     // Nothing has expired and nothing died: no verdict.
     if ceiling_verdict(None, early, CEILING, talking, 40).is_some() {
         return Err(String::from("a healthy run was given a verdict"));
+    }
+
+    // 3b. **The wall-clock/silence split this file's own defect was about**, in
+    //     all four directions. A talking guest past its budget is slow, not
+    //     wedged; a silent one within its budget is idle, not wedged; the wedge
+    //     guard still fires, and fast; and the backstop still catches a guest
+    //     that talks forever. Staged with a ceiling below [`GUEST_WEDGED`] so the
+    //     backstop is a distinct, higher number — the shape every real test has.
+    const TIGHT: Duration = Duration::from_secs(153);
+    let bstop = TIGHT.max(GUEST_WEDGED);
+    assert!(TIGHT < bstop, "the case needs a ceiling below the backstop");
+    // (a) The flake itself: `launcher_refusals` at `192s "still talking 1s ago"`
+    //     on a loaded smp:2 runner. Past its 153 s budget, but talking — no
+    //     verdict, it runs on.
+    if ceiling_verdict(None, Duration::from_secs(192), TIGHT, Duration::from_secs(1), 500).is_some()
+    {
+        return Err(String::from(
+            "a slow-but-talking guest past its budget was still called wedged — the smp:2 flake \
+             this change is for",
+        ));
+    }
+    // (b) The backstop still bites a guest that is stuck *and* chatty: past
+    //     `GUEST_WEDGED`, still talking, it is the one thing silence cannot catch.
+    let Some(forever) = ceiling_verdict(
+        None,
+        bstop + Duration::from_secs(1),
+        TIGHT,
+        Duration::from_secs(1),
+        9000,
+    ) else {
+        return Err(String::from("a guest talking forever past the backstop was given no verdict"));
+    };
+    if forever.contains(STALLED) || !forever.contains("did not finish") {
+        return Err(format!("the chatty-forever backstop misread as a stall: {forever}"));
+    }
+    // (c) Negative control — the wedge guard still fires, and *fast*: a guest
+    //     silent past its budget is caught the moment it passes, at 154 s, not
+    //     held to the 300 s backstop.
+    let Some(wedged) = ceiling_verdict(None, TIGHT + Duration::from_secs(1), TIGHT, GUEST_QUIET, 40)
+    else {
+        return Err(String::from(
+            "a guest silent past its budget was not caught — the liveness guard cannot fire",
+        ));
+    };
+    if !wedged.starts_with(STALLED) {
+        return Err(format!("a genuine wedge past the budget stopped reading as one: {wedged}"));
+    }
+    // (d) Idle-safety, the property the no-speaker boots demand: a guest silent
+    //     for 90 s — inside the 102 s a healthy idle machine with no periodic
+    //     speaker was measured at — but still *within* its budget is not a wedge.
+    if ceiling_verdict(None, Duration::from_secs(100), TIGHT, Duration::from_secs(90), 40).is_some()
+    {
+        return Err(String::from(
+            "a guest idle-but-within-budget was called wedged — a boot with no periodic speaker \
+             would red healthy",
+        ));
     }
 
     // 4. **What the verdict carries, which is the half that was missing.** Every
@@ -2431,6 +2517,66 @@ impl QemuInstance {
         loop {
             let dump = self.screendump();
             if done(&dump) || Instant::now() >= deadline {
+                return dump;
+            }
+            thread::sleep(interval);
+        }
+    }
+
+    /// [`Self::screendump_while`], but a guest still *painting* is still working.
+    ///
+    /// The screen-channel form of what [`ceiling_verdict`] does for
+    /// [`Self::run_test_paced`] on serial: past the budgeted deadline the wait
+    /// does not give up while the framebuffer keeps *changing*. A console
+    /// rendering slowly under a loaded `smp:2` runner is making progress, which
+    /// is the case whose paint "never arrived in the window" while the guest was
+    /// alive — the budget-scaled deadline undercounts a later moment in the run
+    /// exactly as the serial ceiling did. Only a screen *frozen* for
+    /// [`GUEST_QUIET`] past the deadline, or the [`GUEST_WEDGED`] backstop, ends
+    /// the wait; `done` firing ends it at once, so a passing caller is untouched
+    /// and a real bug (the paint that should not be there, and stays) still fires
+    /// its assertion, a frozen-screen `GUEST_QUIET` later.
+    ///
+    /// **Only for a config whose screen freezes when idle** — no compositor;
+    /// `/bin/console` repaints on I/O alone. A compositor's cursor blink and its
+    /// once-a-second taskbar clock never let the screen freeze, so such a caller
+    /// would wait the whole backstop when its `done` never comes and keeps the
+    /// plain [`Self::screendump_while`] (which is also why the `screen_blocked_dump`
+    /// retry loop, whose timeout is a deliberate re-send signal, must not use
+    /// this).
+    ///
+    /// Reuses the one classifier so the two channels cannot drift: `dying` is the
+    /// serial path's alone, and a halted kernel freezes the screen and is caught
+    /// by the freeze here.
+    pub fn screendump_while_rendering(
+        &mut self,
+        timeout: Duration,
+        interval: Duration,
+        done: impl Fn(&super::screen::Ppm) -> bool,
+    ) -> super::screen::Ppm {
+        let ceiling = budget_smp(timeout, self.smp);
+        let start = Instant::now();
+        let mut last_change = start;
+        let mut prev: Option<Vec<[u8; 3]>> = None;
+        loop {
+            let dump = self.screendump();
+            if done(&dump) {
+                return dump;
+            }
+            let now = Instant::now();
+            if prev.as_deref() != Some(dump.pixels.as_slice()) {
+                last_change = now;
+                prev = Some(dump.pixels.clone());
+            }
+            if ceiling_verdict(
+                None,
+                now.duration_since(start),
+                ceiling,
+                now.duration_since(last_change),
+                0,
+            )
+            .is_some()
+            {
                 return dump;
             }
             thread::sleep(interval);
