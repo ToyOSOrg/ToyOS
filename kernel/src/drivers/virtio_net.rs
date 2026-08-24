@@ -1,3 +1,28 @@
+//! The virtio-net driver: bring-up, the two virtqueues, and the one page a
+//! claimant maps.
+//!
+//! **Two DMA pools, and the line between them is who writes an address.** A
+//! split virtqueue puts every address this driver ever programs in one place —
+//! the descriptor table — so the tables, the available rings and the used rings
+//! live in [`KERNEL_DMA_BYTES`] of memory no process maps, and what a
+//! `DeviceType::Nic` claim grants is the frame buffers and nothing else.
+//!
+//! Until 2026-08-23 it was one pool and the whole 2 MiB page was the grant, so
+//! `netd` mapped 7,088 bytes of live virtqueue writable: 256 RX descriptors
+//! carrying the physical address the NIC would DMA the next frame into, and a
+//! TX descriptor the device reads. Rewriting one aimed the device at any
+//! physical address in the machine — kernel text, a page table, another process
+//! — in either direction, and the IOMMU refuses nothing
+//! (`kernel/src/iommu/mod.rs`). `virtio_sound` had already split its pools for
+//! this reason and `virtio_gpu` publishes only its framebuffer; virtio-net was
+//! the one device that handed its virtqueue out, and it predates both.
+//!
+//! [`assert_queues_are_private`] is that rule stated against the addresses the
+//! device was really programmed with, so re-merging the pools cannot be done
+//! quietly. The kernel page costs one 2 MiB frame it does not fill —
+//! `DmaPool` allocates whole pages and a claim maps a whole page, so the two
+//! cannot share one.
+
 use alloc::boxed::Box;
 
 use super::pci::{PciDevice, MSIX_ENTRY};
@@ -21,18 +46,37 @@ const NET_HDR_SIZE: usize = 12;
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
 const RX_QUEUE_SIZE: u16 = 256;
+const TX_QUEUE_SIZE: u16 = 16;
 const RX_BUF_COUNT: usize = 256;
 const RX_BUF_SIZE: u32 = 4096;
 
-// DMA layout (byte offsets, 4KB-aligned):
+// The kernel-only pool (byte offsets, 4 KiB-aligned): both virtqueues in full.
+// No process maps a byte of this.
 const OFF_RXQ_DESC: usize  = 0x0000;
 const OFF_RXQ_AVAIL: usize = 0x1000;
 const OFF_RXQ_USED: usize  = 0x2000;
 const OFF_TXQ: usize       = 0x3000;
-const OFF_RX_BUFS: usize   = 0x4000;  // 256 × 4KB
-const OFF_TX_BUF: usize    = 0x4000 + 256 * 0x1000;
-const TX_BUF_LEN: usize    = 0x1000;
-const DMA_SIZE: usize       = OFF_TX_BUF + TX_BUF_LEN;
+const KERNEL_DMA_BYTES: usize = 0x4000;
+
+// The shared pool: the frame buffers, and nothing else. `NicInfo`'s offsets are
+// relative to this pool's first byte, which is the first byte of the page a
+// claim maps.
+const OFF_RX_BUFS: usize = 0x0000;
+const OFF_TX_BUF: usize  = OFF_RX_BUFS + RX_BUF_COUNT * RX_BUF_SIZE as usize;
+const TX_BUF_LEN: usize  = 0x1000;
+const SHARED_DMA_BYTES: usize = OFF_TX_BUF + TX_BUF_LEN;
+
+const _: () = {
+    use super::virtio::{avail_bytes, contiguous_bytes, used_bytes, DESC_BYTES};
+    // The RX queue's three rings, a 4 KiB page each (`from_separate`).
+    assert!(RX_QUEUE_SIZE as usize * DESC_BYTES <= OFF_RXQ_AVAIL - OFF_RXQ_DESC);
+    assert!(avail_bytes(RX_QUEUE_SIZE) <= OFF_RXQ_USED - OFF_RXQ_AVAIL);
+    assert!(used_bytes(RX_QUEUE_SIZE) <= OFF_TXQ - OFF_RXQ_USED);
+    // The TX queue, all three rings in one page (`Virtqueue::new`).
+    assert!(contiguous_bytes(TX_QUEUE_SIZE) <= KERNEL_DMA_BYTES - OFF_TXQ);
+    // A claim maps one 2 MiB page, so everything it names has to be in one.
+    assert!(SHARED_DMA_BYTES <= crate::mm::PAGE_2M as usize);
+};
 
 const VIRTIO_NET_VECTOR: u8 = 0x22;
 
@@ -40,10 +84,14 @@ const VIRTIO_NET_VECTOR: u8 = 0x22;
 /// deleted this type's `unsafe impl Send`.** A view knows its own physical
 /// address and its own length, so `rx_phys` went with the pointers.
 ///
-/// `'static` because the pool is leaked at `init`: a NIC this kernel has bound
-/// is bound for the boot, its RX buffers are mapped into `netd`, and the
+/// `'static` because both pools are leaked at `init`: a NIC this kernel has
+/// bound is bound for the boot, its RX buffers are mapped into `netd`, and the
 /// `static Lock<Option<DmaPool>>` that used to hold the pages alive said all
 /// that only by existing.
+///
+/// The two queues here are views of the kernel-only pool and the buffers are
+/// views of the shared one — see the module header for why that is not an
+/// arrangement anyone may tidy away.
 struct VirtioNic {
     device: VirtioDevice,
     rxq: Virtqueue<'static>,
@@ -169,6 +217,36 @@ fn arm_interrupt(pci_dev: &PciDevice, device: &VirtioDevice) -> bool {
     true
 }
 
+/// **The rule the two pools exist to keep**, stated against the six addresses
+/// this device was really programmed with rather than against the layout
+/// constants above: no ring of either virtqueue is inside the page a
+/// `DeviceType::Nic` claim maps.
+///
+/// A panic, and the only one on this path. Every other refusal here is a
+/// machine that boots without networking; this one is a kernel that has just
+/// handed a userland process the ability to name any physical address in the
+/// machine, and it would be silent for the life of the boot. Six comparisons,
+/// once per bind.
+fn assert_queues_are_private(rxq: &Virtqueue<'_>, txq: &Virtqueue<'_>, shared_phys: u64) {
+    let page = shared_phys..shared_phys + crate::mm::PAGE_2M;
+    for (what, phys) in [
+        ("the RX descriptor table", rxq.descs_phys()),
+        ("the RX available ring", rxq.avail_phys()),
+        ("the RX used ring", rxq.used_phys()),
+        ("the TX descriptor table", txq.descs_phys()),
+        ("the TX available ring", txq.avail_phys()),
+        ("the TX used ring", txq.used_phys()),
+    ] {
+        assert!(
+            !page.contains(&phys),
+            "VirtIO net: {what} is at {phys:#x}, inside the {:#x}-byte page at {shared_phys:#x} \
+             that a NIC claim maps writable — its holder could aim this device at any physical \
+             address in the machine",
+            crate::mm::PAGE_2M,
+        );
+    }
+}
+
 pub fn init(devices: &[PciDevice]) {
     let pci_dev = match devices.iter().find(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_NET_DEVICE)) {
         Some(dev) => *dev,
@@ -179,23 +257,33 @@ pub fn init(devices: &[PciDevice]) {
     };
     log!("VirtIO net: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
     // Leaked rather than held in a `static`: this NIC is never unbound and its
-    // RX window is handed to `netd`, so the pages outlive every scope by design.
-    let dma = DmaPool::alloc(DMA_SIZE).leak();
+    // buffer window is handed to whoever claims the class, so the pages outlive
+    // every scope by design.
+    let kernel_mem = DmaPool::alloc(KERNEL_DMA_BYTES).leak();
+    let shared = DmaPool::alloc(SHARED_DMA_BYTES).leak();
+    // Exclusive: the pools were allocated on the two lines above and nothing
+    // else holds a view of either. The shared one is zeroed because a claimant
+    // maps the whole 2 MiB page — every byte past the buffers included — and
+    // those are pages this machine has already used for something else.
+    shared.zero();
     pci_dev.enable_bus_master();
 
     let device = VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC);
 
     // RX queue: 256 entries, separate pages for desc/avail/used
     let rxq_regions = VirtqueueRegions::from_separate(
-        dma.subview(OFF_RXQ_DESC, 0x1000),
-        dma.subview(OFF_RXQ_AVAIL, 0x1000),
-        dma.subview(OFF_RXQ_USED, 0x1000),
+        kernel_mem.subview(OFF_RXQ_DESC, OFF_RXQ_AVAIL - OFF_RXQ_DESC),
+        kernel_mem.subview(OFF_RXQ_AVAIL, OFF_RXQ_USED - OFF_RXQ_AVAIL),
+        kernel_mem.subview(OFF_RXQ_USED, OFF_TXQ - OFF_RXQ_USED),
         RX_QUEUE_SIZE,
     );
     let mut rxq = Virtqueue::from_regions(&rxq_regions, RX_QUEUE_SIZE);
 
-    // TX queue: 16 entries, fits in one page
-    let mut txq = Virtqueue::new(dma.subview(OFF_TXQ, 0x1000), 16);
+    // TX queue: 16 entries, all three rings inside one page
+    let mut txq = Virtqueue::new(
+        kernel_mem.subview(OFF_TXQ, KERNEL_DMA_BYTES - OFF_TXQ),
+        TX_QUEUE_SIZE,
+    );
 
     device.setup_queue(RX_QUEUE, &mut rxq);
     device.setup_queue(TX_QUEUE, &mut txq);
@@ -214,17 +302,21 @@ pub fn init(devices: &[PciDevice]) {
     log!("VirtIO net: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-    let rx_bufs: [Dma<'static>; RX_BUF_COUNT] =
-        core::array::from_fn(|i| dma.subview(OFF_RX_BUFS + i * 0x1000, RX_BUF_SIZE as usize));
-    let tx_phys = dma.phys() + OFF_TX_BUF as u64;
+    let rx_bufs: [Dma<'static>; RX_BUF_COUNT] = core::array::from_fn(|i| {
+        shared.subview(OFF_RX_BUFS + i * RX_BUF_SIZE as usize, RX_BUF_SIZE as usize)
+    });
+    let tx_phys = shared.phys() + OFF_TX_BUF as u64;
 
-    let dma_base_phys = dma.phys() & !(crate::mm::PAGE_2M - 1);
+    // `DmaPool` allocations are whole 2 MiB pages, so the pool's first byte is
+    // the first byte of the page a claim maps and `NicInfo`'s offsets are
+    // relative to it.
     let dma_region = Region {
-        phys: crate::DirectMap::from_phys(dma_base_phys),
+        phys: crate::DirectMap::from_phys(shared.phys()),
         size: crate::mm::PAGE_2M,
         cache: CachePolicy::DeferToMtrr,
         pages: None,
     };
+    assert_queues_are_private(&rxq, &txq, shared.phys());
 
     crate::net::set_nic_info(NicInfo {
         dma: toyos_abi::HANDLE_INVALID,

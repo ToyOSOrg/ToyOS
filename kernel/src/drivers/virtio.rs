@@ -57,6 +57,32 @@ struct VirtqDesc {
 /// One descriptor, for a caller sizing a table it allocates itself.
 pub const DESC_BYTES: usize = core::mem::size_of::<VirtqDesc>();
 
+/// How many bytes a split virtqueue's available ring occupies — flags, index
+/// and one `le16` per queue entry (virtio 1.2 §2.7.6). The `used_event` field
+/// past the ring belongs to `VIRTIO_F_EVENT_IDX`, which this kernel never
+/// negotiates.
+pub const fn avail_bytes(queue_size: u16) -> usize {
+    AVAIL_RING_OFF + queue_size as usize * 2
+}
+
+/// How many bytes a split virtqueue's used ring occupies — flags, index and one
+/// eight-byte element per queue entry (virtio 1.2 §2.7.8).
+pub const fn used_bytes(queue_size: u16) -> usize {
+    USED_RING_OFF + queue_size as usize * USED_ELEM_SIZE
+}
+
+/// How many bytes [`VirtqueueRegions::from_contiguous`] lays a queue of
+/// `queue_size` out in: the three rings and the alignment padding between them.
+///
+/// The one arithmetic, so a driver sizing the region it hands that constructor
+/// and the constructor itself cannot disagree — which is what a `const` assert
+/// over a driver's layout is worth anything for.
+pub const fn contiguous_bytes(queue_size: u16) -> usize {
+    let avail_off = (queue_size as usize * DESC_BYTES + 1) & !1;
+    let used_off = (avail_off + avail_bytes(queue_size) + 3) & !3;
+    used_off + used_bytes(queue_size)
+}
+
 // Avail ring layout: flags(u16) + idx(u16) + ring[size](u16 each)
 const AVAIL_IDX_OFF: usize = 2;
 const AVAIL_RING_OFF: usize = 4;
@@ -171,9 +197,9 @@ pub struct VirtqueueRegions<'pool> {
 impl<'pool> VirtqueueRegions<'pool> {
     /// Compute regions from a single contiguous DMA buffer.
     pub fn from_contiguous(buf: Dma<'pool>, queue_size: u16) -> Self {
-        let desc_size = queue_size as usize * core::mem::size_of::<VirtqDesc>();
-        let avail_size = 4 + queue_size as usize * 2;
-        let used_size = 4 + queue_size as usize * USED_ELEM_SIZE;
+        let desc_size = queue_size as usize * DESC_BYTES;
+        let avail_size = avail_bytes(queue_size);
+        let used_size = used_bytes(queue_size);
         let avail_off = (desc_size + 1) & !1;
         let used_off = (avail_off + avail_size + 3) & !3;
         Self {
@@ -190,13 +216,10 @@ impl<'pool> VirtqueueRegions<'pool> {
         used: Dma<'pool>,
         queue_size: u16,
     ) -> Self {
-        let desc_size = queue_size as usize * core::mem::size_of::<VirtqDesc>();
-        let avail_size = 4 + queue_size as usize * 2;
-        let used_size = 4 + queue_size as usize * USED_ELEM_SIZE;
         Self {
-            desc: desc.subview(0, desc_size),
-            avail: avail.subview(0, avail_size),
-            used: used.subview(0, used_size),
+            desc: desc.subview(0, queue_size as usize * DESC_BYTES),
+            avail: avail.subview(0, avail_bytes(queue_size)),
+            used: used.subview(0, used_bytes(queue_size)),
         }
     }
 }
