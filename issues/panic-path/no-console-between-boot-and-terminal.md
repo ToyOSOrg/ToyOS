@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-03
 ---
 
@@ -21,3 +21,10 @@ Narrowed but not closed: the last checkpoint now paints where this boot's log
 can be read (`main.rs`'s `report_log_destination`), so the panel says whether
 there will be anything to go back to. What it cannot give that machine is a
 line *after* the checkpoint.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). It is measured
+rather than suspected, and what it costs is the window in which input debugging
+on real hardware happens: a T14 running ToyOS says nothing between
+`Boot: complete` and the moment the compositor's terminal exists. Owed by
+whoever gives that window an output channel; `report_log_destination` narrowed
+it by saying where the log will be, and cannot put a line in it.

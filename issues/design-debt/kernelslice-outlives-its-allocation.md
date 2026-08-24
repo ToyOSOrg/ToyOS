@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-22
 ---
 
@@ -28,3 +28,11 @@ argument for doing it, and the reason it is not a small change.
 No known live bug: every current holder outlives its slice today, checked by
 hand when `from_raw` was deleted (2026-08-22). This is the residual, not a
 reproduction.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling; unsure resolves
+to promote, and a memory-safety residual is the worst thing to lose to a wrong
+fold). `KernelSlice` being `Copy` with no lifetime means nothing but hand-checking
+stops a copy naming pages that have been reissued — and the hand-check was done
+once, in 2026-08-22, against holders that have moved since. `mm::Dma<'pool>` is
+the shape that answers it. Owed by whoever writes the four holders' lifetimes
+down: `elf::cache`'s `cached_image`, `LoadedLib`, `TlsModule` and `UserStack`.

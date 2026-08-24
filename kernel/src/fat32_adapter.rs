@@ -721,8 +721,11 @@ struct OpenFile {
 /// is reused the moment an entry is erased, so a location-keyed id would let a
 /// new file inherit a deleted one's cached pages, and the crate's stale-handle
 /// fingerprint (8.3 name plus creation timestamp) cannot tell a
-/// delete-and-recreate within the same two-second timestamp from the original,
-/// so it is not a generation counter and is not used as one.
+/// delete-and-recreate under the same name from the original once both stamps
+/// land in the same second — [`now`] reads `clock::local_secs`, so the tenths
+/// byte FAT resolves to 10 ms carries nothing finer than a whole second here.
+/// It is not a generation counter, FAT has nowhere to put one, and it is not
+/// used as one.
 ///
 /// Path identity makes delete-and-recreate produce a *new* `FileId`, because
 /// `delete` drops the name; and it survives a rename, because `rename`

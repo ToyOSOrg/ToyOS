@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-10
 ---
 
@@ -42,3 +42,13 @@ has a `_pad: u32` that could become a flags word without moving a field — and 
 `Builder::keep_all`, after which `sys/process/toyos.rs`'s direct path builds
 `keep_all(parent) + add(extras)` and endows it as `svc`. That is inheritance plus
 the extras with no coincidence in it.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). A caller on the
+direct `SYS_SPAWN` path that transfers a connector to a program the manifest
+does not declare hands the child a name it cannot resolve, and neither side is
+told — a silent hole in the endowment path, not a curiosity. It is unreached
+today only by coincidence (every extras-carrying caller happens to go through
+the launcher), which is the kind of safety that ends the moment somebody adds a
+caller. Owed by whoever next opens `SYS_NAMESPACE_BUILD`: a "keep everything in
+base" flag in `NamespaceBuild`'s `_pad` plus `Builder::keep_all`, on its own ABI
+PR.

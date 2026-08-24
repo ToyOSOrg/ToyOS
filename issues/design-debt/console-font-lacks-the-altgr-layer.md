@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-03
 ---
 
@@ -18,3 +18,10 @@ glyph is missing. Widening the rasterised set is the fix; it is a build-time
 list, not a code change. `legends_are_renderable` in
 `toyos-keymap/tests/detect.rs` keeps the wizard's own prompts inside the covered
 range, and it is the only thing that does.
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). A key the
+shipped layout defines draws as `?` on the panel: wrong output a user sees on a
+path the tree advertises, with a named fix that is a build-time list rather
+than a code change. `legends_are_renderable` keeps only the wizard's own prompts
+inside the covered range, so nothing notices the rest. Owed by whoever next
+touches `src/assets.rs`'s `console_font`.

@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-03
 ---
 
@@ -18,3 +18,13 @@ terminal that missed the notification disagrees with the file and nothing can
 see it. One query syscall answering "what is this process holding" is still the
 shape that closes it, and it is still not built
 (`issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md`).
+
+**Promoted to `defect` 2026-08-25** (finding-lifecycle ruling; promoted rather
+than folded because two pieces of work are named and neither is hypothetical).
+`locale` can read `LAYOUT_CONFIG` and print the configured name today and does
+not — `userland/toybox/src/locale.rs` has no such branch and its menu does not
+open on the current entry. And no translator's *actual* layout is observable, so
+a surface that missed the notification disagrees with the file and nothing can
+see it. The first half is owed by whoever next touches `locale`; the second by
+`issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md`, which is the
+query this needs.
