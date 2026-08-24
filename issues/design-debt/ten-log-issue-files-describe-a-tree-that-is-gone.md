@@ -9,10 +9,10 @@ opened: 2026-08-18
 The log architecture landed on 2026-08-15: the kernel keeps a per-CPU record
 ring and the console, `/bin/logd` owns `/log`, `kernel/src/log_file.rs` and
 `kernel/src/drivers/log_ring.rs` are gone. The closing pass that was to retire
-the entries that work answers never ran, so the files listed below still
-describe the byte ring, the idle-loop flush and the kernel file sink as live.
-The list is what is left: a row goes when its entry does, and the count is
-whatever `ls` says rather than a number written here.
+the entries that work answers never ran, so ten files described the byte ring,
+the idle-loop flush and the kernel file sink as live. The table below is what
+is left of that ten: a row goes when its entry is closed, so the count is the
+table and never a number in this sentence.
 
 Verified against the tree on 2026-08-18. Each row says what makes it closable;
 none was closed here, because each needs its own reading of what durable rule it
@@ -20,7 +20,7 @@ carries before it is deleted (`issues/README.md`). A row leaves this table when
 the entry it names is deleted, so what is listed is what is still owed rather
 than what was found on the audit day.
 
-All eleven files named below were **still present on 2026-08-24**, checked by
+Every file named below was **still present on 2026-08-24**, checked by
 path and frontmatter and nothing more — no row's "what answers it" was re-argued
 that day. The one row whose *blocking concern* had moved is
 `redesign-the-log-subsystem`, and it is rewritten below.
@@ -28,8 +28,6 @@ that day. The one row whose *blocking concern* had moved is
 | slug | area | what answers it |
 |---|---|---|
 | `client-cpu-takes-the-log-flush` | audio | there is no affordability heuristic left to steer and no CPU takes a flush. **Its hypothesis is closed unverified** — its own last section says only a metal boot can confirm it, and deleting the mechanism makes that permanently unfalsifiable, so the metal arm is owed rather than answered |
-| `log-ring-flushes-one-line-behind` | kernel | a commit posts `klogd`'s wake, so the halt is refused by the doorbell and the scheduler's own invariant rather than by a log-specific pre-`hlt` condition |
-| `shutdown-path-logs-never-reach-console` | kernel | `SYS_SHUTDOWN` waits, bounded, for the durability word and then drains the console inline before the power goes |
 | `the-panic-path-does-not-write-the-log` | boot-media | `kind: rejected`, and its argument is a property of the architecture now rather than a decision: the panic path writes the backend and never an object, so it depends on no daemon and no lock the dying thread might hold |
 | `idle-machine-looks-wedged` | kernel | already superseded by a defect that was found and closed; and after the record ring the last line before a quiet period *does* reach the wire, so "the log stops here" is evidence rather than an artefact of the drain |
 | `redesign-the-log-subsystem` | design-debt | **Not a closing candidate, and the split it wanted has happened.** It is `kind: track`, `decided: 2026-08-19`, both halves approved as staged work — so it is open work rather than a stale description, and this pass leaves it alone. What it *does* carry is this entry's own defect: its six-row evidence table still lists `log.rs` (64 lines), `drivers/log_ring.rs` (549) and `log_file.rs` (564), none of which exist — `kernel/src/log/` is a directory of eight files — and its layout half prices `kernel/src` at 39 flat `.rs` beside seven directories, measured 2026-08-24 as 44 beside ten, three of them (`log/`, `object/`, `completion/`) already on its target list. Re-measuring that table is the track owner's, not a closing pass's |

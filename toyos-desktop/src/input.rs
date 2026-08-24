@@ -637,11 +637,11 @@ mod tests {
         assert_eq!(grab, Grab::None);
     }
 
-    /// `issues/kernel/compositor-holds-stale-window-index.md`: a client
-    /// that exits while its window is being dragged must not panic the next
-    /// sample and must not let the drag jump to whatever window slid into its
-    /// slot. Named by `WindowId`, `hold` finds the window gone and ends the
-    /// grab instead of indexing a position that may not even exist anymore.
+    /// A client that exits while its window is being dragged must not panic
+    /// the next sample and must not let the drag jump to whatever window slid
+    /// into its slot. Named by `WindowId`, `hold` finds the window gone and
+    /// ends the grab instead of indexing a position that may not even exist
+    /// anymore.
     #[test]
     fn a_window_closed_mid_drag_ends_the_grab_instead_of_panicking_or_moving_another() {
         let mut stack = stack_of(2);

@@ -82,6 +82,16 @@ pub enum Drain {
     Inline,
     /// `klogd`, made runnable at the commit of the record it will drain, by the
     /// producer's own `wake_direct` (§2.6a).
+    ///
+    /// **So the last line before a quiet period is evidence.** What puts a
+    /// record on the wire is its own commit and nothing else — not the idle
+    /// loop, not the timer, not the next piece of work happening to wake a
+    /// CPU — which is what makes "the log stops here" mean the machine stopped
+    /// there. `i8042_no_spurious_wake` rests on it: the host sends each key
+    /// group only once the *previous* group's drain line has arrived on serial,
+    /// with the guest parked on its keyboard handle in between, so a drain that
+    /// needed the machine to be busy would deadlock that test rather than pass
+    /// it.
     Thread,
 }
 
