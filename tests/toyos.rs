@@ -5787,7 +5787,7 @@ fn console_type_line(
         let echoed =
             |dump: &screen::Ppm| console_input_row(dump, font).as_deref() == Some(want.as_str());
         let dump =
-            qemu.screendump_while_rendering(CONSOLE_ECHO, Duration::from_millis(50), &echoed);
+            qemu.screendump_while_rendering(CONSOLE_ECHO, Duration::from_millis(50), echoed);
         if !echoed(&dump) {
             return Err(format!(
                 "the console never echoed what was typed at it: its input line reads {:?} and \
