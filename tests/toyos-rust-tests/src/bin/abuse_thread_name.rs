@@ -2,7 +2,7 @@
 //! usize).min(THREAD_NAME_LEN)` and set the truncated prefix — a silent
 //! clamp, and the shape
 //! `issues/isolation/untrusted-sites-not-yet-adopted.md` named for the
-//! whole of `kernel/src/arch/syscall.rs`. `Untrusted::at_most` replaced it
+//! whole of `kernel/src/arch/syscall/`. `Untrusted::at_most` replaced it
 //! with a refusal, which is a behaviour change worth its own gate: this
 //! proves the refusal actually fires, rather than the clamp it replaced.
 //!

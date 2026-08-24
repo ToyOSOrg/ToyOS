@@ -14,7 +14,7 @@
 //!
 //! Pure. No I/O, no allocation, no `unsafe`, nothing read from a device and
 //! nothing named outside this crate. The kernel is the only caller —
-//! `user_ptr.rs`, `mm/`, `arch/syscall.rs`, `loader/` and
+//! `user_ptr.rs`, `mm/`, `arch/syscall/`, `loader/` and
 //! `arch/idt/exceptions.rs` — and this is a crate rather than files inside it so
 //! that the boundary table below runs on the host in milliseconds instead of in
 //! a boot.
