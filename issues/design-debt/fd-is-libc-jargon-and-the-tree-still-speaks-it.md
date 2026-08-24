@@ -59,13 +59,13 @@ is below, and none of it is the sweep.
   own non-POSIX vocabulary for a raw handle is. Nobody has ruled between the
   two.
 - **Done.** ~~Four issue files cite the deleted `kernel/src/fd.rs`~~, two of
-  them by line number: `issues/filesystem/close-cannot-report-io-error.md`,
-  `issues/kernel/ftruncate-takes-no-vfs-lock.md`,
+  them by line number: `issues/kernel/ftruncate-takes-no-vfs-lock.md`,
   `issues/kernel/sys-read-doc-comments-describe-nothing.md` and
-  `issues/audio/disk-wait-pins-a-cpu.md` (the fourth, found by grepping the
-  bare filename rather than the full path — `disk-wait-pins-a-cpu.md` names it
-  `fd.rs:644` with no `kernel/src/` prefix). Each now cites where its content
-  lives today; the file itself has not existed since the ruling.
+  `issues/audio/disk-wait-pins-a-cpu.md` (found by grepping the bare filename
+  rather than the full path — `disk-wait-pins-a-cpu.md` names it `fd.rs:644`
+  with no `kernel/src/` prefix); the fourth has been closed since. Each now
+  cites where its content lives today; the file itself has not existed since
+  the ruling.
 
 ## The closing check, and what it is allowed to find
 
