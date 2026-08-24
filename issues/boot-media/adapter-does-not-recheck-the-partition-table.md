@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-01
 ---
 
@@ -34,3 +34,10 @@ tests):
 - Two entries carrying the same `unique_guid` still resolve first-wins:
   `scan_entries` takes the match only `if found.is_none()`, and `locate`
   answered `index: 0` with no refusal.
+
+## Promoted 2026-08-25
+
+The adapter's own stance is already stated at its site
+(`kernel/src/fat32_adapter.rs`'s module header). What makes this a defect is
+the two `toyos-gpt` residuals verified reproducing on 2026-08-24 — owed to
+whoever owns `toyos-gpt`.

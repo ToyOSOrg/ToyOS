@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-03
 ---
 
@@ -46,3 +46,10 @@ The nearest suspect on file is `issues/boot-media/`'s ESP-log flush on the idle 
 `log_file` flush in `idle_loop` (`issues/kernel/`): unbounded, uninterruptible, and in the one
 place a `--smp 1` machine spends the time between audio periods. That is a
 hypothesis, not a measurement.
+
+## Promoted 2026-08-25
+
+Measured harm — 142 ms of silence, 49 underruns, a 5.6x worst-wake outlier,
+all three instruments (gaps, soundd stats, capture) agreeing — makes this a
+defect under the audio law. Owed to whoever investigates the ESP-log-flush
+hypothesis this entry names as the nearest suspect.

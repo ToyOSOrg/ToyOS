@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-21
 ---
 
@@ -164,3 +164,11 @@ guest-side evidence above points there and cannot go further on its own. The
 cheapest one is per-boot `/proc/<qemu>/task/*/schedstat` and the host's
 `cpuidle` residencies sampled across a block — and it perturbs the measurement,
 so it is worth taking only once a session is producing the mode.
+
+## Promoted 2026-08-25
+
+The slow mode sits within one scheduling accident of harm (0.86 of a pipeline
+depth, no margin) and its mixing weight is unexplained across two sessions on
+the same host and tree. Owed to whoever next sees the slow mode, per this
+entry's own "whoever takes it next" section: the host-side schedstat/cpuidle
+capture during a slow session.

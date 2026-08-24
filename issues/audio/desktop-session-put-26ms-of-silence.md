@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-07
 ---
 
@@ -110,3 +110,11 @@ the numbers above as a property of the scheduler.
 **Reproduction.** `cargo run`, `doom` in the terminal, wait for the demo loop,
 quit, then `tone` repeatedly. Add `--dump-audio` so the wav can corroborate the
 underruns. The counters print every 2 s while a client exists.
+
+## Promoted 2026-08-25
+
+Measured harm — 26 ms / 9 periods of silence with a client streaming, plus a
+tone-phase wake-lateness cluster the recorded sample never reaches — makes
+this a defect under the audio law rather than a comparability note. Owed to
+whoever next gives gate A a doom-plus-resume workload and settles `armed_on`
+against `target` in `signal_clients`.
