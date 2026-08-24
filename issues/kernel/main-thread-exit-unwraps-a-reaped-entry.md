@@ -50,9 +50,6 @@ the main thread's 8 MB stack and never publishes an exit, so every
 `SYS_PROCESS_WAIT` waiter parks forever. **This entry is not that.** It is the
 `.unwrap()`, which is wrong whether or not the policy stays.
 
-`issues/kernel/a-thread-exit-wakes-only-the-main-thread.md` is a third,
-separate defect in the same function.
-
 ## What a fix owes
 
 Match `mark_thread_zombie`: a missing entry means the process is already gone, so

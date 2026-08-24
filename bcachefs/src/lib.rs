@@ -3,6 +3,14 @@
 //! format, and this crate is where that lands. What it holds today is an
 //! interim ToyOS-designed format sharing nothing with bcachefs but the
 //! ambition.
+//!
+//! **Every number this crate parses came off a disk it does not own, and a
+//! CRC is not authentication — whoever writes the image writes the CRC.** Each
+//! bound is applied where the bytes become typed data and nowhere else: a
+//! superblock's fields in `Superblock::check`, a btree child pointer in
+//! `Node::parse`, a file's extents in `decode_leaf_value`. A consumer of what
+//! those hand back does not re-check, so a new one of them is a new refusal
+//! here rather than a comparison at the call site.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(dead_code)]

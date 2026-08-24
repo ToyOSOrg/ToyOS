@@ -626,10 +626,9 @@ jobs:
       # because it compiles against the ToyOS sysroot and is a path dependency
       # of `rust/library/std` — but *some* of what it holds is a total function
       # over kernel words, and `net::hangup` is the one that decides whether a
-      # program whose netd has gone leaves quietly or panics across the boot
-      # (`issues/build/sshd-panics-when-netd-exits-before-it-binds.md`). Its
-      # `lib.rs` is `no_std` for every build but this one, and this one links no
-      # syscall.
+      # program whose netd has gone leaves quietly or panics across the boot.
+      # Its `lib.rs` is `no_std` for every build but this one, and this one
+      # links no syscall.
       #
       # Named here rather than folded into the loop above: it is not under
       # `userland/`, it has its own lockfile and its own workspace, and it needs

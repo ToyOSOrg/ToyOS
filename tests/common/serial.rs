@@ -53,11 +53,10 @@ pub enum Died {
     Faulted,
     /// A process that ended itself — its own panic handler wrote the line
     /// (`userland/libc/src/lib.rs`, or the std fork's). Never the machine's
-    /// business, and not even always the boot's: `sshd` loses a race with
-    /// `netd`'s teardown on a NIC-less machine and panics across boots that
-    /// then come up perfectly
-    /// (`issues/build/sshd-panics-when-netd-exits-before-it-binds.md`),
-    /// which is why a boot wait must not end on one.
+    /// business, and not even always the boot's: `sshd` lost a race with
+    /// `netd`'s teardown on a NIC-less machine and panicked across four
+    /// recorded boots that then came up perfectly, which is why a boot wait
+    /// must not end on one.
     Panicked,
 }
 

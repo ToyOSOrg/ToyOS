@@ -890,18 +890,30 @@ pub fn writeback_durability(
         }
     }
 
-    // The actuator must have fired, or this gate proves nothing: a green run with
-    // an inert arm is the worst harness defect (`tests/common/qemu.rs`'s
-    // `refuse_a_staged_image_this_boot_did_not_ask_for`). The refusal is the whole
-    // point — it is what makes the checker below a test of the drain's retry
-    // rather than of an ordinary flush. It fires on `iod`'s drain during the run,
-    // or on the shutdown drain if `iod` was late, so the whole capture is
+    // The actuator must have fired **twice**, or this gate proves nothing: a
+    // green run with an inert arm is the worst harness defect
+    // (`tests/common/qemu.rs`'s `refuse_a_staged_image_this_boot_did_not_ask_for`).
+    // Two refusals are what drive the drain's retry ladder to attempt 2 — the
+    // first depth that *parks* between attempts, where `iod`'s standing `WORK`
+    // arm made `between_attempts` a double-arm and panicked the machine. One
+    // refusal reaches only attempt 1 (a yield), which is why the machine passed
+    // the single-refusal control while broken. So this gate proves both halves of
+    // the durability fix: `set_fat_entry`'s active-last order heals the mirror
+    // (checker silent, below), and `drain_all_iod`'s arm-reusing backoff survives
+    // the attempt-2 park (`must_be_clean` above and the `PANIC` scan of the
+    // shutdown tail catch the double-arm). It fires on `iod`'s drain during the
+    // run, or on the shutdown drain if `iod` was late, so the whole capture is
     // searched.
     const FIRED: &str = "fat-mirror-write-refuse: refusing the FAT-1 mirror write";
-    if !result.before.contains(FIRED) && !result.serial.contains(FIRED) && !tail.contains(FIRED) {
+    let fired = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
+        .iter()
+        .map(|cap| cap.matches(FIRED).count())
+        .sum::<usize>();
+    if fired < 2 {
         return Err(format!(
-            "the fat-mirror-write-refuse actuator never fired, so the write-back drain's retry \
-             was never exercised and this gate proves nothing\nkernel log:\n{}{}\nshutdown:\n{}",
+            "the fat-mirror-write-refuse actuator fired {fired} time(s), not the 2 that drive the \
+             drain's retry ladder to the attempt that parks — the gate never reached the path \
+             that panicked, so it proves nothing\nkernel log:\n{}{}\nshutdown:\n{}",
             result.before, result.serial, tail
         ));
     }

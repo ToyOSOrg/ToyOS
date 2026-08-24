@@ -386,7 +386,7 @@ impl BlockAccess for FatVolume {
         if self.role == Role::Log && mirror_refuse::should_refuse(offset, buf.len()) {
             log!(
                 "log-volume: fat-mirror-write-refuse: refusing the FAT-1 mirror write of a \
-                 drain flush at volume offset {offset} once, as a budget expiry"
+                 drain flush at volume offset {offset} as a budget expiry"
             );
             return Err(IoError::BudgetExpired);
         }
@@ -549,18 +549,18 @@ impl FatExtents {
     }
 }
 
-/// The `fat-mirror-write-refuse` actuator: refuse the first FAT-1 (mirror) write
-/// of a write-back drain flush on the log volume, once, as a budget expiry.
+/// The `fat-mirror-write-refuse` actuator: refuse the first two FAT-1 (mirror)
+/// writes of a write-back drain flush on the log volume, as a budget expiry.
 ///
-/// Scoped to the drain flush (`writeback::drain_pass` brackets its `flush_file`
+/// Scoped to the drain flush (`writeback::drain_one` brackets its `flush_file`
 /// with [`enter_drain_flush`]/[`leave_drain_flush`]) so it lands on the path the
 /// fix is about and not on `SYS_FSYNC`, which already retries. The mirror region
 /// is captured at mount; a write overlapping it while a drain flush is in
-/// progress is refused once. Everything folds to nothing without
-/// `boot-actuators`.
+/// progress is refused, twice, so the drain's retry ladder reaches the attempt
+/// that parks. Everything folds to nothing without `boot-actuators`.
 #[cfg(feature = "boot-actuators")]
 mod mirror_refuse {
-    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     /// The log volume's FAT-1 byte range, volume-relative, captured at mount.
     static LO: AtomicU64 = AtomicU64::new(0);
@@ -568,8 +568,16 @@ mod mirror_refuse {
     /// Set while `writeback`'s drain holds a `flush_file` open, so the refusal
     /// falls on the drain path and not on a `SYS_FSYNC` flush.
     static IN_DRAIN: AtomicBool = AtomicBool::new(false);
-    /// One expiry, then a fresh budget — the retry heals it.
-    static FIRED: AtomicBool = AtomicBool::new(false);
+    /// How many drain-flush mirror writes have been refused so far.
+    static REFUSED: AtomicU32 = AtomicU32::new(0);
+
+    /// Refuse the first **two**, not one. One refusal makes the drain's retry
+    /// ladder reach only attempt 1, which merely yields; attempt 2 is the first
+    /// that parks, and the park is where the `iod` one-arm-per-task panic lived
+    /// (`writeback::drain_all_iod`). So a single-refusal control passes a broken
+    /// kernel — exactly what CI missed. Two refusals force attempt 2; the third
+    /// flush (spent) heals the mirror.
+    const REFUSALS: u32 = 2;
 
     pub fn capture(lo: u64, hi: u64) {
         LO.store(lo, Ordering::Relaxed);
@@ -580,20 +588,20 @@ mod mirror_refuse {
         IN_DRAIN.store(on, Ordering::Relaxed);
     }
 
-    /// Whether this log-volume write is the one to refuse: the actuator is armed,
-    /// a drain flush is in progress, none has fired yet, and the bytes overlap
-    /// the mirror FAT. Consumes the one shot.
+    /// Whether this log-volume write is one to refuse: the actuator is armed, a
+    /// drain flush is in progress, fewer than [`REFUSALS`] have been refused, and
+    /// the bytes overlap the mirror FAT. Counts the refusal.
     pub fn should_refuse(offset: u64, len: usize) -> bool {
         if !crate::actuator::fat_mirror_write_refuse()
             || !IN_DRAIN.load(Ordering::Relaxed)
-            || FIRED.load(Ordering::Relaxed)
+            || REFUSED.load(Ordering::Relaxed) >= REFUSALS
         {
             return false;
         }
         let (lo, hi) = (LO.load(Ordering::Relaxed), HI.load(Ordering::Relaxed));
         let end = offset + len as u64;
         if hi > lo && offset < hi && end > lo {
-            FIRED.store(true, Ordering::Relaxed);
+            REFUSED.fetch_add(1, Ordering::Relaxed);
             return true;
         }
         false

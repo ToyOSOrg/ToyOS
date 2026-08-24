@@ -12,8 +12,8 @@ opened: 2026-08-01
 Three instances, and the statement is here because none of the three says it
 alone — it is what predicts the fourth:
 
-- the compositor's windows (`compositor-and-netd-unbounded-accept`),
-- netd's piped connections (the same entry),
+- the compositor's windows,
+- netd's piped connections,
 - `SYS_CONNECT` pinning 4 MiB into an unbounded pending queue.
 
 **The third was worse than it looks, because the attacker did not need to find a
@@ -33,8 +33,15 @@ hears the refusal — and it is why the cap could be added at all. The same pair
 survives the endowment rewrite: `MAX_PENDING_CONNECTIONS` is per port now and
 `SYS_NAMESPACE_OPEN` answers `ResourceExhausted` on a full one.
 
-**The first two instances are what is left**, and they are the ones a bound alone
-does not answer: a compositor cannot refuse a window without deciding whose.
+**The first two are bounded now, and the bound is a mitigation rather than an
+answer.** `toyos_desktop::max_windows` and netd's `max_piped_connections` each
+divide an eighth of physical memory by what one unit costs, cap that at what one
+poller can watch, and refuse past it with `MSG_WINDOW_REFUSED` and
+`ERR_RESOURCE_EXHAUSTED` — a bound *and* a caller that hears it, which is the
+pair this class asks for. What a bound alone still does not answer is *whose*
+window to refuse: the memory is charged to nobody, so a cap is the only thing
+between one client and the machine. Both functions' doc comments say that where
+they are, and name a kernel memory limit as what deletes them.
 
 **And the 4 MiB is gone with it.** A pipe now allocates its 2 MiB ring page on
 first use — `pipe::create` is infallible because a pipe with no traffic owns no

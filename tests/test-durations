@@ -146,6 +146,7 @@ control_regs_verdict 0
 debug_float 11
 debug_trap 25
 demand_paging_sse 12
+demand_window_race 54
 desktop_audio_client 13791
 desktop_locale_detect 4510
 desktop_typing_damage 14338
@@ -237,6 +238,7 @@ mmap_stress 45
 netd_connection_caps 6538
 netd_gone_mid_bind 32
 netd_hostile_peer 4509
+nic_dma_isolation 21
 nightly_tier_is_announced 0
 null_sink_client_exits 2167
 null_sink_shipped_client 7095

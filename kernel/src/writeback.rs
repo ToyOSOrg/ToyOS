@@ -76,8 +76,9 @@ use alloc::string::String;
 
 use toyos_abi::syscall::SyscallError;
 
-use crate::completion::{self, Outcome, Subject, Token, Watch};
+use crate::completion::{self, Armed, Outcome, Subject, Token, Watch};
 use crate::file_cache::{self, FileId, Teardown};
+use crate::scheduler::Parkable;
 use crate::sync::Lock;
 use crate::time::Deadline;
 
@@ -114,16 +115,50 @@ pub fn enqueue(file_id: FileId, path: String, mtime: u64) {
 /// invariant check to hold.
 pub const TOKEN: Token = Token::new(0);
 
-/// Run every pending teardown now, making each file durable. Called by `iod` on
-/// each wake and by `SYS_SHUTDOWN` before `Vfs::sync_all`.
+/// Run every pending teardown now, making each file durable. Called by
+/// `SYS_SHUTDOWN` before `Vfs::sync_all` — a caller that holds no completion arm,
+/// so the inter-attempt backoff is `block::between_attempts` (which arms the
+/// task's own watch). `iod` cannot use this — it holds a standing [`WORK`] arm —
+/// and calls [`drain_all_iod`] instead.
 ///
-/// `drain_all` loops [`drain_one`] over fresh VFS locks, and when a pass left a
-/// flush refused on budget it backs off on a fresh budget — off the VFS lock,
-/// which every entry took and dropped — and passes again, until the queue is
-/// drained or `block::DEADMAN` turns the last refusals into give-ups. The retry
-/// ladder is `SYS_FSYNC`'s (`block::between_attempts`); see the module header for
-/// why a refused flush loses nothing.
+/// The retry ladder and its `block::DEADMAN` bound are `SYS_FSYNC`'s; see the
+/// module header for why a refused flush loses nothing.
 pub fn drain_all() {
+    drain_retrying(crate::block::between_attempts);
+}
+
+/// The same, for `iod`, whose standing [`WORK`] arm forbids a second
+/// (`completion::arm`'s one-arm-per-task rule). The backoff waits that arm out
+/// for `block::backoff_step` rather than arming the task again — so a new close
+/// posted to `WORK` wakes the retry early, and the machine no longer panics at
+/// attempt >= 2, the depth `between_attempts` first parks at.
+///
+/// The first retry still only yields (no arm taken); the deadline arms come only
+/// at attempt >= 2, and they come to the arm `iod` already holds. `parkable` and
+/// `armed` are `iod`'s own, threaded down so the wait reuses them.
+pub fn drain_all_iod(parkable: &Parkable, armed: &Armed<'_>) {
+    drain_retrying(|attempt| {
+        if attempt <= 1 {
+            // The budget was usually spent by lock-wait or a descheduled vCPU,
+            // over by the next slice; a yield takes no arm.
+            crate::scheduler::yield_now();
+        } else {
+            // Wait on the arm `iod` already holds, for the same span
+            // `between_attempts` would park — a `WORK` post (a new close) ends it
+            // early and the next pass drains that file too.
+            let deadline = Deadline::at(crate::clock::now() + crate::block::backoff_step(attempt));
+            let _ = completion::wait(parkable, armed, deadline);
+        }
+    });
+}
+
+/// The retry loop shared by [`drain_all`] and [`drain_all_iod`]: pass over the
+/// queue, and while a pass left a flush refused on budget, run `backoff` (off the
+/// VFS lock, which every entry took and dropped) and pass again — until the queue
+/// is drained or `block::DEADMAN` turns the last refusals into give-ups. The two
+/// callers differ only in how `backoff` waits, because only one of them holds an
+/// arm.
+fn drain_retrying(mut backoff: impl FnMut(u32)) {
     let deadman = Deadline::at(crate::clock::now() + crate::block::DEADMAN.duration());
     let mut attempt = 0u32;
     loop {
@@ -145,7 +180,7 @@ pub fn drain_all() {
             return;
         }
         attempt += 1;
-        crate::block::between_attempts(attempt);
+        backoff(attempt);
     }
 }
 

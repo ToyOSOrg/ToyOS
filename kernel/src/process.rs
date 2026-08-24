@@ -1700,6 +1700,19 @@ pub fn wait_thread_zombie(tid: Tid, parent_pid: Pid) -> Result<Option<i32>, ()> 
 
 /// Handle a page fault at `fault_addr` by looking up the current process's VMAs.
 /// Returns true if the fault was resolved (a page was mapped), false if fatal.
+///
+/// **One 2 MiB window is filled by however many threads fault on it and
+/// installed exactly once.** Nothing here holds the address space across the
+/// fill — it is the longest operation in the kernel's hottest paging path, up
+/// to 512 device reads — so the mapped/not-mapped question is asked twice: once
+/// cheaply, to decide whether to fill at all, and once inside the critical
+/// section that writes the entry ([`AddressSpace::map_window_if_absent`]). A
+/// thread that loses the second question drops the frame it just filled. It is
+/// still charged for it, so `fault_demand_count + fault_zero_count` exceeds
+/// `alloc_count` by exactly the number of fills this process threw away.
+///
+/// The `ProcessData` lock below serialises the fills but decides nothing about
+/// them: two threads queue on it having both already passed the first question.
 pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
     let t0 = crate::clock::nanos_since_boot();
     let tid = current_tid();
@@ -1767,6 +1780,14 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
 
         // If a 2MB page is already mapped at this region (from a previous fault
         // in a different VMA that shares the same 2MB range), just return success.
+        //
+        // **This is the fast answer and not the decision.** The lock goes away
+        // three statements below and the fill takes 2 MiB of work, so a sibling
+        // thread faulting on this window in the meantime reads the same "not
+        // mapped" from the same table. What decides is `map_window_if_absent`,
+        // which asks again in the same critical section as the install; this
+        // one is here so that the overwhelmingly common case — a window a
+        // previous fault already filled — costs a walk instead of a fill.
         if as_guard.translate(UserAddr::new(region_start)).is_some() {
             return true;
         }
@@ -1914,16 +1935,42 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
     // One 2 MiB frame either way: a window whose pages agree is one PDE, and
     // the one window per binary whose pages do not is a page table over the
     // same frame.
-    addr_space.lock().map_window(UserAddr::new(region_start), page_alloc.phys(), &window_prot);
+    //
+    // **The window is claimed under the lock that installs it, not under the
+    // one that decided to fill.** The `translate` far above answered before
+    // this address space was unlocked for the fill, and the fill is the longest
+    // thing on this path — so a sibling thread faulting on the same window gets
+    // the same "not mapped" and arrives here too. Whoever gets this lock first
+    // installs; the other's fill is thrown away. Installing both is what left
+    // one thread's CPU on a frame nothing else could see: what the PDE write
+    // owes is discharged on *this* CPU, and no shootdown is issued from a
+    // fault.
+    let installed = addr_space.lock().map_window_if_absent(
+        UserAddr::new(region_start),
+        page_alloc.phys(),
+        &window_prot,
+    );
 
-    data.demand_pages.push(page_alloc);
+    if installed {
+        data.demand_pages.push(page_alloc);
 
-    data.alloc_count += 1;
-    let current_mem = data.demand_pages.len() as u64 * PAGE_2M;
-    if current_mem > data.peak_memory {
-        data.peak_memory = current_mem;
+        data.alloc_count += 1;
+        let current_mem = data.demand_pages.len() as u64 * PAGE_2M;
+        if current_mem > data.peak_memory {
+            data.peak_memory = current_mem;
+        }
+    } else {
+        // A wasted fill, and the frame goes back now rather than at the end of
+        // this function: nothing is mapped to it, so nothing but this local
+        // knows it exists.
+        drop(page_alloc);
     }
 
+    // Charged whether or not the fill was kept. The fault happened, the CPU
+    // time was spent and the device reads were issued, so a loser that
+    // vanished from the accounting would make a contended window look free —
+    // and the difference between the fault counts and `alloc_count` is the
+    // only reading anything has of how often this races.
     let fault_elapsed = crate::clock::nanos_since_boot() - t0;
     data.accounting.fault_ns += fault_elapsed;
     if io_reads > 0 {
