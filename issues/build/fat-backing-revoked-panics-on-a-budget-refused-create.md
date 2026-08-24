@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-08-24
 ---
 
@@ -30,3 +30,9 @@ Two honest shapes: the setup retries `WouldBlock` a bounded number of times
 (the doctrine's shape), or a redlist row prices this as a known
 load-coincident red on the dev-host instrument. Whoever owns the test decides;
 what is not honest is re-running it away without either.
+
+**2026-08-25: promoted.** Verified unchanged: `write_file` in
+`tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs` still panics on the
+first `WouldBlock` from `fs::File::create`, and no `src/redlist.rs` row prices
+this. Neither of the two honest shapes has been taken; whoever owns the test
+should pick one.
