@@ -752,9 +752,9 @@ actuators! {
     /// pause stops the guest without leaving it in the state under test, which
     /// is a CPU that will never reach a scheduler pass. What the gate reads is
     /// the *console*: before `Drain::Inline` a boot that stopped here produced
-    /// nothing whatsoever, including everything it had logged
-    /// (`issues/diagnostics/pre-idle-wedge-says-nothing.md`), because the
-    /// only two drains in the machine were the timer tick and the idle loop.
+    /// nothing whatsoever, including everything it had logged, because the only
+    /// two drains in the machine were the timer tick and the idle loop and a
+    /// wedge in phase 3 reaches neither.
     pre_idle_wedge = "pre-idle-wedge";
 
     /// Fail every re-read of a page of a file on either FAT mount through

@@ -9228,8 +9228,10 @@ fn run_machine_test(
             // produced nothing at all on the console — not "less", *nothing*,
             // including every line it had logged — because the only two things
             // that drained the byte ring were the timer tick and the idle loop,
-            // and the machine reaches neither
-            // (`issues/diagnostics/pre-idle-wedge-says-nothing.md`).
+            // and the machine reaches neither. It cost an hour the first time
+            // it was met: a mis-programmed IOMMU stopped NVMe mid-`init`, the
+            // guest had logged sixty lines, and the harness saw the
+            // bootloader's output and then a ten-second timeout.
             // `Drain::Inline` puts every record on the wire as it is committed,
             // for the whole boot, so the end of the log is now where the
             // machine stopped rather than where it last drained.

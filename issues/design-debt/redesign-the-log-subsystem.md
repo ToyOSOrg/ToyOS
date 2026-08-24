@@ -39,10 +39,10 @@ follows is the evidence that made it decidable.
 Its known sins are already entries here and are the argument for the question:
 the flush is unbounded, uninterruptible and in front of the scheduler pass, and
 userland `println!` shares the ring — both
-`issues/boot-media/log-flush-is-unbounded.md`; a boot that wedges before
-the idle loop produces no output at all because the ring's only drains are the
-timer tick and the idle loop
-(`issues/diagnostics/pre-idle-wedge-says-nothing.md`); the ring's occupancy
+`issues/boot-media/log-flush-is-unbounded.md`; a boot that wedged before
+the idle loop produced no output at all because the ring's only drains were the
+timer tick and the idle loop (answered since by `Drain::Inline`, gated by
+`pre_idle_wedge_speaks`); the ring's occupancy
 is one of the pre-`hlt` recheck's conditions, so a CPU with bytes pending
 declines to sleep; and `drain_serial`'s `BackendGuard::lock` spins with
 interrupts disabled with no bound and no deadlock panic (both, CLAUDE.md's
