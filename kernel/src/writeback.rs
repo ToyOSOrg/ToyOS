@@ -124,7 +124,7 @@ pub const TOKEN: Token = Token::new(0);
 /// The retry ladder and its `block::DEADMAN` bound are `SYS_FSYNC`'s; see the
 /// module header for why a refused flush loses nothing.
 pub fn drain_all() {
-    drain_retrying(|attempt| crate::block::between_attempts(attempt));
+    drain_retrying(crate::block::between_attempts);
 }
 
 /// The same, for `iod`, whose standing [`WORK`] arm forbids a second
