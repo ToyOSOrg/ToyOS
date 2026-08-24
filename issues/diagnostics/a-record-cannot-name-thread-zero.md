@@ -29,12 +29,19 @@ formatter would render as `tid=4294967295` on every line a kernel thread logs.
 ## What is in the tree now
 
 The kernel translates at the boundary: `kernel/src/log/mod.rs`'s `on_a_thread`
-maps `u32::MAX` to zero, so the panel never prints the raw sentinel. That closes
-the loud half and leaves the quiet one — a main thread and a kernel thread now
+maps `u32::MAX` to zero, so nothing ever prints the raw sentinel. That closes
+the loud half and leaves the quiet one — a main thread and a kernel thread
 render identically, where the byte ring's prefix distinguished them (`[kernel
-0.123 cpu0 tid=0]` against `[kernel 0.123 cpu0]`). The byte ring still carries
-the old prefix, so today the distinction survives on serial and is lost only on
-the panel; **deleting the byte ring** takes the distinction with it.
+0.123 cpu0 tid=0]` against `[kernel 0.123 cpu0]`).
+
+**Re-read 2026-08-24, and the distinction is now lost everywhere rather than on
+the panel alone.** The byte ring is gone (`kernel/src/log/mod.rs`: "the byte
+ring is gone, and the line the console carries is rendered from the record by
+`log::console`, through the one formatter in `toyos-abi`"), and
+`console::write_line` is public precisely so that `/log`'s sink renders the
+same line — `logd` puts a wall-clock prefix in front of the same `Display` and
+changes nothing else. Serial, panel and file are one rendering, and it is the
+one that drops `tid=0`.
 
 ## Why it was not fixed there
 

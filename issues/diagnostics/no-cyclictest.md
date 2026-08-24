@@ -1,36 +1,37 @@
 ---
 status: open
-kind: finding
+kind: track
 opened: 2026-08-08
 ---
 
 # There is no cyclictest, so nobody can ask this machine what its wake latency is
 
-`grep -rni cyclictest` over the tree finds it only in prose and never in code.
-The design is not the hard part — an RT-priority thread that arms an absolute
-timer, sleeps, and histograms `actual − programmed` at 1 µs resolution — and the
-consequence of not having it is stated: until such a tool exists, **no honest 2x
-claim can be made on this metric in either direction**. A cyclictest-equivalent
-should exist before the first metal
-boot, because it is the instrument that turns that boot into a measurement. That
-is CLAUDE.md's hard bar, unmeasurable for scheduling.
+`git grep -in cyclictest` over the tree finds it only in this file. Until a
+cyclictest-equivalent exists, **no honest claim can be made about this machine's
+wake latency in either direction** — which makes it the instrument that turns
+the first metal boot into a measurement rather than an impression.
+
+**What to build.** A userland program that enters the RT band, arms an absolute
+timer, sleeps, and histograms `actual − programmed` at 1 µs resolution over
+enough samples to have percentiles rather than a maximum.
+
+**What it needs, and it is not blocked on any of it.** `SYS_RT_ENTER` (112) is
+the privilege: a `SysCap` carrying `Rights::RT`, granted by a `system.toml` row
+(`[programs.soundd] syscap = ["rt"]` is the shape), gated at the dispatch site
+and not in the scheduler. The gate this file was opened against is gone —
+`SYS_SET_RT_PRIORITY` (96) demanded a `VirtioSound` or `HdaAudio` device claim,
+so a latency tool could only reach the band by taking the sound card away from
+soundd and measuring a different machine. Number 96 is retired, and
+`toyos-abi/src/syscall.rs` says why: "a claim is not a privilege".
 
 **What exists is not a substitute, and each instrument fails differently.**
-soundd's `max_wake_lat_ns` (`userland/soundd/src/main.rs:995-996`, the null-sink
-copy at `:1371-1372`) is read by gate A (`tests/common/audio.rs:478-488`,
-`:636-645`) and baselined in `tests/audio-baseline.toml:18-22`; the thorough tier
-runs Mann-Whitney on `max_wake_lat_us` (`tests/toyos.rs:1668`). But it is a
-**max over a ~2 s window, not a distribution** — no percentiles, no sample count;
-it measures against a DLL's *prediction of a DMA completion*, not against a
-programmed timer, so it folds in the device model; and it needs soundd plus a
-sound card to exist at all, which is exactly what the T14 has not got.
-`toyos-sched`'s invariant I4 bounds the same quantity but is marked `sim`, so it
-can never see TCG distortion, real IPI delivery, or metal.
-
-**One concrete blocker before it can be written.** `SYS_SET_RT_PRIORITY` is
-gated at its dispatch site on owning an audio device claim — `PermissionDenied`
-unless the caller owns `VirtioSound` or `HdaAudio`
-(`kernel/src/arch/syscall.rs:684-689`), whose own comment records that the band
-wants a privilege and a claim is not one. A standalone latency tool cannot reach
-the RT band today without also taking the sound card away from soundd, which changes
-the machine it is trying to measure.
+soundd's `max_wake_lat_ns` (`toyos-mixer/src/stats.rs`, printed by
+`userland/soundd/src/mix.rs`, read by gate A in `tests/common/audio.rs` and
+baselined in `tests/audio-baseline.toml`; the thorough tier runs Mann-Whitney on
+`max_wake_lat_us`) is a **max over a ~2 s window, not a distribution** — no
+percentiles, no sample count; it measures against a DLL's *prediction of a DMA
+completion* rather than against a programmed timer, so it folds in the device
+model; and it needs soundd plus a sound card to exist at all, which is exactly
+what the T14 has not got. `toyos-sched`'s invariant I4
+(`toyos-sched/sim/src/invariants.rs`) bounds the same quantity but runs in the
+simulator, so it can never see TCG distortion, real IPI delivery, or metal.

@@ -35,9 +35,13 @@ all five.**
 | `usb_disk_index_stable` | 1/5 | 2 | Parallel | nothing enumerated on the first controller |
 
 A twelfth name has been seen since and is not in the table because the probe did
-not see it: `xhci_slow_connect`, red alone in run `31261669826`. It has its own
-entry, `xhci-slow-connect-has-a-1ms-margin` — a 1 ms margin *inside the guest's
-boot*, which is why running alone moves it by milliseconds and not by a verdict.
+not see it: `xhci_slow_connect`, red alone in run `31261669826`. Its margin was
+*inside the guest's boot* — the controller started at 0.296–0.311 s against a
+300 ms held-empty window — which is why running it alone moved it by
+milliseconds and not by a verdict. Re-measured 2026-08-24 on the dev host, that
+margin is gone: four boots put the controller at 0.109, 0.117, 0.122 and
+0.227 s, i.e. 73–191 ms of clearance, on hosts independently measured at
+2.31x–4.45x width.
 
 A thirteenth, with one sample each way on **one tree**: `desktop_audio_client`
 stalled wide *and* alone in run `31264914759` and passed in run `31266194663`,
