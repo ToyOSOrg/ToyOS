@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-07-31
 ---
 
-# `MOUSE_WATCH` and `NETWORK_WATCH` are posted for nobody's benefit
+# An empty Mouse read's `NotFound` is a decision now, and it leaves `MOUSE_WATCH` and `NETWORK_WATCH` posted with nobody armed
 
 Re-measured against `739af0c2` on 2026-08-24, after §5.6 replaced the wait
 queues with completion `Watch`es. The entry's first half is answered; its second
