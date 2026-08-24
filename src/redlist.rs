@@ -45,6 +45,11 @@
 //! re-measure is not something anyone should be trusting, and an index that
 //! shrinks to nothing is a true statement about how much is known.
 //!
+//! **A `Red::source` may point at a code site as readily as a write-up.**
+//! Retiring a row against the commit that fixed it means repointing its source
+//! at the site that now enforces the rule — never leaving it aimed at a deleted
+//! file, which `every_row_can_say_what_it_claims` refuses.
+//!
 //! **What is deliberately not a row.** Gate A's thorough tier compares
 //! distributions against a recorded sample (`tests/audio-baseline.toml`) and its
 //! verdicts are `Fisher p=…`, not "this test went red"; those live with the
