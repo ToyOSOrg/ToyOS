@@ -1,6 +1,21 @@
 //! USB Mass Storage, Bulk-Only Transport with a transparent SCSI command set
 //! (interface class 0x08, subclass 0x06, protocol 0x50).
 //!
+//! **That triple is the whole of what this speaks, and the rest is absent on
+//! purpose.** UAS (protocol 0x62) and the floppy-era CBI/CB subclasses are not
+//! matched at all — `device.rs`'s interface walk takes 0x08/0x06/0x50 and
+//! nothing else, which every enclosure advertising UAS still offers as well.
+//! One logical unit per device: `GET MAX LUN` is never issued and the CBW's LUN
+//! byte is always 0, so a four-slot card reader presents as its first slot.
+//! Nothing handles removable media — no `PREVENT ALLOW MEDIUM REMOVAL`, and no
+//! unit-attention handling past the `REQUEST SENSE` that clears it during
+//! bring-up — so a card swapped under a running system is not noticed. No `MODE
+//! SENSE`, so write protection is discovered by a WRITE failing rather than in
+//! advance. And one command at a time per controller: `with_disk` holds the
+//! `XHCI` ticket spinlock, preemption off, for the whole of it. That is right
+//! at boot and is what a filesystem doing real I/O over USB will outgrow first,
+//! since the transfer rings already allow the queue depth.
+//!
 //! Everything that arrives here came off a wire, so nothing in this file may
 //! panic on it: a capacity, a block size, a CSW tag and a residue are all
 //! numbers a broken or hostile device chooses. They are checked and the device
