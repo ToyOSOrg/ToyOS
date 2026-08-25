@@ -208,7 +208,7 @@ tests/common/audio.rs 404 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
 tests/common/console.rs 249 2
-tests/common/faults.rs 341 0
+tests/common/faults.rs 345 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 85 0
 tests/common/hostload.rs 39 1
