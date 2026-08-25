@@ -674,11 +674,17 @@ pub fn capture() {
         return;
     }
     // SAFETY: irreducible — `Rendered` is too large to be anything but a
-    // `static`, and the panic path may take no lock to guard it. Sound because
-    // `SNAPSHOT` is written here and nowhere else, and `capture` is called once
-    // per panic from the panic handler, which `panic::PANICKING` already
-    // serialises to one CPU; the readers (`fatal_text`) run after it on the same
-    // CPU, or on another that reaches them only through `PAINTING`.
+    // `static`, and the panic path may take no lock to guard it. `SNAPSHOT` is
+    // written here and nowhere else, and the readers (`fatal_text`) run after it
+    // on the same CPU or on another that reaches them only through `PAINTING`.
+    // **Nothing serialises the writers**: the panic handler's guards are all
+    // per-CPU, both panicking CPUs take `cli` first so neither takes the other's
+    // halt IPI, and two can be inside this at once. What bounds that is the
+    // shape rather than a latch — same ring, `len` read once into a local — so
+    // the indices stay in bounds and the worst case is one screen carrying two
+    // interleaved reports;
+    // `issues/panic-path/panic-capture-unlatched.md` is open against exactly
+    // that, and says the `PAINTING` shape extends here when it is ever seen.
     let into = unsafe { &mut *SNAPSHOT.0.get() };
     CAPTURED.store(into.render(0, u64::MAX) > 0, Ordering::Relaxed);
 }

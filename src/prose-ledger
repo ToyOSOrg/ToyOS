@@ -72,7 +72,7 @@ kernel/src/drivers/i8042/tally.rs 100 0
 kernel/src/drivers/ioapic.rs 80 0
 kernel/src/drivers/mod.rs 20 2
 kernel/src/drivers/nvme.rs 344 0
-kernel/src/drivers/panic_console/mod.rs 630 0
+kernel/src/drivers/panic_console/mod.rs 636 0
 kernel/src/drivers/pci.rs 65 0
 kernel/src/drivers/serial.rs 280 0
 kernel/src/drivers/usb_storage.rs 66 0
