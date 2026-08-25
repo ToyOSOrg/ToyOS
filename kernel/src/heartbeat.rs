@@ -1,115 +1,65 @@
 //! One line every quarter second saying the machine is still running, and
 //! which CPUs are still alive.
 //!
-//! # The gap this closes
+//! A live idle desktop and a dead machine have the same last thing to say, so
+//! an ordinary log records a freeze's existence and never its time. A frozen
+//! boot's log ends at the last heartbeat before it died, which is the **time**
+//! of death rather than only the fact of it.
 //!
-//! A laptop that freezes at boot leaves a log **byte-identical** to a healthy
-//! one's. Ten logs off the owner's stick: seven of 214 lines and three of 216,
-//! the three long ones differing only by two `compositor: frames=` reports, and
-//! every log's last kernel line at ~1.33 s whether that boot lived or died.
-//! Nothing that fails leaves a trace on its way down, and nothing that survives
-//! leaves one either — a live idle desktop and a dead machine produce the same
-//! file, because the last thing either has to say is the same.
+//! # What each field is evidence of
 //!
-//! So the log cannot answer *was this boot alive at time T*, and every
-//! conclusion about the freeze has had to come from a photograph of a panel or
-//! from `metal-panic-probe` firing once at claim + 5 s. This makes the answer
-//! continuous: a frozen boot's log ends at the last heartbeat before it died,
-//! which is the **time** of death rather than only the fact of it.
+//! A set bit in `alive=`/`mask=` says: that CPU took an interrupt, returned
+//! from `hlt`, and reached the top of a scheduler pass. The next tick is armed
+//! by the timer stub in assembly before any Rust runs, so one fire arms the
+//! next and the chain breaks only where a CPU stops taking interrupts — which
+//! is the thing being measured, not a step in measuring it.
 //!
-//! # What the first build got wrong, and what `alive=` means now
-//!
-//! The first build ran from the idle loop and nothing else, and its own doc
-//! conceded that a clear bit meant only "this CPU did not reach a pass". Eight
-//! metal boots showed how little that leaves. Each produced exactly three
-//! heartbeats: two while userland was still coming up, then nothing at all for
-//! between 14 s and 102 s, then one final line at `passes=1/8` in the same
-//! millisecond as the boot's first keypress. After ~1.8 s every CPU had run a
-//! pass, found no work and no deadline, stopped its LAPIC timer and halted —
-//! and a halted CPU does not run the idle loop. The instrument was blind at
-//! exactly the job it was built for: a healthy quiescent machine and a dead one
-//! logged the same nothing.
-//!
-//! `diag-tick` is the fix and it belongs to the build rather than to this
-//! module: it caps how long a CPU may sleep, so every CPU reaches a pass two or
-//! three times per line whether or not the machine has work. That is what makes
-//! the field worth printing — **a clear bit now means that CPU stopped**, not
-//! that it had nothing to do, and the shape of the end discriminates a local
+//! **A clear bit means that CPU stopped only because `diag-tick` is under it**:
+//! `diag-tick` caps how long a CPU may sleep, so every CPU reaches a pass two
+//! or three times per line whether or not the machine has work. Without it a
+//! CPU that found no work halts, does not run the idle loop, and reads clear
+//! for having nothing to do. The shape of the end then discriminates a local
 //! cause spreading (the mask thins CPU by CPU) from a global one (full to
 //! nothing between two lines).
 //!
-//! # `ran=`, and why a queue depth could not have served
-//!
-//! `alive=` answers *is this CPU still running*, and on its own that is only
-//! half of what a freeze is. A machine whose timers fire and whose CPUs take
-//! passes but which never wakes the task that should run reads `alive=8/8`
-//! forever while being, to its owner, dead. Three metal freezes now have three
-//! different triggers — a process reaching its first instruction at 1.36 s, a
-//! keypress at 86.9 s, a stream's first DMA at 3.8 s — and without a second
-//! field all three would read as "heartbeats stopped at T", which says when and
-//! never which.
-//!
-//! So `ran=` counts **tasks switched onto a CPU** since the previous line,
-//! machine-wide. Two signatures that were one:
+//! `ran=` counts **tasks switched onto a CPU** since the previous line,
+//! machine-wide, and separates two signatures `alive=` alone cannot:
 //!
 //! - the line stops → nothing is scheduling; the machine stopped.
 //! - the line continues with `ran=0` → the machine is scheduling and running
 //!   nothing. That is a lost wakeup, or a userland that has stopped asking.
 //!
-//! **A sampled queue depth cannot do this and it is worth saying why**, because
-//! it is the obvious design and it is wrong: a woken task is dispatched within
-//! microseconds, so `ready=` sampled four times a second reads 0 on a healthy
-//! machine and 0 on a dead one. The signal is a rate, so the instrument has to
-//! be a counter.
+//! **The signal is a rate, so the instrument is a counter and not a sampled
+//! queue depth**: a woken task is dispatched within microseconds, so `ready=`
+//! sampled four times a second reads 0 on a healthy machine and 0 on a dead
+//! one. What `ran=0` does not mean on its own is that nothing *could* run — a
+//! machine with genuinely nothing to do also runs nothing; cross-check it
+//! against the i8042 counter line, which says whether input was arriving
+//! meanwhile.
 //!
-//! What `ran=0` does **not** mean on its own: a machine with genuinely nothing
-//! to do also runs nothing. It is diagnostic because the laptop's desktop always
-//! has something — the compositor wakes about twice a second to blink a cursor,
-//! and every one of those is a dispatch — so a run of `ran=0` there is a
-//! machine that has stopped doing what it was doing. Cross-check it against the
-//! i8042 counter line, which says whether input was arriving meanwhile.
-//!
-//! # What it is evidence of, stated exactly
-//!
-//! A set bit says: that CPU took an interrupt, returned from `hlt`, and reached
-//! the top of a scheduler pass. The next tick is armed by the timer stub in
-//! assembly before any Rust runs, so one fire arms the next and the chain
-//! breaks only where a CPU stops taking interrupts — which is the thing being
-//! measured, not a step in measuring it.
-//!
-//! The hole it does **not** close: if every CPU's LAPIC timer stopped at once —
-//! a C-state that parks the APIC timer, an SMI storm — the log would go silent
+//! The hole none of it closes: if every CPU's LAPIC timer stopped at once — a
+//! C-state that parks the APIC timer, an SMI storm — the log would go silent
 //! and read as death. The kernel only ever executes `hlt`, never `MWAIT`, and
-//! programs no C-state MSR, so the timers should keep counting; but the laptop's
-//! firmware is not ours. So a log that stops means *the machine stopped taking
-//! timer interrupts*, which is weaker than *the machine died* and should be
-//! written down as the weaker claim. `gap=` is what tells the two apart after
+//! programs no C-state MSR, so the timers should keep counting; but the
+//! laptop's firmware is not ours. So a log that stops means *the machine
+//! stopped taking timer interrupts*, which is weaker than *the machine died*
+//! and is written down as the weaker claim. `gap=` tells the two apart after
 //! the fact: a machine that went quiet and came back says so on the line that
 //! resumes.
 //!
 //! # Where it runs
 //!
-//! [`poll`] is called from `sched::driver::idle_loop`. It used to sit
-//! immediately before `log_file::poll` so its line was flushed by the very next
-//! statement, with the pre-halt recheck keeping the CPU awake until it was.
-//! **Neither exists since log architecture L6**, and the placement needs
-//! neither: a heartbeat is an ordinary record now, so `emit` posts `klogd`'s
-//! wake at the commit and the halt is refused by the doorbell like any other
-//! runnable task's. No second flush mechanism, and nothing here waits on a
-//! lock: a heartbeat that could block would be a diagnostic that stops for the
-//! reason it exists to report. The one
-//! lock in reach is the I/O APIC topology, behind `i8042::report_line`'s
-//! `try_lock`, which prints `rte=busy` rather than waiting.
+//! [`poll`] is called from `sched::driver::idle_loop`. **Nothing here waits on
+//! a lock**: a heartbeat that could block would be a diagnostic that stops for
+//! the reason it exists to report. The one lock in reach is the I/O APIC
+//! topology, behind `i8042::report_line`'s `try_lock`, which prints `rte=busy`
+//! rather than waiting.
 //!
 //! # The line beside it
 //!
-//! `alive=` and `ran=` answer *is the machine running* and *is it running
-//! anything*. On the laptop they leave one question they cannot reach: a desktop
-//! that is alive, has nothing to do and never will again, because the one
-//! channel that could give it something has stopped. Four boots of 2026-08-07
-//! end at the same `spawn:` line with every CPU quiescent, and a fifth had no
-//! keyboard at all by the driver's own fail-closed decision — the same file
-//! either way. So [`crate::drivers::i8042::report_line`] prints the state of
+//! `alive=` and `ran=` cannot reach a desktop that is alive, has nothing to do
+//! and never will again because the one channel that could give it something
+//! has stopped. So [`crate::drivers::i8042::report_line`] prints the state of
 //! the pin beside every heartbeat: the controller's status byte and both
 //! redirection entries, raw. `alive=8/8 ran=0` above `status=0x15` is a
 //! controller holding a byte nobody will ever read; above a masked entry it is
@@ -118,26 +68,22 @@
 //!
 //! # What is deliberately not here
 //!
-//! A heartbeat that **summons the dump by itself** when a CPU has been missing
-//! from the mask for several periods. It is the obvious next step for the
-//! deaf-CPU reading — it would turn `cpu0 last reached one 4.2s ago` into a
-//! symbolised `rip` through `dump::probe_silent`'s NMI with no keystroke needed
-//! — and `dump::request` is reachable from here as written, at preempt count 0
-//! holding nothing. It is not built because it cannot be gated: `dump-deaf-cpu`
-//! stages a 400 ms window and calls `request()` itself, so it can neither reach
-//! a multi-period threshold nor let a test attribute the resulting dump. The
-//! owner reflashes once, and an ungated path in that image is worth less than
-//! the resolution it would add. Whoever picks it up builds the actuator first.
+//! A heartbeat that summons the dump by itself when a CPU has been missing from
+//! the mask for several periods, though `dump::request` is reachable from here
+//! as written, at preempt count 0 holding nothing. It cannot be gated:
+//! `dump-deaf-cpu` stages a 400 ms window and calls `request()` itself, so it
+//! can neither reach a multi-period threshold nor let a test attribute the
+//! resulting dump.
 //!
 //! # Cost
 //!
 //! Four lines a second, about 60 bytes each, each of which `/bin/logd` writes
 //! and `fsync`s — a device cache flush of whatever `/log` sits on. Against its
-//! 1 MiB rotation that is a new part roughly every 70 minutes and sixteen kept, so a diagnostic
-//! session of any length anyone will sit through fits. **That is a diagnostic
-//! budget and not a shipping one**, which is why the shipping kernel does not
-//! carry this module at all — and with `diag-tick` under it, the instrument is
-//! no longer a passive observer of the boot it is watching.
+//! 1 MiB rotation that is a new part roughly every 70 minutes and sixteen kept.
+//! **That is a diagnostic budget and not a shipping one**, which is why the
+//! shipping kernel does not carry this module at all — and with `diag-tick`
+//! under it, the instrument is no longer a passive observer of the boot it is
+//! watching.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -200,8 +146,7 @@ pub fn note_dispatch() {
     }
 }
 
-/// Emit a heartbeat if one is due. Called from the idle loop, immediately
-/// before the log sink's own poll.
+/// Emit a heartbeat if one is due. Called from the idle loop.
 pub fn poll() {
     if !crate::actuator::heartbeat() {
         return;
@@ -234,8 +179,8 @@ pub fn poll() {
     }
 
     // Sampled once and kept, because the summary and the lines below it are one
-    // reading: taking each CPU's stamp twice let a mask that named a CPU silent
-    // sit above a line saying that CPU had just run.
+    // reading: a second read of a CPU's stamp can put a mask that names it
+    // silent above a line saying it had just run.
     let mut stamps = [0u64; MAX_CPUS];
     let mut mask = 0u64;
     let mut alive = 0u32;
