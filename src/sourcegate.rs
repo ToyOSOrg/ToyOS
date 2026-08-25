@@ -339,6 +339,28 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
     ("kernel/src/panic.rs", 2),
 ];
 
+/// Every hand-written `Send`/`Sync` impl `kernel/src` holds, by file and count.
+///
+/// One of these stops the compiler re-deriving the bound, so a field added
+/// later that is not `Send` — a raw pointer, an `Rc`, a `Cell` — keeps
+/// compiling with nobody asked. Per file *and* per count, so an added impl
+/// reds beside a permitted one and a deleted one reds its own stale row.
+const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
+    ("kernel/src/completion/inbox.rs", 1),
+    ("kernel/src/drivers/hda.rs", 1),
+    ("kernel/src/drivers/panic_console/mod.rs", 2),
+    ("kernel/src/drivers/virtio_console.rs", 1),
+    ("kernel/src/drivers/virtio_sound.rs", 2),
+    ("kernel/src/hw.rs", 1),
+    ("kernel/src/mm/mmio.rs", 2),
+    ("kernel/src/mm/region.rs", 2),
+    ("kernel/src/pipe.rs", 1),
+    ("kernel/src/process.rs", 1),
+    ("kernel/src/sched/driver.rs", 2),
+    ("kernel/src/symbols.rs", 2),
+    ("kernel/src/trace.rs", 1),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +438,59 @@ mod tests {
              reads nothing out of the text, so a marker put back into a message marks \
              nothing.\n{}",
             complaints.join("\n")
+        );
+    }
+
+    /// **A `Send`/`Sync` the compiler can derive is the compiler's to derive.**
+    /// A hand-written one is a standing exemption from that re-derivation, so
+    /// every one the kernel keeps is named here with the count its file holds.
+    #[test]
+    fn every_hand_written_auto_trait_impl_is_declared() {
+        let mut found: Vec<(String, usize)> = Vec::new();
+        for (file, _, line) in kernel_lines() {
+            let code = code_only(&line);
+            let code = code.trim_start();
+            if !code.starts_with("unsafe impl Send for")
+                && !code.starts_with("unsafe impl Sync for")
+            {
+                continue;
+            }
+            match found.last_mut() {
+                Some((last, count)) if *last == file => *count += 1,
+                _ => found.push((file, 1)),
+            }
+        }
+        assert!(
+            !found.is_empty(),
+            "the scan found no hand-written impl at all, so it is reading no tree"
+        );
+
+        let mut complaints = Vec::new();
+        for (file, count) in &found {
+            match AUTO_TRAIT_IMPLS.iter().find(|(f, _)| f == file) {
+                Some((_, want)) if want == count => {}
+                Some((_, want)) => complaints.push(format!(
+                    "{file} hand-writes {count} `Send`/`Sync` impls where this table declares \
+                     {want}"
+                )),
+                None => complaints.push(format!(
+                    "{file} hand-writes {count} `Send`/`Sync` impls and is not in this table"
+                )),
+            }
+        }
+        for (file, want) in AUTO_TRAIT_IMPLS {
+            if !found.iter().any(|(f, _)| f == file) {
+                complaints.push(format!(
+                    "{file} no longer hand-writes the {want} impls declared here, so the row is \
+                     stale"
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "a hand-written `Send`/`Sync` is a bound the compiler stops checking on every later \
+             field, so each one is a row somebody wrote on purpose.\n{}",
+            complaints.join("\n"),
         );
     }
 
