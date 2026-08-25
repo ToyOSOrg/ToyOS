@@ -634,8 +634,8 @@ fn allowlist_selftest(stream_offset: u64) {
 /// `None` for every way a function can fail to be one: an I/O BAR, an
 /// unassigned or undersized window, a register window that answers all ones, a
 /// controller that will not reset, and a link with no codec on it. Each says
-/// which, because on the machine this targets `STATESTS` reading zero is the
-/// answer that ends the whole plan (§6.3) and it must not look like a driver
+/// which, because on the machine this targets `STATESTS` reading zero means
+/// there is no codec to drive at all, and that must not look like a driver
 /// that gave up.
 fn probe(pci: &PciDevice) -> Option<(Mmio, u16, u16)> {
     let low = pci.read_config_u32(HEADER_BAR0);

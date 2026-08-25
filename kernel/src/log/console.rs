@@ -79,7 +79,7 @@ pub enum Drain {
     /// no CPU reaches a scheduler pass before the two statements after it.
     Inline,
     /// `klogd`, made runnable at the commit of the record it will drain, by the
-    /// producer's own `wake_direct` (§2.6a).
+    /// producer's own `wake_direct`.
     ///
     /// **So the last line before a quiet period is evidence.** What puts a
     /// record on the wire is its own commit and nothing else — not the idle
@@ -132,7 +132,7 @@ pub fn start() {
 ///
 /// Called from `emit`, after the publication bracket has closed and the
 /// caller's RFLAGS are back — so this is a *second* bracket of the same kind
-/// and not the one §2.3a argues for.
+/// and not the reservation-and-publication bracket itself.
 pub fn post_wake() {
     let ptr = KLOGD.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -243,7 +243,7 @@ pub fn drain_locked(guard: &mut BackendGuard) {
 /// It is deliberately **not** in [`drain_inline`], whose other two callers are a
 /// producer mid-`emit` and a panicking machine: a `Drain::Inline` boot with no
 /// console would then walk every shard per record, which is exactly the cost
-/// §4.2 gates that mode on `has_console()` to avoid.
+/// gating that mode on `has_console()` avoids.
 fn discard_pending() {
     let mut cursor = DRAINED.take();
     let mut sink = Discard;

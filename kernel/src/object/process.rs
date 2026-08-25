@@ -44,9 +44,8 @@ pub struct ProcessObject {
     /// across its park, so the watch it names cannot outlive its subject.
     ///
     /// **One waiter set where there were two.** The `KWaitQueue` beside this
-    /// went with the park it served: after §5.6 a thread arms here and parks
-    /// on its own queue, so a second list on the object had nothing left in
-    /// it.
+    /// went with the park it served: a thread arms here and parks on its own
+    /// queue, so a second list on the object had nothing left in it.
     watch: Watch,
 }
 

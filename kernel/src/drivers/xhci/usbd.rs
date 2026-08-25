@@ -10,15 +10,13 @@
 //! **What it will own, and what it owns now.** C7 moves `poll_if_pending` off
 //! `drain_irqs` and onto this thread, C9 hands it the i8042's verdict as a
 //! deadline park and the polled-device shape that goes with it, and both need
-//! `XHCI` to be a `SleepLock` — which is C7+C8's, because a lock converted alone
-//! parks with the other three still ticket locks (§21.1). Until then the body
+//! `XHCI` to be a `SleepLock`, because a lock converted alone parks with the
+//! other three still ticket locks. Until then the body
 //! below is one park: the thread exists, it is scheduled, it is named in
-//! `ps` and in Ctrl+Alt+D, and its panic row says what a panic in it costs. That
-//! is C6's whole deliverable and §21 states it in those words — "C6 spawns
-//! `usbd` and `iod` on existing machinery".
+//! `ps` and in Ctrl+Alt+D, and its panic row says what a panic in it costs.
 //!
-//! **Spawned on every machine, including one with no xHCI at all.** §10's
-//! cardinality is one of each, machine-wide; a controller-less machine gets a
+//! **Spawned on every machine, including one with no xHCI at all.** There is
+//! one of each kernel thread, machine-wide; a controller-less machine gets a
 //! thread with nothing to do, which is the same thing every machine has until
 //! C7 and costs one 16 KiB kernel stack. Making the spawn conditional would put
 //! a second answer to "how many kernel threads does this machine have" in the
@@ -59,7 +57,7 @@ extern "C" fn body(_arg: u64) -> ! {
 
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("usbd runs as a task");
-    // Armed once and held across the loop, which is §5.3a's edge contract: a
+    // Armed once and held across the loop, which is the edge contract: a
     // post that lands while this thread is doing its step must find the watch
     // still armed, and an arm consumed per wait would lose exactly that wake.
     let armed = completion::arm(

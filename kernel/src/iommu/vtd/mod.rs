@@ -69,8 +69,8 @@ const ROOT_TABLE_SET: u32 = 1 << 30;
 /// How long a `GCMD` write is given to appear in `GSTS`.
 ///
 /// Not a measurement: it is the bound past which the kernel stops waiting for
-/// hardware that is not answering. Expiry is a panic for the same reason §5.5
-/// gives for an unacknowledged invalidation — a unit half-way through being
+/// hardware that is not answering. Expiry is a panic for the same reason an
+/// unacknowledged invalidation is — a unit half-way through being
 /// enabled is a unit whose reach nothing can state.
 const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(1),
@@ -103,7 +103,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
         Ok(dmar) => dmar,
         // Firmware omits the table both when the platform has no VT-d silicon
         // and when VT-d is switched off in firmware setup, and ACPI cannot
-        // separate the two. §2.2: probing a hardcoded MCHBAR-relative window
+        // separate the two. Probing a hardcoded MCHBAR-relative window
         // to tell them apart is exactly the model-table guessing this project
         // bans, so the line names both and names the setting.
         Err(TableError::Absent) => {
@@ -131,8 +131,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
 
     let mut units = 0usize;
     let mut regions = 0usize;
-    // One identity domain for the whole machine (§5.1's passthrough domain,
-    // built out of page tables because §8.1 found `ECAP.PT` clear). Its depth
+    // One identity domain for the whole machine, built out of page tables
+    // because the units in reach report `ECAP.PT` clear. Its depth
     // is the unit's, so a machine whose units disagree about `CAP.SAGAW` gets
     // one set of tables per width rather than one shared set programmed at the
     // wrong depth.
@@ -149,10 +149,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
                 }
                 units += 1;
             }
-            // §7.4: a kernel-owned device is in the passthrough domain and its
+            // A kernel-owned device is in the passthrough domain and its
             // reserved regions are satisfied for free, and a device carrying
-            // one is refused for userspace handoff. Both are I4's decisions;
-            // here the region is reported so that a machine which has one says
+            // one is refused for userspace handoff. Here the region is reported
+            // so that a machine which has one says
             // so on its first boot. QEMU publishes none, so this arm is
             // untestable in the harness and the laptop is its first exercise.
             Ok(Structure::Rmrr(rmrr)) => {
@@ -193,15 +193,14 @@ struct Unit {
     base: u64,
     regs: Mmio,
     caps: Capabilities,
-    /// What has been switched on in `GCMD`. §6.3: the register is not
+    /// What has been switched on in `GCMD`. The register is not
     /// read-modify-write safe — a write names every persistent bit that is to
     /// stay set — so this is the only record of which those are.
     gcmd: u32,
 }
 
 impl Unit {
-    /// Set one `GCMD` bit and wait for `GSTS` to agree (§6.3, one bit at a
-    /// time).
+    /// Set one `GCMD` bit and wait for `GSTS` to agree — one bit at a time.
     fn command(&mut self, bit: u32, persistent: bool, status: u32, what: &str) {
         self.regs.write_u32(GCMD_REG, self.gcmd | bit);
         if persistent {
@@ -250,7 +249,7 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
     };
 
     let version = regs.read_u32(VER_REG);
-    // §2.2 row 2, and the one case here that is distinguishable from "no unit
+    // The one case here that is distinguishable from "no unit
     // at all": firmware described a unit whose window does not decode, either
     // because it is a firmware bug or because the unit was left powered down.
     if version == u32::MAX || (version >> 4) & 0xF == 0 {
@@ -273,8 +272,8 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
         caps.cap,
         caps.ecap,
         // The one decision on this line rather than a register field: the
-        // widest of 48 and 39 the unit advertises (§5.3). A unit offering
-        // neither is §2.2's last row, and at I5 it is a refusal.
+        // widest of 48 and 39 the unit advertises, and a unit offering neither
+        // is refused.
         match caps.address_width() {
             Some(aw) => aw.bits(),
             None => 0,
@@ -301,13 +300,14 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
 
 /// Program this unit and turn translation on.
 ///
-/// The order is §6.3's, minus the interrupt-remapping half that is I3's: the
-/// invalidation queue first, then the root table pointer, then a global
+/// The order is the unit's own, minus the interrupt-remapping half this kernel
+/// does not program yet: the invalidation queue first, then the root table
+/// pointer, then a global
 /// invalidation of everything the unit may have cached, and only then `TE`.
 /// Each step is confirmed in `GSTS` before the next is issued.
 ///
 /// A capability this kernel needs and the unit does not have leaves it
-/// switched off, with a line naming the register. That is I5's refusal one
+/// switched off, with a line naming the register. That is the refusal one
 /// stage early in everything but severity: the machine boots exactly as it
 /// does today, because what a unit that is never enabled does to DMA is
 /// nothing.
@@ -373,7 +373,7 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
             }
         };
 
-        // §5.1: every function `pci::enumerate` returned, before translation is
+        // Every function `pci::enumerate` returned, before translation is
         // enabled. Enabling it with a device on the bus that has no context
         // entry is how a machine bricks its own boot disk — and the corollary
         // still holds, that a device appearing after boot has none and faults.
@@ -391,7 +391,7 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
             // first *read*, which is deliberate: QEMU caches a translation
             // with the permissions of the access that populated it and lets
             // its memory core drop a later access the entry does not allow,
-            // silently and with no fault (measured — §8.2). A control that
+            // silently and with no fault. A control that
             // waited for a device's first write would therefore hang the boot
             // instead of faulting.
             if crate::actuator::iommu_context_absent()
@@ -505,7 +505,7 @@ fn log_scope(owner: &str, index: usize, scope: &Scope) {
 
 /// `CAP` and `ECAP`, read once and decoded on demand.
 ///
-/// §4.2: read once at init, logged once, and then never re-read. Holding the
+/// Read once at init, logged once, and then never re-read. Holding the
 /// two raw values and deriving from them is what makes that true — a decode
 /// that went back to the register per field would be re-reading it a dozen
 /// times per boot.
@@ -520,8 +520,8 @@ impl Capabilities {
         1u32 << (4 + 2 * (self.cap & 0x7))
     }
 
-    /// `CAP.CM`. Read for the log line only: §5.5 invalidates after every
-    /// table modification in both directions and refuses to branch on this,
+    /// `CAP.CM`. Read for the log line only: this kernel invalidates after
+    /// every table modification in both directions and refuses to branch on it,
     /// because the arm a machine in reach does not execute is the arm that is
     /// wrong when somebody finally runs it.
     fn caching_mode(&self) -> bool {
@@ -536,8 +536,8 @@ impl Capabilities {
 
     /// The widest depth this kernel implements that the unit advertises.
     ///
-    /// `None` is a unit offering neither, which §2.2 refuses at I5. 57-bit is
-    /// not considered even when advertised: §10.5, a fifth level of page
+    /// `None` is a unit offering neither, which is a refusal. 57-bit is
+    /// not considered even when advertised: it is a fifth level of page
     /// tables for an address space nothing here needs, and an unused level is
     /// an untested one.
     fn address_width(&self) -> Option<AddressWidth> {
@@ -552,13 +552,13 @@ impl Capabilities {
     }
 
     /// `CAP.MGAW`: the widest address the unit will accept, encoded one less
-    /// than it is. It bounds every IOVA, so §5.3's base is only usable if it
-    /// fits under this.
+    /// than it is. It bounds every IOVA, so an address width is only usable if
+    /// it fits under this.
     fn mgaw(&self) -> u8 {
         (((self.cap >> 16) & 0x3F) + 1) as u8
     }
 
-    /// `CAP.SPS` bit 0: 2 MiB leaf entries. §5.4 requires it, because the
+    /// `CAP.SPS` bit 0: 2 MiB leaf entries. Required, because the
     /// kernel is 2 MiB-page-only and a 4 KiB-leaf path would be 512× the
     /// page-table memory for the same mapping and dead code on every machine
     /// in reach.
@@ -582,7 +582,7 @@ impl Capabilities {
         ((self.cap >> 24) & 0x3FF) * 16
     }
 
-    /// `ECAP.C`: page-table walks snoop the CPU cache. §5.2 reads it for this
+    /// `ECAP.C`: page-table walks snoop the CPU cache. Read for this
     /// log line and for nothing else — the flush is unconditional, because the
     /// `C=0` arm is one no machine anybody here can boot would execute.
     fn coherent(&self) -> bool {
@@ -595,7 +595,7 @@ impl Capabilities {
         self.ecap & (1 << 1) != 0
     }
 
-    /// `ECAP.IR`: this unit can remap interrupts. §6.1 is why its absence is a
+    /// `ECAP.IR`: this unit can remap interrupts. Its absence is a
     /// refusal rather than a reduced mode — without remapping, a driver
     /// process with a mapped BAR can inject an arbitrary vector.
     fn interrupt_remapping(&self) -> bool {
@@ -618,7 +618,7 @@ impl Capabilities {
     }
 
     /// `ECAP.PT`: a context entry may name passthrough translation, which is
-    /// what every kernel-owned device gets (§5.7). Absent means those devices
+    /// what every kernel-owned device gets. Absent means those devices
     /// get identity-mapped translated domains instead: same protection, more
     /// page tables.
     fn passthrough(&self) -> bool {
