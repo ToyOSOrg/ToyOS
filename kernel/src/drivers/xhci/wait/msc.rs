@@ -38,10 +38,9 @@ use crate::log;
 use crate::scheduler::Operation;
 use crate::time::{Budget, Deadline, Duration};
 use super::super::device::Endpoint;
-use super::{Owed, Restart};
+use super::{Owed, Quiet, Restart};
 use super::super::{with_disk, Disk, StorageGeometry, Trb, TrbRing, XhciController, PAGE};
 use super::super::{CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_CTX};
-use super::super::USB_TIMEOUT_NS;
 use super::super::{MSC_IN_RING, MSC_OUT_RING, MSC_CBW, MSC_CSW, MSC_SCRATCH, MSC_SCRATCH_LEN};
 use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS};
 
@@ -211,8 +210,8 @@ enum Bot {
 enum Broke {
     /// The controller reported this completion code for the named phase.
     Code { phase: &'static str, code: u32 },
-    /// Nothing came back for the named phase inside the transfer budget.
-    Silence { phase: &'static str },
+    /// Nothing came back for the named phase, for [`Quiet`]'s reason.
+    Silence { phase: &'static str, why: Quiet },
     /// The phase completed and moved the wrong number of bytes. A command block
     /// and a status block are fixed-length structures, so a short one is not a
     /// short transfer — it is a device that did not take the whole thing.
@@ -235,11 +234,7 @@ impl core::fmt::Display for Broke {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Code { phase, code } => write!(f, "{phase} phase completion code {code}"),
-            Self::Silence { phase } => write!(
-                f,
-                "no answer in the {phase} phase in {} ms",
-                USB_TIMEOUT_NS / 1_000_000
-            ),
+            Self::Silence { phase, why } => why.about(phase, "phase", f),
             Self::Short { phase, moved, wanted } => {
                 write!(f, "{phase} phase moved {moved} of {wanted} B")
             }
@@ -362,6 +357,7 @@ pub(in crate::drivers::xhci) mod reset_break {
 pub(in crate::drivers::xhci) mod short_read {
     use core::sync::atomic::{AtomicBool, Ordering};
 
+    use super::Quiet;
     use crate::mm::Dma;
 
     /// How many bytes at the end of the buffer the controller is made not to
@@ -403,12 +399,12 @@ pub(in crate::drivers::xhci) mod short_read {
     pub fn release(
         dma: Dma<'static>,
         held: Option<Held>,
-        completion: Option<(u32, u32)>,
-    ) -> Option<(u32, u32)> {
+        completion: Result<(u32, u32), Quiet>,
+    ) -> Result<(u32, u32), Quiet> {
         let Some(held) = held else { return completion };
         let (code, residue) = completion?;
         dma.copy_from(held.at, &held.bytes);
-        Some((code, residue + SHORT_BY))
+        Ok((code, residue + SHORT_BY))
     }
 }
 
@@ -895,14 +891,14 @@ impl XhciController {
             // on a 512-byte endpoint is. With no residue behind it the whole
             // block arrived, and reading the code alone would make a complete
             // status phase an error.
-            Some((CC_SUCCESS | CC_SHORT_PACKET, 0)) => Ok(()),
-            Some((CC_SUCCESS | CC_SHORT_PACKET, residue)) => Err(Broke::Short {
+            Ok((CC_SUCCESS | CC_SHORT_PACKET, 0)) => Ok(()),
+            Ok((CC_SUCCESS | CC_SHORT_PACKET, residue)) => Err(Broke::Short {
                 phase: what,
                 moved: len.saturating_sub(residue),
                 wanted: len,
             }),
-            Some((code, _)) => Err(Broke::Code { phase: what, code }),
-            None => Err(Broke::Silence { phase: what }),
+            Ok((code, _)) => Err(Broke::Code { phase: what, code }),
+            Err(why) => Err(Broke::Silence { phase: what, why }),
         }
     }
 
@@ -961,21 +957,21 @@ impl XhciController {
             #[cfg(feature = "boot-actuators")]
             let completion = short_read::release(dma, held, completion);
             match completion {
-                Some((CC_SUCCESS | CC_SHORT_PACKET, unmoved)) => {
+                Ok((CC_SUCCESS | CC_SHORT_PACKET, unmoved)) => {
                     moved = data_len.saturating_sub(unmoved);
                 }
                 // A stalled data phase is ordinary — an unsupported command
                 // or a read past the end stalls here — and the CSW still
                 // arrives once the endpoint is unhalted. Recovering and then
                 // reading the status is what turns it into a clean refusal.
-                Some((CC_STALL, unmoved)) => {
+                Ok((CC_STALL, unmoved)) => {
                     if !self.restart_bulk(dev, data_in) {
                         return Err(Broke::Stall { phase: "data" });
                     }
                     moved = data_len.saturating_sub(unmoved);
                 }
-                Some((code, _)) => return Err(Broke::Code { phase: "data", code }),
-                None => return Err(Broke::Silence { phase: "data" }),
+                Ok((code, _)) => return Err(Broke::Code { phase: "data", code }),
+                Err(why) => return Err(Broke::Silence { phase: "data", why }),
             }
         }
 
@@ -1038,7 +1034,7 @@ impl XhciController {
         in_dir: bool,
         phys: u64,
         len: u32,
-    ) -> Option<(u32, u32)> {
+    ) -> Result<(u32, u32), Quiet> {
         let (dci, ring) = if in_dir {
             (dev.in_dci, &mut dev.in_ring)
         } else {
@@ -1055,7 +1051,7 @@ impl XhciController {
         self.ring_doorbell(slot, dci);
         #[cfg(feature = "boot-actuators")]
         if transport_break::take() {
-            return None;
+            return Err(Quiet::Staged);
         }
         self.wait_transfer(slot, dci, at)
     }

@@ -29,9 +29,8 @@ Two invariants the built half rests on, worth not breaking:
 
 - The IF=0 deadlock class is closed **by the shootdown target polling, not by
   the initiator abstaining**. A spin lock that does not poll re-opens it.
-- `+smep` is on in both harness arms and **nothing asserts it**, so deleting the
-  argument is a silent regression
-  (`issues/build/smep-unasserted-anywhere.md`). `EFER.NXE` is deliberately not
-  in that class: `mmap_prot`'s `exec-heap` and `exec-stack` children die of that
-  bit, so a kernel that stopped setting it reds instead of quietly losing half
-  of W^X.
+- `+smep` is asserted now: `CR4.SMEP` is a required bit in `control_regs`'
+  table, so a launcher that stopped asking for it or a kernel that stopped
+  enabling it reds. `EFER.NXE` is covered a different way — `mmap_prot`'s
+  `exec-heap` and `exec-stack` children die of that bit — and the two together
+  are why neither half of W^X can now be lost quietly.

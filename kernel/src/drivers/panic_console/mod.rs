@@ -567,16 +567,46 @@ fn validate(fb: &Fb) -> bool {
     matches!(needed, Some(n) if fb.bytes >= n)
 }
 
-/// Whether the UEFI memory map hands `phys` to the PMM as free RAM.
+/// Whether the UEFI memory map hands any of `[phys, phys + size)` to the PMM as
+/// free RAM.
 ///
 /// A firmware GOP that is a shim over memory the kernel later re-owns would
 /// make the panic path a write into the heap. `pmm::is_usable` counts
 /// `BootServicesData` and `LoaderData` as free, so this is not hypothetical
 /// on firmware that allocates its scanout from boot services.
-fn framebuffer_is_reclaimed_ram(maps: &[MemoryMapEntry], phys: u64) -> Option<u32> {
-    let entry = maps.iter().find(|e| phys >= e.start && phys < e.end)?;
-    mm::pmm::is_usable_type(entry.uefi_type).then_some(entry.uefi_type)
+///
+/// **Every entry the range touches, because a range is not a byte.** UEFI
+/// describes memory one descriptor per contiguous run of one type (UEFI 2.10
+/// §7.2), so a scanout that starts in `MemoryMappedIO` and ends in a
+/// `BootServicesData` run is two descriptors and only the second is the hazard.
+const fn framebuffer_is_reclaimed_ram(
+    maps: &[MemoryMapEntry],
+    phys: u64,
+    size: u64,
+) -> Option<u32> {
+    let end = phys.saturating_add(if size == 0 { 1 } else { size });
+    let mut i = 0;
+    while i < maps.len() {
+        let entry = &maps[i];
+        if entry.start < end && phys < entry.end && mm::pmm::is_usable_type(entry.uefi_type) {
+            return Some(entry.uefi_type);
+        }
+        i += 1;
+    }
+    None
 }
+
+/// The gate's teeth, checked by the compiler on every build: a scanout whose
+/// first byte is `MemoryMappedIO` and whose tail runs into `BootServicesData`
+/// is PMM-owned RAM, and one that stops short of it is not.
+const _: () = {
+    const SPLIT: [MemoryMapEntry; 2] = [
+        MemoryMapEntry { uefi_type: 11, start: 0xE000_0000, end: 0xE080_0000 },
+        MemoryMapEntry { uefi_type: 4, start: 0xE080_0000, end: 0xE100_0000 },
+    ];
+    assert!(framebuffer_is_reclaimed_ram(&SPLIT, 0xE000_0000, 0x0100_0000).is_some());
+    assert!(framebuffer_is_reclaimed_ram(&SPLIT, 0xE000_0000, 0x0080_0000).is_none());
+};
 
 /// Arm the console from `KernelArgs`, before `serial::init`.
 ///
@@ -588,7 +618,9 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
         return;
     }
 
-    if let Some(uefi_type) = framebuffer_is_reclaimed_ram(maps, args.gop_framebuffer) {
+    if let Some(uefi_type) =
+        framebuffer_is_reclaimed_ram(maps, args.gop_framebuffer, args.gop_framebuffer_size)
+    {
         log!(
             "panic console: disarmed, framebuffer at {:#x} is UEFI type {} (PMM-owned RAM)",
             args.gop_framebuffer,
@@ -674,11 +706,17 @@ pub fn capture() {
         return;
     }
     // SAFETY: irreducible — `Rendered` is too large to be anything but a
-    // `static`, and the panic path may take no lock to guard it. Sound because
-    // `SNAPSHOT` is written here and nowhere else, and `capture` is called once
-    // per panic from the panic handler, which `panic::PANICKING` already
-    // serialises to one CPU; the readers (`fatal_text`) run after it on the same
-    // CPU, or on another that reaches them only through `PAINTING`.
+    // `static`, and the panic path may take no lock to guard it. `SNAPSHOT` is
+    // written here and nowhere else, and the readers (`fatal_text`) run after it
+    // on the same CPU or on another that reaches them only through `PAINTING`.
+    // **Nothing serialises the writers**: the panic handler's guards are all
+    // per-CPU, both panicking CPUs take `cli` first so neither takes the other's
+    // halt IPI, and two can be inside this at once. What bounds that is the
+    // shape rather than a latch — same ring, `len` read once into a local — so
+    // the indices stay in bounds and the worst case is one screen carrying two
+    // interleaved reports;
+    // `issues/panic-path/panic-capture-unlatched.md` is open against exactly
+    // that, and says the `PAINTING` shape extends here when it is ever seen.
     let into = unsafe { &mut *SNAPSHOT.0.get() };
     CAPTURED.store(into.render(0, u64::MAX) > 0, Ordering::Relaxed);
 }

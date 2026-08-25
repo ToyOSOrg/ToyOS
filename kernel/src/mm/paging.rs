@@ -540,22 +540,6 @@ pub struct AddressSpace {
     pcid: u16,
 }
 
-// SAFETY: open question, not resolved by this comment — every field here
-// (`Box<PageTablePage>`, `Vec<Box<PageTablePage>>`, `HashMap<u64, PhysPage>`,
-// `BTreeMap<UserAddr, Region>`, `u16`) is composed of types already `Send` +
-// `Sync` (transitively — `RegionKind::FileBacked` holds `Arc<dyn
-// FileBacking>` and `FileBacking: Send + Sync` is a supertrait, so the trait
-// object inherits both), and `cargo check` with both impls below deleted
-// still compiles clean. These look vestigial rather than load-bearing — the
-// same finding as `object::shm::Pages`, filed together as
-// issues/kernel/redundant-send-sync-impls-mm-object.md rather than removed
-// here: if that holds, a later field that broke auto-`Send` would silently
-// re-inherit these hand-written impls with no new justification, which is a
-// real hazard for a type built entirely out of raw physical addresses.
-unsafe impl Send for AddressSpace {}
-// SAFETY: see the `Send` impl above — same open question, same evidence.
-unsafe impl Sync for AddressSpace {}
-
 /// What a range already in `regions` runs into — [`AddressSpace::occupancy`].
 ///
 /// A *placed* mapping names its own range instead of taking a free one from

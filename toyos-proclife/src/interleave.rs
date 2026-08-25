@@ -195,11 +195,12 @@ impl Op {
                         *post = Some(on);
                         *pc = 1;
                     }
-                    // `process::thread_exit` panics the kernel here today —
-                    // `issues/kernel/main-thread-exit-unwraps-a-reaped-entry.md`.
-                    // The schedule that reaches it is what
-                    // `tests::a_thread_exit_can_reach_a_reaped_entry` counts.
-                    teardown::ThreadExit::NoEntry => *pc = DONE,
+                    // The entry went under this thread; the zombie mark has
+                    // nothing to write and the rest is a sibling's exit.
+                    teardown::ThreadExit::Gone { post: on } => {
+                        *post = Some(on);
+                        *pc = 2;
+                    }
                     // The explorer scripts a sibling; a main thread's exit is
                     // `Op::Exit`.
                     teardown::ThreadExit::Process => *pc = DONE,
@@ -396,17 +397,11 @@ mod tests {
         }
     }
 
-    /// **A standing defect, reached rather than argued about.**
-    /// `process::thread_exit` reads `table.get(process_pid).unwrap()`, and this
-    /// enumerates a schedule in which that entry is gone: a kill publishes the
-    /// exit, an idle pass takes the entry, and a sibling that was already on
+    /// **A thread whose entry went under it still finishes its own exit**: a
+    /// kill publishes, an idle pass takes the entry, and a sibling already on
     /// its way into `SYS_THREAD_EXIT` arrives after both.
-    ///
-    /// `issues/kernel/main-thread-exit-unwraps-a-reaped-entry.md` is open
-    /// against it and this test does not fix it — it holds the reachability, so
-    /// the entry cannot be closed by an argument that the state cannot happen.
     #[test]
-    fn a_thread_exit_can_reach_a_reaped_entry() {
+    fn a_thread_exit_that_outlived_its_entry_still_leaves() {
         let mut world = World::new();
         let pid = world.spawn_process();
         let sibling = world.spawn_thread(pid);
@@ -423,8 +418,23 @@ mod tests {
 
         assert_eq!(
             teardown::route_thread_exit(&world, pid, sibling),
-            teardown::ThreadExit::NoEntry,
-            "a thread whose process was reaped under it reaches the unwrap",
+            teardown::ThreadExit::Gone { post: Watch::Thread(pid, sibling) },
+            "a thread whose process was reaped under it leaves by the sibling door",
         );
+
+        // The route is not the end of the exit: a thread routed to a state its
+        // caller does not survive stops here, and one out of the sibling door
+        // still has its post and its retire to run.
+        let mut exit = Op::thread_exit(pid, sibling, 0);
+        exit.step(&mut world);
+        assert!(
+            !exit.done(),
+            "the exit ended at its routing section: a thread whose entry went under it \
+             still has to post and retire, and one that stops here is the machine \
+             stopping with it",
+        );
+        while !exit.done() {
+            exit.step(&mut world);
+        }
     }
 }
