@@ -652,7 +652,7 @@ userland/toybox/src/echo.rs 0 0
 userland/toybox/src/free.rs 0 0
 userland/toybox/src/grep.rs 0 0
 userland/toybox/src/hexdump.rs 14 0
-userland/toybox/src/locale.rs 33 0
+userland/toybox/src/locale.rs 39 0
 userland/toybox/src/ls.rs 0 0
 userland/toybox/src/main.rs 0 0
 userland/toybox/src/mkdir.rs 0 0
