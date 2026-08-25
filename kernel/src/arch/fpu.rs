@@ -3,9 +3,7 @@
 //! **The invariant**: a transition out of Ring 3 that can reach another task
 //! saves and restores the whole of it, and a task that has never run in Ring 3
 //! starts from a *declared* state rather than from whatever the hardware's init
-//! instruction leaves. This file owns the x86-64 half of that — eventually
-//! `arch/x86_64/fpu.rs`, once the architecture split this tree owes actually
-//! happens.
+//! instruction leaves. This file owns the x86-64 half of that.
 
 use crate::log;
 
@@ -184,10 +182,8 @@ unsafe fn xgetbv0() -> u64 {
 ///
 /// Per CPU rather than once for the machine: a thread that migrates between two
 /// CPUs disagreeing about `XCR0` faults on an instruction that worked a moment
-/// ago. `CR0` and `CR4` were here too and are now
-/// [`control_regs`](super::control_regs)' line, which prints them beside this
-/// one and asserts on them — that they differ between CPUs is no longer an open
-/// question this has to keep asking.
+/// ago. `CR0` and `CR4` are [`control_regs`](super::control_regs)' line, which
+/// prints them beside this one and asserts on them.
 pub fn log_state() {
     let (max_leaf, _, _, _) = super::cpu::cpuid(0, 0);
     let (_, _, ecx1, _) = super::cpu::cpuid(1, 0);

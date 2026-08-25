@@ -45,8 +45,8 @@ pub const HDA_VECTOR: u8 = Vector::Hda as u8;
 /// reason.
 pub const VIRTIO_SOUND_VECTOR: u8 = Vector::VirtioSound as u8;
 
-/// The vector `log-nested-emit` sends itself (§9.2), and the one gate that is
-/// not in the table below.
+/// The vector `log-nested-emit` sends itself, and the one gate that is not in
+/// the table below.
 ///
 /// **It is installed only in a kernel built with `boot-actuators`**, after
 /// `install_gates`, because nothing but that actuator can ever raise it: a
@@ -132,8 +132,6 @@ struct IdtPointer {
     limit: u16,
     base: u64,
 }
-
-// Unified trap frame — contiguous struct for all exception state
 
 /// Complete CPU state at exception entry. Pushed by stub + common_entry + CPU.
 /// Layout (lowest address = first field):
@@ -289,8 +287,7 @@ macro_rules! direct_gate {
 
 // Every vector Intel names for 64-bit mode has a gate, because a vector without
 // one does not fault the process: the CPU takes the missing gate as a second,
-// contributory fault and escalates to #DF, which halts the machine. A userland
-// `div` by zero did exactly that.
+// contributory fault and escalates to #DF, which halts the machine.
 //
 // The ones Intel reserves — 9, 15 and 22..=31 — are left out on purpose:
 // nothing can deliver them, and `from_raw`'s panic is the honest answer if one
@@ -364,8 +361,8 @@ idt_vectors! {
 /// nothing else, so `arch::syscall`'s entry runs three instructions at CPL 0 on
 /// the user's stack and its exit one more between `pop rsp` and `sysretq`; a
 /// frame the CPU builds there is a supervisor write to a user page, SMAP refuses
-/// it, and the `#PF` escalates to `#DF` (measured 2026-08-22 with `TF`, then
-/// masked). `#DF` is on the list because it is where that escalation lands, NMI
+/// it, and the `#PF` escalates to `#DF`. `#DF` is on the list because it is
+/// where that escalation lands, NMI
 /// because nothing masks it, `#MC` because an abort with no report is a machine
 /// that went down saying nothing.
 ///
@@ -411,10 +408,9 @@ extern "sysv64" fn stub_halt_all() {
 /// Every exception vector's second half, #PF included.
 ///
 /// It reaches [`kernel_exit_to_user_check`] and therefore `do_preempt`, so a
-/// fault taken from Ring 3 can return through another task — and until this
-/// bracket existed it did so carrying whatever that task left in the registers.
-/// A demand-paging fault corrupting XMM produces a wrong number rather than a
-/// signal, which is why nothing had noticed.
+/// fault taken from Ring 3 can return through another task: without the bracket
+/// it would carry whatever that task left in the registers, and a demand-paging
+/// fault that corrupts XMM produces a wrong number rather than a signal.
 ///
 /// `rdi` is taken before the bracket because the bracket moves `rsp`: the frame
 /// [`trap_dispatch`] is handed is the one the pushes above built, and the CS
@@ -464,8 +460,8 @@ extern "sysv64" fn common_entry() {
 /// difference is a thread reaching Ring 3 after it was killed.** The loop below
 /// re-enables interrupts and gives this CPU away for a whole pass; a retire
 /// landing in that window — and the retire's kick is a targeted IPI aimed at
-/// exactly this CPU — was observed by nothing, because the one check had
-/// already run. So the check is the loop's own condition: it runs before every
+/// exactly this CPU — is invisible to a check that has already run. So the
+/// check is the loop's own condition: it runs before every
 /// pass and again after the last one, with IF=0, and the return to Ring 3 is
 /// the statement immediately after it.
 ///
@@ -512,17 +508,14 @@ fn flush_ring0_timer_fires_to_trace() {
 /// and halts. The two ahead of it are the exceptions that are not that — #DF
 /// and #MC are aborts with no instruction to return to.
 ///
-/// **#DB is on the default arm and used to have one of its own.** Vector 1 is
-/// reachable from Ring 3 by two ordinary instruction sequences — `INT1`, which
-/// is not subject to `INT n`'s DPL check against the gate, and an `RFLAGS.TF`
-/// a `popfq` sets — so it is a userland bug like `#BP` and `#UD` and ends the
-/// process the same way. It used to reach a debugger-session aid that logged a
-/// register dump, disarmed `DR7`/`DR6` and *returned to resume*: a Ring 3 trap
-/// walked kernel state and then carried on, and with `TF` still set it did so
-/// once per instruction for as long as the process ran. Nothing arms a
-/// watchpoint in this kernel — `arch::debug`'s tools were deleted before this —
-/// so the handler had no other caller and went with them. The gate stays: a
-/// vector without one escalates to `#DF`, which halts the machine.
+/// **#DB is on the default arm.** Vector 1 is reachable from Ring 3 by two
+/// ordinary instruction sequences — `INT1`, which is not subject to `INT n`'s
+/// DPL check against the gate, and an `RFLAGS.TF` a `popfq` sets — so it is a
+/// userland bug like `#BP` and `#UD` and ends the process the same way. Nothing
+/// in this kernel arms a watchpoint, so there is no handler that could disarm
+/// `DR7`/`DR6` and resume instead — and a Ring 3 trap that resumed with `TF`
+/// still set would come back once per instruction. The gate stays: a vector
+/// without one escalates to `#DF`, which halts the machine.
 extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("trap_dispatch");
@@ -593,9 +586,9 @@ pub fn init() {
     install_gates(&mut IDT.lock());
     #[cfg(feature = "boot-actuators")]
     install_actuator_gates(&mut IDT.lock());
-    // **The kernel this tree had until 2026-08-22**, and the negative control on
-    // vector 2's `ist 2`: the gate keeps its handler and its ring and loses the
-    // one byte that decides which stack the CPU builds the frame on.
+    // The negative control on vector 2's `ist 2`: the gate keeps its handler and
+    // its ring and loses the one byte that decides which stack the CPU builds
+    // the frame on.
     // Nothing on the host side can reach that state — the IDT is the guest's own
     // memory, and no QEMU device or machine property edits it.
     #[cfg(feature = "boot-actuators")]
