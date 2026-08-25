@@ -9,14 +9,14 @@ bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 114 0
 bootloader/src/main.rs 198 0
 examples/imgstat.rs 16 0
-kernel-loom/src/lib.rs 139 0
+kernel-loom/src/lib.rs 144 0
 kernel-loom/tests/i8042_tally.rs 95 0
 kernel-loom/tests/inbox.rs 126 3
 kernel-loom/tests/log_body_words.rs 31 0
 kernel-loom/tests/log_publish.rs 35 1
 kernel-loom/tests/log_record.rs 162 1
 kernel-loom/tests/log_wake.rs 59 0
-kernel-loom/tests/log_zeroed_init.rs 23 1
+kernel-loom/tests/log_zeroed_init.rs 24 1
 kernel-loom/tests/reap_gate.rs 53 1
 kernel-loom/tests/sleep_lock.rs 80 1
 kernel-loom/tests/ticket_lock.rs 31 1

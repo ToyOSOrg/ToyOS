@@ -253,10 +253,10 @@ jobs:
       # *nothing* from either — which read as a pass for as long as nobody
       # counted.
       #
-      # Scoped to those targets rather than the crate:
-      # issues/build/kernel-loom-ungated-models-red-without-loom.md
-      # records that `tlb_shootdown.rs` reds deterministically under
-      # --no-default-features, on main as much as here.
+      # Scoped to those targets rather than the crate: every other
+      # loom::model file is gated cfg(feature = "loom"), so a bare
+      # --no-default-features invocation at the crate root would run
+      # nothing from them either.
       - name: kernel-loom without loom
         run: |
           set -e -o pipefail
