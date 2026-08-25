@@ -27,11 +27,9 @@ use super::read::{drain_ordered, Cursor, RecordSink};
 /// Rings with a `POLL_ADD` outstanding on the machine's log.
 ///
 /// **A sixth per-source watcher list, knowingly.** `keyboard`, `mouse`, `net`,
-/// `virtio_sound` and `hda` each carry one of exactly this shape, and the
-/// completion architecture's C3 folds all six into one watch list and deletes
-/// them together. Adding a sixth instance of a mechanism that is about to be
-/// unified is the honest cost of landing first, and it is one static and one
-/// match arm.
+/// `virtio_sound` and `hda` each carry one of exactly this shape; the completion
+/// architecture's C3 folds all six into one watch list and deletes them
+/// together, which is this one's exit.
 static INBOX_WATCHERS: Lock<Vec<InboxId>> = Lock::new(Vec::new());
 
 pub fn add_inbox_watcher(id: InboxId) {
@@ -194,14 +192,3 @@ fn publish_durable(claimed: u64) {
 pub fn durable_ns() -> u64 {
     DURABLE_NS.load(core::sync::atomic::Ordering::Relaxed)
 }
-
-// **There was a `pub fn owed() -> bool` here and it is deleted rather than
-// wired up.** Its doc called it "the predicate both waits are written against,
-// in one place", and neither wait called it: `apic::owed` and
-// `log::wait_for_durable` each snapshot `newest_committed_at_ns()` *once*, as
-// `want`, and then wait for `durable_ns()` to reach that. This one re-read the
-// newest record on every call, which is a different question and a worse one —
-// a machine still committing records while it shuts down would never satisfy
-// it, so calling it from either site would have turned a bounded wait into one
-// that always pays its whole ceiling. Dead code with a claim in it about two
-// callers it did not have.

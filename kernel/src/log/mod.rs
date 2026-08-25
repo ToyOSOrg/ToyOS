@@ -5,11 +5,9 @@
 //! and that is what makes "half a record" untypeable: the smallest thing this
 //! module accepts is a whole one.
 
-// Every `unsafe` block under `log::` has either stopped existing or carries a
-// `SAFETY:` saying why it could not — the reduction-before-documentation sweep
-// `issues/build/clippy-has-never-run-here.md` records. `host-tests.yml`'s two
-// kernel clippy invocations both run with `-D warnings`, so `warn` here is what
-// gates: a new undocumented block anywhere in this module tree fails CI.
+// `host-tests.yml`'s two kernel clippy invocations both run with `-D warnings`,
+// so `warn` here is what gates: a new undocumented `unsafe` block anywhere in
+// this module tree fails CI.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod console;
@@ -37,8 +35,8 @@ pub static PERCPU_READY: AtomicBool = AtomicBool::new(false);
 ///
 /// A `static` rather than a heap allocation because `log!` runs before the heap
 /// exists and before `PERCPU_READY`. **There is no boot-shard-to-cpu0-shard
-/// handoff to get wrong**, and today's `boot` label in the prefix becomes
-/// [`FLAG_EARLY`] on a record in this same shard.
+/// handoff to get wrong**: the `boot` label in the prefix is [`FLAG_EARLY`] on a
+/// record in this same shard.
 ///
 /// Zeroed, so it costs `.bss` and not 512 KiB of kernel image.
 pub static BOOT_SHARD: Shard = Shard::new();
@@ -77,13 +75,15 @@ const SHUTDOWN_DURABLE: Budget = Budget::of(
 /// Wait, bounded, for `/bin/logd` to put everything committed so far on the
 /// device.
 ///
-/// One caller, `SYS_SHUTDOWN` (§6.3), and it is why §5.2's `Sync` frame is
-/// struck: the asker is the kernel, and a kernel opening an IPC connection to a
-/// userland server to ask it a question is the inversion this architecture
-/// exists to remove. `LogCursor::durable` already travels the other way on a
-/// call logd makes every loop, so the answer is a word rather than a protocol —
-/// and the panic path's wait and this one become one mechanism seen from two
-/// contexts, instead of two mechanisms that have to be kept agreeing.
+/// One caller, `SYS_SHUTDOWN` (§6.3), and the answer is a word rather than a
+/// protocol: a kernel opening an IPC connection to a userland server to ask it a
+/// question is the inversion this architecture exists to remove.
+/// `LogCursor::durable` already travels the other way on a call logd makes every
+/// loop, so the panic path's wait and this one are one mechanism seen from two
+/// contexts instead of two that have to be kept agreeing.
+///
+/// **`want` is snapshotted once**, because a machine still committing records
+/// while it shuts down never satisfies a re-read of the newest one.
 ///
 /// **It yields and does not spin.** This runs on an ordinary thread with the
 /// VFS lock already released, and at `--smp 1` the CPU it is on is the only one
@@ -128,10 +128,7 @@ pub fn shard_count() -> u32 {
 
 /// The formatter `emit` runs, writing the message into the record in place.
 ///
-/// **One pass and one sink.** It was a `Tee` until L3 — the record's bounded
-/// message *and* a rendered line into the byte ring — because L1 and L2 had to
-/// leave the wire byte-identical while the record ring grew up beside it. The
-/// byte ring is gone, and the line the console carries is rendered from the
+/// **One pass and one sink.** The line the console carries is rendered from the
 /// record by `log::console`, through the one formatter in `toyos-abi`.
 struct Message<'a> {
     /// The record's own message bytes, written in place. **Borrowed rather than
@@ -199,11 +196,11 @@ struct Origin {
 /// `Shard::oldest_readable`.
 ///
 /// `preempt::disable` would buy migration exclusion for two locked
-/// read-modify-writes per record and would still leave single-step #DB enabled.
-/// That is the cost this whole design exists to avoid — one `fetch_add` per line
-/// cost 350 ms of boot under TCG — without buying the full property. On the
-/// dominant path IF and TF were already clear, because IF is clear for the whole
-/// of every syscall and TF is normally clear machine-wide.
+/// read-modify-writes per record and would still leave single-step #DB enabled —
+/// the cost this whole design exists to avoid, at 350 ms of boot under TCG for
+/// one `fetch_add` per line, without buying the full property. On the dominant
+/// path IF and TF are already clear, because IF is clear for the whole of every
+/// syscall and TF is normally clear machine-wide.
 fn reserve(guard: &crate::arch::LogCommitGuard) -> (Origin, u64) {
     if !PERCPU_READY.load(Ordering::Relaxed) {
         // One CPU, no scheduler, no GS base to read. An interrupt can still
@@ -247,10 +244,9 @@ fn on_a_thread(id: u32) -> u32 {
 pub fn emit(level: Level, args: core::fmt::Arguments) {
     let mut record = LogRecord { level: level as u8, ..LogRecord::EMPTY };
 
-    // **Formatting is outside every critical section**, which is the one thing
-    // it was never inside the old serial writer's. Nothing here takes a lock,
-    // touches a device or reads `gs:`: it fills a stack record and counts what
-    // did not fit.
+    // **Formatting is outside every critical section.** Nothing here takes a
+    // lock, touches a device or reads `gs:`: it fills a stack record and counts
+    // what did not fit.
     let mut message = Message { msg: &mut record.msg, len: 0, elided: 0 };
     let _ = core::fmt::Write::write_fmt(&mut message, args);
     record.len = message.len as u16;
@@ -310,7 +306,7 @@ pub fn emit(level: Level, args: core::fmt::Arguments) {
     }
 }
 
-/// A line of ordinary kernel log. 658 sites.
+/// A line of ordinary kernel log.
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {

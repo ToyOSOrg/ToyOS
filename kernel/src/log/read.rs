@@ -8,8 +8,8 @@
 //! halted — and a reader that waits for it never reaches the line that says
 //! why.
 //!
-//! [`drain_ordered`] is `klogd`'s and, from L4, `SYS_LOG_READ`'s: in sequence
-//! order per shard, oldest first, stopping a shard at its first uncommitted
+//! [`drain_ordered`] is `klogd`'s and `SYS_LOG_READ`'s: in sequence order per
+//! shard, oldest first, stopping a shard at its first uncommitted
 //! record. On a live machine that stop is one bounded 1 KiB publication long;
 //! on a dying one it can be forever, which is exactly why the machine that is
 //! halting uses the other function instead.
@@ -52,9 +52,9 @@ struct Descent {
 const IDLE: Descent = Descent { shard: None, next: 0, floor: u64::MAX, cand: None };
 
 /// Eight of these are the whole of the merge's state, and the number is what
-/// says the panic path can afford it. **Measured, not estimated** — a `const`
-/// assertion rather than a comment, so it cannot drift:
-/// `size_of::<Descent>()` is 48 and eight is 384 bytes, against IST1's 16 KiB.
+/// says the panic path can afford it — 48 bytes each, 384 for eight, against
+/// IST1's 16 KiB. A `const` assertion rather than a comment, so it cannot
+/// drift.
 const _: () = assert!(core::mem::size_of::<Descent>() == 48);
 const _: () = assert!(core::mem::size_of::<[Descent; MAX_LOG_SHARDS]>() == 384);
 
@@ -66,12 +66,11 @@ impl Descent {
     /// record's `at_ns` is read inside the same IF/TF-off bracket as its
     /// reservation, one instruction apart, so within a shard the sequence order
     /// *is* the timestamp order and everything below a record older than `from`
-    /// is older still. Stamped before the bracket — which is where it was until
-    /// this reader existed — an interrupted producer could give the lower
-    /// sequence number the later timestamp, and this early stop would then drop
-    /// live records: a CPU that was mid-`emit` when Ctrl+Alt+D took its `from`
-    /// would lose its whole answer. `log/mod.rs`'s `emit` carries the other half
-    /// of this argument.
+    /// is older still. Stamped outside the bracket, an interrupted producer
+    /// could give the lower sequence number the later timestamp and this early
+    /// stop would drop live records: a CPU that was mid-`emit` when Ctrl+Alt+D
+    /// took its `from` would lose its whole answer. `log/mod.rs`'s `emit`
+    /// carries the other half of this argument.
     ///
     /// `to` only skips, because above the window there is no such argument to
     /// make: a caller asking for a bracket that closed a moment ago is walking
@@ -184,11 +183,6 @@ impl Default for Cursor {
 /// **Words rather than a `Cursor` behind a cell**, because the panic path's
 /// bypass reads the position with no backend lock held — that is what the
 /// bypass *is* — and an array of `AtomicU64` has no torn read to reason about.
-/// `log_file` kept its own position the same way, for a plainer reason: its
-/// pending predicate was read from the pre-`hlt` check with interrupts off and
-/// could take no lock. That reader is gone at L6 and this one is not — the
-/// console's drain is the shared cursor and always was the one this type exists
-/// for.
 pub struct Published {
     next: [core::sync::atomic::AtomicU64; MAX_LOG_SHARDS],
     lost: core::sync::atomic::AtomicU64,
@@ -213,8 +207,8 @@ impl Published {
     }
 
     /// Where the walk got to. Whatever exclusion the position has is the
-    /// caller's — the backend lock for the console, `SINK`'s for the file —
-    /// and these stores only make the result visible to a reader that has none.
+    /// caller's — the backend lock, for the console — and these stores only make
+    /// the result visible to a reader that has none.
     pub fn put(&self, cursor: &Cursor) {
         use core::sync::atomic::Ordering;
         for (word, next) in self.next.iter().zip(cursor.next) {
@@ -287,9 +281,7 @@ pub fn drain_ordered(cursor: &mut Cursor, out: &mut impl RecordSink) -> usize {
         let Some(shard) = shards[i] else { return emitted };
 
         // A `match` and not an `if let`: the `None` arm is empty and the whole
-        // argument for why it may be empty is written inside it. An `if let`
-        // has no arm to hold that, and it is the part of this loop nobody may
-        // re-derive from the code.
+        // argument for why it may be empty is written inside it.
         #[allow(clippy::single_match)]
         match shard.read(cursor.next[i]) {
             Some(record) => {
@@ -303,9 +295,8 @@ pub fn drain_ordered(cursor: &mut Cursor, out: &mut impl RecordSink) -> usize {
             // record is gone; `open` below re-clamps and counts it, which is
             // the same subtraction every other loss goes through.
             //
-            // **This arm does not advance `next[i]` and does not have to, and
-            // the reason is worth writing down because the shape invites the
-            // opposite conclusion.** `open` offered this candidate, so
+            // **This arm does not advance `next[i]` and does not have to.**
+            // `open` offered this candidate, so
             // `at_ns(next[i])` answered `Some` — which means `next[i] < head`
             // and the slot held `next[i]`. For `read` to answer `None` a moment
             // later, one of the two tests they share must have flipped, and
@@ -393,9 +384,8 @@ pub fn any_committed(cursor: &Cursor) -> bool {
 /// rather than every call copying every live record out of every shard.
 ///
 /// **It returns nothing.** A count of records emitted is a number no caller
-/// has: the panel measures what it rendered in bytes, and the streaming reader
-/// that will want a count is L3's. Returning one now would be a contract
-/// nothing checks.
+/// has — the panel measures what it rendered in bytes — so returning one would
+/// be a contract nothing checks.
 ///
 /// Takes no lock and allocates nothing: one [`Descent`] per shard on the stack,
 /// pick the newest, copy that one record, repeat.

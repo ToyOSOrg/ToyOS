@@ -4,19 +4,15 @@
 //! one is the counted reference a process holds to the shared-memory
 //! submission/completion pair `SYS_INBOX_SETUP` installs; this one is a
 //! *task's* own bounded record ring, minted at spawn and never named by a
-//! handle. The two are unrelated today and share the name because a later
-//! chunk means to converge them — this track's chunk list says "the ring as an
-//! inbox".
+//! handle. The two are unrelated; a later chunk converges them.
 //!
 //! **This file is compiled a second time by `kernel-loom`**, so it may name
 //! only what that crate supplies: the atomics, the cell, `toyos_abi`'s error
-//! type and `crate::time`. That is a layout requirement rather than a style
-//! rule, and it is why `Subject`, `Watch` and `arm` live one level up in
-//! `mod.rs`, where they
-//! may name pipe ends and device claims. x86's TSO gives every load acquire and
-//! every store release semantics, so a missing edge here is invisible to every
-//! guest test; loom is the only instrument in the tree that can see one, and
-//! ARM64 is planned.
+//! type and `crate::time` — which is why `Subject`, `Watch` and `arm` live one
+//! level up in `mod.rs`, where they may name pipe ends and device claims. x86's
+//! TSO gives every load acquire and every store release semantics, so a missing
+//! edge here is invisible to every guest test; loom is the only instrument in
+//! the tree that can see one, and ARM64 is planned.
 //!
 //! **The ordering, in one sentence.** A poster writes the slot and *then*
 //! publishes `tail` with a release; a taker reads `tail` with an acquire and
@@ -41,17 +37,10 @@
 //! - **One taker, ever.** The inbox belongs to one task and only that task
 //!   takes from it.
 //!
-//! **The struck version of the first bullet named the wrong mechanism, and the
-//! difference was undefined behaviour.** It argued from "an inbox is armed on
-//! exactly one subject (§5.3's `Armed` is consumed by the wait), and `arm`
-//! refuses a second arm by name" — a signature this implementation does not
-//! have (the arm is held by reference across a loop, §5.3a) and, more
-//! importantly, an argument about *subjects* where the invariant is about
-//! *posters*. The log's producer proved the gap: it posts to `klogd`'s inbox
-//! with no lock at all, admitted one-per-*epoch* by `shard::signal_after_commit`'s
-//! swap — and `klogd`'s re-arm-then-continue loop starts a new epoch while the
-//! previous epoch's producer is still inside `post`. Two CPUs writing one
-//! `UnsafeCell<Record>` is not a lost record, it is UB.
+//! **The mechanism is the lock and never the arm.** An inbox armed on exactly
+//! one subject still admits a producer that takes no lock — the machine's log
+//! is one — and two CPUs inside [`Inbox::post`] on one `UnsafeCell<Record>` is
+//! undefined behaviour rather than a lost record.
 //!
 //! The two read-modify-writes in the file are both flags, both on the *taker's*
 //! side of a word both sides write: the overflow notice and the signal. Neither
@@ -123,9 +112,8 @@ impl Token {
 
 /// Why a subject is gone. Never a bare timeout — the reason is the value.
 ///
-/// **Three of §5.1's four, each arriving with its first producer.** `Revoked`
-/// — a device claim released out from under a waiter — is C7's, because that
-/// is the chunk with the claim to release; a variant nothing constructs is
+/// A fourth, `Revoked` — a device claim released out from under a waiter —
+/// lands with the claim that can release one: a variant nothing constructs is
 /// dead code this tree's build refuses.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
@@ -146,12 +134,9 @@ pub enum Reason {
 ///
 /// One shape for every wait is the whole argument — a caller cannot handle a
 /// disk's refusal and a pipe's differently by accident — and `Gone` makes "the
-/// subject went away" a value rather than an absence.
-///
-/// `Moved(u32)` for the bytes a transfer actually moved and
-/// `Failed(SyscallError)` for a device that said no are §5.1's other two, and
-/// they land with C7's transfer and C3's refusals for the reason [`Reason`]
-/// gives.
+/// subject went away" a value rather than an absence. A `Moved(u32)` and a
+/// `Failed(SyscallError)` land with the transfer and the refusal that construct
+/// them, for the reason [`Reason`] gives.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Ready,
@@ -268,8 +253,8 @@ impl Inbox {
         }
         let slot = tail as usize % MAX_INBOX;
         // SAFETY: this poster owns the slot until `tail` publishes it — the
-        // owner does not read past `tail`, and no second poster exists while
-        // the arm holds.
+        // owner does not read past `tail`, and the subject's leaf lock admits
+        // one poster at a time.
         unsafe { self.slots[slot].get().write(record) };
         self.tail.store(tail.wrapping_add(1), PUBLISH);
     }
@@ -342,14 +327,13 @@ impl Inbox {
 
     /// Take the arm, naming the subject it is for.
     ///
-    /// **It deliberately does not empty the ring**, and the struck version did.
-    /// "A new wait starts owing nothing" is true and is enforced at the other
-    /// end — [`Armed`](super::Armed)'s `Drop` drains, under the same leaf lock
-    /// that stops any further post reaching this inbox — so a reset here can
-    /// only discard something that arrived *between* the two, which for a
-    /// lock-free signaller is a wake nobody will send again. A record that
-    /// outlives its arm costs the next wait one spurious loop, which is legal
-    /// at every park site (§5.5).
+    /// **It deliberately does not empty the ring.** "A new wait starts owing
+    /// nothing" is enforced at the other end — [`Armed`](super::Armed)'s `Drop`
+    /// drains, under the same leaf lock that stops any further post reaching
+    /// this inbox — so a reset here can only discard something that arrived
+    /// *between* the two, which for a lock-free signaller is a wake nobody will
+    /// send again. A record that outlives its arm costs the next wait one
+    /// spurious loop, which is legal at every park site (§5.5).
     ///
     /// `pub` rather than `pub(super)` so that `kernel-loom`, where this file's
     /// `super` is a different crate root, still sees a used item. `mod.rs` is

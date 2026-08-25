@@ -7,19 +7,14 @@
 //! wait source cannot re-open the lost-wake window because it has no way to add
 //! a second predicate.
 //!
-//! **What C3 landed, and the header said the opposite of it until now.** C2
-//! wired the core *behind* the existing wait queues — a park still registered a
-//! `toyos_sched` ticket, was still woken by a queue wake, and nothing parked on
-//! the inbox alone. C3 is the chunk that made [`Inbox::has_record`] the park
-//! predicate and deleted the queue half, and it landed: [`wait_inner`] rechecks
-//! `has_record()` and nothing else, a park registers on the *thread's own*
-//! queue, and no queue in the kernel is woken as a queue any more.
+//! **[`Inbox::has_record`] is the park predicate.** [`wait_inner`] rechecks it
+//! and nothing else, a park registers on the *thread's own* queue, and no queue
+//! in the kernel is woken as a queue.
 //!
 //! **Which subjects exist here.** All of them. The four device watches
 //! (`waitqs::{KEYBOARD, MOUSE, NETWORK, AUDIO}`), both ends of a pipe, the port
-//! acceptor, the process and thread objects, the inbox ring, the futex
-//! bucket, and a thread's own watch for the waits whose end is a deadline. The
-//! header listed five park sites and said C3 would add the rest; C3 did.
+//! acceptor, the process and thread objects, the inbox ring, the futex bucket,
+//! and a thread's own watch for the waits whose end is a deadline.
 //!
 //! **No registry, and no id.** A [`Subject`] is a borrowed reference to the
 //! object being waited on, so a destroyed subject cannot be named and §5.1's
@@ -28,21 +23,17 @@
 //! `sched::waitqs` already has and which deletes the 128-core sharding risk a
 //! global `CORE` lock would have had.
 //!
-//! **The cost, stated because §16.2 requires it to be counted rather than
-//! asserted.** A post to a subject nobody is armed on is *one relaxed load* and
-//! no lock at all — the same trick the log's `signal_after_commit` uses, and
-//! the reason the record path has no read-modify-write on it. A post that finds
-//! a waiter costs one `Lock` acquire plus a plain store per waiter. An arm
-//! costs one `Arc` clone and one `Lock` acquire; a disarm the same. Nothing on
-//! the wake path gained a read-modify-write it did not have.
+//! **The cost, counted rather than asserted.** A post to a subject nobody is
+//! armed on is *one relaxed load* and no lock at all — the same trick the log's
+//! `signal_after_commit` uses, and the reason the record path has no
+//! read-modify-write on it. A post that finds a waiter costs one `Lock` acquire
+//! plus a plain store per waiter. An arm costs one `Arc` clone and one `Lock`
+//! acquire; a disarm the same.
 //!
-//! **The hazard C2 inherited is closed, by §7.2 and in this chunk.** A task
-//! killed while parked used to be reaped where it lay and so never dropped its
-//! [`Armed`]: its node stayed on the watch list and the `Arc<TaskHandle>` behind
-//! it leaked, bounded and census-visible — the endowment spec's §1.1 leak class.
-//! A killed task now runs its own unwind and drops the arm on the way out. The
-//! `Arc` stays anyway, because it is what makes "rare" not have to be "never":
-//! a leak is memory, where a raw pointer would be a use-after-free.
+//! **A killed task runs its own unwind and drops its [`Armed`] on the way
+//! out.** The `Arc<TaskHandle>` a watcher holds stays anyway, because it is what
+//! makes "rare" not have to be "never": an abandoned arm is then a bounded,
+//! census-visible leak, where a raw pointer would be a use-after-free.
 
 pub mod inbox;
 
@@ -67,19 +58,16 @@ pub use toyos_sched::waitq::Cancel;
 ///
 /// Every waitable object owns one, beside the wait queue it already owns. The
 /// count is the whole of what a post pays when nobody is waiting: a relaxed
-/// load, read *before* the lock, so an idle machine's wakes cost exactly what
-/// they cost today.
+/// load, read *before* the lock, so an idle machine's wakes take no lock.
 pub struct Watch {
     armed: AtomicUsize,
     waiters: Lock<Vec<Watcher>>,
 }
 
 struct Watcher {
-    /// The waiter's own inbox, held by `Arc` rather than by reference: a
-    /// raw pointer would make an abandoned arm a use-after-free instead of a
-    /// bounded leak. (Since §7.2 an abandoned arm is itself rare — a killed
-    /// task runs its own unwind and drops it — but the `Arc` is what makes
-    /// "rare" not have to be "never".)
+    /// The waiter's own inbox, held by `Arc` rather than by reference: a raw
+    /// pointer would make an abandoned arm a use-after-free instead of a
+    /// bounded leak.
     task: Arc<TaskHandle>,
     /// The waiter's rendezvous word, for the claim half of the post. Held
     /// beside the handle because the two are minted at different instants and
@@ -109,8 +97,8 @@ impl<'a> Subject<'a> {
 
 /// Proof that a record will arrive on the armed inbox for this token.
 ///
-/// `#[must_use]` and not `Copy`; `Drop` disarms. A park with nothing armed is
-/// untypeable once C3 makes the park take one of these (RT3).
+/// `#[must_use]` and not `Copy`; `Drop` disarms. [`wait`] taking one of these
+/// is what makes a park with nothing armed untypeable (RT3).
 #[must_use = "an arm must outlive the park it was made for"]
 pub struct Armed<'a> {
     subject: Subject<'a>,
@@ -131,10 +119,9 @@ impl Drop for Armed<'_> {
     /// One arm at a time means every record in this inbox was posted by the
     /// subject this arm named, so it carries this arm's token. A record with
     /// another token is two posters on one inbox, which is the one way the
-    /// lock-free `tail` store could be wrong — and it would otherwise be
-    /// invisible until C3 makes something read these records. The overflow
-    /// notice is the exception by construction: it is minted by the taker and
-    /// names no subject.
+    /// lock-free `tail` store could be wrong. The overflow notice is the
+    /// exception by construction: it is minted by the taker and names no
+    /// subject.
     fn drop(&mut self) {
         let watch = self.subject.0;
         let mut waiters = watch.waiters.lock();
@@ -158,13 +145,10 @@ impl Drop for Armed<'_> {
 
 /// Arm a watch for the running task.
 ///
-/// **This is the edge form**, and C2 has no other: the record a post leaves
-/// means "state may have moved", never "there is something for you", so the
-/// waiter's own predicate stays authoritative and is re-derived after this
-/// returns — which is what every site here does today anyway, through
-/// `wait_until`'s loop. §5.3's level form, where `arm` asks the subject and
-/// fires immediately, arrives with C3's park conversion and the readiness
-/// question that goes with it.
+/// **This is the edge form**: the record a post leaves means "state may have
+/// moved", never "there is something for you", so the waiter's own predicate
+/// stays authoritative and is re-derived after this returns — which is what
+/// [`wait_until`]'s loop does.
 ///
 /// `class` is what this wait's blocked time is attributed to. It belongs to the
 /// arm because it is a property of the *subject*: a thread parked on a pipe end
@@ -205,11 +189,9 @@ pub fn post(subject: Subject<'_>, outcome: Outcome) {
 
 /// The same, lending the poster's real-time window to whoever it wakes.
 ///
-/// **Priority inheritance survives the conversion**, and it had to be carried
-/// deliberately: the queue wake this replaces took a `WakeCause::boosted`, and
-/// a completion post that dropped it would silently turn an RT writer's signal
-/// into an ordinary one — scheduler-core-spec §3's lend, invariant I9, and the
-/// audio path's whole latency argument.
+/// **A post that dropped the boost would silently turn an RT writer's signal
+/// into an ordinary one** — scheduler-core-spec §3's lend, invariant I9, and
+/// the audio path's whole latency argument.
 pub fn post_boosted(subject: Subject<'_>, outcome: Outcome, until: Nanos) {
     post_with(subject, outcome, Some(until))
 }
@@ -240,10 +222,8 @@ pub fn post_boosted(subject: Subject<'_>, outcome: Outcome, until: Nanos) {
 /// thread already on its way back to its own code, because a waker got there
 /// first or its own deadline did. Counting it is how one thread gets reported
 /// twice — `futex_wake(addr, 1)` twice in a row, against one waiter that has
-/// not been scheduled in between, answering 1 and 1. That is what the old
-/// queue's `wake_one` avoided by *popping* the waiter, and the claim is the
-/// same discriminator without a queue — but what discriminates is the
-/// *catch-all*, not any one state. `TaskShared::claim_wake`
+/// not been scheduled in between, answering 1 and 1. What discriminates is the
+/// claim's *catch-all*, not any one state. `TaskShared::claim_wake`
 /// (`toyos_sched::task`) takes `Blocked` and `Committing` and answers
 /// `Claim::Lost` for everything else. The first claim leaves the word
 /// `WakeQueued(cpu)`; `TaskShared::finish_wake` moves it to `Ready(cpu)` when
@@ -259,9 +239,8 @@ pub fn post_boosted(subject: Subject<'_>, outcome: Outcome, until: Nanos) {
 /// every park site (§5.5), and skipping the *store* would be the lost wake the
 /// order exists to prevent.
 ///
-/// `futex_wake_counts` is the gate, and it is what found this: the tree that
-/// counted told-but-not-woken waiters answered 1 to a wake of a word whose
-/// waiters were all already gone.
+/// `futex_wake_counts` is the gate: a tree that counts told-but-not-woken
+/// waiters answers 1 to a wake of a word whose waiters are all already gone.
 pub fn post_n(subject: Subject<'_>, outcome: Outcome, token: Token, limit: usize) -> usize {
     let watch = subject.0;
     if limit == 0 || watch.armed.load(Ordering::Relaxed) == 0 {
@@ -418,10 +397,9 @@ pub fn wait_uncancellable(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -
 /// Arm, then park until `ready()` holds, the deadline passes, or this thread is
 /// cancelled.
 ///
-/// **The shape every blocking syscall in the kernel now has**, and the direct
-/// replacement for `scheduler::wait_until`. The arm comes first and the
-/// predicate is re-derived after it — §5.3a's edge contract — so a post that
-/// lands in the window between the two is found by the park's own recheck
+/// **The shape every blocking syscall in the kernel has.** The arm comes first
+/// and the predicate is re-derived after it — §5.3a's edge contract — so a post
+/// that lands in the window between the two is found by the park's own recheck
 /// rather than lost.
 ///
 /// A return is not proof of the condition (scheduler-core-spec §2's invariant
@@ -470,10 +448,10 @@ pub fn wait_until(
 /// Arm, then park until `ready()` holds — for a wait a kill may not end and no
 /// deadline bounds.
 ///
-/// **`SleepLock::lock`'s park, and it has no second caller.** §7.4's third
-/// shape, taken: the kill bit stays sticky and `WaitTicket::commit` still
-/// refuses to park a killed task on an ordinary ticket, so the *ticket* is what
-/// says whether the kill is this wait's answer. A killed thread's teardown
+/// **`SleepLock::lock`'s park, and it has no second caller.** The kill bit
+/// stays sticky and `WaitTicket::commit` refuses to park a killed task on an
+/// ordinary ticket, so the *ticket* is what says whether the kill is this
+/// wait's answer. A killed thread's teardown
 /// takes `ProcessData` and then the VFS, and a lock acquire that answered a
 /// kill would leave that teardown with nothing it could acquire.
 ///
@@ -519,8 +497,7 @@ pub fn wait_uncancellable_until(
 /// here rather than exiting, because a thread that exits frees a stack a
 /// producer may still be about to write to; what they must not do is spin,
 /// which is what they would be doing if they competed with the reader for the
-/// rest of the boot. This is what took the last two callers off
-/// `scheduler::park_lot`, which is deleted with them.
+/// rest of the boot.
 #[cfg(feature = "boot-actuators")]
 #[track_caller]
 pub fn park_forever() -> ! {

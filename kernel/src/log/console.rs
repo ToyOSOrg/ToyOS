@@ -1,12 +1,11 @@
 //! The kernel's console sink, the two drain modes, and `klogd`.
 //!
-//! One thread where every idle CPU used to drain, and that is a reduction this
-//! design accepts and names. Three
-//! things bound it: boot does not need a thread at all, the panic and shutdown
-//! paths drain inline and never depend on `klogd` being schedulable, and
-//! **`klogd`'s own death is not survivable quietly** — its row in
-//! `sched::kthread` is [`OnPanic::Halt`], because a machine whose only console
-//! drainer has been killed goes silent with nothing left able to say so.
+//! **One thread drains the console**, and three things bound that: boot does
+//! not need a thread at all, the panic and shutdown paths drain inline and
+//! never depend on `klogd` being schedulable, and **`klogd`'s own death is not
+//! survivable quietly** — its row in `sched::kthread` is [`OnPanic::Halt`],
+//! because a machine whose only console drainer has been killed goes silent
+//! with nothing left able to say so.
 //!
 //! **Its death is survivable by design, which is why its panic may not be.**
 //! Records keep committing into the shards whatever happens here: the oldest
@@ -41,9 +40,8 @@ use super::shard;
 
 /// The name `sched::dump`, `ps` and a crash report use.
 ///
-/// **`klogd` and not `logd` from the first line, and no rename is owed.**
-/// `/bin/logd` is a userland program in the same machine from L6, and two
-/// things with one name in one machine is a collision a dump report cannot
+/// **`klogd` and not `logd`**: `/bin/logd` is a userland program in the same
+/// machine, and two things with one name is a collision a dump report cannot
 /// survive.
 const NAME: &str = "klogd";
 
@@ -116,12 +114,11 @@ static DRAINED: Published = Published::new();
 /// machine hands itself to the scheduler.
 ///
 /// **That placement is the whole of the `Drain::Inline` → `Drain::Thread`
-/// transition and it is later than §4.2's first draft said.** The APs spin on
-/// `SMP_READY` until the second-to-last statement of `kernel_main` and the BSP
-/// reaches no pass before `enter_idle_loop`, so a `klogd` spawned at
-/// `scheduler::init` cannot run for the whole of phases 5, 6 and 7 — which is
-/// the window a machine with no console wedges in, and §4.1's second constraint
-/// says that window may not get quieter.
+/// transition.** The APs spin on `SMP_READY` until the second-to-last statement
+/// of `kernel_main` and the BSP reaches no pass before `enter_idle_loop`, so a
+/// `klogd` spawned at `scheduler::init` cannot run for the whole of phases 5, 6
+/// and 7 — which is the window a machine with no console wedges in, and that
+/// window may not get quieter.
 pub fn start() {
     let sched = kthread::spawn(NAME, body, 0, OnPanic::Halt);
     // Leaked deliberately: `klogd` never exits, and a producer reading this
@@ -151,13 +148,11 @@ pub fn post_wake() {
     // subject's leaf lock — is not available here.
     //
     // **`signal` and not `post`, because there is no one-poster argument to be
-    // had on this path.** The struck version reasoned from the swap in
-    // `shard::signal_after_commit`: "it admits exactly one poster per park, so
-    // this inbox has one producer and needs no mutual exclusion of its own".
-    // Per *park* is not per *post*. `klogd`'s loop re-arms the waiter flag and
-    // goes round without parking whenever `arm_waiter` finds work, so a second
-    // producer can win a fresh epoch's swap while the first is still inside
-    // `Inbox::post` — two CPUs writing one `UnsafeCell<Record>`, which is
+    // had on this path.** `shard::signal_after_commit`'s swap admits one poster
+    // per *park*, which is not one per *post*: `klogd`'s loop re-arms the waiter
+    // flag and goes round without parking whenever `arm_waiter` finds work, so a
+    // second producer can win a fresh epoch's swap while the first is still
+    // inside `Inbox::post` — two CPUs writing one `UnsafeCell<Record>`, which is
     // undefined behaviour and not a lost record. `Inbox::signal` is one atomic
     // store and has no such precondition; what it gives up is the record's
     // content, which this subject is edge-classed and never had to say.
@@ -209,18 +204,13 @@ pub fn drain_inline() {
 /// Records per backend acquisition on the live paths.
 ///
 /// **`BackendGuard` holds interrupts off for its whole life, so this number is
-/// an interrupt latency and not a batch size.** Draining the whole backlog under
-/// one guard is what the code did until 2026-08-15 and it is measurable from
-/// outside: `i8042_undecoded_bytes` red 2 times in 5 full suites, on a
-/// controller whose byte arrived while a drain had interrupts masked, and
-/// `71_macro_empty_arg` red 3 in 5 because a daemon's own `write` waited behind
-/// the same guard and landed after a marker it was written before. Neither reds
-/// on the byte-ring commit, so both were this window.
+/// an interrupt latency and not a batch size** — draining a whole backlog under
+/// one guard masks interrupts for as long as the backlog takes, which an i8042
+/// byte and a daemon's own `write` both lose against.
 ///
-/// Eight is the byte ring's 512-byte `DRAIN_CHUNK` in the unit this drain moves:
-/// the corpus's mean rendered line is 89.4 bytes, so a chunk was five or six
-/// lines. The outer loop re-acquires, so a backlog still drains in one visit —
-/// it just lets an interrupt in between chunks, which is the whole point.
+/// Eight lines, against a mean rendered line of 89.4 bytes. The outer loop
+/// re-acquires, so a backlog still drains in one visit — it just lets an
+/// interrupt in between chunks, which is the whole point.
 const CHUNK_RECORDS: u64 = 8;
 
 /// The whole backlog under one guard, for a caller that already holds it: the
@@ -235,13 +225,12 @@ pub fn drain_locked(guard: &mut BackendGuard) {
 /// Advance the console's position over records nothing can carry.
 ///
 /// **`klogd`'s, and nobody else's.** A machine with no backend has nowhere to
-/// put a record, and until 2026-08-15 `klogd` answered that by parking
-/// *unarmed*: with the position standing still, an armed waiter would find a
-/// committed record on every rescan and spin for the life of the machine. That
-/// was right about the spin and wrong about the consequence — an unarmed
-/// `klogd` never wakes, so it never reaches `user::post_readiness`, so **the one
-/// machine shape this whole design exists for posts no log readiness at all**
-/// and `/bin/logd` parks for ever with `/log` unwritten.
+/// put a record and the position must move anyway: standing still, an armed
+/// waiter finds a committed record on every rescan and spins for the life of the
+/// machine — and parking *unarmed* instead means `klogd` never wakes, so it
+/// never reaches `user::post_readiness`, so **the one machine shape this whole
+/// design exists for posts no log readiness at all** and `/bin/logd` parks for
+/// ever with `/log` unwritten.
 ///
 /// Advancing costs nothing that machine had: the records stay in their shards
 /// for the panel, which reads them through `snapshot_committed` and not through
@@ -298,13 +287,11 @@ static SPOKEN_TO: AtomicU8 = AtomicU8::new(serial::Backend::None as u8);
 /// A backend has appeared, or the machine has switched to a better one. Say the
 /// whole boot again, into the one that is current now.
 ///
-/// **The rewind is what `log_ring::set_serial_sink`'s re-seed from `retained`
-/// was**, and it is exact where that was a 64 KiB window. A record written
-/// while the only backend was a 16550 went to the 16550; when virtio-console
-/// comes up in phase 6 the machine has a *different* channel that has heard
-/// none of it, and on the harness's shape that channel is the only one anybody
-/// reads. Rewinding to the oldest record each shard still holds and draining
-/// again is what puts the boot on it.
+/// A record written while the only backend was a 16550 went to the 16550; when
+/// virtio-console comes up in phase 6 the machine has a *different* channel that
+/// has heard none of it, and on the harness's shape that channel is the only one
+/// anybody reads. Rewinding to the oldest record each shard still holds and
+/// draining again is what puts the boot on it.
 ///
 /// **Both channels then carry the early boot and neither carries it twice**,
 /// because `BackendGuard::write_raw` writes to exactly one backend and this
@@ -384,8 +371,7 @@ impl<F: FnMut(&[u8])> core::fmt::Write for Line<F> {
             // the `boot` label, the tid, the elision note — is rendered once,
             // in `toyos-abi`, for this sink and the panel and `logd` alike. A
             // `LogRecord::tagged(&str)` beside `Display` would be tidier and is
-            // a *sysroot* change: §11 lands the ABI alone and it has already
-            // landed, so this branch composes instead of reopening it.
+            // a *sysroot* change:
             // `issues/diagnostics/a-console-tag-is-composed-by-replacing-a-bracket.md`.
             //
             // If that leading bracket ever goes, the fragment passes through
@@ -405,10 +391,9 @@ impl<F: FnMut(&[u8])> core::fmt::Write for Line<F> {
 ///
 /// **Public because `/log`'s sink renders the same line**, and a second
 /// implementation of it there would be a second thing to keep agreeing with the
-/// panel. An earlier note here predicted it would go when `logd` took over the
-/// rendering; it did not, because `logd` renders the same record through the
-/// same `Display` and writes a *wall-clock* prefix in front of it. One
-/// implementation of everything that varies, two prefixes over it.
+/// panel: `logd` renders the same record through the same `Display` and writes a
+/// *wall-clock* prefix in front of it. One implementation of everything that
+/// varies, two prefixes over it.
 pub fn write_line(record: &LogRecord, emit: impl FnMut(&[u8])) {
     use core::fmt::Write;
     let mut line = Line::new(emit);
@@ -479,11 +464,10 @@ extern "C" fn body(_arg: u64) -> ! {
         Ordering::Release,
     );
     loop {
-        // One bounded chunk per backend acquisition, exactly as
-        // `drain_chunk_to_serial` was, so an interrupts-off window is never
-        // longer than `CHUNK_RECORDS` lines. With no backend the position moves
-        // and nothing is rendered — `discard_pending` says why that is this
-        // thread's job and not `drain_inline`'s.
+        // One bounded chunk per backend acquisition, so an interrupts-off
+        // window is never longer than `CHUNK_RECORDS` lines. With no backend the
+        // position moves and nothing is rendered — `discard_pending` says why
+        // that is this thread's job and not `drain_inline`'s.
         if serial::has_console() {
             drain_inline();
         } else {
@@ -502,17 +486,10 @@ extern "C" fn body(_arg: u64) -> ! {
         // neither may touch `INBOXES`.
         super::user::post_readiness();
 
-        // **The registration no longer has to come first, and the record is
-        // why.** It used to: `prepare_wait` moved the word to `Committing`
-        // before the arm, so a producer that won the swap took
-        // `Claim::PrePark` and this thread's own commit refused to park —
-        // arming first left a window where the producer claimed a
-        // still-`Running` `klogd`, took `Claim::Lost` and *dropped* the wake.
-        // A completion post cannot drop one: it stores the record before it
-        // claims, so a claim that finds nobody leaves a record `wait`'s own
-        // recheck finds. That is the log branch's §2.6a fallback converted,
-        // and it is what makes the order below a choice rather than a proof
-        // obligation.
+        // **A completion post cannot drop a wake**: it stores the record before
+        // it claims, so a claim that finds nobody parked leaves a record
+        // `wait`'s own recheck finds. That is what makes the order of this arm
+        // and the waiter flag below a choice rather than a proof obligation.
         let Some(armed) = completion::arm(
             completion::Subject::of(handle.watch()),
             completion::Token::new(0),
@@ -521,13 +498,9 @@ extern "C" fn body(_arg: u64) -> ! {
             continue;
         };
         // **A machine with no console arms exactly like one that has a
-        // console, and it did not until 2026-08-15.** It parked unarmed then,
-        // on the reasoning that an armed waiter with a standing position would
-        // find a committed record on every rescan and spin — true of the
-        // position standing still, which `discard_pending` is what fixes. The
-        // consequence of the unarmed park was that this thread never woke, so
-        // it never reached `post_readiness`, so on the one machine shape this
-        // design exists for a userland reader was never told records had moved.
+        // console**, which `discard_pending` above is what makes safe: with the
+        // position standing still an armed waiter would find a committed record
+        // on every rescan and spin.
         if shard::arm_waiter(shard::log_waiter(), || DRAINED.any_pending()) {
             continue;
         }

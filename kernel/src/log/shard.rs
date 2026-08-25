@@ -2,13 +2,12 @@
 //! record" untypeable.
 //!
 //! **This file is compiled a second time by `kernel-loom`**, so it may name
-//! only what that crate shims: the atomics and `arch::percpu_fetch_add`. That
-//! is not a style rule — x86's TSO gives every
-//! load acquire and every store release semantics, so a missing edge here is
-//! invisible to every guest test, and loom is the only instrument in this tree
-//! that can see one. **ARM64 is planned**, and on it the missing edge is not
-//! hypothetical. If this file grows a dependency on a subject, the model stops
-//! compiling and the ordering stops being checked by anything.
+//! only what that crate shims: the atomics and `arch::percpu_fetch_add`. x86's
+//! TSO gives every load acquire and every store release semantics, so a missing
+//! edge here is invisible to every guest test and loom is the only instrument
+//! in this tree that can see one — and on the planned ARM64 it is not
+//! hypothetical. A dependency this file grows stops the model compiling, and
+//! the ordering stops being checked by anything.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
@@ -21,15 +20,12 @@ use toyos_abi::log::{LogRecord, MAX_RECORD_MESSAGE};
 #[cfg(not(feature = "loom"))]
 use toyos_abi::log::RECORD_BYTES;
 
-/// Slots per CPU: 512 KiB at `RECORD_BYTES` of 1024, and 4 MiB at the shipped
-/// eight — bought deliberately when the record was widened to hold a demangled
-/// backtrace frame, and the owner accepted it with that arithmetic in hand.
+/// Slots per CPU: 512 KiB at `RECORD_BYTES` of 1024.
 ///
 /// **Sized by records emitted before a reader exists**, which is the only
 /// quantity this bound has to cover — after that `klogd` and `/bin/logd` are
-/// draining. Measured over all eighteen committed real-hardware logs, cpu0 and `boot`
-/// records up to and including `Boot: complete`: **184 to 186**, and 185 in
-/// fifteen of the eighteen. This is that with 2.7x of headroom.
+/// draining. The measured worst case is **186** cpu0 `boot` records through
+/// `Boot: complete`; this is that with 2.7x of headroom.
 ///
 /// Every other shard has a reader runnable within a scheduler pass, so no AP
 /// shard has to hold a boot. One constant rather than two: giving APs 128 slots
@@ -38,31 +34,30 @@ use toyos_abi::log::RECORD_BYTES;
 pub const SHARD_RECORDS: usize = 512;
 
 /// **Four under loom, and shrinking it is what makes the recycle properties
-/// expressible at all.** A model that had to emit 512 records to lap a
-/// reservation would explore an unbounded branch and never finish; at four, W2
-/// is a handful of steps. Nothing the models check
-/// depends on the value — the validity test is exact equality against a
-/// `u64` that never wraps, and `seq % SHARD_RECORDS` is the only place the
-/// number appears.
+/// expressible at all**: a model that had to emit 512 records to lap a
+/// reservation would explore an unbounded branch and never finish. Nothing the
+/// models check depends on the value — the validity test is exact equality
+/// against a `u64` that never wraps, and `seq % SHARD_RECORDS` is the only
+/// place the number appears.
 #[cfg(feature = "loom")]
 pub const SHARD_RECORDS: usize = 4;
 
 /// The record's identity, packed into the three words that precede its message.
 ///
-/// Written out by hand rather than transmuted from a struct: the packing is
-/// what the two sides agree on, and a `transmute` would make that agreement a
-/// property of the compiler's layout choice instead of of this file.
+/// Packed by hand rather than transmuted from a struct: the packing is what the
+/// two sides agree on, and a `transmute` would make that agreement a property
+/// of the compiler's layout choice instead of of this file.
 const HEADER_WORDS: usize = 3;
 
 /// Message words a slot holds.
 ///
 /// **One under loom, for [`SHARD_RECORDS`]'s reason.** A model shard declares
-/// `SHARD_RECORDS * (1 + HEADER_WORDS + MSG_WORDS)` loom atomics and builds
-/// them all on a 32 KiB generator stack; at the kernel's 124 that is 508 per
-/// shard and the model cannot be constructed at all. Nothing the models check
-/// depends on the number — every record they write has `len` of 8, which is one
-/// word — and the clamp in [`Shard::commit`] is the same expression in both
-/// builds, so the model's bound is checked by the same line the kernel's is.
+/// `SHARD_RECORDS * (1 + HEADER_WORDS + MSG_WORDS)` loom atomics on a 32 KiB
+/// generator stack; at the kernel's 124 that is 508 per shard and the model
+/// cannot be constructed at all. Nothing the models check depends on the number
+/// — every record they write has `len` of 8, one word — and the clamp in
+/// [`Shard::commit`] is the same expression in both builds, so the model's
+/// bound is checked by the line that checks the kernel's.
 #[cfg(not(feature = "loom"))]
 const MSG_WORDS: usize = MAX_RECORD_MESSAGE / 8;
 #[cfg(feature = "loom")]
@@ -89,13 +84,13 @@ const _: () = assert!(BODY_WORDS * 8 == RECORD_BYTES - core::mem::size_of::<u64>
 /// states and models.
 ///
 /// **A cargo feature rather than a comment, because a model that has never
-/// failed proves nothing.** `kernel-loom`'s `log-commit-release-off` makes it
+/// failed proves nothing.** `kernel-loom`'s `log-commit-release-off` makes this
 /// `Relaxed` and `kernel-loom/tests/log_record.rs` must red under it: a reader
 /// then observes the sequence number with a stale or half-written body behind
-/// it, twice over — the re-check reads the same relaxed word and accepts the
-/// mixture. On x86 every store is a release and this cannot happen, which is
-/// the whole reason W1 is a model. No kernel build can turn the name on: the
-/// kernel declares it only so `cfg` checking knows it.
+/// it, twice over, because the re-check reads the same relaxed word and accepts
+/// the mixture. On x86 every store is a release and this cannot happen, which
+/// is the whole reason W1 is a model. **No kernel build can turn the name on**
+/// — the kernel declares it only so `cfg` checking knows it.
 #[cfg(not(feature = "log-commit-release-off"))]
 const PUBLISH: Ordering = Ordering::Release;
 #[cfg(feature = "log-commit-release-off")]
@@ -117,12 +112,10 @@ fn header(record: &LogRecord, len: u16) -> [u64; HEADER_WORDS] {
 /// How many message words a record of this length occupies.
 ///
 /// **The writer stores these and the reader loads these, and neither touches
-/// the rest.** A record's mean message over the measured corpus is 68 bytes,
-/// which is **nine of the 124 message words**; [`HEADER_WORDS`] is always
-/// stored, so the publication a producer pays for is **twelve of the body's
-/// 127** — the bound is the tail of the distribution and the cost is the record
-/// in hand. (This said "nine rather than 127" until 2026-08-15, which compares
-/// message words against body words and drops the header from the count.)
+/// the rest.** A record's mean message is 68 bytes, **nine of the 124 message
+/// words**; [`HEADER_WORDS`] is always stored, so the publication a producer
+/// pays for is **twelve of the body's 127** — the bound is the tail of the
+/// distribution and the cost is the record in hand.
 fn msg_words(len: u16) -> usize {
     (len as usize).min(MSG_BYTES).div_ceil(8)
 }
@@ -133,8 +126,7 @@ fn msg_words(len: u16) -> usize {
 /// `.bss` and an AP's is `alloc_zeroed`, so slot 0 of a shard nothing has ever
 /// written holds the word 0 — which would *equal* sequence number 0 and make a
 /// reader accept an all-zero record as record 0 of every shard on every boot.
-/// Starting at 1 means no issued number can collide with the zeroed state, and
-/// it costs nothing: [`Shard::head`] starts here instead of at zero.
+/// No issued number can collide with the zeroed state from 1.
 ///
 /// `kernel-loom`'s `a_shard_nothing_has_written_answers_for_nothing` is the
 /// model that fails if this goes back to zero.
@@ -143,28 +135,25 @@ pub const FIRST_SEQ: u64 = 1;
 /// A slot whose body is being written right now, and therefore holds no record
 /// anybody may read.
 ///
-/// **Not a sentinel smuggled in through the back door — it is the second state
-/// this one atomic word has to be able to express**, and there is nowhere else
-/// to express it: a reader has to learn "a writer is in this slot" from a
-/// single atomic load, so a second word would be a second thing that can
+/// **The second state this one atomic word has to express**, and there is
+/// nowhere else to express it: a reader has to learn "a writer is in this slot"
+/// from a single atomic load, so a second word would be a second thing that can
 /// disagree with the first. `u64::MAX` is unreachable as a sequence number by
-/// 2^64 records. It is decoded here, at the boundary, and never carried
-/// inward: [`Shard::read`] answers `None` and no [`LogRecord`] ever holds it.
+/// 2^64 records. It is decoded here, at the boundary, and never carried inward:
+/// [`Shard::read`] answers `None` and no [`LogRecord`] ever holds it.
 const WRITING: u64 = u64::MAX;
 
 /// One record's storage. **The same layout as [`LogRecord`], as atomic machine
 /// words**, and nothing else differs.
 ///
 /// **Every word of it is an `AtomicU64`, and that is a soundness requirement
-/// rather than a style.** The body was an `UnsafeCell<Body>` until 2026-08-14:
-/// the writer stored the whole struct through it while a reader took a
-/// `read_volatile` of the same bytes, and the sequence re-check discarded the
-/// torn *result* without ever legalising the *access* — a non-atomic write
-/// racing a read is undefined in Rust's model whatever x86 makes of it, and
-/// `volatile` is not a synchronisation primitive. Per-word `Relaxed` stores and
-/// loads inside the unchanged sequence protocol have no race to discard: on x86
-/// each is the same `mov` the struct copy was made of, and the fences that
-/// order them are the ones that were already here.
+/// rather than a style**: a writer stores into a body a reader is copying, and
+/// a non-atomic write racing a read is undefined in Rust's model whatever x86
+/// makes of it — the sequence re-check discards a torn *result*, it does not
+/// legalise the *access*, and `volatile` is not a synchronisation primitive.
+/// Per-word `Relaxed` accesses inside the sequence protocol have no race to
+/// discard; on x86 each is a plain `mov`, ordered by the fences in
+/// [`Shard::commit`] and [`Shard::read`].
 #[repr(C, align(64))]
 pub struct Slot {
     /// The state word: a sequence number, or [`WRITING`], or zero for a slot
@@ -177,11 +166,10 @@ pub struct Slot {
 }
 
 /// **The layout assertions are the kernel's and are skipped under loom**, whose
-/// atomics and cells carry tracking state and are wider than the real ones.
-/// Nothing is weakened: the layout binds the build whose layout matters, and the
-/// model is about the ordering. The `LogRecord` one holds either way — it is the
-/// ABI type, identical in both builds, and it is what says the body starts where
-/// the publishing word ends.
+/// atomics carry tracking state and are wider than the real ones: the layout
+/// binds the build whose layout matters, and the model is about the ordering.
+/// The `LogRecord` one holds either way — it is the ABI type, identical in both
+/// builds, and it is what says the body starts where the publishing word ends.
 #[cfg(not(feature = "loom"))]
 const _: () = assert!(core::mem::size_of::<Slot>() == RECORD_BYTES);
 #[cfg(not(feature = "loom"))]
@@ -210,10 +198,8 @@ impl Shard {
     #[cfg(not(feature = "loom"))]
     pub const fn new() -> Self {
         // A `const` holding atomics is copied at each use, so a write through
-        // one would go nowhere. This one is never written and never borrowed —
-        // its single use is the array repeat below, which is what "one zeroed
-        // slot per record" is spelled as. `borrow_interior_mutable_const`, the
-        // lint that fires on the losing-a-write shape, is silent here.
+        // one would go nowhere. This one is never written and never borrowed:
+        // its single use is the array repeat below.
         #[allow(clippy::declare_interior_mutable_const)]
         const EMPTY: Slot = Slot {
             seq: AtomicU64::new(0),
@@ -224,8 +210,8 @@ impl Shard {
 
     /// Loom's atomics have no `const` constructor, so the model builds shards at
     /// run time.
-    // No `Default` beside it: the arm above is the one the kernel builds, it
-    // has to stay `const` for the `static`, and `Default::default` cannot be.
+    // No `Default` beside it: the kernel's arm has to stay `const` for the
+    // `static`, and `Default::default` cannot be.
     #[allow(clippy::new_without_default)]
     #[cfg(feature = "loom")]
     pub fn new() -> Self {
@@ -265,14 +251,12 @@ impl Shard {
     /// large enough for one [`Shard`]. It may be called exactly once.
     #[cfg(not(feature = "loom"))]
     pub unsafe fn initialize_zeroed(ptr: *mut Self) {
-        // SAFETY: irreducible, and the doc comment above says why in one line —
-        // a safe constructor returns a value, and a 512 KiB value is a value
-        // this kernel has no stack to hold. So the one word that is not already
-        // correct in zeroed storage is written *in place*, through the caller's
-        // pointer, under the caller's contract: zeroed, aligned, unpublished,
-        // large enough, once. `addr_of_mut!` and not `&mut (*ptr).head` because
-        // the rest of the allocation is still uninitialised as far as the type
-        // system is concerned, and a reference would claim otherwise.
+        // SAFETY: the one word that is not already correct in zeroed storage is
+        // written *in place*, through the caller's pointer, under the caller's
+        // contract: zeroed, aligned, unpublished, large enough, once.
+        // `addr_of_mut!` and not `&mut (*ptr).head` because the rest of the
+        // allocation is still uninitialised as far as the type system is
+        // concerned, and a reference would claim otherwise.
         unsafe {
             core::ptr::addr_of_mut!((*ptr).head).write(AtomicU64::new(FIRST_SEQ));
         }
@@ -320,19 +304,14 @@ impl Shard {
         let slot = &self.slots[(seq % SHARD_RECORDS as u64) as usize];
 
         // **Two stores publish, not one, and the first is what makes the
-        // reader's re-check total.** Until 2026-08-11 this wrote the body and
-        // then stored `seq`, on the argument that "the only thing that can
-        // change a slot's body is a writer reserving `seq + SHARD_RECORDS`, and
-        // that writer's own commit store changes `slot.seq` away from `seq`".
-        // The store comes *after* the body write, so throughout it the word
-        // still reads the *previous* generation's number — and a reader that
-        // loaded it, copied a half-overwritten body and re-checked saw the same
-        // value both times and accepted the tear. The loom recycle models
-        // found it on their first run; no guest test can, on any machine.
-        // `a_reader_racing_a_recycle_gets_nothing_rather_than_a_mixture`
-        // (2026-08-15) is the model that pins this mark directly — it reds if
-        // the mark, its release fence, or either reader's acquire fence is
-        // removed, and §2.5 records the four weakenings.
+        // reader's re-check total.** Without this mark the word reads the
+        // *previous* generation's number throughout the body write, so a reader
+        // that loaded it, copied a half-overwritten body and re-checked sees the
+        // same value both times and accepts the tear. No guest test can observe
+        // that on any machine;
+        // `a_reader_racing_a_recycle_gets_nothing_rather_than_a_mixture` is the
+        // model that pins the mark, and it reds if the mark, its release fence,
+        // or either reader's acquire fence is removed.
         //
         // The release fence is what puts this store ahead of the body writes
         // for the reader, rather than merely ahead of them in this function.
@@ -351,8 +330,8 @@ impl Shard {
         }
         let words = msg_words(len);
         for i in 0..words {
-            // **The nesting gate's injection point, and it is here rather than
-            // anywhere tidier because "mid-body" is the whole claim** (§9.2):
+            // **The nesting gate's injection point, here rather than anywhere
+            // tidier because "mid-body" is the whole claim** (§9.2):
             // `log-nested-emit` sends this CPU its own IPI from exactly here,
             // and whether it is delivered before this loop finishes is decided
             // by §2.3a's bracket and by nothing else. `const fn … { false }` in
@@ -471,22 +450,20 @@ impl Shard {
     }
 }
 
-// A `Shard` is `Sync` because every word in it is an `AtomicU64`, and there is
-// deliberately no `unsafe impl` here saying so on the type's behalf. Until
-// 2026-08-14 there was one, and it stood in for the body's `UnsafeCell` — a
-// hand-written claim that a non-atomic write racing a `read_volatile` was
-// somebody's problem rather than undefined behaviour. The words are what make
-// the claim true, so the compiler makes it instead.
+// A `Shard` is `Sync` by auto-derivation because every word in it is an
+// `AtomicU64`, and deliberately with no `unsafe impl` here saying so on the
+// type's behalf: the words are what make the claim true, so the compiler makes
+// it rather than a hand-written promise standing in for them.
 
 /// Is a reader parked on this machine's records?
 ///
 /// **One bit, and it is what keeps the producer's path free of locked
-/// read-modify-writes.** Without it every commit would pay `claim_wake`'s CAS,
-/// and one locked RMW per line was measured at 350 ms of boot under TCG — one
-/// `lock xadd` on an uncontended line, which QEMU cannot always emit as an
-/// inline host atomic and leaves the translation block for. What a producer pays
-/// here is a fence and a relaxed load; the five locked operations of the post
-/// are paid at most once per park, by whichever producer wins the swap.
+/// read-modify-writes.** Without it every commit would pay `claim_wake`'s CAS:
+/// one locked RMW per line is **350 ms** of boot under TCG, because QEMU cannot
+/// always emit an uncontended `lock xadd` as an inline host atomic and leaves
+/// the translation block for it. A producer pays a fence and a relaxed load
+/// here; the five locked operations of the post are paid at most once per park,
+/// by whichever producer wins the swap.
 #[cfg(not(feature = "loom"))]
 static LOG_WAITER: AtomicBool = AtomicBool::new(false);
 
@@ -515,11 +492,11 @@ pub fn waiter() -> AtomicBool {
 /// producer's path — but only on the path of the one producer that found the
 /// flag set, which is once per park rather than once per record.
 pub fn signal_after_commit(waiter: &AtomicBool) -> bool {
-    // **Load-bearing, and x86 cannot fail without it.** This half is a store
-    // (the commit) followed by a load (the flag), which is the one reordering
-    // TSO permits; the waiter's half is the mirror image. Drop either fence and
-    // both sides can miss, leaving a committed record under a parked reader —
-    // a machine that has gone quiet with something left to say.
+    // **Load-bearing, and x86 is not exempt.** This half is a store (the
+    // commit) followed by a load (the flag), which is the one reordering TSO
+    // permits; the waiter's half is the mirror image. Drop either fence and both
+    // sides can miss, leaving a committed record under a parked reader — a
+    // machine gone quiet with something left to say.
     #[cfg(not(feature = "wake-fence-off"))]
     fence(Ordering::SeqCst);
     if !waiter.load(Ordering::Relaxed) {
