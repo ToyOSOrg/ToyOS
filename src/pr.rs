@@ -519,12 +519,13 @@ mod tests {
     /// the host's global config signs every commit, and a test that waited on
     /// gpg would be a test that hangs.
     fn repo(name: &str) -> (PathBuf, PathBuf) {
-        let origin = std::env::temp_dir().join(format!("toyos-pr-{name}.git"));
-        let work = std::env::temp_dir().join(format!("toyos-pr-{name}"));
+        let pid = std::process::id();
+        let origin = std::env::temp_dir().join(format!("toyos-pr-{name}-{pid}.git"));
+        let work = std::env::temp_dir().join(format!("toyos-pr-{name}-{pid}"));
         let _ = fs::remove_dir_all(&origin);
         let _ = fs::remove_dir_all(&work);
 
-        let seed = std::env::temp_dir().join(format!("toyos-pr-{name}-seed"));
+        let seed = std::env::temp_dir().join(format!("toyos-pr-{name}-{pid}-seed"));
         let _ = fs::remove_dir_all(&seed);
         fs::create_dir_all(&seed).unwrap();
         sh(&seed, &["init", "-q", "-b", "main"]);
@@ -627,7 +628,8 @@ mod tests {
         commit(&wt, "g", "mine\n", "work");
 
         // Someone else lands while this branch is being prepared.
-        let theirs = std::env::temp_dir().join("toyos-pr-merge-first-theirs");
+        let theirs =
+            std::env::temp_dir().join(format!("toyos-pr-merge-first-theirs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&theirs);
         sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
         identify(&theirs);
@@ -657,7 +659,8 @@ mod tests {
         let (origin, wt) = repo("conflict");
         commit(&wt, "f", "mine\n", "work");
 
-        let theirs = std::env::temp_dir().join("toyos-pr-conflict-theirs");
+        let theirs =
+            std::env::temp_dir().join(format!("toyos-pr-conflict-theirs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&theirs);
         sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
         identify(&theirs);

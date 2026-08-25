@@ -707,7 +707,8 @@ mod tests {
     /// directory and a scratch tree that is not one would exercise a path the
     /// build system never takes.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("toyos-buildlock-{name}"));
+        let dir =
+            std::env::temp_dir().join(format!("toyos-buildlock-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let ok = Command::new("git")
