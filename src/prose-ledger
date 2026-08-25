@@ -370,7 +370,7 @@ toyos-cc/src/codegen/ops.rs 19 0
 toyos-cc/src/codegen/resolve.rs 36 0
 toyos-cc/src/codegen/stmt.rs 50 0
 toyos-cc/src/emit.rs 2 0
-toyos-cc/src/lex.rs 24 0
+toyos-cc/src/lex.rs 27 0
 toyos-cc/src/lib.rs 4 0
 toyos-cc/src/main.rs 5 0
 toyos-cc/src/parse/attr.rs 11 0
@@ -389,7 +389,7 @@ toyos-cc/tests/determinism.rs 23 0
 toyos-cc/tests/dominance.rs 19 0
 toyos-cc/tests/emission.rs 32 0
 toyos-cc/tests/pp_corpus.rs 43 1
-toyos-cc/tests/preprocessor.rs 7 0
+toyos-cc/tests/preprocessor.rs 10 0
 toyos-cc/tests/refusals.rs 22 0
 toyos-desktop/src/budget.rs 45 0
 toyos-desktop/src/damage.rs 47 0
