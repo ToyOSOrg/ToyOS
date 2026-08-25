@@ -3401,7 +3401,7 @@ fn qemu_command(
     qemu.arg("-machine")
         .arg(&machine)
         .arg("-cpu")
-        .arg(if kvm { "host,+rdrand,+smap,+fsgsbase,+x2apic,+smep" } else { "qemu64,+rdrand,+smap,+fsgsbase,+x2apic,+smep" })
+        .arg(if kvm { toyos_build::CPU_KVM } else { toyos_build::CPU_TCG })
         .arg("-smp")
         .arg(options.smp.to_string())
         .arg("-m")

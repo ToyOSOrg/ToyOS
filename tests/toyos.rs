@@ -11677,9 +11677,14 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         (12, "LA57", false),
         (16, "FSGSBASE", true),
         (18, "OSXSAVE", false),
+        // Not a bit the machine may withhold: `toyos_build::qemu::CPU_KVM` and
+        // `CPU_TCG` are the only two CPUs this repository launches and both name
+        // `+smep`, so a boot without supervisor-mode execution prevention is a
+        // kernel that stopped enabling it or a launcher that stopped asking.
+        (20, "SMEP", true),
     ];
-    /// The four `CR4` bits the CPU may withhold, so neither answer is wrong.
-    const CR4_MAY: &[(u32, &str)] = &[(11, "UMIP"), (17, "PCIDE"), (20, "SMEP"), (21, "SMAP")];
+    /// The `CR4` bits the CPU may withhold, so neither answer is wrong.
+    const CR4_MAY: &[(u32, &str)] = &[(11, "UMIP"), (17, "PCIDE"), (21, "SMAP")];
 
     let mut seen: Vec<(u32, u64, u64)> = Vec::new();
     for line in log.lines() {
@@ -11818,6 +11823,10 @@ fn control_regs_verdict() -> Result<(), String> {
         &[(DECLARED.0, DECLARED.1 | (1 << 7)); 4],
         "never named",
     )?;
+    // The bit that was on before this and asserted nowhere, so deleting `+smep`
+    // from the launcher or breaking the CPUID gate in `control_regs::supported`
+    // reddened nothing at all.
+    refused("every CPU without SMEP", &[(DECLARED.0, DECLARED.1 & !(1 << 20)); 4], "SMEP")?;
     // A CPU that agrees about every named bit and differs in one the CPU is
     // allowed to withhold, so nothing above it can object.
     refused("one CPU with PCID and three without", &[DECLARED, DECLARED, DECLARED, (DECLARED.0, DECLARED.1 | (1 << 17))], "cpu3")?;
@@ -11825,7 +11834,7 @@ fn control_regs_verdict() -> Result<(), String> {
     // died before the check looks like.
     refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
 
-    eprintln!("  [control_regs] the verdict refuses 9 machines and accepts the declared one");
+    eprintln!("  [control_regs] the verdict refuses 10 machines and accepts the declared one");
     Ok(())
 }
 

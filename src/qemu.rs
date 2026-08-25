@@ -134,10 +134,9 @@ pub fn launch(opts: &Options) {
 
     if toyos_build::kvm_usable() {
         qemu.arg("-accel").arg("kvm");
-        qemu.arg("-cpu").arg("host,+rdrand,+smap,+fsgsbase,+x2apic");
+        qemu.arg("-cpu").arg(toyos_build::CPU_KVM);
     } else {
-        qemu.arg("-cpu")
-            .arg("qemu64,+rdrand,+smap,+fsgsbase,+x2apic");
+        qemu.arg("-cpu").arg(toyos_build::CPU_TCG);
     }
 
     qemu.arg("-machine")
