@@ -3118,10 +3118,7 @@ fn run_screen_test(
                 ));
             }
 
-            {
-                let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                input.type_text(&format!("echo {CONSOLE_NONCE}\n"));
-            }
+            console_type_line(&mut qemu, &font, &format!("echo {CONSOLE_NONCE}"))?;
 
             let dump = qemu.screendump_while(
                 Duration::from_secs(30),
@@ -3206,10 +3203,7 @@ fn run_screen_test(
             // Draw on the glass behind the console's back, which is the state
             // `clear` exists to get a user out of and the one a damage-tracked
             // console can talk itself out of repairing.
-            {
-                let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                input.type_text("test_rs_test_screen_graffiti\n");
-            }
+            console_type_line(&mut qemu, &font, "test_rs_test_screen_graffiti")?;
             // Settle on the strip below the last cell row rather than on the
             // whole panel: the console goes on drawing -- the command echoes,
             // the shell reprints its prompt -- so most of the glass is being
@@ -3250,10 +3244,13 @@ fn run_screen_test(
                 ));
             }
 
-            {
-                let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                input.type_text("clear\n");
-            }
+            // Typed onto the paint, and still confirmed by the console's own
+            // echo: the shell reprinted its prompt after the graffiti child
+            // exited, so the cells it drew are the console's again and the ones
+            // it did not draw are still green. That is why the echo is matched
+            // as a prefix of the input row (`console_type_line`) — the rest of
+            // that row is the actuator's paint and stays.
+            console_type_line(&mut qemu, &font, "clear")?;
 
             // `clear` is `ESC[2J ESC[H`, after which the shell reprints its
             // prompt at the home position. So the whole panel is one row of
@@ -3430,22 +3427,55 @@ fn run_screen_test(
                     // view offset changes what every row of the panel means,
                     // and it is the one input the damage pass takes that the
                     // cell grid does not.
-                    let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                    for _ in 0..3 {
-                        input.keys(&[("pgup", true), ("pgup", false)]);
-                        thread::sleep(Duration::from_millis(250));
-                    }
-                    for _ in 0..2 {
-                        input.keys(&[("pgdn", true), ("pgdn", false)]);
-                        thread::sleep(Duration::from_millis(250));
+                    //
+                    // **Two batches, each inside the device queue, each
+                    // confirmed on the glass.** A page key is `0xE0`-prefixed,
+                    // so a press and its release are four set-1 bytes; three fit
+                    // the queue and so do two, and the queue is empty at the
+                    // first because the round before ran to `CHURN-DONE`. Both
+                    // batches must move the view — the round before printed a
+                    // hundred lines of history and the page down is off a
+                    // non-zero offset — so the panel changing is the guest
+                    // saying it read them.
+                    for (keys, batch) in [(3usize, "pgup"), (2, "pgdn")] {
+                        let was = qemu.screendump();
+                        {
+                            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+                            let mut events: Vec<(&str, bool)> = Vec::new();
+                            for _ in 0..keys {
+                                events.extend([(batch, true), (batch, false)]);
+                            }
+                            assert!(
+                                events.len() * 2 <= QEMU_PS2_QUEUE,
+                                "{} transitions of {batch} are up to {} set-1 bytes against a \
+                                 {QEMU_PS2_QUEUE}-byte device queue",
+                                events.len(),
+                                events.len() * 2
+                            );
+                            input.keys(&events);
+                        }
+                        let moved = |d: &screen::Ppm| !d.identical_to(&was);
+                        let now = qemu.screendump_while_rendering(
+                            CONSOLE_ECHO,
+                            Duration::from_millis(50),
+                            moved,
+                        );
+                        if !moved(&now) {
+                            return Err(format!(
+                                "{keys} {batch} presses moved nothing on the panel, so the \
+                                 console never read them — QEMU's {QEMU_PS2_QUEUE}-byte PS/2 \
+                                 queue drops what a guest that is not draining cannot take, \
+                                 silently\ndecoded screen:\n{}",
+                                now.console_text(&font)
+                            ));
+                        }
                     }
                 }
-                {
-                    let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                    input.type_text(&format!(
-                        "test_rs_test_screen_churn {start} {count} {chunk} {cols}\n"
-                    ));
-                }
+                console_type_line(
+                    &mut qemu,
+                    &font,
+                    &format!("test_rs_test_screen_churn {start} {count} {chunk} {cols}"),
+                )?;
                 // When the round is over is a different question from whether
                 // the panel is right, and asking the panel both at once is how
                 // a broken panel used to spend the whole timeout and then
@@ -4436,9 +4466,23 @@ fn run_screen_test(
             // exactly what was measured blanking every row of the report that
             // lay under it, inside 100 ms, leaving the four rows below the
             // window and a 40-pixel strip beside it.
+            //
+            // **This guest is muted, so the actuator is bounded rather than
+            // confirmed.** No console carries the shell's echo back and no
+            // window's font decodes, so what is left is arithmetic: this line
+            // plus the one chord the loop above may still have outstanding fits
+            // the device queue, so nothing here can be dropped. The premise of
+            // the assertion below is still the measured idle repaint.
             {
                 let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                input.type_text("echo zqjxk\n");
+                let actuator = "echo\n";
+                let bytes: usize = actuator.chars().map(qemu::scancode_bytes).sum();
+                assert!(
+                    bytes + CHORD_BYTES <= QEMU_PS2_QUEUE,
+                    "{actuator:?} is {bytes} set-1 bytes behind a {CHORD_BYTES}-byte chord that \
+                     may still be queued, against a {QEMU_PS2_QUEUE}-byte device queue"
+                );
+                input.type_burst(actuator);
             }
             // Userland's turn, and the wait is the assertion's premise rather
             // than padding: measured with the hold compiled out, an idle
@@ -5399,6 +5443,80 @@ fn i8042_keyboard(boot: &mut Boot) -> Result<(), String> {
     Ok(())
 }
 
+/// The line `tests/toyos-rust-tests/src/bin/locale_gate.rs` prints in `layout`
+/// mode once the surface holds the keyboard and the wizard's child has gone —
+/// the moment a key injected at this machine reaches a translator, and the one
+/// [`SWISS_SCRIPT`] is started off.
+const SWISS_READY: &str = "===SWISS_READY===";
+
+/// What [`swiss_german_layout`] types, as the groups it may have in flight at
+/// once, each with the number of `kev` lines the guest owes for it.
+///
+/// **A group is the unit of pacing, and its size is bounded by
+/// [`QEMU_PS2_QUEUE`]**, for [`KEYBOARD_SCRIPT`]'s reason and by the same
+/// arithmetic: the widest group here is four transitions, eight set-1 bytes even
+/// if every one were `0xE0`-prefixed, against a device holding sixteen. The
+/// whole string is far more than the queue, so a host sending it on a wall clock
+/// loses its tail to a guest that stops draining.
+///
+/// One `kev` per transition, releases and modifiers included: the surface
+/// reports every event it reads, which makes the count a report of what the
+/// guest took off the device rather than of what the host sent.
+const SWISS_SCRIPT: &[(&[(&str, bool)], usize)] = &[
+    // QWERTZ: the two letters that swap.
+    (&[("y", true), ("y", false)], 2),
+    (&[("z", true), ("z", false)], 2),
+    // The three dedicated umlauts, and the accented vowel Shift gives.
+    (&[("bracket_left", true), ("bracket_left", false)], 2),
+    (&[("semicolon", true), ("semicolon", false)], 2),
+    (&[("apostrophe", true), ("apostrophe", false)], 2),
+    (&[("shift", true), ("apostrophe", true), ("apostrophe", false), ("shift", false)], 4),
+    // The AltGr layer.
+    (&[("alt_r", true), ("2", true), ("2", false), ("alt_r", false)], 4),
+    (&[("alt_r", true), ("e", true), ("e", false), ("alt_r", false)], 4),
+    (&[("alt_r", true), ("bracket_left", true), ("bracket_left", false), ("alt_r", false)], 4),
+    // The ISO key, all three levels the reference gives it a legend for.
+    (&[("less", true), ("less", false)], 2),
+    (&[("shift", true), ("less", true), ("less", false), ("shift", false)], 4),
+    (&[("alt_r", true), ("less", true), ("less", false), ("alt_r", false)], 4),
+    // Dead keys: compose, compose with Shift, the capital umlaut this
+    // layout has no dedicated key for, the bare form before a space, an
+    // AltGr dead key, and one that composes with nothing.
+    (&[("equal", true), ("equal", false)], 2),
+    (&[("e", true), ("e", false)], 2),
+    (&[("equal", true), ("equal", false)], 2),
+    (&[("shift", true), ("e", true), ("e", false), ("shift", false)], 4),
+    (&[("bracket_right", true), ("bracket_right", false)], 2),
+    (&[("shift", true), ("u", true), ("u", false), ("shift", false)], 4),
+    (&[("equal", true), ("equal", false)], 2),
+    (&[("spc", true), ("spc", false)], 2),
+    (&[("alt_r", true), ("minus", true), ("minus", false), ("alt_r", false)], 4),
+    (&[("e", true), ("e", false)], 2),
+    (&[("equal", true), ("equal", false)], 2),
+    (&[("q", true), ("q", false)], 2),
+    // And the key the wizard asks about.
+    (&[("grave_accent", true), ("grave_accent", false)], 2),
+    // The sentinel `test_rs_locale_gate layout` exits on — the same End key
+    // and the same reason as [`send_i8042_sentinel`]. Nothing above presses
+    // End, so its release is unambiguous, and a run that loses it pays the
+    // guest binary's whole fallback instead.
+    (&[("end", true), ("end", false)], 2),
+];
+
+/// No group of [`SWISS_SCRIPT`] may outrun the device queue, on the same
+/// worst-case width [`KEYBOARD_SCRIPT`] is held to.
+const _: () = {
+    let mut i = 0;
+    while i < SWISS_SCRIPT.len() {
+        assert!(
+            SWISS_SCRIPT[i].0.len() * 2 <= QEMU_PS2_QUEUE,
+            "a swiss_german_layout group can outrun QEMU's PS/2 queue, which drops what it \
+             cannot hold one byte at a time and says nothing"
+        );
+        i += 1;
+    }
+};
+
 /// Swiss German end to end: the real command selects the layout, and the keys
 /// a Swiss keyboard has arrive as the characters a Swiss keyboard prints.
 ///
@@ -5408,68 +5526,56 @@ fn i8042_keyboard(boot: &mut Boot) -> Result<(), String> {
 /// exists to make, so asserting on the characters that come out is asserting
 /// on the table, the modifier levels, the ISO key and the dead-key machine at
 /// once.
+///
+/// **Paced against the guest's own report**, for [`i8042_keyboard`]'s reason and
+/// [`SWISS_SCRIPT`]'s: a group goes out only once every `kev` line the one
+/// before it owed has come back, so at most one group's bytes are ever
+/// outstanding at a device that holds sixteen. A guest that stalls costs this
+/// test wall clock and never a verdict.
 fn swiss_german_layout(qemu: &mut QemuInstance) -> Result<(), String> {
-    let result = qemu.run_test_hooked(
-        "test_rs_locale_gate layout",
-        Duration::from_secs(30),
-        "===SWISS_READY===",
-        |socket| {
-            let mut input = qemu::QmpInput::open(socket);
-            let mut tap = |events: &[(&str, bool)]| {
-                input.keys(events);
-                thread::sleep(Duration::from_millis(25));
-            };
-            let plain = |k: &'static str| vec![(k, true), (k, false)];
-            let shifted =
-                |k: &'static str| vec![("shift", true), (k, true), (k, false), ("shift", false)];
-            let altgr =
-                |k: &'static str| vec![("alt_r", true), (k, true), (k, false), ("alt_r", false)];
-
-            // QWERTZ: the two letters that swap.
-            tap(&plain("y"));
-            tap(&plain("z"));
-            // The three dedicated umlauts, and the accented vowel Shift gives.
-            tap(&plain("bracket_left"));
-            tap(&plain("semicolon"));
-            tap(&plain("apostrophe"));
-            tap(&shifted("apostrophe"));
-            // The AltGr layer.
-            tap(&altgr("2"));
-            tap(&altgr("e"));
-            tap(&altgr("bracket_left"));
-            // The ISO key, all three levels the reference gives it a legend for.
-            tap(&plain("less"));
-            tap(&shifted("less"));
-            tap(&altgr("less"));
-            // Dead keys: compose, compose with Shift, the capital umlaut this
-            // layout has no dedicated key for, the bare form before a space,
-            // an AltGr dead key, and one that composes with nothing.
-            tap(&plain("equal"));
-            tap(&plain("e"));
-            tap(&plain("equal"));
-            tap(&shifted("e"));
-            tap(&plain("bracket_right"));
-            tap(&shifted("u"));
-            tap(&plain("equal"));
-            tap(&plain("spc"));
-            tap(&altgr("minus"));
-            tap(&plain("e"));
-            tap(&plain("equal"));
-            tap(&plain("q"));
-            // And the key the wizard asks about.
-            tap(&plain("grave_accent"));
-            // The sentinel `test_rs_locale_gate layout` exits on — the same End
-            // key and the same reason as [`send_i8042_sentinel`], sent through
-            // the connection this hook already holds because a `-qmp …,server`
-            // socket serves one connection at a time. Nothing above presses
-            // End, so its release is unambiguous; without it every green run
-            // waited out the binary's whole 8 s fallback against half a second
-            // of typing.
-            tap(&plain("end"));
-        },
-    );
+    let sent = std::cell::Cell::new(0usize);
+    let seen = std::cell::Cell::new(0usize);
+    let result = {
+        let mut input: Option<qemu::QmpInput> = None;
+        qemu.run_test_paced(
+            "test_rs_locale_gate layout",
+            Duration::from_secs(30),
+            |socket, line| {
+                if line.contains(SWISS_READY) {
+                    input = Some(qemu::QmpInput::open(
+                        socket.expect("swiss_german_layout needs BootOptions { qmp }"),
+                    ));
+                }
+                if line.contains("kev usage=") {
+                    seen.set(seen.get() + 1);
+                }
+                let Some(input) = input.as_mut() else { return };
+                // What everything already sent owes. Nothing new goes out until
+                // the guest has reported all of it, which is what bounds the
+                // bytes outstanding at the device to one group's worth.
+                let owed: usize = SWISS_SCRIPT[..sent.get()].iter().map(|(_, n)| n).sum();
+                if seen.get() < owed {
+                    return;
+                }
+                if let Some((keys, _)) = SWISS_SCRIPT.get(sent.get()) {
+                    input.keys(keys);
+                    sent.set(sent.get() + 1);
+                }
+            },
+        )
+    };
+    let (sent, seen) = (sent.get(), seen.get());
     if let Some(err) = &result.error {
-        return Err(format!("{err}\n{}", result.stdout));
+        // The guard, not the verdict: under the pacing the host is *waiting* for
+        // the guest when this fires, so what it establishes is that the run
+        // stopped and never that the machine dropped a key.
+        let owed: usize = SWISS_SCRIPT.iter().map(|(_, n)| n).sum();
+        return Err(format!(
+            "{STALLED} {err} — {sent} of {} groups sent and {seen} of {owed} key events back \
+             when the host gave up waiting for the next\n{}",
+            SWISS_SCRIPT.len(),
+            result.stdout
+        ));
     }
     if !result.stdout.contains("locale: Keyboard layout set to 'swiss-german'") {
         return Err(format!("the real command did not select the layout:\n{}", result.stdout));
@@ -5506,6 +5612,24 @@ fn swiss_german_layout(qemu: &mut QemuInstance) -> Result<(), String> {
     Ok(())
 }
 
+/// How many Escapes [`keep_the_ring_moving`] presses.
+const RING_ESCAPES: usize = 4;
+
+/// How many keys the wizard is answered with, at most — `y`, the `§` key, Enter.
+const WIZARD_ANSWERS: usize = 3;
+
+/// **The wizard gates are the one injection here a wall clock cannot cost
+/// anything**: answers and ring-drainers together are fewer bytes than
+/// [`QEMU_PS2_QUEUE`] holds and none of their qcodes is `0xE0`-prefixed, so a
+/// guest draining nothing for the whole hook still receives every transition.
+/// Anything added to either sequence is past that bound and has to be paced
+/// against the guest, the way [`SWISS_SCRIPT`] is.
+const _: () = assert!(
+    (WIZARD_ANSWERS + RING_ESCAPES) * 2 <= QEMU_PS2_QUEUE,
+    "the wizard gates put more at QEMU's PS/2 queue than it holds, and it drops the excess \
+     one byte at a time and says nothing — pace them against the guest"
+);
+
 /// Keys nothing is listening for, after the ones that are.
 ///
 /// The wizard exits within milliseconds of its last answer, and on a machine
@@ -5516,7 +5640,7 @@ fn swiss_german_layout(qemu: &mut QemuInstance) -> Result<(), String> {
 /// that keeps the ring draining. `i8042_no_spurious_wake` records the same
 /// property from the other side: a guest polling its handle keeps it moving.
 fn keep_the_ring_moving(input: &mut qemu::QmpInput) {
-    for _ in 0..4 {
+    for _ in 0..RING_ESCAPES {
         thread::sleep(Duration::from_millis(150));
         input.keys(&[("esc", true), ("esc", false)]);
     }
@@ -5531,8 +5655,11 @@ fn locale_detect(qemu: &mut QemuInstance) -> Result<(), String> {
         |socket| {
             let mut input = qemu::QmpInput::open(socket);
             // The key a Swiss board prints `Z` on, then the one it prints `§`
-            // on, then Enter to confirm.
-            for key in ["y", "grave_accent", "ret"] {
+            // on, then Enter to confirm — [`WIZARD_ANSWERS`] of them, which is
+            // what the bound beside that constant is about.
+            let answers = ["y", "grave_accent", "ret"];
+            assert_eq!(answers.len(), WIZARD_ANSWERS, "the wizard's answers outgrew their bound");
+            for key in answers {
                 input.keys(&[(key, true), (key, false)]);
                 thread::sleep(Duration::from_millis(60));
             }
@@ -5571,7 +5698,8 @@ fn locale_detect_unrecognized(qemu: &mut QemuInstance) -> Result<(), String> {
         "Press the key labelled",
         |socket| {
             let mut input = qemu::QmpInput::open(socket);
-            // `y` is a QWERTZ answer; `d` is where no layout puts `§`.
+            // `y` is a QWERTZ answer; `d` is where no layout puts `§`. Two,
+            // one under [`WIZARD_ANSWERS`]'s bound.
             for key in ["y", "d"] {
                 input.keys(&[(key, true), (key, false)]);
                 thread::sleep(Duration::from_millis(60));
@@ -5653,19 +5781,44 @@ fn serial_until_new(
     false
 }
 
-/// The wizard's two answers, as a Swiss keyboard's owner gives them: the key
-/// that prints `Z`, the key that prints `§`, then Enter to confirm.
-const SWISS_ANSWERS: [&str; 3] = ["y", "grave_accent", "ret"];
-
-/// Type `line` and press Enter, at whatever prompt is in front of the guest.
+/// Answer the wizard as a Swiss keyboard's owner does — the key that prints
+/// `Z`, the key that prints `§`, then Enter — **each key sent only once the
+/// wizard has asked for it**.
 ///
-/// Paced on a wall clock, because a caller with no view of the guest has
-/// nothing else — [`console_type_line`] is the form for one that has the panel,
-/// and its doc is where the cost of the bet is written down.
-fn type_line(input: &mut qemu::QmpInput, line: &str) {
-    input.type_text(line);
+/// The wizard prints a prompt and then blocks on one press, so its own output is
+/// the pacing and nothing is ever in flight but the key it is waiting for. The
+/// first prompt is the caller's to wait for: what it means is that the surface
+/// lent the wizard its keys, and each caller says that in its own words.
+fn answer_swiss_wizard(
+    qemu: &mut QemuInstance,
+    log: &mut String,
+    where_: &str,
+) -> Result<(), String> {
+    for (key, next, doing) in [
+        ("y", "Press the key labelled", "the wizard to ask for its second key"),
+        ("grave_accent", "That is 'swiss-german'", "the wizard to name a layout"),
+    ] {
+        let asked = log.len();
+        {
+            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+            input.keys(&[(key, true), (key, false)]);
+        }
+        await_marker_new(qemu, log, next, asked, &format!("{doing} {where_}"))
+            .map_err(|why| format!("{why}\n{log}"))?;
+    }
+    let mut input = qemu::QmpInput::open(qemu.qmp_socket());
     input.keys(&[("ret", true), ("ret", false)]);
+    Ok(())
 }
+
+/// How long one typed line has to come back on the guest's own console.
+///
+/// What is being waited for is a shell echoing a line it has not run yet, which
+/// is a round trip and not work — so this is short, and it is paid only when the
+/// line did not arrive. [`shell_type_line`] widens it by the guest's own
+/// oversubscription; the two callers that retype at a surface which may not be
+/// reading yet scale it per host with [`round_trip`] instead.
+const ECHO_TRY: Duration = Duration::from_secs(2);
 
 /// How long one burst of typing has to reach the panel.
 ///
@@ -5681,7 +5834,11 @@ const CONSOLE_ECHO: Duration = Duration::from_secs(30);
 /// with the prompt, trailing blanks off.
 ///
 /// The *last*, because a command that has already run leaves its own prompt row
-/// above the live one.
+/// above the live one. What is *after* the input is not trimmed and must not be
+/// compared against: a panel something painted behind the console's back has
+/// the rest of that row in whatever colour the painter left, and a console that
+/// repaints only the cells it draws never takes it back — so the echo is a
+/// prefix of this row and never the whole of it.
 fn console_input_row(dump: &screen::Ppm, font: &screen::ConsoleFont) -> Option<String> {
     dump.console_rows(font)
         .into_iter()
@@ -5764,6 +5921,12 @@ fn ps2_bursts(line: &str) -> Vec<String> {
 ///
 /// The Enter is separate and unconfirmed on purpose: what it produces is the
 /// caller's assertion, and a prompt that has scrolled is not an echo to match.
+///
+/// The echo is matched as a **prefix** of the input row, which is what lets the
+/// one command in this suite that is typed onto a panel somebody painted over
+/// use this: `screen_console_clear` types `clear` at a prompt whose row is green
+/// from the cell after the cursor to the edge, and a whole-row comparison would
+/// read that paint as a lost keystroke.
 fn console_type_line(
     qemu: &mut QemuInstance,
     font: &screen::ConsoleFont,
@@ -5784,17 +5947,18 @@ fn console_type_line(
         }
         typed.push_str(&burst);
         let want = format!("{CONSOLE_PROMPT} {typed}").trim_end().to_string();
-        let echoed =
-            |dump: &screen::Ppm| console_input_row(dump, font).as_deref() == Some(want.as_str());
+        let echoed = |dump: &screen::Ppm| {
+            console_input_row(dump, font).is_some_and(|row| row.starts_with(&want))
+        };
         let dump =
             qemu.screendump_while_rendering(CONSOLE_ECHO, Duration::from_millis(50), echoed);
         if !echoed(&dump) {
             return Err(format!(
                 "the console never echoed what was typed at it: its input line reads {:?} and \
-                 not {:?}. A keystroke was lost between the host and the shell — QEMU's \
-                 {QEMU_PS2_QUEUE}-byte PS/2 queue drops what a guest that is not draining \
-                 cannot take, silently — so nothing below this would have been asking the \
-                 guest the question it was written to ask\ndecoded screen:\n{}",
+                 does not begin {:?}. A keystroke was lost between the host and the shell — \
+                 QEMU's {QEMU_PS2_QUEUE}-byte PS/2 queue drops what a guest that is not \
+                 draining cannot take, silently — so nothing below this would have been asking \
+                 the guest the question it was written to ask\ndecoded screen:\n{}",
                 console_input_row(&dump, font).unwrap_or_default(),
                 want,
                 dump.console_text(font)
@@ -5804,6 +5968,88 @@ fn console_type_line(
     let mut input = qemu::QmpInput::open(qemu.qmp_socket());
     input.keys(&[("ret", true), ("ret", false)]);
     Ok(())
+}
+
+/// How many times [`shell_type_line`] retypes a line the guest did not receive
+/// whole before it calls that a defect.
+///
+/// A loss is in the device queue and leaves the shell having answered a command
+/// nobody asked for, so the next attempt starts from a fresh prompt and the
+/// retype costs nothing but the attempt. Three, because a channel that loses
+/// three lines running is not a busy guest.
+const SHELL_TYPE_TRIES: usize = 3;
+
+/// Type `line` at a shell this harness cannot read a panel for, press Enter, and
+/// **make the guest say what it received before the caller asserts on what it
+/// did**.
+///
+/// [`console_type_line`] paces on the panel because `/bin/console` draws every
+/// echoed character onto glass this harness decodes. Under a compositor there is
+/// no such row: `/bin/terminal` renders into a window at an offset the
+/// compositor picks, and the mirror both surface owners keep to their own stdout
+/// is line-buffered by std — so nothing of a line under construction reaches the
+/// console at all, and there is no per-burst channel to pace against. What does
+/// reach it is the whole echoed line, the moment Enter flushes it.
+///
+/// So the two halves are split. Delivery is bounded by [`QEMU_PS2_QUEUE`]: one
+/// QMP command per burst, each waiting for QEMU's reply, so the emulator's main
+/// loop has run and a vCPU has had its turn between any two of them, and a guest
+/// that took none of those turns still cannot be past the queue inside one
+/// burst. The **verdict** is the guest's own echo of the line, read back before
+/// anything below asserts on what the command did — a lost byte makes the echo
+/// differ from what was sent, and nothing here reports success on a command the
+/// guest was never asked to run.
+///
+/// Read through [`qemu::ConsoleStream`] rather than by draining, because the
+/// caller owns the capture: a wait that consumed lines here would take the
+/// marker its assertion is waiting for.
+fn shell_type_line(qemu: &QemuInstance, line: &str) -> Result<(), String> {
+    let echo = qemu.budget(ECHO_TRY);
+    let mut last = String::new();
+    for _ in 0..SHELL_TYPE_TRIES {
+        match shell_type_once(qemu, line, echo) {
+            Ok(()) => return Ok(()),
+            Err(said) => last = said,
+        }
+    }
+    Err(format!(
+        "{SHELL_TYPE_TRIES} typed lines and the shell echoed none of them whole. A keystroke \
+         was lost between the host and the shell — QEMU's {QEMU_PS2_QUEUE}-byte PS/2 queue \
+         drops what a guest that is not draining cannot take, silently — so nothing below this \
+         would have been asking the guest the question it was written to ask.\nasked for \
+         {line:?}; the last attempt was answered with {last:?}"
+    ))
+}
+
+/// One attempt of [`shell_type_line`]. `Err` carries what the guest said
+/// instead, which is the evidence and not a message.
+///
+/// `echo` is a liveness ceiling and never the pacing: it is paid only when the
+/// line did not arrive, and a healthy shell echoes inside a round trip.
+fn shell_type_once(qemu: &QemuInstance, line: &str, echo: Duration) -> Result<(), String> {
+    assert!(
+        !line.contains('\n'),
+        "shell_type_line presses Enter itself; {line:?} carries its own"
+    );
+    let mark = qemu.console_stream().mark();
+    {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+        for burst in ps2_bursts(line) {
+            input.type_burst(&burst);
+        }
+        input.keys(&[("ret", true), ("ret", false)]);
+    }
+    let deadline = Instant::now() + echo;
+    loop {
+        let said = qemu.console_stream().since(mark);
+        if said.contains(line) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(said);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Wait until keys typed at the guest reach a shell and come back out.
@@ -5870,16 +6116,20 @@ fn shell_echoes(qemu: &mut QemuInstance, log: &mut String, nonce: &str) -> Resul
     // each gets a round trip scaled to this host — see [`round_trip`] for why
     // that and not the phase width.
     const TRIES: usize = 10;
+    let mut lost = String::new();
     for _ in 0..TRIES {
-        {
-            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-            type_line(&mut input, &format!("echo {nonce}"));
+        // One attempt, because here a line that does not come back is the
+        // loop's ordinary step: the surface is up and the shell may still not
+        // be reading, which is what the retype exists for.
+        if let Err(said) = shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY)) {
+            lost = said;
+            continue;
         }
         if serial_until(qemu, log, nonce, round_trip(Duration::from_secs(2))) {
             return Ok(());
         }
     }
-    Err(format!("{TRIES} typed lines and none of them came back"))
+    Err(format!("{TRIES} typed lines and none of them came back\n{lost}"))
 }
 
 /// A shell must get its prompt back when a windowed child's window goes.
@@ -6122,10 +6372,7 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
     // A windowed child that leaves on its own. The shell is in `waitpid` and
     // the compositor never touches its connection, so this is the plain case
     // and it has to work before the second probe means anything.
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        type_line(&mut input, "test_rs_window_child exit");
-    }
+    shell_type_line(qemu, "test_rs_window_child exit")?;
     let by = qemu.budget(Duration::from_secs(20));
     if !serial_until(qemu, log, "WINDOW-CHILD-GONE", by) {
         return Err(format!("the windowed child never reported leaving:\n{log}"));
@@ -6139,10 +6386,7 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
     // The owner's case: the process is alive and the compositor takes its
     // window away underneath it.
     let started = log.len();
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        type_line(&mut input, "test_rs_window_child");
-    }
+    shell_type_line(qemu, "test_rs_window_child")?;
     // Its own marker, not the one the probe above already printed.
     let by = qemu.budget(Duration::from_secs(20));
     if !serial_until_new(
@@ -6194,10 +6438,7 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
     // second after it opened exercises a quieter program than that. One green
     // round would say very little about a report that arrived once.
     for round in 0..SNAKE_ROUNDS {
-        {
-            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-            type_line(&mut input, "snake");
-        }
+        shell_type_line(qemu, "snake")?;
         // snake prints nothing of its own, so the compositor's second window
         // is what says it is up — and a window it has just created is the
         // focused one, which is what GUI+Q then closes.
@@ -6302,10 +6543,7 @@ fn desktop_typing_damage() -> Result<(), String> {
     // rather than the cause. Each line now waits for its own echo before the
     // next goes in, which costs a slow guest wall clock and never the stimulus.
     for line in 0..8u32 {
-        {
-            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-            type_line(&mut input, &format!("echo {NONCE}"));
-        }
+        shell_type_line(&qemu, &format!("echo {NONCE}"))?;
         // Two: the shell echoes the command as it is typed and again as its
         // output. The same arithmetic the verdict below makes.
         let want = ((line + 1) * 2) as usize;
@@ -6374,22 +6612,16 @@ fn console_locale_detect() -> Result<(), String> {
         return Err(format!("{why}\nnothing typed at /bin/console reached a shell:\n{log}"));
     }
 
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        type_line(&mut input, "locale detect");
-        await_marker(
-            &mut qemu,
-            &mut log,
-            "Press the key labelled",
-            "the wizard to ask for a key under /bin/console — the console did not lend it \
-             the keyboard",
-        )
-        .map_err(|why| format!("{why}\n{log}"))?;
-        for key in SWISS_ANSWERS {
-            input.keys(&[(key, true), (key, false)]);
-            thread::sleep(Duration::from_millis(120));
-        }
-    }
+    shell_type_line(&qemu, "locale detect")?;
+    await_marker(
+        &mut qemu,
+        &mut log,
+        "Press the key labelled",
+        "the wizard to ask for a key under /bin/console — the console did not lend it \
+         the keyboard",
+    )
+    .map_err(|why| format!("{why}\n{log}"))?;
+    answer_swiss_wizard(&mut qemu, &mut log, "under /bin/console")?;
 
     for want in ["That is 'swiss-german'", "Keyboard layout set to 'swiss-german'"] {
         await_marker(&mut qemu, &mut log, want, &format!("{want:?} under /bin/console"))
@@ -6412,9 +6644,22 @@ fn console_locale_detect() -> Result<(), String> {
     // key a US board prints `[` on and a Swiss one prints `ü` on, so this is
     // the substitution the whole exercise exists to make, taken through the
     // console's translator and the shell.
+    // **Bounded rather than echoed back**, and it is the one line here that can
+    // be: `echo `, the key and Enter are fewer set-1 bytes than the device
+    // queue holds, and the wizard's own last answer has just been consumed — so
+    // a guest that drains nothing from here still receives every one of them.
+    // What `bracket_left` produces is the assertion below, which is that key's
+    // arrival stated as the thing under test.
     {
         let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        input.type_text("echo ");
+        let typed = "echo ";
+        let bytes: usize = typed.chars().map(qemu::scancode_bytes).sum();
+        assert!(
+            bytes + 4 <= QEMU_PS2_QUEUE,
+            "{typed:?} plus the ISO key and Enter is more than the {QEMU_PS2_QUEUE}-byte \
+             device queue holds"
+        );
+        input.type_burst(typed);
         input.keys(&[("bracket_left", true), ("bracket_left", false)]);
         input.keys(&[("ret", true), ("ret", false)]);
     }
@@ -6452,22 +6697,16 @@ fn desktop_locale_detect() -> Result<(), String> {
         ));
     }
 
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        type_line(&mut input, "locale detect");
-        await_marker(
-            &mut qemu,
-            &mut log,
-            "Press the key labelled",
-            "the wizard to ask for a key inside a terminal — the compositor or the terminal \
-             did not carry the transitions",
-        )
-        .map_err(|why| format!("{why}\n{log}"))?;
-        for key in SWISS_ANSWERS {
-            input.keys(&[(key, true), (key, false)]);
-            thread::sleep(Duration::from_millis(120));
-        }
-    }
+    shell_type_line(&qemu, "locale detect")?;
+    await_marker(
+        &mut qemu,
+        &mut log,
+        "Press the key labelled",
+        "the wizard to ask for a key inside a terminal — the compositor or the terminal \
+         did not carry the transitions",
+    )
+    .map_err(|why| format!("{why}\n{log}"))?;
+    answer_swiss_wizard(&mut qemu, &mut log, "inside a terminal")?;
 
     for want in ["That is 'swiss-german'", "Keyboard layout set to 'swiss-german'"] {
         await_marker(&mut qemu, &mut log, want, &format!("{want:?} inside a terminal"))
@@ -6477,9 +6716,22 @@ fn desktop_locale_detect() -> Result<(), String> {
     // The same substitution as the console gate, one surface deeper: the
     // config went up to the compositor and came back down to this window's
     // translator.
+    // **Bounded rather than echoed back**, and it is the one line here that can
+    // be: `echo `, the key and Enter are fewer set-1 bytes than the device
+    // queue holds, and the wizard's own last answer has just been consumed — so
+    // a guest that drains nothing from here still receives every one of them.
+    // What `bracket_left` produces is the assertion below, which is that key's
+    // arrival stated as the thing under test.
     {
         let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        input.type_text("echo ");
+        let typed = "echo ";
+        let bytes: usize = typed.chars().map(qemu::scancode_bytes).sum();
+        assert!(
+            bytes + 4 <= QEMU_PS2_QUEUE,
+            "{typed:?} plus the ISO key and Enter is more than the {QEMU_PS2_QUEUE}-byte \
+             device queue holds"
+        );
+        input.type_burst(typed);
         input.keys(&[("bracket_left", true), ("bracket_left", false)]);
         input.keys(&[("ret", true), ("ret", false)]);
     }
@@ -6538,10 +6790,7 @@ fn desktop_audio_client() -> Result<(), String> {
     // One client, start to finish. `tone: done` is the client's own last line,
     // so it is the client saying it got its callbacks and left — not the shell
     // saying it launched something.
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        type_line(&mut input, "tone 440 1");
-    }
+    shell_type_line(&qemu, "tone 440 1")?;
     await_marker(
         &mut qemu,
         &mut log,
@@ -6556,10 +6805,7 @@ fn desktop_audio_client() -> Result<(), String> {
     // reached two live clients, and why the second terminal is part of the
     // stimulus rather than only part of the verdict.
     let before_second = log.len();
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        type_line(&mut input, "tone 660 8");
-    }
+    shell_type_line(&qemu, "tone 660 8")?;
     await_marker_new(
         &mut qemu,
         &mut log,
@@ -6569,10 +6815,7 @@ fn desktop_audio_client() -> Result<(), String> {
     )
     .map_err(|why| format!("{why}\n{}", &log[before_second..]))?;
     open_terminal(&mut qemu, &mut log, "overlap-terminal-jc4t")?;
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        type_line(&mut input, "tone 440 1");
-    }
+    shell_type_line(&qemu, "tone 440 1")?;
     // **The count is the verdict and the wait is not.** Both of these used to be
     // `budget(60 s)`, which is a claim that a desktop with two audio clients on
     // it finishes inside a minute times the width — and at 385 s wide against
@@ -6631,10 +6874,11 @@ fn open_terminal(qemu: &mut QemuInstance, log: &mut String, nonce: &str) -> Resu
 
     // The same count-of-attempts as [`shell_echoes`], and for the same reason.
     const TRIES: usize = 10;
+    let mut lost = String::new();
     for _ in 0..TRIES {
-        {
-            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-            type_line(&mut input, &format!("echo {nonce}"));
+        if let Err(said) = shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY)) {
+            lost = said;
+            continue;
         }
         if serial_until(qemu, log, nonce, round_trip(Duration::from_secs(2))) {
             return Ok(());
@@ -6642,7 +6886,7 @@ fn open_terminal(qemu: &mut QemuInstance, log: &mut String, nonce: &str) -> Resu
     }
     Err(format!(
         "a terminal opened with Ctrl+N never reached a shell that answers in {TRIES} typed \
-         lines:\n{}",
+         lines:\n{lost}\n{}",
         &log[before..]
     ))
 }
@@ -6985,6 +7229,14 @@ fn i8042_no_spurious_wake(boot: &mut Boot) -> Result<(), String> {
 /// can see this, which is why every injection test here is paced against the
 /// guest's own report rather than against a wall clock.
 const QEMU_PS2_QUEUE: usize = 16;
+
+/// What a three-key chord costs on the wire, in set-1 bytes.
+///
+/// Ctrl+Alt+D and Ctrl+N and GUI+Q are all this or less: six transitions at
+/// most, none of them `0xE0`-prefixed on the qcodes this suite injects. A
+/// caller that types behind a chord it cannot prove has been consumed budgets
+/// this much of [`QEMU_PS2_QUEUE`] for it.
+const CHORD_BYTES: usize = 6;
 
 /// No group of [`KEYBOARD_SCRIPT`] may outrun the device queue even if every
 /// transition in it is an `0xE0`-prefixed two-byte one, which is the widest a
