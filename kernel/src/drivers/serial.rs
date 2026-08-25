@@ -1,9 +1,6 @@
 //! The 16550 and the virtio-console, and the one lock that serialises them.
 //!
-//! **There is one thing here now where there were two.** `SerialWriter` was a
-//! per-invocation stack buffer that every `log!` formatted into and committed
-//! to a 64 KiB byte ring, which something else drained later; the ring is gone
-//! and what reaches this file is whole units — a rendered record from
+//! **What reaches this file is whole units** — a rendered record from
 //! `log::console`, a userland `write`, a panic report — each of which takes
 //! [`BackendGuard`] once and holds it for its own whole unit. That is where
 //! line atomicity comes from, and it is the only place it could come from: two
@@ -69,12 +66,11 @@ pub fn init() {
         outb(PORT + 4, 0x0F); // Normal operation mode
         seen
     };
-    // The byte, not just the verdict. Replacing the old assert with a silent
-    // latch collapsed three different situations into one `false`: no SuperIO
-    // at all (0xFF), a chip that answered wrongly, and the right chip at the
-    // wrong port. They want different next steps, and on a machine with no
-    // serial output this line is the difference — it still reaches the
-    // virtio-console and the on-screen console.
+    // The byte, not just the verdict: a bare `false` collapses three different
+    // situations — no SuperIO at all (0xFF), a chip that answered wrongly, and
+    // the right chip at the wrong port — and they want different next steps. On
+    // a machine with no serial output this line still reaches the virtio-console
+    // and the on-screen console.
     log!(
         "serial: 16550 loopback read {:#04x} ({})",
         loopback,
@@ -86,7 +82,7 @@ pub fn init() {
 /// A backend has arrived, or the machine has switched to a better one.
 ///
 /// Called from the two places [`backend`] can change its answer — this module's
-/// probe, and virtio-console coming up in phase 6. What it does is
+/// probe, and virtio-console coming up. What it does is
 /// `log::console`'s and the argument lives there: everything said so far went
 /// to whichever backend existed then, and the new one has heard none of it.
 pub fn console_changed() {
@@ -152,12 +148,11 @@ pub struct BackendGuard {
 ///
 /// **The type is what makes [`SavedFlags::restore`] safe.** Restoring flags is
 /// a memory-safety operation only because of what a *forged* word can carry —
-/// `DF` set makes every `rep` in the machine run backwards (root `CLAUDE.md`
-/// records the three days that cost), `IF` set re-enables interrupts inside a
-/// critical section, `TF` single-steps. None of that is reachable from a value
-/// that came out of `pushfq` on this CPU, and [`save_and_cli`] is the only
-/// constructor, so the two call sites that used to spell `unsafe {
-/// restore_flags(x) }` are ordinary safe code now. Not `Copy` and not `Clone`:
+/// `DF` set makes every `rep` in the machine run backwards, `IF` set re-enables
+/// interrupts inside a critical section, `TF` single-steps. None of that is
+/// reachable from a value that came out of `pushfq` on this CPU, and
+/// [`save_and_cli`] is the only constructor, so restoring is ordinary safe code.
+/// Not `Copy` and not `Clone`:
 /// a saved word is one CPU's state at one instant, and duplicating it is how it
 /// would end up restored somewhere it did not come from.
 pub struct SavedFlags(u64);
@@ -335,10 +330,11 @@ pub unsafe fn panic_flush() {
 
 /// Drain the ring before the machine stops.
 ///
-/// `acpi::shutdown()` cuts power with whatever is still queued, so the tail of
-/// every clean shutdown was unobservable — including the line that says how far
-/// a filesystem sync got before it died, which is the one diagnostic a shutdown
-/// failure has. On a machine with no serial there is no other channel at all.
+/// `acpi::shutdown()` cuts power with whatever is still queued, so without this
+/// the tail of every clean shutdown is unobservable — including the line that
+/// says how far a filesystem sync got before it died, which is the one
+/// diagnostic a shutdown failure has. On a machine with no serial there is no
+/// other channel at all.
 ///
 /// Bounded on the lock rather than blocking, for the same reason `panic_flush`
 /// is: a shutdown must not hang because another CPU is wedged holding the
@@ -358,22 +354,13 @@ pub fn flush_final() {
 /// A userland `write` to a console object, **unbuffered**.
 ///
 /// **One backend acquisition per [`MAX_CONSOLE_LINE`] of output, ANSI stripped,
-/// no buffering.** It replaced `SerialWriter::console()` and the lossless
-/// byte-ring append underneath it, whose unit of interleaving was a `write`
-/// syscall — and two measured splices to show for it, each a kernel record
-/// landing inside a userland line: `hda_tone` red 1 of 3 on a loaded dev host
-/// with `soundd: hda codec0 vendor=1af4` cut between `codec` and `0`, and
-/// `desktop_audio_client` red 1 of 10 on CI with `soundd: client ` and
-/// `1 removed` either side of the kernel's four `exit:` accounting lines —
-/// `src/redlist.rs`'s retired rows are where those measurements are kept now
-/// that the entry that held them is closed. Taking the guard here is what makes
-/// this write whole against a kernel record and against another process; what
-/// it does *not* fix is `println!` handing the kernel half a line at a time.
+/// no buffering.** Taking the guard here is what makes this write whole against
+/// a kernel record and against another process; what it does *not* fix is
+/// `println!` handing the kernel half a line at a time.
 ///
-/// **That is what [`ConsoleLine`] fixes, and this function is now the thing it
-/// is measured against.** Every ordinary write goes through the line buffer;
-/// this path survives as the `console-unbuffered` actuator's behaviour, which
-/// is a state this tree really shipped rather than an invented one.
+/// **That is what [`ConsoleLine`] fixes, and this function is what it is
+/// measured against.** Every ordinary write goes through the line buffer; this
+/// path survives as the `console-unbuffered` actuator's behaviour.
 ///
 /// **The guard is taken and released per chunk, and the bound is the reason
 /// this function may be called with a userland length at all.** `BackendGuard`
@@ -381,9 +368,7 @@ pub fn flush_final() {
 /// single acquisition around the whole call would mask interrupts for a window
 /// userland chooses: `SYS_WRITE` puts no cap on its buffer, and a UART pays a
 /// [`THRE_SPIN_LIMIT`]-bounded spin *per byte* of it. That is the shape
-/// `kernel/CLAUDE.md`'s `BackendGuard` caveat refuses, and it is what the byte
-/// ring this replaced never did — it appended under its own short lock and
-/// something else drained.
+/// `kernel/CLAUDE.md`'s `BackendGuard` caveat refuses.
 ///
 /// **[`MAX_CONSOLE_LINE`] rather than a number invented here.** The console
 /// object bounds a *line* by it and emits a longer one in pieces of it, so the
@@ -484,18 +469,17 @@ impl Default for ConsoleLine {
 
 /// How much of a user write is copied out of user memory at a time.
 ///
-/// The same 256 the old user-memory reader used, for the same reason: a user
-/// window cannot be a slice, so it is copied in pieces, and this is one piece.
-/// It is **not** the backend's unit — [`MAX_CONSOLE_LINE`] is — because the
-/// filter can consume a whole piece and emit nothing.
+/// A user window cannot be a slice, so it is copied in pieces, and this is one
+/// piece. It is **not** the backend's unit — [`MAX_CONSOLE_LINE`] is — because
+/// the filter can consume a whole piece and emit nothing.
 const STRIP_CHUNK: usize = 256;
 
 /// The most that reaches the backend under one [`BackendGuard`], and therefore
 /// the longest interrupts-off window a userland `write` can buy.
 ///
-/// §4.4's console-line bound, 1024, which is what `SerialWriter::SW_BUF_SIZE`
-/// was. [`ConsoleLine`] emits a longer line in pieces of the same size, so a
-/// whole line is one acquisition either side of the buffer arriving.
+/// 1024, the console-line bound. [`ConsoleLine`] emits a longer line in pieces
+/// of the same size, so a whole line is one acquisition either side of the
+/// buffer arriving.
 const MAX_CONSOLE_LINE: usize = 1024;
 
 /// Bytes on their way to the backend, buffered so that a per-byte filter does
@@ -581,14 +565,9 @@ impl Csi {
 /// The bound is not belt-and-braces. `uart_present()` says a 16550 answered a
 /// loopback probe at boot, not that it is still draining: a UART wedged with
 /// THRE clear — flow-controlled by a host that went away, or simply broken —
-/// made this loop infinite, and it is on `panic_flush`'s bypass path, which is
-/// the last thing standing when the backend lock holder is already wedged. So
-/// the one mechanism designed for "everything else has failed" could itself
-/// hang forever, on the machine where it matters most: a laptop, where nothing
-/// is watching the console to notice. The panic path's own port writer has
-/// always bounded its wait; this is the same bound, applied where the bytes
-/// actually go — and since `kernel/src/panic.rs` took that writer over, it is
-/// the only one. Losing a byte to a dead UART beats losing the machine to it.
+/// makes an unbounded loop here infinite, and this is on `panic_flush`'s bypass
+/// path, the last thing standing when the backend lock holder is already
+/// wedged. Losing a byte to a dead UART beats losing the machine to it.
 const THRE_SPIN_LIMIT: u32 = 100_000;
 
 fn uart_write_bytes(bytes: &[u8]) {
