@@ -1,11 +1,11 @@
 //! What the simulator attaches to a task, and the environment-supplied bits
-//! the core crate refuses to implement itself (spec §10.1).
+//! the core crate refuses to implement itself.
 //!
 //! The payload carries a **real** `Arc` to a mock address space. That is the
-//! crash.md detector: the kernel's bug was an address-space `Arc` dropped
-//! twice because a task existed in two places at once, and here the refcount
-//! is checked against the set of live tasks after every single step
-//! (invariant I8).
+//! double-drop detector: the recorded kernel failure was an address-space
+//! `Arc` dropped twice because a task existed in two places at once, and here
+//! the refcount is checked against the set of live tasks after every single
+//! step (invariant I8).
 
 use std::sync::{Arc, Mutex};
 
@@ -39,7 +39,7 @@ pub type SimWaitList = StdLock<WaitList<SimMsg>>;
 pub type SimShareLock = StdLock<ShareState>;
 
 /// The simulator explores interleavings by *choosing steps*, not by running
-/// threads (spec §13's rejected host-thread-per-vCPU design). A step is
+/// threads: a host thread per vCPU was considered and rejected. A step is
 /// atomic, so the executing context provably cannot be descheduled inside
 /// one.
 pub struct SimPreempt;

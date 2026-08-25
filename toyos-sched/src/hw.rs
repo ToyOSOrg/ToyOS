@@ -13,7 +13,7 @@ use crate::task::{SchedPayload, TaskAccounting, TaskKey};
 
 /// CPU identity. Always a field or a parameter, never an ambient query —
 /// `Hw` deliberately has no `cpu_id()`, so a wrong-CPU lookup is
-/// unrepresentable in the core (spec §10.1).
+/// unrepresentable in the core.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct CpuId(pub u32);
 
@@ -38,7 +38,7 @@ impl Nanos {
 }
 
 /// One scheduling-relevant event, in the vocabulary shared by the kernel's
-/// per-CPU binary trace ring and the simulator's recorder (spec §10.4).
+/// per-CPU binary trace ring and the simulator's recorder.
 ///
 /// Vocabulary, not wire format: this is a Rust enum with no layout guarantee.
 /// `kernel/src/trace.rs`'s `Record` is the wire form, and `trace::record` is the
@@ -48,9 +48,7 @@ impl Nanos {
 /// a sim run. A `Scenario` is a workload — which queue each thread blocks on,
 /// what makes its condition true, how long it runs — and the ring records none
 /// of that; it records an observed schedule, from a 4096-entry buffer that
-/// wraps, so a capture is a tail with no initial state to replay from. The
-/// `from-qemu` subcommand that claimed otherwise was an `unimplemented!()` and
-/// is gone.
+/// wraps, so a capture is a tail with no initial state to replay from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TraceEvent {
     pub ts: Nanos,
@@ -64,7 +62,7 @@ pub enum TraceKind {
     Schedule { task: TaskKey },
     Wake { task: TaskKey },
     Block { task: TaskKey },
-    /// Two-phase wait commit parked the task (spec §8.1).
+    /// Two-phase wait commit parked the task.
     ParkCommit { task: TaskKey },
     Migrate { task: TaskKey, to: CpuId },
     Adopt { task: TaskKey },
@@ -104,7 +102,7 @@ pub trait Machine: Kicker + 'static {
     /// Kernel: cli/sti RAII. Sim: gates event delivery for this vcpu.
     ///
     /// Has no caller in either world, and does **not** fit the site it looks
-    /// like it should (§7.5's "cli / final recheck / sti;hlt"): both exits
+    /// like it should — the idle loop's cli / final recheck / sti;hlt: both exits
     /// from that recheck must *set* IF unconditionally — the halt exit because
     /// `sti;hlt` is one atom, the stay-awake exit because panic recovery
     /// enters the idle loop with IF already 0 — and an RAII guard restores
@@ -123,7 +121,7 @@ pub trait Machine: Kicker + 'static {
 
     /// Ask `cpu` to take its next safe point. Needed for one case: a `Retire`
     /// whose target is the *running* task cannot be yanked mid-syscall, so it
-    /// is asked to die at its next safe point instead (spec §7.6).
+    /// is asked to die at its next safe point instead.
     fn need_resched(&self, cpu: CpuId);
 
     fn trace(&self, ev: TraceEvent);
@@ -139,22 +137,22 @@ pub trait Machine: Kicker + 'static {
 /// The complete hardware surface. Everything above this trait is shared
 /// between the kernel and the simulator; everything behind it is
 /// LAPIC/TSC/ICR/asm in the kernel and virtual time/pending-IPI bookkeeping
-/// in the sim (spec §10.1).
+/// in the sim.
 pub trait Hw: Machine {
     type Payload: SchedPayload;
 
     /// Perform the context switch the token describes. Nothing
     /// scheduler-related runs after this on the old context — the pass that
-    /// produced the token has already ended (spec §6.2).
+    /// produced the token has already ended.
     ///
     /// # Safety
     /// The token's pointers are valid: they were constructed by safe code
     /// into stable Box-backed task records and the records outlive the
     /// switch by construction. The implementor must not retain them.
-    #[allow(unsafe_code)] // declaration only — the core constructs tokens in safe code (spec §4)
+    #[allow(unsafe_code)] // declaration only — the core constructs tokens in safe code
     unsafe fn switch(&self, token: RunToken<Self::Payload>);
 
     /// Finalize sink: the environment reclaims a dead task's payload and its
-    /// accounting, both handed over exactly once (spec §9.3).
+    /// accounting, both handed over exactly once.
     fn release(&self, key: TaskKey, payload: Self::Payload, acct: TaskAccounting);
 }

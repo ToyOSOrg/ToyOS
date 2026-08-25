@@ -1,4 +1,4 @@
-//! The one wait/wake primitive — spec §8.
+//! The one wait/wake primitive.
 //!
 //! Every waitable kernel object (pipe end, futex bucket, listener, io_uring
 //! CQ, driver queue) owns a [`WaitQueue`]. Every blocking site uses the same
@@ -17,13 +17,13 @@
 //! }
 //! ```
 //!
-//! Two departures from the spec sketch, both to keep `unsafe` confined to
-//! `mailbox.rs`. The queue's list is behind a [`LeafLock`] the *environment*
-//! supplies (kernel: the IRQ-off leaf lock of §8.1; loom: a
-//! `loom::sync::Mutex`) rather than a lock implemented here. And waiters are
-//! held as `Arc<TaskShared>` in a `VecDeque` rather than through an embedded
-//! `wait_node` link; `TaskShared.waiting` still enforces one queue per task,
-//! but the allocation-free intrusive list is still owed.
+//! Two structural choices, both to keep `unsafe` confined to `mailbox.rs`. The
+//! queue's list is behind a [`LeafLock`] the *environment* supplies (kernel: an
+//! IRQ-off leaf lock; loom: a `loom::sync::Mutex`) rather than a lock
+//! implemented here. And waiters are held as `Arc<TaskShared>` in a `VecDeque`
+//! rather than through an embedded `wait_node` link; `TaskShared.waiting` still
+//! enforces one queue per task, but the allocation-free intrusive list is still
+//! owed.
 
 use alloc::collections::VecDeque;
 use core::marker::PhantomData;
@@ -154,8 +154,8 @@ impl<M: SchedMsg, L: LeafLock<WaitList<M>>> WaitQueue<M, L> {
     /// window, or a park variant that ignores it — either open a hole in the
     /// termination argument or hide the distinction from the type system.
     ///
-    /// It exists because §7.2 makes `Commit::Killed` a *disposition* rather
-    /// than an exit: a killed task keeps running and unwinds. A site that
+    /// It exists because [`Commit::Killed`] is a *disposition* rather than an
+    /// exit: a killed task keeps running and unwinds. A site that
     /// cannot propagate a cancel — the retirer waiting for its victim's
     /// release is the one — would otherwise get `Killed` back from every
     /// acquire and spin, which is exactly the `sleeplock-spins` negative gate
@@ -198,7 +198,7 @@ impl<M: SchedMsg, L: LeafLock<WaitList<M>>> WaitQueue<M, L> {
     ///
     /// The retry on [`Claim::Lost`] is load-bearing: without it, a `wake_one`
     /// racing a waiter's timeout would be consumed by the corpse and strand
-    /// the next waiter forever — the futex-storm shape (spec §8.2).
+    /// the next waiter forever — the futex-storm shape.
     pub fn wake_one(
         &self,
         cause: WakeCause,
@@ -225,7 +225,7 @@ impl<M: SchedMsg, L: LeafLock<WaitList<M>>> WaitQueue<M, L> {
     }
 
     /// Wake every current waiter; returns how many claims were won. Used by
-    /// the audio path's boost signal (spec §8.5) and by pipe/listener close.
+    /// the audio path's boost signal and by pipe/listener close.
     pub fn wake_all(
         &self,
         cause: WakeCause,
@@ -251,7 +251,7 @@ impl<M: SchedMsg, L: LeafLock<WaitList<M>>> WaitQueue<M, L> {
     }
 
     /// Remove a waiter without waking it — the local deadline path, which has
-    /// already won the claim on its own CPU (spec §8.3). Idempotent.
+    /// already won the claim on its own CPU. Idempotent.
     pub fn dequeue(&self, shared: &Arc<TaskShared<M>>) -> bool {
         let key = shared.key();
         let removed = self.list.with(|l| {
@@ -361,11 +361,11 @@ pub enum Commit<'q, M: SchedMsg, L: LeafLock<WaitList<M>>> {
     /// once the task runs again.
     Parked(CommittedTicket<M>, Registration<'q, M, L>),
     /// A wake landed between registration and commit: do not park, do not
-    /// switch (spec §8.1).
+    /// switch.
     AlreadyWoken,
     /// A retire landed while this task was deciding to park. The registration
     /// is already withdrawn and the word is back to `Running(cpu)`: the caller
-    /// must dispose the pass by *exiting*, not by parking (spec §6.3, §7.6).
+    /// must dispose the pass by *exiting*, not by parking.
     Killed,
 }
 
@@ -374,7 +374,7 @@ pub enum Commit<'q, M: SchedMsg, L: LeafLock<WaitList<M>>> {
 /// It exists because a *timeout* leaves the waiter behind: the local deadline
 /// fire wins the same claim CAS a waker would, and the core does not know
 /// which queue the task was on — nor should it, since the scheduler knows only
-/// tasks, tickets and causes (spec §8.1).
+/// tasks, tickets and causes.
 ///
 /// The leftover is not merely untidy. Once the task parks on a *second* queue,
 /// a `wake_one` on the first would find it `Blocked` and claim it, spending
@@ -443,15 +443,14 @@ impl<'q, M: SchedMsg, L: LeafLock<WaitList<M>>> WaitTicket<'q, M, L> {
 
     /// Phase 2, run by the blocking pass.
     ///
-    /// A park is one of §6.3's safe points, so §7.6's promise that a killed
-    /// task "dies at its next safe point" has to be kept *here* and cannot be
-    /// kept later: `handle_retire` already consumed the retire message and
-    /// answered it with `need_resched` because the task was still running.
-    /// Park it anyway and nothing brings the task back — a parked task is
-    /// woken by a wake and there is no second retire to send one, the retirer
-    /// waits on a release that never comes, and the address space the payload
-    /// holds is never freed. The refusal is what keeps the task *running*, on
-    /// its own stack, which since the cancellable kill is where its death
+    /// A park is a safe point, so a killed task's promise to die at its next
+    /// one has to be kept *here* and cannot be kept later: `handle_retire`
+    /// already consumed the retire message and answered it with `need_resched`
+    /// because the task was still running. Park it anyway and nothing brings
+    /// the task back — a parked task is woken by a wake and there is no second
+    /// retire to send one, the retirer waits on a release that never comes, and
+    /// the address space the payload holds is never freed. The refusal is what
+    /// keeps the task *running*, on its own stack, which is where its death
     /// happens.
     ///
     /// The kill check comes first because it subsumes the wake: a task about
@@ -622,9 +621,9 @@ mod tests {
         assert_eq!(kicks.count(), 0);
     }
 
-    /// Spec §6.3 lists the park among the safe points and §7.6 promises a
-    /// killed task dies at its next one. A commit that parked instead would
-    /// put the task somewhere nothing ever looks again.
+    /// The park is a safe point, and a killed task dies at its next one. A
+    /// commit that parked instead would put the task somewhere nothing ever
+    /// looks again.
     #[test]
     fn a_kill_that_lands_before_the_commit_refuses_the_park() {
         let q = queue();

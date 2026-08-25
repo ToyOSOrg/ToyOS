@@ -1,4 +1,4 @@
-//! `SimHw` — the simulator's side of the [`Hw`] boundary (spec §10.1).
+//! `SimHw` — the simulator's side of the [`Hw`] boundary.
 //!
 //! Real and shared with the kernel: task types, state word, transitions, run
 //! queue, fairness math, mailbox, doorbell, sleep handshake, ticket protocol,
@@ -87,9 +87,9 @@ impl SimHw {
     }
 
     /// The timer a pass programs is *for the CPU running that pass*, and the
-    /// core deliberately has no `cpu_id()` to tell us which that is (spec
-    /// §10.1). The VM sets this before every pass, so `set_timer` knows where
-    /// the effect lands without the core ever asking an ambient question.
+    /// core deliberately has no `cpu_id()` to tell us which that is. The VM
+    /// sets this before every pass, so `set_timer` knows where the effect lands
+    /// without the core ever asking an ambient question.
     pub fn enter_pass(&self, cpu: CpuId, now: Nanos) {
         self.with(|s| {
             s.now = now;

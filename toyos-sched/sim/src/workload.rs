@@ -1,15 +1,15 @@
-//! The workload script DSL — spec §10.2's `Run | Block | Wake | Spawn | Exit
-//! | FutexOp | IrqAt | KernelSection(ns)`.
+//! The workload script DSL — the opcode set a thread script is written in; see
+//! [`Op`].
 //!
 //! A scenario is *data*: CPUs, wait queues, processes and their thread
 //! scripts. Everything a scenario can express is something the kernel's own
 //! blocking sites do, so a scenario that passes is a statement about the
 //! protocol rather than about the harness.
 //!
-//! Futexes get no opcode of their own: a futex bucket *is* a `WaitQueue`
-//! (spec §8.6), so a futex storm is `Block`/`Wake` on a queue whose class is
-//! `Futex`. Giving it a second opcode would be modelling a second wake path
-//! — the very thing §8.2 removes.
+//! Futexes get no opcode of their own: a futex bucket *is* a `WaitQueue`, so a
+//! futex storm is `Block`/`Wake` on a queue whose class is `Futex`. Giving it a
+//! second opcode would be modelling a second wake path, and there is exactly
+//! one.
 
 use toyos_sched::cpu::Balance;
 use toyos_sched::queue::FairOrder;
@@ -34,7 +34,7 @@ pub enum Op {
         queue: usize,
         all: bool,
         /// Lend the woken task RT for this long — soundd signalling its
-        /// clients (spec §8.5).
+        /// clients.
         boost: Option<u64>,
     },
     Yield,
@@ -45,7 +45,7 @@ pub enum Op {
     /// Become RT permanently (the privilege-gated syscall).
     SetRt,
     /// Retire every *other* thread of this process, then exit: process
-    /// teardown, the shape crash.md died in.
+    /// teardown, the shape the recorded double-drop died in.
     Teardown,
     Exit,
 }
@@ -93,7 +93,7 @@ pub struct IrqSpec {
     pub boost_ns: Option<u64>,
 }
 
-/// Where phase 2 of the §8.1 handshake — the `Committing(gen) → Blocked` CAS —
+/// Where phase 2 of the wait handshake — the `Committing(gen) → Blocked` CAS —
 /// runs relative to the blocking pass.
 ///
 /// This is a scenario dimension rather than a constant because the kernel has
@@ -104,9 +104,8 @@ pub struct IrqSpec {
 /// whether the window is reachable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockShape {
-    /// Spec §8.1, and the kernel since `8508b37`: the commit runs inside the
-    /// pass, after its mailbox drain. Every claim then lands on one side of
-    /// the drain or the other.
+    /// The shipped shape: the commit runs inside the pass, after its mailbox
+    /// drain. Every claim then lands on one side of the drain or the other.
     CommitInPass,
     /// The kernel before `8508b37`: the commit runs at the call site, so the
     /// task's word reads `Blocked` while it is still the running task and its
@@ -121,7 +120,7 @@ pub enum BlockShape {
 }
 
 /// Whether an *involuntary* scheduler pass can land inside the registration
-/// window — between phase 1 of the §8.1 handshake and phase 2.
+/// window — between phase 1 of the wait handshake and phase 2.
 ///
 /// The window is two steps, so an interrupt can arrive in the middle of it;
 /// `DeliverIpi` and `FireTimer` are enabled there and set `need_resched`. What
@@ -148,8 +147,8 @@ pub enum WindowShape {
 /// the difference between them is invariant I9's whole content.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParkShape {
-    /// Spec §8.5, and the kernel since the park was made unconditional: a block
-    /// ends the hold outright, whatever the clock says.
+    /// The shipped shape: a block ends the hold outright, whatever the clock
+    /// says.
     ReleaseLend,
     /// Commit `9c2fc4d`: clear only `if now >= until`, so a lend blocked on
     /// before it ran out survives the block and `RtState::arm` re-arms it at the
@@ -166,11 +165,10 @@ pub enum ParkShape {
 /// `retire_task: task not released after 1s: InTransit(CpuId(1))`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MigrateShape {
-    /// Spec §7.6's promptness carried into the balance path: a killed task is
+    /// The retire's promptness carried into the balance path: a killed task is
     /// kept by the CPU that holds it and dispatched there, never handed on.
-    /// The variant keeps the name it was minted with, and the name is now the
-    /// *old* mechanism — §7.2 replaced the reap with a dispatch and the
-    /// promptness argument is unchanged by that.
+    /// The name predates the dispatch replacing the reap; the promptness
+    /// argument is unchanged by that.
     ReapTheCorpse,
     /// The balance path before it read the kill bit: a killed ready task is
     /// migrated like any other, and its unwind then waits on an
@@ -194,19 +192,19 @@ pub enum AgeShape {
     RtOutranksEveryCorpse,
 }
 
-/// What a fair share is a share *of* — spec §9.1's "all threads of one process
-/// share a vruntime".
+/// What a fair share is a share *of*: all threads of one process share a
+/// vruntime.
 ///
 /// A scenario dimension rather than a constant for the same reason
 /// [`BlockShape`] and [`ParkShape`] are, except that the other answer is one
-/// the design *rejected* rather than one it shipped: §13.9 turns down
-/// per-thread weight-division fairness, and per-thread vruntime is that policy
-/// in its simplest form. Invariant I5 has to be able to tell the two apart, or
-/// it is not measuring the policy the spec states.
+/// the design *rejected* rather than one it shipped: per-thread
+/// weight-division fairness was turned down, and per-thread vruntime is that
+/// policy in its simplest form. Invariant I5 has to be able to tell the two
+/// apart, or it is not measuring the shipped policy at all.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShareShape {
-    /// Spec §9.1: one [`toyos_sched::fair::FairShare`] per process, reached
-    /// through every thread of it.
+    /// The shipped policy: one [`toyos_sched::fair::FairShare`] per process,
+    /// reached through every thread of it.
     PerProcess,
     /// One share per thread, so a process buys CPU by forking. See
     /// `scenarios::fair_share_per_thread`.
@@ -236,14 +234,14 @@ pub enum ChargeShape {
 /// scheduler is ever measured on: least-loaded-with-rotation spreads every
 /// burst by construction, so under it a machine whose runnable threads all sit
 /// on one CPU is not expressible from a workload at all — and that machine is
-/// exactly what the pull half of §7.7 exists for. Both answers below are the
-/// kernel's own code either way; what this decides is which of the two numbers
-/// `Vm::spawn` places by.
+/// exactly what the steal request's pull half exists for. Both answers below
+/// are the kernel's own code either way; what this decides is which of the two
+/// numbers `Vm::spawn` places by.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlacementShape {
-    /// Spec §9.4, and `kernel::sched::driver`'s `placement`: the least-loaded
-    /// CPU from the published counters, ties rotating so a freshly booted
-    /// system does not put everything on cpu0.
+    /// The shipped policy, `kernel::sched::driver`'s `placement`: the
+    /// least-loaded CPU from the published counters, ties rotating so a freshly
+    /// booted system does not put everything on cpu0.
     LeastLoadedRotating,
     /// Every spawn onto one named CPU, whatever the counters say.
     ///
@@ -328,7 +326,7 @@ impl Scenario {
     /// The longest preempt-off section any thread of this scenario runs. It
     /// is a *term* of invariant I4's RT latency bound, not an excuse for it:
     /// making the budget visible is what stops "the sim cannot see kernel
-    /// critical sections" from being a blind spot (spec §10.2).
+    /// critical sections" from being a blind spot.
     pub fn max_kernel_section(&self) -> u64 {
         self.procs
             .iter()

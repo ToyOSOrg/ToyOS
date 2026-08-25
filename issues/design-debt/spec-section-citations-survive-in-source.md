@@ -28,23 +28,24 @@ and loses its ground.
 
 ## What is left
 
-`rg -n '§[0-9]' $(git ls-files '*.rs')` is the finder: **555 lines across 137
-files**, measured 2026-08-25 after the fourth prose wave. That total mixes live
-external citations with dead ones, so it is a search bound and never a score.
+`rg -c '§[0-9]' $(git ls-files '*.rs')` is the finder. Run it rather than
+quoting a number from here: concurrent sweeps move it, and it is a search bound
+and never a score, because it counts the live external citations that stay
+alongside the dead internal ones that are the defect.
 
 By area:
 
-- **`kernel/src`** — 112 lines in 41 files. Waves 3 and 4 resolved theirs; the
-  remainder is the twenty files two concurrent sweeps hold (`vfs.rs`,
-  `inbox.rs`, `main.rs`, `trace.rs`, `time.rs`, `mm/paging.rs`,
-  `arch/entry.rs`, `arch/idt/mod.rs`, `arch/syscall/machine.rs`,
-  `arch/syscall/proc.rs`, `sched/payload.rs`, `object/device.rs`,
-  `object/shm.rs`, `iommu/vtd/table.rs`, `iommu/vtd/fault.rs`,
-  `drivers/nvme.rs`, `drivers/i8042/mod.rs`, `drivers/panic_console/mod.rs`,
-  `drivers/xhci/wait/msc.rs`, `drivers/xhci/wait/boot.rs`) plus the external
-  citations that stay.
-- **`toyos-sched/`** — 260 lines, the largest concentration in the tree and
-  almost entirely the deleted scheduler-core spec: module headers open with
-  "spec §9.2", and the sim and loom crates cite it by section throughout.
-- **the rest** — `toyos-xhci/`, `toyos-hda/`, `toyos-mixer/`, `userland/`,
-  `tests/` and `src/` carry the balance, a mixture of both kinds.
+- **`toyos-sched/`** — the prose is resolved. What survives there is not prose
+  and cannot be reached by a comments-only sweep: two assertion strings
+  (`loom/tests/loom_mailbox.rs`, `loom/tests/loom_sleep.rs`), the CLI usage
+  text (`sim/src/main.rs`), and the identifier `crash_md_exit_race` together
+  with the corpus trace named after it. Each is program output or a public
+  name, so each needs a code-bearing change with its own gates.
+- **`kernel/src`** — waves three and four resolved the files they held; the
+  remainder is what concurrent sweeps were holding while they ran, plus the
+  Intel SDM citations in `arch/` that are boundary contracts and stay.
+- **the rest** — `toyos-xhci/`, `toyos-hda/`, `toyos-mixer/`,
+  `toyos-fat32-check/`, `userland/`, `tests/` and `src/` carry the balance, and
+  it is mostly the live kind: xHCI 1.2, the HDA specification, the PCIe base
+  spec and fatgen103 are cited by section throughout. Telling those from the
+  dead marks is the work.

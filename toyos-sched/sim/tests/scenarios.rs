@@ -135,7 +135,7 @@ fn every_scenario_survives_raw_fuzz_bytes() {
 ///   lost.
 /// * **I8** — the teardown drew a proof of absence against a task that was
 ///   merely in transit, and freed the address space that task still holds.
-///   That is the crash.md failure itself.
+///   That is the recorded double-drop failure itself.
 #[test]
 fn old_steal_port_is_caught() {
     let scenario = scenarios::old_steal_port();
@@ -174,7 +174,7 @@ fn old_steal_port_is_caught() {
 }
 
 /// The second self-validation gate: the kernel's pre-`8508b37` blocking shape,
-/// where phase 2 of the §8.1 handshake ran at the call site instead of inside
+/// where phase 2 of the wait handshake ran at the call site instead of inside
 /// the blocking pass. On `--smp 8` that was a panic plus a 30 s hang in roughly
 /// two of five audio suite runs.
 ///
@@ -480,8 +480,8 @@ fn a_pass_inside_the_registration_window_is_caught() {
     assert!(guarded.passed(), "{}", guarded.report());
 }
 
-/// §8.1's *residual* window, which the fix names and deliberately does not
-/// close: a waker may claim the task in the instructions between the commit
+/// The wait handshake's *residual* window, named and deliberately left open: a
+/// waker may claim the task in the instructions between the commit
 /// publishing `Blocked` and the park itself. That is why `RunningTask::park`
 /// accepts `WakeQueued` — and until the block became two steps, no simulator
 /// run had ever executed it, so that acceptance was a claim backed by nothing.
@@ -646,8 +646,8 @@ fn shrinking_keeps_the_failure_and_loses_the_noise() {
     );
 }
 
-/// `cpus = 1` is first-class (spec §11 Stage 4): it is the configuration Doom
-/// runs in, and the one where a scheduling mistake is audible.
+/// `cpus = 1` is first-class: it is the configuration Doom runs in, and the one
+/// where a scheduling mistake is audible.
 #[test]
 fn the_audio_pipeline_holds_on_one_cpu() {
     let result = sweep::seed_sweep(&scenarios::audio_pipeline(1), SEEDS, 3);
@@ -665,9 +665,9 @@ fn the_audio_pipeline_holds_on_one_cpu() {
 /// to be *non-zero*: some window has to have opened, stayed open long enough for
 /// a real separation to accumulate, and been measured.
 ///
-/// The widths are the two `all()` carries. Spec §11 Stage 9 wants 1–128, which
-/// runs from the CLI as `measure fairness_storm:<cpus>`; the sweep here is what
-/// `cargo test` can afford.
+/// The widths are the two `all()` carries. Any other width runs from the CLI as
+/// `measure fairness_storm:<cpus>`; the sweep here is what `cargo test` can
+/// afford.
 ///
 /// Both widths meet the *derived* bound today — 30/60 ms and 102/108 ms at
 /// 10 000 seeds — so `worst_over_bound` must be zero here, and that is asserted:
@@ -726,8 +726,8 @@ fn the_fairness_storm_is_measured_and_holds() {
     }
 }
 
-/// The fifth self-validation gate: one fair share per *thread* — spec §13.9's
-/// rejected policy — instead of one per process.
+/// The fifth self-validation gate: one fair share per *thread* — the rejected
+/// policy — instead of one per process.
 ///
 /// `trio` has three times `solo`'s threads and exactly the same entitlement.
 /// Under the shipped policy they split the CPU evenly; under per-thread shares
@@ -833,8 +833,7 @@ fn double_charging_a_share_is_caught() {
 }
 
 /// The seventh self-validation gate: the core's `feature = "check"` pass-cost
-/// recorder, which spec §10.2 makes the on-target counterpart to everything else
-/// in this file.
+/// recorder, the on-target counterpart to everything else in this file.
 ///
 /// It is the one instrument here that says something about *cost* rather than
 /// about state, so it is the one the simulator cannot exercise for free: the

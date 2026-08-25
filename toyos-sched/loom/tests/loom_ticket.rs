@@ -1,10 +1,10 @@
-//! Loom: the two-phase wait handshake (spec §8.1, §8.2, §12).
+//! Loom: the two-phase wait handshake.
 //!
-//! Three races, each a lost-wake window from the bug ledger (B3):
-//! wake vs the `prepare_wait → block_on` commit, wake vs a cancel, and wake
-//! vs a waiter's timeout — the last being the `Claim::Lost → try the next
-//! waiter` rule, without which a `wake_one` racing a timeout is swallowed by
-//! the corpse and the next waiter waits forever.
+//! Three races, each a lost-wake window: wake vs the `prepare_wait → block_on`
+//! commit, wake vs a cancel, and wake vs a waiter's timeout — the last being
+//! the `Claim::Lost → try the next waiter` rule, without which a `wake_one`
+//! racing a timeout is swallowed by the corpse and the next waiter waits
+//! forever.
 
 use loom::sync::atomic::{AtomicBool, Ordering};
 use loom::sync::Arc;
@@ -55,7 +55,7 @@ fn drain(rx: &mut MailboxConsumer<Msg>, preempt: &PreemptModel) -> Vec<Msg> {
     msgs
 }
 
-/// The canonical blocking loop of spec §8.1 against a producer that makes the
+/// The canonical blocking loop against a producer that makes the
 /// condition true and wakes. No schedule may leave the waiter parked while
 /// the condition holds — that is the check-then-block window, closed by
 /// registering *before* the recheck.
@@ -134,7 +134,7 @@ fn no_schedule_leaves_a_waiter_parked_with_the_condition_true() {
     });
 }
 
-/// A pre-park claim posts no message (spec §8.2 `Claim::PrePark`): the
+/// A pre-park claim posts no message (`Claim::PrePark`): the
 /// waiter's own commit observes it and refuses to park, so no `Wake` is
 /// queued and no switch happens.
 #[test]
@@ -180,7 +180,7 @@ fn a_pre_park_claim_never_posts_a_message() {
     });
 }
 
-/// §8.2's load-bearing retry: a `wake_one` that loses the claim to a
+/// The load-bearing retry: a `wake_one` that loses the claim to a
 /// waiter's timeout must move on to the next waiter. Without the retry the
 /// second waiter is stranded — the futex-storm shape.
 #[test]

@@ -1,4 +1,4 @@
-//! The step chooser and the trace recorder — spec §10.3.
+//! The step chooser and the trace recorder.
 //!
 //! One loop: compute the enabled steps, ask the [`ChoiceStream`] which one to
 //! take, take it, re-check every invariant. A run is completely determined by
@@ -41,11 +41,11 @@ pub struct Outcome {
     pub switches: u64,
     pub kicks: u64,
     /// Parks that had their `Blocked` word claimed before the park itself ran
-    /// (spec §8.1's residual window). Reported so a test can assert the window
-    /// was actually executed rather than merely reasoned about.
+    /// — the handshake's residual window. Reported so a test can assert the
+    /// window was actually executed rather than merely reasoned about.
     pub pre_park_claims: u64,
     /// Blocks that ended in `Commit::Killed` — a retire that landed inside the
-    /// registration window (spec §6.3, §7.6). Reported for the same reason.
+    /// registration window. Reported for the same reason.
     pub killed_at_park: u64,
     /// Invariant I14's measurement: the longest a retire went unfinalized, and
     /// the bound in force. A number as well as a verdict, because the kernel's
@@ -62,8 +62,8 @@ pub struct Outcome {
     pub unwind_gate_ns: u64,
     /// Invariant I5's measurement: the widest service spread seen over one
     /// contention window, and the bound in force when it was seen. A number
-    /// rather than a verdict, because spec §11 Stage 9 compares a per-CPU
-    /// frontier against the global one and "both passed" is not a comparison.
+    /// rather than a verdict, because comparing a per-CPU frontier against the
+    /// global one needs a number: "both passed" is not a comparison.
     pub fair_spread: u64,
     pub fair_bound: u64,
     /// Worst spread past the *derived* bound, even where the recorded sample
@@ -316,7 +316,7 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
 }
 
 /// A failed run leaves task values in containers, and a `Task` dropped outside
-/// `finalize()` panics by design (spec §5.1). Letting that fire would replace
+/// `finalize()` panics by design. Letting that fire would replace
 /// the diagnosis with a drop bomb from the teardown; the run is a dead end
 /// either way, so it is abandoned deliberately rather than unwound.
 fn abandon(vm: Vm<'_>) {

@@ -1,18 +1,11 @@
-//! The retire protocol — spec §7.6: a sticky kill bit plus a message chase.
+//! The retire protocol: a sticky kill bit plus a message chase.
 //!
-//! **Termination argument, restated for the cancellable kill.** The kill bit
-//! is already set when the message is posted, so whichever CPU ends up owning
-//! the task *schedules* it — into that CPU's dying list, or by asking a
-//! running victim for a safe point — and it dies by its own `die` at the
-//! first safe point its own unwind reaches. The chase is bounded by the
-//! number of in-flight hops (≤1 in practice). Nothing scans; the home CPU in
-//! the state word is the proof.
-//!
-//! The struck form said the owning CPU "converts it to a dead task on arrival",
-//! and that conversion is exactly what the cancellable kill deleted: this
-//! kernel does not unwind, so discarding the task value discarded every guard
-//! on its kernel stack. The chase's bound is unchanged — what changed is what
-//! the last hop does.
+//! **Termination argument.** The kill bit is already set when the message is
+//! posted, so whichever CPU ends up owning the task *schedules* it — into that
+//! CPU's dying list, or by asking a running victim for a safe point — and it
+//! dies by its own `die` at the first safe point its own unwind reaches. The
+//! chase is bounded by the number of in-flight hops (≤1 in practice). Nothing
+//! scans; the home CPU in the state word is the proof.
 
 use crate::cpu::CpuHandles;
 use crate::hw::{CpuId, Kicker};
@@ -57,7 +50,7 @@ impl<M: SchedMsg> RetireTicket<'_, M> {
 /// state word now names another CPU (an `InTransit` adopt in flight, or a
 /// migration that landed after the retirer read the word), so the *same*
 /// retire node is re-posted there. Legal precisely because this consumer just
-/// unlinked it (spec §7.6, §7.2 N1).
+/// unlinked it (N1).
 pub fn chase<M: SchedMsg>(
     shared: &Arc<TaskShared<M>>,
     cpus: &CpuHandles<M>,
@@ -226,9 +219,9 @@ mod tests {
     /// still in Ring 0 with the bit invisible, leaving nothing in flight when
     /// the bit appears and the victim in Ring 3 until an unrelated tick.
     ///
-    /// The spec and two code comments stated the order backwards while the code
-    /// had it right, which is a proof of the bound's negation offered as a proof
-    /// of the bound. This is the assertion that stops it being restated.
+    /// Prose has stated the order backwards while the code had it right, which
+    /// is a proof of the bound's negation offered as a proof of the bound. This
+    /// is the assertion that stops it being restated.
     ///
     /// **A host test and not a loom model**, deliberately: this is program
     /// order inside one thread — `claim_retire`'s locked read-modify-write, then
@@ -278,7 +271,7 @@ mod tests {
 
         // The waker wins the claim; the retirer sets the kill bit. Both
         // messages are in flight at once, which is well-formed by
-        // construction: they ride two distinct embedded nodes (spec §7.6).
+        // construction: they ride two distinct embedded nodes.
         assert!(crate::waitq::wake_direct(
             &t,
             WakeCause::new(WakeReason::Woken),

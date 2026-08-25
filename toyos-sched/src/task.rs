@@ -1,5 +1,5 @@
 //! Task identity, the rendezvous state word, and the CAS protocol every
-//! wake, timeout and retire arbitrates through (spec §5.3, §8.2, §8.3).
+//! wake, timeout and retire arbitrates through — there is no second path.
 //!
 //! Ownership truth is the linear `Task` value and the container it sits in.
 //! [`TaskShared`] is the *runtime shadow* remote CPUs need: one atomic word
@@ -39,7 +39,7 @@ pub trait SchedPayload: Sized + Send + 'static {
 pub type Share<X> = FairShare<<X as SchedPayload>::ShareLock>;
 
 /// Why a task is being woken, and whether the waker lends it RT priority for
-/// a bounded window (spec §8.5).
+/// a bounded window.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WakeCause {
     pub reason: WakeReason,
@@ -62,7 +62,7 @@ impl WakeCause {
     }
 
     /// RT and boost wakes must preempt the target promptly; ordinary wakes
-    /// ride the target's next safe point (spec §7.3).
+    /// ride the target's next safe point.
     pub fn urgency(&self) -> crate::mailbox::Urgency {
         match self.boost {
             Some(_) => crate::mailbox::Urgency::Preempt,
@@ -83,14 +83,14 @@ pub enum WakeReason {
 /// may be *held*: it is armed at dispatch and cleared at the first preempt or
 /// park past it, so a boosted client that spins cannot keep RT forever, and one
 /// that is merely slow to reach a CPU does not lose the lend it was given
-/// (spec §8.5, invariant I9).
+/// (invariant I9).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BoostWindow {
     pub until: Nanos,
 }
 
 /// What a parked task is waiting for — accounting only; the scheduler itself
-/// knows nothing about event sources (spec §8.1).
+/// knows nothing about event sources.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WaitClass {
     Io,
@@ -130,14 +130,14 @@ impl WaitClass {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Gen(pub u32);
 
-/// The rendezvous states of §5.3. The CPU in each variant is the task's
-/// home — the only CPU allowed to own it as a value.
+/// The rendezvous state set: a task's word is in exactly one of these, and the
+/// CPU in each variant is its home — the only CPU allowed to own it as a value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TaskState {
     Running(CpuId),
     Ready(CpuId),
     /// Registered on a wait queue, not yet parked: the two-phase commit's
-    /// first phase (spec §8.1).
+    /// first phase.
     Committing(CpuId, Gen),
     Blocked(CpuId),
     /// A waker won the claim and a `Wake` message is queued to the home CPU.
@@ -159,10 +159,9 @@ const GEN_MASK: u64 = (1 << GEN_BITS) - 1;
 /// Sticky: set by the retirer before it posts, never cleared. Any CPU that
 /// adopts the task *dispatches* it on arrival — into its own dying list — and
 /// the task dies by its own `die` at the first safe point its unwind reaches,
-/// which is what makes the retire chase terminate (spec §7.6, and the
-/// cancellable kill for why it is a dispatch and no longer a conversion).
+/// which is what makes the retire chase terminate.
 const KILL: u64 = 1 << 62;
-/// Sticky: exactly one retirer may post the retire node (spec §7.6).
+/// Sticky: exactly one retirer may post the retire node.
 const RETIRE_QUEUED: u64 = 1 << 63;
 const STICKY: u64 = KILL | RETIRE_QUEUED;
 
@@ -218,9 +217,8 @@ fn unpack(word: u64) -> TaskState {
     }
 }
 
-/// The complete set of legal edges, mirroring the §5.2 transition table.
-/// Anything else is a scheduler bug and panics at the transition rather than
-/// corrupting the shadow silently.
+/// The complete set of legal edges. Anything else is a scheduler bug and
+/// panics at the transition rather than corrupting the shadow silently.
 fn legal(from: TaskState, to: TaskState) -> bool {
     use TaskState::*;
     match (from, to) {
@@ -242,7 +240,7 @@ fn legal(from: TaskState, to: TaskState) -> bool {
         (WakeQueued(a), Ready(b)) => a == b,
         // A pre-park claim (`Committing → WakeQueued`) posts no message, so
         // the waiter's own commit or cancel resolves it by staying runnable
-        // (spec §8.1's `AlreadyWoken`).
+        // (`ParkOutcome::AlreadyWoken`).
         (WakeQueued(a), Running(b)) => a == b,
         (Blocked(_), Dead) | (WakeQueued(_), Dead) => true,
         // Adoption at the far end of a migration.
@@ -252,7 +250,7 @@ fn legal(from: TaskState, to: TaskState) -> bool {
     }
 }
 
-/// The outcome of a waker's claim (spec §8.2).
+/// The outcome of a waker's claim.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Claim {
     /// The task was parked on `CpuId`: we own the wake and must post
@@ -273,7 +271,7 @@ pub enum ParkOutcome {
     /// The state word is now `Blocked`; the pass may park the task.
     Parked,
     /// A wake landed between registration and commit. Do not park, do not
-    /// switch (spec §8.1).
+    /// switch.
     AlreadyWoken,
 }
 
@@ -374,7 +372,7 @@ impl<M> TaskShared<M> {
         }
     }
 
-    /// Phase 2: park if no waker claimed us in between (spec §8.1).
+    /// Phase 2: park if no waker claimed us in between.
     pub fn commit_park(&self, cpu: CpuId, generation: Gen) -> ParkOutcome {
         if self.transition(
             TaskState::Committing(cpu, generation),
@@ -412,8 +410,7 @@ impl<M> TaskShared<M> {
     }
 
     /// The one arbitration point every wake goes through — remote wakers,
-    /// local deadline fires, join, device ISR tails (spec §8.2). There is no
-    /// second path.
+    /// local deadline fires, join, device ISR tails. There is no second path.
     pub fn claim_wake(&self) -> Claim {
         loop {
             match self.state() {
@@ -455,8 +452,7 @@ impl<M> TaskShared<M> {
     }
 
     /// Sticky KILL + RETIRE_QUEUED. `false` means a retire is already queued
-    /// for this task (spec §7.6: exactly one retirer exists, so the caller
-    /// fails fast).
+    /// for this task: exactly one retirer exists, so the caller fails fast.
     pub(crate) fn claim_retire(&self) -> bool {
         let prev = self.state.fetch_or(KILL | RETIRE_QUEUED, Ordering::AcqRel);
         prev & RETIRE_QUEUED == 0
@@ -469,14 +465,14 @@ impl<M> TaskShared<M> {
     }
 }
 
-// The linear task value and its five lifecycle types (spec §5.1, §5.2)
+// The linear task value and its five lifecycle types
 
 /// Whether a task is real-time, and until when a borrowed priority lasts.
 ///
 /// The borrowed window bounds *running* time, not wall clock: it is armed at
 /// dispatch and cleared at the preempt or park that passes it. A spinning
 /// boosted client therefore cannot keep RT forever, and a starved one cannot
-/// lose the lend before it has spent any of it (spec §8.5, invariant I9).
+/// lose the lend before it has spent any of it (invariant I9).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct RtState {
     /// Granted by the privilege-gated `SYS_RT_ENTER`.
@@ -508,8 +504,8 @@ impl RtState {
         }
     }
 
-    /// Called at `park`, where the hold ends outright (audio spec §9.4: "the
-    /// promotion lasts until the promoted thread blocks again").
+    /// Called at `park`, where the hold ends outright: a promotion lasts until
+    /// the promoted thread blocks again.
     ///
     /// Unconditional, and it has to be: a clear gated on `now >= until` leaves
     /// a lend alive across a block taken before the window ran out, and
@@ -534,12 +530,10 @@ impl RtState {
     /// `preempt_if_due` only preempts it at its quantum end, and that quantum
     /// starts at the same dispatch this arms from — so `now >= until` holds
     /// there and [`RtState::expire`] clears it; a `park` clears it whatever the
-    /// clock says; and the third, which the cancellable kill added and this
-    /// sentence once predated, is the dying list — [`ReadyTask::end_lend`] and
-    /// [`RunningTask::end_lend`] are called on every route into it, and their
-    /// docs carry why. A second arm therefore needs a *new* lend, and one lend
-    /// buys at most one quantum at the borrowed priority (spec §8.5, invariant
-    /// I9).
+    /// clock says; and the dying list is the third — [`ReadyTask::end_lend`]
+    /// and [`RunningTask::end_lend`] are called on every route into it, and
+    /// their docs carry why. A second arm therefore needs a *new* lend, and one
+    /// lend buys at most one quantum at the borrowed priority (invariant I9).
     fn arm(&mut self, now: Nanos) {
         if let Some(until) = self.inherited {
             if now >= until {
@@ -550,7 +544,7 @@ impl RtState {
 }
 
 /// Per-task time accounting, handed to the environment exactly once by
-/// [`DeadTask::finalize`] (spec §9.3). Invariant I7 asserts conservation
+/// [`DeadTask::finalize`]. Invariant I7 asserts conservation
 /// against the virtual CPUs' executed time.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct TaskAccounting {
@@ -576,7 +570,8 @@ struct TaskInner<X: SchedPayload> {
     /// time while running, park time while blocked. One field, because a task
     /// is in exactly one state.
     since: Nanos,
-    /// This task's `Adopt` message rides inside its own record (spec §7.2).
+    /// This task's `Adopt` message rides inside its own record, which is why a
+    /// transfer can never be dropped for want of queue space.
     adopt_node: MailboxNode<Msg<X>>,
     /// Taken by [`DeadTask::finalize`]; still present at drop means the task
     /// value died outside the one legal death, and the drop bomb below turns
@@ -637,7 +632,7 @@ impl<X: SchedPayload> Task<X> {
         &self.0.adopt_node
     }
 
-    /// Lend the borrowed RT window (spec §8.5). Called by the wake path and
+    /// Lend the borrowed RT window. Called by the wake path and
     /// by a client consuming already-signalled data.
     pub(crate) fn boost(&mut self, until: Nanos) {
         let extended = !matches!(self.0.rt.inherited, Some(cur) if cur >= until);
@@ -751,7 +746,7 @@ linear_state!(
 
 /// Everything a spawn must supply. The state word starts at
 /// `InTransit(dst)` — a task is placed by message, never by reaching into
-/// the destination's queue (spec §9.4).
+/// the destination's queue.
 pub struct TaskBuilder<X: SchedPayload> {
     pub key: TaskKey,
     pub share: Arc<Share<X>>,
@@ -806,30 +801,25 @@ impl<X: SchedPayload> ReadyTask<X> {
     /// and exactly as a park ends one.
     ///
     /// **Priority inheritance is about the producer's work, and a killed
-    /// consumer will never do it** (spec §8.5): the lend was granted so this
+    /// consumer will never do it**: the lend was granted so this
     /// task would run *the thing the producer is waiting for* promptly, and
     /// what it will do instead is unwind and die. Spending the window on that
     /// puts a corpse in the RT band ahead of real real-time work, off a lend
     /// nobody can benefit from.
     ///
-    /// It is also what keeps [`RtState::arm`]'s argument true. The cancellable
-    /// kill added a third way out of `Running` — the dying list — and `arm`'s
-    /// enumeration was written when there were two. It names all three now.
-    /// Without this the re-arm at the next dispatch hands the corpse a fresh
-    /// window for its whole unwind, and invariant I9 sees one lend buy more
-    /// than one quantum. It does: the sim found it at 12,500,000 ns against a
-    /// 12,000,000 ns bound as soon as `Vm::UNWIND_NS` made an unwind cost
-    /// anything.
+    /// It is also what keeps [`RtState::arm`]'s argument true: without it the
+    /// re-arm at the next dispatch hands the corpse a fresh window for its
+    /// whole unwind, and invariant I9 sees one lend buy more than one quantum.
     pub(crate) fn end_lend(&mut self) {
         self.0 .0.rt.release();
     }
 
     /// Pick. The kill bit is *not* asserted absent here: it is set by a remote
     /// CPU at any instant, so an assert would be a race, not a check — and
-    /// since §7.2 there is nothing to assert, because a killed task **is**
-    /// dispatched: it runs its own unwind on its own stack and dies by its own
-    /// `die`. What decides *when* is `CpuSched::pick`, which takes the dying
-    /// list ahead of the fair band and behind the RT one.
+    /// there is nothing to assert, because a killed task **is** dispatched: it
+    /// runs its own unwind on its own stack and dies by its own `die`. What
+    /// decides *when* is `CpuSched::pick`, which takes the dying list ahead of
+    /// the fair band and behind the RT one.
     pub(crate) fn dispatch(self, cpu: CpuId, now: Nanos) -> RunningTask<X> {
         let mut task = self.0;
         task.charge_residency(now, Residency::Ready);
@@ -844,7 +834,7 @@ impl<X: SchedPayload> ReadyTask<X> {
 
     /// Balance decision: hand the task to `dst` as an unconsumed message.
     /// Only ready tasks migrate, which is what makes "a blocked task's
-    /// deadline on a migrated task" unrepresentable (spec §6.1).
+    /// deadline on a migrated task" unrepresentable.
     pub(crate) fn migrate(self, from: CpuId, dst: CpuId, now: Nanos) -> TransitTask<X> {
         let mut task = self.0;
         task.charge_residency(now, Residency::Ready);
@@ -888,8 +878,8 @@ impl<X: SchedPayload> RunningTask<X> {
     }
 
     /// Park. The committed ticket is the proof that the commit CAS won, i.e.
-    /// that no wake was lost between registration and commit (spec §8.1) —
-    /// there is no way to park without one.
+    /// that no wake was lost between registration and commit — there is no way
+    /// to park without one.
     ///
     /// The word may read `WakeQueued(cpu)` rather than `Blocked(cpu)`, and
     /// parking anyway is correct: a waker may claim a `Blocked` task the

@@ -1,7 +1,7 @@
-//! The virtual machine — spec §10.2.
+//! The virtual machine: the enabled-step relation the explorer drives.
 //!
-//! Virtual CPUs are not host threads (spec §13.13): the VM holds a set of
-//! *enabled steps* and the explorer picks one per iteration. That is what
+//! Virtual CPUs are not host threads — that design was rejected: the VM holds a
+//! set of *enabled steps* and the explorer picks one per iteration. That is what
 //! makes a run reproducible from its decision sequence alone, and what lets a
 //! failure be shrunk by deleting decisions.
 //!
@@ -88,10 +88,9 @@ pub const UNWIND_NS: u64 = 4 * RUN_CHUNK_NS;
 pub struct QueueState {
     pub queue: SimQueue,
     pub tokens: Cell<u32>,
-    /// A boost the producer left for whoever consumes next. Spec §8.5's
-    /// second bullet: a client that was *not* blocked at signal time cannot
-    /// be handed the window through a wake cause, so the object carries it
-    /// and the consume path picks it up.
+    /// A boost the producer left for whoever consumes next: a client that was
+    /// *not* blocked at signal time cannot be handed the window through a wake
+    /// cause, so the object carries it and the consume path picks it up.
     pub boost_until: Cell<Option<Nanos>>,
 }
 
@@ -121,10 +120,10 @@ pub fn build_queues(scenario: &Scenario) -> Vec<QueueState> {
 
 pub struct ProcState {
     pub name: &'static str,
-    /// Every fair share this process's threads hold. Exactly one under spec
-    /// §9.1's [`ShareShape::PerProcess`]; one per spawned thread under the
-    /// `PerThread` negative gate, which is why invariant I6 sums over the
-    /// vector rather than reading a single share.
+    /// Every fair share this process's threads hold. Exactly one under
+    /// [`ShareShape::PerProcess`]; one per spawned thread under the `PerThread`
+    /// negative gate, which is why invariant I6 sums over the vector rather
+    /// than reading a single share.
     pub shares: Vec<Arc<FairShare<SimShareLock>>>,
     /// The process's own reference to its address space. Dropped when the
     /// process concludes every one of its threads is gone — under the new
@@ -196,7 +195,7 @@ pub struct Program {
     pub run_left: u64,
 }
 
-/// A block that has done phase 1 and owes phase 2 (spec §8.1).
+/// A block that has done phase 1 and owes phase 2.
 ///
 /// It is held *between* two steps, which is the whole point: the wait is
 /// registered, the task is still running, and every other CPU in the system
@@ -205,10 +204,10 @@ pub struct Program {
 /// two steps.
 pub enum BlockPhase<'q> {
     /// The ticket is registered and uncommitted; the commit CAS belongs to the
-    /// pass (spec §8.1, kernel since `8508b37`).
+    /// pass — the shipped shape.
     Registered(WaitTicket<'q, SimMsg, SimWaitList>),
-    /// The commit already ran at the call site (pre-`8508b37`): the word reads
-    /// `Blocked` while the task is still `CpuSched.running`.
+    /// The commit already ran at the call site — the superseded shape, kept as a
+    /// negative gate: the word reads `Blocked` while the task is still running.
     Committed(CommittedTicket<SimMsg>),
 }
 
@@ -233,7 +232,7 @@ pub struct Blocking<'q> {
     pub phase: BlockPhase<'q>,
 }
 
-/// One step of the enabled-step relation (spec §10.2).
+/// One step of the enabled-step relation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Step {
     /// Advance the task running on this CPU by one op (or one run chunk).
@@ -331,7 +330,7 @@ pub struct Vm<'q> {
     pub violations: Vec<String>,
     pub steps: usize,
     /// How many parks published `Blocked` and had it claimed before the park
-    /// itself ran — spec §8.1's residual window, and the only thing that
+    /// itself ran — the handshake's residual window, and the only thing that
     /// exercises `RunningTask::park`'s `WakeQueued` arm.
     pub pre_park_claims: u64,
     /// How many blocks ended in `Commit::Killed` — a retire that landed inside
@@ -379,8 +378,8 @@ pub struct Vm<'q> {
     /// [`crate::invariants`].
     pub fair_epoch: FairEpoch,
     /// The widest service spread I5 has seen, and the bound that was in force
-    /// when it saw it. Reported rather than only asserted, so spec §11 Stage 9
-    /// can compare a per-CPU frontier against the global one by a number.
+    /// when it saw it. Reported rather than only asserted, so a per-CPU
+    /// frontier can be compared against the global one by a number.
     pub fair_spread: u64,
     pub fair_bound: u64,
     /// Worst spread that exceeded the *derived* bound, whether or not the
@@ -714,9 +713,9 @@ impl<'q> Vm<'q> {
             inherited: None,
             lends: 0,
         };
-        // Spawn placement: the least-loaded CPU from the published counters
-        // (spec §9.4) — never a try_lock probe of a remote queue, which is
-        // what used to misread contention as emptiness. Ties rotate, or every
+        // Spawn placement: the least-loaded CPU from the published counters —
+        // never a try_lock probe of a remote queue, which misreads contention
+        // as emptiness. Ties rotate, or every
         // task of a freshly booted system would land on cpu0 and the
         // scenarios would never see two CPUs at once.
         //
@@ -1176,7 +1175,7 @@ impl<'q> Vm<'q> {
                     None,
                     BlockEnd::Parked,
                 ),
-                // Phase 2 inside the pass, after `begin`'s drain (spec §8.1).
+                // Phase 2 inside the pass, after `begin`'s drain.
                 // Committing here puts every claim on one side of the drain or
                 // the other: an earlier one finds `Committing` and posts no
                 // message, so this CAS observes it; a later one's message
@@ -1276,7 +1275,7 @@ impl<'q> Vm<'q> {
         let Some(key) = self.cpus[cpu].running().map(|t| t.key()) else {
             return;
         };
-        // A killed task dies at its next safe point (spec §7.6) — and the
+        // A killed task dies at its next safe point — and the
         // unwind that carries it there is work this CPU is doing, charged like
         // any other run rather than performed for free. [`UNWIND_NS`] says why
         // charging it is what lets the invariants see a CPU held by a corpse at
@@ -1368,7 +1367,7 @@ impl<'q> Vm<'q> {
         self.note_kicks(before);
     }
 
-    /// The uniform blocking shape of spec §8.1, run by the task itself.
+    /// The uniform two-phase blocking shape, run by the task itself.
     fn do_block(
         &mut self,
         cpu: usize,
@@ -1417,7 +1416,7 @@ impl<'q> Vm<'q> {
         // The registration is live and the task has not parked yet: this is
         // the window every one of the five lost-wake bugs lived in. Letting
         // the explorer put another CPU's wake *here* is what makes those
-        // windows reachable rather than argued about (spec §10.2).
+        // windows reachable rather than argued about.
         if choices.choose(2) == 1 {
             self.interfere(cpu, queue);
         }
@@ -1552,7 +1551,7 @@ impl<'q> Vm<'q> {
 
     /// The consume-side half of priority inheritance: a client that was
     /// already running when its producer signalled takes the window here
-    /// rather than through a wake cause it never received (spec §8.5).
+    /// rather than through a wake cause it never received.
     fn take_pending_boost(&mut self, cpu: usize, queue: usize) {
         if let Some(until) = self.queues[queue].boost_until.get() {
             if until > self.clock {
@@ -1688,7 +1687,7 @@ impl<'q> Vm<'q> {
 
     /// Release the process's own reference, asserting what the kernel's
     /// teardown assumes when it drops the last `Arc`: that nothing else still
-    /// points at this address space. Invariant I8 — the crash.md detector.
+    /// points at this address space. Invariant I8 — the double-drop detector.
     fn free_address_space(&mut self, process: usize) {
         let Some(space) = self.procs[process].address_space.take() else {
             return;
@@ -1819,8 +1818,8 @@ pub enum Dispose<'q> {
     /// Park with a ticket that was committed before the pass was entered.
     Block(CommittedTicket<SimMsg>, Option<Nanos>),
     /// Commit *inside* the pass, after its drain, and park with the result —
-    /// spec §8.1's phase 2. The optional wake is issued between the commit and
-    /// the park; see [`Vm::run_pass`].
+    /// the handshake's phase 2. The optional wake is issued between the commit
+    /// and the park; see [`Vm::run_pass`].
     Commit(
         WaitTicket<'q, SimMsg, SimWaitList>,
         Option<Nanos>,

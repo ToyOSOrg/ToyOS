@@ -1,13 +1,12 @@
-//! Loom: the retire protocol (spec §7.6, §12).
+//! Loom: the retire protocol.
 //!
 //! Six races: the kill bit against a concurrent wake claim, the kill bit
 //! against a waiter's own park commit, the retire-node re-post chase against a
 //! migration, adoption under a kill, the two claims on one parked task, and —
 //! last, and the only one that runs a whole `CpuSched` — what
-//! `handle_retire` *does* with the answer it gets. What replaced `KILLED[16]`,
-//! `WAKE_TRANSITS` and the 1 s timeout scan is a sticky bit plus a message, so
-//! the cases worth checking are exactly the orderings of that bit and that
-//! node.
+//! `handle_retire` *does* with the answer it gets. The protocol is a sticky bit
+//! plus a message, so the cases worth checking are exactly the orderings of
+//! that bit and that node.
 
 use loom::sync::Arc;
 use toyos_sched_loom::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, RunToken, SchedPass};
@@ -98,7 +97,7 @@ fn a_wake_and_a_retire_ride_distinct_nodes() {
 }
 
 /// A retire racing a waiter's own park commit — the window `Commit::Killed`
-/// closes (spec §6.3's park-as-safe-point, §7.6's "dies at its next one").
+/// closes: the park is a safe point, and a killed task dies at its next one.
 ///
 /// Whichever order the two land in, *someone* must be left able to reap the
 /// task. Either the commit observed the kill bit and withdrew — leaving the
@@ -156,8 +155,8 @@ fn a_retire_racing_the_park_commit_always_leaves_someone_to_reap() {
     });
 }
 
-/// The chase (spec §7.6 step 2): the home CPU consumed the retire, found the
-/// task gone, and re-posts the *same* node to wherever the word now points.
+/// The chase: the home CPU consumed the retire, found the task gone, and
+/// re-posts the *same* node to wherever the word now points.
 /// Racing that with the migration itself must still produce exactly one
 /// message and must never link the node twice.
 #[test]
@@ -201,7 +200,7 @@ fn the_retire_chase_reuses_one_node_under_a_racing_migration() {
 
 /// The kill bit is sticky and set before the message is posted, so whichever
 /// CPU ends up owning the task observes it and reaps on arrival — that is the
-/// chase's termination argument (spec §7.6).
+/// chase's termination argument.
 #[test]
 fn an_adopting_cpu_always_observes_the_kill_bit() {
     model(|| {
@@ -358,8 +357,8 @@ impl Hw for Silent {
 }
 
 /// Everything a pass touches that is **not** the `CpuSched`. The waker thread
-/// gets a handle to this and to nothing else, which is the whole of §6.1: a
-/// remote CPU may post and ring, and there is no second way in.
+/// gets a handle to this and to nothing else: a remote CPU may post and ring,
+/// and there is no second way in.
 struct Owner {
     cpus: CpuHandles<TaskMsg>,
     hw: Silent,
@@ -382,8 +381,8 @@ const OTHER: TaskKey = TaskKey(2);
 /// `TaskShared::claim_wake` where `handle_retire` calls it. That states the
 /// arbitration is exclusive and says nothing about what the retirer *does* with
 /// the answer, and the gap was measurable: a `panic!()` at the top of
-/// `handle_retire` left all thirteen models green, so no model reached the arm
-/// §7.2(c) is about.
+/// `handle_retire` left all thirteen models green, so no model reached the
+/// retire arm at all.
 ///
 /// This one drives it. The setup is an ordinary life: adopt, dispatch, park.
 /// Then a remote waker and a retirer reach for the same parked task, and the
@@ -391,10 +390,10 @@ const OTHER: TaskKey = TaskKey(2);
 /// is `!Sync` and stays on its own thread, exactly as a CPU's scheduler state
 /// does; what crosses is the message.
 ///
-/// The property is §7.2(c) itself: **whichever way the claim goes, the task
-/// ends up in the dying list.** If the retirer wins, its own wake places it
-/// there; if it loses, the waker's `Msg::Wake` is in flight to this same CPU
-/// and `handle_wake` places it — but only if the retirer left the entry in
+/// The property is this: **whichever way the claim goes, the task ends up in
+/// the dying list.** If the retirer wins, its own wake places it there; if it
+/// loses, the waker's `Msg::Wake` is in flight to this same CPU and
+/// `handle_wake` places it — but only if the retirer left the entry in
 /// `parked`. Remove-then-convert reds this model: the entry is gone, the wake
 /// lands on a `parked.remove` that returns `None`, and the task is in no
 /// container at all.
@@ -433,7 +432,7 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
         let pass = |cpu: &mut CpuSched<Payload>| {
             let _ = SchedPass::begin(cpu, env, NOW).dispose_none().finish();
         };
-        // Spawn placement is a message, never a reach into the queue (§9.4).
+        // Spawn placement is a message, never a reach into the queue.
         let spawn = |key: TaskKey| {
             let share = Arc::new(FairShare::new(LoomLock::new(ShareState::NonRunnable {
                 lag: 0,
@@ -460,7 +459,7 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
         pass(&mut cpu);
         assert_eq!(cpu.running().map(|t| t.key()), Some(KEY), "adopted and picked");
 
-        // It blocks on something — the state §7.1 calls the arm that matters —
+        // It blocks on something — the parked state is the arm that matters —
         // and the pick hands the CPU to `OTHER`, adopted in the same pass.
         let other = spawn(OTHER);
         let queue: WaitQueue<TaskMsg, LoomLock<WaitList<TaskMsg>>> =

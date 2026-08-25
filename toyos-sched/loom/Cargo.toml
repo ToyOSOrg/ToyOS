@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 # This package exists only to run the loom model checker over the scheduler
-# primitives (spec §10.6). It compiles `../src/*.rs` into its own crate with
+# primitives. It compiles `../src/*.rs` into its own crate with
 # `feature = "loom"` on, so every atomic in those files becomes a
 # loom-instrumented one. Nothing depends on this package, and `kernel/` is
 # excluded from the host workspace this package is a member of, so loom never
@@ -28,11 +28,11 @@ protocol-port = []
 # here enables it, because the models exercise the primitives and the
 # tripwire's subject is a whole record in a kernel `static`.
 tripwire = []
-# Model the mandatory preempt-disabled push away (spec §7.2). The
+# Model the mandatory preempt-disabled push away. The
 # `preempted_producer_strands_suffix` case must FAIL under this feature —
 # `loom/tests/loom_mailbox.rs` asserts exactly that.
 no-preempt-guard = []
-# The negative control for the sleep handshake's kick edge (spec §7.3, §7.5).
+# The negative control for the sleep handshake's kick edge.
 # It makes `mailbox.rs`'s `Doorbell::ring` read the doorbell's bits `Relaxed`
 # instead of `AcqRel`, so a producer can miss a consumer's freshly published
 # `SLEEPING` bit and elide the IPI that would have woken it, and

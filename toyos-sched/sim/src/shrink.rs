@@ -1,4 +1,4 @@
-//! Delta-debugging minimizer and replay emitter — spec §10.3.
+//! Delta-debugging minimizer and replay emitter.
 //!
 //! Determinism is what makes this cheap: a candidate decision list is not an
 //! approximation of a schedule, it *is* the schedule, so every candidate can
