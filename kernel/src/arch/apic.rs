@@ -109,9 +109,9 @@ pub fn eoi() {
 /// Send an IPI to **this** CPU (self shorthand), for the one caller that needs
 /// an interrupt whose delivery time is decided by `IF` alone.
 ///
-/// `log-nested-emit` (§9.2) is that caller: it sends this from inside `emit`,
-/// and the whole verdict is *when* it lands — after the publication bracket
-/// with §2.3a's guard, inside the body copy without it. No device interrupt can
+/// `log-nested-emit` is that caller: it sends this from inside `emit`, and the
+/// whole verdict is *when* it lands — after the publication bracket with the
+/// commit guard, inside the body copy without it. No device interrupt can
 /// serve, because nothing about a device's timing is under a test's control.
 #[cfg(feature = "boot-actuators")]
 pub fn send_self(vector: u8) {
@@ -130,8 +130,9 @@ fn ipi_all_excluding_self(vector: u8) {
 
 /// Ask every other CPU to flush its TLB. The *asking* only — `arch::tlb` owns
 /// the protocol that turns it into an answer, and nothing outside that module
-/// may send this vector: a flush request nobody waits for is exactly the defect
-/// M3 removed, and a second sender would reintroduce it one call at a time.
+/// may send this vector: a flush request nobody waits for is the defect that
+/// protocol exists to prevent, and a second sender reintroduces it one call at a
+/// time.
 pub(super) fn tlb_ipi() {
     if X2APIC_ENABLED.load(Ordering::Relaxed) {
         ipi_all_excluding_self(0xFE);
@@ -166,49 +167,37 @@ pub fn send_nmi(cpu_id: u32) {
 
 /// How long a dying machine gives `/bin/logd` to put the report on `/log`.
 ///
-/// **Re-derived at L6, because what it bounds changed kind and not only size.**
-/// It used to bound the idle loop, which goes round in microseconds, doing one
-/// FAT append and a sync itself. What it bounds now is a *userland process*
-/// being scheduled: a wake reaching whichever CPU logd is parked on, its
-/// `SYS_LOG_READ`, a page-cache write-back, a FAT append, the device's own
-/// cache flush, and a second `SYS_LOG_READ` to publish `durable`. Every one of
-/// those is a step the old number did not cover.
+/// What it bounds is a *userland process* being scheduled: a wake reaching
+/// whichever CPU logd is parked on, its `SYS_LOG_READ`, a page-cache write-back,
+/// a FAT append, the device's own cache flush, and a second `SYS_LOG_READ` to
+/// publish `durable`.
 ///
-/// It stays at half a second, and the reason is what the number is *for* rather
-/// than what it now contains: it is not a prediction of how long the write
-/// takes, it is what a machine with nobody left to do the writing pays on its
-/// way down. Half a second against the ~460 ms the panel paint costs on the laptop
-/// anyway, and a machine whose logd is alive and schedulable finishes far
-/// inside it.
+/// Half a second, and the reason is what the number is *for* rather than what it
+/// contains: it is not a prediction of how long the write takes, it is what a
+/// machine with nobody left to do the writing pays on its way down. Half a
+/// second against the ~460 ms the panel paint costs on the laptop anyway, and a
+/// machine whose logd is alive and schedulable finishes far inside it.
 ///
-/// **This wait is insurance and not the mechanism, and that is measured.** With
-/// this constant set to **0 ms** the report still reached `/log` on 3 runs of 3
-/// (dev host, 2026-08-22): `/bin/logd` is already awake and writing while the
-/// panicking CPU is inside `panic_console::capture`, which renders the whole
-/// ring. So what this bound is worth is decided by the runs where logd has
-/// written **nothing** — there the loss is the whole report and never part of
-/// it. `screen_fatal_halt_composited` lost it on **1 of 30** runs with no other
-/// guest on the host and **0 of 30** with eleven, so the expiry is reachable
-/// and host load is not what reaches it. A `/bin/logd` held off its volume for
-/// 3 s reproduces that run exactly, and this volume is known to park for
-/// seconds at a time — `USB_TIMEOUT_NS` is 2 s with `block::OPERATION`'s 2 s
-/// in series behind it, measured holding one `SYS_FSYNC` for 2.1 s at 1 in 73
-/// full 12-wide suites (2026-08-22), and since 2026-08-23 `object/ops.rs`'s
-/// fsync loop may lawfully retry such a stall for up to `block::DEADMAN`.
+/// **This wait is insurance and not the mechanism.** `/bin/logd` is normally
+/// already awake and writing while the panicking CPU is inside
+/// `panic_console::capture`, so what the bound is worth is decided by the runs
+/// where logd has written **nothing** — there the loss is the whole report and
+/// never part of it. The expiry is reachable, because logd's volume can park for
+/// seconds at a time: `USB_TIMEOUT_NS` is 2 s with `block::OPERATION`'s 2 s in
+/// series behind it, and `object/ops.rs`'s fsync loop may lawfully retry such a
+/// stall for up to `block::DEADMAN`.
 ///
 /// **Lengthening this number is a trade against how long a dead machine takes
 /// to stop, and it is the owner's.** What is not optional is that a machine
 /// which pays the bound says so where its reader is, which is what
 /// [`LOG_DRAIN_EXPIRED`] and `panic_console::refresh_capture` are for.
 ///
-/// **A [`Budget`] and not a [`Bound`](crate::time::Bound) — the one place
-/// this sweep came out a square, reclassified away from `Tripwire`** — right,
-/// because [`wait_for_log_file`] logs and *returns* rather than panicking —
-/// **and landed on `Bound`, whose two constructors both demand a register or a
-/// specification section.** This number has neither: it is policy,
-/// priced against the ~460 ms the panel paint costs anyway. A `Budget`'s expiry
-/// is a degraded answer named at the site, and "the panel is the only copy" is
-/// exactly one.
+/// **A [`Budget`] and not a [`Bound`](crate::time::Bound)**, because
+/// [`wait_for_log_file`] logs and *returns* rather than panicking, and because
+/// `Bound`'s two constructors each demand a register or a specification section
+/// this number has neither of: it is policy, priced against the ~460 ms the
+/// panel paint costs anyway. A `Budget`'s expiry is a degraded answer named at
+/// the site, and "the panel is the only copy" is exactly one.
 const LOG_FILE_DRAIN: Budget = Budget::of(
     Duration::from_millis(500),
     "the report reaches the panel and not /log",
@@ -226,13 +215,10 @@ const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
 
 /// Does `/log` still owe this boot the report?
 ///
-/// **One predicate now, where it was two.** The kernel's own file sink is gone
-/// (§8.1), and with it the pair of questions — "has the cursor moved" and "is a
-/// flush between the ring and the device" — that had to be asked together
-/// because the first went false in the middle of the second. `LOG_DURABLE_NS`
-/// has no such gap by construction: `/bin/logd` publishes it *after* the
-/// `fsync` returns, so the word going past a record's timestamp means that
-/// record is on the stick and not that somebody has started putting it there.
+/// One predicate, and it has no gap by construction: `/bin/logd` publishes
+/// `LOG_DURABLE_NS` *after* the `fsync` returns, so the word going past a
+/// record's timestamp means that record is on the stick and not that somebody
+/// has started putting it there.
 fn owed(want: u64) -> bool {
     crate::log::user::durable_ns() < want
 }
@@ -247,8 +233,8 @@ fn owed(want: u64) -> bool {
 /// `try_lock` fails for its own holder, so the cases where the report matters
 /// most are exactly the ones it would decline, and the heap is not try-able at
 /// all. That is "sometimes writes and sometimes hangs", which is worse than the
-/// panel alone. **After L6 it is not even available**: the writer is a userland
-/// process and the kernel has no path to `/log` to take.
+/// panel alone. **It is not even available**: the writer is a userland process
+/// and the kernel has no path to `/log` to take.
 ///
 /// What this does instead takes no lock, allocates nothing and touches no
 /// device: **it waits.** The report is already committed in the shards, the halt
@@ -259,12 +245,11 @@ fn owed(want: u64) -> bool {
 /// the machine do the writing.
 ///
 /// It cannot deadlock and it cannot make a panic worse: [`owed`] is a load, the
-/// deadline is absolute, and every outcome ends in the same `halt_all_cpus` tail
-/// that ran before. A machine where nothing can write — no scheduler able to
-/// pick logd, a logd that died earlier in the boot, a logd that has given up on
-/// the volume, no `/log` at all — pays the bound and halts with the panel as the
-/// only copy and a line saying so. Those are §6.6's cases and §6.6's subject:
-/// they are what a pstore would cover and this cannot.
+/// deadline is absolute, and every outcome ends in the same `halt_all_cpus`
+/// tail. A machine where nothing can write — no scheduler able to pick logd, a
+/// logd that died earlier in the boot, a logd that has given up on the volume,
+/// no `/log` at all — pays the bound and halts with the panel as the only copy
+/// and a line saying so. Those are what a pstore would cover and this cannot.
 ///
 /// Placed before the halt IPI rather than after, because after it there is
 /// nobody left to do the writing.
@@ -274,13 +259,9 @@ fn wait_for_log_file() {
     // machine with a working console has already got that report off the box
     // through `panic_flush`, and making it wait here buys a duplicate at the
     // price of delaying every step below it — `render`, the drain, and
-    // `page_forever`.
-    //
-    // The price is measured, not assumed: without this guard `screen_pager_keys`
-    // failed alone and reproducibly with `0 page moves over 30 keystrokes`,
-    // because the pager had not started by the time the host began injecting.
-    // A diagnostic that perturbs the path it is diagnosing is worth less than
-    // the delay it costs, and on a machine with serial it is worth nothing.
+    // `page_forever` — delaying the pager's start by the whole budget. A
+    // diagnostic that perturbs the path it is diagnosing is worth less than the
+    // delay it costs, and on a machine with serial it is worth nothing.
     if crate::drivers::serial::has_console() {
         return;
     }
@@ -407,9 +388,8 @@ pub fn init_timer() {
 /// instruction after the one that armed it never retires anything again.** The
 /// Ring 0 stub reloads whatever was last armed with no Rust in the path, so a
 /// count too small to outlast the interrupt it schedules is not one late tick
-/// but a livelock nothing recomputes its way out of. Ring 3 can ask for one — a
-/// deadline already past when the pass arms it — and did (`#156`, observed on
-/// the owner's laptop).
+/// but a livelock nothing recomputes its way out of. Ring 3 can ask for one: a
+/// deadline already past when the pass arms it.
 ///
 /// Policy, not physics, and it sits between two bounds. Below: an interrupt
 /// entry and `iretq`, which is what the interval has to be worth more than for
@@ -418,8 +398,7 @@ pub fn init_timer() {
 ///
 /// **The kind is [`Floor`], and it is why that kind exists.** It is not a
 /// register's number and not a specification's, nothing expires, and no caller
-/// chose it — an implementer applying RT7 with only the first four kinds finds
-/// it unconstructible and deletes it, which reopens #156.
+/// chose it.
 const MIN_ONE_SHOT: Floor = Floor::policy(
     Duration::from_micros(10),
     "above an interrupt entry and iretq, a thousandth of QUANTUM_NS",

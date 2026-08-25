@@ -6,19 +6,15 @@
 //! `kernel-loom` can drive the real code.
 //!
 //! **A shootdown returns when every other CPU has flushed, not when the IPI has
-//! been written.** Until this stage it returned after one ICR write with no
-//! acknowledgement path anywhere, which made every unmap-then-free in the kernel
-//! a use-after-free with a short window: `MappedPages::release` dropped pages
-//! back to the PMM while a sibling could still write through a translation for
-//! them. The same gap is what lets one CPU hold a page write-combining while a
-//! sibling's stale entry still calls it write-back, which SDM Vol. 3A §11.12.4
-//! leaves undefined and permits a machine to hang on.
+//! been written.** Callers free on the far side of it, so an early return is a
+//! use-after-free through a sibling's stale translation; and a sibling that
+//! still calls a page write-back while this CPU has made it write-combining is
+//! undefined by SDM Vol. 3A §11.12.4, which permits a machine to hang on it.
 //!
 //! ## The deadlock a synchronous shootdown opens, and why this one does not
 //!
 //! A target spinning with `IF` clear cannot take the IPI. An initiator that
-//! waits for it while holding what it is spinning on never finishes — and it
-//! would look exactly like the freeze this stage is a candidate for.
+//! waits for it while holding what it is spinning on never finishes.
 //!
 //! **`IF` is clear for the whole of every syscall** — `arch::syscall`'s
 //! `MSR_FMASK` masks it on the `SYSCALL` gate and nothing sets it again before
@@ -28,26 +24,21 @@
 //! lock any handler takes.
 //!
 //! **So the target answers instead of the initiator abstaining.** `Lock::lock`'s
-//! spin calls [`poll`] on every turn, and the wait below calls
-//! `Shootdown::wait_turn`, which answers before it asks. A flush is safe from
-//! anywhere — it takes no lock, allocates nothing, and a CPU that flushes more
-//! often than asked is merely slower — so a CPU that cannot take the interrupt
-//! acknowledges as promptly as one that did. That closes the class structurally,
-//! for locks nobody has written yet as much as for the ones in the tree today.
-//!
-//! **The initiator's own wait was outside that closure until 2026-08-07 and is
-//! the reason this paragraph is longer than its author left it.** Two CPUs that
-//! issued concurrently each spun for the other's acknowledgement with `IF`
-//! clear and no path left by which either could give one, so both died at the
-//! deadline — reproduced as a double kernel panic and as seven different
-//! wide-phase test failures carrying one signature (`issues/kernel/`).
+//! spin calls [`poll`] on every turn, and the initiator's own wait below calls
+//! `Shootdown::wait_turn`, which answers before it asks — two CPUs that issue
+//! concurrently each spin for the other, so each must be able to answer while
+//! spinning. A flush is safe from anywhere — it takes no lock, allocates
+//! nothing, and a CPU that flushes more often than asked is merely slower — so a
+//! CPU that cannot take the interrupt acknowledges as promptly as one that did.
+//! That closes the class structurally, for locks nobody has written yet as much
+//! as for the ones in the tree today.
 //!
 //! What is left is an `IF=0` spin that is *not* a `Lock` and not this wait: a
 //! driver waiting on a device register inside a handler. Those are latency, not
 //! deadlock, because each carries its own deadline — but the deadline can be
-//! seconds (`issues/kernel/`, xHCI inside `drain_irqs`), so
-//! [`ACK_TIMEOUT`] is set above the largest of them and a CPU past it is
-//! named in a panic rather than waited for forever.
+//! seconds (xHCI inside `drain_irqs`), so [`ACK_TIMEOUT`] is set above the
+//! largest of them and a CPU past it is named in a panic rather than waited for
+//! forever.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -75,10 +66,10 @@ static SIBLINGS_ANSWER: AtomicBool = AtomicBool::new(false);
 /// How long a CPU gets to acknowledge before the machine is declared broken.
 ///
 /// Generous on purpose: a target inside `drain_irqs` may be in xHCI enumeration
-/// or endpoint recovery, which spin on `USB_TIMEOUT_NS` = 2 s with `IF` clear
-/// (`issues/kernel/`). Anything past that is not a slow CPU, it is a
-/// CPU that will never answer, and a panic naming it is worth more than a hang
-/// that looks like every other freeze.
+/// or endpoint recovery, which spin on `USB_TIMEOUT_NS` = 2 s with `IF` clear.
+/// Anything past that is not a slow CPU, it is a CPU that will never answer, and
+/// a panic naming it is worth more than a hang that looks like every other
+/// freeze.
 ///
 /// A [`Tripwire`]: it panics below, and neither a register nor a specification
 /// publishes it. Its *derivation* is `USB_TIMEOUT_NS`, which splits at C10 —
@@ -106,10 +97,9 @@ const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
 /// and a recycled PCID is every address there is. It is also exactly what the
 /// targets do, so the initiator and its siblings end in the same state.
 ///
-/// The single address is `mm::paging`'s own and it is derived there, in the
-/// address space that was written — which until 2026-08-19 was whatever `CR3`
-/// held instead, and on `shared_memory`'s and `virtio_gpu`'s cross-process
-/// unmaps that is the caller's process rather than the one being unmapped.
+/// The single address is `mm::paging`'s own and is derived there, in the address
+/// space that was written — never from `CR3`, which on a cross-process unmap
+/// names the caller's process rather than the one being unmapped.
 pub fn shootdown() {
     let cpus = smp::cpu_count();
     if !SIBLINGS_ANSWER.load(Ordering::Acquire) || cpus <= 1 {
@@ -218,11 +208,10 @@ mod delay {
 
 /// How long an arming stays live.
 ///
-/// It expires rather than being one-shot for two reasons, and the second is the
-/// one that matters. One-shot would be spent by whatever shootdown happened to
-/// come first — a daemon exiting, a `dlopen` — and the syscall under measurement
-/// would read zero and fail for a reason that is not the defect. And a window
-/// cannot outlive a test that panicked before disarming, which a latch would.
+/// It expires rather than latching: a one-shot arming would be spent by whatever
+/// shootdown came first — a daemon exiting, a `dlopen` — leaving the syscall
+/// under measurement to read zero, and a latch would outlive a test that
+/// panicked before disarming.
 #[cfg(feature = "test-actuators")]
 const ARM_WINDOW_NANOS: u64 = 2_000_000_000;
 

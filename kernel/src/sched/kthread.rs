@@ -20,9 +20,7 @@
 //! byte is set on every tick and nothing ever consumes it. Migration follows
 //! from that and not from a second mechanism — only a *Ready* task is stolen,
 //! so a task that is never switched out never moves, and a park that does reach
-//! the scheduler comes back to the CPU it left. `log::storm`'s header carries
-//! the measurement: three workload shapes at `--smp 8`, and 0 of 8 and 0 of 16
-//! producers ever wrote to a second CPU's shard. Anything that needs a kernel
+//! the scheduler comes back to the CPU it left. Anything that needs a kernel
 //! thread to run on two CPUs has to be given a preemption point, and a body
 //! like these three is not one.
 //!
@@ -58,11 +56,7 @@ use super::payload::ThreadSched;
 /// and the shipping kernel carries none of it.** That storm is one ordinary
 /// stealable task per CPU, and it exists only in the build that has the
 /// actuator. A shipping kernel spawning a fourth still dies naming it, so the
-/// rule above is untouched where it applies. It used to say the storm is what
-/// exercises the migration §2.3a's bracket exists to survive, and that was
-/// never true of any workload here: a task is stealable while it is *Ready*,
-/// and nothing switches a Ring 0 context out between two instructions (this
-/// module's header states the rule and points at the measurement).
+/// rule above is untouched where it applies.
 #[cfg(not(feature = "boot-actuators"))]
 const MAX_KERNEL_TASKS: usize = 3;
 #[cfg(feature = "boot-actuators")]
@@ -167,11 +161,10 @@ pub enum OnPanic {
 /// handler, which may hold any lock and may not fault, and the other is
 /// `scheduler::blocking_baseline`, which runs on every blocking call in the
 /// machine **with preemption still on**. Asking the `CpuSched` instead — the
-/// structural question, "was this task given an address space" — is what the
-/// first draft did, and it is unsound from a preemptible context: `with_cpu`
-/// hands a pass `&mut CpuSched`, so a timer landing inside the read aliases it
-/// and the running task's record may be moving underneath. The identity words
-/// cannot move under their own thread.
+/// structural question, "was this task given an address space" — is unsound from
+/// a preemptible context: `with_cpu` hands a pass `&mut CpuSched`, so a timer
+/// landing inside the read aliases it and the running task's record may be
+/// moving underneath. The identity words cannot move under their own thread.
 fn current_row() -> Option<&'static Row> {
     let (Some(pid), Some(tid)) = (
         crate::arch::percpu::current_pid(),
@@ -189,14 +182,11 @@ fn current_row() -> Option<&'static Row> {
 /// Is the task this CPU is running a kernel thread?
 ///
 /// **A pid a row holds is never reused, and the reason is `id_map`'s rather
-/// than this module's.** It used to be "these threads do not exit", which was
-/// true while `klogd` was the only one: its row is [`OnPanic::Halt`], so a panic
-/// in it takes the machine and no pid is ever given back. `usbd` and `iod` carry
-/// [`OnPanic::Recover`], so one of them *can* die — its entry is zombified by
-/// the idle loop and reaped — and a row holding a dead task's identity would
-/// then answer for whoever took the pid next. Nobody does: `IdMap` counts up
-/// from zero and never reissues a key, which is the property that makes a row
-/// safe to leave standing.
+/// than this module's.** `usbd` and `iod` carry [`OnPanic::Recover`], so one of
+/// them *can* die — its entry is zombified by the idle loop and reaped — and a
+/// row holding a dead task's identity would then answer for whoever took the pid
+/// next. Nobody does: `IdMap` counts up from zero and never reissues a key,
+/// which is the property that makes a row safe to leave standing.
 pub fn current_is_kernel_thread() -> bool {
     current_row().is_some()
 }
@@ -273,12 +263,12 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
     // **Before `enqueue_new` and not after it.** That call is where the task
     // becomes runnable, stealable and able to panic, and a panic on a task whose
     // row is not published yet is answered by the coin toss the row exists to
-    // replace. It was after until 2026-08-15.
+    // replace.
     claim.publish(TaskId(pid, tid), on_panic);
     // **The kernel address space, named rather than defaulted to.** A kernel
-    // thread runs in the one every CPU is already in between two user threads;
-    // saying so here is what let `KernelPayload.address_space` stop being an
-    // `Option`, so one declaration decides every task's `cr3`.
+    // thread runs in the one every CPU is already in between two user threads,
+    // and naming it here is what keeps one declaration deciding every task's
+    // `cr3`.
     let sched = scheduler::enqueue_new(
         TaskId(pid, tid),
         stack,

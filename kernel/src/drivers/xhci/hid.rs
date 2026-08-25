@@ -99,10 +99,9 @@ impl HidDevice {
         // completed, since `dispatch_report` runs off a Transfer Event, and the
         // endpoint is not requeued until `requeue` below.
         self.report.copy_to(0, &mut buf[..size]);
-        // Wake only when the decode actually queued something. A report
-        // identical to the last one produces no event, and waking watchers
-        // for it made readiness disagree with `has_data()` — which froze the
-        // compositor for as long as a key was held.
+        // Wake only when the decode actually queued something: a report
+        // identical to the last one produces no event, and waking watchers for
+        // it makes readiness disagree with `has_data()`.
         let queued = match self.role {
             HidRole::Keyboard => keyboard::handle_report(&mut self.prev_report, &buf[..size]) != 0,
             HidRole::Pointer(source) => mouse::handle_report(source, &buf[..size]) != 0,
@@ -174,27 +173,26 @@ impl HidDevice {
 /// one. `device_add`/`device_del` cannot reach it either — an unplug is a
 /// disconnect, which is a different event with a different recovery.
 ///
-/// What is real is everything the recovery reads and everything it does: the
-/// TRB was on the ring, the controller ran it, the transfer event is the
-/// controller's own, the ring is left holding no TRB, the Endpoint State the
-/// recovery branches on is read out of the controller's output context, and
-/// every command it issues is really answered.
+/// Everything the recovery reads and does stays real: the TRB was on the ring,
+/// the controller ran it, the transfer event is the controller's own, the ring
+/// is left holding no TRB, the Endpoint State the recovery branches on is read
+/// out of the controller's output context, and every command it issues is really
+/// answered.
 ///
-/// What is replaced is the completion code **and the report that transfer
-/// delivered**, which is the half that keeps the gate from being vacuous: a
-/// staged failure carries a real mouse movement into the report buffer, so a
-/// driver that dispatched it anyway would publish a delta it never earned and
-/// the gate would pass against the defect it is aimed at. Taking the bytes away
-/// leaves what a failed transfer leaves — nothing delivered — so the motion the
-/// gate measures can only have crossed an endpoint that was restarted. Same
-/// reason `usb-transport-break` skips a wait rather than forging a CSW.
+/// Replaced is the completion code **and the report that transfer delivered** —
+/// the half that keeps the gate from being vacuous. A staged failure carries a
+/// real mouse movement into the report buffer, so a driver that dispatched it
+/// anyway would publish a delta it never earned; taking the bytes away leaves
+/// what a failed transfer leaves, so the motion the gate measures can only have
+/// crossed an endpoint that was restarted. Same reason `usb-transport-break`
+/// skips a wait rather than forging a CSW.
 #[cfg(feature = "boot-actuators")]
 impl HidDevice {
-    /// Which completion is taken. The first is the shape the laptop showed — a
-    /// freshly configured endpoint whose very first transfer fails, before the
-    /// device has ever delivered — and the fourth is the mid-stream shape,
-    /// where a device that has been working stops. They are different states
-    /// of the driver and neither is a weaker version of the other.
+    /// Which completion is taken. The first is a freshly configured endpoint
+    /// whose very first transfer fails, before the device has ever delivered;
+    /// the fourth is a device that has been working and stops. They are
+    /// different states of the driver and neither is a weaker version of the
+    /// other.
     fn break_at() -> Option<u32> {
         if crate::actuator::xhci_hid_break_first() {
             Some(1)
