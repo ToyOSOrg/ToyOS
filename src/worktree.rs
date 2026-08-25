@@ -79,7 +79,7 @@ fn add(root: &Path, path: &str) {
          its own.",
         path.parent().unwrap_or(Path::new("/")).display(),
         free as f64 / 1024.0_f64.powi(3),
-        NEEDED_BYTES as f64 / 1024.0_f64.powi(3) / 2.0,
+        NEEDED_BYTES as f64 / 1024.0_f64.powi(3),
     );
 
     let branch = format!("wt/{name}");
