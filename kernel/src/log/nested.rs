@@ -15,13 +15,12 @@
 //! `log-nested-emit` sends it from halfway through the body copy: the burst then
 //! commits a whole newer generation into the slot the interrupted writer is
 //! standing in, and the resumed writer overwrites a record that has already been
-//! published. **That corruption is invisible to every reader in the machine**,
-//! and by design rather than by oversight — the resumed writer republishes the
-//! *previous* generation's number, which is exactly what a slot whose writer has
-//! not published yet looks like, and `Shard::oldest_readable` has already moved
-//! past the record it destroyed. What it costs is one record and a stalled
-//! shard, and neither is distinguishable from the ring's declared drop-oldest
-//! policy.
+//! published. **That corruption is invisible to every reader in the machine**:
+//! the resumed writer republishes the *previous* generation's number, which is
+//! exactly what a slot whose writer has not published yet looks like, and
+//! `Shard::oldest_readable` has already moved past the record it destroyed.
+//! What it costs is one record and a stalled shard, neither distinguishable
+//! from the ring's declared drop-oldest policy.
 //!
 //! `log-nested-reserve` sends it from **between the shard-pointer read and the
 //! unlocked `xadd`** — the window §2.3a's bracket names first — and that one is
@@ -67,8 +66,7 @@ mod armed {
     /// **A second flag and not a second setting of the first**, because the two
     /// injection points are on one path and the earlier one would consume
     /// everything: [`reserve_window`] runs before `mid_body` in every single
-    /// record, so a shared flag would have made the body window unreachable the
-    /// moment this one existed.
+    /// record, so a shared flag makes the body window unreachable.
     static ARMED_RESERVE: AtomicBool = AtomicBool::new(false);
 
     /// Set by the injection and cleared by the handler, so a delivery that
@@ -190,8 +188,7 @@ mod armed {
 ///
 /// Not compiled into a shipping kernel: its callers are the `log-nested-emit`
 /// and `log-nested-reserve` arms in `log::user`, which are `#[cfg]`'d away with
-/// the actuators. `mid_body` below is the opposite case and says why it is the
-/// opposite.
+/// the actuators.
 #[cfg(feature = "boot-actuators")]
 pub fn start_once() {
     #[cfg(feature = "boot-actuators")]
