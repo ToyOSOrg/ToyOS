@@ -18,10 +18,10 @@ pub use toyos_abi::inbox::{READABLE, WRITABLE};
 /// and publishes the tail; `claim_submission` reads a submission slot and
 /// advances the submission head. A `&T` carries `dereferenceable` into LLVM —
 /// and for a `T` with no interior mutability `noalias` and `readonly` too — so
-/// a `&RingHeader` here was a data race on `ring_size` whatever was then read
+/// a `&RingHeader` here is a data race on `ring_size` whatever is then read
 /// through it, and `&mut Submission`/`&Completion` (all integers, therefore
-/// `Freeze`) were borrows the compiler was entitled to fold, hoist or split
-/// against a kernel that was writing the same bytes.
+/// `Freeze`) are borrows the compiler is entitled to fold, hoist or split
+/// against a kernel that is writing the same bytes.
 ///
 /// So a ring header is reached one atomic word at a time (`AtomicU32::from_ptr`,
 /// which is the only way to do an atomic operation on memory Rust does not own
@@ -30,11 +30,11 @@ pub use toyos_abi::inbox::{READABLE, WRITABLE};
 /// `read_volatile` of the whole struct — one access, not one the compiler may
 /// split, fold or repeat.
 ///
-/// This is the mirror of `kernel/src/inbox.rs`'s accessor block, fixed the same
-/// way on 2026-08-22; the field offsets come from `offset_of!` at both ends and
-/// `toyos_abi::inbox`'s `RING_*_OFF` constants are what a reordering meets.
-/// `ring_size` has no accessor at either end: both hold the sizes themselves
-/// rather than reading them back out of a page the other side can write.
+/// This is the mirror of `kernel/src/inbox.rs`'s accessor block: the field
+/// offsets come from `offset_of!` at both ends and `toyos_abi::inbox`'s
+/// `RING_*_OFF` constants are what a reordering meets. `ring_size` has no
+/// accessor at either end — both hold the sizes themselves rather than reading
+/// them back out of a page the other side can write.
 struct Rings {
     base: *mut u8,
     submission_ring_size: u32,
@@ -111,10 +111,10 @@ impl Rings {
 
     /// Put one whole submission in the slot `index` names.
     ///
-    /// One store of the whole entry, before the tail publishes it. A
-    /// `&mut Submission` was a borrow the compiler could assume exclusive over
-    /// a page the kernel also maps, and the five field assignments behind it
-    /// were five stores it was free to reorder against each other.
+    /// One store of the whole entry, before the tail publishes it: a
+    /// `&mut Submission` is a borrow the compiler may assume exclusive over a
+    /// page the kernel also maps, and field-by-field assignment is several
+    /// stores it is free to reorder against each other.
     fn write_submission(&self, index: u32, entry: Submission) {
         // SAFETY: `index` is masked by `submission_ring_size` at the one call
         // site, and that size is a power of two no greater than
@@ -171,10 +171,8 @@ impl Rings {
 /// Owns the inbox handle and shared memory mapping. Submissions are batched
 /// and flushed on [`wait`](Self::wait).
 ///
-/// **Deliberately not called `Inbox`.** The ABI object is the kernel's
-/// `object::inbox` and a task's bounded record ring is `completion::inbox`;
-/// a third `Inbox` in userland would undo exactly the separation those two
-/// names keep. `Poller` is what this type does for its caller.
+/// **Deliberately not called `Inbox`**: the kernel already carries two objects
+/// under that word, and `Poller` is what this type does for its caller.
 ///
 /// **A poller has a declared capacity and cannot lose a completion inside it.**
 /// [`new`](Self::new) takes the number of handles the caller will watch at once
@@ -192,12 +190,9 @@ impl Rings {
 /// the number of calls — re-registering the same handle within a round is
 /// deduplicated by the kernel but still counts here, so declare the set.
 ///
-/// The doc that used to be here said the kernel "asserts rather than
-/// overflows", which stopped being true when `post_cqe` switched to recording
-/// a drop and returning: prose asserting a property of another component that
-/// nobody re-checked. [`wait`](Self::wait) still reads the kernel's drop
-/// counter — an assert that should now be unreachable, kept because that is
-/// the shape a fail-fast check is supposed to have.
+/// [`wait`](Self::wait) reads the kernel's drop counter on every call — an
+/// assert that should be unreachable, kept because that is the shape a
+/// fail-fast check is supposed to have.
 pub struct Poller {
     inbox: RawHandle,
     rings: Rings,
@@ -213,17 +208,17 @@ unsafe impl Sync for Poller {}
 
 impl Poller {
     /// Widest handle set one poller can carry — the kernel's deepest
-    /// submission ring, `MAX_SQ_DEPTH` in `kernel/src/io_uring.rs`. A caller
-    /// that must bound its own watched set has to bound it below this.
+    /// submission ring, `MAX_SUBMISSION_DEPTH` in `kernel/src/inbox.rs`. A
+    /// caller that must bound its own watched set has to bound it below this.
     pub const MAX_HANDLES: u32 = 256;
 
     /// Create a poller for `capacity` simultaneously watched handles.
     ///
     /// `capacity` is a declaration, not a hint: the rings are rounded up to the
     /// power of two that holds it, and registering past it panics. A capacity
-    /// above [`MAX_HANDLES`] is refused for the same reason — it used to be
-    /// clamped, which handed the caller a ring smaller than the set it just
-    /// said it had and made the loss reachable while looking like a success.
+    /// above [`MAX_HANDLES`] is refused rather than clamped: a clamp hands the
+    /// caller a ring smaller than the set it just declared, which makes the
+    /// loss reachable while looking like a success.
     pub fn new(capacity: u32) -> Self {
         assert!(
             capacity >= 1 && capacity <= Self::MAX_HANDLES,
@@ -266,11 +261,11 @@ impl Poller {
     /// Prefer [`watch`](Self::watch) when you have a typed handle.
     pub fn watch_raw(&self, handle: RawHandle, flags: u32, token: u64) {
         // A panic, because this is first-party code exceeding a bound it
-        // declared itself. There used to be a mid-batch flush here instead;
-        // that is what made completions reachable while the caller was still
-        // registering, and past the completion ring the kernel dropped them
-        // and the caller blocked forever on readiness it had been told about.
-        // With the ring sized for `capacity` this is unreachable.
+        // declared itself. A mid-batch flush here instead would make
+        // completions reachable while the caller is still registering, and
+        // past the completion ring the kernel drops them and the caller blocks
+        // forever on readiness it was told about. With the ring sized for
+        // `capacity` this is unreachable.
         assert!(
             self.pending() < self.capacity,
             "Poller: {} handles registered since the last wait(), capacity is {}",
@@ -328,8 +323,7 @@ impl Poller {
         // conforming caller does can make the kernel drop a completion here.
         // The counter is cumulative and never cleared, so if the reasoning is
         // wrong this fires and stays fired instead of turning into a caller
-        // blocked forever on readiness that was thrown away — which is what it
-        // was before anyone read this field at all.
+        // blocked forever on readiness that was thrown away.
         let dropped = self.rings.completion_dropped().load(Ordering::Relaxed);
         assert_eq!(
             dropped, 0,
@@ -498,16 +492,16 @@ mod tests {
         assert_eq!(page.get(SUBMISSION_RING_OFF as usize + RING_TAIL_OFF), 3);
     }
 
-    /// **The negative control for the borrow this file removed.**
+    /// **The negative control for the borrow this file refuses.**
     ///
     /// A "kernel" writes the completion tail *between* the two reads a drain
     /// makes, which is exactly what `post_completion` does on another CPU. The
     /// header is reached one `&AtomicU32` at a time, so the second read sees
-    /// the new value and the second batch is drained. Restore the
-    /// `&*(base.add(COMPLETION_RING_OFF) as *const RingHeader)` this replaced
-    /// and the drain holds one snapshot of the header across the loop: the
-    /// borrow is `Freeze`, LLVM is entitled to keep the first `tail` in a
-    /// register, and the second batch is never seen.
+    /// the new value and the second batch is drained. Write it instead as
+    /// `&*(base.add(COMPLETION_RING_OFF) as *const RingHeader)` and the drain
+    /// holds one snapshot of the header across the loop: the borrow is
+    /// `Freeze`, LLVM is entitled to keep the first `tail` in a register, and
+    /// the second batch is never seen.
     #[test]
     fn a_tail_the_kernel_publishes_mid_drain_is_observed() {
         let mut page = FakePage::new(4, 8);
