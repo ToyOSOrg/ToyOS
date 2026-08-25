@@ -9,8 +9,8 @@
 //!
 //! The parking calls — [`sys_process_wait`], [`sys_thread_join`],
 //! [`sys_nanosleep`] — clone what they wait on out of the table before they
-//! block, for `super::io`'s reason: a guard held across a park is the §6.4
-//! tripwire, and a cancelled wait answers `super::cancelled`.
+//! block, for `super::io`'s reason: a guard held across a park is what the
+//! baseline tripwire fires on, and a cancelled wait answers `super::cancelled`.
 
 use alloc::vec::Vec;
 
@@ -99,9 +99,9 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
         // Zero-extended: an exit code is an `i32`, and sign-extending -1 would
         // land on `SyscallError`'s encoding.
         Some(code) => code as u32 as u64,
-        // One answer for both arms, and the blocking one used to `expect` here.
+        // One answer for both arms rather than an `expect` on the blocking one.
         // `publish_exit` fills the slot before it stores `finished`, and the
-        // wait above returns only when `finished` holds, so this is now
+        // wait above returns only when `finished` holds, so this is
         // unreachable — but it is reachable *from userland*, which is the whole
         // reason it may not be an assertion: a wait that came back without its
         // condition is a refusal the caller already handles (it is what
@@ -133,11 +133,10 @@ pub(super) fn sys_process_open(syscap: RawHandle, pid: process::Pid) -> u64 {
 /// [`Rights::RT`].
 ///
 /// The RT band has no priority above it, so unbounded threads in it starve
-/// soundd's mix thread at its own level. It used to be gated on holding an
-/// audio claim, which the dispatch's own comment called out as not a
-/// privilege: whoever won the first-come race for the sound card got the band
-/// with it. This is the privilege that comment asked for, and it is endowed
-/// per manifest rather than won.
+/// soundd's mix thread at its own level. Gating it on holding an audio claim
+/// would be no privilege at all — whoever won the first-come race for the sound
+/// card would get the band with it — so it is endowed per manifest rather than
+/// won.
 pub(super) fn sys_rt_enter(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::RT) {
         return e.refuse();
@@ -184,11 +183,10 @@ pub(super) fn sys_thread_spawn(entry: u64, stack_ptr: u64, arg: u64, stack_base:
 
 /// Wait for a thread of this process to die.
 ///
-/// **It arms on the thread it names**, which is what replaced the parking lot:
-/// the target's own `TaskHandle` carries the watch, `thread_exit` posts to it,
-/// and the `ThreadSched` held across the park is what keeps that watch alive.
-/// A `wake_task(TaskId)` to the process's main thread — a wake by name, into a
-/// hashed bucket, re-checked by whoever happened to be woken — is gone with it.
+/// **It arms on the thread it names**: the target's own `TaskHandle` carries the
+/// watch, `thread_exit` posts to it, and the `ThreadSched` held across the park
+/// is what keeps that watch alive — never a wake by name to the process's main
+/// thread, into a hashed bucket, re-checked by whoever happened to be woken.
 pub(super) fn sys_thread_join(tid: u64) -> u64 {
     let tid = process::Tid::from_raw(tid as u32);
     let caller = process::current_process();
@@ -228,11 +226,10 @@ pub(super) fn sys_nanosleep(nanos: u64) -> u64 {
     // ABI still carries a relative span, and this is the one place it becomes
     // an instant.
     let deadline = Deadline::at(crate::clock::now() + Duration::from_nanos(nanos));
-    // No condition to re-check: the deadline is the wake, and one that has
-    // already passed fires at the next scheduler entry.
     // **Armed on nothing but time.** A sleep has no subject — what ends it is
     // the deadline the caller chose — so it arms on its own thread, where
-    // nothing posts, and the park's own deadline is the whole of the wait.
+    // nothing posts, with no condition to re-check; a deadline already passed
+    // fires at the next scheduler entry.
     let parkable = crate::scheduler::Parkable::at_entry();
     let Some(handle) = crate::sched::driver::current_handle() else {
         return 0;
@@ -250,12 +247,9 @@ pub(super) fn sys_nanosleep(nanos: u64) -> u64 {
 
 /// Accounting for the process a handle names, alive or exited.
 ///
-/// **Repeatable, and not a claim on anything.** It used to hand the caller a
-/// snapshot its exited child had stashed on it, deleting it on the way out —
-/// so the numbers could be read once, by one process, and only after the child
-/// was dead. With a handle there is nothing to stash: a live process is sampled
-/// from its own data and an exited one from the object, and neither reading
-/// spends anything.
+/// **Repeatable, and not a claim on anything.** With a handle there is nothing
+/// to stash: a live process is sampled from its own data and an exited one from
+/// the object, and neither reading spends anything.
 pub(super) fn sys_process_stats(
     ctx: &crate::user_ptr::SyscallContext,
     h: RawHandle,

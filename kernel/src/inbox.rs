@@ -9,17 +9,7 @@
 //! One-shot `OP_WATCH`: each fires once, then the pending poll is consumed.
 //! Userspace must re-submit to re-arm.
 //!
-//! **This file finishes the rename the ABI landing left.** `toyos_abi::io_uring`
-//! became `toyos_abi::inbox` on 2026-08-20, but that change had to land in one
-//! merge with the rust submodule and both fork pins, so it stopped at the ABI
-//! boundary: `Inbox`, `InboxRef`, `Op`, `InboxId` and the `inbox_watchers`
-//! accessors on every source were tree-local and moved here, on their own pull
-//! request. `KObjectRef::Inbox` had already moved — its name is the ABI's,
-//! carried by `toyos_abi::syscall::OBJECT_KINDS` and asserted against
-//! `CENSUS_KIND` — so it named this file's mechanism correctly before the rest
-//! of the file did.
-//!
-//! **A third thing in this kernel is now also called an inbox, and it is not
+//! **A third thing in this kernel is also called an inbox, and it is not
 //! this one.** `completion::Inbox` is a *task's* bounded record ring, minted
 //! at spawn and never named by a handle — a different type for a different
 //! purpose, one level below this one. What a process holds a handle to is
@@ -158,7 +148,7 @@ impl WatchFlags {
 /// What an `OP_WATCH` is registered on: an inbox's key for "which inboxes care
 /// about this object". It names the same objects the wait queues hang off, but
 /// it is not a scheduler concept — the scheduler knows only tasks, tickets and
-/// causes (scheduler-core-spec §8.1).
+/// causes.
 ///
 /// **A port is named by the object and never by a number.** There is no
 /// registry to look an acceptor up in any more, so the watch *holds* what it
@@ -208,24 +198,23 @@ impl Source {
     /// holder's.** [`Source::Log`] is named by every `SysCap`, and the machine's
     /// log is not something a capability going away ends: closing one is a
     /// process putting down its authority to read a stream that outlives every
-    /// handle, and `/bin/logd`'s whole loop is read-then-park, so that was a
-    /// daemon which stopped reading the moment anything anywhere closed a
-    /// capability. [`Source::Keyboard`] is the machine's one keyboard, which no
-    /// claim and no console creates or destroys: the `Device(Keyboard)` claim
-    /// names it *and* so does every `Console` (`object::ops::read_source`), so
-    /// the claim's holder closing its handle posted `-NotFound` into every
-    /// pending poll on stdin in the machine — which is what libc's terminal read
-    /// arms — for processes that hold no device. It stayed quiet only because
-    /// the compositor takes the claim at boot and holds it until the machine
-    /// stops; a restart, a handoff or a rearm would have cancelled every
-    /// terminal read on the machine in between.
+    /// handle, and `/bin/logd`'s whole loop is read-then-park, so ending it
+    /// there stops a daemon the moment anything anywhere closes a capability.
+    /// [`Source::Keyboard`] is the machine's one keyboard, which no claim and no
+    /// console creates or destroys: the `Device(Keyboard)` claim names it *and*
+    /// so does every `Console` (`object::ops::read_source`), so ending it with
+    /// the claim posts `-NotFound` into every pending poll on stdin in the
+    /// machine — which is what libc's terminal read arms — for processes that
+    /// hold no device. The compositor takes the claim at boot and holds it until
+    /// the machine stops, so only a restart, a handoff or a rearm would make
+    /// that visible at all.
     ///
-    /// **The question is the source's and asking the object was the defect.**
-    /// What makes cancelling safe is that no *other kind* of object names the
-    /// same source, and an exhaustive match over `KObjectRef` cannot state that
-    /// — `object::ops` had one, and its argument was "a claim admits exactly one
-    /// handle by construction, so every ring watching it is the one holder's",
-    /// which is true of the claim and false of the source. The match is here
+    /// **The question is the source's and never the object's.** What makes
+    /// cancelling safe is that no *other kind* of object names the same source,
+    /// and an exhaustive match over `KObjectRef` cannot state that: the argument
+    /// available there is "a claim admits exactly one handle by construction, so
+    /// every ring watching it is the one holder's", which is true of the claim
+    /// and false of the source. The match is here
     /// because the fact is here, beside [`Source::is_ready`] and
     /// [`Source::watchers`], and a source added to this enum has to answer it.
     ///
@@ -233,12 +222,10 @@ impl Source {
     /// port and the four remaining device classes each go away with their last
     /// handle, and nothing else in the kernel names any of them.
     pub fn ended_by_its_last_handle(self) -> Option<EndedSource> {
-        // The negative controls restore the prior behaviour for one source
-        // each, so the gate covering it reds on the tree that had it.
-        // `log-close-cancels-any-syscap` covered both while the question was
-        // asked of the object; the keyboard half has its own name now, because
-        // a keyboard *claim* closing is the reachable stimulus for it and no
-        // `SysCap` is involved.
+        // The negative controls put the cancellation back for one source each,
+        // so the gate covering it reds on a tree that has it. The keyboard has
+        // its own name because a keyboard *claim* closing is the reachable
+        // stimulus for it and no `SysCap` is involved.
         let ends = match self {
             Self::Log => crate::actuator::log_close_cancels_any_syscap(),
             Self::Keyboard => crate::actuator::keyboard_close_cancels_every_console(),
@@ -331,12 +318,12 @@ impl PendingWatch {
 ///
 /// **A source's watcher list is a set of rings, not a count**, so removing the
 /// registration unconditionally — which is what an RAII guard beside each poll
-/// did — disarms a sibling poll of the same ring on the same object. Two
+/// would do — disarms a sibling poll of the same ring on the same object. Two
 /// handles to one object in one ring is the reachable shape (a `dup`ped
 /// acceptor polled through both), and nothing about the failure is visible: the
-/// poll stays in the list and no wake ever reaches it again. The guard could
-/// not have got this right, because whether a registration is still owed is a
-/// property of the ring and not of the poll.
+/// poll stays in the list and no wake ever reaches it again. A guard cannot get
+/// this right, because whether a registration is still owed is a property of
+/// the ring and not of the poll.
 fn take_poll(instance: &mut Inbox, index: usize) -> PendingWatch {
     let poll = instance.pending_watches.swap_remove(index);
     for source in poll.sources.iter() {
@@ -364,20 +351,15 @@ struct Inbox {
     submission_size: u32,
     completion_size: u32,
     pending_watches: Vec<PendingWatch>,
-    /// Threads armed on this ring's completion queue (spec §8.6), cloned out
-    /// of the table because `submit` holds it across its park.
+    /// Threads armed on this ring's completion queue, cloned out of the table
+    /// because `submit` holds it across its park.
     ///
-    /// **It was half of a `Wakeable` pair, and the other half was dead.** An
-    /// `Arc<KWaitQueue>` stood beside it — minted at setup, cloned at five wake
-    /// sites and walked on every completion — with nothing registered on it since
-    /// `submit` started parking through `completion::wait_until` on the calling
-    /// thread's own queue. The pair's own doc said it existed "so a site cannot
-    /// take one and forget the other", which is a real hazard
-    /// (`issues/kernel/io-uring-source-half-a-wake-pair.md` records losing
-    /// it twice) and was not that type's to prevent: §5.6's answer is that there
-    /// is **no pair**, and a type minted to enforce one is the pair surviving
-    /// under a new name. Both the alias and the `wakeable()` accessor are gone
-    /// with it, because a synonym for one field earns nothing.
+    /// **One watch, and no pair for a site to take half of.** Losing half a wake
+    /// pair is a real hazard — `issues/kernel/io-uring-source-half-a-wake-pair.md`
+    /// records it twice — and a type minted to enforce the pair is the pair
+    /// surviving under a new name: `submit` parks through
+    /// `completion::wait_until` on the calling thread's own queue, so there is
+    /// no second half.
     watch: Arc<Watch>,
     /// The authoritative completion-ring tail. The copy in the shared header is a
     /// publication for userspace, which only ever reads it — the kernel must
@@ -398,14 +380,13 @@ impl Inbox {
     // of bytes another thread of that process rewrites between any two
     // instructions.
     //
-    // What this replaces handed back `&RingHeader` and `&Submission`. The
-    // sharper of the two was `&RingHeader`: three of its four fields are
+    // A `&RingHeader` is the sharper of the two: three of its four fields are
     // atomics, but `ring_size` is a plain `u32` a process can store to at any
-    // moment, so the reference itself was a data race whatever the kernel then
-    // read through it. `&Submission` was worse in the other way — `Submission`
-    // is all integers and therefore `Freeze`, so that borrow really did carry
-    // `noalias`, and the one-`*`-copy the caller took was a copy the compiler
-    // was free to split back apart.
+    // moment, so the reference itself is a data race whatever the kernel then
+    // reads through it. A `&Submission` is worse in the other way — `Submission`
+    // is all integers and therefore `Freeze`, so that borrow really does carry
+    // `noalias`, and a one-`*`-copy taken from it is a copy the compiler is free
+    // to split back apart.
     //
     // So the ring headers are reached one atomic word at a time
     // (`AtomicU32::from_ptr`, which is the only way to do an atomic operation
@@ -471,8 +452,8 @@ impl Inbox {
     /// One submission entry, copied out.
     ///
     /// By value and by `read_volatile`, so what the kernel goes on to decide
-    /// with is a snapshot it took once. A `&Submission` was a borrow the
-    /// compiler could assume stable over a page the submitting process still
+    /// with is a snapshot it took once. A `&Submission` would be a borrow the
+    /// compiler may assume stable over a page the submitting process still
     /// maps.
     fn submission_at(&self, index: u32) -> Submission {
         let ptr = self.shm_phys.as_mut_ptr::<u8>();
@@ -619,15 +600,14 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
     let addr_space = process::current_address_space();
     let shm = SharedMemObject::create(crate::mm::PAGE_2M)?;
 
-    // **The page is built before it is mapped, and the order is the fix.** This
-    // used to `map_into` first and then write the layout and the two headers,
-    // so a sibling thread of the calling process could be writing the same
-    // bytes while the kernel initialised them. Nothing was ever observed going
-    // wrong — the caller has not returned from `SYS_INBOX_SETUP`, so nothing in
-    // userland knows the address — but "no thread knows the address" is not "no
-    // thread may write it", and a wild store from a sibling reaches an address
-    // nobody named. `phys_before_mapping` is what refuses the reversed order
-    // rather than leaving it to a comment.
+    // **The page is built before it is mapped, and the order is load-bearing.**
+    // `map_into` first would leave a sibling thread of the calling process able
+    // to write the same bytes while the kernel initialises them. The caller has
+    // not returned from `SYS_INBOX_SETUP`, so nothing in userland knows the
+    // address — but "no thread knows the address" is not "no thread may write
+    // it", and a wild store from a sibling reaches an address nobody named.
+    // `phys_before_mapping` is what refuses the reversed order rather than
+    // leaving it to a comment.
     write_ring_page(shm.phys_before_mapping(), submission_size, completion_size);
 
     let shm_vaddr = shm.map_into(pid, &addr_space)?;
@@ -677,10 +657,9 @@ pub fn submit(
     // `timeout_nanos` still arrives from userland with `0` meaning non-blocking
     // and `u64::MAX` meaning forever — that is the ABI until C11 — but inside
     // the kernel each becomes a named `Deadline`: `passed()` is evaluate-once,
-    // `never()` arms no timer, and anything else is an instant. What this
-    // replaces mapped relative `0` onto absolute `1` and `1` back onto `0` —
-    // the motivating example for why the absolute form may not be a bare
-    // `u64`.
+    // `never()` arms no timer, and anything else is an instant. A bare `u64`
+    // for the absolute form maps relative `0` onto absolute `1` and `1` back
+    // onto `0`, which is why the absolute form is a type.
     let non_blocking = timeout_nanos == 0;
     let deadline = if non_blocking {
         Deadline::passed()
@@ -817,11 +796,11 @@ fn process_submission(inbox_id: InboxId, submission: &Submission) {
 
 /// Register a `OP_WATCH`, or answer it.
 ///
-/// **A submission has an error channel, and it is the completion.** Every way this can
-/// refuse posts one, because the alternative is what this call used to do: a
-/// `PendingWatch` carrying no source, which no event site can reach and no
-/// recheck can complete, so the submitter went quiet instead of learning it had
-/// made a mistake.
+/// **A submission has an error channel, and it is the completion.** Every way
+/// this can refuse posts one, because the alternative is a `PendingWatch`
+/// carrying no source, which no event site can reach and no recheck can
+/// complete — so the submitter goes quiet instead of learning it made a
+/// mistake.
 ///
 /// The handle is resolved by [`super::object::HandleError`]'s own rule and not
 /// by one invented here (`kernel/src/object/handle.rs`): a handle
@@ -886,9 +865,9 @@ fn process_watch(inbox_id: InboxId, submission: &Submission) {
         }
 
         // The cap is answered before anything is registered. Registering first
-        // left the ring on every one of this poll's watcher lists with no poll
-        // behind it, so a later event scanned a ring that had told the caller
-        // it was full.
+        // would leave the ring on every one of this poll's watcher lists with
+        // no poll behind it, so a later event scans a ring that has told the
+        // caller it was full.
         if instance.pending_watches.len() >= MAX_PENDING_WATCHES {
             instance.post_completion(user_data, -(SyscallError::ResourceExhausted as i32), 0);
             let watch = instance.watch.clone();
@@ -927,10 +906,10 @@ fn process_watch(inbox_id: InboxId, submission: &Submission) {
 
 /// The same rule as `SYS_ACCEPT`, which this is the submission form of.
 ///
-/// It used to fold five refusals into one `-InvalidArgument` completion, so a program
-/// that submitted an `ACCEPT` on a handle it had closed learned only that its
-/// argument was "nonsense" — where the syscall form of the same mistake ends
-/// the process. `get` answers `WrongType` for a pipe presented as an acceptor,
+/// Folding its refusals into one `-InvalidArgument` completion tells a program
+/// that submitted an `ACCEPT` on a handle it had closed only that its argument
+/// was "nonsense" — where the syscall form of the same mistake ends the
+/// process. `get` answers `WrongType` for a pipe presented as an acceptor,
 /// which is why the type is asked of it rather than matched here.
 fn process_accept(inbox_id: InboxId, submission: &Submission) {
     let user_data = submission.token;
@@ -1038,13 +1017,11 @@ fn complete_pending_for_source(watchers: &[InboxId], matches: impl Fn(&PendingWa
 /// **Selected by source and never by handle.** The rings this reaches
 /// belong to *other* processes — that is the whole point of walking the
 /// source's watcher list — and a handle means nothing outside the process
-/// that owns it. Matching on it cancelled a poll the closing process had never
-/// heard of: a client exiting with its connection on handle 3 posted
-/// `-NotFound` for whatever the server had on *its* handle 3, and a server
-/// whose listener sat there then read ready with nothing queued and blocked in
-/// `accept` forever. Found in the layout wizard's gate, where the wizard's
-/// handle 3 was the gate's listener; the compositor is exposed to exactly the
-/// same shape.
+/// that owns it. Matching on it cancels a poll the closing process has never
+/// heard of: a client exiting with its connection on handle 3 posts `-NotFound`
+/// for whatever the server holds on *its* handle 3, and a server whose listener
+/// sat there then reads ready with nothing queued and blocks in `accept`
+/// forever.
 ///
 /// **Every cancellation is woken.** The ring belongs to a thread parked in
 /// `submit` on it — that is what a pending `OP_WATCH` means — and nothing else

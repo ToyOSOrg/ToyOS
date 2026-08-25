@@ -19,8 +19,7 @@
 //! Every user thread's x87 register file, control, status and tag words, XMM0-15
 //! and `MXCSR` cross a ring transition intact — including a *pending unmasked
 //! x87 exception*, which `FXSAVE64` carries across without raising it, so it
-//! reaches only the task that caused it. It used to be left on the CPU for
-//! whatever ran next.
+//! reaches only the task that caused it.
 //!
 //! **The area is sized by the type, at every site, without the site saying so.**
 //! [`ring3_naked_asm`] appends the two `const` operands the templates name, so
@@ -95,15 +94,9 @@ const _: () = assert!(align_of::<UserFpState>() >= 8);
 /// `DF` write the `n` bytes *below* their destination instead of at it.
 ///
 /// That writes real data — a return address, a rodata pointer, a live frame — at
-/// an address nothing meant to touch, which is a corrupted `BTreeMap` node, a
-/// corrupted `dlmalloc` free list or a null `Arc` a boot later and somewhere
-/// else. It does not stay in the interrupted flow either: `context_switch`'s
-/// `pushfq` saves the set `DF` into a context's frame and a later `popfq`
-/// restores it onto a different execution.
-///
-/// Measured, twelve-wide `bootable.img` boot storms, `sched-tripwire`
-/// `stack-witness` in both arms, thirty minutes each on 2026-08-21: **17 deaths
-/// in 7,059 boots without this instruction, 0 in 7,418 with it.**
+/// an address nothing meant to touch, and it does not stay in the interrupted
+/// flow: `context_switch`'s `pushfq` saves the set `DF` into a context's frame
+/// and a later `popfq` restores it onto a different execution.
 ///
 /// Here rather than at each of the five sites, because a Ring 0 entry that forgot
 /// it would be invisible: the machine keeps running and something else dies, a
@@ -126,8 +119,7 @@ macro_rules! ring3_naked_asm {
 }
 
 /// The negative control (`entry-df-unclean`, declared in `kernel/Cargo.toml`):
-/// the kernel this tree had before the `cld` above, and the one 2026-08-21's
-/// storm measured seventeen deaths in seven thousand boots on.
+/// this kernel with the `cld` above taken out.
 ///
 /// One instruction, and it replaces the *behaviour* rather than a verdict — the
 /// same argument `fpu-save-nothing` makes for the bracket it takes out.

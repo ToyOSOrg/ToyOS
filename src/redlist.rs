@@ -1915,6 +1915,26 @@ pub const KNOWN_RED: &[Red] = &[
         measured: "2026-08-17",
     },
     Red {
+        test: "handle_transfer",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`handle transfer left more live objects behind: [(\"PipeRead\", 2, 3)]` — the \
+               per-kind census one `PipeRead` higher on the closing reading, red again in the \
+               shard's own alone re-run inside the same shared boot. The deferred-release \
+               mechanism through the census instrument: `PipeReadEnd` is a `deferred` row whose \
+               only release site is `on_zero_handles`, and a batch in flight on another CPU is \
+               live to a census and absent to the queue. The fourth witness of that mechanism \
+               and the first through this name on the hosted shard; the pull request it red on \
+               changes comments only, byte-identical code, checkable in its own diff",
+        evidence: "run 32876917304, job 97897004452 (`guest (3)`), `wt/toyos-sw5` — the prose \
+                   sweep's tier-two batch, whose PR body carries the filtered-diff-is-empty \
+                   proof. Parallel arm red at 17:22:04, the alone re-run red eight seconds \
+                   later in the same boot",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
+        measured: "2026-08-25",
+    },
+    Red {
         test: "usb_boot_stick_pulled",
         instrument: Instrument::Ci,
         finding: Finding::Seen,

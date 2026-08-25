@@ -83,6 +83,16 @@ loaded, 1 of 3, 2026-08-18) with a contention reading, and it is **not touched
 here** — this entry records the mechanism, and re-adjudicating that row is its
 owner's to do with a measurement rather than with this argument.
 
+**A fourth witness, hosted CI, 2026-08-25.** `handle_transfer` red on run
+32876917304 `guest (3)` — the census found one extra live `PipeRead` (2 → 3)
+after its deferred-release scenarios, red again in the shard's own alone
+re-run inside the same shared boot, on a pull request whose diff is
+comments-only and provably byte-identical in code. `PipeReadEnd` is a
+`deferred` row whose only release site is `on_zero_handles`, so this is the
+recorded mechanism through the census instrument on the hosted shard — the
+first sighting of this class off the dev host. Its redlist row cites this
+paragraph.
+
 ## A syscall answering the wrong word, 2026-08-20
 
 **The three witnesses above are quantities that settle. This one is not.**

@@ -21,10 +21,9 @@ use toyos_abi::syscall::*;
 
 /// Map anonymous memory, honouring `prot`.
 ///
-/// `prot` used to be `_prot`: every mapping was readable and writable whatever
-/// the caller asked for, so `userland/libc`'s translation of POSIX
-/// `PROT_NONE` produced a writable guard page and the stack-overflow detection
-/// built on it silently did not exist.
+/// A mapping made readable and writable whatever the caller asked for turns
+/// `userland/libc`'s translation of POSIX `PROT_NONE` into a writable guard
+/// page, and the stack-overflow detection built on it into nothing.
 ///
 /// With 2 MiB pages and no `mprotect`, protection is decided once, here. A
 /// mapping without `WRITE` gets a read-only PDE, and `MmapProt::NONE` gets no
@@ -103,18 +102,17 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     if let Some(start) = fixed_start {
         let pt = process::current_address_space();
         let start = UserAddr::new(start);
-        // Both ledgers move together, under both locks, in the order the
-        // arm below established: the process data, then the address space.
+        // Both ledgers move together, under both locks, in the same order as
+        // the arm below: the process data, then the address space.
         let replaced = process::with_process_data(|data| {
             let mut as_guard = pt.lock();
             // A placed mapping names its own range, so the question `find_gap`
-            // answers for every other mapping has to be asked here — and it
-            // was not asked at all. The mapping went into `mmap_regions` and
-            // nowhere near `regions`, which is what the placement search
-            // reads, so the next anonymous `mmap` was handed the range this
-            // one was living in and `map_range` asserted on a present PDE:
-            // three ordinary syscalls from any C program that passes
-            // `MAP_FIXED`, and the machine was gone.
+            // answers for every other mapping has to be asked here. A mapping
+            // that reached `mmap_regions` and not `regions` — which is what
+            // the placement search reads — would hand the next anonymous
+            // `mmap` the range this one is living in, and `map_range` would
+            // assert on a present PDE: three ordinary syscalls from any C
+            // program that passes `MAP_FIXED`, and the machine is gone.
             //
             // One whole mapping of this process's own making is replaced — the
             // address keeps its meaning and changes what it names. Every other
@@ -210,11 +208,10 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
 
 /// The pages go back to the PMM here, so this is the syscall the shootdown
 /// matters most on: a sibling thread of the same process holds translations for
-/// exactly this range, and until M3 nothing told it otherwise.
+/// exactly this range and has to be told.
 ///
-/// One path for every mapping. A placed one used to be freed by a second,
-/// which cleared its page-table entries and left it registered nowhere — the
-/// half of the FIXED defect that outlived the mapping.
+/// One path for every mapping, placed or not — a second free path that cleared
+/// page-table entries would leave the mapping registered nowhere.
 pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
     let pt = process::current_address_space();
     let taken = process::with_process_data(|data| {
@@ -272,9 +269,8 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     let mapped = process::with_process_data(|_data| {
         // One `map_into` for both ownership modes, and the module's own program
         // headers decide which of its pages may be written and which may be
-        // executed. This used to be two arms that each mapped the whole image
-        // writable — which is to say executable *and* writable, for every
-        // library in every process.
+        // executed. An arm that mapped the whole image writable would make
+        // every library in every process writable *and* executable.
         let Some(vaddr) = lib.map_into(&pt) else {
             return Err(SyscallError::ResourceExhausted);
         };
@@ -485,11 +481,9 @@ pub(super) fn sys_dlsym(handle: u64, name: &str) -> u64 {
 
 /// Describe every loaded module into `buf`; return the length it *needs*.
 ///
-/// Same contract as `sys_getcwd` and `sys_readdir`, and for the same reason.
-/// This used to answer a too-small buffer with a bare `InvalidArgument` while
-/// the ABI wrapper's doc comment claimed the required size was "encoded" in it
-/// — a claim `SyscallError` cannot carry, so a caller had no way to size a
-/// retry and no way to learn that was why it failed.
+/// Same contract as `sys_getcwd` and `sys_readdir`, and for the same reason: a
+/// bare `InvalidArgument` leaves a caller no way to size a retry, because
+/// `SyscallError` cannot carry the length it would need.
 ///
 /// The answer is a byte length and never a module count: the records carry
 /// packed path strings, so a count cannot size the buffer. Nothing is written
