@@ -21,21 +21,19 @@ in the module and just let the code speak for itself?"* (`sched/driver.rs`),
 *"theres slop narration in the comments"* (`log_file.rs`, since deleted), and
 *"'now runs the whole way' thats narration slop"* (`bcachefs_adapter.rs:17`).
 
-**The rule this would measure against no longer has a written home.** As of
-2026-08-08 it was CLAUDE.md's "no slop comments" paragraph, narrowed by the
-2026-08 code-quality review (`specs/code-quality-review-2026-08.md` at the
-time, `c6192619`) to three surviving kinds: the one-clause invariant at the
-edit site, the boundary contract, and the refusal-reason at a surprising
-decision — over a module doc that is the contract and nothing else, target
-ten lines. Two later, unrelated owner rulings removed the text itself: the
-root file's byte-budget trim (`6ce687dd`, 2026-08-13) cut CLAUDE.md from
-38,284 bytes to 12,017 and the paragraph did not survive, and the spec
-corpus that might have carried it forward was deleted whole (`c7efcd30`,
-2026-08-19, "documentation carries no gates"). The three-kinds rule is
-recorded here because nowhere else in the tree states it; a sweep that
-wants to gate on it has to decide where it lives first — a module header
-convention, most likely, since that is where this tracker's own norms put a
-durable rule now.
+**The rule has a written home again, and a gate.** `src/prosegate.rs`'s module
+header is where the three surviving kinds are now stated — the one-clause
+invariant at the edit site, the boundary contract, and the refusal-reason at a
+surprising decision, over a module doc that is the contract and nothing else —
+and `src/prose-ledger` is the ratchet under it: one row per `.rs` file the tree
+holds, naming the comment lines and the dated comment lines it is permitted, so
+no file grows past what it carries today without a deliberate edit to that row.
+This entry is no longer load-bearing for the rule, and the half of it that said
+the rule had nowhere to live is closed.
+
+**The ratchet is not the sweep.** Its seed is the tree exactly as it stands, so
+every number below is what the gate now *permits* rather than a figure anyone
+defends. It stops the density rising; it lowers nothing.
 
 **Re-measured 2026-08-24** (lines whose first non-space characters are `//`,
 `/*` or `*`; trailing comments are not counted, so the real figure is higher
@@ -55,21 +53,22 @@ and touched comment text, not comment count):
   the worst file in the 2026-08-08 list at 66%, is deleted (`kernel/CLAUDE.md`:
   "nothing on the idle path touches a filesystem" — it was the last one).
 
-**What does not exist is the sweep, and nothing in the tree measures density
-or would notice it rising** — both true today exactly as they were
-2026-08-08, and the density grew regardless. A sweep would: pick a written
-home for the three-kinds rule (most likely a workflow-file convention, since
-CLAUDE.md itself now carries almost no subsystem-specific prose), re-derive
-each over-dense file's comments against it — narrating investigation and
-measurement moves to the commit message per the (now unwritten but still
-practiced) slop rule, an invariant restates as the one clause that is true
-rather than the paragraph that proved it — and re-run this measurement after
-to say whether the density actually fell. None of that is designed here: a
-design that is right is written as code, and this is not yet code.
+**The ledger's seed, 2026-08-25**, over every `.rs` file the tree holds outside
+`rust/`: 670 files, **70,319 comment lines**, of which **306** carry a
+`YYYY-MM` date. `kernel/src` seeds at 25,679 comment lines of 64,406 — the
+2026-08-24 figure plus four days of landings.
+
+**What is still owed is the sweep**: re-derive each over-dense file's comments
+against `src/prosegate.rs`'s three kinds — narrating investigation and
+measurement moves to the commit message, an invariant restates as the one
+clause that is true rather than the paragraph that proved it, a date in a
+source comment goes to the commit message or here — then re-record the swept
+rows in `src/prose-ledger`, which the gate prints for exactly this purpose, and
+lower its `DATED_TOTAL` to match. Re-run the measurement after to say whether
+the density actually fell. None of that is designed here: a design that is
+right is written as code, and this is not yet code.
 
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). The owner asked
-five times over one review and nothing has acted, and the measurement in this
-file is the evidence that not acting has a cost: `kernel/src` went from 27% to
-39.7% comment lines while the entry sat. Owed by whoever runs the sweep, whose
-first step is giving the three-kinds rule a written home — it is recorded
-nowhere else in the tree, so this file is currently load-bearing for it.
+five times over one review and nothing had acted, and the measurement in this
+file is the evidence that not acting had a cost: `kernel/src` went from 27% to
+39.7% comment lines while the entry sat. Owed by whoever runs the sweep.

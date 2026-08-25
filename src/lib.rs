@@ -14,6 +14,10 @@ pub mod issuegate;
 pub mod libc;
 pub mod mergehealth;
 pub mod pr;
+/// The comment law and its ratchet over `src/prose-ledger`, read by nothing but
+/// its own tests.
+#[cfg(test)]
+pub mod prosegate;
 pub mod redlist;
 pub mod soundfont;
 /// Nothing outside its own gates reads this, so it is not compiled into the
