@@ -13399,12 +13399,16 @@ fn one_vocabulary() -> Result<(), String> {
 /// that only read the test's own source would miss the one test in the list
 /// whose whole subject is the syscall.
 fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<String> {
-    // The third spelling is the SDK's: `toyos::census` calls `debug_with` on the
-    // caller's behalf, so a binary whose leak assertion is a census names no
-    // syscall of its own and reads as innocent to the two above.
+    // The fourth spelling is the argument-taking form: every action that
+    // carries a payload (TLB_ACK_DELAY_ARM, CENSUS_KIND, LOWER_SYSINFO_BOUND,
+    // SLOT_TO_LAST_GENERATION) is reached through `debug_with`, never
+    // `debug`. The third is the SDK's: `toyos::census` calls `debug_with` on
+    // the caller's behalf, so a binary whose leak assertion is a census names
+    // no syscall of its own and reads as innocent to the others.
     let calls = |text: &str| {
         text.contains("SYS_DEBUG")
             || text.contains("syscall::debug(")
+            || text.contains("syscall::debug_with(")
             || text.contains("census::Census")
     };
     let direct: BTreeSet<&str> =
@@ -13464,15 +13468,23 @@ fn suite_split() -> Result<(), String> {
         ("an_unlisted_one".to_string(), "SYS_DEBUG".to_string()),
         ("its_parent".to_string(), "Command::new(\"/bin/test_rs_an_unlisted_one\")".to_string()),
         ("a_censor".to_string(), "use toyos::census::Census;".to_string()),
+        ("a_debug_with_user".to_string(), "syscall::debug_with(3, 4)".to_string()),
         ("innocent".to_string(), "println!()".to_string()),
     ];
-    let staged_registry =
-        ["a_listed_one", "an_unlisted_one", "its_parent", "a_censor", "innocent"];
+    let staged_registry = [
+        "a_listed_one",
+        "an_unlisted_one",
+        "its_parent",
+        "a_censor",
+        "a_debug_with_user",
+        "innocent",
+    ];
     let found = needs_actuators(&staged, &staged_registry);
-    let want: BTreeSet<String> = ["a_listed_one", "an_unlisted_one", "its_parent", "a_censor"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let want: BTreeSet<String> =
+        ["a_listed_one", "an_unlisted_one", "its_parent", "a_censor", "a_debug_with_user"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
     if found != want {
         return Err(format!("the check does not work: on staged input it named {found:?}"));
     }
