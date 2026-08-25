@@ -87,7 +87,7 @@ kernel/src/drivers/xhci/legacy.rs 99 0
 kernel/src/drivers/xhci/mod.rs 948 0
 kernel/src/drivers/xhci/usbd.rs 53 0
 kernel/src/drivers/xhci/wait/boot.rs 232 0
-kernel/src/drivers/xhci/wait/mod.rs 206 0
+kernel/src/drivers/xhci/wait/mod.rs 219 0
 kernel/src/drivers/xhci/wait/msc.rs 548 0
 kernel/src/elf/cache.rs 73 0
 kernel/src/elf/index.rs 50 0
@@ -224,7 +224,7 @@ tests/common/serial.rs 260 1
 tests/common/stats.rs 44 0
 tests/common/storage.rs 57 0
 tests/common/toybox.rs 74 0
-tests/common/usb.rs 934 4
+tests/common/usb.rs 948 4
 tests/common/volumes.rs 556 3
 tests/common/wallclock.rs 144 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
