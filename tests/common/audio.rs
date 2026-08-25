@@ -651,19 +651,12 @@ pub fn check_counters(counters: &SounddCounters, limits: &CounterLimits) -> Vec<
 /// markers used to come from the kernel, from inside the submit syscall, and
 /// the order they appear in is unchanged.
 ///
-/// What this does NOT see is boot. The harness starts collecting at
-/// ===TEST_START and never joins the reader thread's full log
-/// (`tests/common/qemu.rs`), so every line soundd and the driver emit before
-/// the first test are gone. A restored boot prime — the exact code deleted in
-/// 465bc22 — would open the voice, play 8 periods, drain and suspend entirely
-/// inside that discarded prefix, and the window would then show the identical
-/// `connected → started → removed → stopped → suspended` sequence and pass
-/// every assertion below. The §5.8 boot state is certified by nothing today,
-/// in any test: `audio_idle_suspend` asserts no `stream 0 started` in its own
-/// window, which catches a device started with no client attached (the
-/// fill-loop gate at `soundd/src/main.rs` going away, or a spurious resume)
-/// but not one started before the capture opened. Catching that needs the
-/// boot capture the harness currently throws away.
+/// `serial` is expected to carry `qemu.boot_log()` prepended ahead of the
+/// test window, so a restored boot prime — the exact code deleted in
+/// 465bc22, which would open the voice, play 8 periods, drain and suspend
+/// entirely before ===TEST_START — lands inside these patterns rather than
+/// in a discarded prefix. `audio_idle_suspend` reads `result.serial` alone
+/// and stays blind to that window; this function is where it is caught.
 pub fn check_suspend_structure(serial: &str) -> Vec<String> {
     const STARTED: &str = "virtio-sound: stream 0 started";
     const STOPPED: &str = "virtio-sound: stream 0 stopped";

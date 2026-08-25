@@ -1710,12 +1710,14 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
 /// them apart on its own. The serial can: in a window where no audio client
 /// ever connects, the PCM stream has no business starting.
 ///
-/// This is bounded by what the harness captures — collection begins at
-/// ===TEST_START, so a device started before then (a restored boot prime) is
-/// invisible here as it is everywhere else; see `audio::check_suspend_structure`.
-/// What it does catch is a start inside the window with no client to justify
-/// it: soundd's `!streams.is_empty()` fill-loop gate going away, or a resume
-/// fired by anything other than a connect.
+/// This reads only `result.serial`, which begins at ===TEST_START, so a
+/// device started before then (a restored boot prime) is invisible to this
+/// particular check — not because the harness cannot see it: `qemu.boot_log()`
+/// holds it, which is what `audio::check_suspend_structure` concatenates in
+/// ahead of its own window. What this one does catch is a start inside its
+/// window with no client to justify it: soundd's `!streams.is_empty()`
+/// fill-loop gate going away, or a resume fired by anything other than a
+/// connect.
 fn check_audio_idle_suspend(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
@@ -2135,7 +2137,12 @@ fn measure_audio_run(
     // trailing silence context time to reach the file before reading it. The
     // same wait collects soundd's final stats flush, which races the client's
     // exit and so can arrive after ===TEST_END===.
-    let serial = result.serial + &qemu.drain_serial(Duration::from_millis(500));
+    //
+    // Boot prepended so `check_suspend_structure` can see a device started
+    // before ===TEST_START — the boot capture exists (`qemu.boot_log()`),
+    // where its doc comment used to say it did not.
+    let serial =
+        qemu.boot_log().to_string() + &result.serial + &qemu.drain_serial(Duration::from_millis(500));
 
     let wav = audio::parse_wav(qemu.audio_wav_path())?;
     let analysis = audio::analyze(&wav);
