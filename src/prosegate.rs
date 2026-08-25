@@ -52,6 +52,13 @@
 //! at `0 0`, and a file that leaves the tree is a red until its row does.
 //! `userland/libc`'s relaxed rules are about the code it may contain and not
 //! about the narration committed beside it, so it is ledgered like the rest.
+//!
+//! **Two citation laws the sweeps settled.** A `§` in a source comment names
+//! its document or it is a dead pointer — a mark reads authoritative whether
+//! or not anything backs it, which is how one survived the corpus it cited.
+//! And a citation living in a string literal or an identifier is code, not
+//! prose: a comments-only sweep flags it and never edits it, because resolving
+//! it changes program output or a public name.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -67,7 +74,7 @@ const UNLEDGERED: &[&str] = &["rust", "target", ".git"];
 /// Declared apart from the ledger so admitting one dated comment line costs an
 /// edit here as well as there. It only goes down: a sweep that removes
 /// chronology lowers this and the rows together.
-const DATED_TOTAL: usize = 266;
+const DATED_TOTAL: usize = 230;
 
 /// The sentence a raised entry has to be worth.
 const RAISING: &str =
