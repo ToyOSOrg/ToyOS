@@ -9,12 +9,10 @@
 //! nothing here panics on a malformed one. Refusals are `&'static str` because
 //! every caller logs them beside the path.
 
-// Every unsafe block under `elf::` carries a `SAFETY:` comment — measured
-// and documented in full by `issues/build/clippy-has-never-run-here.md`'s
-// per-area plan. `host-tests.yml`'s kernel clippy step already runs with
-// `-D warnings`, so `warn` here is what actually gates: a new undocumented
-// block anywhere in this module tree fails CI, while the rest of the kernel
-// (not yet swept) stays silent.
+// Every unsafe block under `elf::` carries a `SAFETY:` comment
+// (`issues/build/clippy-has-never-run-here.md` holds the tree-wide plan).
+// `host-tests.yml`'s kernel clippy step runs with `-D warnings`, so this `warn`
+// is what gates: a new undocumented block in this module tree fails CI.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 mod cache;
@@ -154,12 +152,11 @@ impl LoadedLib {
 
     /// Give this module a virtual address in `pt` and map its pages there.
     ///
-    /// **One pass, one window at a time, and no window is mapped twice.** The
-    /// shape this replaces mapped the whole image writable and then re-mapped
-    /// the private window over the top of it, which meant every library's
-    /// `.text` was writable in every process that loaded it — and, once the
-    /// image was cached, writable in *every* process at the same physical
-    /// pages.
+    /// **One pass, one window at a time, and no window is mapped twice.**
+    /// Mapping the whole image writable and re-mapping the private window over
+    /// the top of it would leave every library's `.text` writable in every
+    /// process that loaded it — and, once the image is cached, writable in
+    /// *every* process at the same physical pages.
     ///
     /// A `Shared` module's private copy starts at a 2 MiB boundary rounded down
     /// from `rw_lo`, so the window it starts in holds the tail of `.text` as
@@ -212,9 +209,7 @@ impl LoadedLib {
     /// This module's symbol table, or an empty one when it declares none.
     ///
     /// The slices are kernel pages this `LoadedLib` either owns or shares with
-    /// the cache, so they live exactly as long as the borrow. The shape this
-    /// replaces was an `expect("no dynsym")` that four separate callers each
-    /// happened to guard with a different check.
+    /// the cache, so they live exactly as long as the borrow.
     pub fn symbols(&self) -> SymTab<'_> {
         let Some(syms) = &self.dynsym else {
             return SymTab::empty();
@@ -258,8 +253,8 @@ impl LoadedLib {
 
     /// One past the last virtual address this module occupies.
     ///
-    /// Derived rather than stored: it was a field, and four sites added the
-    /// same delta to it that they had just added to `user_base`.
+    /// Derived rather than stored: as a field it would need the same delta
+    /// added at every site that rebases `user_base`.
     pub fn user_end(&self) -> u64 {
         self.user_base.raw() + self.span
     }
@@ -332,9 +327,9 @@ impl ModuleImage {
 /// **The destination is a window and not a `(*mut u8, usize)` pair**, and that
 /// is the whole of what bounds this function: `dst` came from an allocation
 /// that sized it, so the length read is the length allocated and neither this
-/// loop nor any caller can name a third number. The pair this replaced made the
-/// "valid for `len` bytes" requirement real at three call sites and enforced it
-/// at none of them.
+/// loop nor any caller can name a third number — a `(*mut u8, usize)` pair
+/// makes the "valid for `len` bytes" requirement the caller's to keep and
+/// enforces it nowhere.
 ///
 /// `Err` on the first page the store would not give up, with the destination
 /// holding zeros from there on. Every caller refuses rather than continues: an
@@ -406,8 +401,7 @@ pub fn load_shared_lib(
     // The window is the allocation's own. `load_size` sized the request and is
     // not repeated here: what every offset in this function is bounded against
     // is what the PMM actually handed over, so a `load_size` that drifted from
-    // the allocation cannot become a write past it. Every past out-of-bounds in
-    // this loader was that drift.
+    // the allocation cannot become a write past it.
     let image = alloc.window();
 
     // SAFETY: `image` was just built from the fresh, exclusively-owned

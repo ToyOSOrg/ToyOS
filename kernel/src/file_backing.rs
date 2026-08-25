@@ -120,9 +120,9 @@ impl FileBacking for NvmeBacking {
             // File cache is the sole cache for file data.
             let mut raw = [0u8; BLOCK_SIZE];
             // `buf` is already zeroed, so a failed read leaves the caller a
-            // hole rather than another file's data — and now says so in the
-            // return as well as in the log, so a caller that is about to merge
-            // a partial write into this page can decline instead.
+            // hole rather than another file's data, and the return says so as
+            // well as the log — a caller about to merge a partial write into
+            // this page can decline instead.
             if page_cache::raw_block_read(block, &mut raw).is_err() {
                 log!("file: read of block {block} failed; serving zeros");
                 return Err(BlockError::Device);
@@ -143,12 +143,11 @@ impl FileBacking for NvmeBacking {
 /// **The image bounds the extents, and the image is what this holds.** The
 /// extent list comes out of the bcachefs btree *inside the initrd*, so it is
 /// input that crossed a trust boundary and a corrupt or hostile image names
-/// blocks past its own end. This type used to carry the initrd's base address
-/// and the *file's* size, which bounds how many bytes are copied and says
-/// nothing about where the block is — so there was no comparison to make and
-/// none was made. It carries the image instead, and every read goes through
-/// [`SliceBlockIO::block`], which is the one thing that knows the length a
-/// block number has to be under.
+/// blocks past its own end. A base address and the *file's* size would leave
+/// nothing to compare against — that pair bounds how many bytes are copied and
+/// says nothing about where the block is — so this carries the image, and every
+/// read goes through [`SliceBlockIO::block`], which is the one thing that knows
+/// the length a block number has to be under.
 pub struct InitrdBacking {
     image: SliceBlockIO,
     extents: Vec<Extent>,
