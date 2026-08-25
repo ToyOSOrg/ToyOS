@@ -109,9 +109,10 @@ pub struct Iova(u64);
 impl Iova {
     /// The identity policy, and the single site that states it.
     ///
-    /// The only unit anyone here can boot reports `ECAP.PT` clear, so the
-    /// passthrough context type is unavailable and an identity-mapped
-    /// translated domain is what every kernel-owned device gets. That makes
+    /// This kernel never writes a passthrough context entry, on any unit,
+    /// regardless of what its `ECAP.PT` bit reports: an identity-mapped
+    /// translated domain is what every kernel-owned device gets, by policy
+    /// and not because passthrough happens to be unavailable. That makes
     /// each of its device addresses numerically equal to a physical one — a
     /// *policy*, not a fact about the two spaces. This constructor is where
     /// the policy lives, so the stage that stops identity-mapping deletes it
