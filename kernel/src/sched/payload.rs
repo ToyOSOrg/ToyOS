@@ -1,6 +1,6 @@
 //! What the kernel attaches to a task, and the two environment-supplied
-//! pieces the core crate refuses to implement itself (spec §10.1): the leaf
-//! lock and the saved-context type.
+//! pieces the core crate refuses to implement itself: the leaf lock and the
+//! saved-context type.
 //!
 //! The split between [`KernelCtx`] and [`KernelPayload`] is not cosmetic. The
 //! context switch reaches a task through a raw `*mut X::Ctx` and nothing else,
@@ -27,8 +27,8 @@ use crate::symbols::SymbolTable;
 use crate::sync::Lock;
 
 /// The environment's small shared cell. The kernel's `Lock` already raises the
-/// preempt count for its whole lifetime, which is exactly the property spec
-/// §7.2's N3 needs of a mailbox producer — so a wake path that holds one is
+/// preempt count for its whole lifetime, which is exactly the property the core
+/// demands of a mailbox producer — so a wake path that holds one is
 /// automatically a legal producer.
 pub struct KernelLock<T>(Lock<T>);
 
@@ -87,9 +87,7 @@ pub struct KernelPayload {
     /// The address space this task runs in. **Not an `Option`**: a kernel thread
     /// runs in the kernel's, and `mm::paging::kernel` hands that out in the same
     /// `PageTables` shape a process's has — so there is no task without one and
-    /// no second answer for `driver::spawn` to choose between. The `Option`
-    /// went when the kernel-thread work made a kernel thread able to name an
-    /// address space at all.
+    /// no second answer for `driver::spawn` to choose between.
     pub address_space: PageTables,
     /// The cross-CPU-readable face of this task. A `CpuSched` is `!Sync`, so a
     /// remote `ps` cannot walk it; what it can read is here.
@@ -101,10 +99,10 @@ pub struct KernelPayload {
     /// name.** The report runs on the CPU whose task faulted, and this is that
     /// task's own; `driver::current_symbols` is the read and
     /// `process::resolve_user_symbol` is the whole of what asks. A `pid` plus a
-    /// table walk was the shape before, and the walk was a `try_lock` that could
-    /// only ever lose — every spawn, every demand-paged fault and every exit in
-    /// the machine takes that lock, so a report that raced one printed a bare
-    /// address for a symbol its own backtrace named a line later.
+    /// table walk would be a `try_lock` that can only lose — every spawn, every
+    /// demand-paged fault and every exit in the machine takes that lock — so a
+    /// report that raced one would print a bare address for a symbol its own
+    /// backtrace named a line later.
     ///
     /// **On the payload and not on the [`TaskHandle`]** even though the handle
     /// is the other thing a running task carries: the handle outlives the task
@@ -151,15 +149,14 @@ pub struct TaskHandle {
     /// closes the check-then-block window — but after the completion work
     /// nothing is *woken* by queue: a post writes a record into the inbox and
     /// then claims this task's rendezvous word directly. So the queue is a
-    /// parking place and
-    /// nothing else, which is what `waitqs::PARK_BUCKETS` was, without the
-    /// hashing: 32 shared buckets whose `Registration::finish` had to scan
-    /// past every unrelated sleeper are one list of one.
+    /// parking place and nothing else: one list of one, where shared hashed
+    /// buckets would make `Registration::finish` scan past every unrelated
+    /// sleeper.
     park: KWaitQueue,
     /// What another thread arms on to be told this one moved — its exit, for
     /// `SYS_THREAD_JOIN`, and its release, for the retirer.
     watch: Watch,
-    /// Cancels reported to this thread, for RT4.
+    /// Cancels reported to this thread.
     ///
     /// One is the design: `completion::wait` answers `Cancelled`, the caller
     /// propagates it, guards drop on the way out and the thread dies at the
@@ -176,8 +173,7 @@ pub struct TaskHandle {
     /// the waiter arms, so a post reaches the inbox without asking the process
     /// table anything — which a park on a hot path could not afford.
     inbox: Inbox,
-    /// The operation this thread is inside, if it is inside one — owner ruling
-    /// 1B's word.
+    /// The operation this thread is inside, if it is inside one.
     ///
     /// **On the handle and not on the `CpuSched`**, for the reason the two
     /// fields above it are here: a `CpuSched` is `!Sync` and cannot be walked,
