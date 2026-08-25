@@ -12,6 +12,7 @@ use common::qemu::{
     STALLED,
 };
 use common::{audio, compile, faults, hostload, screen, serial, stats, storage, usb};
+use toyos_build::day::Day;
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
 
@@ -974,44 +975,6 @@ impl ExpectedFailure {
                 })
             }
         }
-    }
-}
-
-/// A civil date, as days since 1970-01-01.
-///
-/// Days rather than seconds because that is the resolution of the only question
-/// asked of it, and because a comparison against a wall clock at second
-/// resolution would flip mid-run.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
-struct Day(i64);
-
-impl Day {
-    fn today() -> Day {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("a host clock before 1970 is a host to fix, not a date to guess at")
-            .as_secs() as i64;
-        Day(secs.div_euclid(86_400))
-    }
-
-    /// `YYYY-MM-DD`, or `None`. Hinnant's `days_from_civil`, which is exact for
-    /// every date the proleptic Gregorian calendar has.
-    fn parse(text: &str) -> Option<Day> {
-        let (y, rest) = text.split_once('-')?;
-        let (m, d) = rest.split_once('-')?;
-        if (y.len(), m.len(), d.len()) != (4, 2, 2) {
-            return None;
-        }
-        let (y, m, d) = (y.parse::<i64>().ok()?, m.parse::<i64>().ok()?, d.parse::<i64>().ok()?);
-        if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-            return None;
-        }
-        let y = if m <= 2 { y - 1 } else { y };
-        let era = y.div_euclid(400);
-        let yoe = y - era * 400;
-        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        Some(Day(era * 146_097 + doe - 719_468))
     }
 }
 
@@ -13600,13 +13563,19 @@ fn expected_failure_entries() -> Result<(), String> {
     // on the wrong day is an entry that expires never or immediately, and
     // neither announces itself.
     let day = |s: &str| Day::parse(s).ok_or_else(|| format!("{s} did not parse"));
-    if day("1970-01-01")? != Day(0) {
-        return Err("the epoch is not day zero".to_string());
-    }
-    // A leap day, a century that is not a leap year, and one that is.
-    for (date, want) in [("2024-02-29", 19782), ("1900-03-01", -25508), ("2000-03-01", 11017)] {
-        if day(date)? != Day(want) {
-            return Err(format!("{date} is {:?}, and it has to be Day({want})", day(date)?));
+    let epoch = day("1970-01-01")?;
+    // The epoch itself, a leap day, a century that is not a leap year, and one
+    // that is — each checked as a day-count from the epoch, since `Day`'s
+    // representation is private outside `toyos_build::day`.
+    for (date, want) in [
+        ("1970-01-01", 0),
+        ("2024-02-29", 19782),
+        ("1900-03-01", -25508),
+        ("2000-03-01", 11017),
+    ] {
+        let got = epoch.until(day(date)?);
+        if got != want {
+            return Err(format!("{date} is {got} days from the epoch, and it has to be {want}"));
         }
     }
     if !(day("2026-08-06")? < day("2026-08-07")? && day("2026-12-31")? < day("2027-01-01")?) {
