@@ -178,7 +178,7 @@ kernel/src/user_ptr.rs 247 0
 kernel/src/vfs.rs 308 0
 kernel/src/vma.rs 47 0
 kernel/src/writeback.rs 164 0
-src/assets.rs 92 0
+src/assets.rs 103 0
 src/build.rs 665 3
 src/buildlock.rs 378 5
 src/ci.rs 105 1
@@ -450,7 +450,7 @@ toyos-hda/src/path.rs 121 0
 toyos-hda/src/probe.rs 71 0
 toyos-hda/src/stream.rs 102 0
 toyos-hda/src/verb.rs 52 0
-toyos-keymap/src/compose.rs 30 0
+toyos-keymap/src/compose.rs 32 0
 toyos-keymap/src/detect.rs 46 0
 toyos-keymap/src/layouts.rs 28 0
 toyos-keymap/src/lib.rs 74 0

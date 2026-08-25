@@ -19,7 +19,7 @@ pub mod detect;
 mod layouts;
 mod translate;
 
-pub use compose::Dead;
+pub use compose::{composed_chars, Dead};
 pub use layouts::{LAYOUTS, DEFAULT_LAYOUT};
 pub use translate::{Mods, Translator};
 

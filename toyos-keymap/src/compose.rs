@@ -210,3 +210,9 @@ pub(crate) fn compose(dead: Dead, base: &str) -> Option<&'static str> {
     let [b] = *base.as_bytes() else { return None };
     TABLE.iter().find(|&&(d, k, _)| d == dead && k == b).map(|&(_, _, out)| out)
 }
+
+/// Every character [`TABLE`] can produce, so a renderer can ask what a
+/// composition might type without naming the table itself.
+pub fn composed_chars() -> impl Iterator<Item = char> {
+    TABLE.iter().flat_map(|&(_, _, out)| out.chars())
+}
