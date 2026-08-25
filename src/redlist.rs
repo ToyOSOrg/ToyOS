@@ -673,9 +673,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "hda_client_stall",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
-        what: "`the ring arm: timed out`, and `timed out after 9s` alone. The one of that run's \
-               four that is still standing",
+        standing: Standing::Retired(
+            "a DEADLOCK panic between the idle loop's log-file flush and the xHCI disk lock, in \
+             the same run's own capture 24s before the wait gave up. The idle loop touches no \
+             filesystem now, so this mechanism cannot recur",
+        ),
+        what: "`the ring arm: timed out`, and `timed out after 9s` alone",
         evidence: "run 31247206462, red again alone",
         source: "issues/hardware/four-runner-reds-unclassified.md",
         measured: "2026-08-08",
@@ -1392,8 +1395,7 @@ pub const KNOWN_RED: &[Red] = &[
                whole delta was two documentation lines. **2026-08-22:** a kernel death of PR \
                #202's class (no Ring 0 entry cleared `DF`; 37 deaths in 13,960 loaded boots \
                before the `cld`, 0 in 7,418 after) leaves exactly this capture too — a guest \
-               that stops mid-test under load, on a date before any wait could see a panic \
-               (`issues/build/every-recorded-stall-predates-the-panic-discriminator.md`) — \
+               that stops mid-test under load, on a date before any wait could see a panic — \
                and nothing in it separates that from the host. One sighting, no denominator \
                on record; what retires it is loaded suites of the fixed tree with no red under \
                this name, three by the Poisson rule (p = e^-3 against a rate of one per suite). \

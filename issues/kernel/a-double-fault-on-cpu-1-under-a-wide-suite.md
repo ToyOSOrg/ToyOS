@@ -29,12 +29,10 @@ defect (`writer A declared 1000 whole lines and the capture carries 798`,
 `issues/build/console-line-atomicity-reds-on-a-short-capture.md`), so
 what this name does under load is red in more than one way.
 
-**This is the sighting
-`issues/build/every-recorded-stall-predates-the-panic-discriminator.md`
-said would start arriving.** That file's closing paragraph names the dev-host
-load family and says `ALONE: GREEN` is not evidence against a panic — a panic
-reached only under contention does not reproduce alone either. Before
-2026-08-17 this run would have been recorded as a stall.
+**This is the sighting the panic discriminator was closed to catch.** The
+dev-host load family is exactly where `ALONE: GREEN` is not evidence against a
+panic — a panic reached only under contention does not reproduce alone either.
+Before 2026-08-17 this run would have been recorded as a stall.
 
 ## The diagnostic half is fixed
 

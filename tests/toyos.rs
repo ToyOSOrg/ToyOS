@@ -13331,8 +13331,6 @@ fn expected_failure_exit_status() -> Result<(), String> {
 /// answering. All three ask `serial::died` now, which is the only thing in the
 /// harness that knows the words and the only thing that knows the prefix decides
 /// whose death they report.
-/// `issues/build/every-recorded-stall-predates-the-panic-discriminator.md`
-/// is what the years before it are worth.
 ///
 /// The way that comes back is the obvious patch: one more spelling handed
 /// straight to a `contains` beside the call. It would match a *program's* panic
