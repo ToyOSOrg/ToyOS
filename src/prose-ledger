@@ -203,7 +203,7 @@ src/testargs.rs 97 0
 src/tiers.rs 338 26
 src/toolchain.rs 778 29
 src/wallpaper.rs 124 0
-src/worktree.rs 37 0
+src/worktree.rs 40 0
 tests/common/audio.rs 404 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
@@ -433,7 +433,7 @@ toyos-fat32/src/fs.rs 197 0
 toyos-fat32/src/lib.rs 59 0
 toyos-fat32/src/name.rs 104 0
 toyos-fat32/src/time.rs 40 0
-toyos-fat32/tests/common/mod.rs 98 0
+toyos-fat32/tests/common/mod.rs 103 0
 toyos-fat32/tests/host_read.rs 26 0
 toyos-fat32/tests/host_write.rs 85 1
 toyos-fat32/tests/hostile.rs 193 3

@@ -31,12 +31,7 @@ const ALSO_USED: &[Tool] = &[
         why: "rust/x runs rustc's bootstrap, which is Python — a clean clone and \
               every toolchain change need one",
     },
-    Tool { any: &["df"], why: "`--worktree add` reports the free space it leaves" },
     Tool { any: &["ps"], why: "gate A counts concurrent guests for its host-conditions line" },
-    Tool {
-        any: &["find"],
-        why: "toyos-fat32's host tests sweep macOS resource forks off a mounted volume",
-    },
 ];
 
 /// Where the OS would find `name`, if anywhere.

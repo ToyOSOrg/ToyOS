@@ -138,17 +138,15 @@ fn remove(root: &Path, path: &str) {
 }
 
 fn free_bytes(dir: &Path) -> u64 {
-    let output = Command::new("df")
-        .args(["-k", &dir.to_string_lossy()])
-        .output()
-        .expect("run df");
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.lines()
-        .nth(1)
-        .and_then(|l| l.split_whitespace().nth(3))
-        .and_then(|k| k.parse::<u64>().ok())
-        .map(|k| k * 1024)
-        .unwrap_or_else(|| panic!("could not read free space for {}", dir.display()))
+    let path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes())
+        .unwrap_or_else(|_| panic!("{} has an embedded NUL", dir.display()));
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is a valid, NUL-terminated C string and `buf` is a
+    // `libc::statvfs` the kernel fills in whole or leaves at the `zeroed()`
+    // above; a non-zero return is checked before anything reads it.
+    let rc = unsafe { libc::statvfs(path.as_ptr(), &mut buf) };
+    assert!(rc == 0, "statvfs {}: {}", dir.display(), std::io::Error::last_os_error());
+    buf.f_bavail as u64 * buf.f_frsize as u64
 }
 
 fn git(dir: &Path, args: &[&str]) {

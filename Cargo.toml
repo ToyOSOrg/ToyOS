@@ -84,6 +84,9 @@ license = "MIT OR Apache-2.0"
 fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
+# `statvfs` for `worktree::free_bytes`; `getloadavg` for gate A's
+# host-conditions annotation.
+libc = "0.2"
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
@@ -95,8 +98,6 @@ toyos-manifest = { path = "toyos-manifest" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]
-# `getloadavg` for gate A's host-conditions annotation; already in the lock.
-libc = "0.2"
 toyos-cc = { path = "toyos-cc" }
 toyos-fat32-check = { path = "toyos-fat32-check" }
 toyos-gpt = { path = "toyos-gpt" }
