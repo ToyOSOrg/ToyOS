@@ -115,7 +115,7 @@ kernel/src/irq_ring.rs 52 0
 kernel/src/keyboard.rs 71 0
 kernel/src/loader/mod.rs 246 0
 kernel/src/loader/start.rs 150 0
-kernel/src/loader/symbols.rs 55 0
+kernel/src/loader/symbols.rs 56 0
 kernel/src/loader/tls.rs 123 0
 kernel/src/log/console.rs 279 0
 kernel/src/log/mod.rs 178 0
