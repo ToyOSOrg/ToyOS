@@ -387,7 +387,7 @@ toyos-cc/tests/attributes.rs 4 0
 toyos-cc/tests/common/mod.rs 7 0
 toyos-cc/tests/determinism.rs 23 0
 toyos-cc/tests/dominance.rs 19 0
-toyos-cc/tests/emission.rs 32 0
+toyos-cc/tests/emission.rs 39 0
 toyos-cc/tests/pp_corpus.rs 43 1
 toyos-cc/tests/preprocessor.rs 10 0
 toyos-cc/tests/refusals.rs 22 0

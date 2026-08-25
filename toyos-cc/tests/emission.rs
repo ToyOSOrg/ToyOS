@@ -97,6 +97,28 @@ fn a_scalar_assignment_does_not() {
     assert!(!called.iter().any(|s| s == "memcpy"), "g reached memcpy: {called:?}");
 }
 
+/// A local array's designated index reaches the store's address, not just
+/// its value. The global path already read `Designator::Index`; the local
+/// one incremented `idx` positionally regardless, so `[99] = ...` landed at
+/// offset 4 (the second item, positionally) instead of 396 (`99 * 4`).
+/// Index 99 makes the two offsets encode at different instruction widths
+/// (4 fits an 8-bit displacement, 396 does not), so this would have caught
+/// the regression even before reading what either compiles to.
+#[test]
+fn a_local_arrays_designated_index_reaches_its_own_offset() {
+    let obj = compile(
+        "int f(void) { int arr[100] = { [0] = 0x11111111, [99] = 0x22222222 }; return arr[99]; }",
+    );
+    let obj = object::File::parse(&*obj).unwrap();
+    let b = body(&obj, "f");
+    assert!(loads_immediate(&b, 0x11111111), "arr[0]'s value was never loaded: {b:02x?}");
+    assert!(loads_immediate(&b, 0x22222222), "arr[99]'s value was never loaded: {b:02x?}");
+    assert!(
+        b.windows(4).any(|w| w == 396i32.to_le_bytes()),
+        "no store reaches offset 396 (arr[99]'s real byte offset): {b:02x?}",
+    );
+}
+
 /// A call through a function pointer dereferences the pointer once, wherever
 /// the pointer is kept. A static local used to get a second load on top of the
 /// first, which dereferenced the callee's own address and called whatever its
