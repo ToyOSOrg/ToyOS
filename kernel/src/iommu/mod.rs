@@ -109,8 +109,8 @@ pub struct Iova(u64);
 impl Iova {
     /// The identity policy, and the single site that states it.
     ///
-    /// §8.1 measured `ECAP.PT` clear on the only unit anyone here can boot, so
-    /// §5.7's passthrough context type is unavailable and an identity-mapped
+    /// The only unit anyone here can boot reports `ECAP.PT` clear, so the
+    /// passthrough context type is unavailable and an identity-mapped
     /// translated domain is what every kernel-owned device gets. That makes
     /// each of its device addresses numerically equal to a physical one — a
     /// *policy*, not a fact about the two spaces. This constructor is where
@@ -137,9 +137,9 @@ impl core::fmt::Display for StreamId {
 /// address space, and turn translation on.
 ///
 /// Called from the boot phase that reads ACPI and enumerates PCI, before any
-/// driver `init`: §2.1, because the unit has to be programmed before the first
-/// device is told to do DMA. §5.1's rule that *every* function the walk
-/// returned gets a context entry is why the device list is an argument —
+/// driver `init`, because the unit has to be programmed before the first
+/// device is told to do DMA. *Every* function the walk returned gets a context
+/// entry, which is why the device list is an argument —
 /// enabling translation with an unenumerated device on the bus is how a
 /// machine bricks its own boot disk.
 ///

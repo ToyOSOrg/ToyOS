@@ -17,8 +17,8 @@
 //! and a thread's own watch for the waits whose end is a deadline.
 //!
 //! **No registry, and no id.** A [`Subject`] is a borrowed reference to the
-//! object being waited on, so a destroyed subject cannot be named and §5.1's
-//! "the completion core maps no id to any object" holds structurally. A post is
+//! object being waited on, so a destroyed subject cannot be named and the core
+//! maps no id to any object — structurally, not by discipline. A post is
 //! a walk of one object's own list under its own leaf lock, which is the shape
 //! `sched::waitqs` already has and which deletes the 128-core sharding risk a
 //! global `CORE` lock would have had.
@@ -190,8 +190,8 @@ pub fn post(subject: Subject<'_>, outcome: Outcome) {
 /// The same, lending the poster's real-time window to whoever it wakes.
 ///
 /// **A post that dropped the boost would silently turn an RT writer's signal
-/// into an ordinary one** — scheduler-core-spec §3's lend, invariant I9, and
-/// the audio path's whole latency argument.
+/// into an ordinary one** — the poster's window is lent to whoever it wakes,
+/// and the audio path's whole latency argument rests on that.
 pub fn post_boosted(subject: Subject<'_>, outcome: Outcome, until: Nanos) {
     post_with(subject, outcome, Some(until))
 }
@@ -208,8 +208,8 @@ pub fn post_boosted(subject: Subject<'_>, outcome: Outcome, until: Nanos) {
 /// intended one parked. A shared queue's spurious wake is harmless because
 /// every waiter re-checks; a shared queue's *stolen* wake is not.
 ///
-/// The token closes it without a second channel, which §23's rejection 3
-/// forbids: a futex waiter arms with its word's physical address as its token,
+/// The token closes it without the second channel a bucket would otherwise
+/// need: a futex waiter arms with its word's physical address as its token,
 /// so this walk names the word rather than the bucket. A waiter of another word
 /// in the same bucket is skipped and does not count against `limit`.
 ///
@@ -236,8 +236,8 @@ pub fn post_boosted(subject: Subject<'_>, outcome: Outcome, until: Nanos) {
 /// The record is stored either way, before the claim is attempted, because
 /// invariant W's order is not conditional. A record delivered to a waiter this
 /// call did not wake costs that waiter one spurious return, which is legal at
-/// every park site (§5.5), and skipping the *store* would be the lost wake the
-/// order exists to prevent.
+/// every park site, and skipping the *store* would be the lost wake the order
+/// exists to prevent.
 ///
 /// `futex_wake_counts` is the gate: a tree that counts told-but-not-woken
 /// waiters answers 1 to a wake of a word whose waiters are all already gone.
@@ -326,7 +326,7 @@ fn post_with(subject: Subject<'_>, outcome: Outcome, boost: Option<Nanos>) {
     }
 }
 
-/// **Invariant W, in two statements** (§5.4): the record first, under this
+/// **Invariant W, in two statements**: the record first, under this
 /// subject's leaf lock, and then the claim. A parker that has published
 /// `Committing` is refused its park by the claim; one that has not yet
 /// re-checked finds the record; one already `Blocked` gets the message. There
@@ -366,14 +366,14 @@ pub struct Cancelled(());
 /// [`Inbox::has_record`] — one predicate, with no source named in it, which is
 /// what makes a new wait source unable to re-open the lost-wake window.
 ///
-/// The arm is taken by reference and outlives the call, which is §5.3a's edge
-/// contract rather than §5.3's signature: a caller loops, re-deriving its own
-/// predicate between waits, and a post landing in that window must find the
+/// The arm is taken by reference and outlives the call, which is the edge
+/// contract rather than a per-wait signature: a caller loops, re-deriving its
+/// own predicate between waits, and a post landing in that window must find the
 /// watch still armed. An arm consumed per wait would lose exactly the wake
 /// that arm-before-check exists to catch.
 ///
 /// A deadline that passes is an [`Outcome::Gone`] with [`Reason::Expired`] and
-/// not an error: the caller asked for it, and §3's `Deadline` is the kind that
+/// not an error: the caller asked for it, and [`Deadline`] is the type that
 /// says whose business the expiry is.
 #[track_caller]
 pub fn wait(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -> Result<Record, Cancelled> {
@@ -382,8 +382,8 @@ pub fn wait(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -> Result<Recor
 
 /// The same, for a wait a kill may not end.
 ///
-/// §7.4's third shape. One caller — the retirer waiting for its victim's
-/// release — and its bound is its own tripwire, never the kill: a killed
+/// One caller — the retirer waiting for its victim's release — and its bound
+/// is its own tripwire, never the kill: a killed
 /// retirer that took `Cancelled` here could not propagate it (the retire is
 /// half done) and would spin on a commit that refuses to park.
 #[track_caller]
@@ -398,14 +398,13 @@ pub fn wait_uncancellable(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -
 /// cancelled.
 ///
 /// **The shape every blocking syscall in the kernel has.** The arm comes first
-/// and the predicate is re-derived after it — §5.3a's edge contract — so a post
+/// and the predicate is re-derived after it — the edge contract — so a post
 /// that lands in the window between the two is found by the park's own recheck
 /// rather than lost.
 ///
-/// A return is not proof of the condition (scheduler-core-spec §2's invariant
-/// 10): the loop is what holds the wait until the predicate is true, and a
-/// deadline that passes returns with it still false, which is what the one
-/// timed caller needs.
+/// A return is not proof of the condition: the loop is what holds the wait
+/// until the predicate is true, and a deadline that passes returns with it
+/// still false, which is what the one timed caller needs.
 ///
 /// **Two outcomes end the loop without the predicate, and the second is a
 /// safety property rather than an economy.** A deadline is the caller's own,
@@ -533,9 +532,9 @@ fn wait_inner(
             });
         }
         // Register on this thread's own parking place, re-check, park. The
-        // registration precedes the re-check, which is the whole of §2's
-        // invariant 4; the queue is never woken as a queue, because a post
-        // claims the rendezvous word directly.
+        // registration precedes the re-check, which is the whole of the
+        // lost-wake argument; the queue is never woken as a queue, because a
+        // post claims the rendezvous word directly.
         let ticket = crate::scheduler::prepare_wait(task.park_queue(), cancel, armed.class);
         if task.inbox().has_record()
             || (cancel == Cancel::Answers && armed.shared.kill_pending())

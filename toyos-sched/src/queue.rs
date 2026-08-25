@@ -1,8 +1,8 @@
-//! The per-CPU run queue — spec §9.2.
+//! The per-CPU run queue.
 //!
 //! Two bands: an RT FIFO drained first, and a fair band ordered by
 //! `(vruntime, insertion sequence)`. True EEVDF virtual-deadline ordering is a
-//! later, sim-gated, `queue.rs`/`fair.rs`-only change (spec §9.1).
+//! later, sim-gated, `queue.rs`/`fair.rs`-only change.
 //!
 //! The queue owns [`ReadyTask`] values. A task in a queue is therefore *not*
 //! anywhere else — there is no second owner to construct.
@@ -12,17 +12,16 @@ use alloc::collections::{BTreeMap, VecDeque};
 use crate::task::{ReadyTask, SchedPayload, TaskKey};
 
 /// How the fair band decides between two ready threads of the *same* share —
-/// spec §9.2's tie-break, and what simulator invariant I13 exists to hold.
+/// the tie-break simulator invariant I13 exists to hold.
 ///
-/// The two broken orderings are reproduced for the simulator's negative gates
-/// (spec §10.3) behind a feature the kernel does not enable, exactly as
+/// The two broken orderings are reproduced for the simulator's negative gates,
+/// behind a feature the kernel does not enable, exactly as
 /// [`crate::cpu::CpuSched::set_park_keeps_lapsed_lend`] is. A check that cannot
 /// tell these apart from the shipped one is not measuring the rule it names.
 #[cfg(feature = "protocol-port")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum FairOrder {
-    /// Spec §9.2 and the shipped code: `(vruntime, monotonic insertion
-    /// sequence)`.
+    /// What the kernel ships: `(vruntime, monotonic insertion sequence)`.
     #[default]
     InsertSequence,
     /// `(vruntime, TaskKey)` — the identity tie-break the field comment below
@@ -46,8 +45,8 @@ pub struct RunQueue<X: SchedPayload> {
     /// siblings, or the same thread can win every tie and the others only run
     /// when it blocks.
     ///
-    /// What that is worth *today* is smaller than it reads, and the simulator
-    /// measured it rather than this comment asserting it. A share's pot is
+    /// What that is worth is smaller than it reads, and the simulator measured
+    /// it rather than this comment asserting it. A share's pot is
     /// charged for every nanosecond any of its threads runs, so a thread
     /// re-inserted after a dispatch already carries a key strictly above every
     /// sibling queued before it: the band serves a share's threads in insertion

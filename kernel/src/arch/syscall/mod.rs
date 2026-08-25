@@ -45,7 +45,7 @@ const HANDLE_LEN: usize = core::mem::size_of::<RawHandle>();
 ///
 /// **Nothing ever reads it.** The thread has been killed, so the return path
 /// it is on ends at `kernel_exit_to_user_check`, which sees the kill bit and
-/// exits instead of returning to Ring 3 (§7.2). The word exists because the
+/// exits instead of returning to Ring 3. The word exists because the
 /// unwind has to carry *something* through the `u64` every syscall answers in,
 /// and `Interrupted` is what it would mean if anything could read it.
 fn cancelled() -> u64 {

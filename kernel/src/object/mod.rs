@@ -22,13 +22,11 @@
 //! and the reason nothing may read "the count reached zero" as "the peer has
 //! been told": `issues/kernel/deferred-release-outlives-its-syscall.md`.
 
-// Every unsafe block under `object::` carries a `SAFETY:` comment —
-// measured and documented in full by
-// `issues/build/clippy-has-never-run-here.md`'s per-area plan.
-// `host-tests.yml`'s kernel clippy step already runs with `-D warnings`, so
-// `warn` here is what actually gates: a new undocumented block anywhere in
-// this module tree fails CI, while the rest of the kernel (not yet swept)
-// stays silent.
+// Every unsafe block under `object::` carries a `SAFETY:` comment
+// (`issues/build/clippy-has-never-run-here.md` holds the per-area plan). CI's
+// kernel clippy step runs with `-D warnings`, so `warn` here is what gates: a
+// new undocumented block in this module tree fails CI, while the rest of the
+// kernel (not yet swept) stays silent.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 use alloc::sync::Arc;
@@ -185,9 +183,8 @@ pub trait KObjectVariant: ZeroHandles + Send + Sync + Sized + 'static {
 /// **Each row says whether its last handle is an event.** A `deferred` row has
 /// a [`ZeroHandles`] hook and is released from the queue, with nothing held. An
 /// `immediate` row has none, so there is nothing to defer and the last `Arc`
-/// goes where the handle did — which is where it went before this layer
-/// existed, and which is what keeps a killed process's file flush on the
-/// killer's 128 KiB kernel stack instead of a 16 KiB idle one.
+/// goes where the handle did — which is what keeps a killed process's file
+/// flush on the killer's 128 KiB kernel stack instead of a 16 KiB idle one.
 macro_rules! kobject {
     ($($kind:ident $variant:ident => $ty:ty),+ $(,)?) => {
         /// Every kind of thing a handle can name.
@@ -266,10 +263,8 @@ macro_rules! kobject {
 
             /// `(type name, live count)`, in declaration order.
             ///
-            /// Per kind and only per kind. The machine-wide sum this used to
-            /// offer beside it hid a leak of one kind behind ordinary churn in
-            /// another, and once every leak assertion in the estate was per
-            /// kind it had no reader left.
+            /// Per kind and only per kind: a machine-wide sum beside it hides a
+            /// leak of one kind behind ordinary churn in another.
             ///
             /// Read by `SYS_DEBUG` alone, which is `test-actuators`; the
             /// counters themselves are kept by every build.
@@ -342,10 +337,9 @@ static ZERO_QUEUE: Lock<Vec<KObjectRef>> = Lock::new(Vec::new());
 ///
 /// The drain runs at every syscall exit and every scheduler pass, and
 /// `Lock::lock` is a `fetch_add` — the one operation TCG cannot emit inline,
-/// and a few hundred a boot of it was measured at 350 ms of boot on the log
-/// path. Written under the lock at
-/// both ends, so it never says "empty" over a queued object; a stale
-/// "non-empty" costs one drain that finds nothing.
+/// measured at 350 ms of boot for a few hundred of them on the log path.
+/// Written under the lock at both ends, so it never says "empty" over a queued
+/// object; a stale "non-empty" costs one drain that finds nothing.
 static ZERO_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn enqueue_zero_handles(object: KObjectRef) {
@@ -366,18 +360,18 @@ pub(crate) fn enqueue_zero_handles(object: KObjectRef) {
 /// the one guaranteed to release it.** Any of the three sites, on any other
 /// CPU, can take a batch out from under the syscall that filled it; that
 /// syscall then reaches its own drain site, is told there is nothing to do, and
-/// **returns to userland with its objects still unreleased**. Measured from
+/// **returns to userland with its objects still unreleased**. That shows from
 /// userland as a 2 MiB staircase in `SYS_SYSINFO` across consecutive calls
-/// after a kill, which is one ring page at a time on the other CPU — and, since
-/// 2026-08-20, as a syscall answering the wrong word: `kill_while_blocked` sees
-/// a write to a killed peer's pipe or connection return `Ok(n)` where the ABI
-/// says `NotFound`, because the peer's `on_zero_handles` had not run yet.
-/// Memory is not lost — a killed process's pages do all come back,
-/// sub-millisecond — but a semantic event can be, so nothing may be written
-/// that assumes a release has happened because the call that caused it has
-/// returned. `issues/kernel/deferred-release-outlives-its-syscall.md`
-/// carries the measurement and the two shapes a fix could take; the release
-/// protocol itself belongs to the track in
+/// after a kill — one ring page at a time on the other CPU — and as a syscall
+/// answering the wrong word: `kill_while_blocked` sees a write to a killed
+/// peer's pipe or connection return `Ok(n)` where the ABI says `NotFound`,
+/// because the peer's `on_zero_handles` had not run yet. Memory is not lost — a
+/// killed process's pages do all come back, sub-millisecond — but a semantic
+/// event can be, so nothing may be written that assumes a release has happened
+/// because the call that caused it has returned.
+/// `issues/kernel/deferred-release-outlives-its-syscall.md` carries the
+/// measurement and the two shapes a fix could take; the release protocol itself
+/// belongs to the track in
 /// `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`, whose sleep lock is
 /// what decides what a hook released from here may do — **none of these three
 /// drain sites can park, so no `on_zero_handles` hook may take a sleep lock.**

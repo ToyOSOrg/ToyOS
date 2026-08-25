@@ -64,19 +64,18 @@ pub(super) fn sys_log_read(
 /// Power the machine off, presenting a `SysCap` that carries
 /// [`Rights::POWER`].
 ///
-/// **The largest authority this kernel has, and the last one that was free.**
-/// It took no argument at all: any process that could make a syscall could end
-/// every other one, and a daemon endowed exactly one connector held this too.
-/// It goes through `demand_syscap`, the prologue the five beside it share, so
-/// what can cut the power is exactly what `/bin/init` endowed from
-/// `system.toml`, as minting a device claim, entering the RT band, opening a
-/// process by pid and reading the log already were.
+/// **The largest authority this kernel has.** Ambient, it would let any process
+/// that can make a syscall end every other one, down to a daemon endowed
+/// exactly one connector. It goes through `demand_syscap`, the prologue the five
+/// beside it share, so what can cut the power is exactly what `/bin/init`
+/// endowed from `system.toml`, as minting a device claim, entering the RT band,
+/// opening a process by pid and reading the log are.
 ///
 /// The refusal is `HandleError`'s ordinary one and not a special case: a
 /// capability that resolves without the bit is `PermissionDenied` and the
 /// caller carries on, and a handle the caller does not hold ends it.
 ///
-/// Everything below the check is unchanged and does not come back.
+/// Nothing below the check comes back.
 pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
@@ -95,8 +94,8 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     // is the one that is final.
     crate::irq_census::log_census();
     log!("Shutting down.");
-    // **§6.3, in order, and the order is the whole of it.** At the moment they
-    // are written these last two lines exist nowhere but the shards, and
+    // **Two steps, in order, and the order is the whole of it.** At the moment
+    // they are written these last two lines exist nowhere but the shards, and
     // `acpi::shutdown` does not come back — so a shutdown that loses its own
     // last lines is the one nobody can diagnose, and on a machine with no
     // serial port they exist nowhere else at all.
@@ -124,9 +123,9 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
 /// caller's buffer bounds what is written and bounds nothing about what is
 /// built, because the sort needs every entry before the first one can be
 /// chosen. One `(Tid, &ProcessEntry, &ThreadEntry)` is 24 bytes and this is
-/// one allocation, so it has to stay under `mm::MAX_HEAP_ALLOC` (2,093,056) —
-/// which it did not: nothing caps the thread count, and any process may call
-/// this, so ~87,000 threads turned an ordinary syscall into the allocator's
+/// one allocation, so it has to stay under `mm::MAX_HEAP_ALLOC` (2,093,056):
+/// nothing caps the thread count and any process may call this, so unbounded
+/// it takes ~87,000 threads to turn an ordinary syscall into the allocator's
 /// fail-fast assert.
 ///
 /// 65,536 leaves the allocation at 1,572,864 bytes, a factor of 1.3 under the
@@ -145,9 +144,9 @@ const MAX_SYSINFO_THREADS: usize = 65_536;
 /// and the error return are the shipped ones.
 ///
 /// **Armed at runtime rather than compiled in, and that is the whole of why the
-/// action exists.** As a `#[cfg]` it rode into every kernel the suite booted on
-/// `test-actuators`' coat-tails, so `SYS_SYSINFO` answered against 16 in every
-/// guest and the shipped 65,536 was executed by nothing.
+/// action exists.** As a `#[cfg]` it would ride into every kernel the suite
+/// boots on `test-actuators`' coat-tails, so `SYS_SYSINFO` would answer against
+/// 16 in every guest and the shipped 65,536 be executed by nothing.
 #[cfg(feature = "test-actuators")]
 const GATED_SYSINFO_THREADS: usize = 16;
 
@@ -174,9 +173,9 @@ fn sysinfo_thread_bound() -> usize {
 /// memory budget all read it and nothing else. The entries after it are one per
 /// live thread, each carrying a pid, a scheduler state, a resident size, an
 /// accumulated CPU time and a 28-byte **name**: a census of everything the
-/// machine is running, which was ambient until the owner ruled on 2026-08-20
-/// that it rides a right. A process endowed one connector learned the name,
-/// size and CPU share of every daemon and every program the user had open.
+/// machine is running, which is why it rides a right — ambient, it tells a
+/// process endowed one connector the name, size and CPU share of every daemon
+/// and every program the user has open.
 ///
 /// **The buffer says which of the two is being asked for**, because that is
 /// what it already said: a buffer with no room for an entry cannot be told
@@ -229,13 +228,12 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     header[40..48].copy_from_slice(&total_available_ns.to_le_bytes());
     out.write_at(0, &header);
 
-    // **The ambient call ends here, having built no roster at all.** Every
-    // header-only caller in the tree — `free`, the compositor's taskbar, netd's
-    // memory budget — used to pay for a `Vec` of every thread in the machine
-    // and a sort of it, to write nothing out of either. It is also what makes
-    // the demand above a fact about the whole path rather than about the write
-    // loop: with no room for an entry, nothing about another process is
-    // collected, let alone copied.
+    // **The ambient call ends here, having built no roster at all** — a
+    // header-only caller (`free`, the compositor's taskbar, netd's memory
+    // budget) pays for no `Vec` of every thread in the machine and no sort of
+    // it. It is also what makes the demand above a fact about the whole path
+    // rather than about the write loop: with no room for an entry, nothing
+    // about another process is collected, let alone copied.
     if max_entries == 0 {
         return HEADER_SIZE as u64;
     }

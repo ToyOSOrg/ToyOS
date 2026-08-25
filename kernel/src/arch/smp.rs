@@ -355,8 +355,7 @@ extern "C" fn ap_entry() -> ! {
 }
 
 /// Spend a [`Delay`]. Boot only: there is no scheduler to give the CPU back
-/// to, which is what the enclosing function's own presence in §4.4's
-/// allow-list records.
+/// to, so the wait is a spin and not a park.
 fn delay(span: Delay) {
     let start = clock::nanos_since_boot();
     while clock::nanos_since_boot() - start < span.nanos() {}

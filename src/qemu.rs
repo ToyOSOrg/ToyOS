@@ -59,12 +59,12 @@ use std::process::Command;
 #[derive(Clone, Copy, PartialEq)]
 pub enum Profile {
     /// virtio-gpu for the display, virtio-console for the console, plus
-    /// virtio-net and virtio-sound. What every boot in this tree used to be.
+    /// virtio-net and virtio-sound.
     Virtio,
     /// `-vga std`, so firmware publishes a GOP and the kernel takes the
     /// laptop's display path. Every virtio device is still present.
     Gop,
-    /// M1 metal-sim: the shape a ThinkPad T14 presents. Firmware framebuffer,
+    /// metal-sim: the shape a ThinkPad T14 presents. Firmware framebuffer,
     /// i8042 (q35 gives it for free), NVMe, xHCI with the boot stick on it,
     /// and nothing else — no virtio device anywhere and no USB HID. The 16550
     /// stays on unless [`Options::mute`] takes it away: the T14 has no serial
@@ -73,10 +73,10 @@ pub enum Profile {
     Metal,
 }
 
-/// Everything a profile decides about the machine, in one table. A new
-/// variant answers every question here or does not compile — which `self !=
-/// Profile::Metal` did the opposite of: it handed anything that was not
-/// literally Metal the whole virtio block and a USB keyboard.
+/// Everything a profile decides about the machine, in one table. A new variant
+/// answers every question here or does not compile — where a `self !=
+/// Profile::Metal` test would hand anything that is not literally Metal the
+/// whole virtio block and a USB keyboard.
 struct Shape {
     /// The display device. `Virtio` is the only profile with no firmware GOP.
     virtio_gpu: bool,

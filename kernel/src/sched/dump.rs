@@ -31,9 +31,8 @@
 //! each, which never ran, which CPUs did not answer — because waking a CPU does
 //! not move a task between containers. To learn what the *frozen* machine
 //! looked like, capture it before touching it: `info registers -a` over QMP
-//! gives every vCPU's `RIP` and `HLT` with nothing woken (`CLAUDE.md`,
-//! Debugging). That capture settled #156 and this report's deadline columns
-//! would have said the opposite.
+//! gives every vCPU's `RIP` and `HLT` with nothing woken, and has settled a
+//! freeze whose cause this report's deadline columns named the opposite of.
 //!
 //! It is also what the NMI probe below buys and a kick does not: an answer that
 //! does not require the CPU to schedule in order to give it.
@@ -207,9 +206,9 @@ pub fn request() {
     let cpus = online_cpus();
     let me = percpu::cpu_id() as usize;
     // The bracket is two instants rather than two byte positions in one stream,
-    // because there is no one stream any more: a byte position has no meaning
-    // across shards. It is also exact where a byte range was not — the dump's
-    // own records are stamped by this same clock, so nothing a sibling CPU logs
+    // because there is no one stream: a byte position has no meaning across
+    // shards. It is also exact where a byte range is not — the dump's own
+    // records are stamped by this same clock, so nothing a sibling CPU logs
     // meanwhile can widen it.
     let from = crate::clock::nanos_since_boot();
     log!("=== blocked-task dump: {cpus} cpu(s), and this report takes the screen ===");
@@ -342,17 +341,11 @@ pub(super) fn deaf_window() {
     /// How long cpu0 waits for the victim to reach its idle loop and go deaf.
     ///
     /// **A kicked CPU does not arrive at the top of its loop promptly and there
-    /// is no bound to give.** The measurement below was taken when the pass it
-    /// was finishing ran `flush_log_file_if_affordable` with preemption off, on
-    /// a machine whose `/log` is a USB device — a string of bulk transfers.
-    /// **That statement is deleted at log architecture L6** and the conclusion
-    /// is not: `drain_irqs` still reaches USB enumeration from a pass, so a
-    /// kicked CPU still has no bound, and this is now the record of how large
-    /// "no bound" was measured to be rather than of its only cause. CI run
-    /// `31284962381` measured 251 ms of it — cpu0 gave up at 11.417 s and the
-    /// victim went deaf at 11.568 s, so nothing was staged, no dump ran, and a
-    /// CPU sat deaf for 400 ms for nobody. So this is generous and, more to the
-    /// point, no longer the whole answer: expiring it leaves the machine as it
+    /// is no bound to give**: `drain_irqs` reaches USB enumeration from a pass,
+    /// so a kicked CPU's arrival is a string of bulk transfers away. 251 ms of
+    /// it has been measured — cpu0 gave up before the victim went deaf, so
+    /// nothing was staged, no dump ran, and a CPU sat deaf for 400 ms for
+    /// nobody. So this is generous, and expiring it leaves the machine as it
     /// found it and lets the next pass ask again.
     const ACK_BUDGET_NS: u64 = 1_000_000_000;
 
@@ -475,12 +468,13 @@ fn report_this_cpu() {
     let ready = driver::ready_len() as u32;
     tally::READY.fetch_add(ready, Ordering::Relaxed);
 
-    // **The dying list, which no reader of this dump could see.** A killed
-    // thread's word says `Ready(cpu)`, so the census below counts it — while
-    // `ready_len()` counts only `rq` and `for_each_parked` walks only `parked`,
-    // which made every teardown in flight an `unheld` false positive. The whole
-    // point of the verdict is to tell "a task nothing will ever run" from a
-    // busy machine, and this is a task that runs *next*.
+    // **The dying list, which no reader of this dump could otherwise see.** A
+    // killed thread's word says `Ready(cpu)`, so the census below counts it —
+    // while `ready_len()` counts only `rq` and `for_each_parked` walks only
+    // `parked`, which without this list makes every teardown in flight an
+    // `unheld` false positive. The whole point of the verdict is to tell "a task
+    // nothing will ever run" from a busy machine, and this is a task that runs
+    // *next*.
     let mut dying = 0u32;
     let read_dying = driver::for_each_dying(|id| {
         dying += 1;

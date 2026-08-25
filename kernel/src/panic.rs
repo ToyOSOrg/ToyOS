@@ -4,13 +4,10 @@
 //! Two dead ends end a crash with no report of their own. The **reentry guard**
 //! fires when the panic *report* panics, and the **`DOUBLE PANIC`** arm fires
 //! when a panic arrives on a CPU that is already inside a fault or a report.
-//! Until 2026-08-20 the machine's complete last words in the second case were
-//! the two words `DOUBLE PANIC`, and in the first the one sentence
-//! `PANIC REENTRY: CPU halted` — not what the first crash was, not where, and
-//! not what the second one was
-//! (`issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md`,
-//! finding 2). The one class of crash that is by definition two bugs deep was
-//! the one class that left no evidence at all.
+//! Without what follows, the one class of crash that is by definition two bugs
+//! deep is the one class that leaves no evidence at all — a `DOUBLE PANIC` or a
+//! `PANIC REENTRY: CPU halted` says neither what the first crash was, nor where
+//! (`issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md`).
 //!
 //! **The evidence is copied at the moment the first crash begins, before
 //! anything is printed.** [`record_panic`] runs as the first statement of the
@@ -51,12 +48,11 @@
 //! second panic that arrives while the first holds it is one plausible way a
 //! first panic becomes a double. The `DOUBLE PANIC` arm *also* says it as a
 //! record, because that is the only channel a machine with no serial port has:
-//! the on-screen panel and the virtio-console both read records, and the sighting
-//! this module answers reached the wire that way. Raw first, so a wedge in the
-//! record path costs the second copy and never the first. On a UART-only machine
-//! the report therefore arrives twice, which is the same trade
-//! `log::console::drain_bypassed` already makes: twice beats never on a machine
-//! that is halting.
+//! the on-screen panel and the virtio-console both read records. Raw first, so
+//! a wedge in the record path costs the second copy and never the first. On a
+//! UART-only machine the report therefore arrives twice, which is the same
+//! trade `log::console::drain_bypassed` already makes: twice beats never on a
+//! machine that is halting.
 //!
 //! The two renderings differ on purpose — the raw one carries APIC ids and hex,
 //! the record is the readable line a panel shows — and they are written ten
@@ -81,24 +77,20 @@ const SLOTS: usize = 64;
 /// smashes the stack down through the heap. CPUID is the only per-CPU
 /// discriminator that needs no memory access and no enabled unit at all.
 ///
-/// A single global flag was rejected: it would stay set after a *recovered*
-/// panic and silently swallow every later, independent panic report, and a
-/// panic on one CPU would mask a concurrent first panic on another. Masking
-/// the APIC id to 64 slots only means colliding CPUs share a guard — a
-/// concurrent panic on both halts the second, which halt_all_cpus would do
-/// moments later anyway.
+/// A single global flag would stay set after a *recovered* panic and silently
+/// swallow every later, independent panic report, and a panic on one CPU would
+/// mask a concurrent first panic on another. Masking the APIC id to 64 slots
+/// only means colliding CPUs share a guard — a concurrent panic on both halts
+/// the second, which `halt_all_cpus` would do moments later anyway.
 static PANIC_DEPTH: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 
 /// This CPU's APIC id, from CPUID.
 ///
-/// It used to be `rdmsr(IA32_X2APIC_APICID)` under a comment claiming APs
-/// enable x2APIC before running any panicking kernel code. They do not:
-/// `apic::init_ap` is three calls after `percpu::init_ap` in `ap_entry`, and
-/// that MSR is `#GP` until it has run. Every panic an AP took in between —
-/// `pat::init`'s assertion, `control_regs`', the FSGSBASE one that has been
-/// there all along — faulted *inside the reentry guard*, before the guard was
-/// armed, and the machine triple-faulted with the whole boot still unflushed in
-/// the log ring: no report, no backtrace, no serial output at all.
+/// **Not `rdmsr(IA32_X2APIC_APICID)`**: `apic::init_ap` is three calls after
+/// `percpu::init_ap` in `ap_entry`, and that MSR is `#GP` until it has run, so
+/// a panic an AP takes in between would fault *inside the reentry guard* before
+/// the guard was armed and triple-fault the machine with the whole boot still
+/// unflushed in the log ring.
 ///
 /// Leaf 0x1F and leaf 0xB give the full x2APIC id and leaf 1 the 8-bit initial
 /// one; the slot is masked to 64 either way, so the fallback loses nothing this

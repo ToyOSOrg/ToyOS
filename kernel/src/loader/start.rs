@@ -168,9 +168,8 @@ pub(crate) fn make_name(path: &str) -> [u8; crate::process::THREAD_NAME_LEN] {
 /// **The move is the last thing a spawn does.** `SYS_SPAWN` can still fail long
 /// after its arguments are read — the program may not exist, its ELF may not
 /// parse, its stack may not fit — and a parent told "that did not happen" while
-/// its endowed handles have already gone holds numbers that name nothing. Under
-/// the bad-handle policy its own `close` of one is then fatal, which is how a
-/// `spawn: /bin/pull-probe-0: not found` killed `test-runner`.
+/// its endowed handles have already gone holds numbers that name nothing, and
+/// under the bad-handle policy its own `close` of one is fatal.
 pub enum PendingHandles {
     /// Built by the kernel and owing nobody anything — the boot's `/bin/init`.
     Ready(HandleTable, Endowments),
@@ -307,10 +306,10 @@ pub fn build_child_handles(
         let parent = RawHandle(u32::from_ne_bytes([pair[4], pair[5], pair[6], pair[7]]));
         // **A pair naming a handle the parent does not hold ends the parent**,
         // by the same rule as every other resolution in the kernel
-        // (`object::HandleError`). This used to skip the pair — "the child
-        // simply does not get it" — which is silent degradation at both ends:
-        // the child cannot tell a slot it was denied from one nobody named,
-        // and the parent is told its spawn happened as asked. `rights_of`
+        // (`object::HandleError`). Skipping the pair — "the child simply does
+        // not get it" — is silent degradation at both ends: the child cannot
+        // tell a slot it was denied from one nobody named, and the parent is
+        // told its spawn happened as asked. `rights_of`
         // answers `BadHandle` or `Stale`, and `Refusal` carries either out of
         // this guard to the syscall boundary, where it does not come back.
         let rights = data.handles.rights_of(parent)?;
@@ -323,13 +322,11 @@ pub fn build_child_handles(
         // object *is* the line buffer (`object::device::ConsoleObject`), so a
         // child sharing its parent's would accumulate into one buffer with it
         // and the two half-lines would splice inside the mechanism that exists
-        // to stop splicing. Authority
-        // does not move: a child gets a console exactly when this pair says it
-        // does, which is the rule that was already here, and the duplicate above
-        // is still what refuses a handle without `DUP`. Aliasing does not move
-        // either — two slots naming one parent object get one child object, so a
-        // program whose stdout and stderr are the same console still writes one
-        // stream.
+        // to stop splicing. Authority does not move: a child gets a console
+        // exactly when this pair says it does, and the duplicate above is what
+        // refuses a handle without `DUP`. Aliasing does not move either — two
+        // slots naming one parent object get one child object, so a program
+        // whose stdout and stderr are the same console still writes one stream.
         let entry = match entry.object() {
             crate::object::KObjectRef::Console(parent_console) => {
                 let key = alloc::sync::Arc::as_ptr(parent_console) as usize;

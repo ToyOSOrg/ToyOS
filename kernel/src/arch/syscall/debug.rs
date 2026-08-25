@@ -14,7 +14,7 @@ use toyos_abi::syscall::SyscallError;
 /// `SYS_DEBUG` action 2's lock, and nothing else's.
 ///
 /// Action 2 takes it and then calls a switching scheduler entry — the shape
-/// spec §6.4's tripwire exists to refuse. The assert fires while the guard is
+/// the baseline tripwire exists to refuse. The assert fires while the guard is
 /// still alive, so the guard never drops and this lock stays held for the rest
 /// of the boot; that is why it is private to the one deliberate-panic action
 /// and shared with nothing.

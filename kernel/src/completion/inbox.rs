@@ -24,8 +24,8 @@
 //! constraint.** One `fetch_add` per log line was measured at 350 ms of boot
 //! under TCG, because QEMU cannot always emit an inline host atomic for a guest
 //! RMW and leaves the translation block to run it exclusively. So `tail` is a
-//! plain load and a plain store made under the lock the poster already holds
-//! (§16.2 rule 1), `head` is the same in the taker's hand, and the overflow
+//! plain load and a plain store made under the lock the poster already holds,
+//! `head` is the same in the taker's hand, and the overflow
 //! count is a load and a store rather than an increment. What makes the plain
 //! stores sound is stated as an invariant and asserted at the arm:
 //!
@@ -125,7 +125,7 @@ pub enum Reason {
     Expired,
     /// The inbox filled while this waiter was not running. The record it
     /// replaces is lost; the waiter re-derives its own predicate, which is
-    /// legal at every park site (§5.5).
+    /// legal at every park site.
     Overflowed,
 }
 
@@ -166,7 +166,7 @@ impl Record {
 /// A bounded ring of records, owned by whoever waits.
 ///
 /// **Level-readable, and that is a property of the record rather than of the
-/// subject that posted it** (§5.3a): a record stays until its owner takes it,
+/// subject that posted it**: a record stays until its owner takes it,
 /// so a post that lands between a waiter's last look and its park is found by
 /// the park's own recheck. That is what collapses the recheck to one predicate
 /// — [`Inbox::has_record`] — with nothing named in it.
@@ -272,7 +272,7 @@ impl Inbox {
     /// read-modify-write per log line measured 350 ms of boot under TCG.
     ///
     /// What it costs the reader is exactness: a signal carries no `at` and no
-    /// outcome of its own, which is §5.3a's *edge* contract stated as a type —
+    /// outcome of its own, which is the *edge* contract stated as a type —
     /// the record means "state may have moved", never "there is something for
     /// you", and the waiter's own predicate is authoritative. That is what the
     /// log's reader does anyway.
@@ -333,7 +333,7 @@ impl Inbox {
     /// this inbox — so a reset here can only discard something that arrived
     /// *between* the two, which for a lock-free signaller is a wake nobody will
     /// send again. A record that outlives its arm costs the next wait one
-    /// spurious loop, which is legal at every park site (§5.5).
+    /// spurious loop, which is legal at every park site.
     ///
     /// `pub` rather than `pub(super)` so that `kernel-loom`, where this file's
     /// `super` is a different crate root, still sees a used item. `mod.rs` is

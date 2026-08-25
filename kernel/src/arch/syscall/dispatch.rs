@@ -193,7 +193,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // process-data lock, unlike `with_object`'s other users: `ops::fsync`
         // is a blocking call since the slow-vs-failed split — it yields and
         // parks between flush attempts — and a park under `with_process_data`
-        // is the §6.4 tripwire by construction. Same shape as `sys_read`'s
+        // is what the baseline tripwire refuses. Same shape as `sys_read`'s
         // resolve-then-block loop, taken once because a `File` is never
         // revoked mid-call by anything but `close`, which the clone outlives.
         SYS_FSYNC => {

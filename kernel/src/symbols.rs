@@ -137,11 +137,9 @@ impl SymbolTable {
     /// at them. No copying — only pointers into `data`.
     ///
     /// Located through `toyos-symbols::locate`, which decodes through
-    /// `toyos-elf` in turn — the tree's one ELF decoder: this file used to
-    /// hold the second, on crates.io `elf` 0.8, reached from two lines of the
-    /// whole kernel. A refusal from `locate` answers with a table that names
-    /// nothing, because a kernel that cannot find its symbols still boots —
-    /// it prints bare addresses.
+    /// `toyos-elf` in turn — the tree's one ELF decoder. A refusal from
+    /// `locate` answers with a table that names nothing, because a kernel that
+    /// cannot find its symbols still boots: it prints bare addresses.
     fn from_elf(data: &[u8], base: u64) -> Self {
         let Some((symtab, strtab)) = toyos_symbols::locate(data) else { return Self::empty() };
 

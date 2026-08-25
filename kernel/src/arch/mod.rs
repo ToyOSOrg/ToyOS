@@ -88,9 +88,9 @@ impl LogCommitGuard {
                 saved = out(reg) rflags,
             );
             // **`log-unbracketed-reserve` is the negative control on this whole
-            // type** (§9.4): the guard is constructed and dropped exactly as it
-            // is now, and it masks nothing — so an interrupt that logs lands
-            // where it was raised rather than at the drop, and a producer can
+            // type**, reverting the masking alone: the guard is built and
+            // dropped as now and masks nothing, so an interrupt that logs
+            // lands where it was raised and not at the drop, and a producer can
             // resume its body copy after a whole newer generation has committed
             // into the same slot. `log_reserve_window_negative` is what reads
             // it. In the shipping kernel the accessor is `const fn … { false }`
@@ -145,7 +145,7 @@ pub unsafe fn percpu_fetch_add(
     _guard: &LogCommitGuard,
 ) -> u64 {
     // **`log-shared-reservation` is the negative control on the instruction
-    // itself** (§9.4): a load, a window, and a store, which is the shape that
+    // itself**: a load, a window, and a store, which is the shape that
     // is *not* atomic against an interrupt on its own CPU. The window is what
     // makes it deterministic rather than a race — the defect being staged is
     // exactly "something came between the load and the store", and on one CPU

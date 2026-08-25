@@ -1,4 +1,4 @@
-//! Where the kernel's wait *subjects* live — spec §8.6.
+//! Where the kernel's wait *subjects* live.
 //!
 //! **There is no wait queue in this file any more.** Every waitable
 //! object owns a [`Watch`] and a waiter arms on it; the park itself is on the
@@ -25,8 +25,8 @@ const FUTEX_BUCKETS: usize = 64;
 static FUTEX_WATCH: [Watch; FUTEX_BUCKETS] = [const { Watch::new() }; FUTEX_BUCKETS];
 
 /// The device subjects. **The `KWaitQueue`s that used to stand beside these
-/// are gone**: after §5.6 a reader arms here and parks on its own thread's
-/// queue, so a shared list per device had nothing left in it.
+/// are gone**: a reader arms here and parks on its own thread's queue, so a
+/// shared list per device had nothing left in it.
 pub static KEYBOARD_WATCH: Watch = Watch::new();
 pub static MOUSE_WATCH: Watch = Watch::new();
 pub static NETWORK_WATCH: Watch = Watch::new();
@@ -36,7 +36,7 @@ pub static AUDIO_WATCH: Watch = Watch::new();
 ///
 /// **One call where there was a pair.** `complete_pending_for_event` has ten
 /// hand-paired call sites and `io-uring-source-half-a-wake-pair` records
-/// losing that pairing twice in one cutover (§5.6); the queue half is gone
+/// losing that pairing twice in one cutover; the queue half is gone
 /// now, and what is left is the post.
 pub fn wake_device(watch: &'static Watch) {
     completion::post(Subject::of(watch), Outcome::Ready);

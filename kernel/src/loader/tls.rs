@@ -194,10 +194,9 @@ pub(crate) unsafe fn rebase_block(phys: u64, tp_offset: usize, fs_base: u64, reb
 
 /// Build one thread's TLS block and map it into the child address space.
 ///
-/// The block is filled with *physical* addresses because it has no virtual
-/// address until it is mapped, so the thread pointer, the DTV pointer and every
-/// filled DTV entry are rebased by one delta afterwards. `None` when the block
-/// cannot be allocated or the address space has no room for it.
+/// The block is built holding physical addresses and [`rebase_block`] shifts
+/// them by one delta once it has a virtual one. `None` when the block cannot be
+/// allocated or the address space has no room for it.
 pub fn map_block(
     child_pt: &crate::process::PageTables,
     modules: &[TlsModule],

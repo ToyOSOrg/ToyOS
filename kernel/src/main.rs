@@ -5,11 +5,10 @@
 // kernel is one crate with no `-p` scoping, so an *area* is gated at the
 // source rather than on `host-tests.yml`'s command line; `-D warnings`, which
 // both kernel clippy invocations already pass, is what turns this `warn` into
-// a hard error. Written here as one crate-level `warn` plus a list of
-// `allow`ed module trees — rather than one attribute per swept file — so
-// that whatever is still owed is a list in one place, and a *new* file added
-// beside this one is gated the day it appears instead of the day somebody
-// remembers to give it an attribute.
+// a hard error. One crate-level `warn` plus a list of `allow`ed module trees —
+// rather than one attribute per swept file — so that whatever is still owed is
+// a list in one place, and a *new* file added beside this one is gated the day
+// it appears instead of the day somebody remembers to give it an attribute.
 //
 // `issues/build/clippy-has-never-run-here.md` carries the per-area ledger and
 // the owner's ruling the sweeps run under: reduction before documentation.
@@ -29,8 +28,8 @@ mod sleeplock;
 mod sync;
 mod id_map;
 
-// Every module tree is swept (the last two landed 2026-08-22), so no `mod` line
-// below carries an `#[allow(clippy::undocumented_unsafe_blocks, reason = …)]`.
+// Every module tree is swept, so no `mod` line below carries an
+// `#[allow(clippy::undocumented_unsafe_blocks, reason = …)]`.
 // A tree that cannot be gated the day it appears takes that attribute, and the
 // pull request that sweeps it deletes it again; the list of such lines is the
 // whole of what the kernel owes the lint, and
@@ -107,9 +106,8 @@ mod vma;
 /// is wider than the console grid — 256 columns on the 2048-px framebuffer
 /// QEMU's stdvga offers, 320 at most anywhere. A generic nested in itself
 /// demangles to one: ~25 columns per level, and the head and the tail of the
-/// same symbol are then on different display rows. It is a real backtrace
-/// frame off a real panic, which a synthetic wide `log!` line was only ever
-/// standing in for.
+/// same symbol are then on different display rows. It is a real backtrace frame
+/// off a real panic rather than a synthetic wide `log!` line.
 #[cfg(feature = "boot-actuators")]
 mod late_panic {
     pub struct Nest<T>(core::marker::PhantomData<T>);
@@ -144,12 +142,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // state, logging, unwinding). A panic inside the panic path halts this
     // CPU immediately with one raw report instead of recursing.
     //
-    // **Ahead of the early-boot branch, which it used to sit below.** Nothing
-    // up to here reads memory this machine has had to set up — CPUID and two
-    // statics — while the early branch below formats a `PanicInfo` through the
-    // whole log path with no guard over it at all: a panic in *there* re-entered
-    // this handler, took the same branch again, and recursed until the stack
-    // met the heap. It costs a first panic nothing, because its depth is zero.
+    // **Ahead of the early-boot branch.** Nothing up to here reads memory this
+    // machine has had to set up — CPUID and two statics — while the early
+    // branch below formats a `PanicInfo` through the whole log path: a panic in
+    // *there* with no guard over it re-enters this handler, takes the same
+    // branch again, and recurses until the stack meets the heap. It costs a
+    // first panic nothing, because its depth is zero.
     let depth = panic::depth_slot();
     if depth.fetch_add(1, core::sync::atomic::Ordering::SeqCst) > 0 {
         // No `prev`: the state swap is below this branch and reading percpu is
@@ -157,8 +155,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         // the report path is what has just panicked — this says it straight out
         // the UART port and nowhere else.
         panic::last_words("PANIC REENTRY: CPU halted", None, info, false);
-        // The one fatal branch that reached no channel at all on a machine
-        // with no UART. render() is safe here by construction: if the reentry
+        // Otherwise the one fatal branch that reaches no channel at all on a
+        // machine with no UART. render() is safe here by construction: if the reentry
         // came from a fault inside the renderer, PAINTING is already taken and
         // this returns without touching a pixel. No capture() — the outer
         // panic's snapshot is the report worth showing, and re-peeking a ring
@@ -197,7 +195,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         // say what the crash it landed on top of was. This branch is reached
         // with the reentry depth at zero, so the first event is one no panic
         // handler is inside: a fatal exception mid-report, or a demand-paging
-        // fault. `DOUBLE PANIC` on its own named neither, which is the whole of
+        // fault. `DOUBLE PANIC` on its own names neither, which is the whole of
         // `issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md`.
         panic::last_words("DOUBLE PANIC", Some(prev), info, true);
         apic::halt_all_cpus();
@@ -320,13 +318,12 @@ fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
 /// told anything on — and what they most need to be told is that there will be
 /// nothing to read afterwards.
 ///
-/// **The four-way table survives L6 and its second axis changed, which is not
-/// the same as losing it** (§5.6). It was `(console, the file logd opened)`, and
-/// the kernel does not open a file any more — it does not name one and cannot
-/// say whether logd got anywhere. What it *does* still know is whether the log
-/// **volume mounted**, which is the fact this line exists to carry: a machine
-/// with no `/log` partition leaves no account of itself once userland owns the
-/// screen, and that is the sentence the owner needs on the panel.
+/// **The table's second axis is whether the log volume mounted**, not which
+/// file logd opened: the kernel opens none, names none, and cannot say whether
+/// logd got anywhere. What it does know is whether `/log` mounted, which is the
+/// fact this line exists to carry — a machine with no `/log` partition leaves
+/// no account of itself once userland owns the screen, and that is the sentence
+/// the owner needs on the panel.
 ///
 /// **It has to be the kernel's, because the panel is the kernel's.**
 /// `panic_console` paints records, so a userland line reaches a console and
@@ -531,8 +528,8 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // audio device. The bootloader reads the whole initrd through UEFI before
     // ExitBootServices, so a machine can boot off a USB stick with no NVMe at
     // all, and one where the controller sits behind a firmware setting we have
-    // not touched looks identical. `.expect` here killed both, at 0.08 s, on a
-    // machine whose only output channel is a screen that says nothing useful
+    // not touched looks identical. An `.expect` here kills both, at 0.08 s, on
+    // a machine whose only output channel is a screen that says nothing useful
     // yet.
     //
     // `None` from `open_home` is the other half and means something different:
@@ -566,10 +563,9 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     boot_phase!("storage ready", t_storage);
 
-    // **Four phases before the idle loop, which is where the log used to become
-    // sayable.** Under `Drain::Inline` every record above is already on the wire
-    // when this runs, so what the gate reads is the whole boot and then silence
-    // — where before this branch it was silence and nothing else.
+    // **Four phases before the idle loop.** Under `Drain::Inline` every record
+    // above is already on the wire when this runs, so what the gate reads is
+    // the whole boot and then silence.
     #[cfg(feature = "boot-actuators")]
     if actuator::pre_idle_wedge() {
         pre_idle_wedge();
@@ -733,11 +729,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         input_merge_test::run();
     }
 
-    // Phase 7: Userland. One program, and it is not a choice the boot config
-    // makes any more: init reads `/etc/system.manifest` and starts what that
-    // says. What the bootloader used to carry — a `;`-joined argv blob baked
-    // into its own binary — made the `.efi` a function of the boot config, and
-    // a concurrent build could hand an image another config's init string.
+    // Phase 7: Userland. One program, and not a choice the boot config makes:
+    // init reads `/etc/system.manifest` and starts what that says, so the
+    // `.efi` is not a function of the boot config and a concurrent build cannot
+    // hand an image another config's init string.
     let pid = process::spawn_init();
     log!("spawned {} pid={pid}", process::INIT_PATH);
 
@@ -748,11 +743,9 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // current here, so the handler's recovery predicate fails and it runs the
     // ordinary fatal path — crash_report, capture, drain, halt, paint.
     //
-    // It used to say the drain empties the ring before the paint, "which makes
-    // this the one test that fails if the capture stops happening". That is no
-    // longer true and was measured false: a drain no longer erases what the
-    // console reads, so this test passes with `capture` stubbed out. See the
-    // note on `panic_console::capture` for what still justifies it.
+    // A drain does not erase what the console reads, so this test passes with
+    // `capture` stubbed out; the note on `panic_console::capture` is what still
+    // justifies it.
     #[cfg(feature = "boot-actuators")]
     if actuator::test_late_panic() {
         late_panic::Nest::<late_panic::Nest<late_panic::Nest<late_panic::Nest<
@@ -785,7 +778,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // which is the window a machine with no console wedges in — while the boot
     // believed it had a drainer.
     log::console::start();
-    // The other two of §10's three, beside the drainer and for the same reason:
+    // The other two kernel threads, beside the drainer and for the same reason:
     // a device's work needs a context of its own rather than whichever thread
     // happened to trap. Here rather than earlier because nothing can run before
     // `enter_idle_loop` anyway, and after `klogd` because a kernel thread that
@@ -800,11 +793,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 /// Stop this machine where nothing can report it, and say so first.
 ///
 /// **Interrupts off and then a spin, which is a wedge rather than a machine
-/// that is merely idle.** No timer tick, no scheduler pass, no idle loop: the
-/// two things that used to drain the byte ring are both unreachable from here,
-/// and so is `klogd`, which is not spawned for another four phases. Everything
-/// the boot has said is therefore already on the wire or it never will be —
-/// which is the whole of what `pre_idle_wedge_speaks` reads.
+/// that is merely idle.** No timer tick, no scheduler pass, no idle loop, and
+/// no `klogd`, which is not spawned for another four phases. Everything the
+/// boot has said is therefore already on the wire or it never will be — which
+/// is the whole of what `pre_idle_wedge_speaks` reads.
 #[cfg(feature = "boot-actuators")]
 fn pre_idle_wedge() -> ! {
     log!("pre-idle-wedge: the boot stops here, and this line is the last thing this machine says");

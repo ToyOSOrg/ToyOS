@@ -9,10 +9,8 @@ pub use toyos_abi::syscall::DeviceType;
 
 /// Whether each class is claimed — and deliberately not by whom.
 ///
-/// This was six `Lock<Option<Pid>>` statics, and the pid in them existed for
-/// one caller: `is_owner`, which nine device syscalls asked before driving the
-/// hardware. That is designation by ambient property, and every one of those
-/// nine takes the claim handle now, so the only question left is the one
+/// A pid beside the bit would be designation by ambient property: every device
+/// syscall takes the claim handle, so the only question left here is the one
 /// exclusivity actually needs.
 static TAKEN: [Lock<bool>; DeviceType::ALL.len()] =
     [const { Lock::new(false) }; DeviceType::ALL.len()];
@@ -82,8 +80,8 @@ pub fn set_framebuffer_info(screen: Screen) {
 /// A daemon's whole degradation decision turns on this: "this machine has no
 /// sound card" is a machine, and exiting is right; "another process holds the
 /// sound card" is a conflict, and exiting silently turns it into a session
-/// with no audio and no record of why. One `None` could not tell them apart,
-/// so soundd's and netd's "no device on this machine" line was an assertion
+/// with no audio and no record of why. One `None` cannot tell them apart, which
+/// makes soundd's and netd's "no device on this machine" line an assertion
 /// rather than a check.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClaimError {

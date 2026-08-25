@@ -52,7 +52,7 @@ const FSTS_QUEUE_ERRORS: u32 = (1 << 4) | (1 << 5) | (1 << 6);
 /// How long the unit is given to acknowledge. Linux uses one second for the
 /// same wait; this is not a measurement of anything and does not pretend to
 /// be, it is the bound past which the kernel gives up rather than spins for
-/// ever. Expiry is a panic (§5.5): what a device can reach is unknown from
+/// ever. Expiry is a panic: what a device can reach is unknown from
 /// there.
 const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(1),
@@ -84,7 +84,7 @@ impl Queue {
     /// Every cached translation and every cached context entry, gone, and the
     /// unit has said so before this returns.
     ///
-    /// Both directions, always, and never a branch on `CAP.CM` (§5.5): the
+    /// Both directions, always, and never a branch on `CAP.CM`: the
     /// arm that skips an invalidation is the arm that is right on hardware and
     /// wrong under the only configuration a test can stage, and code that
     /// always invalidates is code the harness can certify.

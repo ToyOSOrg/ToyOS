@@ -20,10 +20,9 @@
 //! Two entry points on the panic path, and the split between them is the
 //! load-bearing decision:
 //!
-//!   - [`capture`] runs at the top of the panic handler, *before* the drain
-//!     that `e9f3356` put there. Downstream of that drain the ring is empty,
-//!     so any reader placed after it paints a blank screen on the single most
-//!     common panic. It copies and consumes nothing.
+//!   - [`capture`] runs at the top of the panic handler, *before* the drain in
+//!     `panic_flush`. It freezes the report at the instant of the panic and
+//!     consumes nothing; its own doc carries what that is worth.
 //!   - [`render`] runs inside `halt_all_cpus`, *before* `panic_flush`. That
 //!     ordering is only defensible because rendering consumes nothing and
 //!     contains no unbounded loop, so a bug here costs the screen and never
@@ -45,8 +44,7 @@
 //! the deadline is what a machine whose keyboard is dead, disabled or absent
 //! still gets. **The first key retires the deadline for the rest of the
 //! session**: a reader who has taken the wheel is reading one page, and a
-//! camera that has been replaced by a person no longer needs the cycle. The
-//! owner asked for that after the pager moved out from under him. Paging
+//! camera that has been replaced by a person no longer needs the cycle. Paging
 //! happens only when the text does not fit, and the `[page n/m]` footer is what
 //! tells a photograph which slice it caught.
 //!
@@ -97,12 +95,12 @@ const _: () = assert!(SNAPSHOT_CAP >= MAX_ROWS * MAX_COLS);
 
 /// One bit of `Rendered::alert` per byte a buffer can hold.
 ///
-/// **A line is a newline, and a record can carry as many as it has bytes.** An
-/// earlier size here divided the buffer by the shortest line the *record*
-/// formatter produces, which assumed one record was one line — and the first
-/// message that matters breaks it: `PanicInfo`'s `Display` writes
-/// `panicked at <site>:`, a newline, then the panic's own text, so the panic
-/// record is two lines and every bit below it was off by one. A message of
+/// **A line is a newline, and a record can carry as many as it has bytes.**
+/// Dividing the buffer by the shortest line the *record* formatter produces
+/// assumes one record is one line, and the first message that matters breaks
+/// it: `PanicInfo`'s `Display` writes `panicked at <site>:`, a newline, then
+/// the panic's own text, so the panic record is two lines and every bit below
+/// it would be off by one. A message of
 /// nothing but newlines is one line per byte, so this is the only bound that
 /// cannot be argued with. 4 KiB per buffer, 12 KiB for the three, and no
 /// arithmetic anybody has to re-check.
@@ -111,8 +109,8 @@ const ALERT_WORDS: usize = SNAPSHOT_CAP.div_ceil(64);
 /// How long each page stays up. Long enough to photograph, short enough that
 /// a five-page report cycles inside a 15-second video.
 ///
-/// A [`Cadence`] under §3.4's widened reading: it is the rate the halted
-/// pager advances at, and nothing expires.
+/// A [`Cadence`] and not a budget: it is the rate the halted pager advances
+/// at, and nothing expires.
 const PAGE_HOLD: Cadence = Cadence::every(
     Duration::from_secs(3),
     "a five-page report cycles inside a 15-second video",
@@ -183,12 +181,10 @@ unsafe impl Sync for FbCell {}
 /// A screenful-and-then-some of rendered log, and which of its lines an
 /// `alert!` produced.
 ///
-/// **The red row is a `Level` now, and that is what deletes a magic value.**
-/// `has_alert` used to scan each display row for three consecutive `!` bytes,
-/// and its own comment enumerated the strings that happened to match — the
-/// comment root `CLAUDE.md` says is the type you should have written. Nothing
-/// in the text says "alert" any more; the record does, and this is where the
-/// record's answer survives being rendered to text.
+/// **The red row is a `Level` and never a magic value in the text.** Scanning a
+/// display row for three consecutive `!` bytes makes the panel's colour depend
+/// on what a message happens to contain; the record says what it is, and this
+/// is where that answer survives being rendered to text.
 struct Rendered {
     text: [u8; SNAPSHOT_CAP],
     /// One bit per line, **counted back from the last one**, because [`Fill`]
@@ -407,8 +403,7 @@ pub fn probe_due() -> bool {
     // Exactly one CPU, and that is not tidiness. Every idle CPU reaches this
     // inside the same microsecond, so without the latch the machine takes as
     // many simultaneous panics as it has idle cores and there is no CPU left in
-    // an idle loop to put the report on `/log`. Measured: two panics 2 ms
-    // apart, and `halt_all_cpus`'s drain wait timed out against both.
+    // an idle loop to put the report on `/log`.
     static FIRED: AtomicBool = AtomicBool::new(false);
     FIRED.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok()
 }
@@ -659,25 +654,17 @@ pub fn remap() {
 /// framebuffer is armed, which is every headless boot, so a panic storm on a
 /// server pays nothing.
 ///
-/// **Its original reason is gone, and it was kept anyway.** It existed because
-/// `panic_flush` drained the byte ring out from under the renderer, so a reader
-/// placed after the flush painted a blank screen. A drain has erased nothing
-/// since that ring learned to retain what serial had collected, and it erases
-/// nothing now for a better reason -- a record drain moves a cursor and leaves
-/// every shard where it was -- so [`live_tail`] after the flush returns the
-/// same text. Measured, not assumed:
-/// with the body of this function replaced by `return`, `screen_late_panic`
-/// still passes -- and `main.rs` used to claim that test was "the one test
-/// that fails if the capture stops happening". Nothing in the tree now
-/// distinguishes capture-present from capture-absent.
+/// **Nothing in the tree distinguishes capture-present from capture-absent.** A
+/// record drain moves a cursor and leaves every shard where it was, so
+/// [`live_tail`] after the flush returns the same text — and with the body of
+/// this function replaced by `return`, `screen_late_panic` still passes.
 ///
-/// What remains is narrower than the original reason and is why it is still
-/// here: this freezes the report at the instant of the panic, while
-/// `live_tail` re-reads a ring that siblings are still writing to. The halt
-/// IPI is maskable, so a CPU with IF=0 keeps running until it re-enables, and
-/// one spinning in a `log!` loop can push 32 KiB through the ring between the
-/// panic and the paint -- which would push the report off the tail. That is
-/// unlikely, unstaged, and not what the code was written for.
+/// What keeps it here is narrower: this freezes the report at the instant of
+/// the panic, while `live_tail` re-reads a ring that siblings are still writing
+/// to. The halt IPI is maskable, so a CPU with IF=0 keeps running until it
+/// re-enables, and one spinning in a `log!` loop can push 32 KiB through the
+/// ring between the panic and the paint -- which would push the report off the
+/// tail. That is unlikely and unstaged.
 ///
 /// So: delete it if you can stage that race and show it does not matter, or if
 /// you decide a diluted tail is an acceptable worst case. Do not delete it on
@@ -708,10 +695,9 @@ pub fn discard_capture() {
 ///
 /// **One caller and it is why this exists**: `apic::wait_for_log_file` says on
 /// the record ring that its budget is spent and the panel is the only copy —
-/// and it says it after [`capture`] has already run, so on the one machine that
-/// wait exists for the sentence reached no channel at all. The laptop has no
-/// serial port, and `/log` is the thing that did not answer. A promise the
-/// kernel makes in a doc comment and delivers nowhere is not a promise.
+/// and it says it after [`capture`] has already run, so without this the
+/// sentence reaches no channel at all on the one machine that wait exists for,
+/// which has no serial port and whose `/log` is the thing that did not answer.
 ///
 /// **Only refreshes a capture that is already there.** A fatal path that never
 /// ran the panic handler paints [`live_tail`], which re-peeks the shards and
@@ -754,9 +740,9 @@ fn live_tail() -> View<'static> {
 // a panic inside a panic. Every framebuffer write is clamped to the published
 // byte count. Stack budget is 256 bytes plus the one wrap array; the double
 // fault path runs on IST1, which is 16384 bytes and already partly consumed by
-// kernel_backtrace_safe -- `percpu.rs:277` carries the 6,688 bytes the whole
-// report was measured using, `ist1_report` off a real #DF with the record
-// merge and the paint included.
+// kernel_backtrace_safe -- `percpu.rs` carries the 6,688 bytes the whole report
+// was measured using, `ist1_report` off a real #DF with the record merge and
+// the paint included.
 
 /// What a fatal path paints: the captured report, or -- for a path that
 /// reached `halt_all_cpus` without the panic handler, a fatal exception or the
@@ -887,7 +873,7 @@ pub fn boot_checkpoint() {
     }
     // The same latch, taken the same way: an AP that misses `boot_aps`' 100 ms
     // deadline can panic while the BSP is inside a checkpoint, and a plain
-    // load here let the checkpoint paint over its report. Losing the race
+    // load here would let the checkpoint paint over its report. Losing the race
     // costs a checkpoint or one fatal repaint; serial reports either way.
     if PAINTING.swap(true, Ordering::SeqCst) {
         return;
@@ -1046,8 +1032,9 @@ fn count_rows(text: &[u8], cols: usize) -> usize {
 /// Total display rows, pages, and rows per page.
 ///
 /// A text that fits gets the whole grid and one page, so a screen that never
-/// needed paging is byte-identical to what it was before paging existed. One
-/// that does not fit gives the bottom row to the `[page n/m]` footer, because
+/// needs paging is byte-identical to one a console without paging would draw.
+/// One that does not fit gives the bottom row to the `[page n/m]` footer,
+/// because
 /// a paging console whose page nobody can identify is a slideshow.
 fn pagination(text: &[u8], cols: usize, grid_rows: usize) -> (usize, usize, usize) {
     let total = count_rows(text, cols);
@@ -1396,13 +1383,6 @@ fn row_base(fb: &Fb, y: usize, len: usize) -> Option<*mut u32> {
     (end <= fb.bytes).then(|| unsafe { fb.ptr.add(start as usize) as *mut u32 })
 }
 
-/// Erases whatever the compositor left behind, so nothing on screen is
-/// ambiguous about which boot it came from.
-///
-/// Proves the clamp once per row rather than once per pixel: a boot
-/// checkpoint repaints six times and a 2048x2048 panel is 4.2M pixels, so
-/// per-pixel checked arithmetic here is the difference between a repaint
-/// nobody notices and one that doubles boot time.
 /// Paint the whole panel a colour no glyph contains, over whatever is there.
 ///
 /// The actuator for "something drew on the glass behind the console's back".
@@ -1425,6 +1405,13 @@ pub fn graffiti() {
     flush_stores();
 }
 
+/// Erases whatever the compositor left behind, so nothing on screen is
+/// ambiguous about which boot it came from.
+///
+/// Proves the clamp once per row rather than once per pixel: a boot checkpoint
+/// repaints six times and a 2048x2048 panel is 4.2M pixels, so per-pixel
+/// checked arithmetic here is the difference between a repaint nobody notices
+/// and one that doubles boot time.
 fn fill_screen(fb: &Fb, color: u32) {
     let width = fb.width as usize;
     for y in 0..fb.height as usize {

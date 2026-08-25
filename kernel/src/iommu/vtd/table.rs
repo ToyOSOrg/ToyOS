@@ -2,18 +2,16 @@
 //! carries a device, and the second-level page tables of the one domain every
 //! kernel-owned device is put in.
 //!
-//! A *passthrough* domain for those devices was the first design, and the
-//! largest de-risking decision that was available. **`ECAP.PT` is clear on the
-//! only unit anyone here can boot** — measured — so that decision is not
-//! available and the fallback, an identity-mapped translated domain, is the
-//! only path. This module therefore never writes a passthrough context entry,
-//! even on a unit that offers one: that arm would be the one no machine in
-//! reach executes.
+//! **`ECAP.PT` is clear on the only unit anyone here can boot** — measured — so
+//! a passthrough domain is not available and an identity-mapped translated
+//! domain is the only path. This module therefore never writes a passthrough
+//! context entry, even on a unit that offers one: that arm would be the one no
+//! machine in reach executes.
 //!
 //! Every write here goes out of the cache before it returns, unconditionally.
-//! `ECAP.C` — page-table walks snoop the CPU cache — is **clear** on QEMU, the
-//! opposite of what the design first assumed, so on the machine this suite runs
-//! an entry left in a dirty line is an entry the unit does not see.
+//! `ECAP.C` — page-table walks snoop the CPU cache — is **clear** on QEMU, so
+//! on the machine this suite runs an entry left in a dirty line is an entry the
+//! unit does not see.
 
 use alloc::vec::Vec;
 
@@ -35,9 +33,8 @@ const LINE_BYTES: usize = 64;
 const SL_READ: u64 = 1 << 0;
 const SL_WRITE: u64 = 1 << 1;
 /// Bit 7 at a page-directory level: this entry is a 2 MiB leaf rather than a
-/// pointer to the level below. §5.4 — the kernel is 2 MiB-page-only, so this
-/// is the only leaf size, and `CAP.SPS` bit 0 is what a unit must advertise
-/// for it.
+/// pointer to the level below. The kernel is 2 MiB-page-only, so this is the
+/// only leaf size, and `CAP.SPS` bit 0 is what a unit must advertise for it.
 const SL_LARGE: u64 = 1 << 7;
 
 /// Root, context and second-level entries all carry their pointer in the same
@@ -61,9 +58,9 @@ const LEAF_PERM: u64 = SL_READ | SL_WRITE;
 ///
 /// The PMM's granularity is 2 MiB and a table is 4 KiB, so a page per table
 /// would waste 511 of every 512. The pages are never handed back: these tables
-/// live as long as the machine does, and a stage that does release one has to
-/// invalidate before it (§5.5) — an ordering `Unmapped`/`Flushed` expresses at
-/// I4 and this allocator cannot.
+/// live as long as the machine does, and releasing one would have to invalidate
+/// before it — an ordering `Unmapped`/`Flushed` expresses and this allocator
+/// cannot.
 pub struct Tables {
     pages: Vec<PhysPage>,
     /// Bytes taken from the newest page. Starts full, so the first call takes
@@ -141,8 +138,8 @@ impl Table {
     /// Write one 64-bit slot and push it out of the cache.
     ///
     /// The two are inseparable on purpose. A `write` that could be called
-    /// without its flush is the `ECAP.C = 0` corruption §5.2 exists to prevent,
-    /// left to review instead of to the compiler.
+    /// without its flush is the `ECAP.C = 0` corruption itself, left to review
+    /// instead of to the compiler.
     fn write(self, index: usize, value: u64) {
         let slot = self.slot(index);
         slot.write_u64(0, value);
@@ -228,10 +225,10 @@ fn levels(width: AddressWidth) -> u8 {
 /// Build the identity domain's second-level tables over `[0, top)` and return
 /// the root and how many leaves it took.
 ///
-/// One rule, and it is what makes this stage behaviour-unchanged by
-/// construction: every address a kernel driver can hand a
-/// device today is an address that device could already reach with no unit on
-/// the machine, and `[0, top)` is that set. It is not isolation and does not
+/// One rule, and it is what makes the unit behaviour-neutral by construction:
+/// every address a kernel driver can hand a device is an address that device
+/// could already reach with no unit on the machine, and `[0, top)` is that
+/// set. It is not isolation and does not
 /// pretend to be — isolation arrives with per-driver domains, where an IOVA is
 /// *allocated* out of a space that starts above the top of RAM rather than
 /// inherited from a physical address.
@@ -277,9 +274,9 @@ fn map_2m(tables: &mut Tables, root: Table, levels: u8, at: Iova, phys: u64) {
 
 /// Give `stream` a context entry naming the identity domain.
 ///
-/// A function that never reaches here has no context entry, and faults on its
-/// first transaction — which is §5.1's stated consequence, and what the
-/// `iommu-context-absent` actuator stages deliberately.
+/// A function that never reaches here has no context entry and faults on its
+/// first transaction, which the `iommu-context-absent` actuator stages
+/// deliberately.
 pub fn bind(tables: &mut Tables, root: Table, stream: StreamId, domain: Table, width: AddressWidth) {
     let bus = stream.bus() as usize;
     let entry = root.read(bus * 2);
@@ -292,7 +289,8 @@ pub fn bind(tables: &mut Tables, root: Table, stream: StreamId, domain: Table, w
     };
     // Translation type 00: an untranslated request is translated through the
     // second-level table this entry names. The other two encodings are
-    // device-TLB (§10.1 rejects it) and passthrough (unavailable, above).
+    // device-TLB, which this kernel does not implement, and passthrough,
+    // which the header above is why nothing writes.
     let lo = domain.phys | PRESENT;
     let hi = ((KERNEL_DOMAIN as u64) << 8) | (levels(width) as u64 - 2);
     context.write_pair(stream.devfn() as usize, lo, hi);

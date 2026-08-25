@@ -4,11 +4,10 @@ use super::DirectMap;
 
 /// Bounds-checked volatile window. Copy, no ownership, no lifetime.
 ///
-/// Named for what it was built for and what nearly every value of it still is:
-/// a device's register window, created by `paging::map_mmio`, which is also
-/// what makes it readable on every CPU and not just the one that mapped it.
-/// [`Mmio::over_phys`] is the other constructor, for memory this kernel owns
-/// that a *device* also reads — same bound, same volatility, no mapping to do.
+/// Nearly every value is a device register window from `paging::map_mmio`,
+/// which is what makes it readable on every CPU and not just the one that
+/// mapped it. [`Mmio::over_phys`] is the other constructor, for memory this
+/// kernel owns that a *device* also reads — same bound, same volatility.
 #[derive(Clone, Copy)]
 pub struct Mmio {
     base: *mut u8,
@@ -35,16 +34,11 @@ impl Mmio {
     /// owns rather than over a device's registers.
     ///
     /// For the two readers that cannot be handed the value `paging::map_mmio`
-    /// returned. The IOMMU's DMA-fault handler may take no lock, so what it
-    /// keeps between the boot that programmed a unit and the interrupt that
-    /// reports on one is an `AtomicU64` — a physical address, from which this
-    /// rebuilds the window. The IOMMU's remapping tables are the other:
-    /// ordinary PMM pages that the *unit* also walks, so every access to one
-    /// is volatile for the same reason a register access is, and wants the
-    /// same bound.
-    ///
-    /// The alternative at both sites is a raw pointer whose bound is the offset
-    /// alone; this is the same window with the length in it.
+    /// returned: the IOMMU's DMA-fault handler, which may take no lock and so
+    /// keeps only an `AtomicU64` physical address between the boot that
+    /// programmed a unit and the interrupt that reports on one; and the IOMMU's
+    /// remapping tables, ordinary PMM pages that the *unit* also walks, so every
+    /// access to one is volatile for the same reason a register access is.
     ///
     /// # Safety
     /// `base` must name `size` bytes of physical memory this kernel owns for
@@ -55,10 +49,8 @@ impl Mmio {
         Self::new(base, size)
     }
 
-    /// The window's base as an integer.
-    ///
-    /// For a caller that has to hand the address itself somewhere this type
-    /// cannot go — a `clflush` operand, or a line of a log.
+    /// The window's base as an integer, for a caller that has to hand the
+    /// address somewhere this type cannot go — a `clflush` operand, a log line.
     pub fn addr(self) -> u64 {
         self.base as u64
     }

@@ -28,7 +28,7 @@
 //! The word is per-CPU but the depth it holds belongs to the running *context*,
 //! so `Hw::switch` swaps it with the incoming context's saved depth. Without
 //! that swap the count is not conserved across a switch and its absolute value
-//! means nothing — which is what `scheduler.rs`'s §6.4 baselines rest on.
+//! means nothing — which `scheduler.rs`'s preempt-depth baselines rest on.
 
 use core::sync::atomic::Ordering;
 

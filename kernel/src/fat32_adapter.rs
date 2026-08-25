@@ -27,9 +27,9 @@
 //!    offset gets [`IoError`] rather than a neighbour's blocks. This is the
 //!    adapter's invariant and not the filesystem's to be trusted about:
 //!    `BlockAccess`'s own documentation claims the crate "never asks for bytes
-//!    it has not already bounded against the volume", and the storage-stack
-//!    audit reproduced a crafted directory entry driving a write 256 GiB past
-//!    the end of one. A driver escaping its partition is how a boot stick's
+//!    it has not already bounded against the volume", and a crafted directory
+//!    entry drives a write 256 GiB past the end of one. A driver escaping its
+//!    partition is how a boot stick's
 //!    other partitions get destroyed — and with two mounted at once, the
 //!    neighbour it would escape into is the other one.
 //!
@@ -537,9 +537,7 @@ impl FatExtents {
     ///
     /// One acquisition per run and never one held across the device read below:
     /// this lock is a leaf above the volume's, and a page on a volume with
-    /// 512-byte clusters is up to eight runs and eight transfers. The walk is
-    /// from the front of the list, which is what the loop it replaced did once
-    /// per page rather than once per run.
+    /// 512-byte clusters is up to eight runs and eight transfers.
     fn locate(&self, file_offset: u64) -> Option<Located> {
         let guard = self.runs.lock();
         let runs = guard.as_ref()?;
@@ -580,10 +578,10 @@ mod mirror_refuse {
 
     /// Refuse the first **two**, not one. One refusal makes the drain's retry
     /// ladder reach only attempt 1, which merely yields; attempt 2 is the first
-    /// that parks, and the park is where the `iod` one-arm-per-task panic lived
-    /// (`writeback::drain_all_iod`). So a single-refusal control passes a broken
-    /// kernel — exactly what CI missed. Two refusals force attempt 2; the third
-    /// flush (spent) heals the mirror.
+    /// that parks, and the park is where the `iod` one-arm-per-task panic
+    /// strikes (`writeback::drain_all_iod`). So a single-refusal control passes
+    /// a broken kernel. Two refusals force attempt 2; the third flush (spent)
+    /// heals the mirror.
     const REFUSALS: u32 = 2;
 
     pub fn capture(lo: u64, hi: u64) {
@@ -752,9 +750,9 @@ pub struct FatFs {
 ///
 /// FAT stores wall-clock time and the VFS's `mtime` is nanoseconds since boot,
 /// so the number the trait hands this adapter is not a time of day and cannot
-/// go on an entry. It comes from `clock` instead, which read the RTC once for
-/// the whole machine — this used to be a per-volume reading, so a machine with
-/// both volumes mounted had two answers to what time it booted.
+/// go on an entry. It comes from `clock` instead, which reads the RTC once for
+/// the whole machine; a per-volume reading would give a machine with both
+/// volumes mounted two answers to what time it booted.
 ///
 /// Local and not UTC: FAT stores local time by specification. A machine with no
 /// wall clock stamps [`FatTime::EPOCH`], which is what the format itself uses
@@ -909,9 +907,8 @@ impl FileSystem for FatFs {
     ///
     /// `Fat32::walk` checks `limit` against the count it has *before* each
     /// push, for files and for directories alike, and abandons the listing
-    /// rather than truncating it. So this is the second implementation of this
-    /// trait that can meet its stated contract; the two bcachefs adapters
-    /// still cannot.
+    /// rather than truncating it. So this implementation meets the trait's
+    /// stated contract; the bcachefs adapters do not.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         let role = self.role;
         self.fs.walk(limit).map_err(|e| refused(role, "list", "/", e))
@@ -1118,7 +1115,7 @@ impl FileSystem for FatFs {
     /// The error is returned rather than logged, and that is the whole point of
     /// the signature: the log mount is where the kernel's own log lives, so a
     /// line written here is pending ring content, which is the next flush,
-    /// which is the next sync. Swallowing it made a device that declines to
+    /// which is the next sync. Swallowing it turns a device that declines to
     /// flush into a permanent write loop from the idle loop.
     ///
     /// [`refused`] is not used, for that same reason — it logs.
@@ -1135,22 +1132,20 @@ impl FileSystem for FatFs {
 /// and do not stop asking while the machine is still missing the one it was
 /// booted from.
 ///
-/// Read-only, and the missing half of the GPT work: `gpt::probe` ran for NVMe
-/// only, so on a machine that boots off a stick — which is every machine this
-/// project boots — `gpt::boot_volume()` answered `None` and no mount could
-/// ever ask it anything.
+/// Read-only. `gpt::probe` over NVMe alone leaves a machine that boots off a
+/// stick — which is every machine this project boots — with
+/// `gpt::boot_volume()` answering `None` and no mount able to ask it anything.
 ///
 /// # Why this is a loop and not a pass
 ///
-/// It ran once, at a fixed point in the peripheral phase, against a disk set
+/// One pass at a fixed point in the peripheral phase runs against a disk set
 /// that is **not final at that point**. `xhci::await_connect_settle` returns as
 /// soon as the root hub's connect set has held still for the USB debounce and is
 /// non-empty, so a machine whose *other* devices are up scans without whatever
 /// is still arriving — and the laptop has four internal USB devices beside the
-/// stick it boots from. That machine reached a working compositor desktop with
-/// neither `/boot` nor `/log` on one boot and mounted both on the next, off the
-/// same stick and the same image, which is a race and not a defect in anything
-/// downstream of here.
+/// stick it boots from. The same stick and the same image then mount both
+/// volumes on one boot and neither on the next: a race, and not a defect in
+/// anything downstream of here.
 ///
 /// The asymmetry is the same one `xhci::EMPTY_BUS` is written around, and it
 /// is what keeps this free: a machine whose boot volume has already been
@@ -1163,8 +1158,8 @@ impl FileSystem for FatFs {
 ///
 /// The end of this function is a machine with no `/boot` and no `/log`, on
 /// hardware whose only other diagnostic channel *is* `/log`. Skipping a disk
-/// silently — which is what a bare `continue` did, three times over — spends the
-/// one chance anybody has to find out why.
+/// silently — which is what a bare `continue` does — spends the one chance
+/// anybody has to find out why.
 pub fn probe_boot_disks() {
     let deadline = crate::clock::nanos_since_boot() + xhci::PORT_SETTLE_CEILING.nanos();
     let mut probed = 0;
@@ -1207,9 +1202,9 @@ fn probe_announced(mut probed: usize) -> usize {
     while probed < count {
         let index = probed;
         probed += 1;
-        // One question with one answer. This used to ask twice — `open` for the
-        // handle and `storage_geometry` for the block size — which is two `None`
-        // branches for one fact, and the disk carried the block size all along.
+        // One question with one answer: asking twice — `open` for the handle and
+        // `storage_geometry` for the block size — is two `None` branches for one
+        // fact, and the disk carries the block size itself.
         let Some(mut disk) = usb_storage::open(index) else {
             log!(
                 "usb-storage: disk {index} was announced and was gone again before its partition \

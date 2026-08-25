@@ -20,10 +20,9 @@
 // CPUs hold a translation is not knowable from the entry.
 //
 // **Every user mapping states one `Prot`, and W^X is the variant that does not
-// exist.** There is no writable-and-executable page a call site can ask for, so
-// the boolean pair that used to decide it cannot be got wrong. `EFER.NXE` is
-// `arch::control_regs`' to declare; without it bit 63 would be reserved rather
-// than a permission, and every `Prot::ReadWrite` would fault.
+// exist.** There is no writable-and-executable page a call site can ask for.
+// `EFER.NXE` is `arch::control_regs`' to declare; without it bit 63 would be
+// reserved rather than a permission, and every `Prot::ReadWrite` would fault.
 //
 // **User mappings are 2 MiB except where a program's own segments forbid it.**
 // One binary has one window where `.text` ends and `.data` begins, and
@@ -48,9 +47,9 @@
 //
 // **The tagged branches are not exercised on the dev host.** Its QEMU is
 // `-cpu qemu64`, which offers no PCID, so `pcid_active()` is false and a guest
-// there boots holding `cr4=0x00310668` — read out of a harness UART log on
-// 2026-08-19. Only a KVM runner with `-cpu host` executes an `INVPCID` at all,
-// so what answers for those branches is the derivation and not the harness.
+// there boots holding `cr4=0x00310668`. Only a KVM runner with `-cpu host`
+// executes an `INVPCID` at all, so what answers for those branches is the
+// derivation and not the harness.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -98,9 +97,7 @@ const PAGES_PER_2M: usize = (PAGE_2M / 4096) as usize;
 ///
 /// **W^X is the missing fourth variant.** Nothing can name a page that is both
 /// writable and executable, so no call site can produce one by passing the
-/// wrong pair of booleans — which is what a `writable: bool` and an
-/// unconditionally executable entry amounted to at every mapping this kernel
-/// made.
+/// wrong pair of booleans.
 ///
 /// Read is implied by all three: this kernel has no execute-only and no
 /// write-only mapping, because `PAGE_USER` grants read wherever it grants
@@ -137,15 +134,14 @@ impl Prot {
 ///
 /// **The reason this kernel has 4 KiB user mappings at all.** `toyos-ld` emits
 /// three `PT_LOAD`s at 4 KiB alignment, so a binary has exactly one 2 MiB
-/// window holding both the end of `.text` and the start of `.data`. Measured
-/// over the boot set on 2026-08-20: 20 binaries, 33 windows, **20 of them
-/// mixed**. One [`Prot`] for such a window has to be wrong in one direction,
-/// and both wrong answers were measured: at 2 MiB granularity only 48.9 % of
-/// 44.96 MiB of text can be write-protected, and **0 %** of 2.96 MiB of program
-/// data can be made non-executable, because every writable byte in the boot set
-/// shares a window with code. Aligning the linker's segments to 2 MiB instead
-/// costs +4 MiB of physical memory per process; one page table per mixed window
-/// costs 4 KiB.
+/// window holding both the end of `.text` and the start of `.data`. Over the
+/// boot set: 20 binaries, 33 windows, **20 of them mixed**. One [`Prot`] for
+/// such a window has to be wrong in one direction, and both wrong answers were
+/// measured: at 2 MiB granularity only 48.9 % of 44.96 MiB of text can be
+/// write-protected, and **0 %** of 2.96 MiB of program data can be made
+/// non-executable, because every writable byte in the boot set shares a window
+/// with code. Aligning the linker's segments to 2 MiB instead costs +4 MiB of
+/// physical memory per process; one page table per mixed window costs 4 KiB.
 ///
 /// [`AddressSpace::map_window`] is the only consumer, and a window whose pages
 /// agree stays one 2 MiB PDE and pays no page table.
@@ -366,8 +362,7 @@ impl Owed {
     /// and `INVPCID` names that tag directly (SDM Vol. 3A §4.10.4.1) — so a
     /// kernel writing a *child's* tables from the parent's CPU, which
     /// `loader::map_libs` does on every spawn, invalidates the child's entries
-    /// and not the parent's live ones. Reading `CR3` here instead did the
-    /// opposite of what the site meant on exactly that path.
+    /// and not the parent's live ones.
     ///
     /// Without PCID there is no tag to name and none is needed: every `CR3`
     /// write flushes the whole TLB, so a CPU holds entries for the address space
@@ -394,11 +389,8 @@ impl Owed {
     }
 
     /// The write installed into a slot the caller has already proven empty, and
-    /// an empty slot owes nothing.
-    ///
-    /// The proof is this value rather than a check the caller makes and throws
-    /// away: `map_range` used to read the slot, assert it was absent, and then
-    /// invalidate anyway.
+    /// an empty slot owes nothing. The proof is this value rather than a check
+    /// the caller makes and throws away.
     fn expect_install(self, what: &str) {
         match self {
             Self::Nothing => {}
@@ -517,7 +509,7 @@ static NEXT_PCID: Lock<u16> = Lock::new(1);
 /// same wrap is covered by a flush that names every tag on every CPU.
 ///
 /// Recycling a live tag at all is a defect in its own right and stays open;
-/// M4 makes the tag an owned resource and deletes this branch.
+/// making the tag an owned resource is what deletes this branch.
 fn alloc_pcid() -> u16 {
     {
         let mut next = NEXT_PCID.lock();
@@ -554,13 +546,12 @@ pub struct AddressSpace {
 // `Sync` (transitively — `RegionKind::FileBacked` holds `Arc<dyn
 // FileBacking>` and `FileBacking: Send + Sync` is a supertrait, so the trait
 // object inherits both), and `cargo check` with both impls below deleted
-// still compiles clean (verified 2026-08-20). These look vestigial rather
-// than load-bearing — the same finding as `object::shm::Pages`, filed
-// together as issues/kernel/redundant-send-sync-impls-mm-object.md rather
-// than removed here: if that holds, a later field that broke auto-`Send`
-// would silently re-inherit these hand-written impls with no new
-// justification, which is a real hazard for a type built entirely out of
-// raw physical addresses.
+// still compiles clean. These look vestigial rather than load-bearing — the
+// same finding as `object::shm::Pages`, filed together as
+// issues/kernel/redundant-send-sync-impls-mm-object.md rather than removed
+// here: if that holds, a later field that broke auto-`Send` would silently
+// re-inherit these hand-written impls with no new justification, which is a
+// real hazard for a type built entirely out of raw physical addresses.
 unsafe impl Send for AddressSpace {}
 // SAFETY: see the `Send` impl above — same open question, same evidence.
 unsafe impl Sync for AddressSpace {}
@@ -647,9 +638,9 @@ impl AddressSpace {
 
     /// Unmap a contiguous range of 2MB pages.
     ///
-    /// Private: unmapping a range without unregistering it is what left a
-    /// placed `mmap` invisible to the placement search, so the only way out of
-    /// this module is [`free_and_unmap`](Self::free_and_unmap), which does both.
+    /// Private: unmapping a range without unregistering it leaves a placed
+    /// `mmap` invisible to the placement search, so the only way out of this
+    /// module is [`free_and_unmap`](Self::free_and_unmap), which does both.
     fn unmap_range(&mut self, vaddr: UserAddr, size: u64) {
         let mut offset = 0u64;
         while offset < size {
@@ -760,12 +751,12 @@ impl AddressSpace {
     /// whole method.** The demand pager cannot hold this lock while it fills —
     /// a fill is a 2 MiB zeroing or up to 512 device reads — so it asks whether
     /// the window is mapped, releases the lock, fills, and comes back. Two
-    /// threads of one process both get "no" to that first question, and before
-    /// this existed both installed: the PDE named the second frame, the first
-    /// thread's CPU kept a translation to the first (an `Owed` reaches this CPU
-    /// alone, and no shootdown is issued on the fault path), and two threads
-    /// disagreed about the contents of one address. Asking again here makes the
-    /// loser a wasted fill instead.
+    /// threads of one process both get "no" to that first question, and without
+    /// this both would install: the PDE would name the second frame, the first
+    /// thread's CPU would keep a translation to the first (an `Owed` reaches
+    /// this CPU alone, and no shootdown is issued on the fault path), and two
+    /// threads would disagree about the contents of one address. Asking again
+    /// here makes the loser a wasted fill instead.
     ///
     /// Exhaustively, for two threads A and B filling one window, with this
     /// lock's critical sections the only ordering that exists between them:
@@ -784,11 +775,8 @@ impl AddressSpace {
     /// `handle_page_fault` answers before it allocates anything.
     ///
     /// Linux answers the same race the same way at the same granularity:
-    /// `mm/huge_memory.c`'s `__do_huge_pmd_anonymous_page` takes `pmd_lock`,
-    /// re-tests `pmd_none` on a 2 MiB folio it has already allocated and
-    /// zeroed, and `folio_put`s it when another fault got there first. Neither
-    /// kernel holds the address space across the fill, because a fill is device
-    /// I/O.
+    /// `mm/huge_memory.c`'s `__do_huge_pmd_anonymous_page` re-tests `pmd_none`
+    /// under `pmd_lock` and `folio_put`s the loser's already-zeroed 2 MiB folio.
     pub fn map_window_if_absent(
         &mut self,
         vaddr: UserAddr,
@@ -818,10 +806,10 @@ impl AddressSpace {
     /// address space owns. A shared-memory page is unmapped here too and its
     /// frame outlives the unmap, so a waiter in *another* process is ended
     /// where it did not have to be — a spurious futex return, which every park
-    /// site is allowed and every futex loop in userland already re-checks.
-    /// The converse mistake is not
-    /// survivable, and telling the two apart would put the ownership question
-    /// on a path whose only wrong answer is a use-after-free.
+    /// site is allowed and every futex loop in userland already re-checks. The
+    /// converse mistake is not survivable, and telling the two apart would put
+    /// the ownership question on a path whose only wrong answer is a
+    /// use-after-free.
     pub fn unmap(&mut self, vaddr: UserAddr) {
         let va = vaddr.raw();
         assert!(
@@ -1252,10 +1240,8 @@ const MIN_PHYS_MAP: u64 = 4 * 1024 * 1024 * 1024;
 /// **An `Arc<Lock<AddressSpace>>` and not a `Lock<Option<AddressSpace>>`,
 /// because a task has to be able to *name* it.** A kernel thread runs here —
 /// `driver::spawn` gives it the `cr3` every CPU is already in between two user
-/// threads — and while it could not name the same thing a process names,
-/// `KernelPayload.address_space` had to stay an `Option` with a fallback branch
-/// deciding which `cr3` a task gets. It does not now: the field is *the address
-/// space this task runs in*, for every task, with no second answer.
+/// threads — so `KernelPayload.address_space` is *the address space this task
+/// runs in*, for every task, with no `Option` and no second answer.
 ///
 /// Published once at boot from a leaked `Arc` and read with one acquire load —
 /// `log::console`'s `KLOGD` has the same shape for the same reason. Leaked
@@ -1291,8 +1277,7 @@ pub fn kernel_cr3() -> Cr3 {
 /// is never torn down, and maps the whole kernel image and the direct map —
 /// which includes every stack a caller could be standing on. There is no
 /// argument left for a caller to get wrong, so there is nothing for `unsafe`
-/// to mark, and the four teardown sites in `process.rs` that used to write the
-/// pair by hand now say what they mean instead.
+/// to mark.
 ///
 /// The one obligation it does carry is not a memory-safety one: everything the
 /// outgoing user address space mapped stops being addressable at this line.
@@ -1327,8 +1312,6 @@ pub fn load_kernel_flush() {
 /// The lock and the shootdown are separate statements, and that is the whole
 /// reason this is a free function rather than a method: the shootdown waits for
 /// siblings and may hold nothing, while the mapping needs the address space.
-/// Eleven callers used to write the lock-and-map incantation themselves, and
-/// none of them could have got the second half right.
 ///
 /// **The shootdown is not bookkeeping on this path.** `map_2m` is allowed to
 /// replace the boot map's own leaf, so a window inside a range the memory map
@@ -1391,8 +1374,8 @@ pub(super) fn init(memory_map: &[MemoryMapEntry]) {
     // finished building — every physical page the memory map reaches was
     // just linked in by the `map_2m` loop above, and nothing has run under
     // it yet, so "live" reduces to "self-consistent", which that loop
-    // guarantees one 2 MiB leaf at a time.
-    // Boot path: load CR3 with flush (PCID not yet enabled).
+    // guarantees one 2 MiB leaf at a time. PCID is not enabled yet, so this is
+    // the flushing form.
     unsafe {
         cr3.load_flush();
     }
