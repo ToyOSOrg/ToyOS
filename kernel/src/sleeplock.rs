@@ -12,15 +12,13 @@
 //! nothing, so `scheduler::assert_baseline` keeps meaning exactly what it means
 //! today: *a spinlock is held*.
 //!
-//! **Nothing in the kernel holds one yet, and C7+C8 is what changes that.**
-//! §21's C5 row is "`SleepLock`, `holder()`, the `Parkable` threading. Nothing
-//! converted" — the four statics of §9 (`vfs::VFS`, `fat32_adapter::VOLUMES`,
-//! `xhci::XHCI`, `process::ProcessData`) convert in one later chunk, because
-//! converting any one of them alone parks with the other three still ticket
-//! locks and trips `assert_baseline` by construction (§21.1). So this module is
-//! `allow(dead_code)` for exactly one chunk, and the allow names it. What keeps
-//! it honest in the meantime is not the kernel but `kernel-loom`, which
-//! compiles this file a second time and drives the real acquire.
+//! **Nothing in the kernel holds one yet.** The four statics of §9
+//! (`vfs::VFS`, `fat32_adapter::VOLUMES`, `xhci::XHCI`, `process::ProcessData`)
+//! convert together, because converting any one of them alone parks with the
+//! other three still ticket locks and trips `assert_baseline` by construction
+//! (§21.1). So this module is `allow(dead_code)` until they do. What keeps it
+//! honest meanwhile is not the kernel but `kernel-loom`, which compiles this
+//! file a second time and drives the real acquire.
 //!
 //! **This file is compiled a second time by `kernel-loom`**, so it may name only
 //! what that crate supplies — §16.1's layout requirement, the same one
@@ -67,14 +65,12 @@
 //!   Nothing in the tree does either today; it is written down because the
 //!   failure is a named panic at a call site that looks innocent.
 
-// **Retired by C7+C8, which is the chunk that gives this type its first
-// holder.** The allow names the chunk rather than standing open: every item
-// below has a caller in `kernel-loom/tests/sleep_lock.rs` today and none in the
-// kernel, and §21 makes that a property of the chunking — a lock converted
-// alone parks with the other three of §9 still ticket locks and trips
-// `assert_baseline` by construction (§21.1). Deleting it and writing it again
-// at C7+C8 would land the primitive and its four conversions in one commit,
-// which is the merge this pipeline's own §24.7 is about.
+// **Retired by the change that gives this type its first holder.** Every item
+// below has a caller in `kernel-loom/tests/sleep_lock.rs` and none in the
+// kernel, because a lock converted alone parks with the other three of §9 still
+// ticket locks and trips `assert_baseline` by construction (§21.1). Deleting
+// the primitive and writing it again at the conversion would land it and its
+// four callers in one commit.
 #![allow(dead_code)]
 
 #[cfg(not(feature = "loom"))]

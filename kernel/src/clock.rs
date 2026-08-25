@@ -6,12 +6,11 @@
 //! [`init_wall`], and answers every later question as that reading plus
 //! [`nanos_since_boot`].
 //!
-//! Once and not per call, for two reasons that were both live. `SYS_CLOCK_REALTIME`
-//! went to the CMOS on every call, so a process asking the time in a loop drove
-//! a port-I/O handshake per iteration and could block on the update flag for as
-//! long as a second. And each FAT volume read the RTC privately when it mounted,
-//! so a machine with two of them had two answers to what time it was and no
-//! rule about which won.
+//! Once and not per call: a CMOS read is a port-I/O handshake that can block on
+//! the update flag for as long as a second, so a process asking the time in a
+//! loop would drive one per iteration — and a per-caller read gives a machine
+//! with two FAT volumes two answers to what time it is and no rule about which
+//! wins.
 //!
 //! Once also means the answer can be *absent*: an RTC that never replies is a
 //! boot with no wall clock, [`local_secs`] and [`utc_secs`] say so in their
@@ -80,11 +79,11 @@ pub fn calibrated() -> bool {
 ///
 /// [`TSC_BOOT`] is one global, stored by the BSP during [`init`]. A CPU whose
 /// TSC reads below it therefore subtracts to a negative number — and with
-/// overflow-checks on, which every guest build has, that is a panic. It was a
-/// latent one until `log::emit` began reading the clock inside its publication
-/// bracket: there it would fire with `IF` clear and a reservation taken and not
-/// yet committed, and the panic handler's own `log!` would reenter the same
-/// shard. **No panic site may be inside that bracket.**
+/// overflow-checks on, which every guest build has, that is a panic. `log::emit`
+/// reads this clock inside its publication bracket, where a panic would fire
+/// with `IF` clear and a reservation taken and not yet committed, and the panic
+/// handler's own `log!` would reenter the same shard. **No panic site may be
+/// inside that bracket.**
 ///
 /// Saturating, and the direction is the argument rather than the taste. A
 /// trailing CPU's records stamp zero, so they read as the oldest thing the
@@ -123,9 +122,8 @@ pub fn now() -> Instant {
 /// `compiler_builtins`, so a spin that reads the clock every iteration spends a
 /// large fraction of its time at an address that is not in the spinning
 /// function. That is invisible to everything except an instrument that samples
-/// the instruction pointer — and `sched::dump`'s NMI probe is exactly one:
-/// `dump_nmi_probe` reported `u128_div_rem+0x99` for a CPU that was in the deaf
-/// window all along, on `main`'s CI run `31280877870` and twice more.
+/// the instruction pointer — and `sched::dump`'s NMI probe is exactly one: it
+/// reports `u128_div_rem` for a CPU that is in the deaf window all along.
 pub fn tsc_deadline(nanos: u64) -> u64 {
     let period_fs = TSC_PERIOD_FS.load(Relaxed);
     let ticks = (nanos as u128 * 1_000_000) / period_fs.max(1) as u128;
@@ -137,19 +135,16 @@ pub fn tsc_deadline(nanos: u64) -> u64 {
 /// it was waiting on.
 ///
 /// **The one bounded wait a driver spins in, and it reads the TSC rather than
-/// the nanosecond clock.** This body was written twice — `drivers/hda.rs` and
-/// `drivers/xhci/wait/mod.rs`, byte-identical apart from which constant each
-/// named — and both read [`nanos_since_boot`] per iteration, whose 128-bit
-/// divide is an out-of-line `compiler_builtins` call.
-/// [`tsc_deadline`] and a 64-bit compare inline, which is why
-/// `src/redlist.rs`'s `dump_nmi_probe` red was retired on this form: a spin
-/// that calls out of itself is a spin an instruction-pointer sample attributes
-/// to `u128_div_rem` instead of to the loop. Consolidating the other way would
-/// re-open that red, so this direction is a constraint and not a taste.
+/// the nanosecond clock.** [`nanos_since_boot`]'s 128-bit divide is an
+/// out-of-line `compiler_builtins` call, while [`tsc_deadline`] and a 64-bit
+/// compare inline: a spin that calls out of itself is a spin an
+/// instruction-pointer sample attributes to `u128_div_rem` instead of to the
+/// loop, which is `src/redlist.rs`'s `dump_nmi_probe` red. Reading the
+/// nanosecond clock per iteration re-opens it, so this direction is a
+/// constraint and not a taste.
 ///
 /// Before [`init`] the TSC period is zero, [`tsc_deadline`] saturates and the
-/// wait is unbounded — the same behaviour the three copies had, and reachable
-/// only by a caller running before phase 2.
+/// wait is unbounded — reachable only by a caller running before phase 2.
 pub fn settles(nanos: u64, ready: impl Fn() -> bool) -> bool {
     let until = tsc_deadline(nanos);
     while !ready() {
@@ -225,9 +220,6 @@ pub fn utc_secs() -> Option<u64> {
 }
 
 // The calendar is `toyos-wallclock`'s, and the kernel is one of its callers
-// rather than a second copy of it. `Civil`, its validity rule and its two
-// conversions used to live here as well, byte-identical to that crate's — which
-// was added *beside* this file rather than replacing it, so the copy userland
-// could not reach was also the copy no test could run. `kernel/src/rtc.rs`
-// decodes into `toyos_wallclock::Civil` and `SYS_CLOCK_REALTIME` answers out of
-// it; the crate's nine host tests are what stand behind both.
+// rather than a second copy of it: `kernel/src/rtc.rs` decodes into
+// `toyos_wallclock::Civil` and `SYS_CLOCK_REALTIME` answers out of it, and the
+// crate's host tests are what stand behind both.
