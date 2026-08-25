@@ -157,7 +157,7 @@ kernel/src/pipe.rs 96 0
 kernel/src/preempt.rs 66 0
 kernel/src/process.rs 917 0
 kernel/src/rtc.rs 123 0
-kernel/src/sched/driver.rs 711 0
+kernel/src/sched/driver.rs 716 0
 kernel/src/sched/dump.rs 241 0
 kernel/src/sched/kthread.rs 159 0
 kernel/src/sched/mod.rs 25 0

@@ -2369,7 +2369,10 @@ pub const KNOWN_RED: &[Red] = &[
              CpuSched` at `sched/driver.rs:219`, the same static reading as a value only a \
              stray write produces, and both after cpu7 had already completed a pass. 20 loaded \
              `sched_stress` runs green at 4.27x-8.00x host width against the 1.41x that took \
-             this one. A red under this name now is a new measurement",
+             this one. A red under this name now is a new measurement — and the two \
+             sightings that arrived after this row are accounted for: both are the \
+             direction-flag stray writer, and the T14 re-measurement that closed them \
+             took 17,555 KVM boots across four arms without one death of any kind",
         ),
         what: "`QEMU disconnected` — the kernel panicked at \
                `alloc/src/collections/btree/navigate.rs:161`, `Option::unwrap()` on `None` \
