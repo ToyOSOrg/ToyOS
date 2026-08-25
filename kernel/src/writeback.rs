@@ -61,7 +61,7 @@
 //!
 //! **[`drain_held`] cannot park, so it does not retry — it re-enqueues and
 //! leaves the retry to `iod`.** Its caller holds the VFS spinlock across the
-//! backlog, and a backoff there would park a lock-holder (§6.4). So a refusal on
+//! backlog, and a backoff there would park a lock-holder. So a refusal on
 //! that path keeps the file owed for `drain_all` to re-drive off the lock; the
 //! spawn that drove it may read a device still a beat behind for that one file
 //! and get the loud short read `loader::spawn` reports, which a retry resolves —
@@ -191,7 +191,7 @@ fn drain_retrying(mut backoff: impl FnMut(u32)) {
 /// **It cannot park, so it does not retry.** A budget refusal here re-enqueues
 /// the file (with `Deadline::never()`, never a give-up) and leaves it for
 /// [`drain_all`] to re-drive off the lock — backing off under the caller's
-/// spinlock would park a lock-holder (§6.4). A snapshot bounds the pass so a
+/// spinlock would park a lock-holder. A snapshot bounds the pass so a
 /// re-enqueued entry is not spun on. The module header says what that costs a
 /// spawn whose own file was the one refused.
 pub fn drain_held(vfs: &mut crate::vfs::Vfs) {

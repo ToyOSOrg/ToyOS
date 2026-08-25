@@ -75,7 +75,7 @@ const SHUTDOWN_DURABLE: Budget = Budget::of(
 /// Wait, bounded, for `/bin/logd` to put everything committed so far on the
 /// device.
 ///
-/// One caller, `SYS_SHUTDOWN` (§6.3), and the answer is a word rather than a
+/// One caller, `SYS_SHUTDOWN`, and the answer is a word rather than a
 /// protocol: a kernel opening an IPC connection to a userland server to ask it a
 /// question is the inversion this architecture exists to remove.
 /// `LogCursor::durable` already travels the other way on a call logd makes every
@@ -283,7 +283,7 @@ pub fn emit(level: Level, args: core::fmt::Arguments) {
     drop(guard);
 
     // **Who speaks this record, after the publication bracket has closed.**
-    // The two modes are phases and not fallbacks (§4.2), and the mode is the
+    // The two modes are phases and not fallbacks, and the mode is the
     // one word `console::mode` reads rather than a flag beside it.
     match console::mode() {
         // Nothing else can run yet, so the producer is the drainer. It costs

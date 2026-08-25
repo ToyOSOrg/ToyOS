@@ -2,15 +2,15 @@
 //! of the window, and the point is which actuator is armed.
 //!
 //! **The case loom cannot express.** Loom models threads, not CPU flags and not
-//! strict LIFO reentrancy on one CPU, so §2.4's fourth property — that a nested
-//! writer cannot collide with the writer it interrupted — has no model. Nothing
-//! on the host can stage it either: there is no injection that interrupts a
-//! kernel between two instructions of one function.
+//! strict LIFO reentrancy on one CPU, so the claim that a nested writer cannot
+//! collide with the writer it interrupted has no model. Nothing on the host can
+//! stage it either: there is no injection that interrupts a kernel between two
+//! instructions of one function.
 //!
 //! **The stimulus is a self-IPI sent from inside `emit` itself**, so when it
-//! arrives is a property of the flags and of nothing else. With §2.3a's bracket
-//! it is pending across the whole reservation and body copy and is delivered
-//! the instant the guard drops; without the bracket it lands where it was sent.
+//! arrives is a property of the flags and of nothing else. With the commit
+//! guard's bracket it is pending across the whole reservation and body copy and
+//! delivered the instant the guard drops; without it it lands where it was sent.
 //!
 //! `log-nested-emit` sends it from halfway through the body copy: the burst then
 //! commits a whole newer generation into the slot the interrupted writer is
@@ -23,8 +23,8 @@
 //! from the ring's declared drop-oldest policy.
 //!
 //! `log-nested-reserve` sends it from **between the shard-pointer read and the
-//! unlocked `xadd`** — the window §2.3a's bracket names first — and that one is
-//! observable, because the two orders a shard has stop being the same order.
+//! unlocked `xadd`** — the first of the two windows that bracket closes — and
+//! that one is observable, because the two orders a shard has stop agreeing.
 //! `emit` stamps `at_ns` before it reserves, so a handler that logs from inside
 //! that window takes the *lower* sequence numbers and carries the *later*
 //! timestamps, and the interrupted producer's own record lands above them with a

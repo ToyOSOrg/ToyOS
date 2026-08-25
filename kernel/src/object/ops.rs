@@ -489,7 +489,7 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
         KObjectRef::Connection(c) => write_pipe(c.tx(), buf),
         KObjectRef::Console(c) => {
             // Into this holder's line buffer, which emits whole lines under one
-            // `BackendGuard` (§4.4). It used to be a lossless append to the byte
+            // `BackendGuard`. It used to be a lossless append to the byte
             // ring that something else drained later, then a direct bounded
             // write to the backend; both made the unit of interleaving a `write`
             // syscall, and `println!` issues two of those per line. The

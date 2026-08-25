@@ -1,4 +1,4 @@
-//! The kernel's half of the scheduler core (spec §4's `kernel/src/sched/`).
+//! The kernel's half of the scheduler core; `toyos-sched` decides.
 //!
 //! * [`payload`] — what the kernel attaches to a task, and the two pieces the
 //!   core crate refuses to implement itself.

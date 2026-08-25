@@ -55,7 +55,7 @@ pub fn inbox_watchers() -> Vec<InboxId> {
 /// inside IRQ handlers, inside the scheduler and inside every syscall's locked
 /// region. `klogd` is the context that has just observed committed records and
 /// may take a lock, and posting there costs one wake per batch rather than one
-/// per record (§2.6a's argument, applied to the second consumer).
+/// per record — the trade the console consumer's own direct wake makes.
 ///
 /// **The readiness is an edge and not a level**, because a level is a question
 /// the kernel cannot answer: "is there anything for *you*" is a property of a
@@ -171,7 +171,7 @@ static DURABLE_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 /// Take the caller's claim, clamped, and keep the maximum.
 ///
 /// **`durable` crossed the trust boundary and decides how long a dying kernel
-/// waits, so it is clamped** (§6.4). The ceiling is the newest record the
+/// waits, so it is clamped.** The ceiling is the newest record the
 /// machine actually holds: an unclamped `u64::MAX` from a buggy `logd` makes
 /// the wait return immediately and the report is silently lost, which is
 /// exactly the "a device's own numbers are untrusted" rule one layer up.

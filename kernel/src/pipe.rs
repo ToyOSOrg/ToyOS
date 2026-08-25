@@ -136,13 +136,13 @@ struct Pipe {
     readers: u32,
     writers: u32,
     inbox_watchers: Vec<InboxId>,
-    /// This pipe end's waiter set (spec §8.6), as a completion subject. Held
+    /// This pipe end's waiter set, as a completion subject. Held
     /// by `Arc` so a blocking site can clone it out from under the table lock
     /// and hold it across its own park.
     ///
     /// **One list per end where there were two.** The `KWaitQueue` beside each
-    /// of these went with the park it served: after §5.6 a reader arms here
-    /// and parks on its own queue.
+    /// of these went with the park it served: a reader arms here and parks on
+    /// its own queue.
     readers_watch: Arc<Watch>,
     writers_watch: Arc<Watch>,
     /// An RT thread wrote to this pipe and the boost has not been claimed

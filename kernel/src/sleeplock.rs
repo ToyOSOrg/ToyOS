@@ -7,22 +7,22 @@
 //! **Preemption stays on for the holder, and that is the whole point.** A
 //! [`crate::sync::Lock`] guard raises the preempt count for its whole life, so
 //! its holder cannot be descheduled and a lock held across a device round trip
-//! pins a CPU for the length of that trip — which is §1.1's finding, four
-//! spinlocks deep at the moment of a disk transfer. A [`SleepGuard`] raises
+//! pins a CPU for the length of that trip: at the moment of a disk transfer
+//! this kernel is four ticket spinlocks deep. A [`SleepGuard`] raises
 //! nothing, so `scheduler::assert_baseline` keeps meaning exactly what it means
 //! today: *a spinlock is held*.
 //!
-//! **Nothing in the kernel holds one yet.** The four statics of §9
+//! **Nothing in the kernel holds one yet.** The four statics that will hold one
 //! (`vfs::VFS`, `fat32_adapter::VOLUMES`, `xhci::XHCI`, `process::ProcessData`)
 //! convert together, because converting any one of them alone parks with the
-//! other three still ticket locks and trips `assert_baseline` by construction
-//! (§21.1). So this module is `allow(dead_code)` until they do. What keeps it
+//! other three still ticket locks and trips `assert_baseline` by construction.
+//! So this module is `allow(dead_code)` until they do. What keeps it
 //! honest meanwhile is not the kernel but `kernel-loom`, which compiles this
 //! file a second time and drives the real acquire.
 //!
 //! **This file is compiled a second time by `kernel-loom`**, so it may name only
-//! what that crate supplies — §16.1's layout requirement, the same one
-//! `completion::inbox` carries. Seven items in two modules
+//! what that crate supplies — the layout rule `completion::inbox` carries
+//! too. Seven items in two modules
 //! (`completion::{Outcome, Subject, Token, Watch, wait_uncancellable_until}`,
 //! `scheduler::{current_task, Parkable, TaskId}`), all of them either compiled
 //! there already or three lines of arithmetic. A file that named a pipe end or
@@ -56,7 +56,7 @@
 //! * **A `SleepLock` taken while a [`crate::sync::Lock`] is held must go through
 //!   [`SleepLock::try_lock`]** — [`Parkable::at_entry`] asserts the context's
 //!   baseline preempt depth, so the token a park needs cannot be made at that
-//!   depth. That is §8's ordering rule and it is enforced rather than reviewed.
+//!   depth. That ordering is enforced rather than reviewed.
 //!   The converse is free: a `Lock` may be taken while a `SleepGuard` is held.
 //! * **A `SleepLock` may not be acquired from inside an armed wait's
 //!   predicate.** `completion::arm` refuses a second arm on one inbox by name,
@@ -67,8 +67,8 @@
 
 // **Retired by the change that gives this type its first holder.** Every item
 // below has a caller in `kernel-loom/tests/sleep_lock.rs` and none in the
-// kernel, because a lock converted alone parks with the other three of §9 still
-// ticket locks and trips `assert_baseline` by construction (§21.1). Deleting
+// kernel, because a lock converted alone parks with the other three still
+// ticket locks and trips `assert_baseline` by construction. Deleting
 // the primitive and writing it again at the conversion would land it and its
 // four callers in one commit.
 #![allow(dead_code)]
@@ -143,9 +143,8 @@ pub struct SleepLock<T> {
     /// **Not part of the acquire.** Mutual exclusion is the ticket pair above;
     /// this word is written after the lock is won and cleared before it is
     /// released, and its only readers are [`SleepLock::holder`] and the
-    /// self-deadlock refusal. §16.2 prices it: one plain store per acquire and
-    /// one per release, on top of the two read-modify-writes a `Lock` already
-    /// pays.
+    /// self-deadlock refusal. It costs one plain store per acquire and one per
+    /// release, on top of the two read-modify-writes a `Lock` already pays.
     holder: AtomicU64,
     /// Contenders arm here, each with its own ticket as the token, so the
     /// release wakes exactly one and it is the right one.
@@ -186,18 +185,17 @@ impl<T> SleepLock<T> {
 
     /// Acquire, parking if it is held.
     ///
-    /// **The park is uncancellable, and §7.4 is the whole reason.** A killed
-    /// thread's teardown takes `ProcessData` and then the VFS through
+    /// **The park is uncancellable, and a killed thread's teardown is the whole
+    /// reason.** That teardown takes `ProcessData` and then the VFS through
     /// `ops::close_all`, so a kill that ended a lock acquire would either leave
     /// the teardown unable to acquire anything — `WaitTicket::commit` refuses to
     /// park a killed task on an ordinary ticket — or hand the caller a second
     /// `Cancelled` and trip RT4. What ends this wait is the holder's own
-    /// release, which is bounded because a killed *holder* runs its unwind and
-    /// drops the guard on the way out (§7.2); `retire_task`'s tripwire prices
-    /// "every sleep-lock acquire on the way" for exactly this reason.
+    /// release, which is bounded because a killed *holder* leaves through its
+    /// own unwind and drops the guard on the way out; `retire_task`'s tripwire
+    /// prices "every sleep-lock acquire on the way" for exactly this reason.
     ///
-    /// So there is no `Result` here and no `?` at any call site, which is also
-    /// what §8's signature says.
+    /// So there is no `Result` here and no `?` at any call site.
     #[track_caller]
     pub fn lock<'p>(&'p self, p: &'p Parkable) -> SleepGuard<'p, T> {
         let me = current_task();
@@ -233,7 +231,7 @@ impl<T> SleepLock<T> {
     ///
     /// Total, and it takes no [`Parkable`]: that is what makes it the answer for
     /// a caller that already holds a [`crate::sync::Lock`], and the one
-    /// filesystem door boot has (§6.1).
+    /// filesystem door boot has.
     pub fn try_lock(&self) -> Option<SleepGuard<'_, T>> {
         self.take(word_of(current_task()))
     }
@@ -262,9 +260,9 @@ impl<T> SleepLock<T> {
     /// **`None` is not "free".** It is "not a task", which is what a lock nobody
     /// holds and a lock boot took through [`SleepLock::try_lock`] both look
     /// like: the answer exists for a reader that wants to name a *thread*, and
-    /// neither of those is one. §17.1 is where this is priced — it buys
-    /// `sched::dump` nothing, because the dump reaches none of §9's four locks,
-    /// and it exists for the self-deadlock refusal in [`SleepLock::lock`].
+    /// neither of those is one. It buys `sched::dump` nothing — the dump reaches
+    /// none of the four locks that will convert — and exists for the
+    /// self-deadlock refusal in [`SleepLock::lock`].
     ///
     /// One relaxed load, and it may be taken from any context including the
     /// panic path.

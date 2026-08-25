@@ -1,7 +1,6 @@
-//! Per-CPU IRQ event records — the scheduler-core spec's Stage 2 `irq_ring`
-//! (spec §11), generalizing the audio completion pattern to every MSI-X
-//! source (B10): the ISR records the IRQ-time timestamp on the CPU that took
-//! the interrupt and sets `need_resched`; that CPU's next scheduler entry
+//! Per-CPU IRQ event records, generalizing the audio completion pattern to
+//! every MSI-X source: the ISR records the IRQ-time timestamp on the CPU that
+//! took the interrupt and sets `need_resched`; that CPU's next scheduler entry
 //! (`sched::driver::drain_irqs`) consumes the record and converts it into
 //! waiter wakes, inbox completions, or controller polls. The audio DATA path
 //! (per-completion `(mask, timestamp)` records read by soundd) lives in

@@ -87,9 +87,9 @@ pub enum Structure {
     Drhd(Drhd),
     Rmrr(Rmrr),
     /// A type this kernel walks past. Carried rather than dropped so the skip
-    /// can be logged with its type: a machine carrying an `ATSR` — which §10.1
-    /// rejects along with device-TLB itself — is a machine somebody will want
-    /// to know is under-configured, rather than silently served.
+    /// can be logged with its type: a machine carrying an `ATSR` — which this
+    /// kernel rejects along with device-TLB itself — is a machine somebody will
+    /// want to know is under-configured, rather than silently served.
     Skipped { kind: u16, at: usize, len: usize },
 }
 
@@ -286,9 +286,9 @@ impl Scope {
     }
 
     /// The I/O APIC id or HPET number this scope names, for the two scope
-    /// types that carry one. §6.3 needs the first: every redirection entry the
-    /// kernel has already programmed has to be reprogrammed into remappable
-    /// form before `IRE` is set, and this is which unit each belongs to.
+    /// types that carry one. Interrupt remapping needs the first: every
+    /// redirection entry the kernel has programmed has to be reprogrammed into
+    /// remappable form before `IRE` is set, and this is which unit each is on.
     pub fn enumeration_id(&self) -> u8 {
         self.field(SCOPE_ENUMERATION_ID)
     }

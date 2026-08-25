@@ -328,7 +328,7 @@ pub fn drain_ordered(cursor: &mut Cursor, out: &mut impl RecordSink) -> usize {
 /// The `at_ns` of the newest committed record in the machine, or zero when no
 /// shard holds one.
 ///
-/// **The clamp's ceiling** (§6.4). `LogCursor::durable` is a number a userland
+/// **The clamp's ceiling.** `LogCursor::durable` is a number a userland
 /// process wrote and a dying kernel waits on, so it is bounded by something the
 /// kernel knows for itself: nothing can have been made durable that is newer
 /// than the newest record there is. An unclamped `u64::MAX` from a buggy

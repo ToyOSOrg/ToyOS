@@ -7,7 +7,7 @@
 //! gone. Each variant carries what its own re-check needs, because the queue is
 //! registered on *before* the condition is re-read — which is what closes the
 //! check-then-block window — and nothing may hold a `with_process_data` guard
-//! across the park, which is the §6.4 tripwire by construction.
+//! across the park, which the baseline tripwire refuses by construction.
 //!
 //! The buffers arrive already bounded: `super::dispatch` turned the caller's
 //! pointer and length into a [`UserBytes`] or [`UserBytesMut`] window before

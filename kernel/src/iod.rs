@@ -9,18 +9,17 @@
 //! **Why the write-back cannot stay where it is.** `OpenFileState::drop`
 //! (`object/file.rs`) used to take the VFS lock and flush. Once that lock is a
 //! `SleepLock` the flush needs a [`crate::scheduler::Parkable`], and a `Drop`
-//! impl cannot take one — which is §6.1's compile-time property stated from the
-//! other end, and the reason this thread exists rather than a rule saying
-//! "don't block in `Drop`". So the flush became a queue (`crate::writeback`):
+//! impl cannot take one — a compile-time property, which is why this thread
+//! exists rather than a rule saying "don't block in `Drop`". So the flush
+//! became a queue (`crate::writeback`):
 //! the last close pins the file and pushes it, and this thread drains it and
 //! runs the teardown the `Drop` used to. `SYS_CLOSE` never promised durability,
 //! so it does not wait; `SYS_FSYNC` did, so it still flushes inline — while the
 //! VFS is a spinlock a caller that asked for durability takes it directly, and
 //! only once it is a sleep lock does `fsync` too have to submit here and park.
 //!
-//! **The queue is C12's and the thread is C6's**, which is what §21 means by
-//! "`iod`'s body is C12's". The drain landed with the write-back queue (wall 4
-//! of `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`); the loop below
+//! **The drain landed with the write-back queue** (wall 4 of
+//! `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`); the loop below
 //! calls `writeback::drain_all`, and `SYS_SHUTDOWN` calls the same function
 //! before `sync_all` so a file closed but not yet drained is still made durable
 //! on the way down. This chunk converts no lock: the VFS is still a spinlock and
@@ -29,14 +28,14 @@
 //! **One `iod`, machine-wide, is a serialisation point, and now it has a
 //! number.** At the 128-core target the root `CLAUDE.md` sets, one thread
 //! draining the write-back of 128 cores' closed files is a serialisation point
-//! §10 leaves per-CPU as the obvious escape from. With the write-back queue
-//! landed (C12) the producers exist, so it was measured: a 6-thread burst that
+//! per-CPU `iod`s are the obvious escape from. With the write-back queue
+//! landed the producers exist, so it was measured: a 6-thread burst that
 //! closes 360 modified files on NVMe `/home` at once drove the worst
 //! close-to-drained latency to **~72 ms** — the whole backlog drained serially
 //! at ~200 µs a file, because each drain holds the VFS spinlock across an NVMe
 //! round trip and `iod` is one thread. That is the serialisation, quantified: a
 //! burst of N closes has a tail of N times the per-file drain, and per-CPU
-//! `iod`s (§10) are the answer if that tail ever matters. The lock conversion
+//! `iod`s are the answer if that tail ever matters. The lock conversion
 //! this chunk unblocks turns the held spinlock into a park, which shortens the
 //! per-file cost but not the one-thread serialisation.
 //!
@@ -75,7 +74,7 @@ extern "C" fn body(_arg: u64) -> ! {
     if crate::actuator::sched_operation_nesting() {
         crate::sched_gate::run("iod");
     }
-    // Armed once and held across the loop — §5.3a's edge contract: a producer
+    // Armed once and held across the loop — the edge contract: a producer
     // that pushes while this thread is draining must find the watch still
     // armed. The subject is the write-back queue's own watch, which is where a
     // closed file's `writeback::enqueue` posts.

@@ -267,8 +267,8 @@ impl Shard {
     /// One non-`lock`-prefixed `xadd`, which is atomic against an interrupt on
     /// its own CPU — instructions retire whole — and **not** atomic against
     /// another CPU. The [`crate::arch::LogCommitGuard`] passed to
-    /// `arch::percpu_fetch_add` is what makes the second half true;
-    /// `log/mod.rs`'s `reserve` is the only caller and §2.3a is the argument.
+    /// `arch::percpu_fetch_add` is what makes the second half true; that
+    /// guard's header carries the argument, and `reserve` is the one caller.
     ///
     /// # Safety
     /// The caller must be the CPU this shard belongs to, and `guard` must stay
@@ -331,12 +331,12 @@ impl Shard {
         let words = msg_words(len);
         for i in 0..words {
             // **The nesting gate's injection point, here rather than anywhere
-            // tidier because "mid-body" is the whole claim** (§9.2):
+            // tidier because "mid-body" is the whole claim**:
             // `log-nested-emit` sends this CPU its own IPI from exactly here,
             // and whether it is delivered before this loop finishes is decided
-            // by §2.3a's bracket and by nothing else. `const fn … { false }` in
-            // a shipping kernel and in `kernel-loom`'s shim, so this folds to
-            // the loop it is written inside.
+            // by the commit guard's bracket and by nothing else. `const fn …
+            // { false }` in a shipping kernel and in `kernel-loom`'s shim, so
+            // this folds to the loop it is written inside.
             if i * 2 == words && crate::actuator::log_nested_emit() {
                 super::nested::mid_body();
             }
