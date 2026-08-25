@@ -65,7 +65,9 @@ has a bounded life: whoever next reviews it either promotes it to a `defect`
 (something real that someone should act on — a fix, a measurement, an
 instrument) or moves its one durable line to the module header or doc comment
 at the site that owns the subject and deletes the file by the closing
-procedure below. "May never be worth fixing" is a reason to fold it to the
+procedure below. A fold moves the invariant, never the investigation: one
+clause, no dates, no story — the deletion commit carries those, and
+`src/prosegate.rs`'s ledger refuses the fold that arrives as a paragraph. "May never be worth fixing" is a reason to fold it to the
 site, never a reason to keep the file; when unsure, promote — a wrong
 promotion costs a later demotion, a wrong fold loses tracked truth.
 
