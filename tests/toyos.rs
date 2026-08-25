@@ -10152,16 +10152,17 @@ fn run_machine_test(
             }
             // `verdict_due` keeps a CPU awake for one pass. If it ever failed to
             // self-clear, that CPU would spin instead of halting — the exact
-            // failure the quarantine path already had once.
-            let health = result.serial.matches("sched: cpu=").count();
-            if health > 50 {
+            // failure the quarantine path already had once. `log_health`
+            // prints at a fixed rate regardless, so the trip-delta check is
+            // read from the counter inside the line rather than a count of
+            // the lines themselves.
+            if let Some((cpu, delta)) = idle_is_spinning(&result.serial) {
                 return Err(format!(
-                    "{health} idle-health lines — the health verdict is holding a CPU awake"
+                    "cpu{cpu}'s idle-trip counter moved by {delta} within the capture — spinning, not halting"
                 ));
             }
             eprintln!("  [i8042] {}", quiet.trim());
             eprintln!("  [i8042] {}", line.trim());
-            eprintln!("  [i8042] {health} idle-health lines — the CPU still halts");
             Ok(())
         }
         "operation_nesting" => {
