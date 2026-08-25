@@ -165,7 +165,7 @@ kernel/src/sched/payload.rs 124 0
 kernel/src/sched/reap_gate.rs 71 1
 kernel/src/sched/waitqs.rs 62 0
 kernel/src/sched_gate.rs 45 0
-kernel/src/scheduler.rs 641 0
+kernel/src/scheduler.rs 642 0
 kernel/src/shootdown.rs 95 0
 kernel/src/sleeplock.rs 176 0
 kernel/src/symbols.rs 135 0
