@@ -7042,8 +7042,19 @@ const MERGE_MOTIONS: usize = 4;
 fn i8042_mouse(boot: &mut Boot) -> Result<(), String> {
     let qemu = &mut boot.qemu;
     let boot = qemu.boot_log().to_string();
-    if !boot.contains("i8042: aux rate=100") {
+    // **The whole line, because its tail is the verdict.** The unmask's result
+    // used to be discarded and the line stopped at the APIC, so a GSI that
+    // never unmasked printed exactly what a working one did — and every packet
+    // this test injects below would then arrive nowhere, which is the check
+    // that the word is not just a word.
+    let Some(aux) = boot.lines().find(|l| l.contains("i8042: aux rate=100")) else {
         return Err(format!("the TrackPoint path never came up:\n{boot}"));
+    };
+    if !aux.ends_with(" on") {
+        return Err(format!(
+            "the aux line does not end in the unmask's verdict, so a masked GSI reads as a \
+             live one: {aux:?}"
+        ));
     }
 
     const BURST: usize = 1000;

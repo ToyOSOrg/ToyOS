@@ -67,7 +67,7 @@ kernel/src/device.rs 51 0
 kernel/src/drivers/acpi.rs 241 0
 kernel/src/drivers/gop.rs 27 0
 kernel/src/drivers/hda.rs 190 0
-kernel/src/drivers/i8042/mod.rs 663 0
+kernel/src/drivers/i8042/mod.rs 666 0
 kernel/src/drivers/i8042/tally.rs 100 0
 kernel/src/drivers/ioapic.rs 80 0
 kernel/src/drivers/mod.rs 20 2
@@ -346,7 +346,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4631 23
+tests/toyos.rs 4636 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
