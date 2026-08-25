@@ -1754,9 +1754,9 @@ pub const KNOWN_RED: &[Red] = &[
              (p = 2.9e-9); a parked silent death reads `RFL=[D--Z-P-]` with a non-canonical \
              RIP (PR #198). Same instrument — TCG, twelve wide, a boot — so the class A/B \
              transfers, and the cold-build correlation the write-up found is the load that \
-             raised the rate. A clean exit before the marker now is a new measurement. What \
-             the write-up still owes is the harness's, not the kernel's: the arm that reports \
-             this exit drops `seen` and the UART log",
+             raised the rate. A clean exit before the marker now is a new measurement. The \
+             arm that reports this exit (`tests/common/qemu.rs`) now includes `seen` and the \
+             UART log rather than dropping both",
         ),
         what: "`[qemu] QEMU died before ===READY=== (status: Ok(ExitStatus(unix_wait_status(0))))` \
                — QEMU exited *successfully* before the guest said anything, so the capture holds \
@@ -1766,7 +1766,7 @@ pub const KNOWN_RED: &[Red] = &[
                    `[host-slots]` naming `toyos-capwin`'s suite on the same host; the run's own \
                    width line was `fastest boot 1380 ms against the reference 1320 ms`, 1.05x, so \
                    this is not the slow-phase shape",
-        source: "issues/build/qemu-exits-clean-before-ready.md",
+        source: "tests/toyos.rs screen_fatal_halt",
         measured: "2026-08-15",
     },
     Red {
@@ -1784,7 +1784,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "the same full `cargo test` on `wt/toyos-ciwall`; the same day the signature also \
                    took `log_backing_read_error` on `wt/toyos-logd56` and, through the screendump \
                    wait rather than the ready marker, `screen_console_shell` on `wt/toyos-capwin`",
-        source: "issues/build/qemu-exits-clean-before-ready.md",
+        source: "tests/common/qemu.rs double_fault_stack",
         measured: "2026-08-15",
     },
     // ---------------------------------------------------------------------

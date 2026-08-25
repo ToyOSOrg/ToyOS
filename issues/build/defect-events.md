@@ -111,7 +111,7 @@ ledger was written.
   other half") found no row or file that attributes a standing boot flake
   (`diskless_boot`, `screen_console_shell`'s `QEMU died before the
   screendump` mode, `kernel_heartbeat`'s clean-exit-before-`===READY===`
-  family in `issues/build/qemu-exits-clean-before-ready.md`) to W^X, to the
+  family, PR #202's direction-flag silent reset) to W^X, to the
   NX bit, or to the boot-time CPU-feature assertion at
   `kernel/src/arch/control_regs.rs:238-242` that panics if a CPU lacks the NX
   bit W^X depends on. Whoever placed this row in the brief holds the citation

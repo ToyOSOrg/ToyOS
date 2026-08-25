@@ -236,8 +236,7 @@ changes.
   `cargo run -- --known-red diskless_boot` answered `NOT ON THE LIST`. Not
   investigated. **Retired 2026-08-22**: under `-no-reboot` a status-0 exit before
   the marker is a guest that reset itself, the silent death of the direction-flag
-  class PR #202 closed — `issues/build/qemu-exits-clean-before-ready.md` carries
-  the reading and the redlist row carries the retirement.
+  class PR #202 closed — the redlist row carries the retirement.
 - **`nvme_large_device`** — same run, same session, and **its mechanism was not
   this file's**: a machine-wide `KERNEL PANIC: execute unmapped address at 0x1b`
   in ring 0 on a `spawn` syscall — the console `metal_sim_input` above owes,
