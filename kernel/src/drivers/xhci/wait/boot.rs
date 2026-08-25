@@ -81,17 +81,15 @@ pub const PORT_POLL: Cadence = Cadence::every(
 /// has to be detected all over again — and detection is a physical process:
 /// port power settling, a USB2 pull-up being debounced, a USB3 link running
 /// receiver detection and training. A scan issued in the same microsecond as
-/// `USBCMD.R/S` reports an empty bus on any machine whose ports are real. That
-/// is what the laptop did on both of its controllers while booting off a stick
-/// plugged into one of them: `controller started` and `no HID devices` share a
-/// millisecond in its log and no `port N connected` line sits between them.
+/// `USBCMD.R/S` reports an empty bus on any machine whose ports are real —
+/// including one booting off a stick plugged into the controller being scanned.
 ///
 /// QEMU's controller has no port state machine and no timer. `xhci_reset()`
 /// calls `xhci_port_update()` for every port, which assigns PORTSC from the QOM
 /// tree — CCS, CSC, PP, the speed, and PED for a SuperSpeed device — so the
-/// register is in its terminal state before the guest's first MMIO access. That
-/// is the whole reason a driver that never waited here passed every test in
-/// this suite.
+/// register is in its terminal state before the guest's first MMIO access —
+/// which is why a driver that never waited here passes every test in this
+/// suite.
 ///
 /// Machine-wide rather than per controller because the wait is wall-clock: a
 /// laptop with two xHCs would otherwise pay for an interval both of them were
@@ -142,10 +140,10 @@ fn await_connect_settle(controllers: &[XhciController]) {
 /// shape of this function. Every read of an event ring in this driver is
 /// `poll_if_pending`, which runs only behind an `irq_ring` record that
 /// nothing but vector 0x21's ISR publishes — so a controller whose messages
-/// cannot reach a CPU is one whose ring is never read again. This used to log
-/// "no MSI-X capability, using polled mode" and carry on: there is no polled
-/// mode, and every device on such a controller enumerated, logged itself
-/// ready, and delivered nothing for the life of the boot.
+/// cannot reach a CPU is one whose ring is never read again. Logging "no MSI-X
+/// capability, using polled mode" and carrying on would be a lie: there is no
+/// polled mode, and every device on such a controller would enumerate, log
+/// itself ready, and deliver nothing for the life of the boot.
 fn arm_interrupt(pci_dev: &PciDevice) -> Option<&'static str> {
     if pci_dev.enable_msix(XHCI_VECTOR) {
         return Some("MSI-X");
@@ -157,9 +155,9 @@ fn arm_interrupt(pci_dev: &PciDevice) -> Option<&'static str> {
 ///
 /// Every one, not the first: a Tiger Lake laptop has two — the Thunderbolt
 /// block's at 00:0d.0 and the PCH's at 00:14.0, identical in class, subclass
-/// and prog_if — and its keyboard and USB-A ports are on the second. Taking
-/// the first match reported that the laptop had no USB HID at all, which was true
-/// of that controller and false of the machine.
+/// and prog_if — and its keyboard and USB-A ports are on the second. Taking the
+/// first match reports that the laptop has no USB HID at all: true of that
+/// controller and false of the machine.
 pub fn init(devices: &[PciDevice]) {
     // Once for the machine, not once per controller: it reads no register and
     // touches no device, so a second run would say the same thing twice.
@@ -194,9 +192,9 @@ pub fn init(devices: &[PciDevice]) {
 
     if controllers.is_empty() {
         // A machine with no xHC and a machine whose xHCs this driver refused
-        // are different machines, and the second used to print the first's
-        // line. The per-controller refusal above says why; this says that
-        // nothing was left.
+        // are different machines, so they do not share a line. The
+        // per-controller refusal above says why; this says that nothing was
+        // left.
         match present {
             0 => log!("xHCI: no controller on this machine, USB input unavailable"),
             n => log!("xHCI: {n} controller(s) present, none of them usable, USB unavailable"),
@@ -217,8 +215,8 @@ pub fn init(devices: &[PciDevice]) {
 /// Supported Protocol capabilities (§7.2).
 ///
 /// **A controller that says nothing leaves every port unknown**, and unknown is
-/// driven the USB2 way — which is what every port got before this was read at
-/// all, so a controller this cannot describe is no worse off than it was.
+/// driven the USB2 way — so a controller this cannot describe is driven exactly
+/// as one whose capabilities are never read.
 fn read_protocols(
     bar: &Mmio,
     bar_size: u64,
@@ -261,7 +259,7 @@ fn read_protocols(
     let (usb2, usb3) = protocols.counts(max_ports);
     // The line that says whether this machine's SuperSpeed ports are known to
     // be SuperSpeed. A zero here on a controller that has them is the laptop's
-    // failure waiting to happen, and it used to be invisible.
+    // failure waiting to happen.
     log!("xHCI: {usb2} USB2 and {usb3} USB3 port register(s) of {max_ports} named, \
          {refused} capability(ies) refused");
     protocols
@@ -418,10 +416,8 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
             for i in 0..layout.scratch_count {
                 let buf = dma.phys() + (layout.scratch_buffers + i * PAGE) as u64;
                 // Volatile because the controller reads this array as soon as
-                // DCBAA[0] points at it. Bounded for the whole entry, where the
-                // form before the sweep
-                // (`(dma.ptr_at(scratch_array) as *mut u64).add(i)`) bounded only
-                // the array's base; `scratch_count` is the controller's own
+                // DCBAA[0] points at it. Bounded for the whole entry and not
+                // just the array's base: `scratch_count` is the controller's own
                 // HCSPARAMS2 figure and `Layout` sized the pool for exactly that
                 // many. Aligned: `scratch_array` is page-aligned and entries are
                 // 8 bytes. Exclusive: DCBAA[0] is written after this loop, so the
@@ -504,8 +500,7 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
     // not a formality: it has been reset, started and armed, so dropping it
     // leaves a live interrupter with nothing draining its event ring. It is
     // also the ordinary state of the target laptop, whose keyboard is PS/2 and
-    // whose touchpad is I2C-HID — under metal-sim a `None` here reached
-    // `kernel_main`'s `.expect` and panicked the boot.
+    // whose touchpad is I2C-HID.
     Some(XhciController {
         pci: *pci_dev,
         op_base,
@@ -554,16 +549,14 @@ pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Pro
 
     // A port that asserts CCS and then never finishes — a device pulled between
     // the scan and the reset, a marginal cable, a reset the controller will not
-    // run — costs that port and not the boot. This spin had no deadline, on the
-    // boot CPU, before the scheduler exists and with nothing logged.
+    // run — costs that port and not the boot, because this spin is bounded.
     if super::settles(|| reset_done(ctrl, port_idx)) {
         return configure(ctrl, port_idx);
     }
 
     // A hot reset a SuperSpeed link could not take leaves it Inactive, and
     // §4.19.1.2.4 has exactly one way out of that. Without this the port is
-    // lost for the boot, which on the laptop is a USB-A socket that mounts
-    // nothing, two boots out of two.
+    // lost for the boot — on the laptop, a USB-A socket that mounts nothing.
     if kind == Reset::Hot && protocol == Some(Protocol::Usb3) {
         log!("xHCI: port {} did not take a hot reset (link {:?}); warm resetting it",
             port_idx + 1, ctrl.read_portsc(port_idx).link_state());
