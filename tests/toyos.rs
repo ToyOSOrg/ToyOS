@@ -581,6 +581,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
     // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
     ("double_panic_names_the_fault", Sched::Parallel, Tier::Nightly),
+    // The third shape: a `#PF` inside a panic, which is the one
+    // `fatal_exception`'s recursive short-circuit exists for and the one it
+    // never classified. Same boot shape as its two neighbours — dies inside the
+    // boot phases at the marker, no userland — so Parallel and, pending its
+    // first measured run, Fast.
+    ("nested_fault_is_recursive", Sched::Parallel, Tier::Fast),
     // §9.1's conservation law across `SYS_LOG_READ`, one registered name per
     // width, and §9.2's nesting gate at one CPU. **Three names because one over
     // three boots measured 17,112 ms in CI** — over the fast tier's line, and
@@ -9365,6 +9371,47 @@ fn run_machine_test(
                 ));
             }
             eprintln!("  [double] {}", raw_line.trim());
+            Ok(())
+        }
+        "nested_fault_is_recursive" => {
+            // **The third second-failure shape, and the one that was silently
+            // misclassified.** `reentry_names_the_first_panic` stages a panic
+            // inside a panic and `double_panic_names_the_fault` a panic on top
+            // of a fault; this stages a `#PF` inside a panic, which is the case
+            // `fatal_exception`'s recursive short-circuit was written for.
+            //
+            // `page_fault_handler` swaps this CPU's fault state to `PageFault`
+            // before it looks at what was there, so until the fix the nested
+            // `#PF` arrived at `fatal_exception` looking like the first crash on
+            // the CPU: the branch printed no `RECURSIVE` and ran the whole
+            // second report. `test-late-panic` is the first crash and
+            // `fault-in-report` is the wild read inside its report.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["test-late-panic", "fault-in-report"],
+                    ready_marker: "RECURSIVE",
+                    ..Default::default()
+                },
+            );
+            let mut nested = serial::Serial::boot(&qemu);
+            nested.push(&qemu.uart_log());
+            let line = nested.must_say("RECURSIVE")?;
+            if !line.contains("FAULT rip=") {
+                return Err(format!(
+                    "`RECURSIVE` is not on `fatal_exception`'s own line, so it is some other \
+                     word: {line:?}"
+                ));
+            }
+            eprintln!("  [nested] {}", line.trim());
+            // And the branch bounds what it claims to: the arm that fires skips
+            // `crash_report`, so the nested fault writes no second report. The
+            // first panic's report never ran either — the wild read is at its
+            // head — so a stack scan anywhere in the capture is the second one.
+            nested.must_not_say("Scanning kernel stack at")?;
+            eprintln!("  [nested] the recursive arm bounded the report: no second crash report");
             Ok(())
         }
         "pre_idle_wedge_speaks" => {
