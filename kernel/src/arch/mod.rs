@@ -4,9 +4,7 @@
 //! Every `unsafe` block under here carries a `SAFETY:` comment saying why it is
 //! irreducible as well as why it is sound, and the attribute above is what keeps
 //! that true — it composes with the `-D warnings` both kernel clippy invocations
-//! already carry, so a new block without one does not build. It is also the
-//! last of these a kernel area needed: `main.rs`'s crate-level warn carries an
-//! `allow` only for `sched/`, `iommu/` and `log/` now.
+//! already carry, so a new block without one does not build.
 //!
 //! Where the machine access lives: [`cpu`] is one instruction per function and
 //! the bottom of the tree, [`percpu`] owns `PerCpu`, its `gs:` offsets and the
@@ -34,16 +32,12 @@ pub mod tlb;
 /// preempted on this CPU.
 ///
 /// **IF is clear, and TF cannot be set.** IF excludes IRQ delivery and scheduler
-/// preemption, and `cli` is what this closes with. TF used to be cleared here
-/// too, and had to be: Ring 3 could set it, `SYSCALL` did not mask it, and the
-/// `#DB` handler logged before returning — so a single-stepping thread could
-/// reserve a whole newer generation while the interrupted writer was halfway
-/// through its slot body. **Neither half is true any more, so the second write
-/// is gone rather than kept for safety.** `emit` is kernel-only, and the two
-/// ways into Ring 0 both settle the bit before a kernel instruction runs:
-/// `arch::syscall::init` names TF in `IA32_FMASK`, and every interrupt and trap
-/// gate clears it (SDM Vol. 3A §6.12.1). No Ring 0 code in this kernel runs with
-/// TF set, and a `#DB` from Ring 3 ends the process rather than reporting.
+/// preemption, and `cli` is what this closes with. TF is not written here
+/// because it cannot be set: `emit` is kernel-only, and the two ways into Ring 0
+/// both settle the bit before a kernel instruction runs — `arch::syscall::init`
+/// names TF in `IA32_FMASK`, and every interrupt and trap gate clears it (SDM
+/// Vol. 3A §6.12.1). No Ring 0 code in this kernel runs with TF set, and a `#DB`
+/// from Ring 3 ends the process rather than reporting.
 ///
 /// The bracket is deliberately narrower than formatting: it covers only the
 /// shard pointer and identity reads, the unlocked `xadd`, and the body
@@ -100,7 +94,7 @@ impl LogCommitGuard {
             // resume its body copy after a whole newer generation has committed
             // into the same slot. `log_reserve_window_negative` is what reads
             // it. In the shipping kernel the accessor is `const fn … { false }`
-            // and this folds to the unconditional `cli` it replaced.
+            // and this folds to an unconditional `cli`.
             if crate::actuator::log_unbracketed_reserve() {
                 return Self { rflags, _not_send_sync: core::marker::PhantomData };
             }
