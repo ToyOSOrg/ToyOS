@@ -269,7 +269,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
     // thread runs in the one every CPU is already in between two user threads,
     // and naming it here is what keeps one declaration deciding every task's
     // `cr3`.
-    let sched = scheduler::enqueue_new(
+    let (sched, _dst) = scheduler::enqueue_new(
         TaskId(pid, tid),
         stack,
         entry_rsp,

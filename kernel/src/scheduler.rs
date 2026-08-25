@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use hashbrown::HashMap;
 use toyos_sched::fair::{ShareState, QUANTUM_NS};
-use toyos_sched::hw::{Machine, Nanos};
+use toyos_sched::hw::{CpuId, Machine, Nanos};
 use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
 
 use crate::arch::percpu;
@@ -448,6 +448,7 @@ pub fn global_min_vruntime() -> u64 {
 }
 
 /// Build and place a new task. The caller supplies everything but the share.
+/// Returns the CPU it was placed on alongside what the process table keeps.
 pub fn enqueue_new(
     id: TaskId,
     kernel_stack: crate::process::OwnedAlloc,
@@ -455,7 +456,7 @@ pub fn enqueue_new(
     address_space: crate::process::PageTables,
     fs_base: u64,
     symbols: alloc::sync::Arc<crate::symbols::SymbolTable>,
-) -> ThreadSched {
+) -> (ThreadSched, CpuId) {
     driver::spawn(NewTask {
         id,
         kernel_stack,

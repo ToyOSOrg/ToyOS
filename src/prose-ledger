@@ -478,7 +478,7 @@ toyos-mixer/src/format.rs 123 0
 toyos-mixer/src/gain.rs 43 0
 toyos-mixer/src/lib.rs 43 0
 toyos-mixer/src/mix.rs 38 0
-toyos-mixer/src/shape.rs 98 0
+toyos-mixer/src/shape.rs 103 0
 toyos-mixer/src/stats.rs 122 0
 toyos-pci/src/bar.rs 97 0
 toyos-pci/src/lib.rs 20 0
@@ -626,7 +626,7 @@ userland/logd/src/wall.rs 100 3
 userland/netd/src/main.rs 237 0
 userland/paint/src/main.rs 25 0
 userland/proctest/src/main.rs 0 0
-userland/shell/src/main.rs 52 0
+userland/shell/src/main.rs 54 0
 userland/snake/build.rs 0 0
 userland/snake/src/main.rs 9 0
 userland/soundd/src/backend.rs 56 0
@@ -639,9 +639,9 @@ userland/soundd/src/mix.rs 305 0
 userland/soundd/src/virtio.rs 92 0
 userland/sprite/src/lib.rs 17 0
 userland/sshd/src/main.rs 78 0
-userland/terminal/src/console.rs 79 0
+userland/terminal/src/console.rs 80 0
 userland/terminal/src/lib.rs 9 0
-userland/terminal/src/main.rs 43 0
+userland/terminal/src/main.rs 46 0
 userland/test-runner/src/kbd_close.rs 62 0
 userland/test-runner/src/log_close.rs 63 0
 userland/test-runner/src/log_gate.rs 251 1

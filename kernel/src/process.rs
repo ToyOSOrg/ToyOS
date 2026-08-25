@@ -1256,7 +1256,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     // Placed while still holding the table lock: teardown claims the process
     // under this lock, so a thread that passed the check above is fully visible
     // to the scheduler before any retire sweep can start.
-    let sched = scheduler::enqueue_new(
+    let (sched, _dst) = scheduler::enqueue_new(
         TaskId(parent_process, tid),
         ks_alloc,
         ks_rsp,
