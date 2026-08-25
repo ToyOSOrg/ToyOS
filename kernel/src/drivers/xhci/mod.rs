@@ -120,8 +120,7 @@ const CC_SHORT_PACKET: u32 = 13;
 
 /// A completion code, named where xHCI 1.2 Table 6-90 names it.
 ///
-/// The bare number is what every line in this driver used to print, and the
-/// device those lines are about is one that has stopped working on a machine
+/// A line carrying one is about a device that has stopped working on a machine
 /// with no debugger and often no serial port: `code 6` and `code 6 (Stall
 /// Error)` are the difference between reaching for the specification and
 /// reading the answer. The number is always there, because a controller can
@@ -176,7 +175,7 @@ impl core::fmt::Display for Completion {
 
 /// What the controller's answer to the one outstanding operation is *for*.
 ///
-/// Every variant is work the driver used to do by spinning inside a scheduler
+/// Every variant is work that may not be done by spinning inside a scheduler
 /// pass, which is what pulling the boot stick out of a laptop runs.
 enum What {
     /// Disable Slot, and what stops being reachable once it has completed.
@@ -221,10 +220,8 @@ impl core::fmt::Display for Answer {
 /// one controller.** `Profile::MetalHotplug` boots the disk as slot 1 on
 /// `00:02.0` and hot-plugs the mouse as slot 1 on `00:03.0`, so a line saying
 /// `slot 1` names two different devices and nothing reading the log can tell
-/// which. That is not hypothetical: a harness assertion counting endpoint
-/// recoveries counted the boot disk's as a mouse's on three CI runs
-/// (31405969578, 31424496450, 31601325987), and the same shape counted the
-/// boot stick's transport recovery as the disk under test's (31684437719).
+/// which — a harness assertion counting one device's endpoint recoveries counts
+/// the other's.
 ///
 /// So every line the recovery path writes carries this, and `pci` on
 /// [`XhciController`] is the field that makes it available.
@@ -321,8 +318,8 @@ fn enqueue_control(
         data.param = buf;
         data.status = data_len as u32;
         let dir = if is_in { 1u32 << 16 } else { 0 };
-        // ISP and IOC, which this TRB carried neither of. Without IOC the data
-        // stage produces no event at all and the only thing the driver ever
+        // ISP and IOC, both required. Without IOC the data stage produces no
+        // event at all and the only thing the driver ever
         // sees is the status stage's Success; without ISP a device that answers
         // short is not required to say so. Between them the two are the whole
         // of "how many bytes are actually in that buffer", and a descriptor
@@ -366,21 +363,17 @@ const MAX_HID_FAILURES: u8 = 8;
 /// How long the driver waits on any one command or transfer.
 ///
 /// A device that never answers must cost that device and not the CPU that
-/// asked it — which is the whole reason this exists, because every wait in
-/// this driver used to be an unbounded `spin_loop`. The bound is generous on
+/// asked it, which is the whole reason this exists. The bound is generous on
 /// purpose: the transfers it covers complete in microseconds even under TCG.
 ///
-/// **It is not true that only a dead device can reach it, and this doc used to
-/// say so.** [`crate::clock::nanos_since_boot`] is the TSC, and a TCG guest's
+/// **It is not true that only a dead device can reach it.**
+/// [`crate::clock::nanos_since_boot`] is the TSC, and a TCG guest's
 /// TSC advances with the *host's* real time rather than with the guest's work,
 /// so on an oversubscribed host this is a host-wall-clock bound on a device that
-/// is answering. Recorded on CI at 2.30x boot width, on the boot stick's own
-/// SYNCHRONIZE CACHE: `transport broke on SCSI 0x35: no answer in the status
-/// phase in 2000 ms`, then `SCSI 0x35 completed on attempt 2` 280 ms later —
-/// run 31684437719, job 94397136494, carries the log.
-/// `MAX_TRANSPORT_ATTEMPTS` absorbed it that time. A *single*
+/// is answering — a live stick's SYNCHRONIZE CACHE breaches it and then
+/// completes on the next attempt. A *single*
 /// breach spends the whole of `block::OPERATION` — the two are the same 2 s —
-/// so since 2026-08-23 it is answered as the caller's budget
+/// so it is answered as the caller's budget
 /// (`Scsi::Budget` → `BlockError::BudgetExpired`) and the re-issue belongs to
 /// `object/ops.rs`'s retry loop, off the pinned path; only three breaches in
 /// one command remain a device fact, indistinguishable from a stick that
@@ -388,9 +381,8 @@ const MAX_HID_FAILURES: u8 = 8;
 const USB_TIMEOUT_NS: u64 = 2_000_000_000;
 
 /// When a wait started now would give up. Before `clock::init` this is 0 plus
-/// the timeout and `nanos_since_boot` stays 0, so the wait is unbounded — the
-/// behaviour this driver had everywhere, and reachable only by a caller that
-/// runs before phase 2.
+/// the timeout and `nanos_since_boot` stays 0, so the wait is unbounded —
+/// reachable only by a caller that runs before the clock is up.
 fn deadline() -> u64 {
     crate::clock::nanos_since_boot() + USB_TIMEOUT_NS
 }
@@ -486,13 +478,13 @@ const SLOW_CONNECT_NS: u64 = 300_000_000;
 /// SuperSpeed device the profiles attach, so it takes the SuperSpeed view of the
 /// first port register while every HID takes the USB2 view of a later one.
 ///
-/// **The window is the boot scan itself and not a span of nanoseconds**, which
-/// [`SLOW_CONNECT_NS`] is and which this used to share. What has to be staged is
-/// "the disk arrives after `scan_ports`", and 300 ms is a claim about how far
-/// into a boot that runs — true at 253 ms on the dev host and false at 407 ms on
-/// the runner that red `late_storage_connect` on CI run `31286199802`, where the
-/// scan bound the disk and the gate correctly reported that it was measuring an
-/// ordinary boot. The scan is an event, so it is the event that closes this.
+/// **The window is the boot scan itself and not a span of nanoseconds**, unlike
+/// [`SLOW_CONNECT_NS`]. What has to be staged is "the disk arrives after
+/// `scan_ports`", and a nanosecond window is a claim about how far into a boot
+/// that scan runs — true on a host that reaches it at 253 ms and false on one
+/// that reaches it at 407 ms, where the scan binds the disk and the gate
+/// measures an ordinary boot. The scan is an event, so it is the event that
+/// closes this.
 const SLOW_STORAGE_PORT: u8 = 0;
 
 /// Whether the boot port scan has run. Until it has, [`SLOW_STORAGE_PORT`]
@@ -541,9 +533,9 @@ pub fn port_work_pending() -> bool {
 /// [`await_connect_settle`] returns as soon as the connect set has held still
 /// for [`PORT_DEBOUNCE_NS`] and is non-empty, so a machine whose other devices
 /// are up settles on *them* and [`device::scan_ports`] runs without whatever is
-/// still coming. The laptop has four internal USB devices beside the stick it boots
-/// from, which is how that machine reached a working desktop with no `/boot` and
-/// no `/log` on one boot and mounted both on the next.
+/// still coming — a laptop with four internal USB devices beside the stick it
+/// boots from can settle on them and reach a desktop with no `/boot` and no
+/// `/log` mounted at all.
 ///
 /// [`poll_if_pending`] cannot be used for this and the difference is the whole
 /// reason this exists: it returns without looking unless an interrupt was
@@ -568,10 +560,10 @@ const RING_SIZE: usize = 256; // TRBs per ring (one page = 256 * 16)
 /// Clear `len` bytes of `dma` at `off`, and answer with the region that was
 /// cleared.
 ///
-/// **One clearer instead of twelve.** Bringing an input context, an output
-/// context, a transfer ring, the enumeration scratch page, a CBW or a CSW up is
-/// the same operation every time, and each of the twelve sites spelled it out as
-/// its own `unsafe` block. Exclusive at every call site: each clears a structure
+/// **One clearer.** Bringing an input context, an output context, a transfer
+/// ring, the enumeration scratch page, a CBW or a CSW up is the same operation
+/// every time, and no call site spells its own
+/// `unsafe` block. Exclusive at every call site: each clears a structure
 /// before the command or transfer that hands it to the controller is enqueued,
 /// and enumeration is serial — one slot holds one operation, and a port inside
 /// an effect is not decided about.
@@ -584,11 +576,10 @@ pub(super) fn zero_dma<'pool>(dma: Dma<'pool>, off: usize, len: usize) -> Dma<'p
 /// Point the Device Context Base Address Array's `slot` entry at `phys`, or
 /// clear it with a zero.
 ///
-/// **The DCBAA's one writer.** `address_device_trb`, `slot_gone` and
-/// `init_one`'s scratchpad setup each had their own
-/// `write_volatile((dma.ptr_at(OFF_DCBAA) as *mut u64).add(n), …)`, which
-/// bounded nothing: `ptr_at` checks the offset of the array's *base* and the
-/// `.add(n)` past it was unchecked. Slot 0 is the scratchpad array pointer
+/// **The DCBAA's one writer**, and the entry is bounded whole: a
+/// `write_volatile((dma.ptr_at(OFF_DCBAA) as *mut u64).add(n), …)` bounds
+/// nothing, because `ptr_at` checks the offset of the array's *base* and the
+/// `.add(n)` past it is unchecked. Slot 0 is the scratchpad array pointer
 /// rather than a device context, which is why `init_one` is a caller.
 pub(super) fn write_dcbaa(dma: Dma<'_>, slot: usize, phys: u64) {
     // Volatile because the controller reads this array whenever it is given a
@@ -610,8 +601,8 @@ struct ErstEntry {
     _reserved: u32,
 }
 
-/// **`buf` and not a `*mut Trb`.** The ring's base was a raw pointer beside its
-/// own physical address, so every write through it was an unbounded
+/// **`buf` and not a `*mut Trb`.** A raw base pointer beside its own physical
+/// address makes every write through it an unbounded
 /// `write_volatile(base.add(i), trb)`; a [`Dma`] view carries the length as
 /// well, which is what [`TrbRing::put`] checks each TRB against — and the
 /// volatile discipline, which is what a ring the controller is consuming needs.
@@ -645,10 +636,9 @@ impl TrbRing {
 
     /// One TRB at ring index `at`.
     ///
-    /// **The ring's one writer.** `init` and both arms of `enqueue` each had
-    /// their own `write_volatile(base.add(i), trb)`, off a raw pointer that
-    /// carried no length; this is bounded for the whole 16-byte TRB against the
-    /// ring.
+    /// **The ring's one writer**, bounded for the whole 16-byte TRB against the
+    /// ring: `init` and both arms of `enqueue` go through it rather than each
+    /// spelling its own unbounded store off a pointer that carries no length.
     fn put(&self, at: usize, trb: Trb) {
         // Volatile because the controller is reading this ring concurrently,
         // which is exactly what the discipline is for: the Cycle bit in
@@ -723,10 +713,11 @@ const SHARED_SIZE: usize   = 6 * PAGE;
 // outlive enumeration: the controller writes the output context and the report
 // buffer for as long as the device is attached, and the interrupt ring carries
 // that device's transfers. Sharing any of them between two devices is a
-// silent data race, which is what keying the interrupt ring by HID class did.
+// silent data race, which is what keying the interrupt ring by HID class rather
+// than by device would be.
 //
-// The EP0 ring is here for the same reason and used to be one shared page.
-// That was sound only while every control transfer happened during that
+// The EP0 ring is here for the same reason. One shared page is sound only while
+// every control transfer happens during that
 // device's own enumeration: the ring is rewound for each device, so a device
 // enumerated earlier has an EP0 dequeue pointer into a ring whose contents and
 // cycle state have since moved under it. Mass storage is the first thing that
@@ -876,8 +867,8 @@ impl Layout {
     /// The `index`-th mass-storage block.
     ///
     /// Private to [`XhciController::claim_msc_block`], which is the only caller
-    /// and the only thing that decides what `index` is. That is deliberate:
-    /// `bind` used to pass `storage.len()`, and `storage.len()` goes back down.
+    /// and the only thing that decides what `index` is. That is deliberate: an
+    /// index taken from `storage.len()` goes back down when a disk leaves.
     fn msc(&self, index: usize) -> usize {
         self.msc_base + index * MSC_STRIDE
     }
@@ -885,14 +876,13 @@ impl Layout {
 
 /// One mass-storage pool block, and whatever is holding it.
 ///
-/// One array and not two. "This block is spoken for" and "there is a disk
-/// behind it" were separate state, and a device refused between Configure
-/// Endpoint and READ CAPACITY sits in the gap: the block was taken, and
-/// nothing anywhere named the port it was taken for. The teardown that gives
-/// blocks back walked the disks, so a refused stick that was then *unplugged*
-/// kept its block for the life of the boot — two of those and the pool is out
-/// for good, boot stick included, on a machine whose only diagnostic channel
-/// is the `/log` it can then no longer mount.
+/// One array and not two. With "this block is spoken for" and "there is a disk
+/// behind it" as separate state, a device refused between Configure Endpoint and
+/// READ CAPACITY sits in the gap — the block is taken and nothing names the port
+/// it was taken for — and a teardown that walks the disks leaves a refused stick
+/// that is then *unplugged* holding its block for the life of the boot. Two of
+/// those and the pool is out for good, boot stick included, on a machine whose
+/// only diagnostic channel is the `/log` it can then no longer mount.
 #[derive(Clone, Copy)]
 struct MscBlock {
     /// The root-hub port whose device claimed this block, and `None` while it
@@ -929,10 +919,9 @@ struct Disk {
 /// `usb_storage::open` indexes by and what a mount holds for its whole life,
 /// so it has to be a fact about *that disk* — and a position in any list is a
 /// fact about every other disk's history instead. Summing `storage.len()`
-/// across controllers made a stick plugged into the laptop's Thunderbolt xHC
-/// renumber the PCH's boot stick underneath the mount holding it: `/log`
-/// appended into the middle of the new drive and `/boot` served its bytes as
-/// the ESP's.
+/// across controllers lets a stick plugged into a second xHC renumber the boot
+/// stick underneath the mount holding it: `/log` appends into the middle of the
+/// new drive and `/boot` serves its bytes as the ESP's.
 ///
 /// Never reused, for the reason the numbers are stable at all: a replugged
 /// stick that took its predecessor's number would be read through the handle
@@ -947,10 +936,10 @@ fn setup_packet(bm_request_type: u8, b_request: u8, w_value: u16, w_index: u16, 
         | ((w_length as u64) << 48)
 }
 
-/// **`Send` is derived, not asserted.** The `unsafe impl Send` that stood here
-/// existed because this struct held raw pointers into DMA memory — the event
-/// ring and every [`TrbRing`]. They are [`Dma`] views now, which carry their own
-/// `Send`, so every field is `Send` on its own and the auto trait applies.
+/// **`Send` is derived, not asserted.** Every field is `Send` on its own — the
+/// event ring and every [`TrbRing`] are [`Dma`] views, which carry their own
+/// `Send` — so the auto trait applies and no `unsafe impl` is owed. A raw
+/// pointer into DMA memory here would take that back.
 pub struct XhciController {
     /// The function this controller is, so every line about it after `init_one`
     /// has returned can still name which of the machine's controllers it means.
@@ -973,11 +962,11 @@ pub struct XhciController {
     context_size: usize, // 32 or 64
     layout: Layout,
 
-    /// This controller's DMA, and this controller's only. It used to be one
-    /// static for the driver, which was sound only while the machine had one
-    /// controller: every offset in `Layout` is relative to a pool base, so two
-    /// controllers sharing one pool put both their DCBAAs, both their command
-    /// rings and both their slot 1 device contexts at the same address.
+    /// This controller's DMA, and this controller's only. One static for the
+    /// driver would be sound only on a machine with one controller: every offset
+    /// in `Layout` is relative to a pool base, so two controllers sharing one
+    /// pool put both their DCBAAs, both their command rings and both their
+    /// slot 1 device contexts at the same address.
     ///
     /// A leaked view and not a [`DmaPool`], and the leak is late on purpose:
     /// `init_one` allocates a pool, brings the controller up through a *borrowed*
@@ -1004,8 +993,8 @@ pub struct XhciController {
     /// A block is claimed before Configure Endpoint — which puts the device's
     /// two bulk endpoints into the Running state with their transfer rings
     /// inside it — and only *then* is the disk asked what it is. Keying the
-    /// block off a count of *bound* disks handed the next disk a block whose
-    /// memory a live endpoint context still named, with whatever transfer
+    /// block off a count of *bound* disks would hand the next disk a block whose
+    /// memory a live endpoint context still names, with whatever transfer
     /// `wait_transfer` abandoned on its 2 s deadline still outstanding on it;
     /// that completion lands in the next disk's `MSC_SCRATCH`, which is where
     /// READ CAPACITY's block size and last LBA arrive.
@@ -1022,9 +1011,9 @@ pub struct XhciController {
     /// array would be 255 entries on a controller with five.
     ports: Vec<PortState>,
 
-    /// What each port register speaks, out of the controller.s own Supported
+    /// What each port register speaks, out of the controller's own Supported
     /// Protocol capabilities. The boot scan reads it directly; the hot-plug
-    /// machine was given its port.s copy at bring-up.
+    /// machine is given its port's copy at bring-up.
     protocols: Protocols,
 
     /// A Port Status Change Event arrived and the ports have not been read
@@ -1040,8 +1029,8 @@ pub struct XhciController {
     /// event ring the poll already drains, and a later pass acts on it. The two
     /// paths this covers — a teardown's Disable Slot and a HID endpoint's
     /// recovery — are exactly what pulling a device out of a running machine
-    /// runs, and each used to spin to [`USB_TIMEOUT_NS`] against a device that
-    /// by then had nothing to answer with.
+    /// runs, and neither may spin to [`USB_TIMEOUT_NS`] against a device that by
+    /// then has nothing to answer with.
     ///
     /// The boot path keeps its waits, because blocking is correct where there
     /// is no scheduler to give a pass back to.
@@ -1175,8 +1164,7 @@ impl XhciController {
     ///
     /// The only way to obtain one, so there is no path that gets a block
     /// without recording who holds it — which is the property [`Self::msc`]
-    /// exists for, and the one `ctrl.layout.msc(ctrl.storage.len())` did not
-    /// have. `None` when the pool is out; nothing is spent then, because
+    /// exists for. `None` when the pool is out; nothing is spent then, because
     /// nothing was handed out.
     fn claim_msc_block(&mut self, port_idx: u8) -> Option<(usize, usize)> {
         let index = self.msc.iter().position(|block| block.port.is_none())?;
@@ -1258,14 +1246,13 @@ impl XhciController {
     /// Give an event to the device it names. A bound device's interrupt
     /// endpoint carries exactly one queued TRB and `requeue` is the only thing
     /// that puts the next one there, so an interrupt completion dropped here —
-    /// as one dequeued during a later port's enumeration used to be — leaves
+    /// one dequeued during a later port's enumeration, say — leaves
     /// that device with an empty ring for the life of the boot: no log line, no
     /// fault, a keyboard that simply stops.
     ///
     /// **A completion code other than Success or Short Packet is the same
-    /// defect wearing a different hat**, and it is the one a Logitech mouse
-    /// hot-plugged into the laptop hit: every bind-time line read perfectly and
-    /// the device delivered nothing for the 28 seconds it stayed in the port.
+    /// defect wearing a different hat**: every bind-time line reads perfectly
+    /// and the device delivers nothing for as long as it stays in the port.
     /// So a code this driver did not expect is *recorded* here rather than
     /// dropped, and [`Self::recover_endpoints`] acts on it.
     fn dispatch_event(&mut self, event: Trb) {
@@ -1345,8 +1332,7 @@ impl XhciController {
     ///
     /// One at a time, and never more: [`Self::outstanding`] is one slot, and a
     /// second device's recovery is owed until the first is answered. That is
-    /// the serialization the submit-and-wait pairs this replaces had by
-    /// construction.
+    /// the whole of the serialization.
     fn recover_endpoints(&mut self) {
         if self.outstanding.busy() {
             return;
@@ -1365,11 +1351,9 @@ impl XhciController {
         let Some(at) = self.devices.iter().position(|d| d.slot_id == slot_id) else {
             return;
         };
-        // The device stays on the list. It used to be taken off for the
-        // duration, because the recovery drained the event ring and a device
-        // let go from inside that would move every index after its own; the
-        // recovery no longer drains anything, and a device that is not on the
-        // list is one a teardown of its port cannot find.
+        // The device stays on the list: the recovery drains nothing, and a
+        // device that is not on the list is one a teardown of its port cannot
+        // find.
         let dev = &mut self.devices[at];
         dev.broke_with = None;
         let kind = dev.kind();
@@ -1384,8 +1368,8 @@ impl XhciController {
         // below is aimed at a device that is still on the bus: it spends a
         // failure out of the budget, issues Reset Endpoint and a
         // CLEAR_FEATURE(HALT) control transfer against a device the owner is
-        // holding in their hand, and then tells them to unplug it. The laptop did
-        // all of that four times over, once per ordinary unplug.
+        // holding in their hand, and then tells them to unplug it — once per
+        // ordinary unplug.
         //
         // CSC as well as CCS, for the reason `service_port` reads it: a device
         // replugged between two looks reads connected again, and the transfer
@@ -1639,7 +1623,7 @@ impl XhciController {
             // The `expect` is a driver bug and not a device one: the only
             // effect that outlives a pass is the one that filled the slot, so
             // a port left working with nothing outstanding is a port no pass
-            // will ever come back for — #151's shape, and silent.
+            // will ever come back for, silently.
             if self.ports[port_idx as usize].working().is_some() {
                 let at = self.outstanding.wake_at().expect(
                     "a port is inside an effect the controller was never asked to perform",
@@ -1684,8 +1668,6 @@ impl XhciController {
                 Step::Reset(kind, write) => {
                     match kind {
                         Reset::Hot => log!("xHCI: port {} connected", port_idx + 1),
-                        // The line the laptop could not produce, because the
-                        // driver had no such command.
                         Reset::Warm => log!(
                             "xHCI: port {} warm reset, link was {:?}",
                             port_idx + 1,
@@ -1727,8 +1709,8 @@ impl XhciController {
                     if trained {
                         // No reset was issued and none was needed: a SuperSpeed
                         // link trains itself and this port was already Enabled.
-                        // The driver that did not know that reset the port into
-                        // Inactive and then had no way back.
+                        // Resetting it anyway puts it into Inactive with no way
+                        // back.
                         log!("xHCI: port {} connected, link already trained", port_idx + 1);
                     }
                     device::begin(self, port_idx);
@@ -1904,23 +1886,21 @@ impl XhciController {
 
     /// One dword of one *device context*, in the input context `ctx_base`
     /// points at: index 0 is the input control context, 1 the slot context,
-    /// and `dci + 1` an endpoint's. The old name for this parameter was
-    /// `slot_index`, which named the one thing no caller ever passes.
+    /// and `dci + 1` an endpoint's.
     ///
-    /// No bound, and it needs none: `Endpoint::dci` is 2..=31 by construction
-    /// and its field is private, so the largest index any of the 23 call sites
-    /// can reach is 32, and `32 * 64 + 4 * 4` is 2064 bytes into the 4096 the
-    /// input context is. That sentence is what `Endpoint`'s private field is
-    /// for; before it, a struct literal under `xhci` could put this write
-    /// 12,880 bytes in.
+    /// `Endpoint::dci` is 2..=31 by construction and its field is private, so
+    /// the largest index a call site can reach is 32, and `32 * 64 + 4 * 4` is
+    /// 2064 bytes into the 4096 the input context is. That is what the private
+    /// field is for: without it a struct literal under `xhci` could put this
+    /// write 12,880 bytes in.
     fn write_ctx32(&self, ctx: Dma<'static>, ctx_index: usize, dword: usize, val: u32) {
         let offset = (ctx_index * self.context_size) + (dword * 4);
         // Volatile because the controller reads an input context the moment the
-        // command naming it is enqueued. Bounded, which is the check the
-        // paragraph on this function used to argue by hand: `ctx` is the
-        // `PAGE`-long input-context region, and the write refuses an offset past
-        // it rather than leaving `Endpoint::dci`'s private field as the only
-        // thing standing between a struct literal and a write 12,880 bytes in.
+        // command naming it is enqueued. Bounded rather than argued: `ctx` is
+        // the `PAGE`-long input-context region, and the write refuses an offset
+        // past it rather than leaving `Endpoint::dci`'s private field as the
+        // only thing standing between a struct literal and a write 12,880 bytes
+        // in.
         // Aligned: `context_size` is 32 or 64 and `dword * 4` keeps 4-alignment
         // from a page-aligned base.
         ctx.write::<u32>(offset, val)
@@ -1937,7 +1917,7 @@ impl XhciController {
         let at = dev_block + DEV_OUT_CTX + dci as usize * self.context_size;
         // Volatile because this dword is written by the controller by DMA, so it
         // must be re-read every time rather than cached. Bounded for the whole
-        // dword, where `ptr_at` bounded only the offset; `dci` is 2..=31 by
+        // dword, where a `ptr_at` bounds only the offset; `dci` is 2..=31 by
         // construction (`Endpoint::dci`'s field is private) and `DEV_OUT_CTX` is
         // a half-page region sized for 32 contexts. Aligned: `context_size` is
         // 32 or 64 from a page-aligned block base.
@@ -1965,8 +1945,8 @@ impl XhciController {
 ///
 /// A `Vec` and not an `Option`, because the machine this project targets has
 /// two: Tiger Lake carries a USB4 xHCI in the Thunderbolt block *ahead* of the
-/// PCH's on the bus, and the laptop's own ports hang off the second one. The
-/// driver that kept one controller reported that the laptop had no USB input.
+/// PCH's on the bus, and the laptop's own ports hang off the second one. A
+/// driver that keeps one controller finds no USB input on that machine at all.
 static XHCI: Lock<Vec<XhciController>> = Lock::new(Vec::new());
 
 /// Process xHCI events if this CPU has an unserviced interrupt record, or if a
@@ -1998,11 +1978,11 @@ static XHCI: Lock<Vec<XhciController>> = Lock::new(Vec::new());
 /// `XHCI`, which is a ticket spinlock and therefore preemption off for its
 /// whole life. Called from a syscall, it makes that syscall's thread the
 /// driver's engine and stops the CPU rescheduling for as long as the bus takes.
-/// The read path called it for the keyboard and mouse claims so a read would
-/// see a report that had just landed; on the laptop that made the compositor's own
-/// mouse read the hot-plug engine and froze the desktop for seconds at a time,
-/// with a live kernel and nothing dropped. A caller that wants fresh input
-/// wants the scheduler pass that is already about to run, not this.
+/// A read path that calls it — for the keyboard and mouse claims, so a read
+/// sees a report that has just landed — makes the compositor's own mouse read
+/// the hot-plug engine and freezes the desktop for seconds at a time, with a
+/// live kernel and nothing dropped. A caller that wants fresh input wants the
+/// scheduler pass that is already about to run, not this.
 pub fn poll_if_pending() {
     let interrupted = crate::irq_ring::pending(crate::irq_ring::IrqSource::Xhci);
     if !interrupted {
