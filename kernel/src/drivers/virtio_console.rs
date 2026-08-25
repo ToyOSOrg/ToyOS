@@ -7,9 +7,9 @@
 //!
 //! Single-port mode uses queues 0 (RX) and 1 (TX). MULTIPORT is offered by
 //! QEMU but not negotiated; the device falls back to port-0-only with no
-//! control queues. RX is poll-driven, matching the existing UART semantics
-//! (see `arch/idt/mod.rs` — the legacy PIC is disabled and no UART IRQ
-//! handler is wired, so input has always been polled).
+//! control queues. RX is poll-driven, matching the UART semantics (see
+//! `arch/idt/mod.rs` — the legacy PIC is disabled and no UART IRQ handler is
+//! wired, so input is polled).
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -43,16 +43,16 @@ struct RxPending {
     pos: u32,
 }
 
-/// **The buffers are [`Dma`] views and not raw pointers, and that is what
-/// deleted this type's `unsafe impl Send`.** Every field is `Send` on its own,
-/// and a view carries the bounds the bare `*mut u8` did not, so the TX copy and
-/// the RX byte read below are checked against the buffer's length rather than
-/// against a comment.
+/// **The buffers are [`Dma`] views and not raw pointers**, which is why this
+/// type needs no `unsafe impl Send`: every field is `Send` on its own, and a
+/// view carries the bounds a bare `*mut u8` does not, so the TX copy and the RX
+/// byte read below are checked against the buffer's length rather than against
+/// a comment.
 ///
 /// `'static` because the pool is leaked at `init`: this console is the kernel's
-/// log channel for the life of the boot and is never unbound. The `static`
-/// holding the pool alive is gone with it — `Dma<'static>` is the same claim
-/// made in the type, and it is the only way to obtain one.
+/// log channel for the life of the boot and is never unbound, and
+/// `Dma<'static>` is that claim made in the type rather than in a `static`
+/// nobody reads.
 struct VConsole {
     device: VirtioDevice,
     rx: Virtqueue<'static>,
@@ -105,10 +105,9 @@ pub fn disable() {
 
 /// Run `f` against the live console, or answer `None` because there is not one.
 ///
-/// **The readiness check and the dereference are one thing now.** Three callers
-/// each wrote `if !is_ready() { return … }` and then `unsafe { console_mut() }`,
-/// which is three copies of an obligation and three chances to write the second
-/// without the first. Here it is structural, and the three call sites are
+/// **The readiness check and the dereference are one thing.** Split, each
+/// caller holds a copy of the obligation and a chance to write the dereference
+/// without the check; here it is structural, and the three call sites are
 /// ordinary safe code.
 #[inline]
 fn with_console<R>(f: impl FnOnce(&mut VConsole) -> R) -> Option<R> {
@@ -174,10 +173,9 @@ pub fn try_read_byte_locked() -> Option<u8> {
             // Both numbers are bounded by `poll_used`: the id indexes
             // `desc_to_rx`, which is exactly `QUEUE_SIZE` long, and `len` is at
             // most the `RX_BUF_SIZE` this driver posted, so the walk below
-            // stays inside the buffer it started in. Neither was checked
-            // before, and the read at the bottom of this function is inside the
-            // direct map, so an over-long `len` used to hand kernel memory to
-            // the console as typed input.
+            // stays inside the buffer it started in. Unchecked, an over-long
+            // `len` hands kernel memory to the console as typed input: the read
+            // at the bottom of this function is inside the direct map.
             let (slot, len) = c.rx.poll_used()?;
             let buf_idx = c.desc_to_rx[slot.id() as usize] as usize;
             c.rx_pending = Some(RxPending { buf_idx, slot, len, pos: 0 });

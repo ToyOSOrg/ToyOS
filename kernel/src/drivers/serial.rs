@@ -360,7 +360,7 @@ pub fn flush_final() {
 ///
 /// **That is what [`ConsoleLine`] fixes, and this function is what it is
 /// measured against.** Every ordinary write goes through the line buffer; this
-/// path survives as the `console-unbuffered` actuator's behaviour.
+/// path is the `console-unbuffered` actuator's behaviour.
 ///
 /// **The guard is taken and released per chunk, and the bound is the reason
 /// this function may be called with a userland length at all.** `BackendGuard`
@@ -374,11 +374,11 @@ pub fn flush_final() {
 /// object bounds a *line* by it and emits a longer one in pieces of it, so the
 /// interleaving unit this chunking creates is the same one [`ConsoleLine`]
 /// already has: anything whole through the line buffer is whole here too, and
-/// nothing that is atomic today stops being so.
-/// The tradeoff is re-acquisition against latency — a write of `n` bytes now
-/// pays `ceil(n/1024)` `cli`/`compare_exchange_weak`/`popfq` triples instead of
-/// one, which is a handful of uncontended atomics against an interrupts-off
-/// window that was otherwise unbounded. Latency wins; the acquisitions are
+/// nothing that is atomic through the line buffer stops being so.
+/// The tradeoff is re-acquisition against latency — a write of `n` bytes pays
+/// `ceil(n/1024)` `cli`/`compare_exchange_weak`/`popfq` triples rather than
+/// one, a handful of uncontended atomics against an otherwise unbounded
+/// interrupts-off window. Latency wins; the acquisitions are
 /// paid once per kilobyte of output and a kilobyte of output is already a
 /// device write two orders of magnitude more expensive.
 ///
@@ -417,8 +417,7 @@ pub fn write_console(src: &crate::user_ptr::UserBytes) {
 /// that bound is an interrupt latency before it is a line bound: the guard
 /// masks interrupts for whatever is written under it and a userland `write` has
 /// no length. So the claim is "whole up to `MAX_CONSOLE_LINE`", the same claim
-/// [`write_console`] already made for its chunking, and nothing that was atomic
-/// before this existed stops being so.
+/// [`write_console`] makes for its chunking.
 ///
 /// The CSI filter's state lives here for the same reason the buffer does: a
 /// sequence split across two `write`s must come out the same as one that is

@@ -14,9 +14,9 @@
 //! `read_blocks` of 64 blocks is therefore the same instant that bounds its
 //! first command.
 //!
-//! **Established on the running context and not passed down**, which is owner
-//! ruling 1B: the deadline crosses `BlockAccess` and `BlockDevice`, two frames
-//! that cannot carry it, so `xhci::wait/msc.rs`'s three operation entry points
+//! **Established on the running context and not passed down**: the deadline
+//! crosses `BlockAccess` and `BlockDevice`, two frames that cannot carry it,
+//! so `xhci::wait/msc.rs`'s three operation entry points
 //! recover it instead. The guard is a `let _op` and not a `let _`: `let _`
 //! drops at the end of the statement, which would end the operation before the
 //! call it bounds.
@@ -62,10 +62,9 @@ pub struct UsbBlockDevice {
     index: usize,
     id: DeviceId,
     blocks: u64,
-    /// What the device addresses in, kept because the caller that needs it had
-    /// to ask the controller a second time to get it — and a second question
-    /// has a second `None`, which is a skip nobody was going to log. One `open`
-    /// is one answer.
+    /// What the device addresses in, kept here because asking the controller a
+    /// second time is a second `None` — a skip nobody was going to log. One
+    /// `open` is one answer.
     lba_bytes: u32,
 }
 
@@ -91,11 +90,12 @@ impl UsbBlockDevice {
     ///
     /// Distinct from a failed transfer, which the trait reports: this answers
     /// "is there still something there", which is what a caller asks after a
-    /// run of failures. It used to ask the geometry, which a device keeps after
-    /// recovery has given up on it — so the one question this exists for was
-    /// the one it got wrong, in the direction that keeps a caller retrying.
-    /// Whether the controller still has this disk bound. Read by
-    /// `usb-storage-gate`'s report and by nothing a shipping kernel compiles.
+    /// run of failures. The geometry cannot answer it — a device keeps that
+    /// after recovery has given up on it, which is wrong in the direction that
+    /// keeps a caller retrying.
+    ///
+    /// Read by `usb-storage-gate`'s report and by nothing a shipping kernel
+    /// compiles.
     #[cfg(feature = "boot-actuators")]
     pub fn healthy(&self) -> bool {
         xhci::storage_online(self.index) == Some(true)
@@ -148,8 +148,8 @@ impl BlockDevice for UsbBlockDevice {
 ///
 /// **"failed" is a claim about the disk**, and a budget refusal is a claim
 /// about the caller's clock: the driver below already wrote the line naming
-/// [`block::OPERATION`], and repeating "failed" over it is what made the
-/// composite log read as a broken stick. `Ok` is unreachable here — the caller
+/// [`block::OPERATION`], and repeating "failed" over it makes the composite log
+/// read as a broken stick. `Ok` is unreachable here — the caller
 /// checks — and answers the word that would be least wrong if it were not.
 fn gave_up(done: BlockResult) -> &'static str {
     match done {

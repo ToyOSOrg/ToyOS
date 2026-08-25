@@ -15,8 +15,8 @@
 //! [`crate::block::OPERATION`] is that opinion, and it belongs to the layer
 //! that knows one call is one operation.
 //!
-//! **It arrives ambiently and is threaded from there.** Owner ruling 1B: the
-//! deadline is established on the running context by
+//! **It arrives ambiently and is threaded from there.** The deadline is
+//! established on the running context by
 //! [`crate::block::begin_operation`] in [`NvmeBlockDevice`]'s trait methods —
 //! this file is both the establisher and the driver, where the USB path needs
 //! two files for it — recovered by `read_blocks` and `write_blocks`, and from
@@ -87,10 +87,9 @@ const QUEUE_DEPTH: usize = 16;
 /// `CC.EN` aborts every outstanding command and forgets every I/O queue), so
 /// the escalation on expiry is one reset and one post-reset chance — and only
 /// a reset that fails, or a controller that is silent again on the very next
-/// command, marks the disk failed. Until 2026-08-23 there was no reset here
-/// and a single silent command ended the controller for the boot, which is the
-/// declare-death-on-elapsed-time policy this tree measured the cost of on the
-/// USB path.
+/// command, marks the disk failed. Without that escalation a single silent
+/// command would end the controller for the boot, which is the
+/// declare-death-on-elapsed-time policy the USB path already paid for.
 const COMMAND: Budget = Budget::of(
     Duration::from_secs(2),
     "the command is abandoned to a controller reset, and one post-reset silence \
@@ -170,9 +169,9 @@ struct CqEntry {
 /// submission queue and writes the completion queue concurrently with this CPU,
 /// which is what the volatile discipline names — and a view carries the length,
 /// so an entry is bounded against the page the queue actually occupies rather
-/// than against `% QUEUE_DEPTH` being right. It is also what deleted
-/// `unsafe impl Send for NvmeBlockDevice`: every field here is `Send` on its own
-/// now, so the auto trait applies.
+/// than against `% QUEUE_DEPTH` being right. It is also why `NvmeBlockDevice`
+/// needs no `unsafe impl Send`: every field here is `Send` on its own, so the
+/// auto trait applies.
 struct NvmeQueue {
     sq: Dma<'static>,
     cq: Dma<'static>,
@@ -221,20 +220,18 @@ impl NvmeQueue {
     ///
     /// `cid` is the one number this driver chose for the command it
     /// submitted and the device must echo back unchanged (NVMe 2.0
-    /// §3.3.3.2.1); nothing compared it against anything until now. Sound
-    /// today only because every submission on this queue is synchronous —
-    /// one command outstanding at a time is a property of the caller, not of
-    /// this parse, which is exactly why the comparison belongs here rather
-    /// than staying an invariant nobody checks.
+    /// §3.3.3.2.1). Sound only because every submission on this queue is
+    /// synchronous — one command outstanding at a time is a property of the
+    /// caller, not of this parse, which is exactly why the comparison belongs
+    /// here rather than staying an invariant nobody checks.
     ///
-    /// **Bounded by [`COMMAND`], and by nothing the caller chose.** This loop
-    /// used to have no deadline in it at all, which mattered more here than
-    /// anywhere else in the kernel: every real caller reaches it holding
-    /// `page_cache::BLOCK_CACHE` *and* `page_cache::BLOCK_DEV`, both
-    /// `sync::Lock`s that disable preemption for their whole life, so a
-    /// controller that stopped answering wedged a CPU holding two of the
-    /// machine's statics and the only thing that ever said so was some other
-    /// CPU's `DEADLOCK` panic naming the victim.
+    /// **Bounded by [`COMMAND`], and by nothing the caller chose.** An
+    /// unbounded loop matters more here than anywhere else in the kernel:
+    /// every real caller reaches it holding `page_cache::BLOCK_CACHE` *and*
+    /// `page_cache::BLOCK_DEV`, both `sync::Lock`s that disable preemption for
+    /// their whole life, so a controller that stopped answering would wedge a
+    /// CPU holding two of the machine's statics, and the only thing to say so
+    /// would be some other CPU's `DEADLOCK` panic naming the victim.
     ///
     /// **Two reads of the entry and not one.** [`crate::clock::settles`] is the
     /// kernel's one bounded driver spin and it takes a predicate, so the read
@@ -365,8 +362,7 @@ const DMA_SIZE: usize        = OFF_DATA + MAX_DATA_PAGES * 0x1000;
 /// first, and answer with the list's own physical address for `prp2`.
 ///
 /// A transfer of more than two pages names its pages through a list rather
-/// than through `prp1`/`prp2` (NVMe 2.0 §4.1.2). `read_sectors` and
-/// `write_sectors` had a byte-identical copy of this loop each.
+/// than through `prp1`/`prp2` (NVMe 2.0 §4.1.2). One loop for the two callers.
 /// The unaligned discipline, because the list is written before the command
 /// naming it is submitted: the controller is not reading it while this runs.
 fn fill_prp_list(dma: Dma<'static, Unaligned>, pages: usize, data_phys: u64) -> u64 {
@@ -383,9 +379,9 @@ fn fill_prp_list(dma: Dma<'static, Unaligned>, pages: usize, data_phys: u64) -> 
 struct NvmeController {
     bar: Mmio,
     /// This controller's DMA window, leaked at `init` and therefore `'static`.
-    /// It used to be a `static Lock<Option<DmaPool>>` that was written once and
-    /// never read for anything but `slice()`; a leaked view says the same thing
-    /// in the type and puts it where the controller is.
+    /// A leaked view rather than a `static Lock<Option<DmaPool>>`: it makes the
+    /// lifetime a claim in the type and puts the window where the controller
+    /// is.
     dma: Dma<'static>,
     admin: NvmeQueue,
     io: NvmeQueue,
@@ -407,10 +403,10 @@ struct NvmeController {
 impl NvmeController {
     /// Clear `len` bytes of the DMA window at `off`.
     ///
-    /// **One clearer instead of four.** `create_io_cq`, `create_io_sq`,
-    /// `identify_namespace` and `init` each spelled `write_bytes(<a raw pointer
-    /// derived from the pool>, 0, <a length>)` in an `unsafe` block of its own,
-    /// with the bound stated nowhere. Exclusive at every call site: each is
+    /// **One clearer for all four callers** — `create_io_cq`, `create_io_sq`,
+    /// `identify_namespace` and `init` — so the bound is stated once here
+    /// instead of in four `unsafe` blocks over a raw pointer derived from the
+    /// pool. Exclusive at every call site: each is
     /// preparing a queue, a scratch page or a descriptor buffer before the
     /// command that hands it to the controller is submitted, and this driver
     /// keeps exactly one command outstanding.
@@ -541,9 +537,10 @@ impl NvmeController {
     }
 
     /// An admin command, with the status the controller returned actually
-    /// looked at. Six calls here discarded it, so a controller that refused to
-    /// identify itself or to create a queue produced a driver that went on to
-    /// read whatever the DMA buffer held and derive a geometry from it.
+    /// looked at. Discarded, it makes a controller that refused to identify
+    /// itself or to create a queue indistinguishable from one that did — and
+    /// the driver goes on to derive a geometry from whatever the DMA buffer
+    /// holds.
     ///
     /// No deadline argument, and no establishment above it: bringing a
     /// controller up is not a block-device operation, so what bounds these is
@@ -641,9 +638,9 @@ impl NvmeController {
             return false;
         }
 
-        // A copy rather than the `&*(ptr as *const IdentifyNamespace)` that was
-        // here, so nothing holds a reference into a window the device may write
-        // again. Bounded for the whole structure, which is 384 bytes of the 4096
+        // A copy rather than a reference into the window, so nothing holds a
+        // `&` into memory the device may write again. Bounded for the whole
+        // structure, which is 384 bytes of the 4096
         // the command was given. The unaligned discipline: the transfer has
         // completed — `admin` returned `true`, which means `wait_completion` saw
         // the phase bit flip — so nothing is writing these bytes, and what is
@@ -654,9 +651,8 @@ impl NvmeController {
         // `lba_ds` is an 8-bit device-reported shift, and it reaches both a
         // shift and a divisor: `1 << lba_ds` overflows above 31, and above 12
         // `4096 / sector_size` is zero, which `NvmeBlockDevice::new` then
-        // divides `nsze` by. Measured on QEMU 11.0.2 with
-        // `nvme-ns,logical_block_size=8192`: `#DE` at `NvmeBlockDevice::new`,
-        // before storage is up, on a machine with nothing to report it on.
+        // divides `nsze` by — a `#DE` before storage is up, on a machine with
+        // nothing to report it on.
         //
         // 512..4096 is not a policy number, it is this driver: every path
         // above the sector layer is written in 4096-byte blocks and needs the
@@ -789,11 +785,11 @@ impl NvmeController {
 /// NVMe block device exposing 4KB block I/O through the BlockDevice trait.
 ///
 /// **`Send` is derived, not asserted.** `block::BlockDevice` requires it, and
-/// the `unsafe impl` that stood here existed because `NvmeController` held
-/// `*mut SqEntry`/`*mut CqEntry` into the DMA pool. They are [`Dma`] views now —
-/// which carry the length as well as the address, and have the typed volatile
-/// accessor the queues need — so every field is `Send` on its own and the auto
-/// trait applies.
+/// `NvmeController`'s queues are [`Dma`] views — which carry the length as well
+/// as the address, and have the typed volatile accessor the queues need — so
+/// every field is `Send` on its own and the auto trait applies. A
+/// `*mut SqEntry`/`*mut CqEntry` into the DMA pool would need an `unsafe impl`
+/// instead.
 pub struct NvmeBlockDevice {
     ctrl: NvmeController,
     id: DeviceId,
@@ -913,7 +909,7 @@ impl BlockDevice for NvmeBlockDevice {
 /// The first one, and a machine with two loses the second: unlike xHCI, where
 /// the second controller is where a Tiger Lake laptop's keyboard actually is,
 /// nothing above here can hold more than one disk yet — `page_cache::init`
-/// takes a single `BlockDevice`. Filed rather than papered over.
+/// takes a single `BlockDevice`.
 pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
     let pci_dev = *devices.iter().find(|d| d.matches_class(0x01, 0x08, None))?;
     log!("NVMe: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
@@ -948,10 +944,10 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
     }
 
     // Leaked rather than held in a `static`: this controller is the machine's
-    // root filesystem for the life of the boot, and the `Lock<Option<DmaPool>>`
-    // that used to hold the pages alive was never cleared either. It is
-    // allocated here, after every refusal above, so a machine whose NVMe
-    // function this driver declines still costs no physical memory.
+    // root filesystem for the life of the boot, and nothing would ever clear
+    // such a `static` either. Allocated here, after every refusal above, so a
+    // machine whose NVMe function this driver declines still costs no physical
+    // memory.
     let dma = DmaPool::alloc(DMA_SIZE).leak();
     const SQ_PAGE: usize = QUEUE_DEPTH * core::mem::size_of::<SqEntry>();
     const CQ_PAGE: usize = QUEUE_DEPTH * core::mem::size_of::<CqEntry>();
@@ -988,9 +984,8 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
     };
 
     // A controller that refuses any of these has not given the driver a
-    // namespace to serve. Going on regardless is what discarding the statuses
-    // amounted to: `identify_namespace` would read a zeroed DMA buffer and
-    // derive its geometry from it.
+    // namespace to serve; going on regardless means `identify_namespace` reads
+    // a zeroed DMA buffer and derives its geometry from it.
     if !ctrl.identify_controller()
         || !ctrl.create_io_cq()
         || !ctrl.create_io_sq()
