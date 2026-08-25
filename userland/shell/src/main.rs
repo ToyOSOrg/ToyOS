@@ -806,7 +806,14 @@ fn save_history(history: &[String]) {
 
 fn read_byte() -> Option<u8> {
     let mut buf = [0u8; 1];
-    io::stdin().lock().read_exact(&mut buf).ok()?;
+    if let Err(e) = io::stdin().lock().read_exact(&mut buf) {
+        // UnexpectedEof is the ordinary end of input; anything else is a
+        // device error or a revoked fd, and would otherwise be silent.
+        if e.kind() != io::ErrorKind::UnexpectedEof {
+            eprintln!("shell: stdin fd=0: {:?}", e.kind());
+        }
+        return None;
+    }
     Some(buf[0])
 }
 

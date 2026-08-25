@@ -92,6 +92,15 @@ fn main() {
             let mut buf = [0u8; 4096];
             let n = shell_stdout.read(&mut buf).unwrap_or(0);
             if n == 0 {
+                // The child closes every fd together, so a last line it wrote
+                // to stderr right before exiting is already sitting in that
+                // pipe — drained here or it is lost with the loop.
+                let n = shell_stderr.read(&mut buf).unwrap_or(0);
+                if n > 0 {
+                    console.write_bytes(&buf[..n]);
+                    std::io::stdout().lock().write_all(&buf[..n]).ok();
+                    present(&console, &window);
+                }
                 break;
             }
             console.write_bytes(&buf[..n]);
