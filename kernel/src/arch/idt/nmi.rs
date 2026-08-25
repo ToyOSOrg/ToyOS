@@ -23,8 +23,7 @@
 //! entry that run at CPL 0 with `rsp` still pointing into the user's stack, and
 //! the one between its `pop rsp` and its `sysretq`. A frame the CPU builds
 //! there is a supervisor write to a user page: SMAP refuses it, the `#PF` lands
-//! on the same stack, and the machine takes a `#DF` — measured on this tree with
-//! `TF` in that window before the bit joined `IA32_FMASK`. An IST index is the
+//! on the same stack, and the machine takes a `#DF`. An IST index is the
 //! architecture's answer (SDM Vol. 3A §6.14.5): the CPU loads `rsp` from the TSS
 //! before it pushes anything, whatever the interrupted context held.
 //!
@@ -70,10 +69,7 @@
 //! dev host delivers 36 to 58 arrivals per 3,000, run after run. Under KVM the
 //! injection happens at the next VM entry after the kick's exit, and **which
 //! instruction that is depends on the host**: the hosted lane has measured both
-//! **0 of 6,000** (run 32584121311, with thousands of the same NMIs arriving in
-//! Ring 3, so the aim was right and the injection point was elsewhere) and
-//! **64 of 64** (run 32587665835, every delivery landing on the entry's first
-//! instruction until the storm stopped at its arrival ceiling). CI's guest lane
+//! **0 of 6,000** and **64 of 64**. CI's guest lane
 //! is KVM (`tests/CLAUDE.md`), so **"the window is exercised per pull request"
 //! is a claim this tree may not make** — and neither is "KVM cannot reach it".
 //! What holds on every host is the `nmi-without-ist` control, which takes this
@@ -187,7 +183,7 @@ extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64) {
 /// `xadd` and its body publication, so a record emitted from here would take a
 /// newer generation of the same shard slot and garble the very ring
 /// `halt_all_cpus` is about to paint. `src/sourcegate.rs`'s `nmi_does_not_log`
-/// is the gate, and it caught exactly that on the first draft of this function.
+/// is the gate.
 ///
 /// `panic_raw` is an `outb` loop with no lock in it, so it cannot be blocked by
 /// whatever either interrupted context was holding. The cost is that a machine

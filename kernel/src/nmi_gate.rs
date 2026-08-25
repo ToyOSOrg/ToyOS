@@ -29,24 +29,18 @@
 //! NMI pending across it is delivered at `syscall_entry+0` — the dev host reads
 //! 36 to 58 window arrivals per 3,000, run after run. Under KVM an NMI to a
 //! running vCPU is a host kick, a VM exit and an injection at the next VM entry,
-//! and **that entry is wherever the kick's exit landed**. Both ends of that have
-//! been measured on the hosted lane: **0 of 6,000** (run 32584121311, two boots,
-//! 2,451 and 438 of the same NMIs arriving in Ring 3, so the aim was right and
-//! the injection point was elsewhere) and **64 of 64** (run 32587665835, the
-//! exit landing on the `syscall` boundary and the injection on the entry's first
-//! instruction every time, so the storm stopped at [`ENOUGH`] after 64
-//! deliveries). Neither number is a fact about this kernel, which is why the
-//! gate asserts on neither. What every host witnesses is the machine taking
-//! aimed NMIs with IST2 in place and going on working, and what proves the
-//! *window* everywhere is the `nmi-without-ist` control's `#DF`.
+//! and **that entry is wherever the kick's exit landed**: both ends of that have
+//! been measured on the hosted lane, **0 of 6,000** and **64 of 64**. Neither
+//! number is a fact about this kernel, which is why the gate asserts on neither.
+//! What every host witnesses is the machine taking aimed NMIs with IST2 in place
+//! and going on working, and what proves the *window* everywhere is the
+//! `nmi-without-ist` control's `#DF`.
 //!
-//! **The storm is triggered by the victim and aimed at it, and neither used to
-//! be true.** It armed at three seconds of wall clock and sprayed every sibling;
-//! the wall clock is two clocks with no handshake — on a loaded shard the
-//! spinner started later than the instant, the storm fired at an idle machine,
-//! and the one shot was spent (run 32582884567, 134 s of a test watching a
-//! machine that had already answered). A CPU's syscall count is the victim's own
-//! signal that it is spinning, and it is also which CPU to aim at.
+//! **The storm is triggered by the victim and aimed at it.** A CPU's syscall
+//! count is the victim's own signal that it is spinning, and it is also which
+//! CPU to aim at; a wall-clock arm is two clocks with no handshake between them,
+//! so it can fire at a machine where nothing is spinning yet and spend the one
+//! shot.
 //!
 //! `nmi-nested` is the second arm and it stages the *other* hazard: an NMI
 //! handler that returns early through `iretq` un-masks NMIs while still standing
@@ -153,20 +147,15 @@ pub fn stage_nested_if_armed() {
 /// Syscalls one CPU must have taken before the storm believes a victim is
 /// spinning on that CPU.
 ///
-/// **The trigger, and it is the victim's own work rather than a clock.** The
-/// storm used to arm at a wall-clock instant three seconds into the boot, on the
-/// assumption that the harness had started the spinner by then — two clocks with
-/// no handshake between them. On a loaded shard the spinner started *after* that
-/// instant, so the storm fired at an idle machine, reported nothing, and left
-/// `FIRED` set: `syscall_window_nmi` sat for 134 s watching a machine that had
-/// already done the one thing it was waiting for (run 32582884567). This
-/// counter is what closes it — a CPU that has taken a million syscalls is a CPU
-/// with a program on it in the entry window as often as a program can be, and no
-/// daemon on an idle machine reaches it.
+/// **The trigger, and it is the victim's own work rather than a clock.** A
+/// wall-clock arm is two clocks with no handshake between them: on a loaded
+/// shard the spinner starts *after* the instant, so the storm fires at an idle
+/// machine, reports nothing, and leaves `FIRED` set. A CPU that has taken a
+/// million syscalls is a CPU with a program on it in the entry window as often
+/// as a program can be, and no daemon on an idle machine reaches it.
 ///
-/// The spinner measured 5.3 million syscalls a second on the hosted lane
-/// (53,150,000 in 10.008 s, 188 ns each, run 32582884567), so this is reached
-/// about 190 ms after it starts and cannot be reached before it does.
+/// The spinner measures ~5.3 million syscalls a second (188 ns each), so this is
+/// reached about 190 ms after it starts and cannot be reached before it does.
 const SPINNING_SYSCALLS: u64 = 1_000_000;
 
 /// How many NMIs the storm will send before giving up on the window.
@@ -228,7 +217,7 @@ fn victim(me: usize, cpus: usize) -> Option<(usize, u64)> {
 /// reaching the loop rather than sleeping through the whole run.
 ///
 /// **The arming condition is the victim's own syscall count and not a clock**
-/// ([`SPINNING_SYSCALLS`] carries what that cost when it was a clock), so the
+/// ([`SPINNING_SYSCALLS`]), so the
 /// storm cannot fire before there is something to storm — and `FIRED` is swapped
 /// only once that is true, which is what keeps a premature look from consuming
 /// the one shot.
