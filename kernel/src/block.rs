@@ -22,10 +22,7 @@ pub type DeviceId = u32;
 /// the reason it exists rather than a consequence of it. `/bin/logd`'s
 /// `LOG_WRITE_BUDGET` is 5 s and it is measured in userland *around the
 /// syscall*: a syscall that has not returned cannot be given up on, so every
-/// bound below it is what decides whether that policy runs at all. Its own doc
-/// used to name `USB_TIMEOUT_NS` as the thing that turns a stick that stopped
-/// answering into an `Err` — true of a dead device and never true of a slow
-/// one, because that bound is never reached by a device that answers.
+/// bound below it is what decides whether that policy runs at all.
 ///
 /// **2 s, and the derivation is two terms.** Below: one whole
 /// `USB_TIMEOUT_NS`, so a caller that has spent more than a single transfer's
@@ -35,16 +32,16 @@ pub type DeviceId = u32;
 /// in flight — one more transfer bound at worst — and `2 + 2` leaves a second
 /// of the daemon's 5 s for it to notice with.
 ///
-/// **What the derivation does not cover, and this doc used to claim it did.**
+/// **What the derivation does not cover.**
 /// The clock is [`crate::clock::now`], which is the TSC, and a TCG guest's TSC
 /// advances with the *host's* real time; [`begin_operation`] is also called
 /// above the `XHCI` ticket lock, so lock-wait and any host descheduling of the
 /// vCPU thread are charged to this budget. A healthy device therefore can reach
-/// it — the same is now recorded one layer down for `USB_TIMEOUT_NS` — and what
+/// it — the same is recorded one layer down for `USB_TIMEOUT_NS` — and what
 /// the caller is told when it does is the sentence below.
 ///
-/// **The term the two-part derivation is missing is the recovery, and since
-/// owner ruling 2026-08-23 the recovery lives one level up.** "One whole
+/// **The term the two-part derivation is missing is the recovery, and the
+/// recovery lives one level up.** "One whole
 /// `USB_TIMEOUT_NS`" is the allowance for transfers that *complete*; a transfer
 /// that breached its own bound did not, and what the driver does next is a Reset
 /// Recovery (`xhci/wait/msc.rs`'s `scsi`, and its own doc on why recovering and
@@ -54,9 +51,7 @@ pub type DeviceId = u32;
 /// refused unissued, the operation answers [`BlockError::BudgetExpired`], and
 /// the retry belongs to the caller above the locks — `object/ops.rs`'s `fsync`
 /// loop, bounded by [`DEADMAN`] — where the CPU is not pinned and can yield
-/// between attempts. Measured 2026-08-22, 1 red in 73 full 12-wide suites,
-/// `esp_filesystem`'s `fsync` on `/log`; the identical break was absorbed by
-/// the in-driver retry on CI on 2026-08-13, before this constant existed.
+/// between attempts.
 ///
 /// **This number is a slowness detector and never a death sentence, and it is
 /// the pin.** `issues/audio/disk-wait-pins-a-cpu.md`: for the whole of one
@@ -71,9 +66,7 @@ pub type DeviceId = u32;
 /// nothing was in flight when the refusal was taken — and the caller is told
 /// which of the two happened: [`BlockError::BudgetExpired`], which reaches
 /// userland as `SyscallError::WouldBlock` and never as
-/// [`SyscallError::Io`](toyos_abi::syscall::SyscallError::Io). Until
-/// 2026-08-22 it did not, and `/bin/logd` ended a boot's log for a stick that
-/// was answering.
+/// [`SyscallError::Io`](toyos_abi::syscall::SyscallError::Io).
 pub const OPERATION: Budget = Budget::of(
     Duration::from_secs(2),
     "the block-device operation is refused as one that would block, and the \
@@ -96,23 +89,19 @@ pub const OPERATION: Budget = Budget::of(
 /// means "not durable *yet*", and only the device's own word means "cannot be
 /// made durable". PostgreSQL post-fsyncgate, ZFS (`zio_slow_io_ms` against its
 /// 300 s hung-I/O deadman) and Linux's SCSI/NVMe error handling all draw the
-/// same line, and this kernel drew it on the other side once: 1 red in 73
-/// suites, a boot's log ended for a stick that answered every transfer.
+/// same line.
 ///
 /// **120 s, and the derivation is three fences.** Below: it must hold the worst
-/// *recoverable* stall ever recorded on this path with room to spare — the
-/// 2026-08-13 stick answered SYNCHRONIZE CACHE 280 ms after a 2 s transport
-/// break, the 2026-08-22 red spent 2.1 s inside one `SYS_FSYNC`, and the
-/// healthy distribution [`census`] measures sits well under one attempt's
-/// bound (2026-08-23, dev host, full 12-wide `cargo test`, busiest guest's 647
-/// flushes: p50 ≤ 512 µs, p99 ≤ 16 ms, max 87.5 ms — 23× under `OPERATION`) —
-/// so 120 s is ~30 whole hung-attempt cycles at the backoff's ceiling, not a
-/// tuned fit. Above: ZFS ships 300 s for the same job, and a laptop being
-/// flashed from this stick deserves an answer while somebody is still
-/// watching; 120 s is the round number between. It deliberately no longer
-/// fits inside `/bin/logd`'s old 5 s syscall-side bound: that bound's slowness
-/// half moved here, and logd's policy now treats a slow-but-answered round as
-/// degraded rather than dead.
+/// *recoverable* stall ever recorded on this path with room to spare — a stick
+/// that answered SYNCHRONIZE CACHE 280 ms after a 2 s transport break, a red
+/// that spent 2.1 s inside one `SYS_FSYNC`, and a healthy distribution
+/// ([`census`]) of p50 ≤ 512 µs, p99 ≤ 16 ms, max 87.5 ms, 23× under
+/// `OPERATION` — so 120 s is ~30 whole hung-attempt cycles at the backoff's
+/// ceiling, not a tuned fit. Above: ZFS ships 300 s for the same job, and a
+/// laptop being flashed from this stick deserves an answer while somebody is
+/// still watching; 120 s is the round number between. It deliberately does not
+/// fit inside `/bin/logd`'s 5 s syscall-side bound: logd's policy treats a
+/// slow-but-answered round as degraded rather than dead.
 pub const DEADMAN: Budget = Budget::of(
     Duration::from_secs(120),
     "the run of retries ends, the volume is declared failed, and the caller is \
@@ -177,10 +166,10 @@ pub(crate) fn backoff_step(attempt: u32) -> Duration {
 ///
 /// **A caller that already holds a completion arm must not call this** — the
 /// park below arms the task's own watch, and `completion::arm` refuses a second
-/// arm on one task. `iod` holds a standing `writeback::WORK` arm across its
-/// loop, so its drain waits on that arm for [`backoff_step`] instead of coming
-/// here (`writeback::drain_all_iod`); routing it here panicked the machine under
-/// contention, the one path that reaches attempt >= 2.
+/// arm on one task, which panics the machine. `iod` holds a standing
+/// `writeback::WORK` arm across its loop, so its drain waits on that arm for
+/// [`backoff_step`] instead of coming here (`writeback::drain_all_iod`); only
+/// attempt >= 2 reaches the park, so contention depth is the coverage.
 pub(crate) fn between_attempts(attempt: u32) {
     if attempt <= 1 {
         crate::scheduler::yield_now();
@@ -206,9 +195,8 @@ pub(crate) fn between_attempts(attempt: u32) {
 ///
 /// Established by the [`BlockDevice`] implementation, which is the layer that
 /// knows one call is one operation, and *recovered* by the driver below it
-/// rather than handed to it: [`Operation`] carries why owner ruling 1B put the
-/// deadline on the running context instead of in an argument, and what else
-/// rides the same word.
+/// rather than handed to it: [`Operation`] carries why the deadline is on the
+/// running context instead of in an argument, and what else rides the same word.
 ///
 /// **A [`Deadline`] because it is absolute**: it crosses into a driver that
 /// loops, and a relative duration re-based at each command would bound every
@@ -221,16 +209,11 @@ pub fn begin_operation() -> Operation {
 /// An operation this trait did not complete, and which of two reasons it was.
 ///
 /// **Two variants and not one bit, because they are not the same fact and the
-/// machine's one consumer acts on them differently.** This was one bit until
-/// 2026-08-22, on the ground that "above this trait there is exactly one thing
-/// to do with the answer — stop, and do not believe the buffer". That is true
-/// of the *buffer* and false of the caller: `/bin/logd` gives its volume up
-/// permanently on any `Err` from `SYS_FSYNC`, which is right for a stick that
-/// cannot flush and wrong for a refusal that means "your budget, not this
-/// stick". The measurement that split them (2026-08-22): 1 red in 73 full
-/// 12-wide suites, a boot whose peers were up in 1,385 ms spending
-/// `syscall_wall=2108ms` inside one `SYS_FSYNC`, and a boot's log ended for a
-/// device that was fine.
+/// machine's one consumer acts on them differently.** "Stop, and do not believe
+/// the buffer" is true of the *buffer* and false of the caller: `/bin/logd`
+/// gives its volume up permanently on any `Err` from `SYS_FSYNC`, which is
+/// right for a stick that cannot flush and wrong for a refusal that means "your
+/// budget, not this stick".
 ///
 /// It is still not a *vocabulary*. Which endpoint stalled, what the sense key
 /// was and whether the device answered at all stay in the driver's own log
@@ -262,8 +245,8 @@ pub enum BlockError {
     /// Not a fact about the device: nothing was in flight when the refusal was
     /// taken, no disk was marked failed, and the transport is exactly as the
     /// last operation left it. A caller that can afford to ask again later
-    /// loses nothing by doing so, and one that cannot is no worse off than the
-    /// single bit left it.
+    /// loses nothing by doing so, and one that cannot is no worse off for
+    /// having been told which.
     BudgetExpired,
 }
 
@@ -291,11 +274,10 @@ pub type BlockResult = Result<(), BlockError>;
 ///
 /// Every method is fallible because every implementation is: an NVMe command
 /// carries a status, and a USB stick can stall, refuse, or be pulled out
-/// mid-transfer. When these returned `()` the NVMe driver discarded six
-/// completion statuses and the page cache filled a slot from a read that had
-/// not happened — which is worse than losing the data, because the slot was
+/// mid-transfer. A discarded status lets the page cache fill a slot from a read
+/// that did not happen — worse than losing the data, because the slot is
 /// already labelled with the new block's number and the *previous tenant's*
-/// bytes were then served under it.
+/// bytes get served under it.
 pub trait BlockDevice: Send {
     fn device_id(&self) -> DeviceId;
     fn block_count(&self) -> u64;
@@ -321,10 +303,11 @@ pub trait BlockDevice: Send {
 //
 // Both numbers are hard ceilings, not targets. Linux lets its page cache take
 // the whole machine because it has a pressure signal and a reclaim path to
-// give it back on demand; ToyOS has neither (`issues/isolation/no-physical-memory-fairness.md` ("No physical
-// memory fairness"), so a cache that grows to fit the workload is a cache
-// that starves userland with no way to stop it. Until there is a pressure
-// signal, the ceiling has to be a number the machine can lose outright.
+// give it back on demand; ToyOS has neither
+// (`issues/isolation/no-physical-memory-fairness.md`), so a cache that grows to
+// fit the workload is a cache that starves userland with no way to stop it.
+// Until there is a pressure signal, the ceiling has to be a number the machine
+// can lose outright.
 //
 // The `test-small-caches` overrides exist because the honest ceilings are
 // tens of megabytes: a test that reached them by doing real I/O would spend
