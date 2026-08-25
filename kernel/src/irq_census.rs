@@ -1,6 +1,6 @@
 //! Where every interrupt lands, counted on the CPU that took it.
 //!
-//! **The instrument before the change.** Every message-signalled interrupt in
+//! **Why it exists.** Every message-signalled interrupt in
 //! this kernel is addressed to physical destination 0 (`drivers::pci`'s
 //! `MSG_ADDR`) and the one I/O APIC pin this kernel routes goes to the BSP's
 //! APIC id, so every device interrupt lands on the boot CPU and is spread from
@@ -33,17 +33,13 @@
 //! increment is missing shows up as `total > Σ sources` rather than as a number
 //! that is quietly too small. `irq_census_conservation` is the gate that asks.
 //!
-//! **What it said the first time it was read.** Dev host, TCG, `cargo test
-//! --test toyos-build` 12-wide, 2026-08-22: 43 of the run's 80 guests printed a
-//! census — a test that boots and runs no program reaches no process exit — and
-//! of **18,314** interrupts **12,239 (66.8%) were cpu0's**, per guest a median
-//! of 87.9%. **Every one of the 7,962 device interrupts (xhci, net, sound,
-//! i8042) was cpu0's**, on the dev host and on all twelve hosted KVM shards
-//! alike; what is already spread is the timer and the shootdown IPI, which are
-//! per-CPU by construction. An interrupt count is a function of timing and moves
-//! between runs — the distribution is what to compare.
-//! `issues/kernel/every-interrupt-lands-on-the-boot-cpu.md` carries both
-//! machines' tables.
+//! **Reading it.** An interrupt count is a function of timing and moves between
+//! runs — the distribution is what to compare, and a test that boots and runs
+//! no program reaches no process exit and prints no census. **Every device
+//! interrupt (xhci, net, sound, i8042) is the boot CPU's**; what is already
+//! spread is the timer and the shootdown IPI, which are per-CPU by
+//! construction. `issues/kernel/every-interrupt-lands-on-the-boot-cpu.md`
+//! carries the tables.
 //!
 //! **What is not counted, and why.** CPU exceptions are not interrupts a
 //! placement policy will ever place — they are raised by the instruction stream
@@ -68,7 +64,7 @@ use crate::scheduler::MAX_CPUS;
 ///
 /// **A variant nothing counts does not compile.** `irq_took!` is the only thing
 /// that names one, so deleting an increment makes its variant unconstructed and
-/// `-D dead-code` refuses the kernel — measured, by deleting `irq_took!(Xhci)`.
+/// `-D dead-code` refuses the kernel.
 /// That covers the increment being *removed*; what it cannot cover is an
 /// increment that runs on some deliveries and not others, which is what
 /// `irq_census_conservation` is for.

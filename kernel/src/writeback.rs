@@ -1,18 +1,16 @@
 //! The write-back queue: the flush a closed file's dirty pages owe, deferred
 //! off the closing thread onto `iod`.
 //!
-//! **Why it exists.** `object::file::OpenFileState::drop` used to take the VFS
-//! lock and flush the file to its device — a device round trip inside a `Drop`,
-//! on whichever thread happened to close the last handle. That blocks the
-//! closer on the disk, and once `vfs::VFS` becomes a sleep lock a `Drop` cannot
-//! take it at all: a `Drop` has no [`crate::scheduler::Parkable`]. So the flush
-//! leaves the closing thread. It leaves it here — the last close pins the file
-//! (`file_cache`'s `teardown_owed`), pushes it on this queue and returns; `iod`
-//! (and `SYS_SHUTDOWN`) drain the queue and run the teardown the `Drop` used to,
-//! under the VFS lock. This chunk converts no lock: the VFS is still a spinlock
-//! and `iod` spins in the driver like any thread. It is the prerequisite the
-//! owner ruled (wall 4) for the conversion, recorded in
-//! `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`.
+//! **Why it exists.** A `Drop` has no [`crate::scheduler::Parkable`], so once
+//! `vfs::VFS` becomes a sleep lock a closing thread's `Drop` cannot take it —
+//! and a device round trip inside a `Drop` blocks the closer on the disk
+//! whichever thread it lands on. So the flush leaves the closing thread. It
+//! leaves it here — the last close pins the file (`file_cache`'s
+//! `teardown_owed`), pushes it on this queue and returns; `iod` (and
+//! `SYS_SHUTDOWN`) drain the queue and run the teardown under the VFS lock.
+//! This chunk converts no lock: the VFS is still a spinlock and `iod` spins in
+//! the driver like any thread. It is the prerequisite for that conversion
+//! (`issues/kernel/every-wait-in-this-kernel-is-a-spin.md`).
 //!
 //! **The pin is the whole correctness argument.** A file on this queue is kept
 //! alive by `teardown_owed` even at `ref_count == 0`, and eviction never takes a
@@ -34,17 +32,15 @@
 //! round the cache has to settle the queue itself.** `Vfs::open_backing` hands
 //! out a view of the *device* — the extent list and the length a filesystem has
 //! recorded — and the whole point of this queue is that the device is not
-//! current while an entry is on it. A `/home` file written, closed and then
-//! spawned answered `ELF: fewer bytes than a file header`, because
-//! `loader::spawn` read a btree inode that still said length 0. So
-//! [`drain_held`] runs the queue out from `Vfs::open_backing` before any backing
-//! is derived, and the invariant it restores is stated once: **no device view is
-//! taken while this queue owes that device anything.** All of it and not the one
-//! path, because the queue is keyed by the path a handle was opened under and a
-//! symlink, a rename or a `cwd`-relative open name the same file differently —
-//! a matcher would answer "nothing owed" for exactly the cases nobody would
-//! test. What it costs the reader is the backlog: `iod`'s header records ~200 µs
-//! a file, measured, and it is the same work in either thread.
+//! current while an entry is on it. So [`drain_held`] runs the queue out from
+//! `Vfs::open_backing` before any backing is derived, and the invariant it
+//! restores is stated once: **no device view is taken while this queue owes
+//! that device anything.** All of it and not the one path, because the queue is
+//! keyed by the path a handle was opened under and a symlink, a rename or a
+//! `cwd`-relative open name the same file differently — a matcher would answer
+//! "nothing owed" for exactly the cases nobody would test. What it costs the
+//! reader is the backlog — ~200 µs a file (`iod`'s header) — and it is the same
+//! work in either thread.
 //!
 //! **A budget refusal is not durable yet, and not a loss.** A flush can be
 //! refused on the block layer's operation budget (`block::OPERATION`) — a
@@ -129,9 +125,8 @@ pub fn drain_all() {
 
 /// The same, for `iod`, whose standing [`WORK`] arm forbids a second
 /// (`completion::arm`'s one-arm-per-task rule). The backoff waits that arm out
-/// for `block::backoff_step` rather than arming the task again — so a new close
-/// posted to `WORK` wakes the retry early, and the machine no longer panics at
-/// attempt >= 2, the depth `between_attempts` first parks at.
+/// for `block::backoff_step` rather than arming the task again — a second arm
+/// panics the machine — so a new close posted to `WORK` wakes the retry early.
 ///
 /// The first retry still only yields (no arm taken); the deadline arms come only
 /// at attempt >= 2, and they come to the arm `iod` already holds. `parkable` and
@@ -222,9 +217,8 @@ enum Drained {
 }
 
 /// One entry, popped and — under the VFS lock the caller holds — flushed and
-/// torn down. The teardown the old `Drop` ran, relocated here: flush the dirty
-/// pages, re-check the last reference, drop the file and release its filesystem
-/// handle.
+/// torn down: flush the dirty pages, re-check the last reference, drop the file
+/// and release its filesystem handle.
 ///
 /// A flush refused on the operation budget (`WouldBlock`) within `deadman` is
 /// [`Drained::Owed`] instead: the entry is re-enqueued and the file left pinned,
@@ -234,9 +228,9 @@ fn drain_one(vfs: &mut crate::vfs::Vfs, deadman: Deadline) -> Drained {
         return Drained::Empty;
     };
 
-    // (a) The flush, relocated from `OpenFileState::drop`. A deleted file
-    // has nothing worth flushing — its data is going away and its
-    // filesystem handle is already torn down — so it is skipped.
+    // (a) The flush. A deleted file has nothing worth flushing — its data is
+    // going away and its filesystem handle is already torn down — so it is
+    // skipped.
     let probe = file_cache::writeback_probe(pending.file_id);
     if probe.dirty_meta && !probe.deleted {
         // Mark the flush as the drain's, so `fat-mirror-write-refuse` stages its
@@ -272,9 +266,9 @@ fn drain_one(vfs: &mut crate::vfs::Vfs, deadman: Deadline) -> Drained {
         }
     }
 
-    // (b)/(c) The last-ref half of the old `release`, re-checked under the VFS
-    // lock a re-open would need — so either the re-open won (the file is adopted
-    // and left) or this drain won and removes the name too.
+    // (b)/(c) The last-ref check, re-taken under the VFS lock a re-open would
+    // need — so either the re-open won (the file is adopted and left) or this
+    // drain won and removes the name too.
     match file_cache::finish_writeback(pending.file_id) {
         Teardown::Released => vfs.close_file(&pending.path, pending.file_id),
         Teardown::Adopted | Teardown::Vanished => {}

@@ -1,10 +1,8 @@
 //! What this kernel has been told to break, and nothing a boot decides.
 //!
-//! Every actuator here used to be a cargo feature, so every one of them was a
-//! kernel build: 45 of them in a full `cargo test`, each the shipping kernel
-//! plus one live path changed. Now there are two kernels — the one an image
-//! ships, which carries none of this, and the one the suite boots, which
-//! carries all of it and arms whichever the boot parameter names.
+//! There are two kernels: the one an image ships, which carries none of this,
+//! and the one the suite boots, which carries all of it and arms whichever the
+//! boot parameter names.
 //!
 //! **The shipping kernel is not this kernel with the switches off.** Without
 //! `boot-actuators` every accessor below is `const fn … { false }`, so a call
@@ -32,8 +30,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// **The comment on each is the claim that earns it a place** — why the state
 /// under it cannot be staged from the host side, which is what separates an
 /// actuator from a harness that could have injected the same thing from
-/// outside — and it lives here rather than in `kernel/Cargo.toml` because this
-/// is the file that has to stay true when one changes.
+/// outside.
 macro_rules! actuators {
     ($( $(#[$doc:meta])* $name:ident = $wire:literal; )*) => {
         /// In bit order: an actuator's bit is its index here.
@@ -52,14 +49,11 @@ macro_rules! actuators {
             $(#[$doc])*
             #[cfg(not(feature = "boot-actuators"))]
             // **The one allow this file needs, and it is the shipping arm.**
-            // Nineteen of these accessors have their only call site inside a
-            // module that is itself `#[cfg(feature = "boot-actuators")]` —
-            // `input_merge_test`, `usb_gate`, `heartbeat`, the xHCI break
-            // arms — so in a shipping kernel the constant is compiled and the
-            // caller is not. Deleting them is not the answer: the whole claim
-            // of this file is that the shipping kernel folds every actuator to
-            // a constant, and an accessor that exists only in the test kernel
-            // makes that claim per-actuator instead of whole.
+            // Many of these accessors have their only call site inside a module
+            // that is itself `#[cfg(feature = "boot-actuators")]`, so in a
+            // shipping kernel the constant is compiled and the caller is not.
+            // Deleting them would make the claim that every actuator folds to a
+            // constant hold per-actuator instead of whole.
             #[allow(dead_code)]
             #[inline(always)]
             pub const fn $name() -> bool {
@@ -96,8 +90,7 @@ actuators! {
 
     /// Set the i8042 probe's whole init budget to zero, so its expiry paths run
     /// on a controller that is answering perfectly. QEMU answers every step in
-    /// microseconds — the whole probe measures 0.099 s to 0.100 s on a
-    /// metal-sim boot — and no real EC has ever been timed, so nothing else can
+    /// microseconds and no real EC has ever been timed, so nothing else can
     /// reach them.
     i8042_budget_expired = "i8042-budget-expired";
 
@@ -110,11 +103,10 @@ actuators! {
     i8042_fadt_denial = "i8042-fadt-denial";
 
     /// Answer the i8042 probe's `0xF0 0x00` scancode-set query with `0xEE` —
-    /// ECHO's own reply, and what the laptop's EC answered on its own
-    /// screen — on a keyboard that is otherwise working. QEMU's PS/2 keyboard
-    /// implements `0xF0` to the letter (`hw/input/ps2.c`, `KBD_CMD_SCANCODE`)
-    /// and no device or machine property makes it stop. Only the verdict is
-    /// replaced; both bytes still go out.
+    /// ECHO's own reply — on a keyboard that is otherwise working. QEMU's PS/2
+    /// keyboard implements `0xF0` to the letter (`hw/input/ps2.c`,
+    /// `KBD_CMD_SCANCODE`) and no device or machine property makes it stop.
+    /// Only the verdict is replaced; both bytes still go out.
     i8042_kbd_echo = "i8042-kbd-echo";
 
     /// Shorten the i8042's post-verdict counter report from 10 s to 500 ms. The
@@ -194,9 +186,8 @@ actuators! {
     ///
     /// **Two, not one, so the drain's retry ladder reaches attempt 2.** One
     /// refusal reaches only attempt 1, which merely yields; attempt 2 is the
-    /// first that parks, and the park is where the standing-`WORK`-arm double-arm
-    /// panic lived (`writeback::drain_all_iod`). A single refusal passed the
-    /// broken kernel, which is why CI missed it. Scoped to the drain flush (not
+    /// first that parks, and the park is where a standing `WORK` arm would be
+    /// armed twice (`writeback::drain_all_iod`). Scoped to the drain flush (not
     /// `SYS_FSYNC`, which already retries) so it lands on exactly the path under
     /// test. See `kernel/src/fat32_adapter.rs`.
     fat_mirror_write_refuse = "fat-mirror-write-refuse";
@@ -260,14 +251,12 @@ actuators! {
     /// Run every `SYS_FSYNC`'s first attempt under an operation that is already
     /// over, so the flush sequence is refused on the caller's budget at the
     /// shipped site and the operation-level retry loop's keep-the-volume half
-    /// runs. The state staged is the one a loaded dev host reproduced 1 in 73
-    /// full 12-wide suites (2026-08-22, `esp_filesystem`'s `fsync` on `/log`)
-    /// — a budget spent by lock-wait and
-    /// host descheduling on a stick that answered every transfer — which
-    /// `usb-slow-device`'s 2 ms against a 2 s bound cannot reach (measured,
-    /// three orders of magnitude) and no QEMU option stages. Every attempt
-    /// after the first runs clean, so every staged refusal is followed by the
-    /// retry delivering the same pages. See `object/ops.rs`'s `fsync`.
+    /// runs. The state staged — a budget spent by lock-wait and host
+    /// descheduling on a stick that answered every transfer — is one
+    /// `usb-slow-device`'s 2 ms against a 2 s bound cannot reach, three orders
+    /// of magnitude short, and no QEMU option stages. Every attempt after the
+    /// first runs clean, so every staged refusal is followed by the retry
+    /// delivering the same pages. See `object/ops.rs`'s `fsync`.
     fsync_budget_spent = "fsync-budget-spent";
 
     /// Make `SYS_FSYNC`'s deadman already expired, so the first budget-refused
@@ -303,19 +292,17 @@ actuators! {
 
     /// Hold every mass-storage bulk completion back for 2 ms before the driver
     /// may see it, which is what a USB flash stick's erase block does to a 4 KiB
-    /// write and what the laptop's audio pops are made of. QEMU's `usb-storage`
-    /// answers in microseconds and has no property that delays a transfer, so
-    /// this is the only way the suite can ask what the machine does while a
-    /// device is slow. The event is the controller's own and the bytes really
-    /// moved; what is replaced is when the driver is allowed to see it.
-    /// See `xhci/mod.rs`'s `SLOW_TRANSFER_NS`.
+    /// write. QEMU's `usb-storage` answers in microseconds and has no property
+    /// that delays a transfer, so this is the only way the suite can ask what
+    /// the machine does while a device is slow. The event is the controller's
+    /// own and the bytes really moved; what is replaced is when the driver is
+    /// allowed to see it. See `xhci/mod.rs`'s `SLOW_TRANSFER_NS`.
     usb_slow_device = "usb-slow-device";
 
     /// Report the preempt depth at the deepest point of a disk transfer, with
-    /// the backtrace that got there. The one number that says how much of the
-    /// kernel is holding a spinlock while a device is being waited for, and one
-    /// no static read of the call graph produces: it is 5 on an ordinary boot.
-    /// The instrument the work in
+    /// the backtrace that got there — how much of the kernel is holding a
+    /// spinlock while a device is being waited for, which no static read of the
+    /// call graph produces. The instrument the work in
     /// `issues/kernel/every-wait-in-this-kernel-is-a-spin.md` is judged on: it
     /// has to fall. It measures and stages nothing — no driver behaviour
     /// changes with it on.
@@ -367,9 +354,8 @@ actuators! {
     /// CPU's own frame.
     ///
     /// **The storm arms on the victim's own syscall count and never on a
-    /// clock**, so it cannot fire at a machine where nothing is spinning yet —
-    /// what that cost while it was a wall-clock instant is written at
-    /// `nmi_gate::SPINNING_SYSCALLS`. Implies `diag-tick`, because the sending
+    /// clock**, so it cannot fire at a machine where nothing is spinning yet
+    /// (`nmi_gate::SPINNING_SYSCALLS`). Implies `diag-tick`, because the sending
     /// CPU looks from its idle loop and a quiet CPU would otherwise sleep
     /// through the run. See `kernel/src/nmi_gate.rs`.
     syscall_window_nmi = "syscall-window-nmi";
@@ -377,13 +363,12 @@ actuators! {
     /// Take the IST index off vector 2's gate, leaving the handler, the ring and
     /// everything else exactly as it ships.
     ///
-    /// **The kernel this tree had until 2026-08-22, and the negative control on
-    /// the row above.** With it the CPU builds the NMI frame at whatever `rsp`
-    /// holds, so an NMI in the syscall window writes to a user page from CPL 0,
-    /// SMAP refuses, and the machine takes the `#DF` this whole change is about.
-    /// The IDT is the guest's own memory and no QEMU property edits it, so the
-    /// state is unreachable from the host side; and it replaces the *behaviour*
-    /// rather than a verdict, which is what keeps the gate above non-vacuous.
+    /// **The negative control on the row above.** With it the CPU builds the NMI
+    /// frame at whatever `rsp` holds, so an NMI in the syscall window writes to
+    /// a user page from CPL 0, SMAP refuses, and the machine takes a `#DF`. The
+    /// IDT is the guest's own memory and no QEMU property edits it, so the state
+    /// is unreachable from the host side; and it replaces the *behaviour* rather
+    /// than a verdict, which is what keeps the gate above non-vacuous.
     nmi_without_ist = "nmi-without-ist";
 
     /// Return from inside the NMI handler through an `iretq` with a second NMI
@@ -427,8 +412,8 @@ actuators! {
     xhci_portsc_rw1c = "xhci-portsc-rw1c";
 
     /// Take a bound HID device's very first completion away and hand the driver
-    /// a stall in its place, which is the shape a Logitech mouse hot-plugged
-    /// into the laptop showed. QEMU's `usb-hid` completes every interrupt TRB it is
+    /// a stall in its place, which is the shape a hot-plugged mouse showed on
+    /// real hardware. QEMU's `usb-hid` completes every interrupt TRB it is
     /// given — `usb_hid_handle_data` answers an IN token on endpoint 1 with a
     /// report or with NAK and has no path to `USB_RET_STALL` for it. What is
     /// replaced is the code *and the report that transfer delivered*: without
@@ -457,12 +442,11 @@ actuators! {
     /// instead of a device. See `drivers/virtio.rs`'s `used_selftest`.
     virtio_used_selftest = "virtio-used-selftest";
 
-    /// Leave every AP holding the CR0 and CR4 that INIT left it, which is what
-    /// every boot before `arch/control_regs.rs` was: caching disabled, WP clear,
-    /// NE clear. `control_regs_negative` boots it and holds the verdict against
-    /// what comes out. The per-CPU line and both assertions are the shipped ones
-    /// and only the two register writes are absent, so the CPU it names is a
-    /// real divergent CPU.
+    /// Leave every AP holding the CR0 and CR4 that INIT left it: caching
+    /// disabled, WP clear, NE clear. `control_regs_negative` boots it and holds
+    /// the verdict against what comes out. The per-CPU line and both assertions
+    /// are the shipped ones and only the two register writes are absent, so the
+    /// CPU it names is a real divergent CPU.
     ///
     /// Nothing else can stage it. A control register is written by the guest and
     /// read by nobody outside it, so there is no QEMU device, machine property
@@ -504,9 +488,8 @@ actuators! {
     /// instruction, a bad syscall pointer — and all of them end at
     /// `recover_or_halt`'s process arm. There is no QEMU device, machine
     /// property or guest program that puts a Ring 0 frame on a bad instruction,
-    /// so before this the kernel arm of the fault path, and the `DOUBLE PANIC`
-    /// branch reachable only through it, had never been executed by a test at
-    /// all.
+    /// so the kernel arm of the fault path, and the `DOUBLE PANIC` branch
+    /// reachable only through it, has no other caller.
     test_kernel_fault = "test-kernel-fault";
 
     /// Panic inside the crash report, before it has said anything: at the head
@@ -515,14 +498,12 @@ actuators! {
     ///
     /// **The panic path panicking is not stageable from the host in any other
     /// way.** It is a second failure *inside* the handler for the first, on one
-    /// CPU, between two statements — no injection reaches there, and the
-    /// sighting that asked for it took two worktrees' suites running at once to
-    /// produce once
-    /// (`issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md`).
-    /// Armed alone it changes nothing: a boot that reports no crash reaches
-    /// neither site. What it drives is which words a machine that is two bugs
-    /// deep leaves behind — the reentry guard's when the first crash was a
-    /// panic, and `DOUBLE PANIC`'s when it was a fault.
+    /// CPU, between two statements, so no injection reaches there. Armed alone
+    /// it changes nothing: a boot that reports no crash reaches neither site.
+    /// What it drives is which words a machine that is two bugs deep leaves
+    /// behind — the reentry guard's when the first crash was a panic, and
+    /// `DOUBLE PANIC`'s when it was a fault. See
+    /// `issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md`.
     panic_in_report = "panic-in-report";
 
     /// Panic a few seconds after a *compositor* has claimed the framebuffer,
@@ -534,16 +515,13 @@ actuators! {
     /// `screen_fatal_halt_composited` certifies the software half and cannot
     /// certify more — QEMU's framebuffer is host RAM, while the laptop's is a
     /// write-combining MMIO mapping the compositor is also writing, and a full
-    /// paint measures ~460 ms there. Three investigations into the machine
-    /// freeze have assumed a fatal panic would have been seen if one had
-    /// happened; this is the boot that turns that assumption into an
-    /// observation. `test-late-panic` cannot serve: it fires during the boot
-    /// phases, before any userland process exists.
+    /// paint measures ~460 ms there. `test-late-panic` cannot serve: it fires
+    /// during the boot phases, before any userland process exists.
     ///
     /// Implies `diag-tick`, because the probe's deadline is read from the idle
     /// loop; without it the probe fires on the first interrupt after the
-    /// deadline rather than at the deadline, which on the owner's laptop was 99
-    /// seconds late and looked like a probe that never fired.
+    /// deadline rather than at the deadline, which on a quiet machine is tens of
+    /// seconds late and looks like a probe that never fired.
     metal_panic_probe = "metal-panic-probe";
 
     /// Cap how long a CPU with nothing to run may sleep, so the idle loop keeps
@@ -554,27 +532,23 @@ actuators! {
     /// which is correct and is good power management. But everything the kernel
     /// does *for the person watching it* lives in the idle loop — the heartbeat,
     /// the probe's deadline, the log sink's flush — so on a machine that has
-    /// gone quiet none of it runs. Eight boots of the owner's laptop produced two
-    /// heartbeats each, at 1.15 s and 1.78 s, then nothing for as long as 102 s
-    /// until a keypress.
+    /// gone quiet none of it runs.
     ///
     /// It costs the wakes and the flushes they carry — with `heartbeat` armed,
     /// four `sync_mount`s a second on whatever `/log` sits on — which also means
     /// the instrument is no longer a passive observer of the boot it is
-    /// watching. A shipping build cannot carry it, and now cannot: the accessor
-    /// is `false` there and the idle loop has no branch at all.
+    /// watching. A shipping build cannot carry it: the accessor is `false` there
+    /// and the idle loop has no branch at all.
     diag_tick = "diag-tick";
 
     /// One log line every 250 ms carrying the monotonic time and which CPUs are
     /// still alive.
     ///
-    /// What nothing else reaches: *was this boot alive at time T*. Ten logs off
-    /// the owner's stick are byte-identical between the boots that froze and the
-    /// boots that did not — a live idle desktop and a dead machine have the same
-    /// last thing to say — so the log records the freeze's existence and never
-    /// its time. With this, a frozen boot's log ends at the last heartbeat
-    /// before death, and the mask says whether the machine stopped all at once
-    /// or a CPU at a time.
+    /// What nothing else reaches: *was this boot alive at time T*. A live idle
+    /// desktop and a dead machine have the same last thing to say, so the log
+    /// records a freeze's existence and never its time. With this, a frozen
+    /// boot's log ends at the last heartbeat before death, and the mask says
+    /// whether the machine stopped all at once or a CPU at a time.
     ///
     /// Implies `diag-tick`, which is what makes the mask mean that: without it a
     /// clear bit means "this CPU had nothing to do", which every idle CPU on a
@@ -616,8 +590,7 @@ actuators! {
     /// frame without polling either, and the bracket contains no preemption
     /// point — so no Ring 0 producer can be switched out inside that window at
     /// any rate, and only a task that is Ready ever migrates.
-    /// `log::storm`'s header carries the same rule from the other end,
-    /// measured: 0 of 8 and 0 of 16 producers with records on a second shard.
+    /// `log::storm`'s header carries the same rule from the other end.
     /// `sched::kthread`'s header is where the rule itself lives. See
     /// `arch::LogCommitGuard::close`.
     log_unbracketed_reserve = "log-unbracketed-reserve";
@@ -674,43 +647,34 @@ actuators! {
     /// Let a handle close cancel every poll in the machine on `Source::Log` —
     /// which is every `SysCap`'s.
     ///
-    /// **A real prior behaviour and the defect `/bin/logd` would have lived
-    /// under.** `ops::close` cancelled by source across every ring, which is
-    /// right for a pipe and wrong for a stream that outlives every handle: any
-    /// process closing any capability posted `-NotFound` into logd's parked
-    /// poll. It cannot be staged from the host — which process closes which
-    /// handle is decided inside the guest, and the two processes involved need
-    /// not know about each other at all, which is the whole shape of the bug.
-    ///
-    /// It used to cover the keyboard too, because the question was asked of the
-    /// object and one switch answered for both of the objects that got it
-    /// wrong. The question is the *source*'s now
-    /// (`Source::ended_by_its_last_handle`), so the keyboard has its own name
-    /// below and this one restores exactly the log half.
+    /// **Cancelling by source across every ring is right for a pipe and wrong
+    /// for a stream that outlives every handle**: armed, any process closing any
+    /// capability posts `-NotFound` into logd's parked poll. It cannot be staged
+    /// from the host — which process closes which handle is decided inside the
+    /// guest, and the two processes involved need not know about each other at
+    /// all, which is the whole shape of the bug. The question the kernel asks is
+    /// the *source*'s (`Source::ended_by_its_last_handle`), so the keyboard has
+    /// its own name below and this one restores exactly the log half.
     log_close_cancels_any_syscap = "log-close-cancels-any-syscap";
 
     /// Let a handle close cancel every poll in the machine on
     /// `Source::Keyboard` — the keyboard claim's, and every `Console`'s.
     ///
     /// **The keyboard half of the row above, and a live cross-cancellation
-    /// rather than an invented one.** While `object::ops` asked the question of
-    /// the object, `Device(_)` answered "this ends its sources" unconditionally,
-    /// so the one process holding the keyboard claim closing its handle posted
-    /// `-NotFound` into every pending `POLL_ADD` on stdin in the machine —
-    /// libc's terminal read is what arms them, so the blast radius was every
-    /// program waiting for a keystroke, none of which holds a device or was
-    /// consulted. It cannot be staged from the host: which process closes which
-    /// handle is decided inside the guest, and the claim's holder and the poll's
-    /// owner need not know about each other at all, which is the whole shape of
-    /// the bug. `Source::ended_by_its_last_handle`, in `kernel/src/inbox.rs`.
+    /// rather than an invented one.** Armed, the one process holding the
+    /// keyboard claim closing its handle posts `-NotFound` into every pending
+    /// `POLL_ADD` on stdin in the machine — libc's terminal read is what arms
+    /// them, so the blast radius is every program waiting for a keystroke, none
+    /// of which holds a device or was consulted. It cannot be staged from the
+    /// host: which process closes which handle is decided inside the guest, and
+    /// the claim's holder and the poll's owner need not know about each other at
+    /// all, which is the whole shape of the bug.
+    /// `Source::ended_by_its_last_handle`, in `kernel/src/inbox.rs`.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
 
     /// Bypass `ConsoleObject`'s line buffer: every userland `write` reaches the
     /// backend as it arrives.
     ///
-    /// **A real prior build rather than an invented defect** — it is exactly
-    /// what this tree shipped between L3 and L5, and before that the byte ring
-    /// made the unit of interleaving a `write` syscall in a lossier way still.
     /// The host cannot stage it: `println!` is `LineWriter`, whose two syscalls
     /// per line are decided inside the guest's own `std`, and no host-side
     /// stimulus can make the kernel forget a buffer it holds. What it produces
@@ -732,15 +696,12 @@ actuators! {
 
     /// Panic inside `usbd`, the second kernel thread, on its first instruction.
     ///
-    /// **`klogd-panic`'s other half, and it is the half nothing has ever run.**
-    /// The two threads carry opposite rows in `sched::kthread`: `klogd`'s panic
-    /// halts the machine, `usbd`'s kills the thread and the machine carries on.
-    /// Until this actuator existed only the halting branch had ever been taken
-    /// by a kernel thread, so "recoverable" was a value in a table rather than a
-    /// path anything had walked — and the recovery it names runs through
+    /// **`klogd-panic`'s other half.** The two threads carry opposite rows in
+    /// `sched::kthread`: `klogd`'s panic halts the machine, `usbd`'s kills the
+    /// thread and the machine carries on. The recovery it names runs through
     /// `poison_tid`, the idle loop's `reap_poisoned` and `zombify_poisoned`,
-    /// none of which had ever seen a task with no address space of its own. The
-    /// host has no stimulus for it even in principle: there is no process to
+    /// none of which otherwise sees a task with no address space of its own.
+    /// The host has no stimulus for it even in principle: there is no process to
     /// kill and no syscall to make.
     usbd_panic = "usbd-panic";
 
@@ -751,10 +712,10 @@ actuators! {
     /// is no injection that stops a kernel between two statements, and a QEMU
     /// pause stops the guest without leaving it in the state under test, which
     /// is a CPU that will never reach a scheduler pass. What the gate reads is
-    /// the *console*: before `Drain::Inline` a boot that stopped here produced
+    /// the *console*: without `Drain::Inline` a boot that stops here produces
     /// nothing whatsoever, including everything it had logged, because the only
-    /// two drains in the machine were the timer tick and the idle loop and a
-    /// wedge in phase 3 reaches neither.
+    /// other two drains in the machine are the timer tick and the idle loop and
+    /// a wedge in phase 3 reaches neither.
     pre_idle_wedge = "pre-idle-wedge";
 
     /// Fail every re-read of a page of a file on either FAT mount through
@@ -764,9 +725,7 @@ actuators! {
     /// volumes mounted — `readonly=on` is writes only and `rerror` takes the
     /// whole drive. The read is still issued and only its verdict is replaced.
     /// What it drives is the partial write an appender makes into an evicted
-    /// page — `log_file`'s until L6 and `/bin/logd`'s since, which is the same
-    /// path through the page cache and a *more* reachable one, because a
-    /// userland writer's tail page is ordinary evictable cache.
+    /// page — `/bin/logd`'s tail page, which is ordinary evictable cache.
     /// See `fat32_adapter.rs`'s `fat_backing_reads`.
     fat_backing_read_fails = "fat-backing-read-fails";
 
@@ -824,8 +783,8 @@ actuators! {
     rtc_no_century = "rtc-no-century";
 
     /// A century register reading 0x21. `-rtc base=` sets every digit of the
-    /// date except the century — measured, a guest booted at 2101 reads century
-    /// 20 and year 01.
+    /// date except the century: a guest booted at 2101 reads century 20 and
+    /// year 01.
     rtc_century_next = "rtc-century-next";
 
     /// A machine whose firmware names its zone. OVMF ships
@@ -835,8 +794,7 @@ actuators! {
     rtc_zone_east = "rtc-zone-east";
 }
 
-/// What arming one arms with it, exactly as `kernel/Cargo.toml`'s feature
-/// implications used to.
+/// What arming one arms with it.
 #[cfg(feature = "boot-actuators")]
 const IMPLIES: &[(&str, &[&str])] = &[
     ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
@@ -848,12 +806,11 @@ const IMPLIES: &[(&str, &[&str])] = &[
 
 /// Words the arm set takes, from how many names there are.
 ///
-/// **One was exactly enough until 2026-08-22 and then it was not.** The 64th
-/// actuator filled it and the 65th made `1 << i` overflow, which the `const`
-/// block at the foot of this file refused by name — so the wall was a compile
-/// error and never a boot that quietly read somebody else's bit. Derived rather
-/// than written down, so the next name past a multiple of 64 costs nothing and
-/// no second number has to be kept agreeing with `NAMES`.
+/// Derived rather than written down, so the next name past a multiple of 64
+/// costs nothing and no second number has to be kept agreeing with [`NAMES`].
+/// The `const` block at the foot of this file refuses a set with fewer bits than
+/// there are actuators, so overflowing it is a compile error and never a boot
+/// that quietly reads somebody else's bit.
 #[cfg(feature = "boot-actuators")]
 const ARM_WORDS: usize = NAMES.len().div_ceil(u64::BITS as usize);
 
