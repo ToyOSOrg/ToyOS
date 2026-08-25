@@ -57,7 +57,7 @@ kernel/src/arch/syscall/machine.rs 134 0
 kernel/src/arch/syscall/mod.rs 28 0
 kernel/src/arch/syscall/proc.rs 86 0
 kernel/src/arch/syscall/vm.rs 186 0
-kernel/src/arch/tlb.rs 137 0
+kernel/src/arch/tlb.rs 139 0
 kernel/src/bcachefs_adapter.rs 135 0
 kernel/src/block.rs 273 0
 kernel/src/clock.rs 106 0
