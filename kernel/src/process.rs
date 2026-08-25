@@ -1357,7 +1357,7 @@ fn teardown_resources(
 /// handle, and `close_all` in phase 3 is what releases them.
 #[must_use = "the exit must be published on the object returned"]
 fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
-                        main_cpu_ns: u64)
+                        main_cpu_ns: u64, child_threads_cpu_ns: u64)
                         -> Arc<crate::object::process::ProcessObject> {
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
@@ -1378,7 +1378,10 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
     // off every CPU.
     proc.symbols = Arc::new(SymbolTable::empty());
 
-    let cpu_ms = main_cpu_ns / 1_000_000;
+    // The whole process, not the main thread alone — retire_threads already
+    // folded every other thread's time into child_threads_cpu_ns, and this
+    // is the same total final_stats hands SYS_PROCESS_STATS.
+    let cpu_ms = (main_cpu_ns + child_threads_cpu_ns) / 1_000_000;
     let name = proc.name_str();
     log!("exit: {name} pid={process_pid} code={code} cpu={cpu_ms}ms");
 
@@ -1492,11 +1495,13 @@ fn teardown_tail(
     let (syscall_total, syscall_total_ns) =
         teardown_resources(process_data_arc, thread_data_arc, pid);
 
+    let child_threads_cpu_ns = process_data_arc.lock().accounting.child_threads_cpu_ns;
+
     // Phase 4: table bookkeeping (thread zombie marks, symbols released).
     let object = {
         let mut guard = PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
-        teardown_bookkeeping(table, pid, code, main_cpu_ns)
+        teardown_bookkeeping(table, pid, code, main_cpu_ns, child_threads_cpu_ns)
     };
 
     // Phase 5: publish the exit. The table lock is given up, which is what the

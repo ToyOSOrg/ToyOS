@@ -155,7 +155,7 @@ kernel/src/page_cache.rs 88 0
 kernel/src/panic.rs 177 0
 kernel/src/pipe.rs 96 0
 kernel/src/preempt.rs 66 0
-kernel/src/process.rs 919 0
+kernel/src/process.rs 922 0
 kernel/src/rtc.rs 123 0
 kernel/src/sched/driver.rs 711 0
 kernel/src/sched/dump.rs 241 0
