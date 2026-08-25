@@ -3,10 +3,8 @@
 //!
 //! A handle is a *slot in one process's own table*. It designates nothing
 //! outside that table: a number lifted out of another process's log, or counted
-//! up from zero, resolves to that process's own slot or to nothing at all.
-//! That is the whole difference between this and the ids it replaces — a
-//! `PipeId`, a `SharedToken` and a service name were all machine-wide, so
-//! holding one *was* the authority.
+//! up from zero, resolves to that process's own slot or to nothing at all — so
+//! holding a number is never the authority.
 
 /// One entry in a process's handle table.
 ///
@@ -27,11 +25,11 @@ impl RawHandle {
     pub const MAX_SLOTS: usize = 1 << Self::SLOT_BITS;
 
     /// **No table ever issues a handle at this generation.** A slot whose
-    /// counter would step to it retires instead — permanently, by owner ruling
-    /// of 2026-08-20 — so a spent slot is one the table no longer has rather
-    /// than one whose numbers start again. Two things rest on it: an ancient
-    /// handle can never come back to life, and [`HANDLE_INVALID`] — which
-    /// encodes slot 4095 at this generation — is a number nothing holds.
+    /// counter would step to it retires instead, permanently, so a spent slot
+    /// is one the table no longer has rather than one whose numbers start
+    /// again. Two things rest on it: an ancient handle can never come back to
+    /// life, and [`HANDLE_INVALID`] — which encodes slot 4095 at this
+    /// generation — is a number nothing holds.
     ///
     /// The last generation a slot is issued at is therefore `MAX_GENERATION - 1`
     /// (`kernel::object::handle`).
@@ -99,11 +97,9 @@ impl Rights {
     /// On a `SysCap`: power the machine off.
     ///
     /// [`SYS_SHUTDOWN`] ends every process there is and does not come back, so
-    /// it is the largest authority this capability carries — and it was the one
-    /// machine-wide authority that took no handle and no right at all, so any
-    /// process that could make a syscall could end the machine. It rides a bit
-    /// for the same reason minting a device claim and entering the real-time
-    /// band do: what can cut the power is exactly what `/bin/init` endowed, and
+    /// it is the largest authority this capability carries. It rides a bit for
+    /// the same reason minting a device claim and entering the real-time band
+    /// do: what can cut the power is exactly what `/bin/init` endowed, and
     /// there is nothing a program can name to reach it otherwise.
     ///
     /// The kernel mints one capability carrying it, at boot, for `/bin/init`
@@ -122,10 +118,6 @@ impl Rights {
     /// **name**. The header is a machine fact like [`SYS_CPU_COUNT`] and stays
     /// ambient; the entries are a census of what the machine is running, and a
     /// process that was endowed one connector has no business reading it.
-    ///
-    /// **Named for the list and not for the call**, because the machine already
-    /// has a census: `debug_action::CENSUS_KIND` counts live kernel objects per
-    /// kind, and a right sharing that word would name neither well.
     ///
     /// `/bin/toybox` holds it because `/bin/ps` is that binary under another
     /// name, and `test-runner` because several guest binaries read their own

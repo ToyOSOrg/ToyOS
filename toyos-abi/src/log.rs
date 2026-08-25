@@ -2,30 +2,20 @@
 //!
 //! One layout, two types over it. The kernel's slot is this struct with its
 //! first word made atomic; [`LogRecord`] is what a reader gets, and by the time
-//! it holds one that word is just a sequence number. Making it *one* type with
-//! an `AtomicU64` in it — which an earlier draft did — makes the copy-out a
-//! transmute of an atomic into a value nobody synchronises on, and gives a
-//! userland reader a field named `commit` that commits nothing.
-//!
-//! Nothing here dispatches: the kernel's implementation of [`SYS_LOG_READ`]
-//! arrives with the record ring it reads, and until then the number falls to the
-//! syscall dispatch's default and answers `InvalidArgument`, which is what an
-//! unassigned number answers.
-//!
-//! [`SYS_LOG_READ`]: crate::syscall::SYS_LOG_READ
+//! it holds one that word is just a sequence number. One type with an
+//! `AtomicU64` in it would make the copy-out a transmute of an atomic into a
+//! value nobody synchronises on, and would give a userland reader a field named
+//! `commit` that commits nothing.
 
 /// Message bytes a record carries.
 ///
-/// **Sized to the next power-of-two record that holds the measured maximum
-/// line.** Across 12,497 committed real-hardware boot-log lines, message length
-/// after the `[kernel … ] ` prefix measured: min 14, p50 59, p90 111, p99 154, p999 857,
-/// max 863. The record's other fields are 32 bytes fixed, so [`RECORD_BYTES`] —
-/// a power of two by its own derivation — is 32 plus this constant; 1024 is the
-/// smallest power of two past 32 + 863, which makes this 992, covering the
-/// measured maximum with headroom at zero alignment padding. The unbounded case
-/// — a demangled backtrace symbol — is not solved by any fixed bound and is
-/// handled separately by head-and-tail elision at the producer
-/// (`kernel/src/log/elide.rs`).
+/// **Sized to the next power-of-two record that holds the longest measured
+/// line**, 863 bytes. The record's other fields are 32 bytes fixed, so
+/// [`RECORD_BYTES`] — a power of two by its own derivation — is 32 plus this
+/// constant; 1024 is the smallest power of two past 32 + 863, which makes this
+/// 992, at zero alignment padding. The unbounded case — a demangled backtrace
+/// symbol — is not solved by any fixed bound and is handled separately by
+/// head-and-tail elision at the producer (`kernel/src/log/elide.rs`).
 pub const MAX_RECORD_MESSAGE: usize = 992;
 
 /// One record on the wire, and one slot in a shard. A power of two so a reader
@@ -36,8 +26,9 @@ pub const RECORD_BYTES: usize = 1024;
 ///
 /// Not read from `sched::MAX_CPUS`: this is an ABI struct's width, so it is
 /// fixed by the ABI and the kernel is what must agree with it. A machine with
-/// more CPUs than this is a kernel that cannot answer [`SYS_LOG_READ`] at all,
-/// which is a build-time disagreement rather than a runtime one.
+/// more CPUs than this is a kernel that cannot answer
+/// [`SYS_LOG_READ`](crate::syscall::SYS_LOG_READ) at all, which is a build-time
+/// disagreement rather than a runtime one.
 pub const MAX_LOG_SHARDS: usize = 8;
 
 /// What a record is, to the one consumer that treats them differently.
@@ -53,11 +44,6 @@ pub enum Level {
     /// `boot_phase!`. The panel repaints on one.
     Phase = 1,
     /// `alert!`. The panel paints the row red.
-    ///
-    /// **This deletes a magic-value sentinel.** `panic_console::has_alert` scans
-    /// each row for three consecutive `!` bytes and its own comment enumerates
-    /// the strings that happen to match, which is the comment root `CLAUDE.md`
-    /// says is the type you should have written.
     Alert = 2,
 }
 
@@ -161,10 +147,8 @@ impl LogRecord {
 
     /// The record's own bytes, which is what goes on the wire.
     ///
-    /// The shape its six siblings in this crate have (`NicInfo`,
-    /// `VirtioSoundInfo`, `FramebufferInfo`, `RawKeyEvent`, `MouseEvent`,
-    /// `HdaInfo`), and it is here rather than at the kernel's copy-out for the
-    /// reason they are: the `unsafe` belongs beside the layout assertion that
+    /// Here rather than at the kernel's copy-out, the shape every ABI struct in
+    /// this crate has: the `unsafe` belongs beside the layout assertion that
     /// discharges it, not beside the caller that happens to need it.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {

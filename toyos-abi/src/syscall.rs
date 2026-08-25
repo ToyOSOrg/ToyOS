@@ -22,23 +22,22 @@ pub const SYS_PIPE: u64 = 24;
 /// Start a program, endowing it exactly what the caller names. Answers a
 /// `Process` handle — see [`spawn`].
 pub const SYS_SPAWN: u64 = 25;
-// Syscall number 26 unused (formerly SYS_WAITPID: a pid is not authority over
-// a process, and a pid outlives nothing — the number is reissued. Waiting is
-// [`SYS_PROCESS_WAIT`] on the handle the spawn answered with).
+// Syscall number 26 unused (formerly SYS_WAITPID: a pid is not authority over a
+// process, and pids are reissued. Waiting is SYS_PROCESS_WAIT on the handle the
+// spawn answered with).
 pub const SYS_MARK_TTY: u64 = 28;
 // Syscall numbers 29-31 unused (formerly SYS_SEND_MSG/SYS_RECV_MSG and
 // SYS_OPEN_DEVICE: first-come claiming, where whoever asked first got the
-// device. Arbitration is the manifest now — init mints every claim from a
-// `SysCap` and endows it, so who holds a device is a fact the image was built
-// with rather than a race).
+// device. Arbitration is the manifest — init mints every claim from a `SysCap`
+// and endows it).
 // Syscall numbers 32-33 unused (formerly SYS_REGISTER_NAME/SYS_FIND_PID).
 // Syscall number 34 unused (formerly SYS_SET_SCREEN_SIZE).
 pub const SYS_GPU_PRESENT: u64 = 35;
 // Syscall numbers 36-39 unused (formerly SYS_ALLOC_SHARED, SYS_GRANT_SHARED,
 // SYS_MAP_SHARED and SYS_RELEASE_SHARED: a shared-memory token was an id
 // treated as a capability and the grant list was a pid ACL. A region is a
-// handle now — [`SYS_SHM_CREATE`] and [`SYS_SHM_MAP`] — and giving one away is
-// [`SYS_HANDLE_SEND`]).
+// handle — SYS_SHM_CREATE and SYS_SHM_MAP — and giving one away is
+// SYS_HANDLE_SEND).
 pub const SYS_THREAD_SPAWN: u64 = 40;
 pub const SYS_THREAD_JOIN: u64 = 41;
 pub const SYS_CLOCK_REALTIME: u64 = 42;
@@ -91,18 +90,17 @@ pub const SYS_CPU_COUNT: u64 = 62;
 pub const SYS_MMAP: u64 = 63;
 pub const SYS_MUNMAP: u64 = 64;
 // Syscall number 65 unused (formerly SYS_KILL: pid-addressed, and gated on
-// being the target's parent — which is a relationship the kernel happened to
-// remember, not a capability anyone was given. [`SYS_PROCESS_KILL`] takes a
-// handle carrying `Rights::MANAGE`).
+// being the target's parent — a relationship the kernel happened to remember,
+// not a capability anyone was given. SYS_PROCESS_KILL takes a handle carrying
+// `Rights::MANAGE`).
 pub const SYS_READ_NONBLOCK: u64 = 66;
 pub const SYS_WRITE_NONBLOCK: u64 = 67;
 // Syscall numbers 68 and 70 unused (formerly SYS_PIPE_OPEN and SYS_PIPE_ID: a
 // pipe id was guessable, and openable by anyone its creator had ever spoken to.
-// A pipe end travels as itself now, over [`SYS_HANDLE_SEND`]).
+// A pipe end travels as itself, over SYS_HANDLE_SEND).
 // Syscall numbers 71 and 84 unused (formerly SYS_AUDIO_SUBMIT and
-// SYS_AUDIO_POLL: the kernel no longer drives a sound card, so a period is
-// published into a ring the kernel built and there is nothing to submit).
-// 84 never had a dispatch arm or a caller, so retiring it saves nothing.
+// SYS_AUDIO_POLL: the kernel drives no sound card, so a period is published
+// into a ring the kernel built and there is nothing to submit).
 pub const SYS_EXIT: u64 = 72;
 pub const SYS_GET_ENV: u64 = 73;
 /// A second handle to the same object, at a slot the caller picks. See
@@ -112,12 +110,9 @@ pub const SYS_CLOCK_EPOCH: u64 = 75;
 /// Join a pipe read end and a pipe write end into one duplex `Connection`.
 /// See [`connection_join`].
 ///
-/// Formerly `SYS_SOCKET_CREATE`, which took two pipe *ids* and is the same
-/// operation with the argument the capability model requires — the way
-/// [`SYS_HANDLE_DUP`] is `SYS_DUP` with a rights word. What is retired is
-/// addressing a pipe by a number anyone could guess, not making a duplex
-/// object out of two simplex ends: `std`'s `TcpStream` is one endpoint, and
-/// netd's data path is two pipes.
+/// It keeps the number of `SYS_SOCKET_CREATE`, which was the same operation
+/// over two pipe *ids*: what is retired is addressing a pipe by a number anyone
+/// could guess, not making a duplex object out of two simplex ends.
 pub const SYS_CONNECTION_JOIN: u64 = 76;
 pub const SYS_PIPE_MAP: u64 = 77;
 pub const SYS_NIC_RX_POLL: u64 = 78;
@@ -142,13 +137,12 @@ pub const SYS_ACCEPT: u64 = 86;
 pub const SYS_TLS_ALLOC_BLOCK: u64 = 88;
 /// Create an [`inbox`](crate::inbox) and map its rings. See [`inbox_setup`].
 ///
-/// **A rename is not a retirement, which is why this is still 89.** These two
-/// were `SYS_IO_URING_SETUP` and `SYS_IO_URING_ENTER` until 2026-08-20. The
-/// rule above — a deleted syscall's number is retired and never reused — is
-/// about a *deleted* call: 89 and 90 are the same two operations with the same
-/// arguments and the same struct layouts, and only the Rust identifier moved.
-/// No number was taken and none was retired, so `RETIRED_ABI_NAMES` in
-/// `src/sourcegate.rs` gains no row for either.
+/// **A rename is not a retirement, which is why this is still 89.** The rule
+/// that a deleted syscall's number is retired and never reused is about a
+/// *deleted* call: 89 and 90 kept their arguments and their struct layouts when
+/// `SYS_IO_URING_SETUP`/`SYS_IO_URING_ENTER` became these, so no number was
+/// taken and `RETIRED_ABI_NAMES` in `src/sourcegate.rs` carries no row for
+/// either.
 pub const SYS_INBOX_SETUP: u64 = 89;
 /// Hand queued submissions to the kernel and/or wait for completions. See
 /// [`inbox_submit`]; on the number, see [`SYS_INBOX_SETUP`].
@@ -214,13 +208,11 @@ pub const SYS_SHM_CREATE: u64 = 105;
 /// Map a region into the caller. Idempotent: a second call answers the first
 /// call's address. See [`shm_map`].
 pub const SYS_SHM_MAP: u64 = 106;
-// Syscall number 107 is retired and unused: it was SYS_SHM_UNMAP, which took a
-// process's mapping away while it kept the handle. It had no caller anywhere —
-// not in the SDK, not in userland, not in a test. A region's mappings go with
-// its last handle (`ZeroHandles for SharedMemObject`), so letting the handle go
-// is the whole of letting the mapping go, and unmapping behind a handle its
-// holder still has was a second spelling of the same event that the two could
-// disagree about.
+// Syscall number 107 is retired and unused: it took a process's mapping away
+// while it kept the handle. A region's mappings go with its last handle
+// (`ZeroHandles for SharedMemObject`), so letting the handle go is the whole of
+// letting the mapping go, and unmapping behind a handle its holder still has is
+// a second spelling of the same event that the two can disagree about.
 
 /// Wait for the process a handle names and take its exit code, gated by
 /// [`Rights::WAIT`]. See [`process_wait`].
@@ -270,8 +262,7 @@ pub const SYS_RT_ENTER: u64 = 112;
 //
 // **Both are recorded here and nowhere else**, because this file is where an
 // agent allocating a number looks and a reservation nobody reads is not a
-// reservation. Holes are already ordinary here — a retired number is never
-// reused either.
+// reservation.
 
 /// Copy kernel log records into a caller's buffer, advancing a cursor the
 /// caller owns. Gated by [`Rights::LOG`] on a `SysCap`. See [`log_read`] and
@@ -289,9 +280,8 @@ pub const SYS_LOG_READ: u64 = 114;
 /// issues, and one at the end for every number it does not.
 ///
 /// **The profile's parts sum to its total, and that is the whole requirement.**
-/// It was `[u32; 64]` while the ABI reached 98, and the bump was guarded by a
-/// silent `if num < len`: every audio, network, IPC and pipe call fell out of
-/// the line, 15% of doom's, with the total still counting them.
+/// A bin array narrower than the ABI reaches drops calls out of the line while
+/// the total goes on counting them.
 pub const SYSCALL_PROFILE_BINS: usize = 128;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
@@ -382,11 +372,9 @@ pub const MAX_ENDOWMENTS: usize = 32;
 /// **Derived rather than chosen.** A slot map installs into the child's table,
 /// which has [`RawHandle::MAX_SLOTS`] slots, so a longer one necessarily names
 /// a slot twice and the second pair says everything the first did. Without it
-/// the count was bounded only by the 2 MiB window the arguments are read
-/// through — 262,144 pairs, every one of them a `duplicate_entry` under the
-/// parent's own lock, and every repeat of one slot displacing a live entry the
-/// caller has to carry out of that lock. That vector passes `MAX_HEAP_ALLOC`
-/// at 87,211 repeats, and the allocator's refusal there is a kernel panic.
+/// the only bound is the 2 MiB window the arguments are read through, and every
+/// pair is a `duplicate_entry` under the parent's own lock — enough of them to
+/// pass `MAX_HEAP_ALLOC`, where the allocator's refusal is a kernel panic.
 pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
 /// Bytes of label blob one endowment table may carry.
 pub const MAX_LABELS_LEN: usize = 4096;
@@ -708,10 +696,7 @@ pub fn debug_with(action: u64, arg: u64) -> u64 {
 
 /// What [`SYS_DEBUG`] can be asked to do.
 ///
-/// **One declaration, because a number that means something is a constant.**
-/// These were bare integers in the kernel's dispatch and re-declared in each
-/// test binary that called one — five spellings of `14`, and the kernel's own
-/// arms said nothing about which was which except in prose beside them. An
+/// **One declaration, because a number that means something is a constant.** An
 /// action's *reason* stays at the kernel arm, where the code it runs is; its
 /// number lives here once, where both sides read it.
 ///
@@ -750,14 +735,12 @@ pub mod debug_action {
     // Actions 14 and 15 are retired and unused: they were CENSUS_TOTAL and
     // CENSUS_BREAKDOWN. A total hides a leak of one kind behind churn in
     // another, and a breakdown written into the kernel log is a reading no
-    // guest test can see — so every leak assertion in the estate is
-    // `CENSUS_KIND`, and neither of the two had a caller left.
+    // guest test can see.
     /// How many kernel objects of one kind are alive right now. The argument is
     /// an [`OBJECT_KINDS`](super::OBJECT_KINDS) index.
     ///
-    /// **Per kind and not a total**, because a total is what every leak
-    /// assertion in the estate used to be against: an object of one kind that
-    /// is never released is invisible behind ordinary churn in another.
+    /// **Per kind and not a total**: an object of one kind that is never
+    /// released is invisible behind ordinary churn in another.
     pub const CENSUS_KIND: u64 = 16;
     /// The deepest any CPU's idle stack has been this boot, in bytes.
     ///
@@ -794,11 +777,8 @@ pub mod debug_action {
 /// declares them — so an index into this is the index
 /// [`debug_action::CENSUS_KIND`] takes.
 ///
-/// **In the ABI rather than in the kernel alone, because a census nobody can
-/// read per kind is a total.** Every leak assertion in the test estate was
-/// against the machine-wide count, where a leak of one kind is hidden by churn
-/// in another, and six of the thirteen kinds were exercised by no census
-/// assertion at all. The kernel checks this list against its own declaration
+/// In the ABI rather than in the kernel alone, because a census nobody can read
+/// per kind is a total. The kernel checks this list against its own declaration
 /// order when the action is called, so a row added to `kobject!` without a row
 /// here is a named refusal rather than an index that quietly names its
 /// neighbour.
@@ -986,9 +966,9 @@ pub fn fsync(handle: RawHandle) -> Result<(), SyscallError> {
 /// buf.len()` means nothing was written and `n` is the size to retry with.
 /// The kernel never writes a partial listing — see `sys_readdir`.
 ///
-/// The error is returned rather than folded into `0`, which is what this did
-/// before: "the directory is too large to list" and "the directory is empty"
-/// are different answers and a caller has to be able to tell them apart.
+/// The error is returned rather than folded into `0`: "the directory is too
+/// large to list" and "the directory is empty" are different answers and a
+/// caller has to be able to tell them apart.
 pub fn readdir(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
     let n = syscall(SYS_READDIR, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64);
     match SyscallError::from_u64(n) {
@@ -1014,10 +994,9 @@ pub fn chdir(path: &[u8]) -> Result<(), SyscallError> {
 /// nothing was written and `n` is the size to allocate before retrying. Pass an
 /// empty buffer to ask the length alone. `0` is the error return.
 ///
-/// Reporting the required length rather than a truncated count is what lets a
-/// caller be correct: the previous contract could not distinguish an exact fit
-/// from a silent truncation, so a caller with a fixed buffer got a valid-looking
-/// path to the wrong directory.
+/// The required length rather than a truncated count, because a count cannot
+/// distinguish an exact fit from a silent truncation — and a caller with a fixed
+/// buffer would take a valid-looking path to the wrong directory.
 pub fn getcwd(buf: &mut [u8]) -> usize {
     let n = syscall(SYS_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
     if SyscallError::from_u64(n).is_some() { 0 } else { n as usize }
@@ -1166,10 +1145,9 @@ device_classes! {
     Framebuffer = 2 => "framebuffer",
     Nic = 3 => "nic",
     // 4 was `Audio`, a sound card the kernel drove on the claimant's behalf.
-    // Retired with the syscall that fed it rather than reused for the stub that
-    // replaced it: the claim authorizes register writes and answers no submit,
-    // so a caller that still names 4 has to be refused rather than handed a
-    // capability of a different shape.
+    // Retired rather than reused for the stubs below: a claim here authorizes
+    // register writes and answers no submit, so a caller that still names 4 is
+    // refused rather than handed a capability of a different shape.
     /// An Intel HDA controller the kernel has brought up but drives no policy
     /// on.
     HdaAudio = 5 => "hda-audio",
@@ -1745,10 +1723,8 @@ pub fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
 
 /// An inbox and where its page of rings is mapped.
 ///
-/// **The inbox owns its page and the kernel maps it at setup.** It used to hand
-/// back a shared-memory token the caller mapped itself, which is the only place
-/// this mechanism ever needed shared memory to be a separate thing with a
-/// separate lifetime.
+/// **The inbox owns its page and the kernel maps it at setup**, so the mapping
+/// has no lifetime of its own: it ends when the last handle to the inbox closes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct InboxSetup {
@@ -1825,12 +1801,9 @@ const _: () = assert!(core::mem::size_of::<ModuleInfo>() == 8 + 8 + 8 + 8 + 4 + 
 impl ModuleInfo {
     /// The record's own bytes, which is what `SYS_QUERY_MODULES` writes.
     ///
-    /// The shape its siblings in this crate have — `NicInfo`,
-    /// `VirtioSoundInfo`, `FramebufferInfo`, `RawKeyEvent`, `MouseEvent`,
-    /// `HdaInfo`, `LogRecord` — and it is here rather than at the kernel's
-    /// copy-out for the reason they are: the `unsafe` belongs beside the
-    /// layout assertion that discharges it, not beside the caller that
-    /// happens to need it.
+    /// Here rather than at the kernel's copy-out, the shape every ABI struct in
+    /// this crate has: the `unsafe` belongs beside the layout assertion that
+    /// discharges it, not beside the caller that happens to need it.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
@@ -1898,7 +1871,7 @@ pub struct ProcessStats {
     /// The process's own pid. Not authority — nothing takes a pid but
     /// [`SYS_PROCESS_OPEN`], which takes a `SysCap` beside it — but it is the
     /// name a diagnostic prints, and this is where a holder of a handle reads
-    /// it. It also fills what was named padding.
+    /// it.
     pub pid: u32,
     pub io_read_bytes: u64,
     pub blocked_io_ns: u64,

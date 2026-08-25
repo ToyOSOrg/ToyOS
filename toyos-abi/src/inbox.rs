@@ -1,20 +1,9 @@
 //! An inbox: the shared-memory pair of rings a process submits work on and
 //! reads completions from.
 //!
-//! **The name is the mechanism's, not Linux's.** This was called `io_uring`
-//! until 2026-08-20, which named a Linux mechanism this kernel does not
-//! implement — no fixed files, no registered buffers, no SQPOLL, three op
-//! codes. The owner ruled `inbox`, and the acronyms went with it: a submission
-//! ring, a completion ring, a submission. Numbers 89 and 90 did not move, and
-//! neither did a single struct layout — [`crate::syscall::SYS_INBOX_SETUP`]
-//! says why a rename is not a retirement.
-//!
-//! **Two other things in this kernel are already called an inbox, and this is
-//! meant to join one of them.** `completion::Inbox` is a *task's* bounded
-//! record ring, which is what a waiter on this object ends up owning; the
-//! kernel's own object for this ABI is to land at `crate::object::inbox`
-//! beside it. A `ConnectionEnd`'s `inbox`/`outbox` pair is the common noun and
-//! is unrelated.
+//! Two other things wear the word: the kernel's `completion::Inbox` is a
+//! *task's* bounded record ring, and a `ConnectionEnd`'s `inbox`/`outbox` pair
+//! is the common noun. Neither is this object.
 //!
 //! Op codes are raw `u8` constants because they cross shared memory. The
 //! kernel converts to a type-safe enum at the syscall boundary.
@@ -23,16 +12,12 @@ use crate::RawHandle;
 
 pub const OP_NOP: u8 = 0;
 pub const OP_WATCH: u8 = 1;
-// Op code 2 unused (formerly IORING_OP_POLL_REMOVE). It had no submitter
-// anywhere either — and the selector that would have been its caller cancels
-// nothing: mio's ToyOS selector keeps its own registration list, re-arms every
-// registration on each `select`, and deregisters by dropping the entry. A watch
-// this kernel takes is one-shot, consumed by the completion it posts, so the
-// interest a remove would withdraw is gone before there is anything to name.
+// Op code 2 unused (formerly IORING_OP_POLL_REMOVE): a watch this kernel takes
+// is one-shot, consumed by the completion it posts, so the interest a remove
+// would withdraw is gone before there is anything to name.
 pub const OP_ACCEPT: u8 = 3;
-// Op code 4 unused (formerly IORING_OP_CLOSE). It had no submitter anywhere —
-// not in the SDK, not in userland, not in mio — and it was the one handle path
-// that could not obey the bad-handle policy: it runs under the ring's own lock,
+// Op code 4 unused (formerly IORING_OP_CLOSE): it is the one handle path that
+// cannot obey the bad-handle policy, because it runs under the ring's own lock
 // where taking the process down is not available.
 
 /// Readiness flags for [`OP_WATCH`], stored in `Submission::op_flags`.
@@ -49,16 +34,13 @@ pub struct Submission {
     pub op: u8,
     pub flags: u8,
     pub _pad: u16,
-    /// The handle this entry is about. Signed until 2026-08-09, which made it
-    /// the one place a handle round-tripped through a type that can hold `-1`.
+    /// The handle this entry is about.
     pub handle: RawHandle,
     pub off: u64,
     pub addr: u64,
     pub len: u32,
     pub op_flags: u32,
-    /// The caller's word, handed back untouched in `Completion::token`. The
-    /// kernel's `completion::arm` takes a `Token`, and this is that value
-    /// round-tripping through shared memory.
+    /// The caller's word, handed back untouched in `Completion::token`.
     pub token: u64,
 }
 
@@ -77,9 +59,9 @@ pub struct Completion {
     pub flags: u32,
 }
 
-// Spelled out rather than derived, as `RingLayout` below is: `Submission`
-// above cannot derive one — `RawHandle` has no `Default` — so a derive here
-// would split one family of ABI structs across two idioms.
+// Spelled out rather than derived: `Submission` cannot derive one — `RawHandle`
+// has no `Default` — so a derive here would split one family of ABI structs
+// across two idioms.
 #[allow(clippy::derivable_impls)]
 impl Default for Completion {
     fn default() -> Self {
@@ -97,15 +79,12 @@ pub struct RingHeader {
     /// Completions the kernel could not post because the completion ring
     /// reported itself full. Cumulative, and never cleared.
     ///
-    /// 2x sizing makes this unreachable only for a process that keeps its
-    /// registrations within the depth it asked for. It said a non-zero value
-    /// meant the process had corrupted its own ring head; honest
-    /// over-registration reaches it with no corruption at all, because
-    /// flushing a full submission ring mid-registration makes the kernel post
-    /// completions for the handles that are already ready while the caller is
-    /// still registering the rest. `toyos`'s `Poller` sizes its rings so that
-    /// cannot happen and reads this on every wait, so the reachable case now
-    /// has a name and an owner.
+    /// The 2x sizing makes this unreachable only for a process that keeps its
+    /// registrations within the depth it asked for: over-registering flushes a
+    /// full submission ring mid-registration, and the kernel then posts
+    /// completions for the handles already ready while the caller is still
+    /// registering the rest. `toyos`'s `Poller` sizes its rings so that cannot
+    /// happen and reads this on every wait.
     pub dropped: core::sync::atomic::AtomicU32,
 }
 
@@ -146,10 +125,9 @@ impl Default for RingLayout {
 /// likes, and a `Freeze` `T` hands the compiler `noalias` it does not have — so
 /// both ends reach a header one `AtomicU32` at a time, at an offset each
 /// computes with `offset_of!`. Those two computations agree with each other by
-/// construction and with *nothing else*: a field reordered here would move both
-/// in step and no test on either side could see it. The `const _`s below are
-/// what the reordering meets instead, in the crate both ends compile against,
-/// so a kernel build and an SDK build red on the same line.
+/// construction and with *nothing else*: a field reordered here moves both in
+/// step and no test on either side can see it. The `const _`s below are what
+/// the reordering meets instead, in the crate both ends compile against.
 pub const RING_HEAD_OFF: usize = 0;
 pub const RING_TAIL_OFF: usize = 4;
 pub const RING_SIZE_OFF: usize = 8;
@@ -159,10 +137,10 @@ const _: () = assert!(RING_HEAD_OFF == core::mem::offset_of!(RingHeader, head));
 const _: () = assert!(RING_TAIL_OFF == core::mem::offset_of!(RingHeader, tail));
 const _: () = assert!(RING_SIZE_OFF == core::mem::offset_of!(RingHeader, ring_size));
 const _: () = assert!(RING_DROPPED_OFF == core::mem::offset_of!(RingHeader, dropped));
+// The completion array starts immediately after its ring's header, which is the
+// one region of the page with no `_OFF` constant of its own — both ends spell it
+// as the ring offset plus this header size.
 const _: () = assert!(core::mem::size_of::<RingHeader>() == 16);
-/// The completion array starts immediately after its ring's header, which is
-/// the one region of the page that has no `_OFF` constant of its own — both
-/// ends spell it as the ring offset plus this.
 const _: () = assert!(core::mem::size_of::<Completion>() == 16);
 const _: () = assert!(core::mem::size_of::<Submission>() == 40);
 
