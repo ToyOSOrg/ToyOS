@@ -300,6 +300,13 @@ changes.
   and is the one thing this test already has both samples for. Still
   `Sched::Parallel`, not investigated further.
 
+- **`metal_sim_window_caps`** and **`null_sink_shipped_client`** — added
+  2026-08-25. Both carried the same two `tlb: cpu N has not flushed for
+  generation …` lines, naming the pair of initiators two CPUs shooting down
+  at once — a mutual wait, not a bound, fixed in `kernel/src/shootdown.rs`
+  and gated by `an_initiator_answers_while_it_waits`. Measured 2026-08-07 on
+  `wt/toyos-boot`, before the fix; not reproduced since.
+
 - **`console_locale_detect`** — added 2026-08-20, first push-triggered `main`
   sighting: `ci` run `32314166262`, `guest (9)`, headSha `eba06ad6`, found
   auditing the merge-health backfill (`issues/build/the-eased-merge-law-carries-a-threshold.md`).

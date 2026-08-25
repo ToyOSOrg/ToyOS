@@ -1552,7 +1552,7 @@ pub const KNOWN_RED: &[Red] = &[
                stalled five seconds on `tlb: cpu N has not flushed for generation …`",
         evidence: "two `--land` gates on `wt/toyos-boot` and five A/B runs against `main` at \
                    6d11938, one session",
-        source: "issues/audio/wide-phase-reds-under-load.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-07",
     },
     Red {
@@ -1563,7 +1563,7 @@ pub const KNOWN_RED: &[Red] = &[
         what: "FAIL 10 s in the wide phase, PASS 4 s alone on the branch and 5 s alone on `main`, \
                with the same two `tlb:` lines in the capture",
         evidence: "two `--land` gates on `wt/toyos-boot`, one session",
-        source: "issues/audio/wide-phase-reds-under-load.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-07",
     },
     // ---------------------------------------------------------------------

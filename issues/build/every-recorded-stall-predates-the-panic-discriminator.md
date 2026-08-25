@@ -107,9 +107,9 @@ kernel panic was found under a verdict that named a wait.**
   kernel death instead of saying it went quiet, so the next occurrence decides
   itself.
 - The dev-host load family in
-  `issues/build/parallel-tests-red-under-other-suites.md` and
-  `issues/audio/wide-phase-reds-under-load.md` — `screen_console_scroll`
-  at 598 s, `screen_early_panic`, the `metal_sim_*` reds at 300 s and more.
+  `issues/build/parallel-tests-red-under-other-suites.md` —
+  `screen_console_scroll` at 598 s, `screen_early_panic`, the `metal_sim_*`
+  reds at 300 s and more.
   `ALONE: GREEN` is *not* evidence against a panic: a panic reached only under
   contention does not reproduce alone either.
 
