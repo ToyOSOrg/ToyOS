@@ -1,5 +1,5 @@
-//! The checks that run *inside* the core — spec §10.5's "cheap subset at
-//! kernel pass ends".
+//! The checks that run *inside* the core: the cheap subset a kernel pass can
+//! afford at its end.
 //!
 //! Everything here is local to one CPU, because that is all a pass can see
 //! without reaching into another CPU's state — which is exactly what the
@@ -100,10 +100,10 @@ pub fn check_cpu<X: SchedPayload>(cpu: &CpuSched<X>) {
     check_timer(cpu);
 }
 
-/// Invariant T (spec §8.4): outside a pass, the armed deadline is no later
-/// than the earliest thing that must happen — the running task's quantum end
-/// or the earliest valid parked deadline. And a CPU with nothing loaded and a
-/// pending deadline must have the timer armed at all.
+/// Invariant T: outside a pass, the armed deadline is no later than the
+/// earliest thing that must happen — the running task's quantum end or the
+/// earliest valid parked deadline. And a CPU with nothing loaded and a pending
+/// deadline must have the timer armed at all.
 pub fn check_timer<X: SchedPayload>(cpu: &CpuSched<X>) {
     let earliest = earliest_event(cpu);
     match (cpu.armed(), earliest) {

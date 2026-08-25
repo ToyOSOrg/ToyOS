@@ -8,7 +8,7 @@
 //! it in `waitq::deliver_wake` — and this test is that pair with a whole pass
 //! executed in between, which is the only way to say it.
 //!
-//! What it asserts is invariant T (spec §8.4) across that window: a CPU that
+//! What it asserts is invariant T across that window: a CPU that
 //! holds a parked task with a pending deadline has its timer armed for it. The
 //! state it constructs is the one `kernel/src/sched/dump.rs` cannot describe —
 //! a machine halted with a parked thread and a stopped timer reports

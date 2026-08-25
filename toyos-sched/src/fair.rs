@@ -1,6 +1,6 @@
-//! Fairness policy: per-process vruntime/lag/frontier math (spec §9.1). The
-//! simulator runs this exact arithmetic, so policy changes belong here and are
-//! sim-gated.
+//! Fairness policy: one pot per *process*, and the vruntime/lag/frontier math
+//! over it. The simulator runs this exact arithmetic, so policy changes belong
+//! here and are sim-gated.
 
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -24,8 +24,8 @@ pub struct NotRunnable;
 
 /// The global vruntime frontier: a monotonic-non-decreasing baseline from
 /// which non-runnable processes' lag is measured (see
-/// [`ShareState::NonRunnable`]). A per-CPU frontier with epoch reconciliation
-/// is a later, sim-gated stage (spec §11 Stage 9).
+/// [`ShareState::NonRunnable`]). One, not one per CPU — a per-CPU frontier
+/// needs epoch reconciliation, which is a policy change the simulator gates.
 pub struct Frontier(AtomicU64);
 
 impl Frontier {
@@ -205,9 +205,9 @@ fn vrt_from_lag(frontier: u64, lag: i64) -> u64 {
     }
 }
 
-/// One process's fair-share pot, reached through any thread that owns it
-/// (spec §9.1). The cell is supplied by the environment for the reason stated
-/// on [`LeafLock`]: the kernel's is a word-sized spin, the simulator's a mutex.
+/// One process's fair-share pot, reached through any thread that owns it. The
+/// cell is supplied by the environment for the reason stated on [`LeafLock`]:
+/// the kernel's is a word-sized spin, the simulator's a mutex.
 pub struct FairShare<L> {
     state: L,
 }
@@ -218,7 +218,7 @@ impl<L: LeafLock<ShareState>> FairShare<L> {
     }
 
     /// A thread of this process is entering a run queue: returns the vruntime
-    /// to insert with. Called at exactly the §5.2 transitions that add a task
+    /// to insert with. Called at exactly the transitions that add a task
     /// to the Ready+Running pair, which is what keeps `runnable_threads` and
     /// the containers in step (invariant I6).
     pub fn enter_runnable(&self, frontier: &Frontier) -> u64 {

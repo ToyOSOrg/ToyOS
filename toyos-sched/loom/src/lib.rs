@@ -1,4 +1,4 @@
-//! Loom harness for the `toyos-sched` primitives (spec §10.6).
+//! Loom harness for the `toyos-sched` primitives.
 //!
 //! This crate is `toyos-sched` compiled a second time: the module list below
 //! includes the very same source files, with `feature = "loom"` on, so
@@ -7,12 +7,12 @@
 //! primitives, not of a re-implementation — a re-implementation is exactly
 //! the divergence risk this crate is meant to remove.
 //!
-//! Division of labour, stated honestly (spec §10.6): loom owns the
-//! primitives the simulator's step granularity assumes correct — mailbox
-//! push/drain, doorbell edges, the ticket CAS protocol, kill-bit vs wake
-//! ordering, retire-node re-post, the sleep handshake. The simulator (Stage
-//! 4) owns the protocol above them. Loom does not scale to the whole
-//! scheduler; the simulator does not model weak memory.
+//! Division of labour, stated honestly: loom owns the primitives the
+//! simulator's step granularity assumes correct — mailbox push/drain, doorbell
+//! edges, the ticket CAS protocol, kill-bit vs wake ordering, retire-node
+//! re-post, the sleep handshake. The simulator owns the protocol above them.
+//! Loom does not scale to the whole scheduler; the simulator does not model
+//! weak memory.
 //!
 //! Keep this module list identical to `../src/lib.rs`. `fair` is pure math
 //! with no atomics worth modelling beyond the frontier's `fetch_max`, but it

@@ -1,4 +1,4 @@
-//! Loom: the intrusive MPSC under torn pushes (spec §7.2, §12).
+//! Loom: the intrusive MPSC under torn pushes.
 //!
 //! One model, two configurations. The threads are the three producers a CPU
 //! actually has — its own thread context, its own IRQ context, and another
@@ -10,7 +10,7 @@
 //!   interleavings), then at IRQ exit runs a pass *if* preemption
 //!   is enabled.
 //! * `remote` — another CPU: pushes and rings with `Urgency::Normal`, so a
-//!   busy target gets no IPI (spec §7.3) — its message is the one
+//!   busy target gets no IPI — its message is the one
 //!   that ends up behind the unlinked suffix.
 //!
 //! Two properties are checked.
@@ -59,11 +59,11 @@ struct World {
 fn pass(world: &World, rx: &mut MailboxConsumer<Msg>, drained: &mut Vec<Msg>) {
     let Some(guard) = world.preempt.enter_pass() else {
         // Preemption is disabled in the interrupted context: IRQ exit returns
-        // to it instead of running a pass (spec §6.3).
+        // to it instead of running a pass.
         return;
     };
     // Clear the edge before draining, so a message posted after the drain
-    // re-raises it (spec §7.3).
+    // re-raises it.
     world.doorbell.begin_pass();
     while let Some(msg) = rx.pop(&guard) {
         drained.push(msg);
@@ -178,7 +178,7 @@ fn preempted_producer_strands_suffix() {
     );
 }
 
-/// §7.7: the steal probe is one reusable node. A thief may only post when its
+/// The steal probe is one reusable node. A thief may only post when its
 /// previous probe has been consumed, and the victim releases the node
 /// strictly after unlinking it — so the node is never linked twice.
 #[cfg(not(feature = "no-preempt-guard"))]
@@ -195,7 +195,7 @@ fn steal_probe_node_is_never_double_linked() {
                 for probe in 0..2 {
                     let guard = world.2.disable();
                     // No probe is posted while one is outstanding; the thief
-                    // simply doesn't post another (spec §7.7).
+                    // simply doesn't post another.
                     if let Some(slot) = world.1.claim() {
                         world.0.post(slot, Msg::Probe(probe), &guard);
                         posted += 1;

@@ -17,9 +17,8 @@ pub const CPU1: CpuId = CpuId(1);
 pub enum Msg {
     Wake(TaskKey, WakeReason),
     Retire(TaskKey),
-    /// Stands in for the ownership-carrying `Adopt`/`StealRequest` traffic
-    /// that Stage 4 adds; the mailbox models only need distinguishable
-    /// payloads.
+    /// Stands in for the ownership-carrying `Adopt`/`StealRequest` traffic;
+    /// the mailbox models only need distinguishable payloads.
     Probe(u32),
 }
 
@@ -44,8 +43,8 @@ impl SchedMsg for Msg {
 /// With `--features no-preempt-guard` the guard is **modelled away**:
 /// [`PreemptModel::disable`] returns a guard that excludes nothing, so the
 /// pass may run inside a half-finished push. That is the forbidden
-/// interleaving of spec §7.2, and `tests/loom_mailbox.rs` asserts it is
-/// detected.
+/// interleaving — a push torn by a pass on its own CPU — and
+/// `tests/loom_mailbox.rs` asserts it is detected.
 pub struct PreemptModel {
     section: Mutex<()>,
 }
@@ -89,7 +88,7 @@ pub struct ThreadGuard<'a>(#[allow(dead_code)] Option<MutexGuard<'a, ()>>);
 unsafe impl PreemptGuard for ThreadGuard<'_> {}
 
 /// The scheduler pass's exclusion against preempt-disabled sections. A pass
-/// runs with preemption disabled itself (spec §6.2), so it is also what the
+/// runs with preemption disabled itself, so it is also what the
 /// consumer's stub re-push pushes under.
 pub struct PassGuard<'a>(#[allow(dead_code)] MutexGuard<'a, ()>);
 
@@ -100,7 +99,7 @@ unsafe impl PreemptGuard for PassGuard<'_> {}
 /// IRQ context: not preemptible by construction, so it needs no exclusion.
 pub struct IrqGuard;
 
-// SAFETY: an interrupt handler cannot be preempted (spec §7.2).
+// SAFETY: an interrupt handler cannot be preempted.
 #[allow(unsafe_code)]
 unsafe impl PreemptGuard for IrqGuard {}
 

@@ -1,8 +1,8 @@
-//! The cross-CPU message set — spec §7.1.
+//! The cross-CPU message set — these four and no others.
 //!
 //! Two of the four messages are requests about a task the target already
 //! owns; one *is* the ownership transfer. That is the property that makes
-//! overflow unrepresentable (§7.2): a queue that cannot drop a message cannot
+//! overflow unrepresentable: a queue that cannot drop a message cannot
 //! lose a task, because the message is the task.
 //!
 //! Its own module rather than part of `mailbox.rs`, so that the crate's single
@@ -21,10 +21,10 @@ pub enum Msg<X: SchedPayload> {
     /// on the node embedded in the transferred task's own record, which is
     /// why a transfer can never be dropped for lack of queue space.
     Adopt { task: TransitTask<X> },
-    /// "If you are overloaded, send me one" (spec §7.7). Rides on the thief's
+    /// "If you are overloaded, send me one". Rides on the thief's
     /// single reusable probe node.
     StealRequest { thief: CpuId },
-    /// Kill protocol (spec §7.6). Rides on `TaskShared.retire_node`.
+    /// Kill protocol. Rides on `TaskShared.retire_node`.
     Retire { shared: Arc<TaskShared<Msg<X>>> },
 }
 
@@ -46,12 +46,12 @@ impl<X: SchedPayload> SchedMsg for Msg<X> {
         Msg::Wake { key, cause }
     }
 
-    /// The spec's `Retire { key, notify: TaskRef }` field is deliberately
-    /// absent: a notify riding the message would be a second wake path (what
-    /// §8.2 exists to prevent) and would have to outlive the message anyway,
-    /// since a *running* target consumes the retire and dies at some later
-    /// safe point. Joiners wait on the environment's finalize sink instead,
-    /// which runs exactly once per task and after the payload is gone.
+    /// `Retire` carries no `notify` handle, deliberately: a notify riding the
+    /// message would be a second wake path, where `TaskShared::claim_wake` is
+    /// the only one, and would have to outlive the message anyway — a
+    /// *running* target consumes the retire and dies at some later safe point.
+    /// Joiners wait on the environment's finalize sink instead, which runs
+    /// exactly once per task and after the payload is gone.
     fn retire(shared: Arc<TaskShared<Msg<X>>>) -> Self {
         Msg::Retire { shared }
     }

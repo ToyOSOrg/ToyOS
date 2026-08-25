@@ -1,4 +1,4 @@
-//! The global walks — spec §10.5, invariants I1–I13.
+//! The global walks: the invariants no single CPU can check from its own state.
 //!
 //! These run after **every** step. They are the reason the simulator exists:
 //! the linear types make most of these states unrepresentable in *scheduler*
@@ -6,10 +6,10 @@
 //! not something the compiler can check, and the old scheduler's failures all
 //! lived exactly there.
 //!
-//! Division of labour with loom is stated in the spec and honoured here: loom
-//! owns the primitives (mailbox linearizability, doorbell edges, the ticket
-//! CAS protocol, weak memory); this file owns the protocol above them and does
-//! not model memory ordering at all.
+//! Division of labour with loom: loom owns the primitives (mailbox
+//! linearizability, doorbell edges, the ticket CAS protocol, weak memory);
+//! this file owns the protocol above them and does not model memory ordering
+//! at all.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as StdArc;
@@ -77,8 +77,8 @@ fn rt_latency_bound(max_kernel_section: u64) -> u64 {
 ///    when the interrupt lands.
 /// 3. `QUANTUM_NS` — the pass drains the retire and the victim reaches the
 ///    dying list, but the pick can only take it once the CPU is free to switch:
-///    a *running* fair task keeps the CPU until its quantum expires (spec
-///    §7.6's "bounded by the quantum").
+///    a *running* fair task keeps the CPU until its quantum expires, which is
+///    what bounds this hop.
 /// 4. **`(1 + peers) × UNWIND_NS × STRETCH`** — the unwind itself, the unwinds
 ///    already queued ahead of it on that CPU, and the real-time band's bounded
 ///    share of the same CPU. See [`rt_deferral_stretch`].
@@ -230,16 +230,15 @@ fn check_single_ownership(vm: &mut Vm<'_>) {
                 | (Container::Parked, TaskState::Blocked(c))
                 | (Container::Parked, TaskState::WakeQueued(c)) => c.0 as usize == cpu,
                 // A task that has registered on a wait queue and not yet parked
-                // is still the running value (spec §8.1). Exactly two words are
-                // legal there: `Committing`, while its own commit is still
-                // owed, and `WakeQueued`, once a remote claim has taken it
-                // pre-park — §8.2's `Claim::PrePark`, which posts no message
-                // precisely because the waiter has not parked. Both are legal
-                // *only* inside that window, which is why this consults the
-                // CPU's pending block instead of accepting the words outright:
-                // a word that says the task is blocked while its CPU still runs
-                // it is otherwise exactly the single-ownership break the
-                // pre-`8508b37` blocking shape had.
+                // is still the running value. Exactly two words are legal
+                // there: `Committing`, while its own commit is still owed, and
+                // `WakeQueued`, once a remote claim has taken it pre-park —
+                // `Claim::PrePark`, which posts no message precisely because
+                // the waiter has not parked. Both are legal *only* inside that
+                // window, which is why this consults the CPU's pending block
+                // instead of accepting the words outright: a word that says the
+                // task is blocked while its CPU still runs it is otherwise
+                // exactly a single-ownership break.
                 (Container::Running, TaskState::Committing(c, _))
                 | (Container::Running, TaskState::WakeQueued(c)) => {
                     c.0 as usize == cpu && vm.blocking[cpu].is_some()
@@ -428,7 +427,7 @@ fn retire_elapsed(vm: &Vm<'_>, key: TaskKey) -> u64 {
 }
 
 /// I3 / invariant T: the armed deadline is never later than the earliest
-/// thing the CPU owes (spec §8.4). Delegated to the core's own checker, which
+/// thing the CPU owes. Delegated to the core's own checker, which
 /// is the same code a kernel `feature="check"` build runs.
 fn check_timers(vm: &mut Vm<'_>) {
     for cpu in 0..vm.scenario.cpus {
@@ -528,7 +527,7 @@ fn note_rt_service(vm: &mut Vm<'_>) -> bool {
 }
 
 /// I5: **equal shares receive equal service, to within the granularity the
-/// policy chooses** (spec §9.1, §10.5).
+/// policy chooses.**
 ///
 /// Fairness is a statement about service, so this measures service — the
 /// nanoseconds the virtual CPUs actually delivered to each process — and not
@@ -555,18 +554,19 @@ fn note_rt_service(vm: &mut Vm<'_>) -> bool {
 /// granularity the policy picked:
 ///
 /// * `lag_spread` — the stored lags of the contending shares. A share that
-///   parked 50 ms behind the frontier is *entitled* to that much catch-up
-///   (§9.1), so the clamp and the intended service difference are the same
-///   number. Asserted against `MAX_VRUNTIME_LAG_NS` here rather than assumed,
-///   because the bound is only worth what the clamp is worth.
+///   parked 50 ms behind the frontier is *entitled* to that much catch-up, so
+///   the clamp and the intended service difference are the same number.
+///   Asserted against `MAX_VRUNTIME_LAG_NS` here rather than assumed, because
+///   the bound is only worth what the clamp is worth.
 /// * `(runnable threads + 1) × (QUANTUM + max KernelSection + 2 × RUN_CHUNK)` —
-///   the fair band is keyed by the vruntime a task had *when it was inserted*
-///   (spec §9.2), so a process with T threads carries up to T−1 of its own
-///   dispatches' worth of stale keys and can be picked that many times over
-///   before its slowest thread comes up. Both sides carry it and the leader is
-///   spending one more quantum on top, hence `ΣT_i + 1`. The kernel-section and
-///   chunk terms are I9's, for I9's reason: a preempt-off section overruns the
-///   quantum it started in, and the model observes the expiry one chunk late.
+///   the fair band is keyed by the vruntime a task had *when it was inserted*,
+///   ties broken by insertion sequence, so a process with T threads carries up
+///   to T−1 of its own dispatches' worth of stale keys and can be picked that
+///   many times over before its slowest thread comes up. Both sides carry it
+///   and the leader is spending one more quantum on top, hence `ΣT_i + 1`.
+///   The kernel-section and chunk terms are I9's, for I9's reason: a
+///   preempt-off section overruns the quantum it started in, and the model
+///   observes the expiry one chunk late.
 ///
 /// Earlier drafts of this check widened that expression twice, because the
 /// shipped scheduler brushed it — 74 ms against 72, then 109 ms against 108.
@@ -759,14 +759,14 @@ fn open_thread_window(vm: &mut Vm<'_>, balanced: bool, live_threads: &BTreeSet<T
 /// I13: **threads of one share receive equal service**, measured over the same
 /// contention windows invariant I5 measures processes over.
 ///
-/// I5 is structurally blind to this. A fair share is per *process* (spec §9.1),
-/// so every thread of a process charges one pot and `service_ns` adds all of
+/// I5 is structurally blind to this. A fair share is per *process*, so every
+/// thread of a process charges one pot and `service_ns` adds all of
 /// them together: a share that runs one thread flat out and never dispatches
 /// its siblings delivers exactly the per-process total that a share
 /// round-robining them delivers, and I5 reports a perfectly even split while a
 /// thread never runs. What prevents that today is the fair band's
-/// insertion-sequence tie-break (`queue.rs`, spec §9.2) — and until this check
-/// existed, nothing measured it.
+/// insertion-sequence tie-break (`queue.rs`), and this check is what measures
+/// it.
 ///
 /// **The window is I5's**, taken from the same `fair_epoch` and opened and
 /// closed by the same rules — the runnable set changing, a CPU idling, a member
@@ -978,9 +978,9 @@ fn check_share_refcounts(vm: &mut Vm<'_>) {
     let counted = runnable_per_process(vm);
     let mut problems = Vec::new();
     for (process, expected) in counted.iter().enumerate() {
-        // A sum, because a process holds one share under spec §9.1 and one per
-        // thread under the `PerThread` negative gate. With one share this is
-        // the single `runnable_threads()` read it has always been.
+        // A sum, because a process holds one share under the shipped policy and
+        // one per thread under the `PerThread` negative gate. With one share it
+        // is a single `runnable_threads()` read.
         let actual: u32 = vm.procs[process]
             .shares
             .iter()
@@ -1000,7 +1000,7 @@ fn check_share_refcounts(vm: &mut Vm<'_>) {
 
 /// I8: the mock address space's refcount equals the number of live tasks that
 /// reference it, plus the process's own reference while it still holds one.
-/// The crash.md detector.
+/// The double-drop detector.
 fn check_address_spaces(vm: &mut Vm<'_>) {
     let mut problems = Vec::new();
     for process in 0..vm.procs.len() {
@@ -1024,17 +1024,15 @@ fn check_address_spaces(vm: &mut Vm<'_>) {
 }
 
 /// I9: **one lend buys at most one quantum of running time at the borrowed
-/// priority** (spec §8.5).
+/// priority.**
 ///
-/// That sentence is now tested directly, against `Vm::boosted_run`'s cumulative
-/// *running* residency per lend, rather than by comparing a running task's
-/// `until` to the clock. The old form could not survive `RtState::arm`: a
-/// re-armed `until` is by construction fresh, so the check passed for the same
-/// reason it stopped measuring anything — the same shape as gate A's four
-/// instrument defects, and the reason `old_park_kept_the_lend` exists as a
-/// standing negative gate rather than a comment.
+/// Tested against `Vm::boosted_run`'s cumulative *running* residency per lend,
+/// never by comparing a running task's `until` to the clock: `RtState::arm`
+/// makes a re-armed `until` fresh by construction, so that form passes for the
+/// same reason it stops measuring anything. `old_park_kept_the_lend` is the
+/// standing negative gate that holds this one honest.
 ///
-/// Queue time is deliberately outside the bound (§8.5: waiting holds nothing),
+/// Queue time is deliberately outside the bound — waiting holds nothing —
 /// which is why the accumulator only advances while the task is `Running`.
 fn check_boost_windows(vm: &mut Vm<'_>) {
     // One quantum is the grant. The slack on top is measurement, not licence:

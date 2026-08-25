@@ -1,5 +1,5 @@
 //! Loom: the sleep handshake and the doorbell's kick accounting
-//! (spec §7.3, §7.5, invariant I2).
+//! (invariant I2).
 //!
 //! The handshake is: publish SLEEPING, drain, check the mailbox one last
 //! time, then halt. A producer that posts after that check raises the KICK
@@ -7,9 +7,9 @@
 //! halt cannot be a sleep-through. The IPI is modelled as a counter, because
 //! its only relevant effect is "the target cannot stay halted".
 //!
-//! Two producers, so the edge-coalescing rule of §7.3 (a normal wake to a
-//! busy CPU costs zero IPIs; a sleeping CPU always gets one) is exercised
-//! rather than assumed.
+//! Two producers, so the edge-coalescing rule (a normal wake to a busy CPU
+//! costs zero IPIs; a sleeping CPU always gets one) is exercised rather than
+//! assumed.
 //!
 //! The edge the property rests on is `ring`'s read of the doorbell's bits: it
 //! is what lets a producer see a target's freshly published SLEEPING before
@@ -24,9 +24,8 @@
 //! ```
 //!
 //! makes that read relaxed and this file must red, at
-//! [`a_halted_cpu_with_queued_work_was_kicked`] — *halted with 2 of 2 messages
-//! queued and no IPI in flight — a sleep-through (spec §7.5)*, stated exactly.
-//! Verified 2026-08-17, both ways round.
+//! [`a_halted_cpu_with_queued_work_was_kicked`], whose assertion names the
+//! failure exactly: halted with messages still queued and no IPI in flight.
 
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::sync::Arc;

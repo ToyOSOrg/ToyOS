@@ -1,4 +1,4 @@
-//! Deterministic scheduler simulator CLI (spec §10).
+//! Deterministic scheduler simulator CLI.
 
 use std::io::Read;
 use std::process::ExitCode;

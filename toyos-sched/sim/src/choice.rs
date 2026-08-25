@@ -2,7 +2,7 @@
 //! Every scheduling-relevant decision (which enabled step, whether to inject
 //! an interfering wake) is drawn from this stream, so a run is fully
 //! determined by its driver: identical seed or identical bytes ⇒ identical
-//! run, always (spec §10.3).
+//! run, always.
 //!
 //! Four interchangeable drivers:
 //!

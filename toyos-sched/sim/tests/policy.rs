@@ -19,7 +19,7 @@
 //! ```
 //!
 //! The fair band is keyed by the vruntime a thread held **when it was inserted**
-//! (`queue.rs`, spec §9.2), and a share's pot advances only when one of its
+//! (`queue.rs`), and a share's pot advances only when one of its
 //! threads runs. So a thread queued behind `R` others can be passed over by all
 //! `R` of them on the strength of keys that were already stale when its own wait
 //! began, and the leader spends one more quantum on top. It is invariant I5's
@@ -318,8 +318,8 @@ fn the_share_deficit_is_an_offset_and_not_a_drift() {
     }
 }
 
-/// The negative control for both cases above: spec §13.9's **rejected** policy,
-/// one fair share per thread instead of one per process.
+/// The negative control for both cases above: the **rejected** policy, one fair
+/// share per thread instead of one per process.
 ///
 /// Without it, "a process cannot buy CPU by forking" is a number with nothing to
 /// compare it to. Under per-thread shares `swarm` is entitled to N times what
@@ -612,9 +612,9 @@ fn stealable(threads: usize) -> u64 {
 /// workload at all — which is why the simulator grew a placement knob for it
 /// (`workload::PlacementShape`), and why until it did, the only balance path
 /// anything had measured was the handful of probes a wakeup storm happens to
-/// provoke. What this stages is the machine the pull half of §7.7 exists for:
-/// every runnable thread on cpu0, every other CPU with nothing, and no wake, no
-/// block and no second placement anywhere in the run.
+/// provoke. What this stages is the machine the steal request's pull half exists
+/// for: every runnable thread on cpu0, every other CPU with nothing, and no
+/// wake, no block and no second placement anywhere in the run.
 ///
 /// Run under the scenario default, which is the shipped policy —
 /// [`Balance::PushOnSurplus`] since the owner's 2026-08-23 decision.

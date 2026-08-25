@@ -1,4 +1,4 @@
-//! The scenario library — spec §11's Stage 4 row.
+//! The scenario library: every shape the sweeps and the gate run.
 //!
 //! Each scenario is a shape the kernel actually has, written as data. They are
 //! deliberately small: the search space is the *interleaving*, not the
@@ -65,7 +65,7 @@ fn process(name: &'static str, initial: Vec<usize>, templates: Vec<Script>) -> P
     }
 }
 
-/// The crash.md shape: a burst wake piles every worker onto the waker's CPU,
+/// The double-drop shape: a burst wake piles every worker onto the waker's CPU,
 /// leaving a sibling idle and hungry, and the process tears down while that
 /// sibling is reaching for one of them.
 ///
@@ -297,7 +297,7 @@ pub fn old_rt_starved_the_corpse() -> Scenario {
 }
 
 /// The same workload driven with the OLD steal-and-scan algorithm. This is the
-/// harness's self-validation gate (spec §10.3): it **must fail**. A fuzzer
+/// harness's self-validation gate: it **must fail**. A fuzzer
 /// that has never rejected the bug class it was built for proves nothing, so a
 /// green run of everything else is only meaningful while this stays red.
 pub fn old_steal_port() -> Scenario {
@@ -308,7 +308,7 @@ pub fn old_steal_port() -> Scenario {
 
 /// The second harness self-validation gate, and the reason the block is two
 /// steps: a port of the kernel's pre-`8508b37` blocking shape, where phase 2 of
-/// the §8.1 handshake ran at the *call site* and the pass came after it.
+/// the wait handshake ran at the *call site* and the pass came after it.
 ///
 /// It **must fail**. A remote waker that claims a task whose word already
 /// reads `Blocked` posts `Msg::Wake` to the task's home CPU — the very CPU
@@ -422,7 +422,7 @@ pub fn lost_wake_pipe() -> Scenario {
 }
 
 /// With a deadline, so the wake and the local timeout arbitrate over the same
-/// claim CAS — the arm that used to strand the second waiter (spec §8.2).
+/// claim CAS — the arm that strands the second waiter without the retry.
 pub fn lost_wake_futex() -> Scenario {
     lost_wake("lost_wake_futex", WaitClass::Futex, Some(4 * MS), false)
 }
@@ -755,9 +755,9 @@ pub fn fork_storm() -> Scenario {
 /// next — `RunQueue`'s insertion-time keys, `FairShare`'s one vruntime pot per
 /// process, `CpuSched::pick`, the surplus rule in `answer_steal_requests` — is
 /// the shipped core; what the simulator mocks is time, timer, IPI, halt and
-/// switch. The width scaling follows from §9.1 directly: every running thread of
-/// a process charges the same pot, so the pot advances at the process's
-/// aggregate rate while each queued thread's key stays frozen at its insert, and
+/// switch. The width scaling follows from one pot per process: every running
+/// thread charges the same pot, so it advances at the process's aggregate rate
+/// while each queued thread's key stays frozen at its insert, and
 /// one dispatch's worth of staleness therefore buys more wall-clock service the
 /// more of that process is running at once. What the *model* contributes is the
 /// search: these are worst-of-N figures over adversarially chosen interleavings
@@ -793,8 +793,8 @@ fn fair_allowance(cpus: usize) -> u64 {
         .map_or(0, |(_, worst)| worst + worst / 4)
 }
 
-/// Invariant I5's workload, and spec §11 Stage 9's gate: two processes of equal
-/// entitlement and unequal thread count, both pure CPU, neither ever blocking.
+/// Invariant I5's workload: two processes of equal entitlement and unequal
+/// thread count, both pure CPU, neither ever blocking.
 ///
 /// Shape, and why each part of it:
 ///
@@ -804,14 +804,14 @@ fn fair_allowance(cpus: usize) -> u64 {
 ///   scenario gives I5 windows a few milliseconds long, which is to say gives
 ///   it nothing to measure.
 /// * **`solo` has one thread per CPU, `trio` three.** A fair share is per
-///   *process* (spec §9.1), so they are owed the same CPU. Under any per-thread
+///   *process*, so they are owed the same CPU. Under any per-thread
 ///   policy `trio` takes three quarters instead of half — which is the whole
 ///   distinction, and is `fair_share_per_thread`.
 /// * **Thread counts are multiples of `cpus`.** Spawn placement is
 ///   least-loaded-with-rotation, so each CPU ends up with the identical mix and
 ///   the run queues are balanced by construction. Balance-by-`StealRequest`
-///   only answers a probe from a CPU whose victim has *two* ready tasks (spec
-///   §7.7), so an odd thread count would leave a standing imbalance and this
+///   only answers a probe from a CPU whose victim has *two* ready tasks, so an
+///   odd thread count would leave a standing imbalance and this
 ///   would be measuring placement rather than fairness.
 /// * **Each `solo` thread carries three times a `trio` thread's work**, so the
 ///   two processes have the *same total* work and, under an even split, finish
@@ -972,8 +972,8 @@ pub fn fair_identity_within_share() -> Scenario {
     scenario
 }
 
-/// Negative gate for invariant I5, first of two: spec §13.9's rejected policy,
-/// one fair share per *thread* instead of one per process.
+/// Negative gate for invariant I5, first of two: the rejected policy, one fair
+/// share per *thread* instead of one per process.
 ///
 /// It **must fail**. `trio` has three times `solo`'s threads and exactly the
 /// same entitlement; under per-thread shares it takes three quarters of the
@@ -1004,7 +1004,7 @@ pub fn fair_double_charge() -> Scenario {
 
 /// Negative gate for the core's `feature = "check"` pass-cost recorder
 /// (`cpu::PassCosts`, budget `cpu::MAX_PASS_NS`), which is the on-target
-/// counterpart to the simulator's invariants (spec §10.2).
+/// counterpart to the simulator's invariants.
 ///
 /// **It must be recorded, not aborted.** The recorder replaced an assert: a
 /// pass's elapsed time is wall clock across the pass, and a guest's wall clock
@@ -1024,7 +1024,7 @@ pub fn overlong_pass() -> Scenario {
     scenario
 }
 
-/// Every scenario the exit criterion covers, in the order the spec lists them.
+/// Every scenario the exit criterion covers.
 /// `old_steal_port` and `old_commit_before_pass` are deliberately absent: they
 /// are the negative gates, and a sweep that treated them as scenarios to pass
 /// would be asserting the opposite of what they are for. `old_commit_fused` is
@@ -1071,8 +1071,8 @@ pub fn all() -> Vec<Scenario> {
 /// them answers is asked of a *curve*. `measure share_gain:256 20` is how the
 /// numbers in that file's tables were taken.
 pub fn by_name(name: &str) -> Option<Scenario> {
-    // `fairness_storm:<cpus>` for any width, which is what spec §11 Stage 9
-    // gates on ("1–128 vcpus"). `all()` carries only the two cheap widths.
+    // `fairness_storm:<cpus>` for any width the caller asks for; `all()`
+    // carries only the two cheap widths.
     if let Some(cpus) = name.strip_prefix("fairness_storm:") {
         return cpus.parse().ok().filter(|&n| n >= 1).map(fairness_storm);
     }
@@ -1381,8 +1381,8 @@ pub const STORM_ROUNDS: usize = 4;
 /// what [`wakeup_storm`] happens to produce — an idle CPU probing a busy one a
 /// few times per run. This stages the state the path exists for and nothing
 /// else does: every runnable thread on one CPU, the rest of the machine with
-/// nothing to run, and the *only* mechanism that can change that the pull half
-/// of §7.7.
+/// nothing to run, and the *only* mechanism that can change that the steal
+/// request's pull half.
 ///
 /// Shape, and why each part of it:
 ///

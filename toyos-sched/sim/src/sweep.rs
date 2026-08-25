@@ -1,4 +1,4 @@
-//! Seed and fuzz-byte sweeps — the exit criterion of spec §11's Stage 4.
+//! Seed and fuzz-byte sweeps — the simulator's exit criterion.
 //!
 //! The criterion is "10⁴ seeds + 10⁷ fuzz steps per scenario class with zero
 //! invariant violations". Both budgets are parameters here so that the same
@@ -16,7 +16,7 @@ pub struct SweepResult {
     pub failures: Vec<Outcome>,
     /// Worst invariant-I5 service spread across the sweep, and the bound in
     /// force when it happened. The sweep's fairness *measurement*, which is what
-    /// spec §11 Stage 9 compares between frontier implementations; `passed()`
+    /// compares two frontier implementations against each other; `passed()`
     /// only says it stayed under the bound.
     pub worst_fair_spread: u64,
     pub worst_fair_bound: u64,

@@ -1,9 +1,9 @@
-//! The timer plan — spec §8.4.
+//! The timer plan: the one armed instant a CPU carries.
 //!
 //! A deadline lives in exactly one place: the `ParkedEntry` of the task that
-//! owns it, on that task's home CPU (spec §6.1, §8.3). Only *ready* tasks
-//! migrate, so a deadline can never end up on a CPU that no longer owns its
-//! task, and a task that is not parked structurally cannot have one.
+//! owns it, on that task's home CPU. Only *ready* tasks migrate, so a deadline
+//! can never end up on a CPU that no longer owns its task, and a task that is
+//! not parked structurally cannot have one.
 //!
 //! There is no separate index, and the absence is the design: an ordered index
 //! would hold the deadline a second time, and the pass that ended a park would
@@ -24,7 +24,7 @@ use crate::hw::Nanos;
 /// What the one-shot timer must be programmed to at the end of a pass.
 /// Produced by `finish()` after every parking change, applied *last* — which
 /// is the whole proof of invariant T: there is no window between the last
-/// change and the arming (spec §8.4).
+/// change and the arming.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[must_use = "a timer plan that is not applied is invariant T violated"]
 pub enum TimerPlan {
