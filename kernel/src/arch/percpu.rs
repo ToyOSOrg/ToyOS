@@ -85,15 +85,12 @@ pub struct PerCpu {
     current_tid: u32,    // offset 136: TID of thread running on this CPU (u32::MAX = idle)
     current_pid: u32,    // offset 140: PID of process running on this CPU (u32::MAX = idle)
     gdt: [u64; 7],      // offset 144 (56 bytes)
-    // offset 200: `idle_rsp` was here — write-only dead state nothing read.
-    // Removing it looks mechanical but is not: every field below is reached by a
-    // `gs:[NNN]` *literal* in a naked stub this change does not own —
+    // offset 200: reserved, and reclaiming it is not a local change. Every field
+    // below is reached by a `gs:[NNN]` *literal* in a naked stub —
     // `syscall_rip`/`syscall_num`/`syscall_rbp` at 216/224/232 and
     // `preempt_count` at 240 (`arch::syscall`), and `need_resched` at 244,
     // `ring0_timer_fires` at 248 and `last_armed_ticks` at 260 (`arch::idt`'s
-    // timer/tlb stubs). Dropping these 8 bytes shifts all of them, so the range
-    // stays as named padding rather than a live field until that removal can be
-    // made across the stubs on its own change.
+    // timer/tlb stubs). Dropping these 8 bytes shifts all of them.
     _pad200: [u8; 8],   // offset 200
     idle_stack_top: u64, // offset 208: top of per-CPU idle stack
     /// Saved user RIP at last syscall entry (for panic diagnostics).
@@ -289,9 +286,7 @@ const _: () = assert!(OFF_IRQ_COUNTS == 280);
 /// **Here because this module owns the layout they index into.** The offsets
 /// above are declared and asserted a few lines up, the entry stubs hardcode the
 /// same numbers, and a GS access written anywhere else is a third place that has
-/// to know both. `preempt` carried six of these of its own, spelled against
-/// three hand-copied literals; they are these, and its literals are now
-/// `OFF_PREEMPT_COUNT`, `OFF_NEED_RESCHED` and `OFF_FAULT_STATE`.
+/// to know both.
 ///
 /// The offset is a `const` operand, so each still assembles to the
 /// immediate-displacement form a hand-written `asm!` string produced —
@@ -404,10 +399,10 @@ pub(crate) mod gs {
     /// instructions.
     #[inline]
     pub fn lock_inc_u32<const OFF: u32>() {
-        // SAFETY: `write_u32`'s argument. **No `preserves_flags`**, and that is
-        // a fix rather than an omission: `lock add` writes OF, SF, ZF, AF, CF
-        // and PF, so a caller claiming it would be telling the compiler it could
-        // keep a comparison's result live across a preempt-count change.
+        // SAFETY: `write_u32`'s argument. **No `preserves_flags`**, and its
+        // absence is deliberate: `lock add` writes OF, SF, ZF, AF, CF and PF, so
+        // a caller claiming it would be telling the compiler it could keep a
+        // comparison's result live across a preempt-count change.
         unsafe {
             asm!("lock add dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
         }
@@ -427,22 +422,18 @@ pub(crate) mod gs {
 /// **One stack size, so "which stack am I on" is not a question kernel code
 /// has to answer.**
 ///
-/// It was 16 KiB, and that number was never a decision about the work this
-/// stack carries. The idle loop runs a scheduler pass, `drain_irqs` — which
-/// reaches USB enumeration — and `object::drain_zero_handles`, which releases
-/// arbitrary kernel objects. **It also ran `log_file::poll` until log
-/// architecture L6**: a filesystem write down to a block device, whose measured
-/// high water was **11,505 bytes of the 16,384** with the USB command path still
-/// below the probe. That caller is gone; the number stays because it is what
-/// established the depth this stack can be driven to, and `drain_irqs` still
-/// reaches a device from here.
+/// The idle loop runs a scheduler pass, `drain_irqs` — which reaches USB
+/// enumeration — and `object::drain_zero_handles`, which releases arbitrary
+/// kernel objects. The depth this stack can be driven to is a measured **11,505
+/// bytes of 16,384**, off a filesystem write down to a block device with the USB
+/// command path still below the probe, and `drain_irqs` still reaches a device
+/// from here.
 ///
-/// That last one is why this is the same number a task's kernel stack is.
+/// The object drain is why this is the same number a task's kernel stack is.
 /// `kobject!` classifies each object `deferred` or `immediate`, and an
 /// `immediate` row's promise is that its destructor runs on the dropping
-/// thread's 128 KiB stack rather than here — which `6d81a73` bought at 147
-/// collateral reds after a killed process's file flush wrote through the guard
-/// page below. **A `deferred` object may own an `immediate` one**: a `File`
+/// thread's 128 KiB stack rather than here. **A `deferred` object may own an
+/// `immediate` one**: a `File`
 /// sent over a connection whose peer dies is released from the drain, so the
 /// classification is defeated by nesting and the macro cannot see it. Nothing
 /// expressible in the object layer fixes that, because the entries are dropped
@@ -466,9 +457,9 @@ const IDLE_STACK_SIZE: usize = crate::process::KERNEL_STACK_SIZE;
 /// which is why that guard detects after the fact instead of trapping.
 ///
 /// Either way the machine halts: a fault on a kernel address is a kernel bug
-/// and `fatal_exception` treats it as fatal. The change is that it is reported
-/// at all — an overflow used to land in the heap and be found later, somewhere
-/// else, as a corrupted allocation.
+/// and `fatal_exception` treats it as fatal. What the guard buys is that the
+/// overflow is reported at all, rather than found later as a corrupted heap
+/// allocation somewhere else.
 const IDLE_GUARD_SIZE: usize = 4096;
 
 /// **Every IST stack this machine has, and which vector takes which.**
@@ -480,8 +471,7 @@ const IDLE_GUARD_SIZE: usize = 4096;
 /// instructions of `SYSCALL` entry and one of its exit run at CPL 0 on the
 /// user's stack, and an exception taken there writes its frame to a user page
 /// from CPL 0 — which SMAP refuses, so the `#PF` lands on the same stack and
-/// escalates to `#DF`. That was measured on this tree
-/// (`arch::syscall::init`'s `TF` note carries the capture).
+/// escalates to `#DF`.
 ///
 /// - **IST1, `#DF`** — the crash report's own stack, and the reason the number
 ///   below is what it is.
@@ -502,52 +492,24 @@ pub(crate) const IST_STACKS: usize = 3;
 /// IST2 ends in the same `halt_all_cpus`, so the deepest of the three decides
 /// the number for all of them.
 ///
-/// It was 4096, and the byte ring's `drain_to_serial` put a 4096-byte buffer on it, so the
-/// report overflowed the stack it was being written from and corrupted the
-/// heap underneath while producing the evidence for the fault that had just
-/// happened.
-///
-/// Both numbers here are `ist1_report`'s, off a real #DF, not estimates:
-/// **9968 bytes** used before the drain buffers were cut to `DRAIN_CHUNK`, and
-/// **4512** after. So the overrun was 5872 bytes — four times the ~1.4 KiB
-/// first estimated — and, more to the point, cutting the buffers was
-/// never going to be sufficient on its own: 4512 still does not fit 4096. The
-/// stack had to grow whatever happened to the buffers.
-///
-/// 16384 is then the smallest power of two that leaves the report room to
-/// double, which is the margin `double_fault_stack` asserts. It costs 20 KiB
-/// per CPU with the guard, against the 16 KiB each already pays for an idle
-/// stack.
-///
-/// **The record ring widened this path and the number is re-measured, not
-/// re-argued: 6,688 bytes**, `ist1_report` off a real #DF on a
-/// `double_fault_stack` run, guard intact. It is taken after `render` and after
-/// `panic_flush`, so it covers the deepest the report goes — the record merge
-/// and the paint included. The margin the gate asserts still holds: 6,688
-/// doubled is 13,376 of 16,384.
+/// **The measured high water is 6,688 bytes**, `ist1_report` off a real #DF on a
+/// `double_fault_stack` run with the guard intact. It is taken after `render`
+/// and after `panic_flush`, so it covers the deepest the report goes — the
+/// record merge and the paint included. 16384 is then the smallest power of two
+/// that leaves the report room to double, which is the margin
+/// `double_fault_stack` asserts: 6,688 doubled is 13,376 of 16,384.
 ///
 /// **What is large on that path — type sizes, not a decomposition of the
-/// measurement.** These are what `size_of` says, not what `ist1_report`
-/// counted, and they come to 4,352 against the measured 6,688; the 2,336
-/// between them is frames, spills, alignment and everything the path does that
-/// is not one of these. Largest first, at `RECORD_BYTES` of 1024:
-/// `log::console`'s rendered line (1,152); `emit`'s `LogRecord` (1,024) beside
-/// `snapshot_committed`'s one materialised record (1,024) and its eight
-/// `Descent`s (384); `paint`'s row table (768). The elision's tail buffer
-/// (452 — its head is streamed and buffers nothing) is on a branch no symbol in
-/// this tree reaches.
+/// measurement.** These are what `size_of` says, and they come to 4,352 against
+/// the measured 6,688; the 2,336 between them is frames, spills, alignment and
+/// everything the path does that is not one of these. Largest first, at
+/// `RECORD_BYTES` of 1024: `log::console`'s rendered line (1,152); `emit`'s
+/// `LogRecord` (1,024) beside `snapshot_committed`'s one materialised record
+/// (1,024) and its eight `Descent`s (384); `paint`'s row table (768). The
+/// elision's tail buffer (452 — its head is streamed and buffers nothing) is on
+/// a branch no symbol in this tree reaches.
 ///
-/// **It was 7,488 with the byte ring, and both halves of that difference are
-/// deletions.** `commit` no longer stages a 1,016-byte `Body` here (the slot's
-/// words are written directly), which the measurement did not notice — so that
-/// frame was never the deepest one; and `SerialWriter`'s 1,024-byte line buffer
-/// and `drain_to_serial`'s 512-byte chunk went with the ring, which it did.
-///
-/// It was 4,512 before the record ring, so the ring's net cost is 2,176 bytes
-/// of a stack with 9,696 still free.
-///
-/// At [`IST_STACKS`] stacks and a guard each it costs 60 KiB per CPU, against
-/// the 20 KiB one stack cost while `#DF` was the only vector with one.
+/// At [`IST_STACKS`] stacks and a guard each it costs 60 KiB per CPU.
 const IST_STACK_SIZE: usize = 16384;
 
 /// Filled with [`STACK_FILL`] and never written by anything legitimate, so an
@@ -601,8 +563,8 @@ fn alloc_percpu(cpu_id: u32, lapic_id: u32) -> *mut PerCpu {
 /// This CPU's log shard: cpu0's is the boot shard, and every other is a fresh
 /// zeroed one.
 ///
-/// **Here rather than in [`init_ap`], which is where an earlier draft of the
-/// spec put it.** `init_ap` calls `control_regs::init` and `fpu::log_state`,
+/// **Here rather than in [`init_ap`].** `init_ap` calls `control_regs::init` and
+/// `fpu::log_state`,
 /// both of which log — so an AP whose shard were allocated there would log into
 /// a shard that did not exist yet, and the only candidate is cpu0's, which
 /// another CPU is writing. The whole `PerCpu` is BSP-allocated before the AP
@@ -684,8 +646,8 @@ pub fn reserve_log_slot(
         );
         // **`log-nested-reserve`'s injection point, and it is here rather than
         // anywhere tidier because "between the shard pointer and the `xadd`" is
-        // the whole claim** (§2.3a): the self-IPI goes out with the shard
-        // pointer already in a register and the sequence number not yet taken,
+        // the whole claim**: the self-IPI goes out with the shard pointer
+        // already in a register and the sequence number not yet taken,
         // so whether the handler's own records are reserved *before* this one is
         // decided by the guard's `cli` and by nothing else. `emit` stamped
         // `record.at_ns` before this call, so a handler that gets in ahead
@@ -704,10 +666,9 @@ const IDLE_SLOT: usize = IDLE_GUARD_SIZE + IDLE_STACK_SIZE;
 /// Idle stacks come out of 2 MiB pages of their own, not the kernel heap.
 ///
 /// The guard is a hole in the direct map, and punching one costs the whole
-/// 2 MiB leaf its large page. From the heap that leaf also held hot kernel
-/// structures, and they went from one TLB entry to 512 — measured against the
-/// same tree with the guard as the only difference, `i8042_mouse` fell from
-/// 1006 pointer events to 27 under the full suite, three runs to one. An arena
+/// 2 MiB leaf its large page. From the heap that leaf also holds hot kernel
+/// structures, which the split takes from one TLB entry to 512 — enough to cut
+/// `i8042_mouse` from 1006 pointer events to 27 under the full suite. An arena
 /// the stacks alone share keeps that cost where it belongs: 15 of them per
 /// leaf, and nothing else in it.
 ///
@@ -761,8 +722,7 @@ fn alloc_idle_stack(percpu: &mut PerCpu) {
     // above that — the whole of what is left, and nothing else. Irreducible in
     // that the region is a stack about to be entered by an `iretq`, not a Rust
     // value: `&mut [u8]` over it would be a borrow of memory a CPU is about to
-    // start pushing frames onto (`issues/kernel/pagealloc-has-no-checked-window.md`
-    // is the same shape, filed by the root-file sweep).
+    // start pushing frames onto.
     unsafe {
         core::ptr::write_bytes(
             (base + IDLE_GUARD_SIZE as u64) as *mut u8,
@@ -999,11 +959,7 @@ pub unsafe fn set_kernel_stack(rsp: u64) {
 /// together and used apart.** Every Ring 3 → Ring 0 entry in the machine takes
 /// its stack from one of these two, so a value here that is not the running
 /// task's stack top is a stack pointer aimed at memory some other execution
-/// owns — and the entry that uses it writes a return address there, which is the
-/// shape a stray-write class chased across 2026-08-19..21 kept finding in kernel
-/// data. It never was that: across 25,123 storm boots these two words always
-/// agreed with the running task's own stack top, and the text-in-data came from
-/// a `memcpy` running backwards (`arch::entry`'s `cld`).
+/// owns — and the entry that uses it writes a return address there.
 ///
 /// # Safety
 /// Must be called from the CPU whose GS base points to the relevant PerCpu.

@@ -1,8 +1,8 @@
 //! Everything in this driver that waits, and the three contexts where waiting
 //! is correct.
 //!
-//! **This module is the split X2b builds, and it is a module rather than a
-//! type.** `poll_if_pending` runs at the top of every scheduler pass on every
+//! **The split is a module and not a type.**
+//! `poll_if_pending` runs at the top of every scheduler pass on every
 //! CPU, so nothing it reaches may spin on a device: a `USB_TIMEOUT_NS` spent
 //! there is spent by every CPU that enters a pass, and pulling the boot stick
 //! out of a laptop aims a filesystem sync, a page-cache fill and the scheduler at
@@ -41,7 +41,7 @@
 //! long that may be. [`crate::block::OPERATION`] is that opinion, and it
 //! belongs to the layer that knows one call is one operation.
 //!
-//! **It arrives ambiently and is threaded from there.** Owner ruling 1B: the
+//! **It arrives ambiently and is threaded from there.** The
 //! deadline is established on the running context above `BlockDevice` and
 //! recovered by [`msc`]'s three operation entry points — `msc_read`,
 //! `msc_write`, `msc_flush` — because the two frames in between cannot carry
@@ -106,14 +106,12 @@ use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
 ///
 /// `Done` carries the bytes the device actually moved, because the completion
 /// code cannot say: the Status Stage reports Success whether the Data Stage
-/// filled the buffer or left it untouched. A `GET_DESCRIPTOR` that returned
-/// nothing and one that returned all 18 bytes were the same value here, and the
-/// caller printed the buffer either way — which is how a laptop port that answered
-/// no descriptor at all was logged as `class=0x0 vendor=0000 product=0000`.
+/// filled the buffer or left it untouched, so a `GET_DESCRIPTOR` that returned
+/// nothing and one that returned all 18 bytes are otherwise the same answer.
 ///
-/// Three variants and no `Option`: the old `Option<u32>` had no code to carry
-/// on the one path where the device never answered, so every failure line read
-/// `code=Some(4)` and the reader had to know that `None` meant a timeout.
+/// Three variants and no `Option`: a device that never answered carries no
+/// completion code at all, and a type that conflates it with one makes every
+/// failure line ambiguous.
 #[derive(Clone, Copy)]
 enum Control {
     /// Both stages completed. `delivered` is what the device moved in the data
@@ -175,14 +173,13 @@ struct Restart<'a> {
 ///
 /// The register bits this covers are ones the controller sets in microseconds;
 /// one that never sets belongs to a controller or a port this driver cannot
-/// drive, and every caller turns `false` into a refusal that names it. Before
-/// this existed the five of them were bare `spin_loop`s, which on a machine
-/// with no serial port is the same picture as every other way a boot can stop:
-/// `Boot: peripherals ready` painted on the panel, forever.
+/// drive, and every caller turns `false` into a refusal that names it. An
+/// unbounded `spin_loop` in its place, on a machine with no serial port, is the
+/// same picture as every other way a boot can stop: `Boot: peripherals ready`
+/// painted on the panel, forever.
 ///
-/// The wait itself is [`crate::clock::settles`], which this file used to hold
-/// its own byte-identical copy of; what stays here is the bound this driver
-/// waits to, which is the only part that was ever the driver's own.
+/// The wait itself is [`crate::clock::settles`]; what this adds is the bound,
+/// which is the only part of it that is the driver's own.
 fn settles(ready: impl Fn() -> bool) -> bool {
     crate::clock::settles(USB_TIMEOUT_NS, ready)
 }
@@ -302,10 +299,9 @@ impl XhciController {
     ///
     /// **The address and not the next completion of any command.** A Command
     /// Completion Event names its Command TRB (§6.4.2.2), and a driver that
-    /// took the first one it saw handed a command that had run out its deadline
-    /// and answered afterwards to whoever asked next. That was latent while
-    /// every command was a submit followed by its own wait, and unavoidable now
-    /// that a scheduler pass can leave one behind.
+    /// took the first one it saw would hand a command that had run out its
+    /// deadline and answered afterwards to whoever asked next — which a
+    /// scheduler pass, leaving a command behind, makes reachable.
     fn wait_command(&mut self, trb: u64) -> Option<(u32, u32)> {
         let deadline = deadline();
         loop {
@@ -327,9 +323,8 @@ impl XhciController {
     /// anything it did not. `what` names the command in that line, because a
     /// bare code is unreadable at 3am.
     ///
-    /// A `bool` and not the `Option<u32>` it was: the only `Some` that value
-    /// ever held was `CC_SUCCESS`, so every caller's `is_none()` was asking a
-    /// question the type pretended was open.
+    /// A `bool` and not an `Option<u32>`: the only code a caller acts on is
+    /// `CC_SUCCESS`, so a richer return would pretend a question was open.
     fn run_command(&mut self, trb: Trb, what: &str) -> bool {
         let at = self.submit_command(trb);
         match self.wait_command(at) {

@@ -108,7 +108,7 @@ pub fn read_rsp() -> u64 {
 
 /// The direction flag, asked at a place in Ring 0 where it must be clear.
 ///
-/// **The instrument for the one kernel-wide stray writer this tree has had.**
+/// **The instrument for a kernel-wide stray writer.**
 /// No gate clears `DF` — an interrupt or trap gate clears `TF`, `NT`, `RF`, `VM`
 /// and `IF`, and `SYSCALL` clears what `IA32_FMASK` names — while
 /// `compiler_builtins::mem::memmove` sets it across three `rep` string operations
@@ -134,14 +134,10 @@ pub fn direction_flag_set() -> bool {
 
 /// The panic [`direction_flag_set`] exists to raise, at the site that asked.
 ///
-/// **It clears the flag before it says anything, and that is not tidiness.** The
-/// first draft did not, and the control (`df-witness-mutate`, one `std` at the
-/// head of a pass) never printed a word: both CPUs died at
-/// `rip=0x0d8d480000e02c3d` with `rbp=0x8d48000e1f3215ff` — values whose bytes
-/// are `48 8d 0d` and `ff 15`, x86 instruction encodings, which is kernel *text*
-/// copied into a stack by the report's own formatting running backwards. A
-/// reporter that runs with the flag set destroys its report, and the wreckage is
-/// the same shape as the class it is reporting on.
+/// **It clears the flag before it says anything, and that is not tidiness.** A
+/// reporter that runs with `DF` set destroys its own report: `core::fmt` copies
+/// kernel text backwards into the stack it is formatting on, so the wreckage has
+/// the same shape as the class being reported and nothing is printed.
 #[cfg(feature = "df-witness")]
 #[cold]
 #[inline(never)]

@@ -1,11 +1,10 @@
 //! What `CR0`, `CR4` and `IA32_EFER` hold on every CPU in this machine.
 //!
 //! One declaration, applied by the BSP and by every AP, and checked on each of
-//! them afterwards. Before this file there was no declaration at all: the BSP
-//! ran with whatever firmware had left and an AP ran with the `INIT` value plus
-//! the two bits `smp.rs`'s trampoline has to OR in to reach long mode, so cores
-//! 1..N booted with **caching disabled**, `WP` clear and `NE` clear for the
-//! whole history of the tree.
+//! them afterwards. Nothing else may write any of the three: an AP arrives
+//! holding `INIT`'s value plus the two bits `smp.rs`'s trampoline ORs in to
+//! reach long mode, so a CPU that skips this file runs with caching disabled and
+//! `WP`, `NE` and `NXE` clear.
 //!
 //! All three are written whole, so every bit of each is decided here. `CR0`'s
 //! value is a constant; four of `CR4`'s bits are the silicon's to offer, so its
@@ -14,8 +13,8 @@
 //! it is the register [`Prot`](crate::mm::paging::Prot) rests on: with `NXE`
 //! clear, bit 63 of a paging entry is a *reserved* bit rather than a permission,
 //! so a CPU that reached Ring 3 without it would either fault on every mapping
-//! this kernel writes or — before this file owned the bit — run every one of
-//! them as executable, and no test downstream could tell which.
+//! this kernel writes or run every one of them as executable, and no test
+//! downstream could tell which.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -75,8 +74,8 @@ mod cr4 {
 /// - `AM` (18) clear — with it set, `RFLAGS.AC` would make an unaligned Ring 3
 ///   access `#AC`. Nothing in this kernel is ready to be the thing that decides
 ///   a process wanted that.
-/// - `NW` (29) and `CD` (30) clear — caching on, which is the defect this file
-///   was written for.
+/// - `NW` (29) and `CD` (30) clear — caching on. `INIT` leaves both set, so an
+///   AP that never reached this declaration runs uncached.
 pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 
 /// The `CR4` bits every CPU must have, or the kernel does not run on it.
@@ -105,10 +104,10 @@ const CR4_REQUIRED: u64 = cr4::DE
 /// The `CR4` bits this kernel takes when the CPU offers them and does without
 /// when it does not.
 ///
-/// `UMIP` (bit 11) joined `SMEP`/`SMAP`/`PCIDE` here rather than
-/// [`CR4_REQUIRED`] for the same reason they did: it is silicon's to offer,
-/// not every CPU this kernel targets does, and `declaration` already checks
-/// it against CPUID before setting it. With it set, `SGDT`, `SIDT`, `SLDT`,
+/// `UMIP` (bit 11) is here rather than in [`CR4_REQUIRED`] for the same reason
+/// `SMEP`/`SMAP`/`PCIDE` are: it is silicon's to offer, not every CPU this
+/// kernel targets does, and `declaration` already checks it against CPUID
+/// before setting it. With it set, `SGDT`, `SIDT`, `SLDT`,
 /// `SMSW` and `STR` executed in Ring 3 raise `#GP` instead of handing a
 /// process the GDT, IDT and TSS addresses (SDM Vol. 3A §2.5) — the addresses
 /// a KASLR bypass is built out of, and nothing in this kernel's userland
@@ -124,11 +123,10 @@ const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;
 ///   a `#GP` with paging on (SDM Vol. 3A §4.1.2).
 /// - `NXE` (11) — bit 63 of a paging entry means *not executable* instead of
 ///   *reserved*. Every data mapping this kernel writes carries it
-///   (`mm::paging::Prot`), and it was set nowhere until W^X existed.
-/// - `SCE` (0) — `SYSCALL`/`SYSRET`. It used to be a read-modify-write in
-///   `arch::syscall::init`, which is the shape this file exists to delete: two
-///   places decided what one register held, and the second one could not see
-///   the first.
+///   (`mm::paging::Prot`).
+/// - `SCE` (0) — `SYSCALL`/`SYSRET`. Declared here and never set by
+///   `arch::syscall::init`: two places deciding one register is the shape this
+///   file exists to prevent, since neither can see the other.
 ///
 /// `LMA` (10) is the CPU's and appears nowhere: it is read-only, so a write
 /// with it clear leaves it set and a comparison against it would fail on every
@@ -367,10 +365,9 @@ fn supported() -> u64 {
 /// One line per CPU naming what it holds, and then the assertion.
 ///
 /// Per CPU rather than once for the machine, unlike the feature line beside it:
-/// "every CPU answers this identically" is the assumption that was false, and a
-/// summary is exactly the shape that hid it. Printed *before* the check, so a
-/// CPU that fails leaves the value it failed with in the log rather than only a
-/// verdict about it.
+/// a summary hides exactly the divergence this check is for. Printed *before*
+/// the check, so a CPU that fails leaves the value it failed with in the log
+/// rather than only a verdict about it.
 fn self_check(cpu_id: u32, declared_cr4: u64) {
     let live_cr0 = cpu::read_cr0();
     let live_cr4 = cpu::read_cr4();
@@ -421,10 +418,8 @@ fn opt(value: u64, bit: u64, name: &'static str) -> &'static str {
 /// **The dev host cannot answer this and no test asserts on it.** QEMU's TCG
 /// models no cache, so `CR0.CD` there is a bit with no timing consequence, and
 /// a KVM guest does not hold the bit at all — an AP that never cleared `CD`
-/// reads it clear (`issues/kernel/ap-control-registers-inherit-init.md`).
-/// The number is bare metal's, not a VM on
-/// it, and the owner takes it with
-/// `--diag-boot --kernel-param control-regs-bench`, off the panel.
+/// reads it clear. The number is bare metal's, not a VM on it, and the owner
+/// takes it with `--diag-boot --kernel-param control-regs-bench`, off the panel.
 ///
 /// Nothing outside the kernel can ask. There is no CPU affinity, so no userland
 /// loop can choose the core it runs on, and the state under test lives only
@@ -486,9 +481,9 @@ mod bench {
     pub fn report(_cpu_id: u32, _before: u64) {}
 }
 
-/// The negative control. Leaves an AP holding what `INIT` left it, which is the
-/// machine every boot before this file was; nothing else can stage it, because
-/// a control register is the guest's own to write and no QEMU flag reaches one.
+/// The negative control. Leaves an AP holding what `INIT` left it; nothing else
+/// can stage it, because a control register is the guest's own to write and no
+/// QEMU flag reaches one.
 ///
 /// The check and its log line are the shipped ones, so what a run with this
 /// armed produces is a real divergent CPU and a real failure.

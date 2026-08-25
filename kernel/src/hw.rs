@@ -1,5 +1,4 @@
-//! `KernelHw` — the kernel's side of the scheduler-core hardware boundary
-//! (spec §10.1).
+//! `KernelHw` — the kernel's side of the scheduler-core hardware boundary.
 //!
 //! Everything here is x2APIC, TSC or a single instruction. Nothing here
 //! decides anything: no queue is consulted, no state machine advances, no
@@ -156,11 +155,9 @@ impl Machine for KernelHw {
     /// `diag-tick`, and the whole difference between the two builds.
     ///
     /// The default is to sleep until something arrives, which is correct for a
-    /// shipping kernel and is what the owner's laptop does: eight boots halted
-    /// every CPU at 1.8 s and took no interrupt for as long as 102 s. Everything
-    /// the kernel says to whoever is watching it is emitted from the idle loop,
-    /// so across that window it said nothing, and the boots that survived wrote
-    /// the same file as the boots that froze.
+    /// shipping kernel. Everything the kernel says to whoever is watching it is
+    /// emitted from the idle loop, so a fully quiescent machine is silent for as
+    /// long as it stays quiescent and reads exactly like a frozen one.
     ///
     /// Arming before the halt and not after the wake: `halt` is `sti; hlt` and
     /// its STI shadow, so a fire that lands in the window between them is taken
@@ -199,24 +196,22 @@ static RUNNING_CTX: [core::sync::atomic::AtomicU64; crate::sched::MAX_CPUS] =
 
 /// Which CPU is standing on which context, printed on **every** kernel crash.
 ///
-/// **The question this answers is the one the whole `BTreeMap`-inside-its-own-
-/// insert class turns on, and until now only one crash in the kernel could ask
-/// it.** A per-CPU scheduler container reading as a value no sequence of
-/// operations on it produces says "something wrote this record"; it does not say
-/// *what*, and the one mechanism anyone has written down for it — two CPUs
-/// executing on one kernel stack — is decided by exactly two facts: whether two
-/// CPUs name one `KernelCtx`, and whether the crashing stack pointer lies inside
-/// a stack that belongs to some other CPU's task. Both are here, and neither
-/// needs a register dump, so a *Rust panic* can now settle what previously only
-/// a `context_switch` fault could hint at.
+/// **The question this answers is whether a sibling is executing on this same
+/// context or this same kernel stack.** A per-CPU scheduler container reading as
+/// a value no sequence of operations on it produces says "something wrote this
+/// record"; it does not say *what*, and the one mechanism written down for it —
+/// two CPUs executing on one kernel stack — is decided by exactly two facts:
+/// whether two CPUs name one `KernelCtx`, and whether the crashing stack pointer
+/// lies inside a stack that belongs to some other CPU's task. Both are here, and
+/// neither needs a register dump, so a Rust panic settles it.
 ///
 /// `rsp` is the crashing frame's stack pointer — the exception frame's for a
 /// fault, the address of a local for a panic; the containment test only needs it
 /// to be somewhere in the stack the crash is running on.
 ///
 /// `subject` is the context the flag is asked about: the *incoming* one at
-/// [`switch_frame_is_wrong`], which is the pointer #149's diagnosis found two
-/// CPUs naming, and this CPU's own everywhere else. `None` means the latter.
+/// [`switch_frame_is_wrong`], and this CPU's own everywhere else. `None` means
+/// the latter.
 ///
 /// **It reads a sibling's `KernelCtx` and that is deliberate.** The pointers came
 /// from this kernel's own switch path and address boxed records in the direct
@@ -256,8 +251,7 @@ pub fn report_contexts(rsp: u64, subject: Option<u64>) {
         // **The idle context is named and not numbered.** Its `id` is `None` and
         // its `kernel_stack_top` is zero by construction, so rendering it as a
         // task gives `pid=4294967295 stack_top=0x0` — which reads exactly like a
-        // record something has overwritten, and was misread that way the first
-        // time this report was used on a storm capture.
+        // record something has overwritten.
         match ctx.id {
             // And a *nonzero* stack top on one is a finding rather than a
             // rendering detail: nothing in the kernel writes that field after
@@ -309,10 +303,8 @@ pub fn report_contexts(rsp: u64, subject: Option<u64>) {
 /// Six pops and a `popfq` run ahead of it, so by the time the CPU faults the
 /// register file holds the frame rather than the context: `rip` is a small
 /// integer, `rflags` is whatever `popfq` made of a pointer, and the backtrace
-/// is empty. Five deaths of that shape are on record in `issues/kernel/` — at
-/// `0x1b`, at `0x0`, page-aligned and not — and not one of them could name the
-/// task, the stack or the sibling CPU. This is checked before the pop so all
-/// three are still readable.
+/// is empty — so the task, the stack and the sibling CPU are all unnameable.
+/// This is checked before the pop, while all three are still readable.
 ///
 /// It is not a debug aid: `0x1b` is `USER_DS`, and a Ring 0 `ret` to a segment
 /// selector is the machine dying with the evidence already destroyed. One load
@@ -374,14 +366,9 @@ fn check_switch_frame(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> u64 {
     }
     // **Is it this task's own stack, and not merely *a* kernel address.**
     //
-    // A guest parked on its shutdown action — the one capture of this class
-    // taken with both vCPUs still readable — had cpu1 at `RIP=1b7b9f15ffd23100`
-    // with `SS=0`, `DF` set and `RSP=0xffff800000c00680`, which is inside the
-    // *per-CPU* region and no stack at all. That is `context_switch`'s tail
-    // exactly: `popfq` took garbage flags and `ret` took a garbage return
-    // address, sixty-four bytes above an `rsp` of `0xffff800000c00640`. The two
-    // tests above passed it, because that address is a kernel address and the
-    // word at `+56` was one too, so a green guard was never evidence.
+    // The two tests above are not evidence on their own: the per-CPU region is a
+    // kernel address and holds kernel-address words, so a frame there passes
+    // both and is no stack at all.
     //
     // An incoming context's `rsp` belongs to the stack its own
     // `kernel_stack_top` names or it belongs to nothing: `alloc_kernel_stack`
@@ -394,13 +381,8 @@ fn check_switch_frame(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> u64 {
     // `kernel_stack_top` is zero by construction — per-CPU, and not knowable at
     // the boot-time init that builds the record — but the stack it names is
     // knowable *here*, on the CPU the record belongs to, which is exactly where
-    // the arm below this one already reads it to load the TSS. The parked
-    // capture's `rsp` was `0xffff800000c00640`, in the per-CPU region, and cpu0's
-    // idle stack in that same boot ran to `0xffff800000e21000` — so the frame
-    // was in neither a task stack nor an idle one, and a version of this test
-    // that skipped `id: None` would have skipped it. A first storm of 7,349
-    // boots with the task-only form fired zero times against 19 silent deaths,
-    // which is what asking the question of the wrong contexts looks like.
+    // the arm below this one already reads it to load the TSS. A task-only form
+    // of this test asks the question of the wrong contexts and never fires.
     //
     // `ctx.rsp` on an idle context is always a real one when it is restored: a
     // CPU only ever switches *to* idle after switching away from it, which is
@@ -435,11 +417,9 @@ fn check_switch_frame(ctx: &KernelCtx, token: &RunToken<KernelPayload>) -> u64 {
 /// popped in [`crate::sched::driver::context_switch`], and between the two lie the
 /// preempt-count swap, two per-CPU identity writes, the TSS stack handover, a
 /// **`mov cr3`**, a `wrfsbase` and the `RUNNING_CTX` store. Nothing tests the
-/// frame across that span, and the class's one parked capture is a `popfq`/`ret`
-/// off a frame at `0xffff800000c00640` — inside the per-CPU region, no stack at
-/// all — which every check that runs at the *check* would have passed. So either
-/// the frame is rewritten in the span, or `ctx.rsp` is, and this separates them:
-/// it holds the eight words *and* the pointer, and is compared against the stack
+/// frame across that span, so a frame that goes wild there is either a frame
+/// rewritten in the span or a `ctx.rsp` rewritten in it. This separates them: it
+/// holds the eight words *and* the pointer, and is compared against the stack
 /// pointer the machine is standing on rather than against the field again.
 ///
 /// Per CPU and touched by that CPU alone, in a region where preemption is off and
@@ -456,9 +436,8 @@ struct SwitchShadow {
     /// as well as whether the frame did.
     ctx: *const KernelCtx,
     /// The **outgoing** context — `context_switch`'s `rdi`, and the record whose
-    /// `rsp` field the switch is about to write. A capture of this class taken
-    /// from a parked guest has that pointer still in `rdi` at the wild `ret`, so
-    /// naming it here is what turns a register dump into a pair of records.
+    /// `rsp` field the switch is about to write. It is still in `rdi` at a wild
+    /// `ret`, so naming it here turns a register dump into a pair of records.
     save: u64,
     /// The stack the incoming context claims, so a report can say where the
     /// frame lies relative to it without a second lookup.
@@ -516,16 +495,13 @@ fn switch_witness_capture(ctx: &KernelCtx, token: &RunToken<KernelPayload>, rsp:
 /// moved and the first `pop` one instruction away.
 ///
 /// `rsp` is the machine's own stack pointer, handed over in `rdi`, and the field
-/// is re-read here beside it. **The two are separate questions and were one
-/// until the single load existed.** `rsp == shadow.rsp` says the word the
-/// machine is standing on is the word the check validated — which is now
-/// `Hw::switch`'s invariant rather than a hope, because `check_switch_frame`
-/// returns that word and nothing reads the field again. `field == shadow.rsp`
-/// says the separate thing: that nothing wrote `ctx.rsp` in the window at all.
-/// Before the invariant a moved field *was* a moved stack pointer — the switch
-/// re-read it across the `mov cr3`, which LLVM may not forward a load over — so
-/// the two answers could not come apart, and `switch-witness-mutate-rsp` is the
-/// build in which they do.
+/// is re-read here beside it. **The two are separate questions.** `rsp ==
+/// shadow.rsp` says the word the machine is standing on is the word the check
+/// validated, which is `Hw::switch`'s invariant: `check_switch_frame` returns
+/// that word and nothing reads the field again. `field == shadow.rsp` says the
+/// separate thing, that nothing wrote `ctx.rsp` in the window at all. They come
+/// apart only in `switch-witness-mutate-rsp`, which is what makes that build the
+/// negative control for the single load.
 ///
 /// # Safety
 /// Called only from [`crate::sched::driver::context_switch`], with `rsp` equal
@@ -624,12 +600,10 @@ fn switch_window_is_wrong(rsp: u64, field: u64, now: &[u64; 8], shadow: &SwitchS
 unsafe fn switch_witness_mutate(restore: *const KernelCtx) {
     /// Switches into the boot before the one write.
     ///
-    /// **Small because it was measured.** A boot of the storm's shape reaches
-    /// `compositor: ready` with fewer than three hundred context switches behind
-    /// it — a `MUTATE_AT` of 300 produced a clean boot, which is what a control
-    /// that never fires looks like whether or not the instrument works. Eight is
-    /// past the three kernel threads and inside the first dispatches, and it is
-    /// reached by every boot there is.
+    /// Small on purpose: a boot reaches `compositor: ready` with fewer than
+    /// three hundred context switches behind it, so a larger number is a control
+    /// that never fires. Eight is past the three kernel threads, inside the
+    /// first dispatches, and reached by every boot there is.
     const MUTATE_AT: u64 = 8;
     static SWITCHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     if SWITCHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) != MUTATE_AT {
