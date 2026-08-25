@@ -146,6 +146,53 @@ const BANS: &[Ban] = &[
               usize::MAX entries, and no such table exists",
         allowed: &[],
     },
+    // A 4096 typed into a kernel constant is the page size almost every time,
+    // and a private copy of it is a value that does not move when the export
+    // does. `mm::PAGE_SIZE` is the export; the exceptions below are the
+    // 4096-byte things that are not a page — a probe's line count, a guard
+    // page's *size in bytes* where the page size is not what decides it, a ring
+    // capacity in entries, a path length, a device's own buffer or register
+    // window — each one a row somebody wrote on purpose.
+    Ban {
+        needle: ": usize = 4096",
+        why: "a private page size is a copy of `mm::PAGE_SIZE` that stops moving \
+              with it",
+        allowed: &[
+            // Cache lines to walk, not bytes.
+            ("kernel/src/arch/control_regs.rs", 1),
+            // Two guard-page sizes: the mapping is 4 KiB because a guard is one
+            // hardware page, and `PAGE_SIZE` is 2 MiB territory here.
+            ("kernel/src/arch/percpu.rs", 2),
+            // A device's TX buffer.
+            ("kernel/src/drivers/virtio_console.rs", 1),
+            // A VT-d table is 4 KiB by the specification, not by this kernel.
+            ("kernel/src/iommu/vtd/table.rs", 1),
+            // Ring entries.
+            ("kernel/src/trace.rs", 1),
+            // A path length, in bytes.
+            ("kernel/src/vfs.rs", 1),
+        ],
+    },
+    Ban {
+        needle: ": u64 = 4096",
+        why: "as above, in the other width",
+        allowed: &[
+            // A VT-d register window, by the specification.
+            ("kernel/src/iommu/vtd/mod.rs", 1),
+            // The export itself, and the one place the literal lives.
+            ("kernel/src/mm/mod.rs", 1),
+        ],
+    },
+    Ban {
+        needle: ": u32 = 4096",
+        why: "as above, in the other width",
+        allowed: &[
+            // A device's RX buffer.
+            ("kernel/src/drivers/virtio_net.rs", 1),
+            // The block size this driver reads a disk in.
+            ("kernel/src/drivers/xhci/wait/msc.rs", 1),
+        ],
+    },
 ];
 
 fn rel(root: &Path, path: &Path) -> String {

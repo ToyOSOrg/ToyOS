@@ -94,8 +94,8 @@ kernel/src/elf/index.rs 50 0
 kernel/src/elf/mod.rs 214 0
 kernel/src/elf/reloc.rs 91 0
 kernel/src/fat32_adapter.rs 576 0
-kernel/src/file_backing.rs 75 0
-kernel/src/file_cache.rs 223 0
+kernel/src/file_backing.rs 77 0
+kernel/src/file_cache.rs 224 0
 kernel/src/gpt.rs 104 0
 kernel/src/gpu.rs 19 0
 kernel/src/heartbeat.rs 135 0
@@ -173,7 +173,7 @@ kernel/src/sync.rs 39 0
 kernel/src/time.rs 159 0
 kernel/src/tmpfs.rs 20 0
 kernel/src/trace.rs 98 0
-kernel/src/usb_gate.rs 83 1
+kernel/src/usb_gate.rs 84 1
 kernel/src/user_ptr.rs 247 0
 kernel/src/vfs.rs 308 0
 kernel/src/vma.rs 47 0
@@ -197,7 +197,7 @@ src/prosegate.rs 113 0
 src/qemu.rs 113 0
 src/redlist.rs 492 24
 src/soundfont.rs 133 0
-src/sourcegate.rs 183 1
+src/sourcegate.rs 201 1
 src/stamps.rs 3 0
 src/testargs.rs 97 0
 src/tiers.rs 338 26
