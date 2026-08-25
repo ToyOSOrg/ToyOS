@@ -8,7 +8,7 @@
 //! copied ([`SyscallContext::copy_in`], [`SyscallContext::copy_out`]), strings
 //! are copied, and bulk buffers are a [`UserBytes`] / [`UserBytesMut`] window
 //! the kernel reads or writes but never borrows — see [`UserBytes`] for why the
-//! borrow was the bug.
+//! borrow is the bug.
 //!
 //! **Every read of a single user word in this kernel is a `read_volatile`, and
 //! the two that are not in this module obey it too**: the futex word the
@@ -33,7 +33,7 @@ use crate::UserAddr;
 /// Longest string, in bytes, the kernel accepts from userspace — for every
 /// syscall that takes one.
 ///
-/// The bound lives on the primitive rather than at its ~20 call sites because
+/// The bound lives on the primitive rather than at each call site because
 /// every consumer either copies the string onto the kernel heap or splits it
 /// into borrowed tokens; none of them stream it, so none of them wants a
 /// different answer. The number is set by the largest *derived* allocation,
@@ -49,18 +49,18 @@ pub const MAX_USER_STR: u64 = 64 * 1024;
 /// Must be `#[repr(C)]`, `Copy`, have no padding, and be valid for any bit pattern.
 pub unsafe trait UserSafe: Copy {}
 
-// **Every impl below is irreducible, and the reason is the same one for all
-// fourteen: `UserSafe` states a property of a type's *bytes* — `#[repr(C)]`,
-// no padding, every bit pattern a value — and Rust offers no way to observe
-// any of the three.** There is no `const fn` that reports a struct's padding
-// and no trait bound that means "valid for any bit pattern", so the only
-// mechanical alternative is a derive macro, which would be a proc-macro crate
-// this kernel does not have and would move the same claim rather than check
-// it. What each impl below can do is say what it checked, and every one was
-// checked by reading the definition: `#[repr(C)]`, `Copy`, integer fields
-// only, and an explicit `_pad` wherever alignment would otherwise have left a
-// hole. Integer fields only is what makes "any bit pattern" true — nothing
-// here holds an enum, a `bool`, a `char`, a reference or a `NonZero`.
+// **Every impl below is irreducible: `UserSafe` states a property of a type's
+// *bytes* — `#[repr(C)]`, no padding, every bit pattern a value — and Rust
+// offers no way to observe any of the three.** There is no `const fn` that
+// reports a struct's padding and no trait bound that means "valid for any bit
+// pattern", so the only mechanical alternative is a derive macro, which would
+// be a proc-macro crate this kernel does not have and would move the same claim
+// rather than check it. What each impl below can do is say what it checked, and
+// every one was checked by reading the definition: `#[repr(C)]`, `Copy`,
+// integer fields only, and an explicit `_pad` wherever alignment would
+// otherwise have left a hole. Integer fields only is what makes "any bit
+// pattern" true — nothing here holds an enum, a `bool`, a `char`, a reference
+// or a `NonZero`.
 //
 // Padding matters in both directions. `copy_out` writes `size_of::<T>()`
 // bytes into a page userland reads, so a padding byte would be uninitialized
@@ -95,8 +95,7 @@ unsafe impl UserSafe for toyos_abi::syscall::NamespaceBuild {}
 unsafe impl UserSafe for toyos_abi::syscall::SchedInfo {}
 // SAFETY: `#[repr(C)] Copy`, `u64`s and `u32`s in pairs — 128 bytes, no
 // padding: the two `u32` pairs (`fault_demand_count`/`fault_zero_count` and
-// `io_read_ops`/`pid`) are what keeps every `u64` 8-aligned, and `pid` was
-// named padding until it was given a meaning.
+// `io_read_ops`/`pid`) are what keeps every `u64` 8-aligned.
 unsafe impl UserSafe for toyos_abi::syscall::ProcessStats {}
 // SAFETY: `#[repr(C)] Copy`, `[RawHandle; 2]` then six `u32`s — 32 bytes,
 // align 4, no padding.
@@ -265,7 +264,7 @@ impl<'a> SyscallContext<'a> {
 
 /// A bulk buffer in user memory the kernel copies *out of*, and never borrows.
 ///
-/// **The borrow was the bug.** A `&[u8]` or `&mut [u8]` over a page userland
+/// **The borrow is the bug.** A `&[u8]` or `&mut [u8]` over a page userland
 /// can write carries `noalias` and `dereferenceable` into LLVM, so the compiler
 /// is entitled to assume the bytes do not change under it — to hoist a read out
 /// of a loop, to fold two of them into one, to reorder a check with the use it
@@ -333,7 +332,7 @@ impl UserBytes<'_> {
         }
     }
 
-    /// The `len`-byte window at `off` inside this one — what `buf[a..b]` was.
+    /// The `len`-byte window at `off` inside this one.
     pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
         assert!(
             off.checked_add(len).is_some_and(|end| end <= self.len),
@@ -352,7 +351,7 @@ impl UserBytes<'_> {
 /// A bulk buffer in user memory the kernel copies *into*. [`UserBytes`] carries
 /// the argument for why neither hands out a reference.
 ///
-/// Write-only, which is one property stronger than `&mut [u8]` was: a kernel
+/// Write-only, which is one property stronger than `&mut [u8]`: a kernel
 /// that never reads back what it put in a user buffer cannot be made to act on
 /// a value another thread of that process substituted in between.
 pub struct UserBytesMut<'a> {
@@ -403,7 +402,7 @@ impl UserBytesMut<'_> {
         unsafe { core::ptr::write_bytes(self.kptr.add(off), 0, len) };
     }
 
-    /// The `len`-byte window at `off` inside this one — what `buf[a..b]` was.
+    /// The `len`-byte window at `off` inside this one.
     pub fn sub(&mut self, off: usize, len: usize) -> UserBytesMut<'_> {
         assert!(
             off.checked_add(len).is_some_and(|end| end <= self.len),
@@ -417,14 +416,10 @@ impl UserBytesMut<'_> {
 
 /// Bytes the kernel copies *from*, wherever they live.
 ///
-/// It existed for two callers: `file_cache::write_page` was reached both by a
-/// syscall carrying a [`UserBytes`] window and by `log_file`, whose bytes were
-/// the kernel's own. **`log_file`, the kernel's own file sink, is gone** — the
-/// kernel writes no file at all — and `/bin/logd` reaches the page cache
-/// through `SYS_WRITE` like any other program, so the second caller is a
-/// kernel-owned buffer no more. The abstraction stays because the page cache
-/// naming the capability it needs is still the right shape and the kernel still
-/// has non-syscall writers; if it ever has none, this goes with them.
+/// It exists so `file_cache::write_page` names the capability it needs rather
+/// than the window it is handed: its callers are a syscall carrying a
+/// [`UserBytes`] and the kernel's own non-syscall writers. If the kernel ever
+/// has none of the second kind, this goes with them.
 pub trait ByteSource {
     fn len(&self) -> usize;
     fn read_at(&self, off: usize, dst: &mut [u8]);

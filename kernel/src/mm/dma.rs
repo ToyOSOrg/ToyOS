@@ -8,15 +8,6 @@
 //! for `size_of::<T>()` and not for the offset alone; and the view carries the
 //! pool's lifetime, so the region cannot outlive the pages behind it.
 //!
-//! Before this, `DmaPool::slice()` handed out a `KernelSlice` whose every
-//! accessor was an `unsafe fn`, so 35 blocks across ten drivers spelled the
-//! unsafety at the call site and argued the same three sentences by hand
-//! (measured by the `undocumented_unsafe_blocks` sweep of `drivers/`,
-//! 2026-08-22). Five drivers had each grown a local approximation of this type —
-//! `virtio::Ring`, `xhci::zero_dma`, `xhci::wait::msc::{read_dma, write_dma}`,
-//! `nvme::zero_dma`, `virtio_gpu::{put, answer}` — which is what says the
-//! abstraction belongs on the pool once.
-//!
 //! # Two disciplines, and a driver cannot take the wrong one by accident
 //!
 //! One accessor set cannot serve both kinds of DMA memory, so there are two and
@@ -57,11 +48,8 @@
 //! than by adjacency.
 //!
 //! A driver whose device outlives every scope is served by [`DmaPool::leak`],
-//! which consumes the pool, never gives its pages back, and answers with
-//! `Dma<'static>`. That is the honest form of what four drivers used to spell as
-//! a `static` holding a pool nobody ever read again — and it is a stronger
-//! statement than the `static` was, because a `Dma<'static>` cannot be built any
-//! other way.
+//! which consumes the pool, never gives its pages back, and answers with a
+//! `Dma<'static>` — a value that cannot be built any other way.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -94,8 +82,8 @@ impl Discipline for Unaligned {}
 ///
 /// `Copy`, like [`Mmio`](super::Mmio): it is an address, a length and a
 /// discipline, and copying one grants nothing the original did not have. The
-/// lifetime travels with the copy, which is the whole difference from the
-/// `KernelSlice` this replaced.
+/// lifetime travels with the copy, which is what [`super::KernelSlice`] does
+/// not carry.
 pub struct Dma<'pool, D: Discipline = Volatile> {
     base: *mut u8,
     size: usize,
@@ -216,12 +204,10 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
 /// The refusal, out of line and marked cold, so the accessors above stay small
 /// enough for the inliner.
 ///
-/// **Measured, not assumed.** With the panic in the accessor body LLVM declined
-/// to inline `Dma::read` at all: `Virtqueue::poll_used` compiled to three
-/// `callq _R…Dma4read…` per turn of its loop where the driver-local `Ring` it
-/// replaced had the load inline. This restores that — the emitted `poll_used` is
-/// one `movzwl` per volatile read again, and the comparison is in the pull
-/// request that introduced this type.
+/// **Measured, not assumed.** With the panic in the accessor body LLVM declines
+/// to inline `Dma::read` at all: `Virtqueue::poll_used` compiles to three
+/// `callq _R…Dma4read…` per turn of its loop. Out of line and cold, the emitted
+/// `poll_used` is one `movzwl` per volatile read.
 #[cold]
 #[inline(never)]
 fn refuse(why: toyos_dma::Refused, base: *mut u8) -> ! {
@@ -232,8 +218,7 @@ impl<'pool> Dma<'pool, Volatile> {
     /// Read the `T` at `offset` with a volatile load.
     ///
     /// Bounded for all of `T` and asserted naturally aligned for it — the two
-    /// things `read_volatile` needs and the two the raw form at each of these
-    /// call sites argued in prose.
+    /// things `read_volatile` needs.
     #[inline]
     pub fn read<T: Copy>(self, offset: usize) -> T {
         // SAFETY: `at` refused anything but a naturally aligned `size_of::<T>()`
@@ -322,9 +307,9 @@ impl Dma<'_, Unaligned> {
 /// and [`Dma`] is the only thing that can. A pool dropped gives every page back,
 /// which is what makes a device this kernel refuses cost no physical memory.
 ///
-/// **`Send` is derived, not asserted.** `PhysPage` and `DirectMap` are integers,
-/// so the auto trait already holds — the manual `unsafe impl Send for DmaPool {}`
-/// that stood here was redundant and is gone.
+/// **`Send` is derived, not asserted**: `PhysPage` and `DirectMap` are
+/// integers, so the auto trait already holds and a manual `unsafe impl` would
+/// be a hand-written claim standing in for it.
 pub struct DmaPool {
     pages: Vec<PhysPage>,
     base: DirectMap,
@@ -343,8 +328,7 @@ impl DmaPool {
 
     /// The whole pool, as a view that may not outlive it.
     ///
-    /// This is where the deleted `KernelSlice::from_raw`'s justification used to
-    /// be argued and where it is now enforced: `alloc_contiguous` returned physically
+    /// Enforced rather than argued: `alloc_contiguous` returned physically
     /// contiguous pages, `pages[0].direct_map()` is their first byte in the
     /// direct map, `self` is holding every one of them, and the borrow is what
     /// says the caller may not keep the view past that.
@@ -357,10 +341,8 @@ impl DmaPool {
     ///
     /// **For a device that outlives every scope**, which is every device this
     /// kernel binds: nothing here is ever unbound, so the alternative is a
-    /// `static` holding a pool no code reads again — which is what
-    /// `virtio_console`, `virtio_net`, `virtio_gpu` and `nvme` each had, one per
-    /// driver, purely to keep the pages alive. This says the same thing once and
-    /// says it in the type.
+    /// `static` per driver holding a pool no code reads again, purely to keep
+    /// the pages alive. This says the same thing once and says it in the type.
     ///
     /// It is called at the point where the driver has committed, so every refusal
     /// *above* it still drops the pool and gives the pages back. The `Vec`'s own
