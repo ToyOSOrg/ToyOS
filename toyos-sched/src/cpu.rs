@@ -1,4 +1,4 @@
-//! The per-CPU machine — spec §6, §7, §8.3, §8.4.
+//! The per-CPU machine.
 //!
 //! A CPU's scheduler state is a `!Sync` value reachable only through that
 //! CPU's own pointer; there is no global runqueue array, because a `static` of
@@ -42,7 +42,7 @@ use crate::timer::{TimerApplied, TimerPlan};
 use crate::waitq::{CommittedTicket, CurrentTask};
 
 /// Permission to switch. Holds pointers into the stable Box-backed task
-/// records (spec §5.1); constructed only by safe code in
+/// records; constructed only by safe code in
 /// [`SchedPass::finish`], consumed by the driver's `unsafe Hw::switch`.
 ///
 /// The keys let a driver do its own bookkeeping (trace, invariant I11's
@@ -77,7 +77,7 @@ impl<X: SchedPayload> RunToken<X> {
 }
 
 /// Proof that halting is safe, assembled from two independently unforgeable
-/// halves (spec §7.5, §8.4):
+/// halves:
 ///
 /// * [`Quiesced`] — SLEEPING was published *before* a mailbox-empty check
 ///   that came back empty, so any message that check missed rings the
@@ -120,10 +120,10 @@ pub enum Action<X: SchedPayload> {
 
 /// A parked task, plus the two facts that are only meaningful while parked.
 ///
-/// The deadline lives *here* and nowhere else (spec §6.1, §8.3), so a task
-/// that is not parked structurally cannot have one, and no second copy can
-/// disagree with this one about what the CPU owes. The spec's `since` field is
-/// omitted for the same reason: the residency stamp is in the task record.
+/// The deadline lives *here* and nowhere else, so a task that is not parked
+/// structurally cannot have one, and no second copy can disagree with this one
+/// about what the CPU owes. A `since` field here is omitted for the same
+/// reason: the residency stamp is in the task record.
 pub struct ParkedEntry<X: SchedPayload> {
     task: BlockedTask<X>,
     deadline: Option<Nanos>,
@@ -202,9 +202,9 @@ pub struct CpuSched<X: SchedPayload> {
     /// ahead of the **fair** queue, and behind the RT band only until the head
     /// of this list has aged ([`DYING_AGE_NS`]).
     ///
-    /// **This is what replaces every reap-in-place**: this kernel does not
-    /// unwind, so a task whose value is discarded takes every guard on its
-    /// stack with it — a sleep lock nobody can ever take again. A killed task
+    /// **No killed task is reaped in place**: this kernel does not unwind, so a
+    /// task whose value is discarded takes every guard on its stack with it —
+    /// a sleep lock nobody can ever take again. A killed task
     /// is therefore *scheduled*, observes the cancel at its next park or at its
     /// return to userland, and dies by its own `die`.
     ///
@@ -217,9 +217,7 @@ pub struct CpuSched<X: SchedPayload> {
     /// bound is queue-shaped in *this* container, and its own derivation says
     /// so: the term is `(1 + peers)`, where `peers` is the depth of this list
     /// on this CPU, and it is workload-shaped exactly as invariant I5's factor
-    /// is. The sentence that used to end here said the opposite — "a
-    /// quantum-shaped number instead of a queue-shaped one" — and it was
-    /// written before that term existed.
+    /// is — not a quantum-shaped number.
     ///
     /// **The argument reaches the fair band and stops there, and what happens
     /// past it is a bounded deferral rather than an absolute.** "A retirer is
@@ -229,9 +227,8 @@ pub struct CpuSched<X: SchedPayload> {
     /// [`SchedPass::preempt_if_due`]'s RT arm does not fire against an aged
     /// corpse inside its [`DYING_CHUNK_NS`] grant — the two halves of one rule,
     /// which is why neither may be read as "exactly like any other fair-band
-    /// task". The sentence that used to end here said exactly that, and said
-    /// the pick serves `rq` first whenever the RT band is occupied; both were
-    /// written before the grant existed and both were false the moment it did.
+    /// task", and why "the pick serves `rq` first whenever the RT band is
+    /// occupied" is false.
     ///
     /// **Superseded in design by the reservation model**
     /// (`issues/kernel/cpu-time-is-a-band-and-not-a-reservation.md`), which
@@ -253,7 +250,7 @@ pub struct CpuSched<X: SchedPayload> {
     /// cannot free the stack it is running on.
     zombie: Option<DeadTask<X>>,
     mailbox: MailboxConsumer<Msg<X>>,
-    /// This CPU's single reusable `StealRequest` node (spec §7.7). Its
+    /// This CPU's single reusable `StealRequest` node. Its
     /// in-flight flag *is* the "a probe is already outstanding" answer — one
     /// mechanism for every node kind.
     steal_probe: MailboxNode<Msg<X>>,
@@ -430,7 +427,7 @@ impl<X: SchedPayload> CpuSched<X> {
 
     /// Is a steal probe from this CPU still on its way to a victim?
     ///
-    /// The node's in-flight flag *is* the answer (spec §7.7), so this asks the
+    /// The node's in-flight flag *is* the answer, so this asks the
     /// mechanism rather than a shadow of it. It exists for one reader: the
     /// simulator's probe-gap instrument, which measures how long a halted CPU
     /// sits with a surplus published next door and no probe outstanding — the
@@ -441,12 +438,12 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 
     /// The number of ready tasks, republished to the handle every pass for
-    /// spawn placement (spec §9.4).
+    /// spawn placement.
     pub fn ready_len(&self) -> usize {
         self.rq.len()
     }
 
-    /// Lend the running task an RT window (spec §8.5): the path for a client
+    /// Lend the running task an RT window: the path for a client
     /// that was *not* blocked when its producer signalled, and so takes the
     /// boost at its own consume point instead of through a wake cause.
     pub fn boost_current(&mut self, until: Nanos) {
@@ -457,7 +454,7 @@ impl<X: SchedPayload> CpuSched<X> {
 
     /// `SYS_RT_ENTER` on the running task — permanent RT, as opposed to the
     /// bounded window a waker lends. The privilege gate lives at the syscall
-    /// layer (spec §9.2).
+    /// layer.
     pub fn set_current_rt(&mut self, permanent: bool) {
         if let Some(current) = self.running.as_mut() {
             current.set_permanent_rt(permanent);
@@ -469,7 +466,7 @@ impl<X: SchedPayload> CpuSched<X> {
 /// to **not having changed while nothing was allowed to change it**.
 ///
 /// The reading itself is the driver's: this crate writes `unsafe` in
-/// [`crate::mailbox`] and nowhere else (spec §4), and a byte-level copy of a
+/// [`crate::mailbox`] and nowhere else, and a byte-level copy of a
 /// record is exactly the kind of thing that rule exists to keep out of the state
 /// machine. What is here is what only this module can compute — where the one
 /// remotely-written field sits, and which field a byte offset lands in.
@@ -482,8 +479,8 @@ impl<X: SchedPayload> CpuSched<X> {
 /// already completed a pass. Every one of them is a *word that changed*, and no
 /// predicate over the containers names which word or what it was before. A
 /// shadow copy does both, and it is the difference between "something wrote this
-/// record" — which is where that class has sat since 2026-08-19 — and an offset,
-/// a field, and the value that landed.
+/// record" — which is where that class sits — and an offset, a field, and the
+/// value that landed.
 ///
 /// **The one field a sibling legitimately writes is excluded.** `steal_probe` is
 /// a [`MailboxNode`] embedded in this record and posted into *another* CPU's
@@ -556,9 +553,9 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 }
 
-/// Broken protocol shapes, reproduced for the simulator's negative gates
-/// (spec §10.3). Behind a feature the kernel does not enable, so they are not
-/// compiled into production at all.
+/// Broken protocol shapes, reproduced for the simulator's negative gates.
+/// Behind a feature the kernel does not enable, so they are not compiled into
+/// production at all.
 ///
 /// `scenarios::old_steal_port` uses these two to re-create the pre-cutover
 /// idle-loop steal: pop a ready task straight out of a sibling's queue, carry
@@ -601,8 +598,8 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 
     /// Give the real-time band *unqualified* precedence over the dying list —
-    /// the shape this branch shipped between the two fixes, where `pick` asked
-    /// only `rq.has_rt()` and [`DYING_AGE_NS`] did not exist.
+    /// the shape in which `pick` asks only `rq.has_rt()` and [`DYING_AGE_NS`]
+    /// does not exist.
     ///
     /// One permanently-RT thread that never parks then holds a CPU's dying list
     /// closed for ever, no sibling can rescue the corpse, and
@@ -615,8 +612,8 @@ impl<X: SchedPayload> CpuSched<X> {
         self.rt_outranks_every_corpse = outranks;
     }
 
-    /// Order the fair band by something other than spec §9.2's insertion
-    /// sequence. Invariant I13 must catch what that does to a share's threads;
+    /// Order the fair band by something other than its insertion sequence.
+    /// Invariant I13 must catch what that does to a share's threads;
     /// `scenarios::sibling_storm`'s two gates are what prove it does.
     pub fn set_fair_order(&mut self, order: crate::queue::FairOrder) {
         self.rq.set_order(order);
@@ -626,7 +623,7 @@ impl<X: SchedPayload> CpuSched<X> {
 /// What the balance path does — the one policy value in [`Env`].
 ///
 /// **[`Balance::PushOnSurplus`] at [`PUSH_THRESHOLD`] is what ships** (owner
-/// decision 2026-08-23): spec §7.7 and §9.4's pull half — an idle pass probes
+/// decision): the pull half — an idle pass probes
 /// the CPU publishing the most surplus, a loaded pass answers a probe out of
 /// `pop_surplus` — plus a push that closes the pull's one hole. The pull is
 /// one-shot: [`SchedPass::post_steal_probe`] posts at most one probe per idle
@@ -650,8 +647,7 @@ pub enum Balance {
     /// No probe and no answer. A task woken or placed onto a busy CPU waits
     /// there until that CPU's own queue reaches it.
     None,
-    /// Spec §7.7 and §9.4's pull half, one-shot — what `kernel::sched::driver`
-    /// selected until 2026-08-23, kept as the baseline the push's costs are
+    /// The pull half, one-shot — kept as the baseline the push's costs are
     /// priced against.
     Pull,
     /// Pull, plus a **bounded re-arm**: a CPU that halts with nothing to run
@@ -765,11 +761,11 @@ pub struct Env<'e, H: Hw, P: PreemptGuard> {
     pub hw: &'e H,
     pub cpus: &'e CpuHandles<Msg<H::Payload>>,
     pub frontier: &'e Frontier,
-    /// The pass runs preempt-disabled (spec §6.2), which is also what its own
-    /// mailbox pushes need (N3).
+    /// The pass runs preempt-disabled, which is also what its own mailbox
+    /// pushes need (N3).
     pub preempt: &'e P,
-    /// What the balance path does (spec §7.7, §9.4's pull half). A field and not
-    /// a `cfg` so that every setting stays compiled and simulatable.
+    /// What the balance path does. A field and not a `cfg` so that every
+    /// setting stays compiled and simulatable.
     pub balance: Balance,
 }
 
@@ -803,10 +799,8 @@ impl<X: SchedPayload> CpuSched<X> {
         env.hw.release(key, payload, acct);
     }
 
-    /// Every death goes through here (invariant I11) — and since the
-    /// cancellable kill there is only one kind: a task's own `die`, on the
-    /// stack it unwound. The reap paths this sentence used to have to name
-    /// are gone.
+    /// Every death goes through here (invariant I11), and there is exactly one
+    /// kind: a task's own `die`, on the stack it unwound.
     ///
     /// A task whose context is the one this CPU is *currently executing on*
     /// cannot be handed back yet: in the kernel that record owns the kernel
@@ -855,11 +849,11 @@ impl<X: SchedPayload> CpuSched<X> {
     /// is what makes the chase terminate.
     ///
     /// **The loaded task is never migrated, and the rule is asserted here
-    /// because this is where every migration passes.** It was implemented one
-    /// caller up, in [`crate::queue::RunQueue::pop_surplus`]'s `loaded`
-    /// argument, which covers the steal path and only the steal path; the
+    /// because this is where every migration passes.**
+    /// [`crate::queue::RunQueue::pop_surplus`]'s `loaded` argument covers the
+    /// steal path and only the steal path; the
     /// wake-forward in [`CpuSched::place`] reaches this function too, and what
-    /// kept *it* correct was an argument rather than a check — a task `place`
+    /// keeps *it* correct is an argument rather than a check — a task `place`
     /// hands on came out of `parked` or off the wire in `InTransit`, and the
     /// loaded task is the one in `running`, which the linear task states make
     /// disjoint from both. That argument is worth one comparison per migration
@@ -887,12 +881,12 @@ impl<X: SchedPayload> CpuSched<X> {
         #[cfg(feature = "protocol-port")]
         let migrate_anyway = self.migrate_keeps_the_corpse;
         if task.shared().kill_pending() && !migrate_anyway {
-            // **A killed task is still never migrated**, and that half of
-            // invariant I14 is unchanged by §7.2: `InTransit` is the one state
+            // **A killed task is never migrated**, which is half of
+            // invariant I14: `InTransit` is the one state
             // whose handling is not backed by an interrupt, so handing a
             // corpse on trades an unwind that could start in this pass for a
-            // wait on another CPU's next voluntary one. What changes is only
-            // what happens to it here — it is kept and dispatched, not reaped.
+            // wait on another CPU's next voluntary one. So it is kept here and
+            // dispatched, not reaped.
             self.begin_dying(task, env, now);
             return;
         }
@@ -916,9 +910,9 @@ impl<X: SchedPayload> CpuSched<X> {
         }
     }
 
-    /// A CPU that has published SLEEPING, for RT wake-forwarding (spec
-    /// §7.4.4). Reading the doorbells is a heuristic: a CPU that woke up in
-    /// the meantime simply gets an ordinary adopt.
+    /// A CPU that has published SLEEPING, for RT wake-forwarding. Reading the
+    /// doorbells is a heuristic: a CPU that woke up in the meantime simply gets
+    /// an ordinary adopt.
     fn idle_sibling<H: Hw<Payload = X>, P: PreemptGuard>(
         &self,
         env: Env<'_, H, P>,
@@ -928,7 +922,7 @@ impl<X: SchedPayload> CpuSched<X> {
             .find(|&cpu| cpu != self.id && env.cpus.get(cpu).doorbell().sleeping())
     }
 
-    /// Wake placement (spec §9.4): keep the task local — that is where its
+    /// Wake placement: keep the task local — that is where its
     /// cache lines are — unless this CPU is already running RT and the task
     /// is too, in which case an idle sibling gets it rather than queueing RT
     /// behind RT.
@@ -965,8 +959,7 @@ impl<X: SchedPayload> CpuSched<X> {
     /// The refcount is the reason this is not a bare `push`: `Ready` and
     /// `Running` both count as runnable, so a dying task that skipped
     /// `enter_runnable` would desynchronise the per-share count the sim walks
-    /// in `check_share_refcounts` — which is §7.2(a)'s warning about the
-    /// struck replacement code, one container over.
+    /// in `check_share_refcounts`.
     fn begin_dying<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
         task: ReadyTask<X>,
@@ -998,8 +991,7 @@ impl<X: SchedPayload> CpuSched<X> {
             // Not parked here any more: a `Retire` already woke it into the
             // dying list, or its deadline fired first and this wake lost the
             // arbitration CAS. Keys are never reused, so a stale wake is
-            // provably about a task that is no longer waiting — a benign no-op
-            // (spec §7.6).
+            // provably about a task that is no longer waiting — a benign no-op.
             return;
         };
         let task = entry.task.wake(self.id, cause, entry.class, now);
@@ -1031,7 +1023,7 @@ impl<X: SchedPayload> CpuSched<X> {
     ) {
         let key = shared.key();
         if self.parked.contains_key(&key) {
-            // **Claim-arbitrated, exactly as `fire_deadlines` is** (§7.2(c)):
+            // **Claim-arbitrated, exactly as `fire_deadlines` is**:
             // remove-then-convert loses the race. If a remote waker has
             // already claimed this task its `Msg::Wake` is in flight to this
             // same CPU, so leaving the entry alone is what keeps the task in
@@ -1072,12 +1064,10 @@ impl<X: SchedPayload> CpuSched<X> {
             // priority on a corpse.
             current.end_lend();
             // A running task cannot be yanked out from under its own kernel
-            // stack; it dies at its next safe point (spec §7.6). Consuming the
-            // message here is only sound because the sticky kill bit outlives
-            // it and *every* safe point honours it, and the cancellable kill
-            // changed which points those are. **The pick no longer reaps
-            // anything** — the argument this comment used to make. What ends
-            // the task instead:
+            // stack; it dies at its next safe point. Consuming the message here
+            // is only sound because the sticky kill bit outlives it and *every*
+            // safe point honours it. **The pick reaps nothing.** What ends the
+            // task:
             //
             // * `completion::wait` answers `Cancelled` and the caller `?`s it
             //   out, dropping every guard on the way, so the unwind reaches the
@@ -1089,8 +1079,7 @@ impl<X: SchedPayload> CpuSched<X> {
             //   is the backstop for a thread that never parks again, with an
             //   empty kernel stack by construction.
             //
-            // The quantum is not the bound any more and saying so would be the
-            // same error: what bounds this is the unwind, and
+            // The quantum is not the bound: what bounds this is the unwind, and
             // `sim::invariants::retire_latency_bound` derives it hop by hop.
             env.hw.need_resched(self.id);
             return;
@@ -1111,7 +1100,7 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 
     /// Consume the mailbox. Runs before anything else in a pass, so a woken
-    /// RT task is in the RT band *before* the pick (spec §7.4).
+    /// RT task is in the RT band *before* the pick.
     fn drain<H: Hw<Payload = X>, P: PreemptGuard>(&mut self, env: Env<'_, H, P>, now: Nanos) {
         while let Some(msg) = self.mailbox.pop(env.preempt) {
             match msg {
@@ -1141,7 +1130,7 @@ impl<X: SchedPayload> CpuSched<X> {
     }
 
     /// Fire every deadline that is due, arbitrating with remote wakers
-    /// through the same claim CAS they use (spec §8.3).
+    /// through the same claim CAS they use.
     fn fire_deadlines<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
         env: Env<'_, H, P>,
@@ -1189,10 +1178,10 @@ fn home_of(state: TaskState) -> Option<CpuId> {
     }
 }
 
-/// How long one scheduler pass is modelled to take on the machine it runs on
-/// (spec §10.2, §14's preempt-off risk). **Measured by a `feature = "check"`
-/// build and gated in the harness against the measurement; asserted by
-/// nothing.**
+/// How long one scheduler pass is modelled to take on the machine it runs on,
+/// which is also how long preemption is off for. **Measured by a
+/// `feature = "check"` build and gated in the harness against the measurement;
+/// asserted by nothing.**
 ///
 /// The number is the simulator's own modelling error made explicit. The sim
 /// charges a pass **zero** time — every step it takes is either a workload op
@@ -1217,24 +1206,23 @@ fn home_of(state: TaskState) -> Option<CpuId> {
 /// distribution ([`PassCosts`]) and judged where composed quantities are judged:
 /// in the harness and the simulator.
 ///
-/// **And the harness's line is no longer this number, on a measurement.** Host
+/// **The harness's line is not this number, and a measurement is why.** Host
 /// load moves *every* order statistic of the recorded distribution and not only
-/// its tail — 2026-08-18, twelve CPU-runs an arm, quiet against loaded: median
+/// its tail — twelve CPU-runs an arm, quiet against loaded: median
 /// 65 536 → 131 072 ns and 90th percentile 131 072 → 262 144 ns on one
 /// unchanged tree. So `tests/common/passcost.rs` holds a run to what its own
-/// accelerator has been recorded producing instead. This constant stays the
-/// policy number, stays what `over` is counted against, and stays reported on
-/// every run; it has only stopped being the threshold. What that measurement
-/// also says about *this* number: across sixteen CI runs on KVM, 7 612 passes,
-/// **not one reached it** and the largest single pass was 173 906 ns.
+/// accelerator has been recorded producing instead. This constant is the policy
+/// number, is what `over` is counted against, and is reported on every run; it
+/// is not the threshold. What that measurement also says about *this* number:
+/// across sixteen CI runs on KVM, 7 612 passes, **not one reached it** and the
+/// largest single pass was 173 906 ns.
 pub const MAX_PASS_NS: u64 = 200_000;
 
 /// How long the real-time band may defer one corpse's unwind before that
 /// corpse outranks it for a single chunk.
 ///
-/// **A killed task is normal-band work whose deferral is bounded, and both
-/// halves of that sentence had to be paid for.** Unqualified precedence in
-/// either direction is wrong and both were tried:
+/// **A killed task is normal-band work whose deferral is bounded.** Unqualified
+/// precedence in either direction is wrong:
 ///
 /// * The dying list ahead of `rq` starved a ready real-time task for the whole
 ///   of an unwind, quantum after quantum, because `preempt_if_due` returned the
@@ -1269,7 +1257,7 @@ pub const DYING_AGE_NS: u64 = QUANTUM_NS;
 /// the other side can afford. Under saturated RT an unwind is delivered at one
 /// chunk per `DYING_AGE_NS + DYING_CHUNK_NS`, so the corpse's release is
 /// stretched by 11× — which is a term of `scheduler::retire_task`'s `GIVE_UP`
-/// derivation and the reason that number moved. A larger chunk buys that term
+/// derivation. A larger chunk buys that term
 /// back and spends it on RT latency; `soundd` is the process that pays, and 1 ms
 /// of added worst-case jitter once per 10 ms is the trade this picks.
 pub const DYING_CHUNK_NS: u64 = QUANTUM_NS / 10;
@@ -1301,10 +1289,9 @@ pub fn pass_cost_bucket_end(bucket: usize) -> u64 {
 /// One CPU's pass-cost distribution, as a value: the wire form between the
 /// kernel that measures and the harness that judges.
 ///
-/// `over` is exact and the histogram is not, which is deliberate — it is the
-/// direct successor of the quantity the removed assert panicked over, and
-/// rounding it to a power of two would lose the one number a reader compares
-/// against [`MAX_PASS_NS`] by eye.
+/// `over` is exact and the histogram is not, which is deliberate: rounding it
+/// to a power of two would lose the one number a reader compares against
+/// [`MAX_PASS_NS`] by eye.
 #[cfg(feature = "check")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PassCostReport {
@@ -1416,7 +1403,7 @@ impl PassCostReport {
 }
 
 /// One CPU's live pass-cost recorder, written only by that CPU and read by
-/// anyone (spec §10.2). Exists only in a `feature = "check"` build.
+/// anyone. Exists only in a `feature = "check"` build.
 ///
 /// Plain relaxed load/store rather than read-modify-write: the writer is the
 /// owning CPU inside its own pass, so there is no contention to lose to, and an
@@ -1507,7 +1494,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
     /// against the arming computed from it.
     ///
     /// Entry order is load-bearing: clear the doorbell edge *before* draining
-    /// (so a message posted after the drain re-raises it, §7.3), free the
+    /// (so a message posted after the drain re-raises it), free the
     /// previous pass's zombie (we are not on its stack), charge the running
     /// task, then drain and fire deadlines — so that everything the pick can
     /// see is already visible.
@@ -1570,7 +1557,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
     /// per-CPU ownership: a wake for the just-parked task arrives as a message
     /// to this same CPU and cannot be processed until the next pass, which
     /// necessarily runs after the switch completes. The stack-reuse race is
-    /// sequentially impossible, not locked away (spec §6.2).
+    /// sequentially impossible, not locked away.
     pub fn dispose_block(
         self,
         ticket: CommittedTicket<Msg<H::Payload>>,
@@ -1634,7 +1621,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
 impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// The only exit. Picks the next task, answers steal requests from
     /// surplus, publishes load, and — LAST — programs the timer. Arming after
-    /// every change to `parked` is the whole proof of invariant T (spec §8.4):
+    /// every change to `parked` is the whole proof of invariant T:
     /// with no window between the last change and the arming, "deadline exists
     /// but timer unarmed" is not a state the code can be in.
     pub fn finish(self) -> Action<<H as Hw>::Payload> {
@@ -1664,12 +1651,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             // [`CpuHandle::load`] and [`CpuHandle::surplus`]. Spawn placement
             // wants everything a new task would queue behind, and a corpse
             // mid-unwind is exactly that: it is dispatched ahead of the fair
-            // band, so counting `rq` alone made a CPU holding two teardowns look
-            // as empty as an idle one — the same blindness `dying_len` closes in
-            // the dump. The steal probe wants what this CPU could hand over,
-            // which is the fair band and only the fair band; publishing the
-            // first number to the second reader sent thieves to CPUs with
-            // nothing to give.
+            // band, so counting `rq` alone makes a CPU holding two teardowns
+            // look as empty as an idle one — the same blindness `dying_len`
+            // closes in the dump. The steal probe wants what this CPU could
+            // hand over, which is the fair band and only the fair band;
+            // publishing the first number to the second reader sends thieves to
+            // CPUs with nothing to give.
             //
             // Both are sampled after the pick, so neither counts the task this
             // CPU is about to run.
@@ -1690,7 +1677,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             match self.try_sleep() {
                 Ok(action) => return action,
                 // A message landed between the drain and the final check:
-                // consume it and decide again (spec §7.5).
+                // consume it and decide again.
                 Err(()) => continue,
             }
         }
@@ -1709,9 +1696,10 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         // **`serves_rt_band` and not `is_rt`**, which is what makes this arm and
         // `pick` agree about one task. A killed thread that had called
         // `SYS_RT_ENTER` still answers `is_rt()`, because `RtState::release`
-        // ends a lend and leaves the permanent flag alone — so this arm exempted
-        // it while the pick gated its dying list on `rq.has_rt()` regardless,
-        // and it held the CPU for a full quantum against a ready RT sibling.
+        // ends a lend and leaves the permanent flag alone — so `is_rt` here
+        // would exempt it while the pick gates its dying list on `rq.has_rt()`
+        // regardless, and it would hold the CPU for a full quantum against a
+        // ready RT sibling.
         let rt_due = self.cpu.rq.has_rt() && !current.serves_rt_band() && !self.cpu.aged_grant;
         let due = self.now >= self.cpu.quantum_end || rt_due;
         if !due {
@@ -1720,12 +1708,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let current = self.cpu.running.take().expect("checked above");
         let task = current.preempt(self.cpu.id, self.now);
         if task.shared().kill_pending() {
-            // §7.2(3): once `Commit::Killed` is `dispose_none` the killed
-            // thread keeps running and unwinds, and its next quantum expiry
-            // must not put it where something else can take it — the pick
-            // reaped it here in the struck design, mid-unwind, with every
-            // guard still on the stack. It goes to the back of the dying list,
-            // which the next pick empties ahead of the fair band.
+            // Once `Commit::Killed` is `dispose_none` the killed thread keeps
+            // running and unwinds, and its next quantum expiry must not put it
+            // where something else can take it — a pick that reaped it here
+            // would do so mid-unwind, with every guard still on the stack. It
+            // goes to the back of the dying list, which the next pick empties
+            // ahead of the fair band.
             //
             // **Ahead of the fair band and not of the RT one**, which is the
             // half that makes this arm honour rather than undo the decision
@@ -1748,12 +1736,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// **RT band, then the dying list, then the fair band — and no kill check
     /// at all on the fair path.**
     ///
-    /// §7.2(2): the pick used to reap a killed ready task, which is what made
-    /// the earlier drafts' `handle_retire` rewrite a no-op — a task pushed
-    /// into `rq` by the retire was popped and reaped in the very same pass,
-    /// stack and guards discarded, the disaster moved fifteen lines later.
-    /// Now a killed task is dispatched like any other, and it dies by its own
-    /// `die` at the first safe point that can end it. Nothing is reaped here,
+    /// A pick that reaped a killed ready task would make `handle_retire`'s care
+    /// a no-op — a task pushed into `rq` by the retire popped and reaped in the
+    /// very same pass, stack and guards discarded, the disaster moved fifteen
+    /// lines later. A killed task is dispatched like any other, and it dies by
+    /// its own `die` at the first safe point that can end it. Nothing is reaped
+    /// here,
     /// so `ReadyTask::dispatch`'s note about the kill bit not being asserted
     /// away is the whole of what remains true.
     ///
@@ -1761,12 +1749,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// advance for it: it is not spending a share of the CPU, it is finishing.
     ///
     /// **It does not jump the RT band, and it is not held off by it for ever
-    /// either — the deferral is bounded, and both absolutes were tried.**
+    /// either — the deferral is bounded, and both absolutes are wrong.**
     /// `rq.pop_next()` is the only place the RT band is served, so a pick that
-    /// emptied `dying` first left a killed normal task holding the CPU against a
-    /// ready real-time task for the whole of its unwind, quantum after quantum,
-    /// because `preempt_if_due` returns it to `dying` and this pick handed it
-    /// straight back with a fresh quantum. That contradicts the rule this
+    /// emptied `dying` first would leave a killed normal task holding the CPU
+    /// against a ready real-time task for the whole of its unwind, quantum after
+    /// quantum, because `preempt_if_due` returns it to `dying` and this pick
+    /// would hand it straight back with a fresh quantum. That contradicts the rule this
     /// scheduler states as law — a ready real-time task preempts the normal
     /// band — outright.
     ///
@@ -2036,7 +2024,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         self.best_victim().is_some()
     }
 
-    /// One probe at a time (spec §7.7): if the previous one is still in
+    /// One probe at a time: if the previous one is still in
     /// flight the claim fails and we simply do not post another — the
     /// outstanding probe will be answered, and this CPU sleeps with its
     /// doorbell armed.
@@ -2124,7 +2112,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
 }
 
 /// The globally shared, `Sync` face of a CPU, and the whole remote surface:
-/// post a message, ring the doorbell, read the published load (spec §6.1).
+/// post a message, ring the doorbell, read the published load.
 pub struct CpuHandle<M> {
     id: CpuId,
     post: MailboxProducer<M>,
@@ -2138,7 +2126,7 @@ pub struct CpuHandle<M> {
     /// steal probe and for nothing else.
     ///
     /// A separate number from [`Self::load`] because the two questions have
-    /// different answers and one of them was being asked with the other's:
+    /// different answers, and asking one with the other's is a defect:
     /// [`SchedPass::answer_steal_requests`] hands over `rq.pop_surplus()`, which
     /// reads the *fair* band only, so a corpse and a queued real-time task are
     /// both work that inflates `load` and can never be stolen. A thief choosing
@@ -2146,8 +2134,8 @@ pub struct CpuHandle<M> {
     /// with nothing, and sleeps — and the probe is one-shot per idle trip, so
     /// the genuinely surplus-holding CPU goes unprobed for a whole idle round.
     surplus: AtomicU32,
-    /// The on-target counterpart to the simulator's invariants (spec §10.2):
-    /// the sim asserts what a pass *does*, this measures what a pass *costs*.
+    /// The on-target counterpart to the simulator's invariants: the sim asserts
+    /// what a pass *does*, this measures what a pass *costs*.
     ///
     /// Everything else in `feature = "check"` is a statement about state the
     /// core owns, which is checkable in either world. Cost is not: the
@@ -2205,8 +2193,7 @@ impl<M: SchedMsg> CpuHandle<M> {
     }
 
     /// Post one message and ring the doorbell. The returned [`Kick`] is the
-    /// caller's obligation: `Kick::Send` means the targeted IPI must go out
-    /// (spec §7.3).
+    /// caller's obligation: `Kick::Send` means the targeted IPI must go out.
     pub fn post(
         &self,
         slot: PostSlot<'_, M>,
@@ -2228,7 +2215,7 @@ impl<M: SchedMsg> CpuHandle<M> {
     /// surplus now visible to it.
     ///
     /// The returned [`Kick`] is the caller's obligation exactly as
-    /// [`Self::post`]'s is. `Urgency::Normal`, so the coalescing rule of §7.3
+    /// [`Self::post`]'s is. `Urgency::Normal`, so the doorbell's coalescing rule
     /// applies: a target that already has an IPI coming costs nothing, and a
     /// busy target costs nothing at all.
     pub fn poke(&self) -> Kick {
@@ -2236,7 +2223,7 @@ impl<M: SchedMsg> CpuHandle<M> {
     }
 
     /// Post a message that carries its own node — the ownership-transferring
-    /// `Adopt` (spec §7.2).
+    /// `Adopt`.
     pub fn post_owned(
         &self,
         msg: M,
@@ -2286,12 +2273,10 @@ impl<M: SchedMsg> CpuHandles<M> {
 
 /// The arms this file has that nothing else covers.
 ///
-/// **`cpu.rs` had no test module at all until the completion work needed one**,
-/// and every arm exercised below — the retire's three, the pick's, the balance
-/// path's and the adopt's — was reachable only through the simulator, which
-/// explores *scenarios* rather than stating what a single arm does. The
-/// scheduler migration cost about seventy defects in code whose own suites were
-/// green; these are the statements a reader can check one at a time.
+/// Every arm exercised below — the retire's three, the pick's, the balance
+/// path's and the adopt's — is otherwise reachable only through the simulator,
+/// which explores *scenarios* rather than stating what a single arm does. These
+/// are the statements a reader can check one at a time.
 ///
 /// The harness is deliberately the smallest thing that can hold a `CpuSched`:
 /// a payload with no address space, an `Hw` that records rather than acts, and
@@ -2299,9 +2284,9 @@ impl<M: SchedMsg> CpuHandles<M> {
 ///
 /// **A world holding one task cannot state where a disposition put it.** The
 /// pick launders every container back into `running`, so "it ended up running"
-/// is what a fair-queue route, a dying-list route and a no-op all produce, and
-/// three of the four gates in this module were vacuous for exactly that reason
-/// until they were made to red under a mutation. A *second* occupant — a task
+/// is what a fair-queue route, a dying-list route and a no-op all produce, so a
+/// gate written that way is vacuous unless it reds under a mutation. A *second*
+/// occupant — a task
 /// already in the dying list, or an RT task already in the band — is what makes
 /// the answer observable, because the pick then takes that one and leaves the
 /// one under test where the disposition put it. Every test below that asserts a
@@ -2525,7 +2510,7 @@ mod tests {
         /// A waker is two steps: the claim CAS, then the push. They are not one
         /// instruction and nothing makes them one, so a message posted by
         /// anybody else can land in between — and for a retire, landing in
-        /// between is the whole of §7.2(c). The mailbox is FIFO, so a test that
+        /// between is the whole of the arbitration. The mailbox is FIFO, so a test that
         /// posts the wake first can never observe that order; this is how it
         /// gets to.
         fn post_claimed_wake(
@@ -2577,10 +2562,10 @@ mod tests {
         w.abandon();
     }
 
-    /// **The arm §7.1 calls the one that matters, rewritten.** A thread parked
-    /// on a disk transfer is in `parked`; it used to be reaped where it lay,
-    /// and its kernel stack — every guard on it — went with it. Now the retire
-    /// *wakes* it, claim-arbitrated, into the dying list.
+    /// **The arm that matters.** A thread parked on a disk transfer is in
+    /// `parked`; reaping it where it lies takes its kernel stack — every guard
+    /// on it — with it, so the retire *wakes* it, claim-arbitrated, into the
+    /// dying list.
     #[test]
     fn a_retire_wakes_a_parked_task_so_it_can_unwind() {
         let mut w = World::new(1);
@@ -2606,20 +2591,21 @@ mod tests {
     /// The claim is arbitrated and not assumed: a remote waker that got there
     /// first owns a `Msg::Wake` in flight to this same CPU, so the retire
     /// leaves the entry alone. Removing it here would leave the task in no
-    /// container at all — never runnable, never reaped — which is §7.2(c).
+    /// container at all — never runnable, never reaped — which is the state the
+    /// arbitration exists to prevent.
     ///
-    /// **The order has to be driven by hand, and this test did not use to be
-    /// able to reach the arm it is named for.** Posting the wake and then the
+    /// **The order has to be driven by hand, or this test does not reach the arm
+    /// it is named for.** Posting the wake and then the
     /// retire cannot: the mailbox is FIFO, so the wake is drained first,
     /// `parked` is empty by the time `handle_retire` runs, and the whole
     /// `parked.contains_key` branch is skipped — with `Claim::Lost =>
-    /// panic!()` staged in it, this test passed. What reaches the arm is the
+    /// panic!()` staged in it, such a test passes. What reaches the arm is the
     /// window a waker really has ([`World::post_claimed_wake`]): the claim CAS
     /// has been won and the push has not happened yet, so the retire is the
     /// first message this CPU sees.
     ///
     /// The first block below is what has the teeth. It reds under
-    /// remove-then-convert (the defect §7.2(c) names) and under a retirer that
+    /// remove-then-convert and under a retirer that
     /// claims and ignores the answer: both take the entry out of `parked`, and
     /// there is nothing there for the wake to find.
     #[test]
@@ -2683,9 +2669,8 @@ mod tests {
         w.abandon();
     }
 
-    /// The one arm that always did what §7.2 wants of all of them: a running
-    /// task cannot be yanked out from under its own kernel stack, so it is
-    /// asked to take a safe point instead.
+    /// The arm where nothing moves: a running task cannot be yanked out from
+    /// under its own kernel stack, so it is asked to take a safe point instead.
     #[test]
     fn a_retire_of_the_running_task_asks_for_a_safe_point() {
         let mut w = World::new(1);
@@ -2702,10 +2687,10 @@ mod tests {
         w.abandon();
     }
 
-    /// **The pick no longer reaps anything.** A killed task is dispatched like
-    /// any other and dies by its own `die`; reaping it here is what made the
-    /// earlier drafts of §7.2 a no-op, since a task the retire had just made
-    /// runnable was popped and discarded in the very same pass.
+    /// **The pick reaps nothing.** A killed task is dispatched like any other
+    /// and dies by its own `die`; reaping it here would make the retire a no-op,
+    /// since a task the retire had just made runnable would be popped and
+    /// discarded in the very same pass.
     #[test]
     fn the_pick_dispatches_a_killed_task_so_it_can_unwind() {
         let mut w = World::new(1);
@@ -2771,15 +2756,15 @@ mod tests {
         assert_eq!(w.released(), std::vec![key]);
     }
 
-    /// §7.2(3): a killed task that expires its quantum mid-unwind must not
-    /// land anywhere the pick can treat it as ordinary work.
+    /// A killed task that expires its quantum mid-unwind must not land anywhere
+    /// the pick can treat it as ordinary work.
     ///
     /// **The second corpse is what makes this test a statement about where the
     /// first one landed.** With one task on the CPU the pick empties whichever
     /// container `preempt_if_due` put it in and hands it straight back, so
     /// "it is running again" and "the fair queue is empty" read the same
-    /// whether the kill arm is there or not — deleting that arm left this test
-    /// passing. A corpse already queued ahead of it is what the pick takes
+    /// whether the kill arm is there or not — deleting that arm leaves such a
+    /// test passing. A corpse already queued ahead of it is what the pick takes
     /// instead, and where the expiring one went stays observable.
     #[test]
     fn a_killed_task_that_expires_its_quantum_goes_back_to_the_dying_list() {
@@ -2826,7 +2811,7 @@ mod tests {
     ///
     /// Read against its involuntary twin above, and gated the same way: with a
     /// single task on the CPU the pick launders the difference, and deleting
-    /// `dispose_yield`'s kill arm left the whole suite green. The corpse queued
+    /// `dispose_yield`'s kill arm leaves the whole suite green. The corpse queued
     /// ahead of it is what keeps the answer visible.
     #[test]
     fn a_killed_task_that_yields_goes_back_to_the_dying_list() {
@@ -2867,10 +2852,9 @@ mod tests {
         w.abandon();
     }
 
-    /// **I14's first half is unchanged by §7.2**: a killed task is still never
-    /// migrated, because `InTransit` is the one state whose handling is not
-    /// backed by an interrupt. What changed is only what happens to it here —
-    /// kept and dispatched, where it used to be reaped.
+    /// **I14's first half**: a killed task is never migrated, because
+    /// `InTransit` is the one state whose handling is not backed by an
+    /// interrupt. It is kept and dispatched here instead.
     #[test]
     fn the_balance_path_keeps_a_killed_task_rather_than_migrating_it() {
         let mut w = World::new(2);
@@ -2892,13 +2876,12 @@ mod tests {
 
     /// A kill that lands after the adopt was posted: the destination adopts it
     /// like any other task and routes it by its kill bit, which is what makes
-    /// the retire chase terminate — for a sharper reason than the reap it
-    /// replaces.
+    /// the retire chase terminate.
     ///
     /// **The routing is asserted before the pick runs, and that is the half
     /// with teeth.** "It ends up running" is equally true of an adopt that put
     /// the corpse in the fair band, so `place` → `enqueue` in `handle_adopt`
-    /// used to be invisible to the whole suite. A corpse in the fair band is
+    /// would be invisible to the whole suite. A corpse in the fair band is
     /// ordinary work: it queues behind whatever is there, `answer_steal_requests`
     /// may hand it to another CPU as surplus, and the retirer's bound picks up
     /// the whole depth of the fair band — which is exactly what the dying list
@@ -2970,10 +2953,9 @@ mod tests {
     /// inside one pass, so it has stood in the list for far less than
     /// [`DYING_AGE_NS`] and `pick`'s aging test is false.
     /// `a_corpse_is_not_starved_for_ever_by_a_spinning_rt_task` is the other
-    /// direction and stages the aged one. Neither absolute holds, and a doc
-    /// here that stated one — "spec §3's 'a ready real-time task always
-    /// preempts the normal band' admits no exception for it" — was carrying an
-    /// absolute this crate's own gates already disprove.
+    /// direction and stages the aged one. Neither absolute holds: "a ready
+    /// real-time task always preempts the normal band" does admit an exception
+    /// here, and this crate's own gates are what state its shape.
     #[test]
     fn a_killed_task_does_not_starve_a_ready_rt_task() {
         let mut w = World::new(1);
@@ -3087,8 +3069,8 @@ mod tests {
         w.abandon();
     }
 
-    /// **The other direction of the same law, and the one the first fix
-    /// created.** The three tests above say a corpse never starves the RT band.
+    /// **The other direction of the same law.** The three tests above say a
+    /// corpse never starves the RT band.
     /// This one says the RT band never starves the corpse, because unqualified
     /// RT precedence over the dying list ends in a kernel panic:
     /// `scheduler::retire_task` blocks on `Hw::release` behind a tripwire, and
@@ -3280,20 +3262,20 @@ mod tests {
     }
 
     /// **A killed thread that holds the RT right unwinds in the normal band**,
-    /// and until `serves_rt_band` existed it did not.
+    /// which is what `serves_rt_band` exists for.
     ///
     /// `RtState::release` ends an inherited lend and deliberately leaves the
     /// *permanent* flag alone, so a thread that called `SYS_RT_ENTER` and was
-    /// then killed still answers `is_rt()`. `preempt_if_due` asked exactly that
-    /// and therefore exempted the corpse, while `pick` gated its dying list on
+    /// then killed still answers `is_rt()`. A `preempt_if_due` that asked that
+    /// would exempt the corpse while `pick` gated its dying list on
     /// `rq.has_rt()` whatever it was — two halves of one rule disagreeing about
-    /// one task. The corpse held its CPU for a full quantum against a ready
-    /// real-time sibling; `soundd` holds the right and a killed `soundd` thread
-    /// is exactly this.
+    /// one task, and the corpse holding its CPU for a full quantum against a
+    /// ready real-time sibling. `soundd` holds the right, and a killed `soundd`
+    /// thread is exactly this.
     ///
     /// The control is `a_live_fair_task_loses_the_cpu_to_a_ready_rt_task` and
     /// its three siblings above: this asserts the same thing of the one task
-    /// that used to be the exception.
+    /// that would otherwise be the exception.
     #[test]
     fn a_killed_rt_thread_unwinds_in_the_normal_band() {
         let mut w = World::new(1);
@@ -3324,14 +3306,14 @@ mod tests {
         w.abandon();
     }
 
-    /// **A corpse is not stealable surplus**, and the probe now asks the
-    /// question it means.
+    /// **A corpse is not stealable surplus**, and the probe asks the question it
+    /// means.
     ///
     /// `finish_inner` publishes two numbers because two readers ask two
     /// questions — see [`CpuHandle::load`] and [`CpuHandle::surplus`]. Reading
-    /// the placement number for the steal probe sent the thief to the CPU
+    /// the placement number for the steal probe sends the thief to the CPU
     /// holding the most *work*, which a CPU deep in two teardowns is, and
-    /// `answer_steal_requests` then had nothing to give it: `pop_surplus` reads
+    /// `answer_steal_requests` then has nothing to give it: `pop_surplus` reads
     /// the fair band only. The probe is one-shot per idle trip and a sleeping
     /// CPU stops its timer, so that miss costs a whole idle round.
     #[test]
@@ -3403,8 +3385,8 @@ mod tests {
     /// it is.
     ///
     /// The second occupant this module's header asks for is the *third* task:
-    /// with only the loaded one and one other, refusing would be indventing
-    /// nothing to observe — `fair_len() <= 1` already declines. Three makes the
+    /// with only the loaded one and one other, refusing leaves nothing to
+    /// observe — `fair_len() <= 1` already declines. Three makes the
     /// refusal a choice between two candidates, and the assertion below reads
     /// which one was made.
     ///
@@ -3412,7 +3394,7 @@ mod tests {
     /// carries the highest vruntime in the band, so `pop_surplus`'s `next_back`
     /// names it first and every run hands over exactly the wrong one.
     ///
-    /// **Under that mutation the red is now [`CpuSched::hand_off`]'s own
+    /// **Under that mutation the red is [`CpuSched::hand_off`]'s own
     /// assertion**, which fires inside `run_a_pass_at` before this function's
     /// `assert!` on the state word is reached. Both are the same finding; the
     /// panic is the earlier and the more precise of the two, and the assertions
@@ -3568,7 +3550,7 @@ mod pass_cost_tests {
         assert_eq!(report.over, 2);
         // Both budget samples land in bucket 18, `[131072, 262144)`, which is
         // exactly why `over` is counted separately: the histogram cannot tell
-        // 200 000 from 200 001 and the assert this replaced could.
+        // 200 000 from 200 001.
         assert_eq!(report.buckets[pass_cost_bucket(MAX_PASS_NS)], 2);
         assert_eq!(report.buckets.iter().sum::<u64>(), 6);
     }

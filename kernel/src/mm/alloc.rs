@@ -11,16 +11,14 @@ use super::pmm;
 /// Every method here runs inside `KernelAllocator`'s `dlmalloc.lock()`, in the
 /// middle of dlmalloc mutating its own chunk and segment lists, and the kernel
 /// does not unwind — so a panic from in here abandons the heap in whatever
-/// state it was in, with the lock held forever. The CPU that recovers from
-/// that panic then spins `Lock::lock` on its next `alloc` or `free`, and the
-/// machine goes quiet.
+/// state it was in, with the lock held forever, and the next `alloc` or `free`
+/// on any CPU spins in `Lock::lock`.
 ///
 /// So a size this source cannot back is a `null`, not an assert: dlmalloc
-/// hands the null back to the caller with its structures consistent, the lock
-/// drops, and whatever the caller does about it — `handle_alloc_error`, an
-/// `Option` — happens outside. The fail-fast for a caller asking the heap for
-/// page-scale memory is [`MAX_HEAP_ALLOC`], checked in `KernelAllocator::alloc`
-/// *before* the lock is taken.
+/// hands the null back to the caller with its structures consistent and the
+/// lock drops, and whatever the caller does about it happens outside. The
+/// fail-fast for a caller asking the heap for page-scale memory is
+/// [`MAX_HEAP_ALLOC`], checked in `KernelAllocator::alloc` *before* the lock.
 ///
 /// `pmm::alloc_page` is the only thing reached from here, and it is
 /// panic-free by the same rule.
@@ -85,17 +83,14 @@ unsafe impl dlmalloc::Allocator for KernelPageSource {
 /// read back when it is freed and, for the allocations that matter most, while
 /// they are still live.
 ///
-/// **It exists because the allocator's own answer was too expensive.**
-/// `dlmalloc` carries Doug Lea's full consistency checker behind its `debug`
-/// cargo feature — `check_malloc_state` walks all 32 smallbins, all 32
-/// treebins and every chunk of every segment at the head of *every* `malloc`
-/// and `free`. That is the right oracle at the wrong price: this heap runs to
-/// several MiB by the end of boot, so the walk is O(heap) per allocation and a
-/// TCG guest carrying it does not finish a boot in a storm's lifetime. The
-/// bands below cost two writes per allocation and two reads per free, and they
-/// answer the question this class actually poses — *is something writing
-/// outside an allocation it owns* — rather than the one the checker answers,
-/// which is whether the free lists still hang together afterwards.
+/// **It exists because the allocator's own answer is too expensive.**
+/// `dlmalloc`'s `debug` feature walks all 32 smallbins, all 32 treebins and
+/// every chunk of every segment at the head of *every* `malloc` and `free` —
+/// O(heap) per allocation over a heap that runs to several MiB by the end of
+/// boot, which a TCG guest does not finish a boot under. The bands below cost
+/// two writes per allocation and two reads per free, and they answer the
+/// question this class poses — *is something writing outside an allocation it
+/// owns* — rather than whether the free lists still hang together afterwards.
 ///
 /// What each side catches:
 ///
@@ -111,20 +106,16 @@ unsafe impl dlmalloc::Allocator for KernelPageSource {
 ///   the guard page `arch::percpu` gives every *idle* stack, in the one form
 ///   available to an allocation that comes out of the heap.
 ///
-/// Neither band is swept — there is no registry of live allocations to sweep —
-/// so a band is read at `dealloc`, which is late, and by [`check_live`] at
-/// whatever site cares, which is not. `sched::driver`'s pass reads the running
-/// task's bands every pass, which is the both-ends pattern `sched-tripwire`
-/// established: a band broken at the entry to a pass was broken before that
-/// pass ran a statement.
+/// Without `heap-sweep` no band is walked, so one is read at `dealloc`, which
+/// is late, and by [`check_live`] at whatever site cares, which is not.
+/// `sched::driver`'s pass reads the running task's bands every pass: a band
+/// broken at the entry to a pass was broken before that pass ran a statement.
 ///
 /// **The one behaviour it changes.** A request within `head + TAIL` bytes of
 /// `MAX_HEAP_ALLOC` fits the ceiling and its banded form does not, so it is
-/// answered `null` here and would have succeeded without the feature.
-/// `OwnedAlloc::new` hands that back as `None`; a `Vec` would reach
-/// `handle_alloc_error`. This is a diagnostic build and the window is 4 KiB
-/// wide at the very top of a 2 MiB ceiling, so it is recorded rather than
-/// papered over.
+/// answered `null` here and would have succeeded without the feature. This is
+/// a diagnostic build and the window is 4 KiB wide at the very top of a 2 MiB
+/// ceiling, so it is recorded rather than papered over.
 #[cfg(feature = "heap-tripwire")]
 mod tripwire {
     use core::alloc::Layout;
@@ -136,16 +127,11 @@ mod tripwire {
     pub const RECORD: usize = 32;
 
     /// The record's two magic words are **tied to the address they are written
-    /// at**, and that is what makes [`super::sweep`] sound rather than tidy.
-    ///
-    /// A bare constant is a value this module's own code holds in registers,
-    /// spills to locals and reads back into locals — and a task kernel stack is
-    /// 128 KiB of the same heap the sweep walks. Measured: the first sweep
-    /// build died on its second walk of *every* boot, on a bare `CLOSE` sitting
-    /// in pid 0's kernel stack, 429 live records into a boot that had not
-    /// finished spawning `logd`. XORing the address in means a copy of the word
-    /// anywhere but where it was written does not read as a record, so the walk
-    /// cannot find its own reader's leftovers.
+    /// at**, and that is what makes [`super::sweep`] sound rather than tidy: a
+    /// bare constant is a value this module's own code spills to locals on a
+    /// task kernel stack, which is 128 KiB of the same heap the sweep walks, so
+    /// the walk would find its own reader's leftovers. XORing the address in
+    /// means a copy of the word anywhere but where it was written is not one.
     const OPEN: u64 = 0x4845_4144_5a4f_4e45;
     const CLOSE: u64 = 0x5a4f_4e45_4441_4548;
 
@@ -157,16 +143,11 @@ mod tripwire {
     pub const FILL: u8 = 0x5a;
     pub const FILL_WORD: u64 = u64::from_ne_bytes([FILL; 8]);
 
-    /// **The three shapes, and why there is more than one.**
-    ///
-    /// `heap-tripwire` put a band on *both* sides of every allocation and the
-    /// class it was built to catch stopped happening — 7,205 boots against a
-    /// rate that expected twelve deaths, and no band ever fired. Two readings
-    /// survive that and one band on each side cannot separate them: either the
-    /// bands *absorb* a bounded overrun that used to land in the neighbouring
-    /// chunk, or they *displace* every allocation and a victim computed from a
-    /// layout assumption no longer lands on anything that matters.
-    ///
+    /// **The three shapes, and why there is more than one.** Bands on both
+    /// sides of every allocation both *absorb* a bounded overrun that would
+    /// land in the neighbouring chunk and *displace* every allocation, so a
+    /// victim computed from a layout assumption no longer lands on anything
+    /// that matters — and one band per side cannot separate the two readings.
     /// A band cannot be made zero-width and keep its placement — the padding
     /// *is* the displacement — so the separation is per side instead:
     ///
@@ -186,15 +167,9 @@ mod tripwire {
     /// way, so the slack past the payload's end is byte-for-byte what an
     /// unbanded build has.
     ///
-    /// **What the arms measured, 2026-08-21, and the durable half of it.**
-    /// Twelve-wide boot storms of ~7,000 boots each, `sched-tripwire` on in
-    /// every one, against a same-session unbanded baseline of 6 deaths in 7,251
-    /// boots: default bands 0/7,211, `notail` 0/7,011, `nohead` 2/7,102 — and
-    /// the default bands *with* [`super::sweep`] added 9/7,040. The absorb
-    /// reading predicted that taking the tail slack away would bring the deaths
-    /// back, and it did the opposite. **So the band width is not what governs
-    /// this class's rate; the layout it happens to produce is.** Do not read a
-    /// quiet arm here as a fix, and do not read a loud one as a regression.
+    /// **The band width is not what governs this class's rate; the layout it
+    /// happens to produce is.** Do not read a quiet arm here as a fix, and do
+    /// not read a loud one as a regression.
     #[cfg(all(feature = "heap-band-notail", feature = "heap-band-nohead"))]
     compile_error!("heap-band-notail and heap-band-nohead are two arms of one sweep; build one");
 
@@ -226,10 +201,9 @@ mod tripwire {
     const _: () = assert!(TAIL_FILL.is_multiple_of(8), "the tail band's fill is walked in words");
 
     /// Head bytes for a request of this alignment. A head band is as wide as
-    /// the alignment because that is what keeps the payload aligned, and it is
+    /// the alignment because that is what keeps the payload aligned, which is
     /// why `alloc_kernel_stack`'s `(KERNEL_STACK_SIZE, 4096)` gets 4096 bytes
-    /// of it — the guard page `arch::percpu` gives every *idle* stack, in the
-    /// one form available to an allocation that comes out of the heap.
+    /// of it — a guard page in the one form a heap allocation admits.
     pub const fn head(align: usize) -> usize {
         if HEAD_MIN == 0 {
             0
@@ -294,11 +268,10 @@ mod tripwire {
         let head = head(layout.align());
         // The rest of the head band, which [`check`] deliberately skips. Only
         // here: it is `align - 32` bytes wide, 4064 of them on a kernel stack,
-        // and a live site pays that on every visit.
-        // A `while` and not a `for` over a range, in this loop and every other
-        // band walk here: a shape whose band is zero wide makes that range
-        // empty at compile time, and an empty range is a clippy denial rather
-        // than a loop that runs no times.
+        // and a live site pays that on every visit. A `while` and not a `for`,
+        // in this loop and every other band walk here: a shape whose band is
+        // zero wide makes that range empty at compile time, which is a clippy
+        // denial rather than a loop that runs no times.
         let fill_bytes = head.saturating_sub(RECORD);
         let mut i = 0;
         while i < fill_bytes {
@@ -321,13 +294,12 @@ mod tripwire {
     /// The edges of an allocation that is still live: the record, and the fill
     /// that shares a band with it.
     ///
-    /// **The record and not the whole head band, and that is the design.** Both
-    /// are eight-word reads, so a caller on the scheduler's pass path can
-    /// afford them — and in the default shape the record sits at the very top
-    /// of the head band, immediately below the payload, which is the first
-    /// thing a stack walking off its own bottom writes. Widening this to the
-    /// full band would buy nothing a stack overflow does not already trip, at
-    /// 508 more reads per pass.
+    /// **The record and not the whole head band, and that is the design.** In
+    /// the default shape the record sits at the very top of the head band,
+    /// immediately below the payload, which is the first thing a stack walking
+    /// off its own bottom writes. Widening this to the full band would buy
+    /// nothing a stack overflow does not already trip, at 508 more reads per
+    /// pass.
     ///
     /// # Safety
     /// `ptr` and `layout` are a pair this module's [`arm`] produced, and
@@ -382,13 +354,10 @@ mod tripwire {
 
     /// The first four words of a band, for the message a fire produces.
     ///
-    /// **One dirty word does not say what wrote it and four often do.** The one
-    /// band this instrument has ever caught firing held `stack_top + 16` at
-    /// `stack_top` of a task kernel stack — which is what a `#GP`/interrupt
-    /// frame's saved `RSP` looks like if the entry happened with `rsp` sixteen
-    /// bytes above the stack, and if it is one then the word above it is a
-    /// stack segment selector and the two above *that* are still fill. That
-    /// reading was unfalsifiable from a report that printed one word. A shape
+    /// **One dirty word does not say what wrote it and four often do**: a
+    /// `stack_top + 16` at `stack_top` followed by a stack segment selector and
+    /// two untouched words reads as an interrupt frame's saved `RSP`, and that
+    /// reading is unfalsifiable from a report that printed one word. A shape
     /// whose band is shorter than four words reads `FILL_WORD` past the end of
     /// it, which is what an untouched word reads as anyway.
     ///
@@ -444,14 +413,11 @@ pub unsafe fn check_live(ptr: *mut u8, layout: Layout, site: &str) {
 /// The sweep: every live band in the heap, read at a point of the caller's
 /// choosing rather than at the free that may never come.
 ///
-/// **What it is for, and it is one question.** `heap-tripwire` bands both sides
-/// of every allocation and the class stopped happening under it — 7,205 boots
-/// against a rate that expected twelve deaths — while **no band ever fired**.
-/// That silence proves nothing on its own, because a band is only ever read at
+/// **What it is for, and it is one question.** A band is only ever read at
 /// `dealloc` and, for the running task's kernel stack, at every pass: an
 /// allocation live from early boot to `compositor: ready` is never freed inside
-/// a boot, so its band is never read at all. A write that the bands *absorb* is
-/// therefore indistinguishable from one they *displace*. This reads them, so
+/// a boot, so its band is never read at all, and a write that the bands
+/// *absorb* is indistinguishable from one they *displace*. This reads them, so
 /// "no band fired" becomes either a named victim or a real negative.
 ///
 /// **No registry, and that is the design.** [`KernelPageSource`] is the only
@@ -459,9 +425,7 @@ pub unsafe fn check_live(ptr: *mut u8, layout: Layout, site: &str) {
 /// page the heap owns; a band is self-describing (`tripwire::RECORD`), so a
 /// walk of those pages at eight-byte alignment finds every live band in the
 /// machine with no per-allocation bookkeeping, no intrusive list and no second
-/// lock. The alternative — a `prev`/`next` in a widened head band — costs a
-/// list operation on every allocation in the kernel and changes the placement
-/// the arms are comparing.
+/// lock.
 ///
 /// **The lock is held across the walk and dropped before the panic.** Held,
 /// because `dlmalloc` carving or coalescing a chunk under the walk would read
@@ -470,18 +434,13 @@ pub unsafe fn check_live(ptr: *mut u8, layout: Layout, site: &str) {
 /// report would never reach the wire. So the walk answers with a value and the
 /// panic happens outside it.
 ///
-/// **This reader is not free of the machine it reads, and that is measured.**
-/// Two twelve-wide boot storms, same tree, same bands, differing only in
-/// whether this was compiled in: without it, 0 kernel deaths in 7,211 boots;
-/// with it, 9 in 7,040, which is the unbanded baseline's own rate. The chance
-/// that all nine of those events land on the swept side under one common rate
-/// is 1.8e-3. It compiles no decision, so it is not causing corruption — what
-/// it does is take `dlmalloc`'s lock on the pass path every 25 ms and hold it
-/// for a walk of every heap page, and that is enough to move the rate from
-/// "does not happen" to "happens". `sched::driver`'s `sched-tripwire` shadow
-/// has the same shape and the same unexplained 7.2x. **A kernel carrying this
-/// is not the kernel a rate was measured on**; hold the instrument set fixed
-/// across any two arms that are being compared.
+/// **This reader is not free of the machine it reads.** It compiles no
+/// decision, so it is not causing corruption — what it does is take
+/// `dlmalloc`'s lock on the pass path every 25 ms and hold it for a walk of
+/// every heap page, and that is enough to move this class's rate from "does not
+/// happen" to the unbanded baseline's own. **A kernel carrying this is not the
+/// kernel a rate was measured on**; hold the instrument set fixed across any
+/// two arms that are being compared.
 #[cfg(feature = "heap-sweep")]
 pub fn sweep(site: &str) {
     SWEPT.0.fetch_add(1, Ordering::Relaxed);
@@ -510,14 +469,11 @@ pub fn sweep(site: &str) {
 
 /// Hold `dlmalloc`'s lock for `ns` of guest time and do nothing with it.
 ///
-/// **The sweep's cost without the sweep.** `heap-sweep` moved this class's rate
-/// from nothing to the unbanded baseline while compiling no decision, and the
-/// two things it does that a bandless kernel does not are *spend time on the
-/// pass path* and *hold this lock while it does*. `sched-tripwire` already
-/// amplifies by spending time on the same path and takes no lock at all, so the
-/// lock has never been separated from the delay. This is the half with the lock;
-/// `sched::driver`'s `pass-spin` is the same visit without it, and the pair is
-/// one experiment in two arms.
+/// **The sweep's cost without the sweep.** The two things `heap-sweep` does
+/// that a bandless kernel does not are *spend time on the pass path* and *hold
+/// this lock while it does*, and the lock has never been separated from the
+/// delay. This is the half with the lock; `sched::driver`'s `pass-spin` is the
+/// same visit without it, and the pair is one experiment in two arms.
 ///
 /// Nothing is read or written through the guard, so a kernel carrying this
 /// allocates exactly what one without it allocates — later.
@@ -802,17 +758,16 @@ unsafe impl GlobalAlloc for KernelAllocator {
             PHASE_READY => {
                 assert!(layout.align() < PAGE_2M as usize,
                     "GlobalAlloc: {:#x} bytes with {:#x} align — use PageAlloc", layout.size(), layout.align());
-                // Before the lock, deliberately. This is the ceiling every
-                // bound upstream of the heap is derived against, and it used
-                // to be enforced one level down in `KernelPageSource::alloc`
-                // — inside `dlmalloc.lock()`, which is where a panic costs
-                // the machine rather than the process.
+                // Before the lock, deliberately: this is the ceiling every
+                // bound upstream of the heap is derived against, and a panic
+                // inside `dlmalloc.lock()` costs the machine rather than the
+                // process.
                 //
                 // `MAX_HEAP_ALLOC` rather than whatever dlmalloc's padding
                 // happens to permit, so the documented number is the enforced
                 // number — the way `MAX_HANDLES` and `MAX_USER_STR` are at their
-                // own primitives. Measured: 2,097,152 asks the page source
-                // for 2,162,688, which it cannot back.
+                // own primitives: 2,097,152 asks the page source for 2,162,688,
+                // which it cannot back.
                 //
                 // Being past this is sufficient for a request to fail and not
                 // necessary, which is why the page source is total rather

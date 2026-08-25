@@ -1,10 +1,7 @@
 //! A region of memory more than one process can see.
 //!
-//! What replaced the token registry. A `SharedToken` was a `u32` a process
-//! presented and a list of pids that were allowed to present it — designation
-//! as capability, with the owner maintaining the ACL by hand. A region is an
-//! object now: holding a handle to one is the whole of being allowed to map it,
-//! and giving one away is `SYS_HANDLE_SEND`.
+//! A region is an object: holding a handle to one is the whole of being allowed
+//! to map it, and giving one away is `SYS_HANDLE_SEND`.
 //!
 //! **Two lifetimes, and keeping them apart is the point.** The *mappings* go
 //! when the last handle goes, from the deferred queue with nothing held,
@@ -52,8 +49,8 @@ impl Pages {
 // by every path that frees a process — but `PhysPage` is itself `{phys: u64,
 // category: u8}` with no manual `Send`/`Sync` impl, so `Vec<PhysPage>` (and
 // therefore `Pages`) already derives both automatically: `cargo check` with
-// these two impls deleted still compiles clean (verified 2026-08-20). Filed
-// as issues/kernel/redundant-send-sync-impls-mm-object.md together with the
+// these two impls deleted still compiles clean. Filed as
+// issues/kernel/redundant-send-sync-impls-mm-object.md together with the
 // same finding on `paging::AddressSpace`, rather than removed here — if a
 // future `PhysPage` field broke the auto-derive (a raw pointer, say), these
 // hand-written impls would silently paper over it with no new review.
@@ -156,9 +153,7 @@ impl SharedMemObject {
     /// [`map_into`](Self::map_into) has run, a sibling thread of the owning
     /// process can be writing the same bytes and a kernel still initialising is
     /// racing it. That ordering is easy to reverse by accident and impossible
-    /// to observe when it is wrong — `inbox::create` built its ring headers
-    /// *after* mapping for as long as inboxes had existed, and nothing anywhere
-    /// would have said so. This says so.
+    /// to observe when it is wrong, so this states it.
     ///
     /// Cheap: one uncontended lock and a length test, once per region ever
     /// created.

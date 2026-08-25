@@ -10,9 +10,6 @@
 //!   (lldb) p &TRACE_RINGS
 //!   (lldb) memory read --size 8 --count 2 <head_addr>
 //!
-//! Layer 2 of the diagnostics roadmap (see CLAUDE.md). Layer 3 (RIP sampling)
-//! builds on this ring once in-kernel call-stack unwinding is available.
-//!
 //! # Relationship to `toyos_sched::hw::TraceEvent`
 //!
 //! The kernel and the simulator share one event vocabulary in two
@@ -30,20 +27,14 @@
 //! kinds the core cannot produce ([`Kind::IrqDrain`], [`Kind::TimerArm`],
 //! [`Kind::Preempt`]) — kernel observations from below the boundary.
 //!
-//! **There is one reader, not two, and that is settled rather than pending.**
-//! This paragraph said the wire form also existed for a `toyos-sched-sim replay
-//! --from-qemu` that was coming. It is not coming, and the reasoning is
-//! `toyos_sched::hw::TraceEvent`'s: a sim `Scenario` is a *workload* — which
-//! queue each thread blocks on, what makes its condition true, how long it runs
-//! — and this ring records none of that. It records an observed schedule, from
-//! a buffer of [`RING_CAPACITY`] entries that wraps, so a capture is a tail
-//! with no initial state to replay from. The subcommand that claimed otherwise
-//! was an `unimplemented!()` and was deleted.
-//!
-//! The wire form survives that deletion unchanged, because LLDB alone wants
-//! every property of it. What does not survive is the idea that a numeric
-//! discriminant has a second consumer: it has one, and the const assertions
-//! below are what make "do not reorder" a build error rather than a comment.
+//! **There is one reader, not two.** LLDB alone wants every property of the
+//! wire form; this ring cannot feed a simulator replay, because a sim
+//! `Scenario` is a *workload* — which queue each thread blocks on, what makes
+//! its condition true, how long it runs — and the ring records none of that. It
+//! records an observed schedule, from a buffer of [`RING_CAPACITY`] entries
+//! that wraps, so a capture is a tail with no initial state to replay from. So
+//! a numeric discriminant has one consumer, and the const assertions below are
+//! what make "do not reorder" a build error rather than a comment.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -83,10 +74,10 @@ pub enum Kind {
     TimerFireBurst = 12,
     /// An `irq_ring` record was consumed. `data` = IrqSource discriminant in
     /// the top byte, IRQ→service latency (µs, saturated) in the low 24 bits —
-    /// the observable form of B10's completion-delivery delay. Distinct from
+    /// the observable form of the completion-delivery delay. Distinct from
     /// [`Kind::Irq`], which is entry rather than consumption.
     IrqDrain = 13,
-    /// Two-phase wait commit parked the task (spec §8.1).
+    /// The two-phase wait commit parked the task.
     ParkCommit = 14,
     /// `data` = destination cpu id.
     Migrate = 15,
@@ -229,9 +220,9 @@ pub fn trace(kind: Kind, data: u32) {
 /// Write one [`Record`] into `cpu`'s ring.
 ///
 /// `cpu` is a parameter rather than an ambient `cpu_id()` read because the
-/// scheduler core carries CPU identity in the event (spec §10.1) — and
-/// because the ring's single-writer property is per-CPU, so the caller
-/// naming the wrong one is the only way to break it.
+/// scheduler core carries CPU identity in the event — and because the ring's
+/// single-writer property is per-CPU, so the caller naming the wrong one is the
+/// only way to break it.
 #[inline]
 fn push(cpu: u32, timestamp_ns: u64, kind: Kind, pid: u32, tid: u32, data: u32) {
     if !ENABLED.load(Ordering::Relaxed) {

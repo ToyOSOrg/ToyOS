@@ -19,38 +19,34 @@
 //! | [`Budget`] | a wall-clock allowance | what the answer costs when it is spent | a degraded answer, named |
 //! | [`Delay`] | a duration the caller **spends** | a spec that mandates it, or what is being measured | nothing; the spending is the point |
 //!
-//! **Seven, where §3 wrote six, and the seventh is this sweep's own finding.**
-//! §3.1 added `Floor` and §3.3 added `Budget` the same way: the sweep is what
-//! makes the taxonomy total, and a duration that fits nothing is a finding
-//! rather than a licence to invent a citation. [`Delay`] is what the six could
-//! not hold — a mandatory hardware settle (`CODEC_DETECT`, D3hot recovery,
-//! the SDM's INIT/SIPI delays) and a calibration window (`clock::init`,
-//! `apic::init_timer`) are durations the CPU *spends*, not durations something
-//! is waited for. Nothing expires; there is no error, no panic and no degraded
-//! answer, because the elapsing **is** the success path. Classifying them as
-//! `Bound`s would have made "expiry means the device broke" false of a third of
-//! the `Bound`s in the tree.
+//! **The taxonomy is total, and a duration that fits none of the seven kinds is
+//! a finding rather than a licence to invent a citation.** [`Delay`] is what the
+//! other six could not hold — a mandatory hardware settle (`CODEC_DETECT`,
+//! D3hot recovery, the SDM's INIT/SIPI delays) and a calibration window
+//! (`clock::init`, `apic::init_timer`) are durations the CPU *spends*, not
+//! durations something is waited for. Nothing expires; there is no error, no
+//! panic and no degraded answer, because the elapsing **is** the success path.
+//! Classifying them as `Bound`s would make "expiry means the device broke" false
+//! of a third of the `Bound`s in the tree.
 //!
-//! **RT7, and what it actually buys.** There is no `Bound::from_nanos`, no
-//! `Tripwire::from_nanos` and no way to build any kind from a magnitude alone:
-//! every constructor takes the justification as a `&'static str` beside the
-//! number. A number nobody can cite is a [`Tripwire`] or it does not exist.
+//! **No kind can be built from a magnitude alone.** There is no
+//! `Bound::from_nanos` and no `Tripwire::from_nanos`: every constructor takes
+//! the justification as a `&'static str` beside the number. A number nobody can
+//! cite is a [`Tripwire`] or it does not exist.
 //!
-//! **What a panic may be about, and it is the rule the two panicking kinds cost
-//! the most to learn.** A panic asserts what its own site observes, and nothing
-//! a workload scales. A latency, a rate of progress, a time-to-complete: each of
-//! those is device time and workload time added together, so each is *measured*,
-//! reported, and gated in the harness — where a number can be read and argued
-//! with — and none of them is asserted here. Three successive scheduler designs
-//! were lost to the other reading, and every one of them was locally plausible:
-//! the constant looked generous, the composition that outgrew it was one level
-//! down, and the kernel died naming its own bound instead of the workload that
-//! had exceeded it. The question to ask of a number before it becomes a
-//! [`Tripwire`] is whether it gets larger when the machine gets busier. If it
-//! does, it is not one.
+//! **What a panic may be about.** A panic asserts what its own site observes,
+//! and nothing a workload scales. A latency, a rate of progress, a
+//! time-to-complete: each of those is device time and workload time added
+//! together, so each is *measured*, reported, and gated in the harness — where a
+//! number can be read and argued with — and none of them is asserted here. The
+//! other reading is locally plausible every time: the constant looks generous,
+//! the composition that outgrows it is one level down, and the kernel dies
+//! naming its own bound instead of the workload that exceeded it. The question
+//! to ask of a number before it becomes a [`Tripwire`] is whether it gets larger
+//! when the machine gets busier. If it does, it is not one.
 //!
-//! **What is not a duration**, stated because the sweep had to decide it twice:
-//! a spin *count* is not one — `serial.rs`'s `PANIC_LOCK_SPIN_LIMIT` and
+//! **What is not a duration.** A spin *count* is not one —
+//! `serial.rs`'s `PANIC_LOCK_SPIN_LIMIT` and
 //! `THRE_SPIN_LIMIT`, `sync.rs`'s 50M/500M — even where a doc comment prices it
 //! in seconds. Neither is an *instant* stored in a static (`FIRST_IRQ_NS`,
 //! `NEXT_REPORT_NS`, `LOG_DURABLE_NS`): those are [`Instant`]s the machine
@@ -167,10 +163,9 @@ impl fmt::Display for Duration {
 /// because a `Deadline` cannot be built from a bare integer at all.
 ///
 /// That is the whole reason this is not a `u64` newtype with a public
-/// constructor. `scheduler::block_on`'s contract used to be "`deadline = 0`
-/// means no timeout", and `inbox::submit` carried a *third* reading of the
-/// same word — relative `0` mapped to absolute `1`, and `1` mapped back to `0`.
-/// A site left passing `0` through a change of that convention goes from "block
+/// constructor. A `u64` invites conventions — "`deadline = 0` means no timeout"
+/// in one place, a relative `0` mapped to an absolute `1` in another — and a
+/// site left passing `0` through a change of convention goes from "block
 /// forever" to "return immediately", which is a busy loop and not a compile
 /// error, and no test asserts on it. With three named constructors every site
 /// says which it meant.
@@ -230,9 +225,7 @@ impl Bound {
 
     /// A bound a device register publishes. `cite` names the register. Not
     /// `const`, because the number is read off the hardware at the call site —
-    /// `NvmeController::reset`'s `CAP.TO` is the first caller, exactly the
-    /// shape the taxonomy named beside `from_spec` and left for the first
-    /// chunk with a register to cite.
+    /// `NvmeController::reset`'s `CAP.TO` is the first caller.
     pub fn from_register(limit: Duration, cite: &'static str) -> Self {
         Self { limit, cite }
     }
@@ -254,10 +247,9 @@ impl fmt::Display for Bound {
 
 /// How often a thing may be re-done, and what makes that rate affordable.
 ///
-/// Nothing expires: a `Cadence` is a rate. §3's first draft defined it as "how
-/// fast the bit can physically change", which describes a register poll and
-/// none of the cost budgets and log-rate limits the kernel actually has; the
-/// definition is the widened one.
+/// Nothing expires: a `Cadence` is a rate — deliberately wider than "how fast
+/// the bit can physically change", which describes a register poll and none of
+/// the cost budgets and log-rate limits the kernel actually has.
 #[derive(Clone, Copy)]
 pub struct Cadence {
     period: Duration,
@@ -359,9 +351,9 @@ impl fmt::Display for Budget {
 ///
 /// Nothing expires; there is no caller and no register. `MIN_ONE_SHOT_NS` is
 /// why this kind has to exist: it is the LAPIC one-shot floor every arm is
-/// clamped to, its own doc says "Policy, not physics", and an implementer
-/// applying RT7 with only four kinds finds it unconstructible and deletes it —
-/// which reopens #156, a CPU gone off the laptop on eight boots of eight.
+/// clamped to, its own doc says "Policy, not physics", and with no kind to
+/// build it from an implementer finds it unconstructible and deletes it —
+/// which loses a CPU off the laptop on eight boots of eight.
 #[derive(Clone, Copy)]
 pub struct Floor {
     least: Duration,

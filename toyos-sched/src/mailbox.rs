@@ -1,16 +1,15 @@
-//! Intrusive MPSC mailbox and doorbell — spec §7.2, §7.3, §7.5.
+//! Intrusive MPSC mailbox and doorbell.
 //!
 //! One queue per CPU. Producers are any CPU or IRQ context; the consumer is
 //! the owning CPU, at pass start. Nodes are **embedded in the objects the
 //! messages are about** (`TaskShared.wake_node`, `TaskShared.retire_node`,
 //! the task record's adopt node, the per-CPU steal probe) and never
 //! allocated, so there is no capacity to size wrong: **queue overflow has no
-//! representation** (B8), and an ownership-carrying message cannot be dropped
+//! representation**, and an ownership-carrying message cannot be dropped
 //! because the message *is* the owner.
 //!
-//! This is the only module in the crate allowed to write `unsafe`
-//! (spec §4). Everything it does rests on three invariants, each restated at
-//! its use site:
+//! This is the only module in the crate allowed to write `unsafe`. Everything
+//! it does rests on three invariants, each restated at its use site:
 //!
 //! * **N1 (single claim).** A node carries at most one message at a time —
 //!   [`MailboxNode::claim`] is the only way to post and it hands out an
@@ -38,13 +37,13 @@ use crate::task::{TaskKey, TaskShared, WakeCause};
 
 /// The message vocabulary the primitives need to speak. Wait queues and the
 /// retire protocol construct only these two, which is what keeps them free of
-/// the task payload type; [`crate::msg::Msg`] is the full set of spec §7.1.
+/// the task payload type; [`crate::msg::Msg`] is the full set.
 pub trait SchedMsg: Send + Sized {
     fn wake(key: TaskKey, cause: WakeCause) -> Self;
 
     /// A retire carries the whole [`TaskShared`], not just the key: the home
-    /// CPU that finds the task gone must read the state word to chase it
-    /// (spec §7.6), and a bare key gives it nothing to read.
+    /// CPU that finds the task gone must read the state word to chase it, and
+    /// a bare key gives it nothing to read.
     fn retire(shared: Arc<TaskShared<Self>>) -> Self;
 }
 
@@ -55,8 +54,8 @@ pub trait SchedMsg: Send + Sized {
 /// descheduled while a value of the type is alive: the kernel's preempt-count
 /// guard, an IRQ context (which cannot be preempted at all), or a model that
 /// represents either. Implementing this on a type that does not disable
-/// preemption reintroduces the stranded-suffix failure (spec §12, and the
-/// negative loom case `preempted_producer_strands_suffix`).
+/// preemption reintroduces the stranded-suffix failure — the negative loom
+/// case `preempted_producer_strands_suffix`.
 pub unsafe trait PreemptGuard {}
 
 #[cfg(not(feature = "loom"))]
@@ -120,7 +119,7 @@ pub struct MailboxNode<M> {
     next: AtomicPtr<MailboxNode<M>>,
     slot: Slot<M>,
     /// N1: set by [`Self::claim`], cleared by the consumer *after* the node
-    /// is unlinked. Also the §7.7 steal-probe recycling flag — one mechanism
+    /// is unlinked. Also the steal-probe recycling flag — one mechanism
     /// for every node kind instead of a special case for one of them.
     in_flight: AtomicBool,
 }
@@ -147,7 +146,7 @@ impl<M> MailboxNode<M> {
     ///
     /// `None` means a message from this node is still in flight. The steal
     /// probe treats that as "a probe is already outstanding, don't post
-    /// another" (spec §7.7); the wake and retire nodes cannot legitimately
+    /// another"; the wake and retire nodes cannot legitimately
     /// see it — their higher-level CAS (`Blocked → WakeQueued`) and sticky
     /// `RETIRE_QUEUED` bit admit exactly one poster — so those call sites
     /// unwrap and fail fast.
@@ -229,14 +228,14 @@ impl<M> MailboxInner<M> {
         // below lands. Bounded to these two instructions by N3; an
         // interrupted (never a preempted) producer completes it before the
         // interrupted context can ever sleep, and the doorbell edge that
-        // follows the push guarantees another pass (spec §7.2, §12).
+        // follows the push guarantees another pass.
         unsafe { (*prev).next.store(node, Ordering::Release) };
     }
 }
 
 /// The producer half: `Sync`, cloneable, reachable by every CPU. It can only
 /// push messages — the compile-time form of "a CPU's queue is touched only by
-/// its owner" (spec §6.1).
+/// its owner".
 pub struct MailboxProducer<M> {
     inner: Arc<MailboxInner<M>>,
 }
@@ -266,8 +265,8 @@ impl<M: Send> MailboxProducer<M> {
     }
 
     /// Push a message that carries its own node — the ownership-transferring
-    /// `Adopt`, which rides inside the very task record it transfers
-    /// (spec §7.2). That message cannot be posted through [`Self::post`]: a
+    /// `Adopt`, which rides inside the very task record it transfers. That
+    /// message cannot be posted through [`Self::post`]: a
     /// [`PostSlot`] borrows the node, and the node is inside the value being
     /// moved.
     ///
@@ -317,7 +316,7 @@ unsafe impl<M: Send> Send for MailboxConsumer<M> {}
 
 impl<M: Send> MailboxConsumer<M> {
     /// Pop one message, or `None` for "end of queue" — which includes the
-    /// transient torn-push state (spec §7.2): a message behind an
+    /// transient torn-push state: a message behind an
     /// in-progress push is delayed by that push's remaining two instructions,
     /// never lost, because the pusher's doorbell edge follows it.
     pub fn pop(&mut self, _preempt: &impl PreemptGuard) -> Option<M> {
@@ -376,7 +375,7 @@ impl<M: Send> MailboxConsumer<M> {
         let msg = unsafe { (*node).slot.take() }.expect("linked node without a message");
         // Release *after* the unlink, so a producer that observes the node
         // free (claim succeeds) also observes it out of the queue — the
-        // §7.7 steal-probe recycling rule, generalized to every node.
+        // steal-probe recycling rule, generalized to every node.
         unsafe { (*node).in_flight.store(false, Ordering::Release) };
         msg
     }
@@ -384,7 +383,7 @@ impl<M: Send> MailboxConsumer<M> {
     /// Would [`Self::pop`] return `None` right now? Conservative in exactly
     /// one direction: an in-progress push reads as empty, which is what makes
     /// the sleep handshake's ordering (SLEEPING before this check) load
-    /// bearing (spec §7.5).
+    /// bearing.
     pub fn is_empty(&self) -> bool {
         let stub = self.inner.stub_ptr();
         if self.head != stub {
@@ -416,7 +415,7 @@ pub fn mailbox<M: Send>() -> (MailboxProducer<M>, MailboxConsumer<M>) {
     )
 }
 
-/// How promptly the target must notice a posted message (spec §7.3).
+/// How promptly the target must notice a posted message.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Urgency {
     /// RT wake, boost wake, adopt of an RT task, retire: the target must
@@ -443,7 +442,7 @@ const SLEEPING: u32 = 1 << 1;
 /// carries.
 ///
 /// It reads the bits [`Doorbell::arm_sleep`] published, so this is the edge
-/// that makes SLEEPING-before-the-empty-check (spec §7.5) reach the producer:
+/// that makes SLEEPING-before-the-empty-check reach the producer:
 /// a `ring` that raced a sleeping target and did not see the bit would elide
 /// the IPI the target's own store had just earned.
 ///
@@ -460,7 +459,7 @@ const KICK: Ordering = Ordering::AcqRel;
 const KICK: Ordering = Ordering::Relaxed;
 
 /// The per-CPU doorbell: the kick-pending edge plus the sleeping bit that
-/// makes the idle handshake safe (spec §7.3, §7.5).
+/// makes the idle handshake safe.
 pub struct Doorbell {
     bits: AtomicU32,
 }
@@ -493,7 +492,7 @@ impl Doorbell {
     }
 
     /// Consumer side, at pass start: clear the edge *before* draining, so a
-    /// message posted after the drain re-raises it (spec §7.3). Also clears
+    /// message posted after the drain re-raises it. Also clears
     /// SLEEPING — a CPU running a pass is by definition awake.
     pub fn begin_pass(&self) {
         self.bits
@@ -503,7 +502,7 @@ impl Doorbell {
     /// Consumer side, idle path: publish SLEEPING *before* the final
     /// mailbox-empty check. Any message not seen by that check has its
     /// doorbell edge after this store, so its producer sees SLEEPING and
-    /// kicks (spec §7.5).
+    /// kicks.
     pub fn arm_sleep(&self) -> SleepArm<'_> {
         self.bits.fetch_or(SLEEPING, Ordering::AcqRel);
         SleepArm { doorbell: self }
@@ -527,7 +526,7 @@ impl Default for Doorbell {
 
 /// SLEEPING is published; the final mailbox check has not happened yet. The
 /// only way to obtain a [`crate::cpu::SleepToken`] runs through here, so "halt with work
-/// queued" has no expression (spec §7.5).
+/// queued" has no expression.
 #[must_use = "an armed sleep must be confirmed or abandoned"]
 pub struct SleepArm<'d> {
     doorbell: &'d Doorbell,
@@ -550,7 +549,7 @@ impl SleepArm<'_> {
     /// in the CPU's own `CpuSched`.
     ///
     /// Success yields [`Quiesced`], one of the two halves [`crate::cpu::SleepToken`]
-    /// needs — the other being the applied timer plan (spec §7.5, §8.4). A
+    /// needs — the other being the applied timer plan. A
     /// CPU therefore cannot halt with work queued *or* with a deadline
     /// pending and the timer unarmed, and neither fact is asserted anywhere:
     /// there is no way to say it.

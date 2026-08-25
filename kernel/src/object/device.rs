@@ -20,10 +20,8 @@ use super::{Held, KObjectRef, KObjectVariant, ObjectCore, ZeroHandles};
 /// is why they have no arm here rather than an empty one.
 ///
 /// **Every buffer a description names travels beside it as an object**, and the
-/// handle fields in the wire struct are filled in by the read that answers.
-/// They used to be shared-memory tokens the kernel granted to the reading pid,
-/// which is the last place in the system where a number crossed the boundary
-/// and stood for authority.
+/// handle fields in the wire struct are filled in by the read that answers — no
+/// number crosses the boundary standing for authority.
 pub enum DeviceInfo {
     Events,
     Framebuffer(FramebufferInfo, FramebufferBuffers),
@@ -210,10 +208,10 @@ pub struct ConsoleObject {
     pub(super) core: ObjectCore,
     /// Bytes written but not yet ended by a newline.
     ///
-    /// **Not a leaf, and this comment used to say it was.** `ConsoleLine::write`
-    /// flushes every whole line it completes, and `Stripped::flush` takes
-    /// `serial::BackendGuard` — so the backend's spinlock is held *underneath*
-    /// this one, once per line, for as long as the device write takes.
+    /// **Not a leaf.** `ConsoleLine::write` flushes every whole line it
+    /// completes, and `Stripped::flush` takes `serial::BackendGuard` — so the
+    /// backend's spinlock is held *underneath* this one, once per line, for as
+    /// long as the device write takes.
     ///
     /// The order is **`process_data` → `line` → `BackendGuard`**, and it is
     /// consistent because nothing takes those three in any other order:
@@ -225,8 +223,8 @@ pub struct ConsoleObject {
     /// - Nothing that holds `BackendGuard` takes `line` or `process_data`. The
     ///   other three producers write the *backend* and never an object:
     ///   `klogd`'s drain, `panic_flush`/`flush_final`, and the input path. That
-    ///   is §4.1's split, and it is what makes a console object something a
-    ///   dying machine does not need.
+    ///   split — an object per holder, the backend for the machine — is what
+    ///   makes a console object something a dying machine does not need.
     /// - `BackendGuard` is `cli` plus a global spin, so what is bounded under it
     ///   is one `MAX_CONSOLE_LINE` and never a userland length — the reason
     ///   `ConsoleLine` cuts a long line into pieces at all.
@@ -243,10 +241,9 @@ impl ConsoleObject {
 
     /// Take a userland write, emitting every whole line it completes.
     pub fn write(&self, buf: &crate::user_ptr::UserBytes) {
-        // The negative control, and it is literally the state this tree shipped
-        // between L3 and L5: every `write` reaches the backend as it arrives,
-        // so a `println!` hands the kernel half a line and a kernel record can
-        // land in the gap. `console_line_atomicity` reds under it.
+        // The negative control: every `write` reaches the backend as it
+        // arrives, so a `println!` hands the kernel half a line and a kernel
+        // record can land in the gap. `console_line_atomicity` reds under it.
         if crate::actuator::console_unbuffered() {
             crate::drivers::serial::write_console(buf);
             return;
