@@ -1,9 +1,8 @@
-// Every unsafe block under `mm::` carries a `SAFETY:` comment — measured and
-// documented in full by `issues/build/clippy-has-never-run-here.md`'s
-// per-area plan. `host-tests.yml`'s kernel clippy step already runs with
-// `-D warnings`, so `warn` here is what actually gates: a new undocumented
-// block anywhere in this module tree fails CI, while the rest of the kernel
-// (not yet swept) stays silent.
+// Every unsafe block under `mm::` carries a `SAFETY:` comment
+// (`issues/build/clippy-has-never-run-here.md` holds the per-area plan). CI's
+// kernel clippy step runs with `-D warnings`, so `warn` here is what gates: a
+// new undocumented block in this module tree fails CI, while the rest of the
+// kernel (not yet swept) stays silent.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod pmm;
@@ -50,9 +49,7 @@ pub use toyos_userbound::PAGE_2M;
 
 /// The hardware page size — every block-device transfer is a whole multiple
 /// of this, and it is what `paging::PAGE_SIZE_BIT` marks a PDE as mapping
-/// directly instead of through a PT. `mm` did not export a 4 KiB constant
-/// before this; a caller that reached for one and found nothing here is why
-/// more than one private copy exists elsewhere in the kernel.
+/// directly instead of through a PT.
 pub const PAGE_SIZE: u64 = 4096;
 
 /// Round `size` up to the next 2MB boundary.
@@ -82,16 +79,14 @@ pub const fn align_2m_checked(size: usize) -> Option<usize> {
 /// `KernelPageSource` hands out one 2 MiB page and can hand out no more.
 /// dlmalloc rounds a request up to a whole granule *plus* its own chunk and
 /// segment bookkeeping, so a request that merely fits in 2 MiB still asks the
-/// page source for more than one page — which is why the ceiling is not
-/// `PAGE_2M` itself. Measured: a 2,097,152-byte request asks for 2,162,688.
+/// page source for more than one page — a 2,097,152-byte request asks for
+/// 2,162,688 — which is why the ceiling is not `PAGE_2M` itself.
 ///
-/// The 4 KiB of headroom is policy, in the same sense as
-/// `user_ptr::MAX_USER_STR`: the number is chosen, the reason it exists is
-/// not. It is enough for dlmalloc's own bookkeeping, which is tens of bytes —
-/// a request of exactly this size is served — and it is *not* enough to
-/// absorb an alignment: `memalign` pads by the alignment before asking for
-/// backing, so this size with a 4096-byte alignment asks the page source for
-/// 2,162,688 as well and is refused. Both figures are off the guest.
+/// The 4 KiB of headroom is policy: enough for dlmalloc's own bookkeeping,
+/// which is tens of bytes, so a request of exactly this size is served; and
+/// *not* enough to absorb an alignment, because `memalign` pads by the
+/// alignment before asking for backing, so this size with a 4096-byte
+/// alignment asks the page source for 2,162,688 as well and is refused.
 ///
 /// Anything sized from outside the kernel must be refused above this rather
 /// than reaching the allocator. `KernelAllocator::alloc` asserts it for every

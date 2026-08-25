@@ -10,14 +10,14 @@
 //! A process holds typed handles; `fd` names the interface of exactly one layer,
 //! `userland/libc`, and std's POSIX surface keeps it by charter. Anywhere else
 //! in this tree — kernel, ABI, SDK, a test binary — the word is wrong (owner
-//! ruling, 2026-08-19), and so is `io_uring`: that mechanism is an inbox.
+//! ruling), and so is `io_uring`: that mechanism is an inbox.
 //!
 //! **A slot's generations are finite and what happens at the end of them is a
 //! security decision, not an overflow.** A handle carries twelve bits of slot
 //! and twenty of generation, so a slot has 1,048,575 lifecycles; a table that
 //! wrapped would hand the holder of an ancient handle a live object again,
 //! which is a use-after-free of authority however improbable. It does not wrap:
-//! by owner ruling of 2026-08-20 a slot at its last generation **retires**, and
+//! by owner ruling a slot at its last generation **retires**, and
 //! [`Slot`] is the shape that decision takes — a retired slot has no generation
 //! to be issued at, so no insertion path can offer one by forgetting to look.
 
@@ -48,19 +48,15 @@ pub struct TableFull;
 /// correct program can do. Fail-fast is for bugs, so [`refuse`] takes the
 /// process down for those three rather than handing back a word it can ignore.
 ///
-/// **The rule has exactly one named exception, and by owner ruling of
-/// 2026-08-19 there is not a second.** The exception is the connector argument
-/// to `SYS_NAMESPACE_BUILD`: an added connector is routinely one a *peer*
+/// **The rule has exactly one named exception, and by owner ruling there is not
+/// a second.** The exception is the connector argument to
+/// `SYS_NAMESPACE_BUILD`: an added connector is routinely one a *peer*
 /// transferred, so `WrongType` there is not provably the caller's bug, and
 /// faulting on it let any process holding the `launcher` connector end
 /// `/bin/init` by sending it a pipe (`arch::syscall::sys_namespace_build`).
-/// A spawn's slot map was the candidate for a second — it skipped a parent
-/// handle that did not resolve, so the child started without a capability its
-/// parent had named and could not tell that from having asked for nothing, and
-/// the parent was told its spawn happened as asked. The owner ruled that
-/// strictness wins: a parent naming a handle it does not hold has made exactly
-/// the mistake this rule is about, and it now ends like every other
-/// (`loader::start::build_child_handles`).
+/// A spawn's slot map is not a second: a parent naming a handle it does not
+/// hold has made exactly the mistake this rule is about, and it ends like every
+/// other (`loader::start::build_child_handles`).
 ///
 /// [`refuse`]: Self::refuse
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -229,16 +225,15 @@ impl Drop for HandleEntry {
 /// the only place a generation exists — so a site that forgets to ask whether a
 /// slot is still allocatable has no number to hand out and does not compile.
 ///
-/// The shape this replaced parked an exhausted slot at `MAX_GENERATION` and
-/// left the free list as the only thing keeping it out of circulation. That
-/// held for [`install`](HandleTable::install), which allocates from that list,
-/// and not for [`install_at`](HandleTable::install_at), which names its own
-/// slot: `dup2` onto an exhausted slot reissued it at `MAX_GENERATION` — for
-/// slot 4095 that encoding *is* `HANDLE_INVALID` — and the close after it
-/// stepped the counter to `MAX_GENERATION + 1`, whose overflowing bit
-/// `RawHandle::new` discards without panicking in any profile, putting the slot
-/// back on the free list at generation 0. Every handle the process had ever
-/// been issued for that slot named a live object again.
+/// Parking an exhausted slot at `MAX_GENERATION` and leaving the free list to
+/// keep it out of circulation holds for [`install`](HandleTable::install),
+/// which allocates from that list, and not for
+/// [`install_at`](HandleTable::install_at), which names its own slot: `dup2`
+/// onto an exhausted slot reissues it at `MAX_GENERATION` — for slot 4095 that
+/// encoding *is* `HANDLE_INVALID` — and the close after it steps the counter to
+/// `MAX_GENERATION + 1`, whose overflowing bit `RawHandle::new` discards without
+/// panicking in any profile, putting the slot back on the free list at
+/// generation 0 with every handle ever issued for it live again.
 enum Slot {
     /// Issuable, at this generation. A handle naming an earlier one is `Stale`,
     /// which is a different fact from `BadHandle` and is worth telling a crash
@@ -248,10 +243,10 @@ enum Slot {
     /// Spent. Never issued again and never written again — the table is one
     /// slot smaller for the rest of this process's life.
     ///
-    /// **Owner ruling of 2026-08-20**, taken over widening the field,
-    /// randomising the token, and accepting the wrap under a stated threat
-    /// model: a handle that becomes valid again is a use-after-free of
-    /// *authority*, and one leaked slot in 4096 buys it away for good. It is
+    /// **Owner ruling**, over widening the field, randomising the token, and
+    /// accepting the wrap under a stated threat model: a handle that becomes
+    /// valid again is a use-after-free of *authority*, and one leaked slot in
+    /// 4096 buys it away for good. It is
     /// also this tree's standing instinct about a name that is spent — a
     /// deleted syscall's number is retired and never reused
     /// (`toyos_abi::syscall`).
@@ -260,9 +255,7 @@ enum Slot {
 
 /// Handles one process may hold.
 ///
-/// Policy on the primitive, `MAX_*`-named, refused by name and never truncated
-/// — four times the 1024 the descriptor table allowed, because a handle now
-/// names things a descriptor never did.
+/// Policy on the primitive, `MAX_*`-named, refused by name and never truncated.
 pub const MAX_HANDLES: usize = RawHandle::MAX_SLOTS;
 
 pub struct HandleTable {
@@ -403,10 +396,9 @@ impl HandleTable {
     /// `read` and `write` are that call, and they are the hottest pair in the
     /// kernel: cloning the `Arc` out would put one atomic read-modify-write on
     /// each of them, which is the operation TCG runs a translation block
-    /// exclusively for — a few hundred a boot of it was measured at 350 ms of
-    /// boot on the log path. Nothing escapes —
-    /// the lifetime is `&self`'s, so the compiler refuses a borrow that
-    /// outlives the table.
+    /// exclusively for — measured at 350 ms of boot for a few hundred of them
+    /// on the log path. Nothing escapes: the lifetime is `&self`'s, so the
+    /// compiler refuses a borrow that outlives the table.
     pub fn get_ref(&self, h: RawHandle, need: Rights) -> Result<&KObjectRef, HandleError> {
         let entry = self.entry_of(h)?;
         if !entry.rights.contains(need) {
@@ -471,8 +463,8 @@ impl HandleTable {
     /// The handle is gone for good, and the slot either moves on or stops.
     ///
     /// **A slot at its last generation retires, never wraps** — the owner's
-    /// ruling of 2026-08-20, and the reason [`Slot::Retired`] exists rather than
-    /// a counter parked at its maximum. One leaked slot of 4096 against a handle
+    /// ruling, and the reason [`Slot::Retired`] exists rather than a counter
+    /// parked at its maximum. One leaked slot of 4096 against a handle
     /// that silently names a different object is not a trade; it is also what
     /// keeps `HANDLE_INVALID` unreachable, since that encoding is slot 4095 at
     /// `MAX_GENERATION` and no slot is ever issued at that generation now.
@@ -519,9 +511,7 @@ impl HandleTable {
     /// is exactly what a slow or hostile peer produces. Taking the entries out
     /// and dropping them on that answer destroys capabilities the caller was
     /// told nothing happened to: its next `close` of one is `Stale`, which ends
-    /// it. `/bin/init` was that caller — a client that hung up after its launch
-    /// frame made init's answering `Process` handle vanish and init's own close
-    /// of it fatal.
+    /// it — `/bin/init` answering a client that hung up is that caller.
     ///
     /// `sink` therefore hands the batch back with its refusal, which is the
     /// whole of the discipline: the type says a refused transfer still owns
@@ -586,8 +576,8 @@ impl HandleTable {
     /// **The near-exhaustion instrument, and there is no other way to reach
     /// this state.** A slot's counter is twenty bits, so running one out for
     /// real is 1,048,575 close/reopen round trips against a table that answers
-    /// each in a syscall — the property under test would be gated by a test
-    /// nobody could afford to run, which is how it went ungated to begin with.
+    /// each in a syscall, so the property under test would be gated by a test
+    /// nobody could afford to run.
     /// Nothing is faked: the generation is the shipped field, the install that
     /// follows is the shipped path, and [`retire`](Self::retire) makes the
     /// shipped decision about what it finds.
