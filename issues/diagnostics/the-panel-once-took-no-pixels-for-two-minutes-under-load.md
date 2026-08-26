@@ -30,9 +30,19 @@ that is not draining cannot take, silently. Nothing about the panel was
 involved. **This test types `test_rs_test_screen_graffiti` the same way**, and a
 mangled command name is exactly what `0 of 2073600 pixels are [0, 192, 0]` looks
 like — so read the panel out of the failing job before assuming a pixel was
-lost. `issues/build/console-tests-still-type-on-a-wall-clock.md` carries the
-mechanism, the fix that closed it for `screen_console_panic`, and why that
-helper does not transfer here unchanged.
+lost.
+
+**That mechanism is now closed for this test as well, and it reproduces this
+message on demand.** `screen_console_clear` types both its commands through
+`console_type_line`, which splits a line into bursts no wider than the device
+queue and waits for the console to echo each one; the echo is matched as a
+*prefix* of the input row, which is what lets the second command be typed onto a
+panel the graffiti actuator has painted green. Staged the other way — the whole
+command in one transmission, which is what a guest that drains nothing sees —
+this test printed `the graffiti actuator did not reach the panel: 0 of 2073600
+pixels are [0, 192, 0]` on 3 of 3 dev-host runs, verbatim the sighting above.
+What that does not settle is whether the CI sighting *was* that: its capture was
+not kept, and a lost pixel and a mangled command name print the same sentence.
 
 The diff each rode on could not have caused it: PR #135 changes a tier
 declaration and a duration table.
