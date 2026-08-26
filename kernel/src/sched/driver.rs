@@ -308,6 +308,11 @@ pub fn in_pass() -> bool {
 /// the kernel writes `SCHEDS`: `init` fills it before any AP is released and
 /// [`try_with_cpu`] only reads, so between one exit from here and the next entry
 /// the record is a thing no code may change. `sched-tripwire` holds it to that.
+///
+/// **A `cpu N has no CpuSched` is a stray write into `.bss`, not a bring-up
+/// ordering bug** — the fill-before-release held across 17,555 boots on KVM
+/// silicon, over half of them staging the direction-flag defect that produced
+/// every prior sighting, and no arm produced one.
 fn with_cpu<R>(f: impl FnOnce(&mut CpuSched<KernelPayload>) -> R) -> R {
     let cpu = percpu::cpu_id() as usize;
     assert!(

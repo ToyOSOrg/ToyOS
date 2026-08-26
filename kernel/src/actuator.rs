@@ -384,6 +384,14 @@ actuators! {
     /// `issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md`.
     panic_in_report = "panic-in-report";
 
+    /// Take a `#PF` inside the crash report, at the head of
+    /// `crash_report_panic`, before it has said anything. `panic-in-report`'s
+    /// neighbour with the other kind of second failure, and the one
+    /// `fatal_exception`'s recursive short-circuit exists for: a wild read
+    /// between two statements of the handler for the first crash, on one CPU,
+    /// which no injection from outside reaches. Armed alone it changes nothing.
+    fault_in_report = "fault-in-report";
+
     /// Panic a few seconds after a *compositor* has claimed the framebuffer,
     /// from an idle CPU, so the panic handler's recovery branch is not taken and
     /// the report reaches `halt_all_cpus`. What nothing else reaches: whether a

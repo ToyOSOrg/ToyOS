@@ -1588,20 +1588,17 @@ pub fn thread_exit(code: i32) -> ! {
     let post = match route {
         proclife::ThreadExit::Process => exit(code),
         proclife::ThreadExit::Sibling { post } => post,
-        // **A standing defect**: a thread whose process another CPU's kill has
-        // already reaped panics the kernel, where its neighbour
-        // `mark_thread_zombie` documents the same race and tolerates it.
-        // `issues/kernel/main-thread-exit-unwraps-a-reaped-entry.md` is open
-        // against it and says what a fix owes;
-        // `toyos_proclife::interleave::tests::a_thread_exit_can_reach_a_reaped_entry`
-        // holds the schedule that gets here, so the entry cannot be closed by
-        // an argument that the state is unreachable.
-        proclife::ThreadExit::NoEntry => {
-            panic!("thread_exit: pid {process_pid} tid {tid} has no process-table entry")
+        // The entry went under this thread while it was on its way here, which
+        // is the race `mark_thread_zombie` one function along already tolerates.
+        // It leaves by the sibling door and every table write below finds
+        // nothing to do.
+        proclife::ThreadExit::Gone { post } => {
+            log!("exit: pid={process_pid} tid={tid} outlived its process-table entry");
+            post
         }
     };
 
-    let _parent_main_tid = release_thread(process_pid, tid, code);
+    release_thread(process_pid, tid, code);
     // Whoever joined this thread armed on it. Posted before the exit pass,
     // because after it this thread does not run again.
     if let Some(handle) = crate::sched::driver::current_handle() {
@@ -1626,10 +1623,12 @@ pub fn thread_exit(code: i32) -> ! {
 ///
 /// It **returns** rather than diverging, for [`release_process`]'s reason: the
 /// address space it clones out is an `Arc`, and one left live where
-/// `exit_current` is called is one nothing ever drops. The `Tid` it hands back
-/// is the process's main thread, which [`thread_exit`] discards: a joiner is
-/// released by the completion post there instead.
-fn release_thread(process_pid: Pid, tid: Tid, code: i32) -> Tid {
+/// `exit_current` is called is one nothing ever drops.
+///
+/// Every table write here is silent about an entry that has gone, which is
+/// [`mark_thread_zombie`]'s rule: a thread can arrive with its process already
+/// reaped by another CPU's kill, and it still has to finish leaving.
+fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
     // Thread-only exit path: release this thread's mappings, zombify, wake parent.
     let addr_space = current_address_space();
     crate::mm::paging::activate_kernel();
@@ -1654,11 +1653,13 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) -> Tid {
     let cpu_ms = table.get(process_pid).and_then(|p| p.threads.get(tid))
         .and_then(|t| t.sched())
         .map_or(0, scheduler::task_cpu_ns) / 1_000_000;
-    table.get_mut(process_pid).unwrap().threads.get_mut(tid).unwrap().state = ThreadLocation::Zombie(code);
-    let proc = table.get(process_pid).unwrap();
-    let name = proc.name_str();
-    log!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
-    proc.main_tid
+    if let Some(thread) = table.get_mut(process_pid).and_then(|p| p.threads.get_mut(tid)) {
+        thread.state = ThreadLocation::Zombie(code);
+    }
+    if let Some(proc) = table.get(process_pid) {
+        let name = proc.name_str();
+        log!("exit: {name} tid={tid} code={code} cpu={cpu_ms}ms");
+    }
 }
 
 /// A thread's scheduler record, cloned out of the table.

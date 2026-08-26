@@ -52,6 +52,18 @@ pub fn kvm_usable() -> bool {
             .is_ok()
 }
 
+/// The CPU every guest this repository launches gets, accelerated and not.
+///
+/// **One declaration, read by `cargo run` and by the harness both**, because
+/// the two drifted: the harness gained `+smep` and the interactive path did
+/// not, so the machine an owner looked at differed from the machine the suite
+/// judged in exactly the dimension the suite had been changed for. The kernel's
+/// own `CR4` comes from one declaration for the same reason.
+pub const CPU_KVM: &str = "host,+rdrand,+smap,+fsgsbase,+x2apic,+smep";
+/// [`CPU_KVM`]'s emulated twin — the same features off a base model, because a
+/// TCG guest that withholds one is a feature this tree stops exercising.
+pub const CPU_TCG: &str = "qemu64,+rdrand,+smap,+fsgsbase,+x2apic,+smep";
+
 /// The `.git` directory every worktree of this repository shares.
 ///
 /// `git rev-parse --git-common-dir` answers relatively from the primary

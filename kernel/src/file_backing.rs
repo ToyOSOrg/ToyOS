@@ -6,8 +6,10 @@ use crate::block::{BlockError, BlockResult};
 use crate::page_cache;
 use crate::sync::Lock;
 
-const BLOCK_SIZE: usize = 4096;
-const BLOCK_SIZE_U64: u64 = 4096;
+/// `mm::PAGE_SIZE`, in both widths this file's callers want: the array type
+/// of a page buffer is `usize` and a file offset is `u64`.
+const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
+const BLOCK_SIZE_U64: u64 = crate::mm::PAGE_SIZE;
 
 /// Abstracts the backing store for a memory-mapped file.
 /// The page fault handler calls `read_page()` — it never knows

@@ -338,7 +338,7 @@ const EFI_BOOT_SERVICES_DATA: u32 = 4;
 const EFI_CONVENTIONAL_MEMORY: u32 = 7;
 
 /// Whether a UEFI memory type becomes free RAM the PMM will hand out.
-pub fn is_usable_type(uefi_type: u32) -> bool {
+pub const fn is_usable_type(uefi_type: u32) -> bool {
     matches!(uefi_type,
         EFI_LOADER_CODE | EFI_LOADER_DATA |
         EFI_BOOT_SERVICES_CODE | EFI_BOOT_SERVICES_DATA |

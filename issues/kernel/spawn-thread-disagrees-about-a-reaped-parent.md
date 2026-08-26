@@ -31,12 +31,13 @@ nothing reaches and `mark_thread_zombie`'s neighbouring comment ("silent about
 an entry that has gone: a main thread reaches this after its own process
 published its exit") is the false one.
 
-This is the same disagreement
-`issues/kernel/main-thread-exit-unwraps-a-reaped-entry.md` records at
-`thread_exit`, one function over, and the two should be settled together: the
-question in both is whether a thread can reach a syscall body after
-`kill_process` on another CPU has published its process's exit and an idle pass
-has taken the entry.
+This is the same disagreement `thread_exit` carried one function over, and
+`thread_exit` has since been settled the tolerant way: a reaped entry routes to
+`teardown::ThreadExit::Gone` and the thread finishes leaving. That is a choice
+of arm and not the argument this file asks for — the question in both is whether
+a thread can reach a syscall body after `kill_process` on another CPU has
+published its process's exit and an idle pass has taken the entry, and nothing
+yet answers it.
 
 **What a fix owes.** Not a choice of arm — an argument. Whichever way it goes,
 one sentence at the site saying whether the entry can be missing, and the two
@@ -46,6 +47,9 @@ Found while extracting the lifecycle's decisions into `toyos-proclife`
 (2026-08-24), which is what made the two spellings of one lookup visible: they
 are now one function asked twice, and the callers still disagree about its
 `NoSuchProcess` answer.
-`toyos_proclife::interleave::tests::a_thread_exit_can_reach_a_reaped_entry`
-holds a schedule that reaches the state, so neither entry can be closed by an
-argument that it is unreachable.
+`toyos_proclife::interleave::tests::a_thread_exit_that_outlived_its_entry_still_leaves`
+holds the schedule that reaches the state at `thread_exit`. **It reaches it by
+routing rather than by running**: the model's `retire` takes a thread off every
+CPU, so no schedule it can enumerate has a live thread arriving at a syscall
+body with its entry gone. That gap is what leaves this file's question open —
+the model cannot exhibit the state the kernel would have to survive.

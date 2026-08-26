@@ -87,8 +87,8 @@ use crate::gpt;
 use crate::sync::Lock;
 use crate::vfs::FileSystem;
 
-/// The only transfer unit [`BlockDevice`] has.
-const BLOCK: u64 = 4096;
+/// The only transfer unit [`BlockDevice`] has, which is `mm::PAGE_SIZE`.
+const BLOCK: u64 = crate::mm::PAGE_SIZE;
 
 /// Which of the two partitions a mount is.
 ///

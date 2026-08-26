@@ -11,7 +11,8 @@ use crate::user_ptr::{ByteSource, UserBytesMut};
 
 pub type FileId = u64;
 
-const PAGE_SIZE: usize = 4096;
+/// `mm::PAGE_SIZE`, in the width this file's arrays and slices index by.
+const PAGE_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 
 struct CachedPage {
     data: Box<[u8; PAGE_SIZE]>,

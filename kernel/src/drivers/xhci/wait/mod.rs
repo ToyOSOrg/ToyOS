@@ -119,8 +119,49 @@ enum Control {
     Done { delivered: u16 },
     /// The controller reported `code` for the named stage.
     Failed { stage: &'static str, code: u32 },
-    /// The named stage never completed inside [`USB_TIMEOUT_NS`].
-    Silent { stage: &'static str },
+    /// Nothing came back for the named stage, for [`Quiet`]'s reason.
+    Silent { stage: &'static str, why: Quiet },
+}
+
+/// Why a wait ended with no event.
+///
+/// **A wait that gave up is not necessarily a wait that elapsed**, and the
+/// difference is where a triage goes: a pulled stick reported as a slow one
+/// sends its reader after the controller. Only [`Quiet::Elapsed`] spent the
+/// budget, and only it may say so.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Quiet {
+    /// [`USB_TIMEOUT_NS`] passed with the port still connected.
+    Elapsed,
+    /// The port reads disconnected. Nothing is behind it, and no budget makes
+    /// that answer arrive.
+    Gone,
+    /// A staged break skipped the wait by design.
+    #[cfg(feature = "boot-actuators")]
+    Staged,
+}
+
+impl Quiet {
+    /// What to say about a step that ended this way. `step` is the caller's
+    /// word for it — `"data"`, `"status"` — and `kind` is `"phase"` or
+    /// `"stage"`, so no formatter here allocates on a driver's error path.
+    pub(super) fn about(
+        self,
+        step: &str,
+        kind: &str,
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        match self {
+            Self::Elapsed => write!(
+                f,
+                "no answer in the {step} {kind} in {} ms",
+                USB_TIMEOUT_NS / 1_000_000
+            ),
+            Self::Gone => write!(f, "the port disconnected during the {step} {kind}"),
+            #[cfg(feature = "boot-actuators")]
+            Self::Staged => write!(f, "a staged break skipped the {step} {kind} wait"),
+        }
+    }
 }
 
 impl Control {
@@ -136,11 +177,7 @@ impl core::fmt::Display for Control {
         match self {
             Self::Done { delivered } => write!(f, "{delivered} B delivered"),
             Self::Failed { stage, code } => write!(f, "{stage} stage completion {}", Completion(*code)),
-            Self::Silent { stage } => write!(
-                f,
-                "no answer to the {stage} stage in {} ms",
-                USB_TIMEOUT_NS / 1_000_000
-            ),
+            Self::Silent { stage, why } => why.about(stage, "stage", f),
         }
     }
 }
@@ -355,7 +392,7 @@ impl XhciController {
     /// (slot, dci) alone hands that late answer — and its residue, which is how
     /// many of the caller's bytes are real — to whatever asked next on the same
     /// endpoint.
-    fn wait_transfer(&mut self, slot: u8, dci: u8, trb: u64) -> Option<(u32, u32)> {
+    fn wait_transfer(&mut self, slot: u8, dci: u8, trb: u64) -> Result<(u32, u32), Quiet> {
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::io_depth_probe() {
             depth_probe::report();
@@ -367,7 +404,7 @@ impl XhciController {
         // `reset_recovery` call, on this CPU, under the lock this wait holds.
         #[cfg(feature = "boot-actuators")]
         if msc::reset_break::active() {
-            return None;
+            return Err(Quiet::Staged);
         }
         let on = Await::Transfer { slot, dci, trb };
         let deadline = deadline();
@@ -375,7 +412,7 @@ impl XhciController {
         loop {
             let Some(event) = self.next_event() else {
                 if crate::clock::nanos_since_boot() >= deadline {
-                    return None;
+                    return Err(Quiet::Elapsed);
                 }
                 // **A device that has been unplugged is not a device that is
                 // slow.** The budget exists for one that might still answer; a
@@ -386,7 +423,7 @@ impl XhciController {
                 // the stick a machine logs to aims all three at a dead device
                 // on the same event.
                 if port.is_some_and(|p| !self.read_portsc(p).connected()) {
-                    return None;
+                    return Err(Quiet::Gone);
                 }
                 core::hint::spin_loop();
                 continue;
@@ -398,7 +435,7 @@ impl XhciController {
                 trb: event.param & !0xF,
             };
             if trb_type == EVENT_TRANSFER && answers == on {
-                return Some(((event.status >> 24) & 0xFF, event.status & 0x00FF_FFFF));
+                return Ok(((event.status >> 24) & 0xFF, event.status & 0x00FF_FFFF));
             }
             self.dispatch_event(event);
         }
@@ -429,7 +466,7 @@ impl XhciController {
         let mut delivered = 0u16;
         if let Some(data) = trbs.data {
             match self.wait_transfer(slot, 1, data) {
-                Some((CC_SUCCESS | CC_SHORT_PACKET, residue)) => {
+                Ok((CC_SUCCESS | CC_SHORT_PACKET, residue)) => {
                     // A residue past the length asked for is a controller
                     // contradicting itself; believing it would report more bytes
                     // delivered than the buffer holds.
@@ -438,14 +475,14 @@ impl XhciController {
                 // The status stage is deliberately not waited for. An errored
                 // data stage halts EP0, so the TRB behind it never runs, and
                 // waiting would spend the whole transfer budget learning that.
-                Some((code, _)) => return Control::Failed { stage: "data", code },
-                None => return Control::Silent { stage: "data" },
+                Ok((code, _)) => return Control::Failed { stage: "data", code },
+                Err(why) => return Control::Silent { stage: "data", why },
             }
         }
         match self.wait_transfer(slot, 1, trbs.status) {
-            Some((CC_SUCCESS, _)) => Control::Done { delivered },
-            Some((code, _)) => Control::Failed { stage: "status", code },
-            None => Control::Silent { stage: "status" },
+            Ok((CC_SUCCESS, _)) => Control::Done { delivered },
+            Ok((code, _)) => Control::Failed { stage: "status", code },
+            Err(why) => Control::Silent { stage: "status", why },
         }
     }
 

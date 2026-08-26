@@ -1701,9 +1701,10 @@ pub fn init(rsdp_addr: u64) {
         return;
     }
     let unmasked = ioapic::set_masked(kbd_line.gsi, false).is_ok();
-    if let Some(l) = aux_line {
-        let _ = ioapic::set_masked(l.gsi, false);
-    }
+    // Captured, not discarded: an aux GSI that would not unmask is the
+    // TrackPoint and touchpad silently dead on a boot whose every line reads
+    // green, which is what the read-back above exists to prevent.
+    let aux_unmasked = aux_line.is_some_and(|l| ioapic::set_masked(l.gsi, false).is_ok());
     ACTIVE.store(true, Ordering::Relaxed);
     ARMED_NS.store(crate::clock::nanos_since_boot(), Ordering::Relaxed);
     HEALTH.store(HEALTH_ARMED, Ordering::Relaxed);
@@ -1720,7 +1721,13 @@ pub fn init(rsdp_addr: u64) {
         if unmasked { "on" } else { "MASKED" }
     );
     match aux_line {
-        Some(l) => log!("i8042: aux rate=100 res=8/mm, GSI {} -> vec {:#04x} apic {}", l.gsi.0, I8042_VECTOR, apic_id),
+        Some(l) => log!(
+            "i8042: aux rate=100 res=8/mm, GSI {} -> vec {:#04x} apic {} {}",
+            l.gsi.0,
+            I8042_VECTOR,
+            apic_id,
+            if aux_unmasked { "on" } else { "MASKED" }
+        ),
         None => log!("i8042: no pointer on the aux port"),
     }
 

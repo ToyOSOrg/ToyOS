@@ -1,8 +1,9 @@
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
@@ -2075,10 +2076,49 @@ impl TestResult {
     }
 }
 
+/// Every byte the guest's console has produced, the unfinished last line
+/// included — **a view, not a queue: reading it takes nothing from anyone.**
+///
+/// The line channel is a `Receiver`, so a wait on it consumes: a helper that
+/// drained lines looking for its own evidence would take the marker its caller's
+/// assertion is waiting for. That is the whole reason this exists, and it is why
+/// `shell_type_line` in `tests/toyos.rs` reads the guest's echo of a typed line
+/// from here.
+///
+/// It also carries what the line channel structurally cannot. A surface owner
+/// mirrors the shell's bytes to its own stdout and std buffers that by line, so
+/// a prompt — `"{cwd}> "`, no newline — reaches a host reading bytes and no host
+/// reading lines.
+#[derive(Clone)]
+pub struct ConsoleStream(Arc<Mutex<Vec<u8>>>);
+
+impl ConsoleStream {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(Vec::new())))
+    }
+
+    /// How much the guest has said so far: the mark a caller takes before it
+    /// injects, so that what it reads back afterwards is its own doing.
+    pub fn mark(&self) -> usize {
+        self.0.lock().expect("the console stream lock is never held across a panic").len()
+    }
+
+    /// Everything the guest has said since byte `at`.
+    ///
+    /// Lossy, and it has to be: `at` is a byte offset a caller took between two
+    /// writes and the tail is whatever has arrived since, so both ends can fall
+    /// inside a multi-byte character that is not finished yet.
+    pub fn since(&self, at: usize) -> String {
+        let buf = self.0.lock().expect("the console stream lock is never held across a panic");
+        String::from_utf8_lossy(&buf[at.min(buf.len())..]).into_owned()
+    }
+}
+
 pub struct QemuInstance {
     child: Child,
     stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
+    console: ConsoleStream,
     _reader_thread: thread::JoinHandle<String>,
     audio_wav: PathBuf,
     uart_log: PathBuf,
@@ -2599,6 +2639,12 @@ impl QemuInstance {
     /// virtio-console — the only record a guest that died early leaves.
     pub fn uart_log(&self) -> String {
         fs::read_to_string(&self.uart_log).unwrap_or_default()
+    }
+
+    /// The guest's console byte for byte, unfinished last line included — see
+    /// [`ConsoleStream`].
+    pub fn console_stream(&self) -> &ConsoleStream {
+        &self.console
     }
 
     /// The wav file the virtio-sound device records into for this boot.
@@ -3172,11 +3218,17 @@ impl QmpInput {
     /// batch wider than that queue is a hole in the middle of a word whatever
     /// the guest is doing. Use [`scancode_bytes`] to measure a batch, and send
     /// the next one only once the guest has shown it consumed this one —
-    /// `console_type_line` in `tests/toyos.rs` is the pattern.
+    /// `console_type_line` and `shell_type_line` in `tests/toyos.rs` are the
+    /// two patterns, one reading the panel and one reading [`ConsoleStream`].
     ///
-    /// The gap [`Self::type_text`] leaves between characters is the same bound
-    /// bet on a wall clock, and this exists because that bet loses: see that
-    /// function.
+    /// **There is no wall-clock form of this and there must not be one.** A gap
+    /// between characters is the same bound bet on the guest being scheduled,
+    /// and a guest whose vCPU the host has not run for a couple of hundred
+    /// milliseconds drains none of them — at which point the queue starts
+    /// dropping, silently and one byte at a time, and the guest receives the
+    /// line with a hole in it. Both times `screen_console_panic` has ever gone
+    /// red that is what happened, and neither side of the wire says a word
+    /// about it.
     pub fn type_burst(&mut self, text: &str) {
         let mut events: Vec<(&str, bool)> = Vec::new();
         for ch in text.chars() {
@@ -3188,33 +3240,6 @@ impl QmpInput {
             }
         }
         self.keys(&events);
-    }
-
-    /// Type `text` on the guest's keyboard, one character at a time.
-    ///
-    /// **The gap between characters is a bet, and a loaded host takes it.** The
-    /// i8042 carries one scancode per interrupt and the guest has to drain each
-    /// before the next; 15 ms is a guess at how long that takes, and a guest
-    /// whose vCPU the host has not scheduled for a couple of hundred
-    /// milliseconds drains none of them — at which point QEMU's 16-byte queue
-    /// starts dropping, silently and one byte at a time, and the guest receives
-    /// the line with a hole in it. Both times `screen_console_panic` has ever
-    /// gone red that is what happened, and neither side of the wire says a word
-    /// about it.
-    ///
-    /// So this is for a caller with **no** channel to pace against. One that
-    /// can see what the guest received pairs [`Self::type_burst`] with that
-    /// channel instead and cannot lose a byte at all.
-    pub fn type_text(&mut self, text: &str) {
-        for ch in text.chars() {
-            let (qcode, shift) = qcode(ch);
-            if shift {
-                self.keys(&[("shift", true), (qcode, true), (qcode, false), ("shift", false)]);
-            } else {
-                self.keys(&[(qcode, true), (qcode, false)]);
-            }
-            thread::sleep(Duration::from_millis(15));
-        }
     }
 
     /// `times` relative moves of `dx`, all in one command.
@@ -3401,7 +3426,7 @@ fn qemu_command(
     qemu.arg("-machine")
         .arg(&machine)
         .arg("-cpu")
-        .arg(if kvm { "host,+rdrand,+smap,+fsgsbase,+x2apic,+smep" } else { "qemu64,+rdrand,+smap,+fsgsbase,+x2apic,+smep" })
+        .arg(if kvm { toyos_build::CPU_KVM } else { toyos_build::CPU_TCG })
         .arg("-smp")
         .arg(options.smp.to_string())
         .arg("-m")
@@ -3643,34 +3668,44 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     let stdout = child.stdout.take().unwrap();
 
     let (tx, rx) = mpsc::channel::<String>();
+    let console = ConsoleStream::new();
+    let reader_console = console.clone();
     let reader_thread = thread::spawn(move || {
-        let reader = BufReader::new(stdout);
+        let mut reader = BufReader::new(stdout);
         let mut full_log = String::new();
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    full_log.push_str(&line);
-                    full_log.push('\n');
-                    // Here rather than in a caller's capture, because no caller
-                    // holds every line: `boot_log` ends at the ready marker and
-                    // a `TestResult` begins at `===TEST_START===`. The census is
-                    // cumulative, so what the suite's summary wants is the last
-                    // one of the boot, whichever of those windows it fell in.
-                    super::irqcensus::observe(seq, &line);
-                    if VERBOSE.load(Ordering::Relaxed) {
-                        // The boot's own number, because `--nocapture` on a
-                        // wide run is several guests talking into one terminal
-                        // and an unattributed line is worse than no line.
-                        eprintln!("[serial {seq}] {line}");
-                    }
-                    if tx.send(line).is_err() {
-                        break;
-                    }
+        // Read bytes and split them, rather than `BufRead::lines`: every
+        // consumer below still gets whole lines and nothing else, and
+        // [`ConsoleStream`] gets the tail that is not a line yet, which is
+        // where a prompt lives.
+        let mut pending: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let read = reader.read(&mut chunk).unwrap_or(0);
+            if read == 0 {
+                // EOF, and whatever has no newline behind it is the last line —
+                // which is what `lines` hands over here too.
+                if !pending.is_empty() {
+                    publish_line(pending, seq, &mut full_log, &tx);
                 }
-                Err(_) => break,
+                return full_log;
+            }
+            reader_console
+                .0
+                .lock()
+                .expect("the console stream lock is never held across a panic")
+                .extend_from_slice(&chunk[..read]);
+            pending.extend_from_slice(&chunk[..read]);
+            while let Some(at) = pending.iter().position(|&b| b == b'\n') {
+                let mut line: Vec<u8> = pending.drain(..=at).collect();
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                if !publish_line(line, seq, &mut full_log, &tx) {
+                    return full_log;
+                }
             }
         }
-        full_log
     });
 
     // A muted guest has no console at all, so there is no marker to wait for:
@@ -3698,8 +3733,39 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         screendump,
         own_boot_image,
         boot_log,
+        console,
         smp: options.smp,
     }
+}
+
+/// One finished console line into everything that keeps one.
+///
+/// `false` means nothing is left to read for: the receiver has gone, or the
+/// guest put a byte on the wire that is not UTF-8 — the second being the same
+/// refusal `BufRead::lines` made here before, kept because a console that has
+/// started emitting bytes no decoder agrees on is not a stream any assertion
+/// below should be run against.
+fn publish_line(
+    raw: Vec<u8>,
+    seq: u32,
+    full_log: &mut String,
+    tx: &mpsc::Sender<String>,
+) -> bool {
+    let Ok(line) = String::from_utf8(raw) else { return false };
+    full_log.push_str(&line);
+    full_log.push('\n');
+    // Here rather than in a caller's capture, because no caller holds every
+    // line: `boot_log` ends at the ready marker and a `TestResult` begins at
+    // `===TEST_START===`. The census is cumulative, so what the suite's summary
+    // wants is the last one of the boot, whichever of those windows it fell in.
+    super::irqcensus::observe(seq, &line);
+    if VERBOSE.load(Ordering::Relaxed) {
+        // The boot's own number, because `--nocapture` on a wide run is several
+        // guests talking into one terminal and an unattributed line is worse
+        // than no line.
+        eprintln!("[serial {seq}] {line}");
+    }
+    tx.send(line).is_ok()
 }
 
 /// Returns every line seen on the way to the marker — see [`QemuInstance::boot_log`].

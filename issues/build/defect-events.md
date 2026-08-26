@@ -183,8 +183,8 @@ ledger was written.
   instrument that had already cleared the scheduler's own record, the heap, the
   entry stacks and the switch frame. escape boundary: **release or real
   hardware** — the class was sighted on the T14 under KVM before it was
-  understood (`issues/kernel/cpu-7-has-no-cpusched-returned-on-kvm.md`), not
-  only on the dev host under cross-arch TCG. PR #202 ("No Ring 0 entry cleared
+  understood — a `cpu 7 has no CpuSched` on the T14 under KVM — not only on the
+  dev host under cross-arch TCG. PR #202 ("No Ring 0 entry cleared
   the direction flag, and that was the stray writer"):
   `compiler_builtins::mem::memmove`'s overlapping path is `std` … three `rep`
   string operations … `cld`, interruptible throughout, and no gate clears `DF` —

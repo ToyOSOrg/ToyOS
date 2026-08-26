@@ -366,6 +366,16 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
     if crate::actuator::panic_in_report() {
         panic!("panic-in-report: the crash report panicked before it said anything");
     }
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::fault_in_report() {
+        // Canonical, high-half, and past any physical memory this kernel boots
+        // on, so the read faults rather than hitting the direct map.
+        const UNMAPPED: u64 = 0xFFFF_8FFF_FFFF_F000;
+        // SAFETY: none, and the absence is what is staged — a `#PF` taken
+        // between two statements of the panic's own report, on a CPU already
+        // `Panic`. Reached only when the boot parameter named it.
+        unsafe { core::ptr::read_volatile(UNMAPPED as *const u64) };
+    }
     alert!("PANIC: {}", info);
 
     log!("  Backtrace:");
@@ -559,7 +569,14 @@ pub(super) fn machine_check_handler(frame: &TrapFrame) -> ! {
 /// Returns normally if the fault was resolved (page mapped in).
 /// Diverges (never returns) if the fault is fatal.
 pub(super) fn page_fault_handler(frame: &TrapFrame) {
-    if percpu::swap_fault_state(percpu::CpuFaultState::PageFault) != percpu::CpuFaultState::Normal {
+    let prev = percpu::swap_fault_state(percpu::CpuFaultState::PageFault);
+    if prev != percpu::CpuFaultState::Normal {
+        // **Put back what this swap took.** [`fatal_exception`] classifies a
+        // recursive fault by the state it finds, and a `#PF` that overwrote a
+        // `Panic` or a `Fatal` with its own reads there as the first crash on
+        // this CPU — so the short-circuit that bounds a faulting renderer never
+        // fires for the nested `#PF` it exists for.
+        percpu::set_fault_state(prev);
         let cr2 = cpu::read_cr2();
         let ctx = ExceptionContext { frame, cr2 };
         fatal_exception(&ctx);
