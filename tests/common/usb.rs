@@ -1526,9 +1526,13 @@ pub fn usb_transport_break(
     // The injection reached the driver, and the driver said *what* broke. Both
     // halves are assertions: without the first this is a boot with nothing
     // injected, and without the second the log says only that something went
-    // wrong — which is the line the T14 produced, and the reason the cause of
-    // that break cannot be read out of its log today.
-    const BROKE: &str = "transport broke on SCSI 0x2a: no answer in the data phase";
+    // wrong.
+    //
+    // **And it says which of the three silences it was.** This wait never
+    // started, so a message asserting the transfer budget would be a false
+    // number on the one channel the T14 has — a pulled stick and a staged skip
+    // both reading as a slow device sends a triage to the wrong shelf.
+    const BROKE: &str = "transport broke on SCSI 0x2a: a staged break skipped the data phase wait";
     let staged: Vec<&str> = log.lines().filter(|l| l.contains(BROKE)).collect();
     if staged.len() != 1 {
         return Err(format!(
@@ -1547,6 +1551,19 @@ pub fn usb_transport_break(
     // `SCSI 0x35`, slot 1, 2.3 s after the gate had swept — pushed the total
     // from the injected disk's real 2 to 3 and reddened a run in which the
     // disk under test never left its budget.
+    // The kernel's own clock against the claim, on a channel the message does
+    // not write: every record carries `[kernel <seconds>]`, so a wait that had
+    // really spent `USB_TIMEOUT_NS` would put two seconds between the break and
+    // the record before it. Measured here rather than asserted from the wording.
+    let waited = elapsed_before(&log, staged[0])?;
+    if waited >= 2.0 {
+        return Err(format!(
+            "the staged break took {waited:.3} s, which is the transfer budget — the wait it \
+             is supposed to skip really ran\n{log}"
+        ));
+    }
+    eprintln!("  [usb] the staged break waited {waited:.3} s, not the 2 s it used to claim");
+
     let under_test = broke_on(staged[0])?;
 
     // And the driver got over it. Two attempts are explained by the fault — the
@@ -1637,6 +1654,31 @@ pub fn usb_transport_break(
 /// transport break" is not recoverable from a line that does not say which disk
 /// it was, and matching every disk's line instead is how this test came to red
 /// on a boot stick's own clean recovery.
+/// How long the guest's own clock says passed between `line` and the kernel
+/// record before it.
+///
+/// The timestamp in a record's `[kernel <seconds>]` prefix is a channel the
+/// message text does not write, which is the whole point of reading it: a claim
+/// about how long a wait took is checkable against the clock that timed it.
+fn elapsed_before(log: &str, line: &str) -> Result<f64, String> {
+    let stamp = |l: &str| -> Option<f64> {
+        l.split_once("[kernel ")?.1.split_whitespace().next()?.parse().ok()
+    };
+    let lines: Vec<&str> = log.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == line)
+        .ok_or_else(|| format!("{line:?} is not a line of the log it came from"))?;
+    let now = stamp(line)
+        .ok_or_else(|| format!("{line:?} carries no kernel timestamp to measure against"))?;
+    let before = lines[..at]
+        .iter()
+        .rev()
+        .find_map(|l| stamp(l))
+        .ok_or_else(|| format!("no kernel record precedes {line:?}, so nothing times it"))?;
+    Ok(now - before)
+}
+
 fn broke_on(line: &str) -> Result<&str, String> {
     line.split_once("usb-storage: ")
         .and_then(|(_, rest)| rest.split_once(" transport broke"))

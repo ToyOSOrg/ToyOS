@@ -158,21 +158,21 @@ pub enum ThreadExit {
         post: Watch,
     },
     /// The process has no entry — another CPU's kill reaped it while this
-    /// thread was on its way here.
-    NoEntry,
+    /// thread was on its way here. **The same exit a sibling takes**, on the
+    /// same [`Watch`]: nothing here is the main thread any more, so the
+    /// teardown branch is skipped and every table write is a no-op.
+    Gone { post: Watch },
 }
 
 /// Route a thread's own exit.
 ///
-/// **[`ThreadExit::NoEntry`] is a state this kernel does not survive**, and it
-/// is named here rather than hidden inside an `.unwrap()` so that the one
-/// caller says what it is doing: `process::thread_exit` panics on it, and
-/// `issues/kernel/main-thread-exit-unwraps-a-reaped-entry.md` is open against
-/// exactly that. Naming the state is not the fix — the fix is a decision about
-/// what a thread whose process is already gone should do, and the entry says
-/// what it owes.
+/// **A missing entry is [`ThreadExit::Gone`] and not a panic**, which is
+/// [`mark_zombie`]'s rule one function along: a thread that arrives to find
+/// nothing has to leave, not take the machine with it.
 pub fn route_thread_exit<T: Processes>(table: &T, pid: Pid, tid: Tid) -> ThreadExit {
-    let Some(proc) = table.get(pid) else { return ThreadExit::NoEntry };
+    let Some(proc) = table.get(pid) else {
+        return ThreadExit::Gone { post: Watch::Thread(pid, tid) };
+    };
     if proc.main_tid() == tid {
         return ThreadExit::Process;
     }
@@ -297,9 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn an_exit_on_a_reaped_process_is_named_rather_than_unwrapped() {
+    fn an_exit_on_a_reaped_process_leaves_by_the_sibling_door() {
         let world = World::new();
-        assert_eq!(route_thread_exit(&world, Pid(3), Tid(1)), ThreadExit::NoEntry);
+        assert_eq!(
+            route_thread_exit(&world, Pid(3), Tid(1)),
+            ThreadExit::Gone { post: Watch::Thread(Pid(3), Tid(1)) },
+        );
     }
 
     /// Two siblings, and the one that is waiting is not the main thread — the

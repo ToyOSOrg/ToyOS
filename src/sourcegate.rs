@@ -146,6 +146,53 @@ const BANS: &[Ban] = &[
               usize::MAX entries, and no such table exists",
         allowed: &[],
     },
+    // A 4096 typed into a kernel constant is the page size almost every time,
+    // and a private copy of it is a value that does not move when the export
+    // does. `mm::PAGE_SIZE` is the export; the exceptions below are the
+    // 4096-byte things that are not a page — a probe's line count, a guard
+    // page's *size in bytes* where the page size is not what decides it, a ring
+    // capacity in entries, a path length, a device's own buffer or register
+    // window — each one a row somebody wrote on purpose.
+    Ban {
+        needle: ": usize = 4096",
+        why: "a private page size is a copy of `mm::PAGE_SIZE` that stops moving \
+              with it",
+        allowed: &[
+            // Cache lines to walk, not bytes.
+            ("kernel/src/arch/control_regs.rs", 1),
+            // Two guard-page sizes: the mapping is 4 KiB because a guard is one
+            // hardware page, and `PAGE_SIZE` is 2 MiB territory here.
+            ("kernel/src/arch/percpu.rs", 2),
+            // A device's TX buffer.
+            ("kernel/src/drivers/virtio_console.rs", 1),
+            // A VT-d table is 4 KiB by the specification, not by this kernel.
+            ("kernel/src/iommu/vtd/table.rs", 1),
+            // Ring entries.
+            ("kernel/src/trace.rs", 1),
+            // A path length, in bytes.
+            ("kernel/src/vfs.rs", 1),
+        ],
+    },
+    Ban {
+        needle: ": u64 = 4096",
+        why: "as above, in the other width",
+        allowed: &[
+            // A VT-d register window, by the specification.
+            ("kernel/src/iommu/vtd/mod.rs", 1),
+            // The export itself, and the one place the literal lives.
+            ("kernel/src/mm/mod.rs", 1),
+        ],
+    },
+    Ban {
+        needle: ": u32 = 4096",
+        why: "as above, in the other width",
+        allowed: &[
+            // A device's RX buffer.
+            ("kernel/src/drivers/virtio_net.rs", 1),
+            // The block size this driver reads a disk in.
+            ("kernel/src/drivers/xhci/wait/msc.rs", 1),
+        ],
+    },
 ];
 
 fn rel(root: &Path, path: &Path) -> String {
@@ -339,6 +386,28 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
     ("kernel/src/panic.rs", 2),
 ];
 
+/// Every hand-written `Send`/`Sync` impl `kernel/src` holds, by file and count.
+///
+/// One of these stops the compiler re-deriving the bound, so a field added
+/// later that is not `Send` — a raw pointer, an `Rc`, a `Cell` — keeps
+/// compiling with nobody asked. Per file *and* per count, so an added impl
+/// reds beside a permitted one and a deleted one reds its own stale row.
+const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
+    ("kernel/src/completion/inbox.rs", 1),
+    ("kernel/src/drivers/hda.rs", 1),
+    ("kernel/src/drivers/panic_console/mod.rs", 2),
+    ("kernel/src/drivers/virtio_console.rs", 1),
+    ("kernel/src/drivers/virtio_sound.rs", 2),
+    ("kernel/src/hw.rs", 1),
+    ("kernel/src/mm/mmio.rs", 2),
+    ("kernel/src/mm/region.rs", 2),
+    ("kernel/src/pipe.rs", 1),
+    ("kernel/src/process.rs", 1),
+    ("kernel/src/sched/driver.rs", 2),
+    ("kernel/src/symbols.rs", 2),
+    ("kernel/src/trace.rs", 1),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +485,59 @@ mod tests {
              reads nothing out of the text, so a marker put back into a message marks \
              nothing.\n{}",
             complaints.join("\n")
+        );
+    }
+
+    /// **A `Send`/`Sync` the compiler can derive is the compiler's to derive.**
+    /// A hand-written one is a standing exemption from that re-derivation, so
+    /// every one the kernel keeps is named here with the count its file holds.
+    #[test]
+    fn every_hand_written_auto_trait_impl_is_declared() {
+        let mut found: Vec<(String, usize)> = Vec::new();
+        for (file, _, line) in kernel_lines() {
+            let code = code_only(&line);
+            let code = code.trim_start();
+            if !code.starts_with("unsafe impl Send for")
+                && !code.starts_with("unsafe impl Sync for")
+            {
+                continue;
+            }
+            match found.last_mut() {
+                Some((last, count)) if *last == file => *count += 1,
+                _ => found.push((file, 1)),
+            }
+        }
+        assert!(
+            !found.is_empty(),
+            "the scan found no hand-written impl at all, so it is reading no tree"
+        );
+
+        let mut complaints = Vec::new();
+        for (file, count) in &found {
+            match AUTO_TRAIT_IMPLS.iter().find(|(f, _)| f == file) {
+                Some((_, want)) if want == count => {}
+                Some((_, want)) => complaints.push(format!(
+                    "{file} hand-writes {count} `Send`/`Sync` impls where this table declares \
+                     {want}"
+                )),
+                None => complaints.push(format!(
+                    "{file} hand-writes {count} `Send`/`Sync` impls and is not in this table"
+                )),
+            }
+        }
+        for (file, want) in AUTO_TRAIT_IMPLS {
+            if !found.iter().any(|(f, _)| f == file) {
+                complaints.push(format!(
+                    "{file} no longer hand-writes the {want} impls declared here, so the row is \
+                     stale"
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "a hand-written `Send`/`Sync` is a bound the compiler stops checking on every later \
+             field, so each one is a row somebody wrote on purpose.\n{}",
+            complaints.join("\n"),
         );
     }
 

@@ -133,7 +133,7 @@ before adopting:
 | `drivers/` | 121 | **adopted 2026-08-22 — the first sweep under the reduction ruling.** 121 undocumented blocks (132 `unsafe` blocks in all); **60 removed, 72 documented, 1 filed.** Per driver below — and the filed one was built the same day, taking the area from 72 blocks to 37. |
 | `arch/` | 107 | **adopted 2026-08-22 — the last area, and the highest-risk one.** 107 findings (112 `unsafe` blocks in all); **30 removed, 77 documented, 3 filed.** Per file below. |
 | root files (`user_ptr.rs`, `process.rs`, `preempt.rs`, `inbox.rs`, `main.rs`, `symbols.rs`, `hw.rs`, `file_backing.rs`, `sync.rs`, `scheduler.rs`, `pipe.rs`, `page_cache.rs`, `bcachefs_adapter.rs`) | 76 | **adopted** — 13 removed, 63 documented, 4 filed. Per file and per finding below. |
-| `mm/` | 35 | **adopted** — every site now carries a `SAFETY:` comment; two (`object::shm::Pages`, `mm::paging::AddressSpace`'s `Send`/`Sync` impls) turned out to look vestigial rather than load-bearing, filed rather than removed: `issues/kernel/redundant-send-sync-impls-mm-object.md` |
+| `mm/` | 35 | **adopted** — every site now carries a `SAFETY:` comment; two (`object::shm::Pages`, `mm::paging::AddressSpace`'s `Send`/`Sync` impls) turned out to be vestigial and were deleted, and `src/sourcegate.rs`'s `AUTO_TRAIT_IMPLS` now names every hand-written one the kernel keeps |
 | `elf/` | 23 | **adopted** — every site now carries a `SAFETY:` comment; writing the justification found two functions (`elf::read_backing_into`, `elf::index::RelocationIndex::apply_to_page`) that write through a raw pointer without being `unsafe fn`, filed rather than fixed. Both take a `mm::KernelSlice` now (2026-08-22), so the extent is the allocation's and the file is closed. |
 | `sched/` | 8 | **adopted 2026-08-22**, under the reduction ruling. 8 findings (26 `unsafe` blocks in all); **4 removed, 5 documented, 1 filed** — the five sites of the same shape outside this area, since taken by the root-file and `arch/` sweeps, so that file is closed too. |
 | `loader/` | 8 | **adopted** — every site now carries a `SAFETY:` comment (one finding shared with `elf/`, above) |
@@ -424,11 +424,11 @@ today's implementation-defined-but-tested state.
 
 Documenting `mm/` and `object/` surfaced two more `unsafe impl Send`/`Sync`
 pairs that `cargo check` says are unnecessary — `object::shm::Pages` and
-`mm::paging::AddressSpace` — filed together as
-`issues/kernel/redundant-send-sync-impls-mm-object.md` rather than removed
-here, the same reasoning as the two findings above: this pass's job was
-documentation, and the fix touches a security-relevant module's actual code,
-not its comments. Documenting `elf/` surfaced a related but distinct pattern
+`mm::paging::AddressSpace` — filed rather than removed here, the same
+reasoning as the two findings above: this pass's job was documentation, and
+the fix touches a security-relevant module's actual code, not its comments.
+All four impls are gone now, and `src/sourcegate.rs`'s `AUTO_TRAIT_IMPLS`
+declares every hand-written one `kernel/src` still holds. Documenting `elf/` surfaced a related but distinct pattern
 — two functions that take a raw pointer without being `unsafe fn`, so the
 validity requirement is real but not type-enforced — filed rather than fixed,
 and both take a `mm::KernelSlice` now. Four real findings from three areas,

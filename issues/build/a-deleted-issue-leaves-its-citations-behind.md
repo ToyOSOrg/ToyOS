@@ -27,7 +27,7 @@ which is one thing a real gate would have to.
 | `issues/build/i8042-keyboard-pays-a-lost-sentinel-and-reds-the-durations-gate.md` | `issues/build/defect-events.md` |
 | `issues/build/one-issue-file-carries-an-area-name-as-its-kind.md` | `issues/build/the-swarm-is-not-yet-falsifiable.md` |
 | `issues/build/three-host-crates-are-tested-nowhere.md` | `src/hostws.rs` |
-| `issues/design-debt/four-deletions-still-owed.md` | `issues/design-debt/four-private-page-size-constants-still-have-no-owner.md` |
+| `issues/design-debt/four-deletions-still-owed.md` | *its one citer has since been deleted with the work it tracked, so this row's dangling citation is gone — the count above is the measurement as it stood* |
 | `issues/hardware/metal-sim-pointer-churn-red-again-on-main.md` | `.github/workflows/probe-green.yml` |
 | `issues/isolation/shutdown-needs-no-capability.md` | `issues/kernel/the-capability-end-state-is-twelve-answers.md` |
 | `issues/kernel/i8042-quarantine-health-line-count-is-vacuous.md` | `kernel/src/actuator.rs`, `tests/toyos.rs` |

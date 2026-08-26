@@ -28,7 +28,8 @@ const MAGIC: &[u8; 16] = b"TOYOS-USB-GATE1\0";
 const AT_BLOCKS: usize = 16;
 const AT_NONCE: usize = 24;
 
-const BLOCK: usize = 4096;
+/// `mm::PAGE_SIZE`, in the width this file's buffers are sized by.
+const BLOCK: usize = crate::mm::PAGE_SIZE as usize;
 
 /// Blocks the host wrote and the guest must read back unchanged.
 const HOST_BLOCKS: [i64; 2] = [1, -1];
