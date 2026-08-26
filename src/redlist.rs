@@ -673,9 +673,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "hda_client_stall",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
-        what: "`the ring arm: timed out`, and `timed out after 9s` alone. The one of that run's \
-               four that is still standing",
+        standing: Standing::Retired(
+            "a DEADLOCK panic between the idle loop's log-file flush and the xHCI disk lock, in \
+             the same run's own capture 24s before the wait gave up. The idle loop touches no \
+             filesystem now, so this mechanism cannot recur",
+        ),
+        what: "`the ring arm: timed out`, and `timed out after 9s` alone",
         evidence: "run 31247206462, red again alone",
         source: "issues/hardware/four-runner-reds-unclassified.md",
         measured: "2026-08-08",
@@ -1392,8 +1395,7 @@ pub const KNOWN_RED: &[Red] = &[
                whole delta was two documentation lines. **2026-08-22:** a kernel death of PR \
                #202's class (no Ring 0 entry cleared `DF`; 37 deaths in 13,960 loaded boots \
                before the `cld`, 0 in 7,418 after) leaves exactly this capture too — a guest \
-               that stops mid-test under load, on a date before any wait could see a panic \
-               (`issues/build/every-recorded-stall-predates-the-panic-discriminator.md`) — \
+               that stops mid-test under load, on a date before any wait could see a panic — \
                and nothing in it separates that from the host. One sighting, no denominator \
                on record; what retires it is loaded suites of the fixed tree with no red under \
                this name, three by the Poisson rule (p = e^-3 against a rate of one per suite). \
@@ -1552,7 +1554,7 @@ pub const KNOWN_RED: &[Red] = &[
                stalled five seconds on `tlb: cpu N has not flushed for generation …`",
         evidence: "two `--land` gates on `wt/toyos-boot` and five A/B runs against `main` at \
                    6d11938, one session",
-        source: "issues/audio/wide-phase-reds-under-load.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-07",
     },
     Red {
@@ -1563,7 +1565,7 @@ pub const KNOWN_RED: &[Red] = &[
         what: "FAIL 10 s in the wide phase, PASS 4 s alone on the branch and 5 s alone on `main`, \
                with the same two `tlb:` lines in the capture",
         evidence: "two `--land` gates on `wt/toyos-boot`, one session",
-        source: "issues/audio/wide-phase-reds-under-load.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-07",
     },
     // ---------------------------------------------------------------------
@@ -1754,9 +1756,9 @@ pub const KNOWN_RED: &[Red] = &[
              (p = 2.9e-9); a parked silent death reads `RFL=[D--Z-P-]` with a non-canonical \
              RIP (PR #198). Same instrument — TCG, twelve wide, a boot — so the class A/B \
              transfers, and the cold-build correlation the write-up found is the load that \
-             raised the rate. A clean exit before the marker now is a new measurement. What \
-             the write-up still owes is the harness's, not the kernel's: the arm that reports \
-             this exit drops `seen` and the UART log",
+             raised the rate. A clean exit before the marker now is a new measurement. The \
+             arm that reports this exit (`tests/common/qemu.rs`) now includes `seen` and the \
+             UART log rather than dropping both",
         ),
         what: "`[qemu] QEMU died before ===READY=== (status: Ok(ExitStatus(unix_wait_status(0))))` \
                — QEMU exited *successfully* before the guest said anything, so the capture holds \
@@ -1766,7 +1768,7 @@ pub const KNOWN_RED: &[Red] = &[
                    `[host-slots]` naming `toyos-capwin`'s suite on the same host; the run's own \
                    width line was `fastest boot 1380 ms against the reference 1320 ms`, 1.05x, so \
                    this is not the slow-phase shape",
-        source: "issues/build/qemu-exits-clean-before-ready.md",
+        source: "tests/toyos.rs screen_fatal_halt",
         measured: "2026-08-15",
     },
     Red {
@@ -1784,7 +1786,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "the same full `cargo test` on `wt/toyos-ciwall`; the same day the signature also \
                    took `log_backing_read_error` on `wt/toyos-logd56` and, through the screendump \
                    wait rather than the ready marker, `screen_console_shell` on `wt/toyos-capwin`",
-        source: "issues/build/qemu-exits-clean-before-ready.md",
+        source: "tests/common/qemu.rs double_fault_stack",
         measured: "2026-08-15",
     },
     // ---------------------------------------------------------------------

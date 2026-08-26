@@ -80,9 +80,11 @@ const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
     "above the longest IF-clear device spin a target can be inside",
 );
 
-/// Spins between deadline checks. `nanos_since_boot` is an HPET read on the
-/// machines that have no invariant TSC, and reading it every iteration would
-/// make the wait's own cost the thing being measured.
+/// Spins between deadline checks. `nanos_since_boot`'s 128-bit divide is
+/// `__udivti3`, an out-of-line call in `compiler_builtins`
+/// (`clock::tsc_deadline`'s doc comment is where that cost and its
+/// `dump_nmi_probe` symptom are recorded), so reading it every iteration
+/// would spend a large fraction of the wait's time outside the spinning code.
 const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
 
 /// Flush this CPU and every other one, and do not return until they have.

@@ -700,7 +700,7 @@ fn shape(o: &mut Out) {
     for buffers in [0usize, 1, 2, 3, 4, 6, 8, 16, 17, 32] {
         for channels in [0u16, 1, 2, 3, 6] {
             for bytes in [0usize, 1, 2, 4, 511, 512, 513, 1024] {
-                let word = match period_frames(buffers, channels, bytes) {
+                let word = match period_frames(buffers, channels, bytes, 44_100) {
                     Ok(frames) => format!("ok {frames}"),
                     Err(why) => format!("refused {why}"),
                 };

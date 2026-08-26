@@ -595,8 +595,8 @@ pub struct NewTask {
 }
 
 /// Place a new task by message — never by reaching into the destination's
-/// queue. Returns what the process table keeps.
-pub fn spawn(new: NewTask) -> ThreadSched {
+/// queue. Returns what the process table keeps, and the CPU it was placed on.
+pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
     // A kernel thread's is the kernel address space — the one every CPU is
     // already in between two user threads, which is why `idle_ctx` above names
     // the same `cr3`. Nothing is released when the task ends: that `Arc` is a
@@ -645,7 +645,7 @@ pub fn spawn(new: NewTask) -> ThreadSched {
             HW.kick(dst);
         }
     });
-    sched
+    (sched, dst)
 }
 
 pub enum Dispose {

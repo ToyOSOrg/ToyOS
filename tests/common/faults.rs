@@ -315,9 +315,13 @@ pub fn diskless_boot(
         ..Default::default()
     };
     // The teeth, and the only ones: absence is invisible to every console line
-    // and every screendump, so the argv is where it has to be checked.
+    // and every screendump, so the argv is where it has to be checked. Only
+    // the value following `-device`/`-drive` is a device claim — every other
+    // element, including four filesystem paths, is not one, and a worktree
+    // checked out under a path containing "nvme" made a plain substring scan
+    // over the whole argv false-positive on itself.
     let argv = qemu::profile_argv(&options);
-    if argv.iter().any(|a| a.contains("nvme")) {
+    if argv.windows(2).any(|w| (w[0] == "-device" || w[0] == "-drive") && w[1].contains("nvme")) {
         return Err(format!("the diskless profile still has an NVMe device: {argv:?}"));
     }
 

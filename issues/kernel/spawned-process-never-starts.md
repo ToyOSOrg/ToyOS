@@ -79,9 +79,9 @@ nothing about `ls`'s own I/O path is involved. The kernel logs to the end.
 The per-CPU `parked` counters climbing 1 → 2 → 3 is **not** the victims
 accumulating, and `ready = 0` on every report is not evidence of anything: a
 thread that never ran cannot be in `parked`, and the line is printed from the
-idle loop. Both numbers are fixed by where they are printed. `spawn-placement-unlogged`
-carries that elimination, and the one instrument that would settle the split
-the `ps` column was going to.
+idle loop. Both numbers are fixed by where they are printed. The `spawn:`
+line now also records the destination CPU (`dst=`), which is the one
+instrument that would settle the split the `ps` column was going to.
 
 The assignment was reclaimed 2026-08-23: #142's investigation left no artifact.
 

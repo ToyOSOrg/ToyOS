@@ -1027,6 +1027,7 @@ dependencies = [
  "toyos-fat32",
  "toyos-fat32-check",
  "toyos-gpt",
+ "toyos-keymap",
  "toyos-ld",
  "toyos-manifest",
  "toyos-sched",

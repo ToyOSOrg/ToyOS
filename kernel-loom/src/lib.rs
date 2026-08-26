@@ -29,6 +29,11 @@
 //! boots and becomes observable on ARM64, which is planned and not built. That
 //! is why `try_lock`'s acquire edge sat on the wrong atomic through every green
 //! suite run until a model checker was pointed at it.
+//!
+//! Every `loom::model` test file in this crate is gated `cfg(feature =
+//! "loom")`, so the crate's two supported invocations are `cargo test`
+//! (default features, every model) and `cargo test --no-default-features
+//! --test <name>` naming only a file gated the other way round.
 
 /// Loom's cell with the `get(&self) -> *mut T` shape `Lock` uses.
 ///

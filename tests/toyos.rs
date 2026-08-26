@@ -12,6 +12,7 @@ use common::qemu::{
     STALLED,
 };
 use common::{audio, compile, faults, hostload, screen, serial, stats, storage, usb};
+use toyos_build::day::Day;
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
 
@@ -983,44 +984,6 @@ impl ExpectedFailure {
     }
 }
 
-/// A civil date, as days since 1970-01-01.
-///
-/// Days rather than seconds because that is the resolution of the only question
-/// asked of it, and because a comparison against a wall clock at second
-/// resolution would flip mid-run.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
-struct Day(i64);
-
-impl Day {
-    fn today() -> Day {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("a host clock before 1970 is a host to fix, not a date to guess at")
-            .as_secs() as i64;
-        Day(secs.div_euclid(86_400))
-    }
-
-    /// `YYYY-MM-DD`, or `None`. Hinnant's `days_from_civil`, which is exact for
-    /// every date the proleptic Gregorian calendar has.
-    fn parse(text: &str) -> Option<Day> {
-        let (y, rest) = text.split_once('-')?;
-        let (m, d) = rest.split_once('-')?;
-        if (y.len(), m.len(), d.len()) != (4, 2, 2) {
-            return None;
-        }
-        let (y, m, d) = (y.parse::<i64>().ok()?, m.parse::<i64>().ok()?, d.parse::<i64>().ok()?);
-        if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-            return None;
-        }
-        let y = if m <= 2 { y - 1 } else { y };
-        let era = y.div_euclid(400);
-        let yoe = y - era * 400;
-        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        Some(Day(era * 146_097 + doe - 719_468))
-    }
-}
-
 /// Tests this tree expects to fail, and what each is pending on.
 ///
 /// **Empty is the normal state**, and an entry is a claim with a cost: the run
@@ -1753,12 +1716,14 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
 /// them apart on its own. The serial can: in a window where no audio client
 /// ever connects, the PCM stream has no business starting.
 ///
-/// This is bounded by what the harness captures — collection begins at
-/// ===TEST_START, so a device started before then (a restored boot prime) is
-/// invisible here as it is everywhere else; see `audio::check_suspend_structure`.
-/// What it does catch is a start inside the window with no client to justify
-/// it: soundd's `!streams.is_empty()` fill-loop gate going away, or a resume
-/// fired by anything other than a connect.
+/// This reads only `result.serial`, which begins at ===TEST_START, so a
+/// device started before then (a restored boot prime) is invisible to this
+/// particular check — not because the harness cannot see it: `qemu.boot_log()`
+/// holds it, which is what `audio::check_suspend_structure` concatenates in
+/// ahead of its own window. What this one does catch is a start inside its
+/// window with no client to justify it: soundd's `!streams.is_empty()`
+/// fill-loop gate going away, or a resume fired by anything other than a
+/// connect.
 fn check_audio_idle_suspend(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;
@@ -2178,7 +2143,12 @@ fn measure_audio_run(
     // trailing silence context time to reach the file before reading it. The
     // same wait collects soundd's final stats flush, which races the client's
     // exit and so can arrive after ===TEST_END===.
-    let serial = result.serial + &qemu.drain_serial(Duration::from_millis(500));
+    //
+    // Boot prepended so `check_suspend_structure` can see a device started
+    // before ===TEST_START — the boot capture exists (`qemu.boot_log()`),
+    // where its doc comment used to say it did not.
+    let serial =
+        qemu.boot_log().to_string() + &result.serial + &qemu.drain_serial(Duration::from_millis(500));
 
     let wav = audio::parse_wav(qemu.audio_wav_path())?;
     let analysis = audio::analyze(&wav);
@@ -10499,16 +10469,17 @@ fn run_machine_test(
             }
             // `verdict_due` keeps a CPU awake for one pass. If it ever failed to
             // self-clear, that CPU would spin instead of halting — the exact
-            // failure the quarantine path already had once.
-            let health = result.serial.matches("sched: cpu=").count();
-            if health > 50 {
+            // failure the quarantine path already had once. `log_health`
+            // prints at a fixed rate regardless, so the trip-delta check is
+            // read from the counter inside the line rather than a count of
+            // the lines themselves.
+            if let Some((cpu, delta)) = idle_is_spinning(&result.serial) {
                 return Err(format!(
-                    "{health} idle-health lines — the health verdict is holding a CPU awake"
+                    "cpu{cpu}'s idle-trip counter moved by {delta} within the capture — spinning, not halting"
                 ));
             }
             eprintln!("  [i8042] {}", quiet.trim());
             eprintln!("  [i8042] {}", line.trim());
-            eprintln!("  [i8042] {health} idle-health lines — the CPU still halts");
             Ok(())
         }
         "operation_nesting" => {
@@ -13686,8 +13657,6 @@ fn expected_failure_exit_status() -> Result<(), String> {
 /// answering. All three ask `serial::died` now, which is the only thing in the
 /// harness that knows the words and the only thing that knows the prefix decides
 /// whose death they report.
-/// `issues/build/every-recorded-stall-predates-the-panic-discriminator.md`
-/// is what the years before it are worth.
 ///
 /// The way that comes back is the obvious patch: one more spelling handed
 /// straight to a `contains` beside the call. It would match a *program's* panic
@@ -13756,12 +13725,16 @@ fn one_vocabulary() -> Result<(), String> {
 /// that only read the test's own source would miss the one test in the list
 /// whose whole subject is the syscall.
 fn needs_actuators(sources: &[(String, String)], registry: &[&str]) -> BTreeSet<String> {
-    // The third spelling is the SDK's: `toyos::census` calls `debug_with` on the
-    // caller's behalf, so a binary whose leak assertion is a census names no
-    // syscall of its own and reads as innocent to the two above.
+    // The fourth spelling is the argument-taking form: every action that
+    // carries a payload (TLB_ACK_DELAY_ARM, CENSUS_KIND, LOWER_SYSINFO_BOUND,
+    // SLOT_TO_LAST_GENERATION) is reached through `debug_with`, never
+    // `debug`. The third is the SDK's: `toyos::census` calls `debug_with` on
+    // the caller's behalf, so a binary whose leak assertion is a census names
+    // no syscall of its own and reads as innocent to the others.
     let calls = |text: &str| {
         text.contains("SYS_DEBUG")
             || text.contains("syscall::debug(")
+            || text.contains("syscall::debug_with(")
             || text.contains("census::Census")
     };
     let direct: BTreeSet<&str> =
@@ -13821,15 +13794,23 @@ fn suite_split() -> Result<(), String> {
         ("an_unlisted_one".to_string(), "SYS_DEBUG".to_string()),
         ("its_parent".to_string(), "Command::new(\"/bin/test_rs_an_unlisted_one\")".to_string()),
         ("a_censor".to_string(), "use toyos::census::Census;".to_string()),
+        ("a_debug_with_user".to_string(), "syscall::debug_with(3, 4)".to_string()),
         ("innocent".to_string(), "println!()".to_string()),
     ];
-    let staged_registry =
-        ["a_listed_one", "an_unlisted_one", "its_parent", "a_censor", "innocent"];
+    let staged_registry = [
+        "a_listed_one",
+        "an_unlisted_one",
+        "its_parent",
+        "a_censor",
+        "a_debug_with_user",
+        "innocent",
+    ];
     let found = needs_actuators(&staged, &staged_registry);
-    let want: BTreeSet<String> = ["a_listed_one", "an_unlisted_one", "its_parent", "a_censor"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let want: BTreeSet<String> =
+        ["a_listed_one", "an_unlisted_one", "its_parent", "a_censor", "a_debug_with_user"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
     if found != want {
         return Err(format!("the check does not work: on staged input it named {found:?}"));
     }
@@ -13919,13 +13900,19 @@ fn expected_failure_entries() -> Result<(), String> {
     // on the wrong day is an entry that expires never or immediately, and
     // neither announces itself.
     let day = |s: &str| Day::parse(s).ok_or_else(|| format!("{s} did not parse"));
-    if day("1970-01-01")? != Day(0) {
-        return Err("the epoch is not day zero".to_string());
-    }
-    // A leap day, a century that is not a leap year, and one that is.
-    for (date, want) in [("2024-02-29", 19782), ("1900-03-01", -25508), ("2000-03-01", 11017)] {
-        if day(date)? != Day(want) {
-            return Err(format!("{date} is {:?}, and it has to be Day({want})", day(date)?));
+    let epoch = day("1970-01-01")?;
+    // The epoch itself, a leap day, a century that is not a leap year, and one
+    // that is — each checked as a day-count from the epoch, since `Day`'s
+    // representation is private outside `toyos_build::day`.
+    for (date, want) in [
+        ("1970-01-01", 0),
+        ("2024-02-29", 19782),
+        ("1900-03-01", -25508),
+        ("2000-03-01", 11017),
+    ] {
+        let got = epoch.until(day(date)?);
+        if got != want {
+            return Err(format!("{date} is {got} days from the epoch, and it has to be {want}"));
         }
     }
     if !(day("2026-08-06")? < day("2026-08-07")? && day("2026-12-31")? < day("2027-01-01")?) {

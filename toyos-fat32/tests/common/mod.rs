@@ -40,6 +40,24 @@ fn run(cmd: &mut Command) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// Delete every `._*` AppleDouble sidecar `root` or a directory under it
+/// holds — recursively, since macOS drops one beside any file it touches on
+/// a mount at any depth. A directory that vanished mid-walk (macOS removing
+/// its own sidecar concurrently) is not an error: there is nothing left in
+/// it to delete.
+fn delete_apple_double_sidecars(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            delete_apple_double_sidecars(&path);
+        } else if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("._")) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 // ---------------------------------------------------------------- devices
 
 /// A device backed by a file, which only ever issues whole 4096-byte block
@@ -369,7 +387,7 @@ impl Image {
         let mount = mount.unwrap_or_else(|| panic!("{} did not mount", self.path.display()));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(Path::new(&mount))));
         // AppleDouble sidecars and Spotlight state are macOS's, not the test's.
-        let _ = run(Command::new("find").args([&mount, "-name", "._*", "-delete"]));
+        delete_apple_double_sidecars(Path::new(&mount));
         for junk in [".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems"] {
             let _ = std::fs::remove_dir_all(Path::new(&mount).join(junk));
         }

@@ -365,7 +365,10 @@ impl<'a> Lexer<'a> {
             line_str.push(self.advance() as char);
         }
         if let Ok(line) = line_str.parse::<u32>() {
-            self.line = line;
+            // `# N "file"` means the *next* source line is N; the directive's
+            // own trailing newline, consumed after this returns, advances
+            // `self.line` once more before the first token of it is read.
+            self.line = line.saturating_sub(1);
         }
         self.skip_whitespace_and_comments();
         if self.peek() == Some(b'"') {

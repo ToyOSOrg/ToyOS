@@ -68,6 +68,33 @@ fn rasterize_cells(
     data
 }
 
+/// Every codepoint a shipped layout can put on the panel: what each key
+/// types at every level of every layout, plus whatever a dead key composes
+/// to — so the console font covers a layout's whole reach rather than only
+/// Latin-1.
+fn keymap_codepoints() -> BTreeSet<u32> {
+    use toyos_keymap::{Key, LAYOUTS, LEVELS};
+
+    let mut out = BTreeSet::new();
+    let mut add_entry = |entry: &toyos_keymap::KeyEntry| {
+        for level in 0..LEVELS {
+            if let Key::Chars(s) = entry.level(level) {
+                out.extend(s.chars().map(|c| c as u32));
+            }
+        }
+    };
+    for layout in LAYOUTS {
+        for usage in toyos_keymap::FIRST_USAGE..=toyos_keymap::LAST_USAGE {
+            if let Some(entry) = layout.entry(usage) {
+                add_entry(entry);
+            }
+        }
+        add_entry(&layout.iso_key);
+    }
+    out.extend(toyos_keymap::composed_chars().map(|c| c as u32));
+    out
+}
+
 /// Pre-rasterize a TTF font into a flat bitmap format.
 ///
 /// Binary format:
@@ -77,10 +104,23 @@ fn rasterize_cells(
 ///   [glyph_count * 4] codepoints: [u32 LE]
 ///   [glyph_count * width * height] alpha bitmaps
 fn rasterize_font(ttf_bytes: &[u8], cell_width: usize, cell_height: usize) -> Vec<u8> {
-    let mut codepoints: Vec<u32> = (0u32..=255).collect();
+    let mut codepoints: BTreeSet<u32> = (0u32..=255).collect();
     codepoints.extend(0x2500u32..=0x257F); // Box Drawing
     codepoints.extend(0x2580u32..=0x259F); // Block Elements
 
+    // A layout can ask for a character JetBrainsMono has no glyph for — a
+    // handful of rare dead-key compositions and symbols do. Left out rather
+    // than rasterized blank, so it keeps falling back to `?` exactly as an
+    // uncovered codepoint always has, instead of silently drawing nothing.
+    let font = fontdue::Font::from_bytes(ttf_bytes, fontdue::FontSettings::default())
+        .expect("rasterize_font: failed to parse TTF");
+    codepoints.extend(
+        keymap_codepoints()
+            .into_iter()
+            .filter(|&cp| char::from_u32(cp).is_some_and(|c| font.has_glyph(c))),
+    );
+
+    let codepoints: Vec<u32> = codepoints.into_iter().collect();
     let data = rasterize_cells(ttf_bytes, &codepoints, cell_width, cell_height);
     let glyph_count = codepoints.len();
 
@@ -298,6 +338,25 @@ pub fn collect(dirs: &[String]) -> Vec<(String, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sample of the `ch(de)` characters `issues/design-debt/
+    /// console-font-lacks-the-altgr-layer.md` named as unrenderable — past
+    /// Latin-1, so absent unless a layout's own reach is rasterized.
+    #[test]
+    fn the_console_font_covers_the_swiss_german_altgr_layer() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let raw = console_font(&root);
+        let count = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
+        let covered: BTreeSet<u32> = (0..count)
+            .map(|i| {
+                let at = 8 + i * 4;
+                u32::from_le_bytes(raw[at..at + 4].try_into().unwrap())
+            })
+            .collect();
+        for ch in ['€', 'œ', 'Œ', 'ŋ', 'ħ', 'ł', 'ŧ', 'đ', 'ĸ', 'ſ', 'ẞ', 'Ω', 'ĉ', 'ń', 'Ÿ'] {
+            assert!(covered.contains(&(ch as u32)), "{ch:?} is not in the console font");
+        }
+    }
 
     /// The initrd carries what the repository declares: git's index, and
     /// nothing else.

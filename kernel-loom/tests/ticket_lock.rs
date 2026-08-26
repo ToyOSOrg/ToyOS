@@ -19,6 +19,8 @@
 //! is a lock handing out data it did not synchronize, stated exactly. Verified
 //! 2026-08-17, both ways round.
 
+#![cfg(feature = "loom")]
+
 use kernel_loom::sync::Lock;
 use loom::sync::Arc;
 

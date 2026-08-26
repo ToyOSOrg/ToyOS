@@ -1165,7 +1165,8 @@ mod tests {
     /// neither check sees the other's failure.
     #[test]
     fn the_base_a_run_names_is_read_out_of_git() {
-        let dir = std::env::temp_dir().join("toyos-durations-base");
+        let dir =
+            std::env::temp_dir().join(format!("toyos-durations-base-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("tests")).unwrap();
         fs::create_dir_all(dir.join("src")).unwrap();
@@ -1217,7 +1218,8 @@ mod tests {
     /// registers no binary, names nothing.
     #[test]
     fn a_discovered_guest_test_is_named_by_the_file_that_registers_it() {
-        let dir = std::env::temp_dir().join("toyos-durations-discovered");
+        let dir = std::env::temp_dir()
+            .join(format!("toyos-durations-discovered-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let bins = dir.join(RUST_TEST_BINS);
         let crate_src = dir.join("tests/toyos-rust-tests/src");

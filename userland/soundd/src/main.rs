@@ -167,7 +167,7 @@ fn run_with_device(
     // derives anything from it — a zero channel count divides by zero on the
     // way to a frame count, which is a panic that names neither the device nor
     // the reason.
-    let device_period_frames = match period_frames(num_buffers, device_channels, device_period_bytes) {
+    let device_period_frames = match period_frames(num_buffers, device_channels, device_period_bytes, device_sample_rate) {
         Ok(frames) => frames,
         Err(why) => {
             say!("soundd: this audio device's shape cannot carry audio: {why}");

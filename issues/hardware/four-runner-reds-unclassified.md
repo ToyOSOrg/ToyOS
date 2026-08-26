@@ -16,12 +16,14 @@ the dev host:
 - `sshd_fail_closed` — red alone in 22 s, having taken 152 s in the phase.
 
 Three of the four are soundd's, which makes them worth reading together rather
-than one at a time. Nothing here is diagnosed; they are recorded so the next
+than one at a time. Two remain undiagnosed; they are recorded so the next
 green run cannot quietly be read as their absence.
 
-**Two of the four are 0 of 5 on the current tree and one is closed.**
-`doom_sound_flood` and `sshd_fail_closed` did not fire in the rate probe.
-`metal_sim_null_audio` was 5 of 5 and is closed, together with
+**Two of the four are 0 of 5 on the current tree, one is closed and one is
+diagnosed.** `doom_sound_flood` and `sshd_fail_closed` did not fire in the rate
+probe. `metal_sim_null_audio` was 5 of 5 and is closed, together with
 `hda_two_live_refused` — one question about how the two tests read the boot
 console, and not one about soundd's device-less path, which was doing its job on
-every one of those runs. `hda_client_stall` is the one still standing.
+every one of those runs. `hda_client_stall` was a `DEADLOCK` panic between the
+idle loop's log-file flush and the xHCI disk lock, diagnosed in the same run's
+own capture, and no longer reachable — the idle loop touches no filesystem now.

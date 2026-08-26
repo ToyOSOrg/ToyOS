@@ -236,8 +236,7 @@ changes.
   `cargo run -- --known-red diskless_boot` answered `NOT ON THE LIST`. Not
   investigated. **Retired 2026-08-22**: under `-no-reboot` a status-0 exit before
   the marker is a guest that reset itself, the silent death of the direction-flag
-  class PR #202 closed — `issues/build/qemu-exits-clean-before-ready.md` carries
-  the reading and the redlist row carries the retirement.
+  class PR #202 closed — the redlist row carries the retirement.
 - **`nvme_large_device`** — same run, same session, and **its mechanism was not
   this file's**: a machine-wide `KERNEL PANIC: execute unmapped address at 0x1b`
   in ring 0 on a `spawn` syscall — the console `metal_sim_input` above owes,
@@ -299,6 +298,13 @@ changes.
   against an absolute, which is the first of the two legitimate fix shapes below
   and is the one thing this test already has both samples for. Still
   `Sched::Parallel`, not investigated further.
+
+- **`metal_sim_window_caps`** and **`null_sink_shipped_client`** — added
+  2026-08-25. Both carried the same two `tlb: cpu N has not flushed for
+  generation …` lines, naming the pair of initiators two CPUs shooting down
+  at once — a mutual wait, not a bound, fixed in `kernel/src/shootdown.rs`
+  and gated by `an_initiator_answers_while_it_waits`. Measured 2026-08-07 on
+  `wt/toyos-boot`, before the fix; not reproduced since.
 
 - **`console_locale_detect`** — added 2026-08-20, first push-triggered `main`
   sighting: `ci` run `32314166262`, `guest (9)`, headSha `eba06ad6`, found

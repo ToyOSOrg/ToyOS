@@ -3882,7 +3882,12 @@ fn wait_for_ready(
             }
             Err(RecvTimeoutError::Disconnected) => {
                 let status = child.wait();
-                panic!("[qemu] QEMU died before {ready} (status: {status:?})");
+                let uart = fs::read_to_string(uart_log).unwrap_or_default();
+                panic!(
+                    "[qemu] QEMU died before {ready} (status: {status:?})\nconsole:\n{}\nuart:\n{}",
+                    if seen.is_empty() { "nothing at all" } else { &seen },
+                    if uart.is_empty() { "nothing at all" } else { &uart },
+                );
             }
         }
     }

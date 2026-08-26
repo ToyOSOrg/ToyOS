@@ -140,6 +140,11 @@ impl Codegen {
                 let max_elems = size.unwrap_or(usize::MAX);
                 let mut idx = 0;
                 while *cursor < items.len() && idx < max_elems {
+                    if let Some(Designator::Index(expr)) = items[*cursor].designators.first() {
+                        if let Some(val) = self.eval_const(expr) {
+                            idx = val as usize;
+                        }
+                    }
                     let offset = idx * elem_size;
                     let elem_ptr = if offset == 0 { base_ptr }
                     else { ctx.builder.ins().iadd_imm(base_ptr, offset as i64) };

@@ -256,14 +256,18 @@ impl Console {
                 span * fw,
                 self.screen.pixel_format_raw(),
             );
+            let x = first * fw;
+            let w = (span * fw).min(paint_width.saturating_sub(x));
+            let delivered = first + w / fw;
             for col in first..=last {
                 let cell = self.view_cell(row, col);
                 self.font
                     .draw_char(&surface, (col - first) * fw, 0, cell.ch, cell.fg, cell.bg);
-                self.painted[row * self.cols + col] = Some(cell);
+                // A column the clamp below never blits is not recorded as painted.
+                if col < delivered {
+                    self.painted[row * self.cols + col] = Some(cell);
+                }
             }
-            let x = first * fw;
-            let w = (span * fw).min(paint_width.saturating_sub(x));
             if w > 0 {
                 self.screen.blit(x, row * fh, w, fh, span * fw, &strip);
             }

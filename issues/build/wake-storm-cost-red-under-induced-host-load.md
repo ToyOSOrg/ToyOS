@@ -27,6 +27,16 @@ no more; past this, something in the claim grows with the size of the storm
 why this file exists: the next reader of this name gets a sighting instead of
 nothing.
 
+## Second sighting, hosted shard, 2026-08-26 — the other instrument
+
+Run 32909059602 `guest (1)`, the small-fix batch's pull request (a diff of
+tracker closes and unrelated small fixes, none reaching the scheduler or
+`post_n`): the same ratio assertion red, 183 of 184 names green beside it. A
+hosted shard is four cores running one eight-vCPU guest, so it is loaded by
+construction — which means both recorded firings are on oversubscribed hosts
+and none on a quiet one. That is half the denominator the section below asks
+for; the quiet-host arm is still the missing half.
+
 ## What this is and is not evidence about
 
 The assertion is a *ratio* of guest TSC deltas, so a host that deschedules the

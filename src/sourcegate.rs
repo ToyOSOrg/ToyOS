@@ -265,8 +265,6 @@ const RETIRED_REGISTRY: &[&str] = &[
 /// `SYS_INBOX_SUBMIT` on 2026-08-20 keeping numbers 89 and 90, the same
 /// arguments and the same struct layouts, so nothing was deleted and no number
 /// is protectable by forbidding the old spelling.
-/// `issues/build/retired-inbox-op-names-are-a-spelling-behind.md` records what
-/// the rename left this table owing.
 const RETIRED_ABI_NAMES: &[&str] = &[
     // Syscall 107. Nothing called it; a region's mappings go with its last
     // handle, so the handle is the whole of letting go.
@@ -277,11 +275,17 @@ const RETIRED_ABI_NAMES: &[&str] = &[
     "CENSUS_TOTAL",
     "CENSUS_BREAKDOWN",
     // Inbox op code 2. No submitter anywhere: this kernel's watches are
-    // one-shot and mio re-arms rather than cancels. Spelled as it was when it
-    // was deleted; op code 4 is missing from this table entirely, and both
-    // gaps are
-    // `issues/build/retired-inbox-op-names-are-a-spelling-behind.md`.
+    // one-shot and mio re-arms rather than cancels. Retired under both the
+    // spelling it carried when it was deleted and the one a reintroduction
+    // would write in today's vocabulary.
     "IORING_OP_POLL_REMOVE",
+    "OP_POLL_REMOVE",
+    "OP_CANCEL",
+    // Inbox op code 4, `IORING_OP_CLOSE`: the one handle path that could not
+    // obey the bad-handle policy, running under the ring's own lock. Same two
+    // vocabularies.
+    "IORING_OP_CLOSE",
+    "OP_CLOSE",
 ];
 
 /// Everything this repository compiles into the guest.

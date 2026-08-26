@@ -35,6 +35,8 @@
 //! kernel comes from the IPI being redelivered, which is hardware and not this
 //! protocol.
 
+#![cfg(feature = "loom")]
+
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
 use kernel_loom::shootdown::Shootdown;

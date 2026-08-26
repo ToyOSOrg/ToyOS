@@ -10,11 +10,28 @@ fn layouts() -> impl Iterator<Item = &'static str> {
     toyos_keymap::LAYOUTS.iter().map(|l| l.name)
 }
 
+/// What [`surface::LAYOUT_CONFIG`] says, if it says a layout this table
+/// still has. Not what a translator is actually using — the config is the
+/// last thing anyone asked for, and a surface that missed the notification
+/// can disagree with it; that half stays unanswerable until the query
+/// syscall in `issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md`
+/// exists.
+fn current() -> Option<String> {
+    let name = std::fs::read_to_string(surface::LAYOUT_CONFIG).ok()?;
+    let name = name.trim();
+    toyos_keymap::by_name(name).map(|_| name.to_string())
+}
+
 pub fn main(args: Vec<String>) {
     match args.first().map(|s| s.as_str()) {
         Some("--list") => {
+            let active = current();
             for name in layouts() {
-                println!("{name}");
+                if active.as_deref() == Some(name) {
+                    println!("{name} (current)");
+                } else {
+                    println!("{name}");
+                }
             }
         }
         Some("detect") => detect(),
@@ -50,7 +67,9 @@ fn set(name: &str) {
 
 fn interactive_select() {
     let names: Vec<&str> = layouts().collect();
-    let mut selected: usize = 0;
+    let active = current();
+    let mut selected: usize =
+        active.and_then(|a| names.iter().position(|&n| n == a)).unwrap_or(0);
     std::os::toyos::io::set_stdin_raw(true);
 
     draw_menu(&names, selected);

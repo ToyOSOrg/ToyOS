@@ -401,6 +401,8 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
                     log!("  Process: {} pid={} state={}", proc.name_str(), proc.pid(), if proc.tearing_down() { "TearingDown" } else { "Live" });
                 }
             }
+        } else {
+            log!("  [Process: PROCESS_TABLE locked, skipping]");
         }
 
         let user_rip = percpu::syscall_rip();

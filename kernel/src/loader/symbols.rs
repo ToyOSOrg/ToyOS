@@ -78,11 +78,12 @@ pub fn read_symtab(backing: &dyn FileBacking, layout: &Layout) -> Option<(Vec<u8
 /// backtraces name their frames.
 ///
 /// Policy, and generous by design: the largest tables any binary in this tree
-/// has are `bin/toyos-cc`'s 13,152,031 bytes, and `bin/sshd` is next at
-/// 3,769,757 — so this is the next power of two above the real worst case. What
-/// a caller sees when it is hit is a log line naming the binary and a process
-/// whose backtraces are bare addresses; it is never a spawn failure, because a
-/// program the kernel cannot narrate is still a program the machine can run.
+/// has are `bin/toyos-cc`'s 4,366,771 bytes, and `bin/sshd` is next at
+/// 2,953,863 — under a third of this bound, headroom rather than the tightest
+/// power of two above it. What a caller sees when it is hit is a log line
+/// naming the binary and a process whose backtraces are bare addresses; it is
+/// never a spawn failure, because a program the kernel cannot narrate is
+/// still a program the machine can run.
 pub const MAX_SYMBOL_BYTES: usize = 16 * 1024 * 1024;
 
 /// The table a process's backtraces are named from, read off its own file.

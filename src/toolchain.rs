@@ -1834,7 +1834,8 @@ mod tests {
 
     /// A repository with `main` and the three witnessed trees on it.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("toyos-standing-{name}"));
+        let dir =
+            std::env::temp_dir().join(format!("toyos-standing-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         for tree in SYSROOT_SOURCES {
             fs::create_dir_all(dir.join(tree)).unwrap();
@@ -2025,7 +2026,8 @@ mod tests {
     /// A `rust/` whose sysroot carries a claim by `who`, written the way
     /// [`record_claimant`] writes one and as old as the ghost below was.
     fn claimed_by(name: &str, who: &Path) -> PathBuf {
-        let rust_dir = std::env::temp_dir().join(format!("toyos-claim-{name}"));
+        let rust_dir =
+            std::env::temp_dir().join(format!("toyos-claim-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&rust_dir);
         fs::create_dir_all(rust_dir.join("build")).unwrap();
         let when = SystemTime::now()
@@ -2040,7 +2042,8 @@ mod tests {
 
     /// A `rust/` whose sysroot was built by somebody who left no record.
     fn unrecorded(name: &str) -> PathBuf {
-        let rust_dir = std::env::temp_dir().join(format!("toyos-claim-{name}"));
+        let rust_dir =
+            std::env::temp_dir().join(format!("toyos-claim-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&rust_dir);
         fs::create_dir_all(rust_dir.join("build")).unwrap();
         rust_dir
@@ -2135,7 +2138,8 @@ mod tests {
     /// livelock.
     #[test]
     fn a_claim_whose_holder_is_gone_is_staleness_and_not_a_claim() {
-        let ghost = std::env::temp_dir().join("toyos-a-worktree-that-was-removed");
+        let ghost = std::env::temp_dir()
+            .join(format!("toyos-a-worktree-that-was-removed-claim-{}", std::process::id()));
         let _ = fs::remove_dir_all(&ghost);
         assert!(holder_gone(&ghost));
 
@@ -2250,7 +2254,8 @@ mod tests {
         git(&root, &["checkout", "-qb", "wt/abi"]);
         fs::write(root.join("toyos-abi/src/lib.rs"), b"pub struct A(pub u64);\n").unwrap();
 
-        let ghost = std::env::temp_dir().join("toyos-a-worktree-that-was-removed");
+        let ghost = std::env::temp_dir()
+            .join(format!("toyos-a-worktree-that-was-removed-abi-{}", std::process::id()));
         let _ = fs::remove_dir_all(&ghost);
         assert_eq!(resolution(&root, &claimed_by("ghost-abi", &ghost)), Resolution::Claim);
 
@@ -2266,7 +2271,8 @@ mod tests {
     /// [`assert_toolchain_is_honest`] is this function over the real `bin/`.
     #[test]
     fn a_toolchain_bin_without_cargo_is_one_rustup_narrates() {
-        let stage2 = std::env::temp_dir().join("toyos-toolchain-layout");
+        let stage2 =
+            std::env::temp_dir().join(format!("toyos-toolchain-layout-{}", std::process::id()));
         let _ = fs::remove_dir_all(&stage2);
         let bin = stage2.join("bin");
         fs::create_dir_all(&bin).unwrap();
@@ -2321,7 +2327,8 @@ mod tests {
 
     #[test]
     fn the_build_leaves_the_fork_byte_identical_even_after_a_killed_one() {
-        let rust_dir = std::env::temp_dir().join("toyos-source-override");
+        let rust_dir =
+            std::env::temp_dir().join(format!("toyos-source-override-{}", std::process::id()));
         let _ = fs::remove_dir_all(&rust_dir);
         fs::create_dir_all(rust_dir.join("library/std")).unwrap();
         let manifest = rust_dir.join(STD_MANIFEST);
@@ -2435,7 +2442,8 @@ mod tests {
     /// `stale`, or every CI shard refuses the toolchain it just downloaded.
     #[test]
     fn a_std_fork_edit_is_seen_and_a_missing_fork_is_not_a_verdict() {
-        let rust_dir = std::env::temp_dir().join("toyos-std-fork-witness");
+        let rust_dir =
+            std::env::temp_dir().join(format!("toyos-std-fork-witness-{}", std::process::id()));
         let _ = fs::remove_dir_all(&rust_dir);
         fs::create_dir_all(rust_dir.join("build")).unwrap();
 

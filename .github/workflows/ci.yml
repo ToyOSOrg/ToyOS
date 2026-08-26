@@ -924,6 +924,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -o pipefail
           cargo run -- --merge-health 2>&1 | tee /tmp/merge-health.log
           {
             echo "### merge health"

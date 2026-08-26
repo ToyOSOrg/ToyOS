@@ -66,6 +66,10 @@ pub enum Shape {
     /// no bytes at all, which would divide by zero on the way to the frame
     /// count.
     PartialFrame { period_bytes: usize, frame_bytes: usize },
+    /// A rate too low for [`period_nanos`] and [`ramp_frames`] to stay
+    /// non-zero: `period_nanos` divides by it, and `ramp_frames` is `rate * 5
+    /// / 1000`, zero below 200 Hz.
+    Rate(u32),
 }
 
 impl core::fmt::Display for Shape {
@@ -83,6 +87,7 @@ impl core::fmt::Display for Shape {
             Shape::PartialFrame { period_bytes, frame_bytes } => {
                 write!(f, "a {period_bytes}-byte period is not a whole number of {frame_bytes}-byte frames")
             }
+            Shape::Rate(r) => write!(f, "{r} Hz leaves the period grid or the connect ramp at zero"),
         }
     }
 }
@@ -95,6 +100,7 @@ pub fn period_frames(
     num_buffers: usize,
     device_channels: u16,
     device_period_bytes: usize,
+    device_rate: u32,
 ) -> Result<usize, Shape> {
     if num_buffers < 2 {
         return Err(Shape::Shallow(num_buffers));
@@ -107,6 +113,9 @@ pub fn period_frames(
     }
     if device_channels != 1 && device_channels != 2 {
         return Err(Shape::Channels(device_channels));
+    }
+    if ramp_frames(device_rate) == 0 {
+        return Err(Shape::Rate(device_rate));
     }
     let frame_bytes = device_channels as usize * 2;
     if device_period_bytes == 0 || !device_period_bytes.is_multiple_of(frame_bytes) {
@@ -188,7 +197,7 @@ mod tests {
     /// machine on the null sink.
     #[test]
     fn the_shipped_device_shape_is_served() {
-        assert!(matches!(period_frames(8, 2, 512), Ok(128)));
+        assert!(matches!(period_frames(8, 2, 512, 44_100), Ok(128)));
     }
 
     /// Every constraint the mix loop imposes is refused by name rather than by
@@ -197,16 +206,25 @@ mod tests {
     /// supposed to catch it.
     #[test]
     fn a_shape_the_mixer_cannot_render_is_refused_and_nothing_divides_by_zero() {
-        assert!(matches!(period_frames(1, 2, 512), Err(Shape::Shallow(1))));
-        assert!(matches!(period_frames(32, 2, 512), Err(Shape::Deep(32))));
-        assert!(matches!(period_frames(6, 2, 512), Err(Shape::Uneven(6))));
-        assert!(matches!(period_frames(8, 0, 512), Err(Shape::Channels(0))));
-        assert!(matches!(period_frames(8, 6, 512), Err(Shape::Channels(6))));
-        assert!(matches!(period_frames(8, 2, 0), Err(Shape::PartialFrame { .. })));
-        assert!(matches!(period_frames(8, 2, 513), Err(Shape::PartialFrame { .. })));
+        assert!(matches!(period_frames(1, 2, 512, 44_100), Err(Shape::Shallow(1))));
+        assert!(matches!(period_frames(32, 2, 512, 44_100), Err(Shape::Deep(32))));
+        assert!(matches!(period_frames(6, 2, 512, 44_100), Err(Shape::Uneven(6))));
+        assert!(matches!(period_frames(8, 0, 512, 44_100), Err(Shape::Channels(0))));
+        assert!(matches!(period_frames(8, 6, 512, 44_100), Err(Shape::Channels(6))));
+        assert!(matches!(period_frames(8, 2, 0, 44_100), Err(Shape::PartialFrame { .. })));
+        assert!(matches!(period_frames(8, 2, 513, 44_100), Err(Shape::PartialFrame { .. })));
         // A shape the free list *can* hold, which is what makes the ceiling a
         // ceiling rather than a refusal of everything unusual.
-        assert!(matches!(period_frames(16, 1, 512), Ok(256)));
+        assert!(matches!(period_frames(16, 1, 512, 44_100), Ok(256)));
+    }
+
+    /// The rate arm: below 200 Hz the connect ramp is zero frames, and the
+    /// refusal fires before `ramp_frames`/`period_nanos` run on it at all.
+    #[test]
+    fn a_rate_too_low_for_the_ramp_or_the_grid_is_refused() {
+        assert!(matches!(period_frames(8, 2, 512, 0), Err(Shape::Rate(0))));
+        assert!(matches!(period_frames(8, 2, 512, 199), Err(Shape::Rate(199))));
+        assert!(matches!(period_frames(8, 2, 512, 200), Ok(128)));
     }
 
     /// **The inequality the mix loop's scratch rests on.** `mix_client` asserts

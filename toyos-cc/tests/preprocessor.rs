@@ -22,6 +22,14 @@ fn hash_error_is_catchable_and_names_the_line() {
     says("int a;\n#error no thank you\n", "e.c", "e.c:2");
 }
 
+/// Every preprocessed file opens with a synthetic `# 1 "file"` line marker;
+/// its own trailing newline must not double-count against the first real
+/// line.
+#[test]
+fn a_parse_time_refusal_on_the_first_line_is_not_a_line_late() {
+    says("int b __attribute__((weak));\n", "loc.c", "loc.c:1:");
+}
+
 #[test]
 fn a_missing_quoted_include_is_catchable_and_names_the_file() {
     says("#include \"not-here.h\"\n", "q.c", "cannot find include file: not-here.h");
