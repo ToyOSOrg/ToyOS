@@ -2030,16 +2030,20 @@ pub const KNOWN_RED: &[Red] = &[
         what: "`no \\`i8042:\\` line above the prompt: \\`/boot/toyos/kernel.log\\` never reached the \
                scrollback` — **and the panel it printed disproves that sentence**: every line on \
                it is stamped `0.000` and comes from the first screenful of the boot, so the seed \
-               reached the console and the view was at its *head*. The assertion wants the end of \
-               the seed and `screendump_while` stops at the first frame carrying the prompt, so \
-               nothing orders the seed's paint against it. `ALONE: GREEN, and it was alone both \
-               times — a rate and not a classification`. **Not about the diff it was found on**, \
-               which is the i8042 interrupt tally: that change writes no boot line and removes \
-               none, so the set of `i8042:` lines this test looks for is identical either side of \
-               it",
+               reached the console and the view was at its *head*. `ALONE: GREEN, and it was \
+               alone both times — a rate and not a classification`. **Not about the diff it was \
+               found on**, which is the i8042 interrupt tally: that change writes no boot line \
+               and removes none, so the set of `i8042:` lines this test looks for is identical \
+               either side of it. **Both halves of the test have moved since.** The wait is now \
+               for the prompt *and* the seed's witness, where `screendump_while` stopped at the \
+               first frame carrying the prompt and nothing ordered the seed's paint against it; \
+               and the message no longer names a cause it did not establish — it reads the byte \
+               count `console: ready` publishes and says whether the log reached the scrollback \
+               at all. A recurrence therefore arrives already told apart, and would be a view \
+               that is not at the bottom rather than a console that started blank",
         evidence: "PR #111 run 32040411208, job 95418635461 (`guest (3)`); the isolated re-run in \
                    the same job was green",
-        source: "issues/diagnostics/console-scrollback-can-sit-at-the-head-of-the-seeded-log.md",
+        source: "issues/hardware/collapsed-scroll-paint-unasserted.md",
         measured: "2026-08-17",
     },
     // ---------------------------------------------------------------------
@@ -2732,6 +2736,77 @@ pub const KNOWN_RED: &[Red] = &[
                    laptop: 1 red, then 3 of 3 green at load 3.1 with the neighbour still present",
         source: "issues/boot-media/kernel-log-file-reds-beside-other-guests-and-is-green-alone.md",
         measured: "2026-08-22",
+    },
+    // ---------------------------------------------------------------------
+    // One same-session A/B, six full suites an arm, interleaved on one dev
+    // host: `wt/toyos-freeze` (the scheduler's staleness rule) against
+    // `origin/main`. Three rows because three names fired and no two of them
+    // are one measurement — and the `main` row is here for the reason the
+    // branch rows are, because an index that carries only the arm under
+    // suspicion is an index that cannot answer whether the arm is the cause.
+    // ---------------------------------------------------------------------
+    Red {
+        test: "fat_backing_revoked",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::fires(3, 6),
+        standing: Standing::Disputed(
+            "the arms do not separate at this sample size, and nobody may read this row either \
+             way. 3 of 6 against 0 of 6 on one name is p ~ 0.18 by Fisher's exact test, and the \
+             *class* — a volume checker complaining after a loaded run — fired in both arms, 4 of \
+             6 on the branch and 1 of 6 on `main`. The coupling is real and is named rather than \
+             denied: the branch refuses a CPU whose doorbell edge has stood longer than a pass may \
+             take, and at boot several programs are spawned before any CPU has run one, so a \
+             two-CPU guest's boot burst spreads differently and a verdict that depends on when \
+             `iod` drains relative to an unlink can change phase on that alone. What retires or \
+             confirms it is the same A/B on a quiet host: six runs an arm or more. The six that \
+             were started to get it were abandoned — the first took 417.4 s against the 58-79 s of \
+             every run above it and `pgrep` found three other worktrees' suites on the box, which \
+             `tests/CLAUDE.md` says is discarded and never corrected",
+        ),
+        what: "`the unlink-and-reallocate cycle left the log volume breaking the format: 1 \
+               cluster(s) from 20 are marked allocated and no directory entry reaches them` — one \
+               leaked cluster on `/log`, found by `toyos-fat32-check` after the guest had shut \
+               down. `ALONE fat_backing_revoked: GREEN` every time",
+        evidence: "six full `cargo test` runs on `wt/toyos-freeze` at 8a7b82ee, 58-79 s each, \
+                   interleaved in one session with six on `origin/main` at 16c05999",
+        source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
+        measured: "2026-08-27",
+    },
+    Red {
+        test: "device_claim_lifetime",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Disputed(
+            "one sighting in the same six-suite arm as the `fat_backing_revoked` row above, in the \
+             one run that produced two reds, and a single sample is no rate. It is recorded apart \
+             from that row because two guests failing in one phase is not by itself a claim about \
+             a common cause — `Instrument::DevHostLoaded`'s own doc carries the arithmetic — and \
+             folding them into one measurement would have invented the claim it declines to make",
+        ),
+        what: "`exit code Some(101)` from its guest binary, with \
+               `exit: test_rs_device_claim_lifeti pid=62 code=101 cpu=136ms` on the wire; \
+               `ALONE device_claim_lifetime: GREEN`",
+        evidence: "one of six full `cargo test` runs on `wt/toyos-freeze` at 8a7b82ee, the same \
+                   run that reddened `fat_backing_revoked`",
+        source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
+        measured: "2026-08-27",
+    },
+    Red {
+        test: "esp_filesystem",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Disputed(
+            "**this one is `main`'s**, and it is what stops the two rows above being read as a \
+             regression on sight: the third name of one shape — a volume checker complaining after \
+             a loaded run — fired on the unmodified tree in the same session, on the same \
+             instrument, in six runs. One sighting, so no rate; recorded because a row measured \
+             only on the arm under suspicion cannot answer whether the arm is the cause",
+        ),
+        what: "red in the wide phase, `ALONE esp_filesystem: GREEN`",
+        evidence: "one of six full `cargo test` runs on `origin/main` at 16c05999, 58-79 s each, \
+                   interleaved in one session with six on `wt/toyos-freeze`",
+        source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
+        measured: "2026-08-27",
     },
 ];
 

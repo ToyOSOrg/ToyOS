@@ -28,7 +28,7 @@ use window::Screen;
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handles, mark_dead, note_closed, Client,
     ClientFrame, ClientRx, Dead, DropReason, PendingConn, Win, HANDSHAKE_TIMEOUT,
-    MAX_CLIPBOARD_BYTES, MAX_PENDING_CONNS,
+    MAX_CLIPBOARD_BYTES, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::FrameStats;
@@ -707,6 +707,17 @@ impl Session {
     fn dispatch(&mut self, frames: Vec<ClientFrame>) {
         for frame in frames {
             let handle = frame.handle;
+            // A payload filling the kept buffer declared more than any client
+            // may inline, so what arrived is a prefix of what was sent.
+            if frame.payload().len() >= MAX_KEPT_PAYLOAD {
+                eprintln!(
+                    "compositor: refusing an inline payload past {} bytes from client {}",
+                    window::MAX_INLINE_PAYLOAD,
+                    handle.0
+                );
+                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                continue;
+            }
             match frame.msg_type {
                 window::MSG_CREATE_WINDOW => self.create_window(frame),
                 window::MSG_PRESENT => {
@@ -1202,14 +1213,15 @@ impl Session {
 
     /// GUI+V: hand the window at `idx` the clipboard.
     ///
-    /// Over 4096 bytes it goes through shared memory — a region made here and
-    /// moved to the window with the message that says how much of it is text.
+    /// Past [`window::MAX_INLINE_PAYLOAD`] it goes through shared memory — a
+    /// region made here and moved to the window with the message that says how
+    /// much of it is text. The same number the window's receive buffer is.
     fn paste(&mut self, idx: usize) {
         if self.clipboard.is_empty() {
             return;
         }
         let win = &self.stack[idx];
-        if self.clipboard.len() <= 4096 {
+        if self.clipboard.len() <= window::MAX_INLINE_PAYLOAD {
             if let Err(e) = win
                 .client
                 .conn

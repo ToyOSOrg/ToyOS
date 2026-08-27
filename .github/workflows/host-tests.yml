@@ -647,6 +647,33 @@ jobs:
             exit 1
           fi
 
+      # **The scheduler's staleness rule, and it is the simulator rather than
+      # loom.** What `CpuHandle::answering` decides is not an ordering — it is
+      # whether a CPU's published load is still a claim about the present — so
+      # the model that can show it wrong is a whole machine with a CPU that
+      # takes no passes, which is `scenarios::stopped_cpu`.
+      # `placement-ignores-staleness` answers `true` for every CPU, which is
+      # what every path that chooses one believed before the rule existed, and
+      # `a_stopped_cpu_stops_taking_work` must red.
+      - name: toyos-sched-sim placement staleness has teeth
+        run: |
+          set -o pipefail
+          echo "=== toyos-sched-sim --features placement-ignores-staleness --test policy (must red)" \
+            | tee -a /tmp/host.log
+          if cargo test -p toyos-sched-sim \
+               --features placement-ignores-staleness --test policy 2>&1 \
+               | tee /tmp/placement-staleness.log | tee -a /tmp/host.log; then
+            echo "the policy suite passed with a stopped cpu's load believed: the model has no teeth" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'a_stopped_cpu_stops_taking_work \.\.\. FAILED' \
+               /tmp/placement-staleness.log; then
+            echo "the staleness-ignored build failed without a_stopped_cpu_stops_taking_work reaching a verdict: this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
       # `userland/.cargo/config.toml` cross-compiles by default, so a userland
       # crate's host tests have to name the host. `calc` is here for the reason
       # the pure crates above are: its arithmetic is decided without a guest,

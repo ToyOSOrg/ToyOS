@@ -49,3 +49,10 @@ doorbell-kick-relaxed = []
 # that policy either; the crate declares the name only so `cfg` checking knows
 # it.
 push-fence-relaxed = []
+# The staleness test's negative control: `cpu.rs`'s `CpuHandle::answering`
+# answers `true` for every CPU under it, which is what every path that chooses a
+# CPU believed before it existed. The simulator's
+# `a_stopped_cpu_stops_taking_work` must red when it is on. No kernel build
+# selects it, and one that did would place tasks onto CPUs that never pick
+# them up.
+placement-ignores-staleness = []

@@ -35,19 +35,19 @@ commit and this branch may not reopen it. Re-deriving the fields kernel-side was
 the alternative and is the thing the single formatter exists to prevent — two
 implementations of one line, and the panel is the one that would drift.
 
-## The fix, for whoever opens the ABI next
+## The ABI half is in the tree; the kernel half is what is left
 
-```rust
-impl LogRecord {
-    /// The line with `tag` inside the bracket: `[kernel 0.123 cpu0] …`.
-    pub fn tagged(&self, tag: &str) -> Tagged<'_>;
-}
-```
+`LogRecord::tagged(&self, tag: &str) -> Tagged<'_>` exists, and `Display` is
+`fmt_with_tag(f, "")` over the same private renderer — one implementation, and
+`a_tag_goes_through_the_bracket_and_an_empty_one_changes_nothing` holds the
+empty tag to `Display`'s bytes.
 
-`Display` becomes `self.tagged("")` over one private `fmt_with_tag`, so there is
-still exactly one implementation, and `log::console::write_line` loses its
-`strip_prefix` and its `tagged` flag. `logd` wants the same wrapper for its own
-wall-clock prefix, so the next ABI landing has two callers for it.
+What remains is the consumer, and it is kernel-side, so it could not ride the
+ABI landing: `kernel/src/log/console.rs`'s `Line::write_str` still strips a
+leading `[` from the first fragment and writes `[kernel ` in its place. It
+should call `record.tagged("kernel")` and lose both the `strip_prefix` and the
+`tagged` flag. `logd` wants the same wrapper for its own wall-clock prefix, so
+the kernel PR has two call sites to convert.
 
 ## What it is not
 

@@ -32,6 +32,8 @@ const EAGAIN: i32 = 11;
 const S_IFREG: u32 = 0o100000;
 const S_IFIFO: u32 = 0o010000;
 const S_IFCHR: u32 = 0o020000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFLNK: u32 = 0o120000;
 
 // Helper: set errno from toyos-abi error
 
@@ -233,15 +235,55 @@ pub unsafe extern "C" fn chdir(path: *const u8) -> i32 {
     }
 }
 
-// stat by path: open + fstat + close
+/// Whether `path` names a directory, asked through `readdir`.
+///
+/// `open` refuses every directory, so this is the only way to tell. The buffer
+/// is deliberately tiny — only whether the kernel accepted the path matters,
+/// and a listing that does not fit is reported rather than written, so a
+/// directory too large to list is still a yes.
+unsafe fn is_dir(path_bytes: &[u8]) -> bool {
+    let mut probe = [0u8; 1];
+    matches!(
+        syscall::readdir(path_bytes, &mut probe),
+        Ok(_) | Err(syscall::SyscallError::ResourceExhausted)
+    )
+}
+
+/// Fill `buf` with what a directory looks like to `stat`: a mode and nothing
+/// else, because `readdir` answers existence and the kernel keeps no size or
+/// mtime for one.
+unsafe fn stat_a_directory(buf: *mut Stat) -> i32 {
+    if !buf.is_null() {
+        ptr::write_bytes(buf, 0, 1);
+        (*buf).st_mode = S_IFDIR | 0o755;
+    }
+    0
+}
+
+// stat by path: open + fstat + close, or readdir for what open refuses
 #[no_mangle]
 pub unsafe extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
     stat_impl(path, buf)
 }
 
+/// `stat` that does not follow a final symbolic link.
+///
+/// `SYS_READLINK` is what distinguishes one, and it is asked first: it succeeds
+/// on a link and on nothing else, so a success is both the answer and the
+/// target length `st_size` reports. Everything else is [`stat`].
 #[no_mangle]
 pub unsafe extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
-    // ToyOS has no symlinks, lstat = stat
+    let path_bytes = c_str_to_bytes(path);
+    let mut target = [0u8; 4096];
+    if let Ok(n) = syscall::readlink(path_bytes, &mut target) {
+        if !buf.is_null() {
+            ptr::write_bytes(buf, 0, 1);
+            let s = &mut *buf;
+            s.st_mode = S_IFLNK | 0o777;
+            s.st_size = n as i64;
+        }
+        return 0;
+    }
     stat_impl(path, buf)
 }
 
@@ -254,6 +296,7 @@ unsafe fn stat_impl(path: *const u8, buf: *mut Stat) -> i32 {
             syscall::close(f);
             result
         }
+        Err(_) if is_dir(path_bytes) => stat_a_directory(buf),
         Err(e) => set_errno(e),
     }
 }
@@ -264,6 +307,7 @@ pub unsafe extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
     let path_bytes = c_str_to_bytes(path);
     match syscall::open(path_bytes, OpenFlags::READ) {
         Ok(f) => { syscall::close(f); 0 }
+        Err(_) if is_dir(path_bytes) => 0,
         Err(e) => set_errno(e),
     }
 }

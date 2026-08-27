@@ -17,6 +17,13 @@ pub use toyos_keymap::{Emit, Mods, Translator};
 // Window flags
 pub const WINDOW_FLAG_TOPMOST: u8 = 1;
 
+/// The largest payload a client sends inline; past it a region moves instead.
+///
+/// One number both ends read: `ipc::FrameRx` discards whatever a frame
+/// declares past what its receiver keeps and tells neither end, so a sender
+/// holding the larger of two such numbers loses the tail in silence.
+pub const MAX_INLINE_PAYLOAD: usize = 4096;
+
 // Client → Compositor
 pub const MSG_CREATE_WINDOW: u32 = 1;
 pub const MSG_PRESENT: u32 = 2;
@@ -352,7 +359,7 @@ pub fn clipboard_set(text: &str) -> Result<(), CreateError> {
 
     let conn = endow::service("compositor")?;
     let bytes = text.as_bytes();
-    if bytes.len() <= 4096 {
+    if bytes.len() <= MAX_INLINE_PAYLOAD {
         let _ = conn.send_bytes(MSG_CLIPBOARD_SET, bytes);
     } else if let Ok(mut shm) = SharedMemory::create(bytes.len()) {
         shm.as_mut_slice()[..bytes.len()].copy_from_slice(bytes);
@@ -558,7 +565,7 @@ impl Window {
                 Event::Resized
             }
             MSG_CLIPBOARD_PASTE => {
-                let mut buf = [0u8; 4096];
+                let mut buf = [0u8; MAX_INLINE_PAYLOAD];
                 let Ok(n) = self.conn.recv_bytes(header, &mut buf) else {
                     return Event::Close;
                 };

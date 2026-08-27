@@ -97,6 +97,7 @@
 //! doing what a sweep is for.
 
 use toyos_sched::cpu::Balance;
+use toyos_sched::cpu::STALE_PASS_NS;
 use toyos_sched::fair::QUANTUM_NS;
 use toyos_sched_sim::choice::ChoiceStream;
 use toyos_sched_sim::explore::{run, Outcome};
@@ -1380,4 +1381,45 @@ fn a_runnable_task_waits_at_most_one_dispatch_per_rival() {
              under it — the bound has stopped constraining anything",
         );
     }
+}
+
+/// **What a machine that has lost a CPU does with everything it spawns next.**
+///
+/// The measurement is `never_ran`: programs created and never given a single
+/// instruction. Every other number in this file is a wait that *ended*, and a
+/// task nobody dispatches contributes to none of them — which is why a suite
+/// built from maxima reads such a machine as a quiet one.
+///
+/// **The bound is derived.** A stopped CPU is a legal target while its doorbell
+/// edge is still down, or while [`toyos_sched::cpu::STALE_PASS_NS`] has not
+/// elapsed since the pass it never took; both windows close at `STALE_PASS_NS`
+/// from clock zero, so the losses are the launcher's spawns inside it.
+///
+/// Measured over the sweep: **1 program of 24 on every one of 16 seeds**, where
+/// `--features placement-ignores-staleness` — the whole rule reverted — loses
+/// **10 at worst and 114 in total**, and this assertion reds.
+#[test]
+fn a_stopped_cpu_stops_taking_work() {
+    let scenario = scenarios::stopped_cpu();
+    // Ceiling division: the spawn at `STALE_PASS_NS` itself is already outside
+    // the window, and the one before it is the last that can be lost.
+    let inside_the_window =
+        (STALE_PASS_NS as usize).div_ceil(scenarios::STOPPED_CPU_PERIOD_NS as usize);
+    let mut worst = 0usize;
+    let mut total = 0usize;
+    sweep(&scenario, SEEDS, |outcome| {
+        worst = worst.max(outcome.never_ran);
+        total += outcome.never_ran;
+    });
+    println!(
+        "stopped_cpu: worst never_ran {worst}, total {total} over {SEEDS} seeds, \
+         bound {inside_the_window} of {}",
+        scenarios::STOPPED_CPU_PROGRAMS,
+    );
+    assert!(
+        worst <= inside_the_window,
+        "a stopped cpu took {worst} of {} programs, against the {inside_the_window} its \
+         published numbers are believed for",
+        scenarios::STOPPED_CPU_PROGRAMS,
+    );
 }

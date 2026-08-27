@@ -57,9 +57,10 @@ capture carries one. A wait that reports a kernel death without the text
 explaining it is no longer expressible, and every arm that formats the field
 gets the report whether or not anyone was ever going to edit it. `before` and
 `serial` are handed over in that order, so a death *before* the test announced
-itself is recovered too (`issues/build/a-failure-message-drops-the-lines-before-the-test-started.md`
-is that hole's general form and stays open — this closes it for a kernel death
-only). Gated in both directions under `serial_vocabulary`, and against the real
+itself is recovered too. That hole's general form — a death with no report
+vocabulary in it at all, where the arm prints an empty `serial` — is closed at
+the same field: `WaitVerdict::for_test` carries the window when `started` is
+false. Gated in both directions under `serial_vocabulary`, and against the real
 `#DF` `double_fault_stack` already puts on the wire.
 
 **So what the next sighting shows that this one did not** — every line of it,

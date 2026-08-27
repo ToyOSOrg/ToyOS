@@ -8,7 +8,23 @@
 
 use toyos_abi::syscall::{self, SyscallError};
 use crate::{Device, AsHandle};
+use crate::ipc::IpcPayload;
 use toyos_abi::RawHandle;
+
+/// SAFETY: each is `#[repr(C)]` over `u32`/`u16`/`u8` fields and `RawHandle`s
+/// (`repr(transparent)` over a `u32`), so none holds a pointer or a field with
+/// an invalid bit pattern, and the padding-free layout is the `const` assertion
+/// beside each declaration in `toyos-abi` — the one its `as_bytes` already
+/// reads on to publish these bytes.
+macro_rules! device_info {
+    ($($t:ty),* $(,)?) => { $(unsafe impl IpcPayload for $t {})* };
+}
+device_info!(
+    toyos_abi::FramebufferInfo,
+    toyos_abi::net::NicInfo,
+    toyos_abi::virtio_sound::VirtioSoundInfo,
+    toyos_abi::hda::HdaInfo,
+);
 
 /// Read a claim's description, whose buffer fields are handles this call
 /// installs.
@@ -19,15 +35,23 @@ use toyos_abi::RawHandle;
 /// twice and adopting both answers closes one buffer twice. A mode set is the
 /// exception and says so: [`FramebufferDev::set_resolution`] remints, and its
 /// answer is the fresh set.
-pub(crate) fn read_info<T: Copy>(dev: &Device) -> Result<T, SyscallError> {
+///
+/// Bounded by [`IpcPayload`] and not by `Copy`: the answer's bytes are
+/// *reinterpreted* as a `T`, so what the bound has to promise is that every bit
+/// pattern of that width is one — the contract [`crate::ipc::recv_payload`]
+/// reads on, held here by the kernel rather than by a peer.
+pub(crate) fn read_info<T: IpcPayload>(dev: &Device) -> Result<T, SyscallError> {
     let size = core::mem::size_of::<T>();
-    let mut val = unsafe { core::mem::zeroed::<T>() };
+    let mut val = core::mem::MaybeUninit::<T>::uninit();
+    // SAFETY: the slice covers exactly the `T` being filled, and `IpcPayload`
+    // promises every bit pattern the read can write is a valid `T`.
     let buf = unsafe {
-        core::slice::from_raw_parts_mut(&mut val as *mut T as *mut u8, size)
+        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, size)
     };
     let n = syscall::read(dev.0.0, buf)?;
     assert_eq!(n, size, "device info size mismatch");
-    Ok(val)
+    // SAFETY: the assertion above proves the read filled all `size` bytes.
+    Ok(unsafe { val.assume_init() })
 }
 
 pub struct Keyboard(pub(crate) Device);

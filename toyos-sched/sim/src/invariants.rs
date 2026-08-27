@@ -280,7 +280,10 @@ fn check_sleeping_cpus(vm: &mut Vm<'_>) {
     let mut problems = Vec::new();
     let (halted, pending) = vm.hw.with(|s| (s.halted.clone(), s.pending_ipi.clone()));
     for cpu in 0..vm.scenario.cpus {
-        if !halted[cpu] || pending[cpu] > 0 {
+        // The stopped CPU is the modelled fault, not a protocol break: it is
+        // *given* work it never takes, which is the whole of what the scenario
+        // stages. Every other CPU still answers for itself.
+        if vm.is_stopped(cpu) || !halted[cpu] || pending[cpu] > 0 {
             continue;
         }
         if !vm.cpus[cpu].rq().is_empty() {
@@ -1059,12 +1062,37 @@ fn check_boost_windows(vm: &mut Vm<'_>) {
 /// I7 and I10, checked once at the end of a run rather than after every step:
 /// every task finalized exactly once, nothing left queued, and the accounting
 /// adds up to the time the CPUs actually spent.
+/// A task the run left behind on the CPU that stopped, which I10 does not judge:
+/// a machine with a CPU that takes no passes leaves everything given to it
+/// unfinished by construction, and that count is the *measurement*
+/// ([`crate::explore::Outcome::never_ran`]) rather than a violation.
+fn stranded_on_the_stopped_cpu(vm: &Vm<'_>, key: TaskKey) -> bool {
+    let Some(stopped) = vm.scenario.stopped else {
+        return false;
+    };
+    let on = match vm.shared[&key].state() {
+        TaskState::InTransit(cpu)
+        | TaskState::Ready(cpu)
+        | TaskState::Running(cpu)
+        | TaskState::Blocked(cpu)
+        | TaskState::WakeQueued(cpu)
+        | TaskState::Committing(cpu, _) => cpu,
+        TaskState::Dead => return false,
+    };
+    on.0 as usize == stopped
+}
+
 pub fn check_final(vm: &mut Vm<'_>) {
     let mut problems = Vec::new();
 
-    if !vm.live.is_empty() {
-        let stuck: Vec<String> = vm
-            .live
+    let live: Vec<TaskKey> = vm
+        .live
+        .iter()
+        .copied()
+        .filter(|&key| !stranded_on_the_stopped_cpu(vm, key))
+        .collect();
+    if !live.is_empty() {
+        let stuck: Vec<String> = live
             .iter()
             .map(|key| {
                 let state = vm.shared[key].state();
@@ -1079,11 +1107,14 @@ pub fn check_final(vm: &mut Vm<'_>) {
             .collect();
         problems.push(format!(
             "I10: the run quiesced with {} task(s) never finalized: {}",
-            vm.live.len(),
+            live.len(),
             stuck.join(", "),
         ));
     }
     for cpu in 0..vm.scenario.cpus {
+        if vm.is_stopped(cpu) {
+            continue;
+        }
         if !vm.cpus[cpu].rq().is_empty() {
             problems.push(format!("I10: cpu{cpu} quiesced with a non-empty run queue"));
         }

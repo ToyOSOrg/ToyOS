@@ -42,6 +42,7 @@ fn scenario(
         share: ShareShape::PerProcess,
         charge: ChargeShape::Honest,
         placement: PlacementShape::LeastLoadedRotating,
+        stopped: None,
         // The shipped policy (owner decision 2026-08-23), so every scenario
         // that does not name its own drives the balance path the kernel runs.
         balance: Balance::PushOnSurplus {
@@ -1111,6 +1112,7 @@ pub fn by_name(name: &str) -> Option<Scenario> {
         "old_commit_before_pass" => Some(old_commit_before_pass()),
         "old_commit_fused" => Some(old_commit_fused()),
         "old_preemptible_window" => Some(old_preemptible_window()),
+        "stopped_cpu" => Some(stopped_cpu()),
         _ => all().into_iter().find(|s| s.name == name),
     }
 }
@@ -1441,5 +1443,51 @@ pub fn lopsided_placement(cpus: usize, threads: usize, work: u64) -> Scenario {
 pub fn old_park_kept_the_lend() -> Scenario {
     let mut scenario = lend_then_block().with_park(ParkShape::KeepLapsedLend);
     scenario.name = "old_park_kept_the_lend";
+    scenario
+}
+
+/// How long [`stopped_cpu`]'s launcher runs between two programs, and how many
+/// it starts. Named so that `sim/tests/policy.rs` can derive its bound from the
+/// scenario rather than from the number it measured.
+pub const STOPPED_CPU_PERIOD_NS: u64 = 30 * MS;
+pub const STOPPED_CPU_PROGRAMS: usize = 24;
+
+/// **A machine that has lost a CPU, and what the rest of it then does with
+/// every task it spawns** — a launcher starting one program after another while
+/// cpu3 takes no passes at all ([`Scenario::stopped`]).
+///
+/// * **The launcher runs between spawns.** What decides whether a stopped CPU
+///   keeps receiving work is how long its published numbers are believed, so a
+///   run whose spawns all land in one instant measures nothing about it.
+/// * **Nothing blocks**, for [`lopsided_placement`]'s reason: a wake places a
+///   task again and would launder the placement being measured into a second.
+/// * **cpu3 is stopped from the first instant**, which is the worst case for
+///   the rule under test: a CPU that never completed a pass never stamped one,
+///   so its numbers are believed for a whole `STALE_PASS_NS` from clock zero.
+///
+/// `sim/tests/policy.rs` measures `Outcome::never_ran` against it, and
+/// `toyos-sched`'s `placement-ignores-staleness` is the arm that says what the
+/// number is when a stopped CPU's published load is believed.
+pub fn stopped_cpu() -> Scenario {
+    let mut scenario = scenario(
+        "stopped_cpu",
+        4,
+        Vec::new(),
+        vec![process(
+            "shell",
+            vec![0],
+            vec![
+                Script::looping(
+                    vec![Op::Spawn { template: 1 }, Op::Run(STOPPED_CPU_PERIOD_NS)],
+                    STOPPED_CPU_PROGRAMS,
+                ),
+                Script::new(vec![Op::Run(2 * MS)]),
+            ],
+        )],
+    )
+    .with_stopped(3);
+    // Every program the stopped CPU is handed stays live for the whole run, so
+    // the concurrent count is the launcher plus the losses.
+    scenario.max_tasks = 32;
     scenario
 }
