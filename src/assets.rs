@@ -257,7 +257,21 @@ fn absentees(dir: &Path, declared: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
     declared.iter().map(|name| dir.join(name)).filter(|path| !path.exists()).collect()
 }
 
-pub fn collect(dirs: &[String]) -> Vec<(String, Vec<u8>)> {
+/// An asset in the initrd, and the one program that opens it.
+///
+/// **`assets = [..]` names a directory and sweeps it whole**, so a config that
+/// builds no reader for a file still shipped it: these two are 19.7 MB of the
+/// 20.8 MB `assets/` holds, and `console/`, both desktop cases,
+/// `tests/logrotatecase` and `tests/metalcase` each carried both into an image
+/// with no doom in it. Named here rather than per config, because which program
+/// opens a file is a property of the program and not of any one image, and a
+/// list repeated in five configs is a list that goes stale in four of them.
+/// The names are the initrd's, which [`collect`] lower-cases.
+/// `only_doom_opens_doom_s_assets` is what keeps the right-hand column true.
+const OPENED_BY: &[(&str, &str)] = &[("doom1.wad", "doom"), ("soundfont.sf2", "doom")];
+
+/// The initrd's files, for an image building exactly `programs`.
+pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u8>)> {
     let mut files = vec![];
 
     for dir in dirs {
@@ -273,11 +287,22 @@ pub fn collect(dirs: &[String]) -> Vec<(String, Vec<u8>)> {
         }
         let ships = |path: &Path| {
             let relative = path.strip_prefix(dir).unwrap_or(path);
-            if tracked.contains(relative) {
-                return true;
+            if !tracked.contains(relative) {
+                eprintln!("assets: skipping {} — git does not track it", path.display());
+                return false;
             }
-            eprintln!("assets: skipping {} — git does not track it", path.display());
-            false
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+            if let Some((_, reader)) = OPENED_BY.iter().find(|(asset, _)| *asset == name) {
+                if !programs.contains(reader) {
+                    eprintln!(
+                        "assets: leaving out {} — only /bin/{reader} opens it and this image \
+                         builds no {reader}",
+                        path.display()
+                    );
+                    return false;
+                }
+            }
+            true
         };
 
         // Pre-rasterize TTF fonts
@@ -395,7 +420,7 @@ mod tests {
         git(&["init", "-q"]);
         git(&["add", "kept.wad", "icons/kept.svg", "music.sf2"]);
 
-        let shipped: BTreeSet<String> = collect(&[dir.display().to_string()])
+        let shipped: BTreeSet<String> = collect(&[dir.display().to_string()], &BTreeSet::new())
             .into_iter()
             .map(|(name, _)| name)
             .collect();
@@ -415,7 +440,7 @@ mod tests {
         // of the image is exactly what it was, and that the absent one is
         // named.
         fs::remove_file(dir.join("music.sf2")).expect("take music.sf2 away");
-        let without: BTreeSet<String> = collect(&[dir.display().to_string()])
+        let without: BTreeSet<String> = collect(&[dir.display().to_string()], &BTreeSet::new())
             .into_iter()
             .map(|(name, _)| name)
             .collect();
@@ -435,5 +460,82 @@ mod tests {
             vec![dir.join("music.sf2")],
             "a committed asset that is not there has to be named"
         );
+    }
+
+    /// An asset [`OPENED_BY`] names ships to the image building its reader and
+    /// to no other, and an asset it does not name ships to both.
+    #[test]
+    fn an_owned_asset_ships_only_where_its_reader_does() {
+        let dir = std::env::temp_dir().join(format!("toyos-owned-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("make the asset tree");
+        for name in ["doom1.wad", "soundfont.sf2", "wallpaper.rgb"] {
+            fs::write(dir.join(name), b"tracked").unwrap_or_else(|e| panic!("write {name}: {e}"));
+        }
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(["-C", &dir.display().to_string()])
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["add", "doom1.wad", "soundfont.sf2", "wallpaper.rgb"]);
+
+        let shipped = |programs: BTreeSet<&str>| -> BTreeSet<String> {
+            collect(&[dir.display().to_string()], &programs)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        let with = shipped(BTreeSet::from(["doom", "compositor"]));
+        let without = shipped(BTreeSet::from(["compositor"]));
+        fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            with,
+            BTreeSet::from([
+                "share/doom1.wad".to_string(),
+                "share/soundfont.sf2".to_string(),
+                "share/wallpaper.rgb".to_string(),
+            ]),
+            "an image that builds doom did not get doom's assets"
+        );
+        assert_eq!(
+            without,
+            BTreeSet::from(["share/wallpaper.rgb".to_string()]),
+            "an image with no doom in it still carries what only doom opens"
+        );
+    }
+
+    /// The right-hand column of [`OPENED_BY`] is true of the tree.
+    ///
+    /// The claim is that one program opens the file, so a second program naming
+    /// its path is an image losing a file it needs. `userland/` only: the
+    /// harness names both paths in assertions about doom, and it runs on the
+    /// host.
+    #[test]
+    fn only_doom_opens_doom_s_assets() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for (asset, reader) in OPENED_BY {
+            let out = Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(["grep", "-l", &format!("/share/{asset}"), "--", "userland"])
+                .output()
+                .expect("run git grep");
+            let hits: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect();
+            assert!(!hits.is_empty(), "nothing under userland/ opens /share/{asset} at all");
+            let strangers: Vec<&String> =
+                hits.iter().filter(|p| !p.starts_with(&format!("userland/{reader}/"))).collect();
+            assert!(
+                strangers.is_empty(),
+                "OPENED_BY says only /bin/{reader} opens /share/{asset}, and {strangers:?} \
+                 name it too — an image without {reader} would be built without a file it needs"
+            );
+        }
     }
 }
