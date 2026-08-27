@@ -397,6 +397,73 @@ mod tests {
         }
     }
 
+    /// **The three-way form of #142's window**: a kill, a spawn racing its
+    /// sweep, and the idle pass that takes the entry out of the table. Two
+    /// operations were what the crate landed with, and the sighting is a machine
+    /// where the reaper is a third CPU rather than a phase of one of them.
+    #[test]
+    fn a_spawn_racing_a_kill_and_the_pass_that_reaps_it() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let ops = vec![Op::kill(pid, 137), Op::spawn(pid), Op::idle_pass()];
+        if let Some(found) = explore(&world, &ops) {
+            panic!("a lifecycle law broke:\n{found}");
+        }
+    }
+
+    /// A sibling leaving through `SYS_THREAD_EXIT` while the main thread's own
+    /// exit sweeps the process and a third thread is being built.
+    ///
+    /// The three doors out of a process at once, which is what the T14 log
+    /// shows: `/bin/ls` spawning while a shell reaps and a terminal exits.
+    #[test]
+    fn a_sibling_exit_a_spawn_and_the_processs_own_exit() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let main = world.main_tid(pid);
+        let sibling = world.spawn_thread(pid);
+        let ops = vec![
+            Op::exit(pid, main, 0),
+            Op::thread_exit(pid, sibling, 3),
+            Op::spawn(pid),
+        ];
+        if let Some(found) = explore(&world, &ops) {
+            panic!("a lifecycle law broke:\n{found}");
+        }
+    }
+
+    /// Two spawns and one teardown: the window admits at most one thread behind
+    /// the sweep, and the second question is asked of each of them separately.
+    ///
+    /// One spawn cannot show that. The insert recheck reads a flag rather than
+    /// a count, so a rule that admitted *the first* arrival after the claim and
+    /// refused the rest would pass the two-op case and break here.
+    #[test]
+    fn two_spawns_race_one_teardown() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let main = world.main_tid(pid);
+        let ops = vec![Op::exit(pid, main, 0), Op::spawn(pid), Op::spawn(pid)];
+        if let Some(found) = explore(&world, &ops) {
+            panic!("a lifecycle law broke:\n{found}");
+        }
+    }
+
+    /// A `SYS_THREAD_JOIN` armed on a thread the killer is about to retire, in
+    /// every ordering — the waiter that L4 is about and the one shape where it
+    /// is answered by a teardown rather than by the thread it named.
+    #[test]
+    fn a_join_racing_the_kill_that_takes_its_target() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let target = world.spawn_thread(pid);
+        let waiter = world.spawn_thread(pid);
+        let ops = vec![Op::kill(pid, 137), Op::join(pid, target, waiter)];
+        if let Some(found) = explore(&world, &ops) {
+            panic!("a lifecycle law broke:\n{found}");
+        }
+    }
+
     /// **A thread whose entry went under it still finishes its own exit**: a
     /// kill publishes, an idle pass takes the entry, and a sibling already on
     /// its way into `SYS_THREAD_EXIT` arrives after both.

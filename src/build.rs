@@ -1792,18 +1792,24 @@ mod tests {
     /// a model with controls, and a control with no step behind it is the same
     /// hole either way.
     ///
-    /// `loom` selects loom's instrumented atomics; `check`, `protocol-port` and
-    /// `tripwire` mirror `toyos-sched`'s own features so the shared sources
-    /// compile identically and name nothing a model turns on. Everything else
-    /// declared in any of these files is, by construction, a `--features <name>`
-    /// command that must red a named model — each file's own comment beside the
-    /// name carries the argument for why.
+    /// **And `toyos-sched-sim` is one of them**: what a whole simulated machine
+    /// can show wrong is a policy rather than an ordering, so a control over one
+    /// lives there and would otherwise be the only kind this gate could not see.
+    ///
+    /// `loom` selects loom's instrumented atomics; `check`, `protocol-port`,
+    /// `tripwire` and `std` mirror `toyos-sched`'s own features so the shared
+    /// sources compile identically and name nothing a model turns on. Everything
+    /// else declared in any of these files is, by construction, a
+    /// `--features <name>` command that must red a named model — each file's own
+    /// comment beside the name carries the argument for why.
     fn declared_model_controls(root: &Path) -> Vec<(&'static str, String)> {
-        const NOT_A_CONTROL: &[&str] = &["loom", "check", "protocol-port", "tripwire", "default"];
+        const NOT_A_CONTROL: &[&str] =
+            &["loom", "check", "protocol-port", "tripwire", "std", "default"];
         let mut out = Vec::new();
         for (crate_name, manifest) in [
             ("kernel-loom", "kernel-loom/Cargo.toml"),
             ("toyos-sched-loom", "toyos-sched/loom/Cargo.toml"),
+            ("toyos-sched-sim", "toyos-sched/sim/Cargo.toml"),
             ("toyos-proclife", "toyos-proclife/Cargo.toml"),
         ] {
             let path = root.join(manifest);

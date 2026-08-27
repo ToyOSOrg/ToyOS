@@ -31,9 +31,7 @@ use crate::mailbox::{
 };
 use crate::msg::Msg;
 use crate::queue::RunQueue;
-use crate::sync::{fence, Arc, AtomicU32, Ordering};
-#[cfg(feature = "check")]
-use crate::sync::AtomicU64;
+use crate::sync::{fence, Arc, AtomicU32, AtomicU64, Ordering};
 use crate::task::{
     BlockedTask, Claim, DeadTask, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
     TaskState, TransitTask, WaitClass, WakeCause, WakeReason,
@@ -685,6 +683,17 @@ pub enum Balance {
 /// unannounced.
 pub const PUSH_THRESHOLD: u32 = 2;
 
+/// How long a CPU may owe a pass and still be chosen as a target.
+///
+/// Ten [`QUANTUM_NS`], because one quantum is the whole of what the wake
+/// contract promises: a busy CPU drains at its next safe point, and its next
+/// safe point is at worst the end of the quantum it is running.
+///
+/// **The direction of error is chosen.** Refusing a CPU that was only slow puts
+/// one task elsewhere; accepting one that has stopped puts the task where
+/// nothing ever picks it up.
+pub const STALE_PASS_NS: u64 = 10 * QUANTUM_NS;
+
 impl Balance {
     /// Does the pull half run at all? Every cure is built on it — a push and a
     /// re-arm both end in a `StealRequest` that a loaded pass has to answer.
@@ -913,13 +922,20 @@ impl<X: SchedPayload> CpuSched<X> {
     /// A CPU that has published SLEEPING, for RT wake-forwarding. Reading the
     /// doorbells is a heuristic: a CPU that woke up in the meantime simply gets
     /// an ordinary adopt.
+    ///
+    /// A CPU that stopped mid-idle publishes SLEEPING for ever, and forwarding
+    /// a real-time task to one is the worst outcome this scan has — RT is the
+    /// band with nothing behind it to notice.
     fn idle_sibling<H: Hw<Payload = X>, P: PreemptGuard>(
         &self,
         env: Env<'_, H, P>,
+        now: Nanos,
     ) -> Option<CpuId> {
-        (0..env.cpus.len())
-            .map(|i| CpuId(i as u32))
-            .find(|&cpu| cpu != self.id && env.cpus.get(cpu).doorbell().sleeping())
+        (0..env.cpus.len()).map(|i| CpuId(i as u32)).find(|&cpu| {
+            cpu != self.id
+                && env.cpus.get(cpu).doorbell().sleeping()
+                && env.cpus.get(cpu).answering(now)
+        })
     }
 
     /// Wake placement: keep the task local — that is where its
@@ -939,7 +955,7 @@ impl<X: SchedPayload> CpuSched<X> {
         // a negative gate that has become unreachable is a gate that has been
         // weakened.
         if task.is_rt() && self.running.as_ref().is_some_and(|r| r.is_rt()) {
-            if let Some(dst) = self.idle_sibling(env) {
+            if let Some(dst) = self.idle_sibling(env, now) {
                 self.hand_off(task, dst, env, now);
                 return;
             }
@@ -1664,6 +1680,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             let surplus = self.cpu.rq.fair_len() as u32;
             handle.publish_load((self.cpu.rq.len() + self.cpu.dying.len()) as u32);
             handle.publish_surplus(surplus);
+            // The stamp goes with them: it is what says they are about now.
+            handle.publish_pass(self.now);
             self.push_on_surplus(surplus);
             if self.cpu.running.is_some() {
                 // The re-arm's allowance is per idle period, so a CPU that is
@@ -2062,10 +2080,15 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// [`SchedPass::probe_still_owed`] must ask the *same* question after
     /// publishing SLEEPING; two spellings of one inequality is how a push that
     /// wakes a CPU its victim would refuse gets written.
+    ///
+    /// The staleness test is load-bearing here in a way it is nowhere else: the
+    /// probe rides one node per thief, and a node posted into a CPU that never
+    /// drains is never freed, so one probe spent on a stopped CPU costs this one
+    /// the pull half for the rest of the machine's life.
     fn best_victim(&self) -> Option<CpuId> {
         let (victim, surplus) = (0..self.env.cpus.len())
             .map(|i| CpuId(i as u32))
-            .filter(|&cpu| cpu != self.cpu.id)
+            .filter(|&cpu| cpu != self.cpu.id && self.env.cpus.get(cpu).answering(self.now))
             .map(|cpu| (cpu, self.env.cpus.get(cpu).surplus()))
             .max_by_key(|&(_, surplus)| surplus)?;
         (surplus >= PUSH_THRESHOLD).then_some(victim)
@@ -2100,7 +2123,10 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             .map(|offset| (base + offset) % n)
             .filter(|&cpu| cpu != me)
             .map(|cpu| CpuId(cpu as u32))
-            .find(|&cpu| self.env.cpus.get(cpu).doorbell().sleeping())
+            .find(|&cpu| {
+                self.env.cpus.get(cpu).doorbell().sleeping()
+                    && self.env.cpus.get(cpu).answering(self.now)
+            })
         else {
             return;
         };
@@ -2134,6 +2160,10 @@ pub struct CpuHandle<M> {
     /// with nothing, and sleeps — and the probe is one-shot per idle trip, so
     /// the genuinely surplus-holding CPU goes unprobed for a whole idle round.
     surplus: AtomicU32,
+    /// When the pass that published the two numbers above ran, so that a reader
+    /// can tell a claim about the present from one a stopped CPU left behind.
+    /// See [`CpuHandle::answering`].
+    last_pass: AtomicU64,
     /// The on-target counterpart to the simulator's invariants: the sim asserts
     /// what a pass *does*, this measures what a pass *costs*.
     ///
@@ -2158,6 +2188,7 @@ impl<M: SchedMsg> CpuHandle<M> {
             doorbell: Doorbell::new(),
             load: AtomicU32::new(0),
             surplus: AtomicU32::new(0),
+            last_pass: AtomicU64::new(0),
             #[cfg(feature = "check")]
             pass_costs: PassCosts::new(),
         }
@@ -2190,6 +2221,29 @@ impl<M: SchedMsg> CpuHandle<M> {
 
     pub fn publish_surplus(&self, fair: u32) {
         self.surplus.store(fair, Ordering::Relaxed);
+    }
+
+    /// Stamp the two numbers above with the pass that published them.
+    pub fn publish_pass(&self, now: Nanos) {
+        self.last_pass.store(now.0, Ordering::Relaxed);
+    }
+
+    /// Are this CPU's published numbers a claim about the present?
+    ///
+    /// A pass clears the doorbell edge before it drains and republishes the
+    /// numbers when it ends, so an edge standing longer than [`STALE_PASS_NS`]
+    /// names a CPU that is not looking — and what it publishes then is what it
+    /// wrote on its way into idle, which is zero. That is what makes a stopped
+    /// CPU the one every least-loaded reader would otherwise *prefer*.
+    ///
+    /// **Every path that chooses a CPU asks this; no path that delivers to one
+    /// does**, so a wrong answer costs a placement and never a message.
+    pub fn answering(&self, now: Nanos) -> bool {
+        if cfg!(feature = "placement-ignores-staleness") {
+            return true;
+        }
+        !self.doorbell.kick_pending()
+            || now.since(Nanos(self.last_pass.load(Ordering::Relaxed))) < STALE_PASS_NS
     }
 
     /// Post one message and ring the doorbell. The returned [`Kick`] is the
@@ -2268,6 +2322,30 @@ impl<M: SchedMsg> CpuHandles<M> {
 
     pub fn is_empty(&self) -> bool {
         self.handles.is_empty()
+    }
+
+    /// Where a new task goes: the least loaded CPU still answering, scanned from
+    /// `start` so that ties spread instead of piling on one CPU.
+    ///
+    /// **It lives here rather than in the driver because the simulator places
+    /// tasks too**, and a placement rule written twice is one the sim is not
+    /// measuring. The rotation stays the caller's; the scan order is the same
+    /// either way.
+    ///
+    /// A machine where no CPU is answering falls back to the plain minimum: the
+    /// test breaks a tie against a CPU that will never answer, and a machine
+    /// with none has no such tie to break.
+    pub fn place(&self, start: CpuId, now: Nanos) -> CpuId {
+        let n = self.handles.len();
+        let scan = |answering_only: bool| {
+            (0..n)
+                .map(|offset| CpuId(((start.0 as usize + offset) % n) as u32))
+                .filter(|&cpu| !answering_only || self.get(cpu).answering(now))
+                .min_by_key(|&cpu| self.get(cpu).load())
+        };
+        scan(true)
+            .or_else(|| scan(false))
+            .expect("placing a task on a machine with no cpus")
     }
 }
 
@@ -3443,6 +3521,62 @@ mod tests {
             "and the probe was still answered, from the rest of the band",
         );
         w.abandon();
+    }
+
+    /// The four arms of the staleness rule, one at a time — a `CpuHandles` and
+    /// nothing else, because the decision is a function of the published words.
+    /// The sim's `stopped_cpu` says what the rule is *worth* over a run; a
+    /// scenario reaches each arm only by luck, so this says what it decides.
+    #[test]
+    fn placement_believes_a_cpu_that_answers_and_no_other() {
+        let mut handles = Vec::new();
+        let mut keep = Vec::new();
+        for i in 0..3 {
+            let (tx, rx) = mailbox::<Msg<TestPayload>>();
+            handles.push(CpuHandle::new(CpuId(i), tx));
+            keep.push(rx);
+        }
+        let handles = CpuHandles::new(handles);
+        let (idle, busy, stopped) = (CpuId(0), CpuId(1), CpuId(2));
+        let late = Nanos(STALE_PASS_NS + 1);
+        // The `Kick` a poster owes an IPI has nowhere to go in a harness with no
+        // machine under it; the edge it leaves behind is what the rule reads.
+        let owe_a_pass = |cpu: CpuId| {
+            let _no_machine_to_kick = handles.get(cpu).poke();
+        };
+
+        // Three CPUs that have all just passed: the plain minimum.
+        for cpu in [idle, busy, stopped] {
+            handles.get(cpu).publish_pass(Nanos(1));
+        }
+        handles.get(idle).publish_load(0);
+        handles.get(busy).publish_load(4);
+        handles.get(stopped).publish_load(0);
+        assert_eq!(handles.place(idle, Nanos(2)), idle);
+        assert_eq!(handles.place(busy, Nanos(2)), stopped, "ties go to the scan order");
+
+        // Handed a message and never taking the pass that clears the edge: its
+        // zero is believed inside the window and refused outside it.
+        owe_a_pass(stopped);
+        assert_eq!(handles.place(busy, Nanos(2)), stopped);
+        assert_eq!(handles.place(busy, late), idle);
+
+        // A CPU that is merely *busy* is not stale: it owes a pass and its last
+        // one is recent, which is every wake on a working machine.
+        owe_a_pass(busy);
+        handles.get(busy).publish_pass(late);
+        handles.get(busy).publish_load(0);
+        handles.get(idle).publish_load(1);
+        assert_eq!(handles.place(busy, late), busy);
+
+        // And a machine where nothing answers still places somebody.
+        owe_a_pass(idle);
+        handles.get(idle).publish_pass(Nanos(0));
+        handles.get(busy).publish_pass(Nanos(0));
+        handles.get(idle).publish_load(3);
+        handles.get(busy).publish_load(2);
+        handles.get(stopped).publish_load(9);
+        assert_eq!(handles.place(idle, late), busy);
     }
 }
 

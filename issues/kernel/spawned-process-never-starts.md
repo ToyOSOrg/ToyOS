@@ -89,3 +89,58 @@ Investigation is the scheduler agent's (#142); the shapes are consistent with
 one defect. Ctrl+Alt+D is now machine-wide and process-named (`issues/diagnostics/`), and on the
 owner's laptop one press named three CPUs not reaching a scheduler pass and
 three threads ready-and-never-run.
+
+## The amplifier is closed, and it was most of the arithmetic
+
+`driver::placement` picked the least *published* load, and a CPU publishes at
+the end of each of its own passes — so a CPU that takes no more passes
+advertises for ever the number it wrote on its way into idle, which is zero.
+That did not merely leave a shed core unused: it left it in the rotation as a
+CPU every spawn would rather have than a busy one, and an `Adopt` posted into a
+CPU that never drains is a task no balance path can reach. `InTransit` is one of
+the words the dump renders as `ready`, which is why the census says `ready and
+has never run` and `cpu_ns` says zero.
+
+It also fits the shape of this file's own numbers rather than contradicting it.
+Twelve `/bin/ls`, two of them hung, is a *fraction* lost and not everything —
+which is what the rotating scan start produces when several CPUs publish zero
+and one of them is dead. What `min_by_key` over a stale zero adds is that the
+fraction never shrinks, however long the CPU has been gone.
+
+`CpuHandle::answering` is the rule now, in `toyos-sched`: a CPU whose doorbell
+edge has stood for longer than a pass may take is not a claim about the present,
+and the four paths that choose a CPU — spawn placement, the RT wake-forward,
+the surplus push and the steal probe's victim — all ask it. **What is left of
+this defect after that is one task per CPU that goes quiet**, because the first
+message posted to a silent CPU is what raises the edge the rule reads. The
+simulator measures exactly that: `scenarios::stopped_cpu` loses 1 program of 24
+on every one of 16 seeds, against 10 at worst and 114 in total with the rule
+reverted (`toyos-sched/sim/tests/policy.rs`,
+`a_stopped_cpu_stops_taking_work`).
+
+## What is still open here, stated as the two things it is
+
+**Why a CPU stops reaching a pass at all.** Nothing in this work touched it and
+nothing in it explains it. The instrument that can name it exists —
+`sched::dump`'s NMI probe separates a CPU spinning with `IF` clear from one
+halted with its kick undelivered from one wedged below the interrupt layer —
+and it has never been fired at a machine in this state. Capture
+`info registers -a` over QMP before pressing Ctrl+Alt+D, which destroys what it
+reports on.
+
+**The one task per silent CPU.** The rule cannot do better without a liveness
+beat the idle path does not have, and adding one is an audio change
+(`kernel/CLAUDE.md`). A task lost this way is still a hung program and this file
+stays open for it.
+
+## The process table is not where this is, and that is now checked rather than argued
+
+`toyos-proclife` enumerates every interleaving of the paths this file's shapes
+implicate — a spawn racing a kill and the idle pass that reaps the entry, a
+sibling's `SYS_THREAD_EXIT` beside the process's own exit and a spawn, two
+spawns racing one teardown, a join racing the kill that takes its target — and
+no lifecycle law breaks in any ordering of any of them. The three that carry a
+spawn all red under `mutate-spawn-skips-the-insert-recheck`, so they are
+checking the window rather than passing through it. The retire-sweep race is a
+class this kernel closed at `spawn::admit_thread_insert`; it is not what strikes
+a fresh process here.

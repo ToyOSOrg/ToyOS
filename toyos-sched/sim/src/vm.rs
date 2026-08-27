@@ -272,6 +272,11 @@ pub struct Vm<'q> {
     pub programs: BTreeMap<TaskKey, Program>,
     /// Every task ever created, so a finalize-twice is detectable.
     pub spawned: BTreeSet<TaskKey>,
+    /// Every task that ever executed a single op. The difference against
+    /// [`Self::spawned`] is what a stopped CPU costs the machine, and it is the
+    /// only quantity that can be read off a run where some tasks never run at
+    /// all: every latency here is a wait that *ended*.
+    pub ran: BTreeSet<TaskKey>,
     pub live: BTreeSet<TaskKey>,
     pub shared: BTreeMap<TaskKey, Arc<TaskShared<SimMsg>>>,
     /// Registrations held across a block, exactly where a kernel blocking
@@ -614,6 +619,7 @@ impl<'q> Vm<'q> {
             procs,
             programs: BTreeMap::new(),
             spawned: BTreeSet::new(),
+            ran: BTreeSet::new(),
             live: BTreeSet::new(),
             shared: BTreeMap::new(),
             registrations: BTreeMap::new(),
@@ -713,20 +719,19 @@ impl<'q> Vm<'q> {
             inherited: None,
             lends: 0,
         };
-        // Spawn placement: the least-loaded CPU from the published counters —
-        // never a try_lock probe of a remote queue, which misreads contention
-        // as emptiness. Ties rotate, or every
-        // task of a freshly booted system would land on cpu0 and the
-        // scenarios would never see two CPUs at once.
+        // Spawn placement: the core's own `CpuHandles::place`, which is the
+        // function `kernel::sched::driver::placement` calls — never a try_lock
+        // probe of a remote queue, which misreads contention as emptiness. Ties
+        // rotate, or every task of a freshly booted system would land on cpu0
+        // and the scenarios would never see two CPUs at once.
         //
         // `AllOn` is the adversary and not a policy — see [`PlacementShape`].
         // The rotation counter still advances under it, so the two answers
         // differ in where a task lands and in nothing else.
-        let base = self.next_spawn_cpu;
-        let least_loaded = (0..self.scenario.cpus)
-            .map(|offset| (base + offset) % self.scenario.cpus)
-            .min_by_key(|&c| self.handles.get(CpuId(c as u32)).load())
-            .expect("at least one cpu");
+        let least_loaded = self
+            .handles
+            .place(CpuId(self.next_spawn_cpu as u32), self.clock)
+            .0 as usize;
         self.next_spawn_cpu = (least_loaded + 1) % self.scenario.cpus;
         let dst = match self.scenario.placement {
             PlacementShape::LeastLoadedRotating => least_loaded,
@@ -798,12 +803,15 @@ impl<'q> Vm<'q> {
         // this the explorer could hold one CPU at its interrupt while another
         // ran for milliseconds, and invariant I4 would be measuring the
         // explorer's freedom rather than the protocol's latency.
-        let delivery_owed = (0..self.scenario.cpus).any(|cpu| {
-            (pending_ipi[cpu] > 0 && self.ipi_due[cpu].is_some_and(|at| at <= self.clock))
-                || armed[cpu].is_some_and(|at| at <= self.clock)
-                || (need_resched[cpu]
-                    && self.resched_at[cpu].is_some_and(|at| at.after(RUN_CHUNK_NS) <= self.clock))
-        });
+        let delivery_owed = (0..self.scenario.cpus)
+            .filter(|cpu| !self.is_stopped(*cpu))
+            .any(|cpu| {
+                (pending_ipi[cpu] > 0 && self.ipi_due[cpu].is_some_and(|at| at <= self.clock))
+                    || armed[cpu].is_some_and(|at| at <= self.clock)
+                    || (need_resched[cpu]
+                        && self.resched_at[cpu]
+                            .is_some_and(|at| at.after(RUN_CHUNK_NS) <= self.clock))
+            });
 
         // The same device one step further in: a CPU that has held an unwinding
         // task for longer than one chunk owes it an execution step, and no
@@ -833,6 +841,13 @@ impl<'q> Vm<'q> {
             .map(|(_, cpu)| cpu);
 
         for cpu in 0..self.scenario.cpus {
+            // A stopped CPU is offered nothing at all — not its interrupts, not
+            // its passes, not its execution steps. What it has already been
+            // given stays where it is, which is the state this dimension exists
+            // to reach.
+            if self.is_stopped(cpu) {
+                continue;
+            }
             if pending_ipi[cpu] > 0 {
                 steps.push(Step::DeliverIpi(cpu));
             }
@@ -917,6 +932,11 @@ impl<'q> Vm<'q> {
         steps
     }
 
+    /// Does this CPU take scheduler passes at all? See [`Scenario::stopped`].
+    pub fn is_stopped(&self, cpu: usize) -> bool {
+        self.scenario.stopped == Some(cpu)
+    }
+
     fn next_deadline(&self) -> Option<Nanos> {
         let armed = self.hw.with(|s| s.armed.clone());
         let irqs = if self.live.is_empty() {
@@ -924,7 +944,16 @@ impl<'q> Vm<'q> {
         } else {
             self.next_irq.clone()
         };
-        armed.into_iter().flatten().chain(irqs).min()
+        // A stopped CPU's armed deadline is one nothing will ever take, so a
+        // clock jump to it is a jump to nothing — and, once every other step is
+        // spent, a jump the explorer would take for ever.
+        armed
+            .into_iter()
+            .enumerate()
+            .filter(|(cpu, _)| !self.is_stopped(*cpu))
+            .filter_map(|(_, at)| at)
+            .chain(irqs)
+            .min()
     }
 
     pub fn execute(&mut self, step: Step, choices: &mut ChoiceStream) {
@@ -941,6 +970,9 @@ impl<'q> Vm<'q> {
         // instant this CPU began working, not the instant it stopped.
         if let Some(cpu) = executed {
             self.first_exec_ns[cpu].get_or_insert(self.clock.0);
+            if let Some(key) = self.cpus[cpu].running().map(|task| task.key()) {
+                self.ran.insert(key);
+            }
         }
         self.execute_inner(step, choices);
         let owed = self.hw.with(|s| s.need_resched.clone());

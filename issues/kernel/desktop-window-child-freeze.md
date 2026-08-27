@@ -183,3 +183,52 @@ scheduler passes during a session and threads placed on them never run (`issues/
 promptly, with `code=0`. This entry must not be closed by it — though the
 freeze the test now reproduces is very likely that defect, which is the whole
 reason the test is worth keeping red.
+
+## What the placement work changed here, and it is not the signature
+
+The family's other half is closed: a CPU that stops taking passes no longer
+keeps being *chosen*. `CpuHandle::answering` refuses a CPU whose doorbell edge
+has stood longer than a pass may take, and spawn placement, the RT
+wake-forward, the surplus push and the steal probe's victim all ask it
+(`toyos-sched/src/cpu.rs`). So one route from "a core goes quiet" to "the
+machine gets progressively worse" is gone.
+
+**Nothing in that explains this entry.** The signature at the top is a machine
+that stops *entirely*, and a placement rule can only decide where work goes on a
+machine that is still running passes somewhere. Judge the next occurrence by the
+signature exactly as before; a green run of this test proves what it always
+proved, which is nothing.
+
+Two things a reader looking for the next sighting needs. The test is
+`Tier::Nightly` (`src/tiers.rs`), so a plain `cargo test` does not run it at all
+— `cargo test --test toyos-build -- --nightly desktop_window_child` does. And
+the one instrument that could name what a stopped CPU is doing has still never
+been fired at one: `sched::dump`'s NMI probe separates a CPU spinning with `IF`
+clear from one halted with its kick undelivered from one wedged below the
+interrupt layer. Take `info registers -a` over QMP before pressing Ctrl+Alt+D,
+which destroys what it reports on.
+
+## And the reproduction is unreachable again, for a reason nobody chose
+
+Measured 2026-08-27, four runs on the placement branch and one on `origin/main`
+at `16c05999`, identical in all five: the test stops at its **first** probe. The
+windowed child asks for a window, is answered `NotEndowed`, prints
+`WINDOW-CHILD-REFUSED this program was given no compositor` and exits `code=1`
+eight milliseconds after it is spawned. Serial flows for the whole drain and the
+dump answers `8/8 cpu(s) answered` every time, so by this entry's own
+discriminator it is not the freeze and it never gets near one.
+
+The cause is not in this file's subject at all and is filed as its own:
+`issues/build/a-harness-injected-program-can-be-endowed-with-nothing.md`. The
+harness's guest binaries enter an image as extra files, a `[programs.<name>]`
+row demands a crate at `userland/<name>`, and `/bin/init` endows a name the
+manifest does not carry with nothing. The one-row experiment was run and refused
+by the build before any guest booted.
+
+**So this entry's `EXPECTED_FAILURES` declaration is currently absorbing a
+failure it was not written about** — `the windowed child never reported leaving`
+is one of its six, and it has been meaning "the client was given no compositor"
+rather than "the desktop stopped answering". Nothing that reads a run can tell
+the two apart. Until the endowment is restored, no occurrence of the freeze can
+be produced here at all, and this entry's review date will arrive against a test
+that has not reached its own venue since the endowment work landed.
