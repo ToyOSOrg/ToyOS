@@ -2970,13 +2970,16 @@ impl QemuInstance {
                         let rest = rest.split_once("===").map_or(rest, |(head, _)| head);
                         let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                         // **A marker naming another test is the previous one's**,
-                        // and taking it was `issues/build/`'s cascade:
-                        // one timed-out test left the guest still producing its
-                        // output, every later member of the block read a window
-                        // that opened on it, and 110 of 238 went red on an
-                        // "actual" that was verbatim the previous expectation.
-                        // The name has been on the wire the whole time.
+                        // still on the wire because that test timed out and this
+                        // one's window opened over its output. Filed where any
+                        // other line of that window goes rather than dropped: it
+                        // is the one line that says the window is desynced, and
+                        // taking it as this test's end is what turned one
+                        // timed-out test into 110 red ones.
                         if parts[0] != want {
+                            let window = if in_test { &mut serial } else { &mut before };
+                            window.push_str(&line);
+                            window.push('\n');
                             continue;
                         }
                         // Everything before the marker is what some console
