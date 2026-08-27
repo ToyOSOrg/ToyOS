@@ -612,7 +612,7 @@ userland/libc/src/lib.rs 14 0
 userland/libc/src/math.rs 13 0
 userland/libc/src/memory.rs 8 0
 userland/libc/src/misc.rs 38 0
-userland/libc/src/posix_io.rs 36 0
+userland/libc/src/posix_io.rs 49 0
 userland/libc/src/printf.rs 22 0
 userland/libc/src/pthread.rs 40 0
 userland/libc/src/socket.rs 40 0
