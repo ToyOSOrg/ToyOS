@@ -328,13 +328,14 @@ fn crash_report_exception(ctx: &ExceptionContext) {
     } else {
         kernel_backtrace(ctx.frame.rbp, 32);
 
-        // The `Syscall:` line below is the faulting thread's *last* syscall and
-        // says nothing about where the fault is: `syscall_rip` is never cleared
-        // (`issues/panic-path/syscall-rip-never-cleared.md`), so it can name a return address
-        // many syscalls old. Reading it as the fault site cost the AMD `#GP`
-        // investigation its first day.
+        // The `Syscall:` line below is where the faulting thread *called in
+        // from*, not where the fault is — reading it as the fault site cost the
+        // AMD `#GP` investigation its first day. It is printed only while this
+        // CPU is inside that thread's own syscall, because the words are its
+        // entry's and nobody else's; a stale `syscall_rbp` walked through the
+        // current address space faults and takes the rest of the report with it.
         let user_rip = percpu::syscall_rip();
-        if user_rip != 0 && pid.is_some() {
+        if percpu::in_syscall() && pid.is_some() {
             log!("  Syscall: num={} user_rip={:#x} user_rsp={:#x}",
                 percpu::syscall_num(), user_rip, percpu::user_rsp());
             log!("  User backtrace:");
@@ -405,8 +406,10 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
             log!("  [Process: PROCESS_TABLE locked, skipping]");
         }
 
+        // `in_syscall` and not a non-zero word: the three diagnostics belong to
+        // the entry of the task named above, and are a lie about any other.
         let user_rip = percpu::syscall_rip();
-        if user_rip != 0 {
+        if percpu::in_syscall() {
             log!("  Syscall: num={} user_rip={:#x} user_rsp={:#x}",
                 percpu::syscall_num(), user_rip, percpu::user_rsp());
             log!("  User backtrace:");

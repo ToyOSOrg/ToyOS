@@ -239,16 +239,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // is fully handled — reset the reentry guard so a future, independent
     // panic on this CPU still reports.
     //
-    // **A kernel thread answers from its own row and never from the two words
-    // below**, because for one of them the words do not merely give the wrong
-    // answer — they give a *nondeterministic* one. `syscall_rip` is never
-    // cleared (`issues/panic-path/syscall-rip-never-cleared.md`), so a
-    // kernel task reads whatever user thread last ran on this CPU left behind:
-    // the same panic on the same build would recover or halt depending on which
-    // CPU work stealing had put the thread on. `sched::kthread` is where the
-    // answer is a property of the thread instead.
-    let recoverable = sched::kthread::panic_recovers_here()
-        .unwrap_or_else(|| percpu::syscall_rip() != 0 && percpu::current_tid().is_some());
+    // **A kernel thread answers from its own row**, because the question below
+    // is not about it: it has no syscall to be inside, and `sched::kthread` is
+    // where the answer is a property of the thread. Everything else recovers
+    // only where the panicking task is the one this CPU is inside a syscall
+    // for — the one context `try_recover_from_panic` can abandon, since killing
+    // its process is what abandoning it means.
+    let recoverable = sched::kthread::panic_recovers_here().unwrap_or_else(percpu::in_syscall);
     if recoverable {
         depth.store(0, core::sync::atomic::Ordering::SeqCst);
         // The captured report dies with the panic it belongs to. Left set, it

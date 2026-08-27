@@ -29,7 +29,7 @@ kernel/src/arch/entry.rs 96 0
 kernel/src/arch/fpu.rs 81 0
 kernel/src/arch/idt/device_irq.rs 25 0
 kernel/src/arch/idt/dma_fault.rs 9 0
-kernel/src/arch/idt/exceptions.rs 192 1
+kernel/src/arch/idt/exceptions.rs 195 1
 kernel/src/arch/idt/hda.rs 4 0
 kernel/src/arch/idt/i8042.rs 3 0
 kernel/src/arch/idt/log_nest.rs 15 0
@@ -43,13 +43,13 @@ kernel/src/arch/idt/xhci.rs 6 0
 kernel/src/arch/mod.rs 118 0
 kernel/src/arch/mtrr.rs 54 0
 kernel/src/arch/pat.rs 74 0
-kernel/src/arch/percpu.rs 501 0
+kernel/src/arch/percpu.rs 535 0
 kernel/src/arch/smp.rs 125 0
 kernel/src/arch/syscall/debug.rs 64 0
 kernel/src/arch/syscall/device.rs 59 0
 kernel/src/arch/syscall/dispatch.rs 229 1
 kernel/src/arch/syscall/fs.rs 76 0
-kernel/src/arch/syscall/gate.rs 90 0
+kernel/src/arch/syscall/gate.rs 95 0
 kernel/src/arch/syscall/handles.rs 75 0
 kernel/src/arch/syscall/io.rs 51 0
 kernel/src/arch/syscall/ipc.rs 133 0

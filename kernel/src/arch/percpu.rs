@@ -96,6 +96,10 @@ pub struct PerCpu {
     pub syscall_num: u64,
     /// Saved user RBP at last syscall entry (for panic diagnostics).
     pub syscall_rbp: u64,
+    /// The task whose syscall this CPU is inside, packed pid:tid, or
+    /// [`NO_SYSCALL`] — which is what makes the three words above readable:
+    /// they are diagnostics of *that* task's entry and of no other.
+    syscall_task: u64,
     /// `lock add/sub` because IRQ entry/exit and Rust kernel code mutate it
     /// on the same CPU.
     pub preempt_count: AtomicU32,
@@ -236,6 +240,7 @@ const OFF_IDLE_STACK_TOP: u32 = offset_of!(PerCpu, idle_stack_top) as u32;
 pub(crate) const OFF_SYSCALL_RIP: u32 = offset_of!(PerCpu, syscall_rip) as u32;
 pub(crate) const OFF_SYSCALL_NUM: u32 = offset_of!(PerCpu, syscall_num) as u32;
 pub(crate) const OFF_SYSCALL_RBP: u32 = offset_of!(PerCpu, syscall_rbp) as u32;
+const OFF_SYSCALL_TASK: u32 = offset_of!(PerCpu, syscall_task) as u32;
 pub(crate) const OFF_RING0_TIMER_FIRES: u32 = offset_of!(PerCpu, ring0_timer_fires) as u32;
 const OFF_LAST_SEEN_RING0_FIRES: u32 = offset_of!(PerCpu, last_seen_ring0_fires) as u32;
 pub(crate) const OFF_LAST_ARMED_TICKS: u32 = offset_of!(PerCpu, last_armed_ticks) as u32;
@@ -322,6 +327,17 @@ pub(crate) mod gs {
         // atomicity is the whole of the synchronization.
         unsafe {
             asm!("mov gs:[{off}], {v:e}", off = const OFF, v = in(reg) v,
+                options(nostack, preserves_flags));
+        }
+    }
+
+    /// One naturally aligned per-CPU `u64` store. No `lock` prefix, for
+    /// [`write_u32`]'s reason at eight bytes.
+    #[inline]
+    pub fn write_u64<const OFF: u32>(v: u64) {
+        // SAFETY: `write_u32`'s argument, for eight bytes.
+        unsafe {
+            asm!("mov gs:[{off}], {v}", off = const OFF, v = in(reg) v,
                 options(nostack, preserves_flags));
         }
     }
@@ -507,11 +523,8 @@ const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
 /// Allocate and initialize PerCpu for a CPU. Returns a raw pointer (lives forever).
 ///
 /// **One `write` of the whole struct, so the allocator zeroes nothing this
-/// function means.** A field added to [`PerCpu`] has to be given a value here or
-/// the initialiser does not compile; the partial form this replaced named 8 of
-/// the fields and left the rest to `alloc_zeroed`, where a new field's default
-/// is silently whatever zero means for it — and two of these fields have a
-/// non-zero idle state.
+/// function means.** A field added to [`PerCpu`] does not compile until it is
+/// given a value here, and three of these have a non-zero idle state.
 fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     let layout = Layout::from_size_align(size_of::<PerCpu>(), 16).unwrap();
     // SAFETY: `size_of::<PerCpu>()` is non-zero and 16 is a power of two, which
@@ -523,9 +536,9 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     assert!(!ptr.is_null(), "percpu: alloc failed");
 
     // SAFETY: the allocation above succeeded (asserted) and is
-    // `size_of::<PerCpu>()` bytes at 16-byte alignment, so it is a writable,
-    // aligned, uninhabited-by-anything-else place for one `PerCpu`. Nothing has
-    // a reference to it and nothing reads it until this function returns.
+    // `size_of::<PerCpu>()` bytes at 16-byte alignment, so it is an aligned,
+    // writable place for one `PerCpu` that nothing else references or reads
+    // until this function returns.
     unsafe {
         core::ptr::write(
             ptr,
@@ -535,9 +548,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 kernel_rsp: 0,
                 user_rsp: 0,
                 tss: Tss::new(),
-                // The idle sentinel, and an asm wire format: `current_tid` and
-                // `current_pid` are decoded to `Option` at this module's
-                // boundary, so zero here would name thread 0 of process 0.
+                // The idle sentinel: zero would name thread 0 of process 0.
                 current_tid: u32::MAX,
                 current_pid: u32::MAX,
                 gdt: GDT_ENTRIES,
@@ -545,6 +556,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 syscall_rip: 0,
                 syscall_num: 0,
                 syscall_rbp: 0,
+                syscall_task: NO_SYSCALL,
                 preempt_count: AtomicU32::new(0),
                 need_resched: AtomicU8::new(0),
                 _pad_after_need_resched: [0; 3],
@@ -1061,7 +1073,51 @@ pub fn idle_stack_top() -> u64 {
     gs::read_u64::<OFF_IDLE_STACK_TOP>()
 }
 
-/// User RIP saved at last syscall entry (for panic diagnostics).
+/// No task on this CPU is inside a syscall. Not an identity anything can hold:
+/// [`pack_task`] never produces it, because no id map issues `u32::MAX`.
+const NO_SYSCALL: u64 = u64::MAX;
+
+/// The identity a syscall bracket records — the pid and the tid together,
+/// because a tid is per-process and `Tid(0)` is the main thread of every
+/// process on the machine.
+fn pack_task(pid: u32, tid: u32) -> u64 {
+    ((pid as u64) << 32) | tid as u64
+}
+
+/// Enter this CPU's syscall bracket. `arch::syscall` is the only caller.
+pub fn enter_syscall() {
+    gs::write_u64::<OFF_SYSCALL_TASK>(pack_task(
+        gs::read_u32::<OFF_CURRENT_PID>(),
+        gs::read_u32::<OFF_CURRENT_TID>(),
+    ));
+}
+
+/// …and leave it.
+pub fn leave_syscall() {
+    gs::write_u64::<OFF_SYSCALL_TASK>(NO_SYSCALL);
+}
+
+/// Whether the task this CPU is running is inside a syscall right now.
+///
+/// **An identity and not a flag**, because the word is per-CPU while the
+/// question is about a thread: the comparison is what rules out a thread in
+/// Ring 3 on a CPU that once served a syscall, and a thread in Ring 3 while a
+/// sibling sits parked inside one.
+///
+/// It errs one way, the safe one: a syscall that parked and resumed on a CPU
+/// that finished somebody else's in between answers `false`, so a panic there
+/// halts and reports instead of recovering. The other answer needs the word
+/// saved and restored across a switch, as `preempt_count` is
+/// (`hw::KernelHw::switch`).
+pub fn in_syscall() -> bool {
+    let recorded = gs::read_u64::<OFF_SYSCALL_TASK>();
+    recorded != NO_SYSCALL
+        && recorded
+            == pack_task(gs::read_u32::<OFF_CURRENT_PID>(), gs::read_u32::<OFF_CURRENT_TID>())
+}
+
+/// User RIP saved at last syscall entry, meaningful only while
+/// [`in_syscall`] holds.
 pub fn syscall_rip() -> u64 {
     gs::read_u64::<OFF_SYSCALL_RIP>()
 }
