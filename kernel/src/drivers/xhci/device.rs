@@ -6,9 +6,10 @@ use toyos_xhci::enumerate::{
 };
 use toyos_xhci::job::{Await, Outcome, Stages};
 use toyos_xhci::port::{self, Reset};
+use toyos_xhci::recovery;
 use super::{deadline, Answer, Trb, TrbRing, What, XhciController, PAGE};
 use super::{OFF_INPUT_CTX, OFF_DATA_BUF};
-use super::{DEV_INT_RING, DEV_EP0_RING, DEV_OUT_CTX, DEV_REPORT};
+use super::{DEV_INT_RING, DEV_EP0_RING, DEV_OUT_CTX, DEV_REPORT, EP0_DCI};
 use super::{TRB_ENABLE_SLOT, TRB_ADDRESS_DEVICE, TRB_CONFIGURE_EP, TRB_EVALUATE_CONTEXT};
 use super::{enqueue_control, CC_SUCCESS};
 
@@ -395,7 +396,7 @@ pub(super) fn slot_answered(
     let Some(block) = ctrl.layout.device(slot_id) else {
         log!("xHCI: slot {} is beyond the pool's {} device blocks, dropping port {}",
             slot_id, ctrl.layout.dev_blocks, port_idx + 1);
-        return finish(ctrl, port_idx, Some(slot_id));
+        return refuse(ctrl, port_idx, slot_id);
     };
     log!("xHCI: slot {} enabled (dma +{:#x})", slot_id, block);
 
@@ -423,12 +424,17 @@ pub(super) fn stepped(ctrl: &mut XhciController, mut state: Enumerating, outcome
         Act::Command(cmd) => {
             if !outcome.succeeded() {
                 log!("xHCI: {} on port {port}: {}", command_name(cmd), Answer(outcome));
-                return finish(ctrl, state.port_idx, Some(state.slot_id));
+                return refuse(ctrl, state.port_idx, state.slot_id);
             }
             match cmd {
                 enumerate::Command::AddressDevice => log!("xHCI: device addressed"),
                 enumerate::Command::ConfigureEndpoint => log!("xHCI: endpoint configured"),
-                enumerate::Command::EnableSlot | enumerate::Command::EvaluateEp0 => {}
+                enumerate::Command::SetEp0Dequeue => {
+                    log!("xHCI: EP0 on port {port} runs again after the stall")
+                }
+                enumerate::Command::EnableSlot
+                | enumerate::Command::EvaluateEp0
+                | enumerate::Command::ResetEp0 => {}
             }
             Learnt::Nothing
         }
@@ -439,8 +445,15 @@ pub(super) fn stepped(ctrl: &mut XhciController, mut state: Enumerating, outcome
         Act::Request(Request::SetProtocol) => {
             if !outcome.succeeded() {
                 log!("xHCI: SET_PROTOCOL on port {port}: {}", Answer(outcome));
+                // Going on is the decision; leaving EP0 halted behind it is
+                // not. The sequence answers with the controller's two
+                // recovery commands, which is the whole of what a stalled
+                // control endpoint owes — the device clears its own half on
+                // the next SETUP (USB 2.0 §8.5.3.4).
+                Learnt::Stalled
+            } else {
+                Learnt::Nothing
             }
-            Learnt::Nothing
         }
         Act::Request(request) => {
             let want = match request {
@@ -450,11 +463,11 @@ pub(super) fn stepped(ctrl: &mut XhciController, mut state: Enumerating, outcome
             };
             let Some(delivered) = delivered(outcome, want) else {
                 log!("xHCI: {} on port {port}: {}", request_name(request), Answer(outcome));
-                return finish(ctrl, state.port_idx, Some(state.slot_id));
+                return refuse(ctrl, state.port_idx, state.slot_id);
             };
             match read_back(ctrl, &mut state, request, delivered) {
                 Ok(learnt) => learnt,
-                Err(()) => return finish(ctrl, state.port_idx, Some(state.slot_id)),
+                Err(()) => return refuse(ctrl, state.port_idx, state.slot_id),
             }
         }
     };
@@ -469,7 +482,7 @@ fn advance(ctrl: &mut XhciController, state: Enumerating, learnt: Learnt) {
         Next::Refuse => {
             log!("xHCI: no HID boot interface found on port {}, skipping it",
                 state.port_idx + 1);
-            finish(ctrl, state.port_idx, Some(state.slot_id))
+            refuse(ctrl, state.port_idx, state.slot_id)
         }
     }
 }
@@ -483,7 +496,7 @@ fn perform(ctrl: &mut XhciController, mut state: Enumerating, act: Act) {
         Act::Request(request) => Some(control(ctrl, &mut state, request)),
     };
     let Some((on, stages)) = submitted else {
-        return finish(ctrl, state.port_idx, Some(state.slot_id));
+        return refuse(ctrl, state.port_idx, state.slot_id);
     };
     ctrl.outstanding.submit(What::Enumerating(state), on, stages, deadline());
 }
@@ -504,6 +517,25 @@ fn command(
             Some(evaluate_ep0_trb(ctrl, state.slot_id, state.packet))
         }
         enumerate::Command::ConfigureEndpoint => configure_endpoint_trb(ctrl, state),
+        // EP0's own recovery, which the sequence owes after an act the device
+        // stalled and it went on from. `recovery_trb` is the same builder the
+        // bulk and interrupt endpoints recover through, and its Set TR Dequeue
+        // arm is what re-initialises the ring — the controller is otherwise
+        // still pointing at the TRB that stalled.
+        enumerate::Command::ResetEp0 => Some(ctrl.recovery_trb(
+            recovery::Command::ResetEndpoint,
+            state.slot_id,
+            EP0_DCI,
+            &mut state.ep0_ring,
+            state.block + DEV_EP0_RING,
+        )),
+        enumerate::Command::SetEp0Dequeue => Some(ctrl.recovery_trb(
+            recovery::Command::SetDequeue,
+            state.slot_id,
+            EP0_DCI,
+            &mut state.ep0_ring,
+            state.block + DEV_EP0_RING,
+        )),
     }
 }
 
@@ -659,6 +691,8 @@ fn command_name(cmd: enumerate::Command) -> &'static str {
         enumerate::Command::AddressDevice => "Address Device",
         enumerate::Command::EvaluateEp0 => "Evaluate Context (EP0 packet size)",
         enumerate::Command::ConfigureEndpoint => "Configure Endpoint",
+        enumerate::Command::ResetEp0 => "Reset Endpoint (EP0)",
+        enumerate::Command::SetEp0Dequeue => "Set TR Dequeue Pointer (EP0)",
     }
 }
 
@@ -783,27 +817,33 @@ fn hid_input_context(
 fn bind(ctrl: &mut XhciController, state: Enumerating) {
     let (_, function) = state.parsed.expect("a configuration named a function");
     let rings = state.rings.expect("Configure Endpoint named this device's rings");
-    match (function, rings) {
+    // Whether a device came of it, because that is what decides who keeps the
+    // slot: a class driver that refused this device leaves the controller
+    // holding a slot for something nothing will ever talk to.
+    let bound = match (function, rings) {
         (Function::Msc(info), Rings::Msc(msc)) => {
-            super::msc::bind(ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info);
+            super::msc::bind(ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info)
         }
-        (Function::Hid(info), Rings::Hid(int_ring)) => {
-            bind_hid(ctrl, &state, &info, int_ring);
-        }
+        (Function::Hid(info), Rings::Hid(int_ring)) => bind_hid(ctrl, &state, &info, int_ring),
         // The rings are built from the function two acts earlier and nothing
         // between the two can change it, so a mismatch is a driver that lost
         // track of which device it is enumerating.
         _ => unreachable!("the rings were built for another function"),
+    };
+    if bound {
+        finish(ctrl, state.port_idx, Some(state.slot_id));
+    } else {
+        refuse(ctrl, state.port_idx, state.slot_id);
     }
-    finish(ctrl, state.port_idx, Some(state.slot_id));
 }
 
+/// `true` if a device came of it — the caller gives the slot back if not.
 fn bind_hid(
     ctrl: &mut XhciController,
     state: &Enumerating,
     info: &HidInterfaceInfo,
     int_ring: TrbRing,
-) {
+) -> bool {
     let report = ctrl.dma().subview(state.block + DEV_REPORT, 8);
     let report_size = match info.protocol {
         HidType::Keyboard => 8,
@@ -820,7 +860,7 @@ fn bind_hid(
             None => {
                 log!("xHCI: slot {} is past the pointers this machine can number, dropping it",
                     state.slot_id);
-                return;
+                return false;
             }
         },
     };
@@ -855,6 +895,7 @@ fn bind_hid(
         log!("xHCI: pointer on slot {} merges as source {}", state.slot_id, source.id());
     }
     ctrl.devices.push(dev);
+    true
 }
 
 /// The enumeration is over, however it went.
@@ -871,6 +912,25 @@ fn bind_hid(
 pub(super) fn finish(ctrl: &mut XhciController, port_idx: u8, slot: Option<u8>) {
     ctrl.ports[port_idx as usize].enumerated(slot.and_then(NonZeroU8::new));
     ctrl.acknowledge_port_read(port_idx);
+}
+
+/// The enumeration is over and the device is refused, with the device still in
+/// its port.
+///
+/// **The slot goes back here rather than at the unplug.** A slot is the
+/// controller's resource from the moment Enable Slot answers, and a device that
+/// is refused and stays plugged in — a hub, a camera, a fingerprint reader, a
+/// disk with no bulk pair — kept one for the life of the boot. On a controller
+/// with fewer slots than the machine has devices, that is a later device losing
+/// its slot to an earlier one nothing will ever talk to.
+///
+/// The port is left *attached with no slot*, which is `let_go`'s answer one
+/// stage earlier: a port that read as unattached would enumerate the same
+/// refused device again every debounce.
+pub(super) fn refuse(ctrl: &mut XhciController, port_idx: u8, slot_id: u8) {
+    ctrl.ports[port_idx as usize].enumerated(None);
+    ctrl.acknowledge_port_read(port_idx);
+    ctrl.submit_disable_slot(slot_id, super::AfterSlot::Refused);
 }
 
 /// Drop an enumeration outstanding for a port whose device has gone, for the

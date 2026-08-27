@@ -63,6 +63,14 @@ pub enum Command {
     /// a device that is not yet configured and says far more than is meant.
     EvaluateEp0,
     ConfigureEndpoint,
+    /// Reset Endpoint on DCI 1, which is what takes the default control pipe
+    /// out of Halted after the device stalled a request the sequence went on
+    /// from (xHCI 1.2 §4.6.8).
+    ResetEp0,
+    /// …and Set TR Dequeue Pointer for the same endpoint, because the
+    /// controller's dequeue pointer is still on the TRB that stalled: without
+    /// it the next control transfer re-runs the stalled one (xHCI 1.2 §4.6.10).
+    SetEp0Dequeue,
 }
 
 /// A control request the enumeration issues on EP0.
@@ -112,6 +120,10 @@ pub enum Learnt {
     Ep0PacketWrong,
     /// The configuration descriptor named a function this driver can bind.
     Function(Function),
+    /// The device stalled the act, and the sequence goes on regardless — which
+    /// is a decision only [`Request::SetProtocol`] has. The stall left EP0
+    /// halted, so what is owed before the next act is EP0's own recovery.
+    Stalled,
 }
 
 /// Where the sequence goes after the act that has just completed.
@@ -144,6 +156,8 @@ enum At {
     Config,
     Configuration,
     Protocol,
+    Ep0Reset,
+    Ep0Dequeue,
     Endpoints,
 }
 
@@ -189,7 +203,15 @@ impl Enumeration {
             At::Configuration if self.boot_protocol => {
                 (At::Protocol, Act::Request(Request::SetProtocol))
             }
-            At::Configuration | At::Protocol => {
+            // A tolerated stall halts EP0 at the controller, and the device
+            // clears its own half on the next SETUP (USB 2.0 §8.5.3.4). So what
+            // is owed is the controller's two commands and no packet on the bus
+            // — which is why this branch is here and not a `Request`.
+            At::Protocol if learnt == Learnt::Stalled => {
+                (At::Ep0Reset, Act::Command(Command::ResetEp0))
+            }
+            At::Ep0Reset => (At::Ep0Dequeue, Act::Command(Command::SetEp0Dequeue)),
+            At::Configuration | At::Protocol | At::Ep0Dequeue => {
                 (At::Endpoints, Act::Command(Command::ConfigureEndpoint))
             }
             At::Endpoints => return Next::Bind,
@@ -290,6 +312,40 @@ mod tests {
         // And exactly once: a second Evaluate Context would be asked from the
         // state the first one left.
         assert_eq!(route.count(Act::Command(Command::EvaluateEp0)), 1);
+    }
+
+    /// The one act the sequence goes on from after a stall, and what a stall
+    /// leaves behind: EP0 halted at the controller, recovered by two commands
+    /// and no packet on the bus.
+    #[test]
+    fn a_stalled_set_protocol_recovers_ep0_before_the_endpoints_are_configured() {
+        let route = route(|act| match act {
+            Act::Request(Request::SetProtocol) => Learnt::Stalled,
+            other => keyboard(other),
+        });
+        assert_eq!(route.end, Next::Bind);
+        assert_eq!(
+            route.acts()[6..],
+            [
+                Act::Request(Request::SetProtocol),
+                Act::Command(Command::ResetEp0),
+                Act::Command(Command::SetEp0Dequeue),
+                Act::Command(Command::ConfigureEndpoint),
+            ]
+        );
+        // Both, and in that order: Reset Endpoint alone leaves the controller's
+        // dequeue pointer on the TRB that stalled, so the next control transfer
+        // runs it again.
+        assert_eq!(route.count(Act::Command(Command::ResetEp0)), 1);
+        assert_eq!(route.count(Act::Command(Command::SetEp0Dequeue)), 1);
+    }
+
+    /// …and a device that did not stall pays nothing for it.
+    #[test]
+    fn a_device_that_answered_set_protocol_recovers_nothing() {
+        let route = route(keyboard);
+        assert_eq!(route.count(Act::Command(Command::ResetEp0)), 0);
+        assert_eq!(route.count(Act::Command(Command::SetEp0Dequeue)), 0);
     }
 
     /// A disk and a tablet have no boot protocol to select, and asking for one

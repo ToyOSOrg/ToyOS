@@ -1,12 +1,12 @@
 //! Linux-style deferred preemption primitives.
 //!
 //! Two per-CPU words drive the model (defined in `arch::percpu::PerCpu`):
-//!   - `preempt_count` @ gs:[240] — incremented by every IRQ entry and by
+//!   - `preempt_count` — incremented by every IRQ entry and by
 //!     `disable()`. Read-modify-writes are `lock`-prefixed because both kernel
 //!     code and IRQ entries mutate it on the same CPU; `set_count`'s plain
 //!     store needs no prefix (a naturally aligned 32-bit store, and a same-CPU
 //!     IRQ cannot land inside one instruction).
-//!   - `need_resched` @ gs:[244] — set by the timer ISR (and future wake
+//!   - `need_resched` — set by the timer ISR (and future wake
 //!     paths), cleared by the deferred-preempt epilogue. Single-byte stores
 //!     are naturally atomic on x86 — no `lock` prefix needed.
 //!
@@ -17,13 +17,13 @@
 //! `const`-generic primitives — `read_u32`, `write_u32`, `read_u8`,
 //! `write_u8_imm`, `lock_inc_u32`, `lock_dec_u32` — rather than a hand-written
 //! `asm!` string per accessor. The offset is a `const` operand, so each still
-//! assembles to the immediate-displacement form (`lock addl $1, %gs:240`) the
-//! entry stubs in `arch::syscall` and `arch::idt` open and close the same count
-//! with. **They live in `arch::percpu` and not here**: that module declares
-//! `PerCpu`, asserts every offset against the number the assembly hardcodes, and
-//! reaches the same fields itself — this file had a second copy of both the
-//! primitives and the three offsets, and a `gs:` string at the crate root is
-//! also x86 in a file that is not `arch/`.
+//! assembles to the immediate-displacement form the entry stubs in
+//! `arch::syscall` and `arch::idt` open and close the same count with — and
+//! those stubs feed it the same constant, so no spelling of this word is a
+//! number. **They live in `arch::percpu` and not here**: that module declares
+//! `PerCpu` and derives every offset from it — this file had a second copy of
+//! both the primitives and the three offsets, and a `gs:` string at the crate
+//! root is also x86 in a file that is not `arch/`.
 //!
 //! The word is per-CPU but the depth it holds belongs to the running *context*,
 //! so `Hw::switch` swaps it with the incoming context's saved depth. Without
@@ -118,9 +118,7 @@ pub fn enable() {
 
 /// Whether this CPU is inside a fault or panic report.
 ///
-/// `gs:[256]` is `PerCpu::fault_state`, non-zero for PageFault/Fatal/Panic and
-/// asserted at that offset in `percpu.rs` alongside the other raw offsets this
-/// module uses.
+/// `PerCpu::fault_state` is non-zero for PageFault/Fatal/Panic.
 ///
 /// A CPU inside a report is not reschedulable, so a `fault_state` never
 /// returned to Normal costs that CPU its preemption for the rest of the boot:

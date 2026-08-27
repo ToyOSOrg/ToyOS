@@ -544,6 +544,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
+    // One boot whose verdict is three lines of kernel log and a census column.
+    // The two waits inside the guest are bounded and report rather than hang, so
+    // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
+    // price it.
+    ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
     ("xhci_many_devices", Sched::Parallel, Tier::Fast),
     // Its whole assertion is that a keystroke injected from the host crossed a
     // USB keyboard on the *second* controller, and `input_events_run` sends
@@ -8712,13 +8717,13 @@ fn run_machine_test(
             if found != 2 {
                 return Err(format!("{found} controller(s) initialised, want 2:\n{boot}"));
             }
-            if !boot.contains("xHCI: 2 controller(s), 4 HID device(s)") {
+            if !boot.contains("xHCI: 2 controller(s), 5 HID device(s)") {
                 return Err(format!(
-                    "the machine-wide totals are not 2 controllers and 4 HID devices:\n{boot}"
+                    "the machine-wide totals are not 2 controllers and 5 HID devices:\n{boot}"
                 ));
             }
             let binds = parse_xhci_binds(&boot);
-            for (want, count) in [("keyboard", 2), ("mouse", 2)] {
+            for (want, count) in [("keyboard", 3), ("mouse", 2)] {
                 let got = binds.iter().filter(|b| b.kind == want).count();
                 if got != count {
                     return Err(format!("{got} {want}(s) bound, want {count}: {binds:?}\n{boot}"));
@@ -8750,7 +8755,7 @@ fn run_machine_test(
             }
             serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
             eprintln!(
-                "  [xhci] 2 controllers, 4 HID; both pointers on slot {}, merging as sources {} \
+                "  [xhci] 2 controllers, 5 HID; both pointers on slot {}, merging as sources {} \
                  and {}",
                 pointers[0].0, pointers[0].1, pointers[1].1
             );
@@ -10097,6 +10102,17 @@ fn run_machine_test(
             if slots != [1] {
                 return Err(format!("slots {slots:?} got a block, want just slot 1:\n{log}"));
             }
+            // And every one of them gave its slot straight back. A slot is the
+            // controller's from the moment Enable Slot answers, so a device
+            // refused and left plugged in used to keep one for the life of the
+            // boot — which is this test's own bus five times over, on a
+            // controller the shortage is staged on.
+            let given_back = log.matches("disabled").count();
+            if given_back != over {
+                return Err(format!(
+                    "{given_back} slot(s) disabled for {over} refused device(s):\n{log}"
+                ));
+            }
 
             // The one device that did get the block was enumerated to
             // completion, which is what makes "the extra devices and nothing
@@ -10721,6 +10737,47 @@ fn run_machine_test(
                     asked[0], asked[1], asked[2],
                 );
             }
+            Ok(())
+        }
+        "lapic_spurious_vector" => {
+            // `apic::enable_x2apic` writes 0xFF into the SVR on every CPU, so
+            // the platform names a vector the IDT has to gate: delivery through
+            // a `P = 0` slot is a contributory fault and the CPU escalates to
+            // `#DF`, which halts the machine. Nothing on this host raises one by
+            // itself — the SDM's classic condition needs a task-priority
+            // register this kernel never writes, and every device here is MSI or
+            // MSI-X — so the kernel raises it on purpose under this parameter.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["lapic-spurious-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            if let Some(bad) = log.lines().find(|l| l.contains("spurious selftest FAILED")) {
+                return Err(format!("{bad}\n{log}"));
+            }
+            let Some(verdict) = log.lines().find(|l| l.contains("spurious selftest")) else {
+                return Err(format!("the spurious vector was never raised:\n{log}"));
+            };
+            // `3/3`, not the absence of a FAILED line: a self-test that never
+            // ran satisfies that absence just as well.
+            if !verdict.contains("3/3") {
+                return Err(format!("the self-test did not reach its verdict: {verdict}"));
+            }
+            // The two numbers are the interrupt census's own column — the
+            // handler may not log, so that column is the only report a delivery
+            // has — and both are asserted: nothing raised this vector before the
+            // staged one, and exactly one arrived.
+            if !verdict.contains("(0 -> 1)") {
+                return Err(format!(
+                    "the census did not count exactly the staged delivery: {verdict}"
+                ));
+            }
+            eprintln!("  [lapic] {}", verdict.trim());
             Ok(())
         }
         "virtio_used_ring" => {

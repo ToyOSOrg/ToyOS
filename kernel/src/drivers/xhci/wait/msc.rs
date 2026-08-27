@@ -44,6 +44,17 @@ use super::super::{CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_
 use super::super::{MSC_IN_RING, MSC_OUT_RING, MSC_CBW, MSC_CSW, MSC_SCRATCH, MSC_SCRATCH_LEN};
 use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS};
 
+/// Where a command's data phase lands, or `None` for a command that has none.
+///
+/// **A region and not an address, which is the whole of what makes the length
+/// checkable.** The CBW tells the device how many bytes to move, and that
+/// number is now the region's own size — so no command can name a length its
+/// destination does not have. It was a `(u64, u32)` pair, and four of the five
+/// call sites pointed at a 64-byte scratch buffer while the bound above them
+/// was the 32 KiB data buffer's.
+type DataPhase = Option<Dma<'static>>;
+
+
 /// The block size the layer above this one is written in. A device that
 /// addresses in anything this does not divide by is unimplemented, not
 /// unsupported-but-approximated — see `bring_up`.
@@ -626,7 +637,7 @@ impl XhciController {
             // LBA 0, block count 0: the whole medium, which is the only thing
             // a cache flush above a block device can mean.
             let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-            let issued = ctrl.scsi(dev, &cdb, 10, 0, 0, false, until);
+            let issued = ctrl.scsi(dev, &cdb, 10, None, false, until);
             let outcome = match flush_sense() {
                 Some((key, asc, ascq)) => Scsi::Refused { key, asc, ascq },
                 None => issued,
@@ -695,7 +706,7 @@ impl XhciController {
         }
 
         let dma = self.dma();
-        let data_phys = dma.phys() + (dev.block + MSC_DATA) as u64;
+        let data = dma.subview(dev.block + MSC_DATA, MSC_DATA_LEN);
         let mut done = 0u32;
         while done < count {
             let batch = (count - done).min(MSC_MAX_BLOCKS);
@@ -725,7 +736,7 @@ impl XhciController {
                 dma.copy_from(dev.block + MSC_DATA, &src[offset..offset + bytes]);
             }
 
-            match self.scsi(dev, &cdb, 10, data_phys, bytes as u32, !write, until) {
+            match self.scsi(dev, &cdb, 10, Some(data.subview(0, bytes)), !write, until) {
                 Scsi::Ok { delivered } if delivered as usize == bytes => {}
                 // Short of what was asked, and reported as success. Nothing
                 // above here has a way to say "these blocks arrived and those
@@ -799,8 +810,7 @@ impl XhciController {
         dev: &mut MscDevice,
         cdb: &[u8],
         cdb_len: u8,
-        data_phys: u64,
-        data_len: u32,
+        data: DataPhase,
         data_in: bool,
         until: Deadline,
     ) -> Scsi {
@@ -821,7 +831,7 @@ impl XhciController {
                 // `/bin/logd` give up a volume on a stick that is answering.
                 return Scsi::Budget;
             }
-            match self.bot(dev, cdb, cdb_len, data_phys, data_len, data_in) {
+            match self.bot(dev, cdb, cdb_len, data, data_in) {
                 Ok(Bot::Done { delivered }) => {
                     if attempt > 1 {
                         log!("usb-storage: {slot} SCSI {opcode:#04x} completed on attempt \
@@ -855,8 +865,8 @@ impl XhciController {
     /// zeroes fall on the failing side of every such decision.
     fn request_sense(&mut self, dev: &mut MscDevice) -> (u8, u8, u8) {
         let dma = self.dma();
-        let phys = dma.phys() + (dev.block + MSC_SCRATCH) as u64;
-        super::super::zero_dma(dma, dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
+        let scratch = dma.subview(dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
+        scratch.zero();
         let cdb = [0x03u8, 0, 0, 0, 18, 0];
         // Recursion is not possible: a failing REQUEST SENSE goes through
         // `bot` directly, so it cannot ask for sense data about itself.
@@ -864,7 +874,7 @@ impl XhciController {
         // what makes all three readable. Short of that they are whatever the
         // zeroing above left, and zero ASC/ASCQ is exactly the value
         // [`Scsi::unimplemented`] tests for.
-        match self.bot(dev, &cdb, 6, phys, 18, true) {
+        match self.bot(dev, &cdb, 6, Some(scratch.subview(0, 18)), true) {
             Ok(Bot::Done { delivered }) if delivered >= 14 => {
                 let mut resp = [0u8; 18];
                 dma.copy_to(dev.block + MSC_SCRATCH, &mut resp);
@@ -908,13 +918,24 @@ impl XhciController {
         dev: &mut MscDevice,
         cdb: &[u8],
         cdb_len: u8,
-        data_phys: u64,
-        data_len: u32,
+        data: DataPhase,
         data_in: bool,
     ) -> Result<Bot, Broke> {
         // The CDBs are this file's own, so their shape is a kernel invariant.
         assert!(cdb_len as usize <= cdb.len() && cdb_len <= 16);
-        assert!(data_len as usize <= MSC_DATA_LEN);
+        // The length the device is told to move is the region's own, so the
+        // only bound left to state is this driver's largest transfer.
+        let (data_phys, data_len) = match data {
+            Some(region) => {
+                assert!(
+                    region.size() <= MSC_DATA_LEN,
+                    "usb-storage: a {} B data phase, past the {MSC_DATA_LEN} B this driver rings",
+                    region.size(),
+                );
+                (region.phys(), region.size() as u32)
+            }
+            None => (0, 0),
+        };
 
         let dma = self.dma();
         let tag = dev.next_tag();
@@ -1127,7 +1148,9 @@ impl XhciController {
     fn reset_the_device(&mut self, dev: &mut MscDevice, in_ep: Owed, out_ep: Owed) -> bool {
         let slot = dev.slot_id;
         let iface = dev.iface as u16;
-        let reset = self.control_transfer(slot, &mut dev.ep0_ring, 0x21, 0xFF, 0, iface, None, 0);
+        let block = dev.dev_block;
+        let reset =
+            self.control_transfer(slot, block, &mut dev.ep0_ring, 0x21, 0xFF, 0, iface, None, 0);
         if !reset.done() {
             log!("usb-storage: slot {slot} would not take a Bulk-Only Reset: {reset}");
         }
@@ -1135,8 +1158,8 @@ impl XhciController {
         // endpoints are what the next command touches, and leaving one halted
         // because another step failed turns a recoverable device into a
         // permanently offline one.
-        let cleared_in = self.clear_endpoint_halt(slot, &mut dev.ep0_ring, in_ep);
-        let cleared_out = self.clear_endpoint_halt(slot, &mut dev.ep0_ring, out_ep);
+        let cleared_in = self.clear_endpoint_halt(slot, block, &mut dev.ep0_ring, in_ep);
+        let cleared_out = self.clear_endpoint_halt(slot, block, &mut dev.ep0_ring, out_ep);
         reset.done() && cleared_in && cleared_out
     }
 }
@@ -1229,6 +1252,7 @@ pub(in crate::drivers::xhci) fn prepare(
 /// No return value: every failure path below logs, so a `bool` would carry
 /// nothing the one caller wants — and it would be dropped in statement
 /// position, silently, because Rust does not warn about a discarded `bool`.
+/// `true` if a disk came of it — the caller gives the slot back if not.
 pub(in crate::drivers::xhci) fn bind(
     ctrl: &mut XhciController,
     ep0_ring: TrbRing,
@@ -1236,7 +1260,7 @@ pub(in crate::drivers::xhci) fn bind(
     dev_block: usize,
     rings: MscRings,
     info: &MscInterface,
-) {
+) -> bool {
     let MscRings { at, block, in_ring, out_ring } = rings;
     let mut dev = MscDevice {
         slot_id,
@@ -1259,7 +1283,7 @@ pub(in crate::drivers::xhci) fn bind(
     };
 
     if !bring_up(ctrl, &mut dev) {
-        return;
+        return false;
     }
     // The machine-wide number, taken here because here is where there is a disk
     // to give one to: it is what `usb_storage::open` indexes by and what a mount
@@ -1275,6 +1299,7 @@ pub(in crate::drivers::xhci) fn bind(
         block
     );
     ctrl.msc[at].disk = Some(Disk { index, dev });
+    true
 }
 
 /// TEST UNIT READY, INQUIRY and READ CAPACITY: everything between a configured
@@ -1288,7 +1313,7 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     let mut sense = (0u8, 0u8, 0u8);
     let mut ready = false;
     loop {
-        match ctrl.bot(dev, &[0x00u8; 6], 6, 0, 0, false) {
+        match ctrl.bot(dev, &[0x00u8; 6], 6, None, false) {
             Ok(Bot::Done { .. }) => {
                 ready = true;
                 break;
@@ -1312,7 +1337,7 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     }
 
     let dma = ctrl.dma();
-    let scratch_phys = dma.phys() + (dev.block + MSC_SCRATCH) as u64;
+    let scratch = dma.subview(dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
     // **No caller's budget here, and that is not an omission.**
     // [`crate::block::OPERATION`] bounds one *block-device operation*, and a
     // bring-up is not one: nobody has asked for anything yet, there is no
@@ -1328,8 +1353,11 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
                         cdb_len: u8,
                         want: u32,
                         out: &mut [u8]| {
-        super::super::zero_dma(dma, dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
-        match ctrl.scsi(dev, cdb, cdb_len, scratch_phys, want, true, until) {
+        scratch.zero();
+        // `subview` is what refuses a command asking for more than the scratch
+        // buffer holds, at the buffer rather than against a constant somewhere
+        // else.
+        match ctrl.scsi(dev, cdb, cdb_len, Some(scratch.subview(0, want as usize)), true, until) {
             Scsi::Ok { delivered } if delivered as usize >= out.len() => {
                 dma.copy_to(dev.block + MSC_SCRATCH, out);
                 true

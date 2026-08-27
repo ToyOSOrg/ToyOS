@@ -1889,11 +1889,28 @@ pub fn xhci_full_speed_device(
     if !log.contains("Boot: complete") {
         return Err(format!("the boot did not finish\n{log}"));
     }
+
+    // The tablet stalls SET_PROTOCOL: QEMU's `usb-wacom-tablet` reports a boot
+    // protocol it will not select, and the driver binds it anyway. What it may
+    // not do is bind it with EP0 still halted, because a halted control
+    // endpoint runs no TRB — so a device whose interrupt endpoint later needs a
+    // CLEAR_FEATURE could never be recovered. This is the one bus in the suite
+    // where a device stalls a request the driver goes on from.
+    let stalled = log.lines().filter(|l| l.contains("SET_PROTOCOL")).count();
+    if stalled != 1 {
+        return Err(format!(
+            "{stalled} stalled SET_PROTOCOL(s); this gate needs the tablet's one\n{log}"
+        ));
+    }
+    if !log.contains("runs again after the stall") {
+        return Err(format!("EP0 was left halted behind the stall\n{log}"));
+    }
     serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
 
     eprintln!(
         "  [xhci] two full-speed devices enumerated: one EP0 resized to 64 from the reader's \
-         own bMaxPacketSize0 and the tablet's 8 left alone, both identities read off the wire"
+         own bMaxPacketSize0 and the tablet's 8 left alone, both identities read off the wire, \
+         and the tablet's stalled SET_PROTOCOL left EP0 running"
     );
     Ok(())
 }

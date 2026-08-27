@@ -74,16 +74,12 @@ const CLAIMING: u64 = u64::MAX - 1;
 
 /// One kernel thread, and whether a panic inside it may be recovered from.
 ///
-/// **The column exists because the ordinary predicate is not merely wrong for
-/// a kernel thread, it is nondeterministic.** `main.rs`'s panic handler
-/// recovers when `percpu::syscall_rip() != 0 && percpu::current_tid().is_some()`
-/// — and `syscall_rip` is *never cleared*
-/// (`issues/panic-path/syscall-rip-never-cleared.md`, and
-/// `arch/idt/exceptions.rs` says so in its own comment). A kernel thread has a
-/// tid, so the second clause holds; the first reads whatever user thread last
-/// ran on *this* CPU left behind. The same panic on the same build therefore
-/// recovers or halts depending on which CPU the thread happened to be
-/// scheduled on. The row is what makes the answer a property of the thread.
+/// **The column exists because the ordinary predicate is not about a kernel
+/// thread at all.** `main.rs`'s panic handler recovers where
+/// `percpu::in_syscall()` holds, and a kernel thread has no syscall to be
+/// inside: there is no process to kill and no user frame to return to, so
+/// every one of them would answer `false` and halt the machine. The row is
+/// what makes the answer a property of the thread.
 ///
 /// **[`Row::task`] is the last word written and the first word read**, and that
 /// is the whole publication protocol. A reader searches on the identity, so

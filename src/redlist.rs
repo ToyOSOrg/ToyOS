@@ -2233,6 +2233,23 @@ pub const KNOWN_RED: &[Red] = &[
         measured: "2026-08-20",
     },
     Red {
+        test: "syscall_window_nmi",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`the storm never reported — is `syscall-window-nmi` on?` at 1,505 s against a \
+               committed 6,825 ms, in a 288-name run at 92 guests with a second worktree's \
+               suite on the same host. A 220x wall stretch, and the guest's own message for \
+               a storm line that has not arrived yet. The isolated re-run in the same \
+               session was green in 5 s and reported `3000 sent, 3000 taken, 43 in the \
+               window`. First sighting, no denominator; `--known-red` answered NOT ON THE \
+               LIST. **Not about the diff it was found on**",
+        evidence: "dev host, 2026-08-27, the `cargo test` run of the md2 defect-fix branch; \
+                   `exit_wait_storm` reds in the same phase and is already on this list",
+        source: "issues/build/syscall-window-nmi-reds-under-a-shared-host.md",
+        measured: "2026-08-27",
+    },
+    Red {
         test: "exit_wait_storm",
         instrument: Instrument::Ci,
         finding: Finding::Seen,

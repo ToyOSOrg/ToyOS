@@ -684,7 +684,8 @@ pub fn set_current_rt(enable: bool) {
     driver::set_current_rt(enable);
 }
 
-/// Block on a futex word unless it already changed. Returns whether it parked.
+/// Block on a futex word unless it already changed, and answer which of the two
+/// things the ABI names ended the wait.
 ///
 /// Registering before reading the word is the whole protocol: a `futex_wake`
 /// that runs after the registration either claims the ticket or finds the
@@ -702,7 +703,7 @@ pub fn futex_wait(
     phys_addr: DirectMap,
     expected: u32,
     deadline: Deadline,
-) -> bool {
+) -> FutexEnd {
     let parkable = Parkable::at_entry();
     // The value check is the predicate, and it runs *after* the arm — which is
     // the same ordering the registration gave it, and why no wake-generation
@@ -757,7 +758,33 @@ pub fn futex_wait(
         deadline,
         read,
     );
-    true
+    // **The predicate again, which is the whole of how the two are told
+    // apart.** `wait_until` answers `Ok(())` for a satisfied predicate and for
+    // an expired deadline alike, so what separates them is the word itself: it
+    // is the thing this wait was armed on, and the caller asked to sleep for as
+    // long as it held `expected`. A word that changed and changed back reads as
+    // a wake, which is the ABI's answer too — a `futex_wait` return is never
+    // proof of anything but that the caller must look again.
+    if read() {
+        FutexEnd::Changed
+    } else {
+        FutexEnd::Timeout
+    }
+}
+
+/// Which of the two things `SYS_FUTEX_WAIT`'s ABI names ended a wait.
+///
+/// A named pair rather than the `bool` this returned, because the `bool` said
+/// "it parked" — a question no caller asks and which it answered `true` to
+/// whether or not it had.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FutexEnd {
+    /// The word no longer holds `expected` — the wake this wait was for, a
+    /// writer that got there first, or the word's own frame going away.
+    Changed,
+    /// The word still holds `expected`, so nothing this wait was armed for has
+    /// happened and the caller's own deadline is what ended it.
+    Timeout,
 }
 
 /// Wake up to `count` waiters on this futex word, and answer how many.

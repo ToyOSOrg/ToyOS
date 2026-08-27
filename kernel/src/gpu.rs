@@ -37,7 +37,31 @@ pub trait Gpu: Send {
 static GPU: Lock<Option<Box<dyn Gpu>>> = Lock::new(None);
 static INFO: Lock<Option<GpuInfo>> = Lock::new(None);
 
+/// What the machine outside this module derives from the current mode.
+///
+/// One constructor, because the two callers are the two moments it changes —
+/// the driver registering and a resolution being set — and a second copy is how
+/// one of them ends up describing the mode before last.
+pub fn screen(info: &GpuInfo) -> crate::device::Screen {
+    crate::device::Screen {
+        // A description carries handles into whichever process reads it, and
+        // that process does not exist yet: `try_claim` mints them.
+        info: toyos_abi::FramebufferInfo {
+            scanout: [toyos_abi::HANDLE_INVALID; 2],
+            cursor: toyos_abi::HANDLE_INVALID,
+            width: info.width,
+            height: info.height,
+            stride: info.stride,
+            pixel_format: info.pixel_format,
+            flags: info.flags,
+        },
+        scanout: info.scanout.clone(),
+        cursor: info.cursor.clone(),
+    }
+}
+
 pub fn register(gpu: Box<dyn Gpu>, info: GpuInfo) {
+    crate::device::set_framebuffer_info(screen(&info));
     *INFO.lock() = Some(info);
     *GPU.lock() = Some(gpu);
 }
@@ -79,8 +103,7 @@ pub fn set_resolution(width: u32, height: u32) -> Result<GpuInfo, SyscallError> 
         }
         result?
     };
-    let mut info = INFO.lock();
-    *info = Some(GpuInfo {
+    *INFO.lock() = Some(GpuInfo {
         scanout: new_info.scanout.clone(),
         cursor: new_info.cursor.clone(),
         width: new_info.width,
@@ -89,6 +112,14 @@ pub fn set_resolution(width: u32, height: u32) -> Result<GpuInfo, SyscallError> 
         pixel_format: new_info.pixel_format,
         flags: new_info.flags,
     });
+    // **Every cached description of the old mode is this function's to
+    // replace**, which is what it means for it to own the invalidation: the
+    // registry answers the *next* framebuffer claim out of these regions, and
+    // the absolute pointer's per-axis scale is a function of this geometry. A
+    // caller doing it for itself is a caller that has to know the driver freed
+    // something, and the panic console — the one consumer that caches an
+    // address rather than a region — is blinded above for the same reason.
+    crate::device::set_framebuffer_info(screen(&new_info));
     Ok(new_info)
 }
 

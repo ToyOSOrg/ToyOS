@@ -257,30 +257,46 @@ impl XhciController {
     /// [`Self::step_recovery`] is the same route stepped across passes.
     fn restart_endpoint(&mut self, mut ep: Restart<'_>) -> bool {
         let owed = self.quiesce_endpoint(&mut ep);
-        self.clear_endpoint_halt(ep.slot_id, ep.ep0_ring, owed)
+        self.clear_endpoint_halt(ep.slot_id, ep.ctx_block, ep.ep0_ring, owed)
     }
 
     /// The half of one endpoint's recovery the **controller** answers: every
     /// command [`Recovery`] owes, up to the point where the sequence would
     /// speak to the device.
     fn quiesce_endpoint(&mut self, ep: &mut Restart<'_>) -> Owed {
-        let slot = self.slot(ep.slot_id);
-        let state = self.endpoint_state(ep.ctx_block, ep.dci);
-        log!("xHCI: {slot} endpoint {} is {state}, recovering", ep.dci);
+        self.run_recovery(ep.slot_id, ep.dci, ep.ctx_block, ep.ring, ep.ring_at, ep.ep_addr)
+    }
+
+    /// [`Recovery`] run to whatever it owes the device, one blocking command at
+    /// a time. Every endpoint reaches this, EP0 included — what differs is who
+    /// answers the [`Owed`] it ends with.
+    #[allow(clippy::too_many_arguments)]
+    fn run_recovery(
+        &mut self,
+        slot_id: u8,
+        dci: u8,
+        ctx_block: usize,
+        ring: &mut TrbRing,
+        ring_at: usize,
+        ep_addr: u8,
+    ) -> Owed {
+        let slot = self.slot(slot_id);
+        let state = self.endpoint_state(ctx_block, dci);
+        log!("xHCI: {slot} endpoint {dci} is {state}, recovering");
         let (mut seq, mut act) = match Recovery::begin(state) {
             Ok(begun) => begun,
             Err(NeedsConfigure(state)) => {
-                log_unrecoverable(slot, ep.dci, state);
+                log_unrecoverable(slot, dci, state);
                 return Owed::Failed;
             }
         };
         loop {
             let cmd = match act {
                 Act::Running => return Owed::Nothing,
-                Act::ClearHalt => return Owed::ClearHalt { ep_addr: ep.ep_addr },
+                Act::ClearHalt => return Owed::ClearHalt { ep_addr },
                 Act::Command(cmd) => cmd,
             };
-            let trb = self.recovery_trb(cmd, ep.slot_id, ep.dci, ep.ring, ep.ring_at);
+            let trb = self.recovery_trb(cmd, slot_id, dci, ring, ring_at);
             if !self.run_command(trb, cmd.name()) {
                 return Owed::Failed;
             }
@@ -288,16 +304,52 @@ impl XhciController {
         }
     }
 
+    /// The default control pipe, back to a state that runs TRBs.
+    ///
+    /// **Its own entry point because the device half does not exist.** USB 2.0
+    /// §9.4.5 does not define the Halt feature for the default pipe and §8.5.3.4
+    /// has the device clear the condition itself on the next SETUP — and a
+    /// CLEAR_FEATURE asking for it would have to go out over the very endpoint
+    /// that is halted. What is left is the controller's half, which is Reset
+    /// Endpoint and Set TR Dequeue Pointer (xHCI 1.2 §4.6.8): without the
+    /// second, the controller's dequeue pointer is still on the TRB that
+    /// stalled and the next transfer re-runs it.
+    ///
+    /// Every device's EP0 ring is at `DEV_EP0_RING` inside its own device
+    /// block, which is what makes the block the whole of what a caller supplies.
+    fn restart_control_endpoint(
+        &mut self,
+        slot_id: u8,
+        ctx_block: usize,
+        ring: &mut TrbRing,
+    ) -> bool {
+        let owed = self.run_recovery(
+            slot_id,
+            super::EP0_DCI,
+            ctx_block,
+            ring,
+            ctx_block + super::DEV_EP0_RING,
+            0,
+        );
+        !matches!(owed, Owed::Failed)
+    }
+
     /// The half the **device** answers, which is the only packet a recovery
     /// puts on the bus.
-    fn clear_endpoint_halt(&mut self, slot_id: u8, ep0_ring: &mut TrbRing, owed: Owed) -> bool {
+    fn clear_endpoint_halt(
+        &mut self,
+        slot_id: u8,
+        ctx_block: usize,
+        ep0_ring: &mut TrbRing,
+        owed: Owed,
+    ) -> bool {
         let ep_addr = match owed {
             Owed::Nothing => return true,
             Owed::Failed => return false,
             Owed::ClearHalt { ep_addr } => ep_addr,
         };
-        let cleared =
-            self.control_transfer(slot_id, ep0_ring, 0x02, 0x01, 0, ep_addr as u16, None, 0);
+        let cleared = self
+            .control_transfer(slot_id, ctx_block, ep0_ring, 0x02, 0x01, 0, ep_addr as u16, None, 0);
         if !cleared.done() {
             log!("xHCI: {} would not clear the halt on endpoint {ep_addr:#04x}: {cleared}",
                 self.slot(slot_id));
@@ -450,6 +502,7 @@ impl XhciController {
     fn control_transfer(
         &mut self,
         slot: u8,
+        ctx_block: usize,
         ring: &mut TrbRing,
         bm_request_type: u8,
         b_request: u8,
@@ -475,14 +528,37 @@ impl XhciController {
                 // The status stage is deliberately not waited for. An errored
                 // data stage halts EP0, so the TRB behind it never runs, and
                 // waiting would spend the whole transfer budget learning that.
-                Ok((code, _)) => return Control::Failed { stage: "data", code },
+                Ok((code, _)) => {
+                    self.recover_after(slot, ctx_block, ring, code);
+                    return Control::Failed { stage: "data", code };
+                }
                 Err(why) => return Control::Silent { stage: "data", why },
             }
         }
         match self.wait_transfer(slot, 1, trbs.status) {
             Ok((CC_SUCCESS, _)) => Control::Done { delivered },
-            Ok((code, _)) => Control::Failed { stage: "status", code },
+            Ok((code, _)) => {
+                self.recover_after(slot, ctx_block, ring, code);
+                Control::Failed { stage: "status", code }
+            }
             Err(why) => Control::Silent { stage: "status", why },
+        }
+    }
+
+    /// Take EP0 back out of Halted where `code` says the device stalled the
+    /// transfer, before the failure is reported to a caller that will very
+    /// likely send another one.
+    ///
+    /// **Here rather than at each caller**, because this is the only place that
+    /// knows a control transfer stalled — and a stall the caller answers with
+    /// another control transfer, which is what Bulk-Only Reset Recovery does
+    /// twice, is a transfer whose TRBs the controller never runs.
+    fn recover_after(&mut self, slot: u8, ctx_block: usize, ring: &mut TrbRing, code: u32) {
+        if code != super::CC_STALL {
+            return;
+        }
+        if !self.restart_control_endpoint(slot, ctx_block, ring) {
+            log!("xHCI: {} EP0 stayed halted after the stall", self.slot(slot));
         }
     }
 

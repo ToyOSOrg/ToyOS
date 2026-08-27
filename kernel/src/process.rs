@@ -1718,11 +1718,15 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
 
-    // Both outcomes answer 0: a thread that blocked and was woken and one whose
-    // word did not match and never blocked are the same answer to the caller,
-    // which re-checks the word either way.
-    scheduler::futex_wait(addr, phys_addr, expected, deadline);
-    0
+    // The ABI's two answers, and the kernel can produce both now: 0 wherever
+    // the word no longer holds `expected` — woken, or never blocked at all,
+    // which are one answer to a caller that re-checks the word either way —
+    // and 1 where it still does, which nothing but the caller's own deadline
+    // can have ended.
+    match scheduler::futex_wait(addr, phys_addr, expected, deadline) {
+        scheduler::FutexEnd::Changed => 0,
+        scheduler::FutexEnd::Timeout => 1,
+    }
 }
 
 /// Wake up to `count` threads blocked on the same physical address as `addr`.
