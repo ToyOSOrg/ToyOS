@@ -28,6 +28,9 @@ enum Reg {
     Id = 0x802,
     Eoi = 0x80B,
     Svr = 0x80F,
+    /// The first of the eight in-service words, 0x810..=0x817. Read through
+    /// [`in_service`], which is where a vector picks one of the eight.
+    Isr0 = 0x810,
     Icr = 0x830,
     LvtTimer = 0x832,
     TimerInit = 0x838,
@@ -69,8 +72,11 @@ fn enable_x2apic() {
     base |= (1 << 11) | (1 << 10);
     Reg::ApicBase.write(base);
 
+    // Bit 8 software-enables the APIC; the low byte is the vector it delivers
+    // when it takes an interrupt back, and `arch::idt::spurious` is the gate
+    // that number has to have.
     let svr = Reg::Svr.read();
-    Reg::Svr.write(svr | (1 << 8) | 0xFF);
+    Reg::Svr.write(svr | (1 << 8) | super::idt::spurious::SPURIOUS_VECTOR as u64);
 }
 
 /// Initialize the BSP's Local APIC in x2APIC mode.
@@ -104,6 +110,18 @@ pub fn send_sipi(apic_id: u32, vector: u8) {
 #[inline]
 pub fn eoi() {
     Reg::Eoi.write(0);
+}
+
+/// Whether `vector` is in service on this CPU — the one question that separates
+/// an interrupt the LAPIC delivered from one it took back.
+///
+/// The in-service register is eight 32-bit words (SDM Vol. 3A §12.8.4): the
+/// vector's high five bits pick the word and its low five the bit. `Isr0` plus
+/// an offset rather than eight variants, because the eight *are* one array and
+/// `vector >> 5` cannot leave it.
+pub fn in_service(vector: u8) -> bool {
+    let word = cpu::rdmsr(Reg::Isr0 as u32 + (vector as u32 >> 5));
+    (word >> (vector & 31)) & 1 != 0
 }
 
 /// Send an IPI to **this** CPU (self shorthand), for the one caller that needs

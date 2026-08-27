@@ -162,15 +162,17 @@ What survives of that class was audited here, in code:
   every redirection entry firmware left, so neither can deliver a vector at all.
   **Closed.**
 - every vector Intel names for 64-bit mode has a gate. **Closed by `9bd7a9e`.**
-- **the LAPIC's spurious-interrupt vector is `0xFF` and the IDT has no entry at
-  `0xFF`.** That is a defect on its own terms and is filed as
-  `issues/kernel/the-lapic-spurious-vector-has-no-gate.md`. **It is not
-  claimed as the cause of this sighting** — a spurious interrupt leaves nothing
-  behind, and what would deliver one on *this* configuration is itself
-  unestablished (that file has the reading). It is recorded here because
-  a `#DF` naming a live pid is precisely what it would look like, and because
-  closing it removes one of the three readings the next sighting has to be
-  weighed against.
+- the LAPIC's spurious-interrupt vector is `0xFF`, and the IDT had no entry at
+  `0xFF`. **Closed**: `arch/idt/spurious.rs` is that gate, and
+  `lapic_spurious_vector` raises the vector on purpose on every run. **It was
+  never claimed as the cause of this sighting** — a spurious interrupt leaves
+  nothing behind, and what would have delivered one on *this* configuration was
+  itself unestablished. It is recorded here because a `#DF` naming a live pid is
+  precisely what it would have looked like, and because closing it removes one
+  of the three readings the next sighting has to be weighed against.
+- **the other 235 `IdtEntry::EMPTY` slots are unchanged**, and each turns an
+  interrupt nobody expected into the same halt — filed as
+  `issues/kernel/an-unclaimed-vector-halts-the-machine-with-no-name.md`.
 
 ## Reproduction
 

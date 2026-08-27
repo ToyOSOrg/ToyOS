@@ -207,6 +207,7 @@ kernel_log_file 13152
 keyboard_claim_close_spares_stdin 4580
 kill_while_blocked 44
 klogd_hosted 17870
+lapic_spurious_vector 18446744073709551615
 late_storage_connect 6455
 launcher_refusals 2106
 locale_detect 5588

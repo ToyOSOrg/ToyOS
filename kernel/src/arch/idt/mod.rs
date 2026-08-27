@@ -6,6 +6,7 @@ mod i8042;
 #[cfg(feature = "boot-actuators")]
 mod log_nest;
 mod nmi;
+pub(crate) mod spurious;
 mod timer;
 mod tlb;
 mod virtio_net;
@@ -350,6 +351,19 @@ idt_vectors! {
         // Ring 0 because it never returns: `cli; hlt` forever.
         ring0 HaltAll      = 0xFD, stub_halt_all;
         ring3 TlbFlush     = 0xFE, tlb::tlb_flush_entry;
+        // The vector this kernel names by writing it into the SVR, which is
+        // why it is on a table whose rule is Intel's names: a vector the CPU
+        // can deliver through a `P = 0` slot is the escalation above, and the
+        // platform names this one. Ring 0 because the handler reaches no task —
+        // it counts the delivery and acknowledges it only if the in-service
+        // register says it is one that may be acknowledged.
+        ring0 Spurious     = 0xFF, spurious::spurious_entry;
+        // The vector this kernel names by writing it into the SVR, which is
+        // why it is on a table whose rule is Intel's names: a vector the CPU
+        // can deliver through a `P = 0` slot is the escalation above, and the
+        // platform names this one. Ring 0 because the handler reaches no task —
+        // it counts the delivery and acknowledges it only if the in-service
+        // register says it is one that may be acknowledged.
     }
 }
 

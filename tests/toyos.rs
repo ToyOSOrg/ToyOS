@@ -513,6 +513,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
+    // One boot whose verdict is three lines of kernel log and a census column.
+    // The two waits inside the guest are bounded and report rather than hang, so
+    // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
+    // price it.
+    ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
     ("xhci_many_devices", Sched::Parallel, Tier::Fast),
     // Its whole assertion is that a keystroke injected from the host crossed a
     // USB keyboard on the *second* controller, and `input_events_run` sends
@@ -10618,6 +10623,47 @@ fn run_machine_test(
                     asked[0], asked[1], asked[2],
                 );
             }
+            Ok(())
+        }
+        "lapic_spurious_vector" => {
+            // `apic::enable_x2apic` writes 0xFF into the SVR on every CPU, so
+            // the platform names a vector the IDT has to gate: delivery through
+            // a `P = 0` slot is a contributory fault and the CPU escalates to
+            // `#DF`, which halts the machine. Nothing on this host raises one by
+            // itself — the SDM's classic condition needs a task-priority
+            // register this kernel never writes, and every device here is MSI or
+            // MSI-X — so the kernel raises it on purpose under this parameter.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["lapic-spurious-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            if let Some(bad) = log.lines().find(|l| l.contains("spurious selftest FAILED")) {
+                return Err(format!("{bad}\n{log}"));
+            }
+            let Some(verdict) = log.lines().find(|l| l.contains("spurious selftest")) else {
+                return Err(format!("the spurious vector was never raised:\n{log}"));
+            };
+            // `3/3`, not the absence of a FAILED line: a self-test that never
+            // ran satisfies that absence just as well.
+            if !verdict.contains("3/3") {
+                return Err(format!("the self-test did not reach its verdict: {verdict}"));
+            }
+            // The two numbers are the interrupt census's own column — the
+            // handler may not log, so that column is the only report a delivery
+            // has — and both are asserted: nothing raised this vector before the
+            // staged one, and exactly one arrived.
+            if !verdict.contains("(0 -> 1)") {
+                return Err(format!(
+                    "the census did not count exactly the staged delivery: {verdict}"
+                ));
+            }
+            eprintln!("  [lapic] {}", verdict.trim());
             Ok(())
         }
         "virtio_used_ring" => {

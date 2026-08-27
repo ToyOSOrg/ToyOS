@@ -336,6 +336,14 @@ actuators! {
     /// kernel. See `drivers/virtio.rs`'s `used_selftest`.
     virtio_used_selftest = "virtio-used-selftest";
 
+    /// Raise the local APIC's spurious vector on this CPU on purpose, once, and
+    /// report whether the machine survived it, the handler counted it, and the
+    /// next interrupt still arrived. Nothing outside the guest reaches that
+    /// vector: this CPU's own LAPIC delivers it, its classic condition needs a
+    /// task-priority register this kernel never writes, and no QEMU device,
+    /// machine property or `-cpu` flag produces one. See `arch/idt/spurious.rs`.
+    lapic_spurious_selftest = "lapic-spurious-selftest";
+
     /// Leave every AP holding the CR0 and CR4 that INIT left it: caching
     /// disabled, WP clear, NE clear. A control register is written by the guest
     /// and read by nobody outside it, so no QEMU device, machine property or

@@ -90,16 +90,21 @@ pub enum Source {
     Tlb,
     /// Vector 0x02, and `sched::dump` is its only sender.
     Nmi,
+    /// Vector 0xFF, the local APIC's spurious vector — an interrupt it
+    /// signalled and then took back. A non-zero count on a machine that staged
+    /// nothing is an interrupt-routing defect this census is the only witness
+    /// to, because the handler may not log.
+    Spurious,
 }
 
 impl Source {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
 
     /// The census's field names, in variant order. Read by the host side, so
     /// they are part of what a capture means: `tests/toyos.rs`'s
     /// `irq_census_conservation` parses them back.
     pub const NAMES: [&'static str; Self::COUNT] =
-        ["timer", "xhci", "net", "sound", "i8042", "dmafault", "hda", "tlb", "nmi"];
+        ["timer", "xhci", "net", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious"];
 }
 
 /// How many `u64`s one CPU's counter block holds: the total, then one per
@@ -193,6 +198,20 @@ impl fmt::Display for Fields<'_> {
         }
         Ok(())
     }
+}
+
+/// What one CPU has taken from one source, or `None` if that CPU has never
+/// been built. The only read of a single counter: everything else prints the
+/// whole census, and a caller that wants a *difference* needs one number twice.
+#[cfg(feature = "boot-actuators")]
+pub fn deliveries(cpu: u32, source: Source) -> Option<u64> {
+    read(cpu).map(|counts| counts[1 + source as usize])
+}
+
+/// …and everything one CPU has taken, from the counter written beside them.
+#[cfg(feature = "boot-actuators")]
+pub fn deliveries_total(cpu: u32) -> Option<u64> {
+    read(cpu).map(|counts| counts[TOTAL])
 }
 
 /// One `irq: cpuN total=… <source>=… …` line per online CPU.

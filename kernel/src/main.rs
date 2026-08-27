@@ -691,6 +691,14 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         drivers::virtio::used_selftest();
     }
 
+    // Here because it needs interrupts on and a timer already ticking: the last
+    // of its three assertions is that the interrupt *after* the spurious one
+    // still arrives.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::lapic_spurious_selftest() {
+        arch::idt::spurious::selftest();
+    }
+
     virtio_console::init(&pci_devices);
     virtio_net::init(&pci_devices);
 
