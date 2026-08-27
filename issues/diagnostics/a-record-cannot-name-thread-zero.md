@@ -63,3 +63,20 @@ kernel-side commit could not carry one.
    it puts an ABI rendering decision inside the process table.
 
 Option 1 or 2, on the next ABI-only landing.
+
+## Why the ABI-only landing declined it (2026-08-27)
+
+An ABI branch that could take option 1 looked at it and did not, because the
+flag does not stand alone. `FLAG_NO_THREAD` is only worth a bit if a producer
+sets it, and the only producer is `kernel/src/log/mod.rs`'s `on_a_thread`.
+Landing the bit without that producer gives two outcomes and both are worse
+than today: leave `Display` alone and the constant is dead code, or make
+`Display` render `tid=` whenever the flag is clear and every one of the 738
+kernel-thread lines gains a ` tid=0` that still does not distinguish it from a
+main thread — noise bought for nothing, until the second PR.
+
+So this one is not the two-PR sequence `LogRecord::tagged` was: there the ABI
+half had an in-tree caller (`Display`) and changed no byte of output. Option 1
+or 2 wants a single PR carrying `toyos-abi/src/log.rs` and the kernel's
+producer together, which `abi_lands_alone` permits — it partitions commits, so
+one commit holding the ABI change and its inseparable consumer is lawful.

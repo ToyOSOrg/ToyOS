@@ -1,3 +1,14 @@
+//! The kernel ABI: struct layouts, syscall numbers, and the typed wrappers over
+//! them. Completely unstable — userland reaches it through `toyos`, and the
+//! kernel is the only other side.
+//!
+//! **A doc in this crate states what the ABI itself owns, and cites the
+//! component by path for everything else.** A sentence asserting how the kernel
+//! dispatches a call, or what another component keeps internally, is a claim
+//! nothing here checks and somebody else's landing falsifies. A citation that
+//! goes stale is a dead pointer — visible, and greppable; an assertion that
+//! goes stale is a lie that still reads authoritative.
+
 #![no_std]
 
 #[cfg(test)]

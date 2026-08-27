@@ -57,3 +57,26 @@ routing these copies through volatile or relaxed-atomic byte access, or a
 type that says "outside memory" explicitly — and is real, unresolved work on
 a foundational IPC primitive. Sysroot law: the site is `toyos-abi/src`, so
 any fix lands on its own single-commit branch per `abi_lands_alone`.
+
+**2026-08-27: the map re-verified, and the split re-measured.** The premise is
+not inference from a comment any more:
+`kernel/src/arch/syscall/ipc.rs`'s `sys_pipe_map` calls
+`vma_map(&pt, phys.phys(), pipe::PIPE_SIZE as u64, Prot::ReadWrite)` — the
+whole `PIPE_SIZE` region, data included, writable, not a header-sized window.
+
+**There is no sysroot-only half of this fix.** `Ring::read`/`Ring::write`
+already describe the destination rather than passing it (`sink`/`fill`
+closures, so the *kernel's* user page never becomes a `&mut [u8]`), and the
+remaining defect is precisely the type those closures receive: a `&[u8]` /
+`&mut [u8]` over the shared page. Removing it changes the closure parameter
+type, and the entire consumer set is two lines in `kernel/src/pipe.rs`
+(`try_read`'s `|off, src| buf.write_at(off, src)` and `try_write`'s
+`|off, dst| buf.read_at(off, dst)`), whose bodies then need a raw-pointer copy
+that `kernel/src/user_ptr.rs` does not expose today. Landing only the
+`toyos-abi` side leaves the kernel not compiling; landing a second, unused
+"outside memory" API beside the live one is dead code. So this is one commit
+touching `toyos-abi/src/ring.rs` and `kernel/src/pipe.rs` together —
+`abi_lands_alone` permits exactly that (it partitions commits, and the ABI
+change plus its one inseparable consumer is the case its doc comment names),
+and it is what the next attempt should be briefed as. A branch scoped to
+sysroot sources alone cannot do it.
