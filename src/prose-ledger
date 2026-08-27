@@ -522,7 +522,7 @@ toyos-sched/sim/src/workload.rs 201 0
 toyos-sched/sim/tests/deadline_claim_race.rs 36 0
 toyos-sched/sim/tests/policy.rs 654 6
 toyos-sched/sim/tests/scenarios.rs 384 0
-toyos-sched/src/cpu.rs 1270 0
+toyos-sched/src/cpu.rs 1272 0
 toyos-sched/src/fair.rs 94 0
 toyos-sched/src/hw.rs 79 0
 toyos-sched/src/invariants.rs 26 0

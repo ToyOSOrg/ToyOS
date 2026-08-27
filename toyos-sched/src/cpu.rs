@@ -3539,6 +3539,11 @@ mod tests {
         let handles = CpuHandles::new(handles);
         let (idle, busy, stopped) = (CpuId(0), CpuId(1), CpuId(2));
         let late = Nanos(STALE_PASS_NS + 1);
+        // The `Kick` a poster owes an IPI has nowhere to go in a harness with no
+        // machine under it; the edge it leaves behind is what the rule reads.
+        let owe_a_pass = |cpu: CpuId| {
+            let _no_machine_to_kick = handles.get(cpu).poke();
+        };
 
         // Three CPUs that have all just passed: the plain minimum.
         for cpu in [idle, busy, stopped] {
@@ -3552,20 +3557,20 @@ mod tests {
 
         // Handed a message and never taking the pass that clears the edge: its
         // zero is believed inside the window and refused outside it.
-        handles.get(stopped).poke();
+        owe_a_pass(stopped);
         assert_eq!(handles.place(busy, Nanos(2)), stopped);
         assert_eq!(handles.place(busy, late), idle);
 
         // A CPU that is merely *busy* is not stale: it owes a pass and its last
         // one is recent, which is every wake on a working machine.
-        handles.get(busy).poke();
+        owe_a_pass(busy);
         handles.get(busy).publish_pass(late);
         handles.get(busy).publish_load(0);
         handles.get(idle).publish_load(1);
         assert_eq!(handles.place(busy, late), busy);
 
         // And a machine where nothing answers still places somebody.
-        handles.get(idle).poke();
+        owe_a_pass(idle);
         handles.get(idle).publish_pass(Nanos(0));
         handles.get(busy).publish_pass(Nanos(0));
         handles.get(idle).publish_load(3);
