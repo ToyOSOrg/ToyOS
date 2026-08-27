@@ -156,7 +156,7 @@ kernel/src/page_cache.rs 88 0
 kernel/src/panic.rs 177 0
 kernel/src/pipe.rs 96 0
 kernel/src/preempt.rs 66 0
-kernel/src/process.rs 920 0
+kernel/src/process.rs 922 0
 kernel/src/rtc.rs 123 0
 kernel/src/sched/driver.rs 716 0
 kernel/src/sched/dump.rs 241 0
@@ -166,7 +166,7 @@ kernel/src/sched/payload.rs 124 0
 kernel/src/sched/reap_gate.rs 71 1
 kernel/src/sched/waitqs.rs 62 0
 kernel/src/sched_gate.rs 45 0
-kernel/src/scheduler.rs 642 0
+kernel/src/scheduler.rs 659 0
 kernel/src/shootdown.rs 95 0
 kernel/src/sleeplock.rs 176 0
 kernel/src/symbols.rs 135 0
@@ -275,7 +275,7 @@ tests/toyos-rust-tests/src/bin/fault_gates.rs 27 0
 tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
-tests/toyos-rust-tests/src/bin/futex_wake_counts.rs 152 0
+tests/toyos-rust-tests/src/bin/futex_wake_counts.rs 167 0
 tests/toyos-rust-tests/src/bin/handle_basic.rs 121 2
 tests/toyos-rust-tests/src/bin/handle_kill_policy.rs 207 4
 tests/toyos-rust-tests/src/bin/handle_lifetime.rs 94 1

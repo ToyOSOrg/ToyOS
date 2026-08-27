@@ -101,7 +101,41 @@ fn main() {
     counts();
     claim_semantics();
     orphaned_by_unmap();
+    timeout_is_its_own_answer();
     println!("futex_wake respects its count, names its word, says how many it woke, and ends");
+}
+
+/// The wait's own two answers, which the ABI names and the kernel could not
+/// produce: `0` on a wake and `1` on a timeout.
+///
+/// **Both arms, because either one alone passes on a kernel that answers a
+/// constant** — which is what this was: every return was 0, so a
+/// `pthread_cond_timedwait` built on it could never report `ETIMEDOUT`, and the
+/// honest answer and the wrong one were the same number.
+///
+/// The timeout is a real span and the wake is not raced against one: the woken
+/// arm waits forever and is woken by this thread after the word changes, so no
+/// margin decides anything. What the timed arm asserts is only that a wait
+/// nobody wakes ends saying so — a slow host makes it later, never wrong.
+fn timeout_is_its_own_answer() {
+    static TIMED: AtomicU32 = AtomicU32::new(7);
+    static WOKEN: AtomicU32 = AtomicU32::new(7);
+
+    let timed_out = unsafe { syscall::futex_wait(TIMED.as_ptr(), 7, Some(50_000_000)) };
+    assert_eq!(timed_out, 1, "a futex wait nobody woke answered {timed_out}, wanted the timeout");
+
+    // …and the same call with the word already changed is the other answer,
+    // which is what rules out a kernel that has started answering 1 to
+    // everything.
+    let changed = unsafe { syscall::futex_wait(TIMED.as_ptr(), 9, Some(50_000_000)) };
+    assert_eq!(changed, 0, "a futex wait whose word did not match answered {changed}");
+
+    let waiter = thread::spawn(|| unsafe { syscall::futex_wait(WOKEN.as_ptr(), 7, None) });
+    thread::sleep(PARK_MARGIN);
+    WOKEN.store(8, Ordering::SeqCst);
+    unsafe { syscall::futex_wake(WOKEN.as_ptr(), 1) };
+    let woken = waiter.join().expect("the woken waiter panicked");
+    assert_eq!(woken, 0, "a futex wait that was woken answered {woken}, wanted the wake");
 }
 
 /// A count-limited wake names its word and answers how many it woke.
