@@ -2716,6 +2716,77 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/boot-media/kernel-log-file-reds-beside-other-guests-and-is-green-alone.md",
         measured: "2026-08-22",
     },
+    // ---------------------------------------------------------------------
+    // One same-session A/B, six full suites an arm, interleaved on one dev
+    // host: `wt/toyos-freeze` (the scheduler's staleness rule) against
+    // `origin/main`. Three rows because three names fired and no two of them
+    // are one measurement — and the `main` row is here for the reason the
+    // branch rows are, because an index that carries only the arm under
+    // suspicion is an index that cannot answer whether the arm is the cause.
+    // ---------------------------------------------------------------------
+    Red {
+        test: "fat_backing_revoked",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::fires(3, 6),
+        standing: Standing::Disputed(
+            "the arms do not separate at this sample size, and nobody may read this row either \
+             way. 3 of 6 against 0 of 6 on one name is p ~ 0.18 by Fisher's exact test, and the \
+             *class* — a volume checker complaining after a loaded run — fired in both arms, 4 of \
+             6 on the branch and 1 of 6 on `main`. The coupling is real and is named rather than \
+             denied: the branch refuses a CPU whose doorbell edge has stood longer than a pass may \
+             take, and at boot several programs are spawned before any CPU has run one, so a \
+             two-CPU guest's boot burst spreads differently and a verdict that depends on when \
+             `iod` drains relative to an unlink can change phase on that alone. What retires or \
+             confirms it is the same A/B on a quiet host: six runs an arm or more. The six that \
+             were started to get it were abandoned — the first took 417.4 s against the 58-79 s of \
+             every run above it and `pgrep` found three other worktrees' suites on the box, which \
+             `tests/CLAUDE.md` says is discarded and never corrected",
+        ),
+        what: "`the unlink-and-reallocate cycle left the log volume breaking the format: 1 \
+               cluster(s) from 20 are marked allocated and no directory entry reaches them` — one \
+               leaked cluster on `/log`, found by `toyos-fat32-check` after the guest had shut \
+               down. `ALONE fat_backing_revoked: GREEN` every time",
+        evidence: "six full `cargo test` runs on `wt/toyos-freeze` at 8a7b82ee, 58-79 s each, \
+                   interleaved in one session with six on `origin/main` at 16c05999",
+        source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
+        measured: "2026-08-27",
+    },
+    Red {
+        test: "device_claim_lifetime",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Disputed(
+            "one sighting in the same six-suite arm as the `fat_backing_revoked` row above, in the \
+             one run that produced two reds, and a single sample is no rate. It is recorded apart \
+             from that row because two guests failing in one phase is not by itself a claim about \
+             a common cause — `Instrument::DevHostLoaded`'s own doc carries the arithmetic — and \
+             folding them into one measurement would have invented the claim it declines to make",
+        ),
+        what: "`exit code Some(101)` from its guest binary, with \
+               `exit: test_rs_device_claim_lifeti pid=62 code=101 cpu=136ms` on the wire; \
+               `ALONE device_claim_lifetime: GREEN`",
+        evidence: "one of six full `cargo test` runs on `wt/toyos-freeze` at 8a7b82ee, the same \
+                   run that reddened `fat_backing_revoked`",
+        source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
+        measured: "2026-08-27",
+    },
+    Red {
+        test: "esp_filesystem",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Disputed(
+            "**this one is `main`'s**, and it is what stops the two rows above being read as a \
+             regression on sight: the third name of one shape — a volume checker complaining after \
+             a loaded run — fired on the unmodified tree in the same session, on the same \
+             instrument, in six runs. One sighting, so no rate; recorded because a row measured \
+             only on the arm under suspicion cannot answer whether the arm is the cause",
+        ),
+        what: "red in the wide phase, `ALONE esp_filesystem: GREEN`",
+        evidence: "one of six full `cargo test` runs on `origin/main` at 16c05999, 58-79 s each, \
+                   interleaved in one session with six on `wt/toyos-freeze`",
+        source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
+        measured: "2026-08-27",
+    },
 ];
 
 // ---------------------------------------------------------------------------
