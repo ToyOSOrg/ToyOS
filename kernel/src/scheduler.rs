@@ -756,7 +756,7 @@ pub fn futex_wait(
         completion::Token::new(phys_addr.phys()),
         WaitClass::Futex,
         deadline,
-        &read,
+        read,
     );
     // **The predicate again, which is the whole of how the two are told
     // apart.** `wait_until` answers `Ok(())` for a satisfied predicate and for
