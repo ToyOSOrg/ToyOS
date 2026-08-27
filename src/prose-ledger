@@ -89,7 +89,7 @@ kernel/src/drivers/xhci/mod.rs 948 0
 kernel/src/drivers/xhci/usbd.rs 53 0
 kernel/src/drivers/xhci/wait/boot.rs 232 0
 kernel/src/drivers/xhci/wait/mod.rs 219 0
-kernel/src/drivers/xhci/wait/msc.rs 548 0
+kernel/src/drivers/xhci/wait/msc.rs 561 0
 kernel/src/elf/cache.rs 73 0
 kernel/src/elf/index.rs 50 0
 kernel/src/elf/mod.rs 214 0
