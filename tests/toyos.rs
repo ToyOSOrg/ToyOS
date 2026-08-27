@@ -406,6 +406,13 @@ const CONSOLE_NONCE: &str = "zqjxk";
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
 const CONSOLE_PROMPT: &str = "/home/root>";
+/// The seed's witness on the panel.
+///
+/// `/bin/console` pushes the newest logs on `/log` into its scrollback before
+/// its first prompt, so a panel carrying one of their lines is a console that
+/// read them. This one is written hundreds of lines into a boot, which is what
+/// makes its *absence* two different things — see `screen_console_shell`.
+const CONSOLE_SEED_WITNESS: &str = "i8042:";
 
 /// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
 /// the brightest channel and a colour a glyph could contain would let a
@@ -3078,10 +3085,18 @@ fn run_screen_test(
             serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
 
             let font = screen::ConsoleFont::load();
+            // **Both, because nothing orders them.** The seed's paint and the
+            // shell's first prompt are two independent writers, so a wait that
+            // stopped at the prompt could sample a panel the seed had not
+            // finished putting up and report it as a console that never read
+            // the log.
             let dump = qemu.screendump_while(
                 Duration::from_secs(30),
                 Duration::from_millis(200),
-                |d| d.console_text(&font).contains(CONSOLE_PROMPT),
+                |d| {
+                    let text = d.console_text(&font);
+                    text.contains(CONSOLE_PROMPT) && text.contains(CONSOLE_SEED_WITNESS)
+                },
             );
             let before = dump.console_text(&font);
             if !before.contains(CONSOLE_PROMPT) {
@@ -3096,12 +3111,44 @@ fn run_screen_test(
             // cleared the screen would have traded the diagnostic that works
             // today for one that might — and this is the line the metal track
             // keeps having to read.
-            if !before.contains("i8042:") {
-                return Err(format!(
-                    "no `i8042:` line above the prompt: `/boot/toyos/kernel.log` never \
-                     reached the scrollback, so this console starts blank where the \
-                     diagnostic boot starts with the log\ndecoded screen:\n{before}"
-                ));
+            if !before.contains(CONSOLE_SEED_WITNESS) {
+                // **Which of the two it is, from a number the guest published
+                // rather than from the panel.** `console: ready` reports the
+                // bytes of log it seeded, so a blank console and a console
+                // showing some other part of the log are told apart by that
+                // count — the panel cannot separate them, and a message that
+                // picked one sent the next reader after the wrong subsystem.
+                // The byte stream and not `boot_log`: the count is on the rest
+                // of the ready marker's own line, which the line channel has
+                // already consumed by the time the marker ends the boot wait.
+                let said = qemu.console_stream().since(0);
+                // Anchored on the whole of the console's own phrase: `logd`
+                // says "this boot's kernel log is …" on the same console, and
+                // a search for the shorter string finds that one first.
+                let seeded = said
+                    .split("cells), kernel log ")
+                    .nth(1)
+                    .and_then(|rest| rest.split(' ').next())
+                    .and_then(|n| n.parse::<u64>().ok());
+                return Err(match seeded {
+                    Some(0) => format!(
+                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and `console: \
+                         ready` reported 0 bytes of kernel log: this console started blank \
+                         where the diagnostic boot starts with the log\ndecoded \
+                         screen:\n{before}"
+                    ),
+                    Some(bytes) => format!(
+                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and the console \
+                         seeded {bytes} bytes of kernel log — so the log reached the \
+                         scrollback and what is on the panel is some other part of it. This \
+                         is not a console that started blank\ndecoded screen:\n{before}"
+                    ),
+                    None => format!(
+                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and no `kernel \
+                         log N bytes` on the console to say whether the seed happened at \
+                         all\nboot console:\n{said}\ndecoded screen:\n{before}"
+                    ),
+                });
             }
             // Non-vacuity, and not a formality: a boot checkpoint paints the
             // same lines off the same ring, so on a boot where the console
