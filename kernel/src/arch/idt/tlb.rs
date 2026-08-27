@@ -22,7 +22,7 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "push r10",
         "push r11",
         "push rbp",
-        "lock add dword ptr gs:[240], 1",
+        "lock add dword ptr gs:[{preempt_count}], 1",
         "mov rbp, rsp",
         "and rsp, -16",
         "call {flush}",
@@ -31,7 +31,7 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "xor eax, eax",
         "xor edx, edx",
         "wrmsr",
-        "lock sub dword ptr gs:[240], 1",
+        "lock sub dword ptr gs:[{preempt_count}], 1",
         "test dword ptr [rsp + 88], 3",
         "jz 1f",
         "cli",
@@ -52,6 +52,7 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "iretq",
         flush = sym flush,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
+        preempt_count = const crate::arch::percpu::OFF_PREEMPT_COUNT,
     );
 }
 

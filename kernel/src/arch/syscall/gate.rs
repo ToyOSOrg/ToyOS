@@ -62,7 +62,7 @@ pub fn init() {
         //   The single-step trap after a `popfq` that set `TF` is deferred by
         //   exactly one instruction, and if that instruction is `syscall` the
         //   `#DB` is taken at `LSTAR` with CPL already 0 and `rsp` still the
-        //   *user* stack, because the entry has not reached `mov rsp, gs:[16]`.
+        //   *user* stack, because the entry has not reached its stack switch.
         //   The `#DB` gate has no IST, so the CPU builds its frame there — a
         //   supervisor write to a user page, which SMAP refuses — and the `#PF`
         //   lands on the same stack and escalates. Measured on this tree before
@@ -86,15 +86,14 @@ pub fn init() {
 }
 
 // Syscall entry: GS permanently points to kernel per-CPU data (no swapgs needed).
-// PerCpu layout: offset 16 = kernel_rsp, offset 24 = user_rsp.
 //
 // The bracket spans the handler *and* the exit-to-user epilogue, because both
 // can context-switch. The epilogue used to run with the user state already put
 // back, so a switch there returned to Ring 3 carrying whatever the task that
 // ran in between had left in the registers.
 //
-// **`SYSCALL` switches no stack, so the instructions before `mov rsp, gs:[16]`
-// run at CPL 0 on the user's stack — and that is the whole of the window an
+// **`SYSCALL` switches no stack, so the instructions before `mov rsp,
+// gs:[{kernel_rsp}]` run at CPL 0 on the user's stack — and that is the whole of the window an
 // exception may not land in.** It was six instructions and it is three: the
 // three diagnostic stores below it — `syscall_rip`, `syscall_num`,
 // `syscall_rbp` — are reads of `rcx`, `rdi` and `rbp`, which the stack switch
@@ -109,12 +108,12 @@ pub fn init() {
 #[unsafe(naked)]
 extern "sysv64" fn syscall_entry() {
     ring3_naked_asm!(
-        "mov gs:[24], rsp",     // save user RSP to percpu.user_rsp
-        "mov rsp, gs:[16]",     // load kernel RSP from percpu.kernel_rsp
-        "mov gs:[216], rcx",    // save user RIP to percpu.syscall_rip
-        "mov gs:[224], rdi",    // save syscall number to percpu.syscall_num
-        "mov gs:[232], rbp",    // save user RBP to percpu.syscall_rbp
-        "push gs:[24]",         // user RSP on kernel stack
+        "mov gs:[{user_rsp}], rsp",
+        "mov rsp, gs:[{kernel_rsp}]",
+        "mov gs:[{syscall_rip}], rcx",
+        "mov gs:[{syscall_num}], rdi",
+        "mov gs:[{syscall_rbp}], rbp",
+        "push gs:[{user_rsp}]",  // user RSP on kernel stack
         "push rcx",             // return RIP
         "push r11",             // return RFLAGS
         "push rdi",
@@ -126,11 +125,11 @@ extern "sysv64" fn syscall_entry() {
 
         save_user_state!(),
 
-        "lock add dword ptr gs:[240], 1",   // preempt_count++
+        "lock add dword ptr gs:[{preempt_count}], 1",
 
         "call {handler}",
 
-        "lock sub dword ptr gs:[240], 1",   // preempt_count--
+        "lock sub dword ptr gs:[{preempt_count}], 1",
         // cli before exit_to_user and pop rsp / sysretq: an interrupt after
         // pop rsp would land on the user RSP as a kernel stack. Helper
         // preserves IF=0 across its return.
@@ -159,6 +158,12 @@ extern "sysv64" fn syscall_entry() {
         "sysretq",
         handler = sym syscall_handler,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
+        kernel_rsp = const percpu::OFF_KERNEL_RSP,
+        user_rsp = const percpu::OFF_USER_RSP,
+        syscall_rip = const percpu::OFF_SYSCALL_RIP,
+        syscall_num = const percpu::OFF_SYSCALL_NUM,
+        syscall_rbp = const percpu::OFF_SYSCALL_RBP,
+        preempt_count = const percpu::OFF_PREEMPT_COUNT,
     );
 }
 

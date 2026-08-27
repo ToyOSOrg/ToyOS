@@ -72,54 +72,52 @@ pub enum CpuFaultState {
     Panic = 3,       // panic handler running
 }
 
-/// Per-CPU data. Accessed via GS segment in kernel mode.
-/// Field offsets are hardcoded in assembly — do not reorder.
+/// Per-CPU data, reached through the GS segment. Every access — Rust and
+/// assembly alike — names an `OFF_*` constant below, so the layout is this
+/// type's alone and a field that moves moves its accessors with it.
 #[repr(C)]
 pub struct PerCpu {
-    self_ptr: u64,      // offset 0: points to self (for gs:0 self-reference)
-    cpu_id: u32,        // offset 8
-    lapic_id: u32,      // offset 12
-    pub kernel_rsp: u64, // offset 16: syscall entry loads this as kernel stack
-    pub user_rsp: u64,   // offset 24: syscall entry saves user RSP here
-    pub tss: Tss,        // offset 32 (104 bytes)
-    current_tid: u32,    // offset 136: TID of thread running on this CPU (u32::MAX = idle)
-    current_pid: u32,    // offset 140: PID of process running on this CPU (u32::MAX = idle)
-    gdt: [u64; 7],      // offset 144 (56 bytes)
-    // offset 200: reserved, and reclaiming it is not a local change. Every field
-    // below is reached by a `gs:[NNN]` *literal* in a naked stub —
-    // `syscall_rip`/`syscall_num`/`syscall_rbp` at 216/224/232 and
-    // `preempt_count` at 240 (`arch::syscall`), and `need_resched` at 244,
-    // `ring0_timer_fires` at 248 and `last_armed_ticks` at 260 (`arch::idt`'s
-    // timer/tlb stubs). Dropping these 8 bytes shifts all of them.
-    _pad200: [u8; 8],   // offset 200
-    idle_stack_top: u64, // offset 208: top of per-CPU idle stack
+    self_ptr: u64,
+    cpu_id: u32,
+    lapic_id: u32,
+    /// The syscall entry loads this as its kernel stack.
+    pub kernel_rsp: u64,
+    /// …and parks the user's RSP here across the switch.
+    pub user_rsp: u64,
+    pub tss: Tss,
+    /// TID of the thread running on this CPU; `u32::MAX` when none is.
+    current_tid: u32,
+    /// PID of the process running on this CPU; `u32::MAX` when none is.
+    current_pid: u32,
+    gdt: [u64; 7],
+    idle_stack_top: u64,
     /// Saved user RIP at last syscall entry (for panic diagnostics).
-    pub syscall_rip: u64,  // offset 216
+    pub syscall_rip: u64,
     /// Saved syscall number (for panic diagnostics).
-    pub syscall_num: u64,  // offset 224
+    pub syscall_num: u64,
     /// Saved user RBP at last syscall entry (for panic diagnostics).
-    pub syscall_rbp: u64,  // offset 232
+    pub syscall_rbp: u64,
     /// `lock add/sub` because IRQ entry/exit and Rust kernel code mutate it
     /// on the same CPU.
-    pub preempt_count: AtomicU32,          // offset 240
-    pub need_resched: AtomicU8,            // offset 244
-    _pad245: [u8; 3],                      // offset 245..248
+    pub preempt_count: AtomicU32,
+    pub need_resched: AtomicU8,
+    _pad_after_need_resched: [u8; 3],
     /// Writes use plain `inc`: only the Ring 0 timer stub writes, with IF=0.
-    pub ring0_timer_fires: AtomicU32,      // offset 248
-    pub last_seen_ring0_fires: u32,        // offset 252
-    fault_state: u8,                       // offset 256
-    _pad257: [u8; 3],                      // offset 257..260
-    /// Ticks the Ring 0 timer asm re-arms with (gs:[260]). Per-CPU: one-shot
+    pub ring0_timer_fires: AtomicU32,
+    pub last_seen_ring0_fires: u32,
+    fault_state: u8,
+    _pad_after_fault_state: [u8; 3],
+    /// Ticks the Ring 0 timer asm re-arms with. Per-CPU: one-shot
     /// timers are armed independently on every CPU; a shared value would let
     /// any CPU's arm/stop clobber every other CPU's re-arm fallback.
-    pub last_armed_ticks: AtomicU32,       // offset 260
+    pub last_armed_ticks: AtomicU32,
     /// This CPU's [`log::Shard`], reached by [`reserve_log_slot`].
     ///
     /// **Never null on a live CPU**: [`alloc_percpu`] fills it for cpu0 and for
     /// every AP, and the BSP allocates an AP's whole `PerCpu` before that AP
     /// executes an instruction. That is why `emit` needs no check — an absent
     /// shard is not a state this field can be in.
-    log_shard: u64,                        // offset 264
+    log_shard: u64,
     /// Non-zero while this CPU is inside its NMI handler, written by
     /// `arch::idt::nmi`'s entry and by nothing else.
     ///
@@ -129,8 +127,8 @@ pub struct PerCpu {
     /// handler's `iretq` (SDM Vol. 3A §6.7.1), and the handler cannot fault, so
     /// no such entry exists — and this word is what turns that argument into an
     /// observation rather than an assumption.
-    nmi_active: u32,                       // offset 272
-    _pad276: [u8; 4],                      // offset 276..280
+    nmi_active: u32,
+    _pad_after_nmi_active: [u8; 4],
     /// Interrupt deliveries this CPU has taken: the machine's total, then one
     /// counter per `irq_census::Source`.
     ///
@@ -141,7 +139,7 @@ pub struct PerCpu {
     /// module header states. Last on purpose: the array's length is
     /// `irq_census::SLOTS`, so a new `Source` grows it without moving any
     /// other field.
-    pub irq_counts: [AtomicU64; crate::irq_census::SLOTS], // offset 280
+    pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
 }
 
 // GDT layout:
@@ -221,25 +219,27 @@ impl PerCpu {
 
 // Where each field this kernel reaches through `gs:` sits inside `PerCpu`.
 //
-// **Derived from the type and asserted against the number the assembly
-// hardcodes.** `arch::syscall`'s entry and `arch::idt`'s stubs — the Ring 0
-// timer's re-arm and the preempt-count opens and closes among them — write the
-// displacement as a literal, so the assertion is the whole of what keeps the
-// two sides in step — a reordered or resized field would otherwise move only
-// the Rust half. Every GS access written in Rust names one of these constants;
-// none of them names a number.
+// **Derived from the type, and the only spelling any access has.** Every GS
+// access — the primitives below, `preempt`, `irq_census`, and the five naked
+// entry stubs of `arch::syscall` and `arch::idt` — feeds one of these in as a
+// `const` operand, a naked stub exactly as an ordinary `asm!`. So no
+// displacement is written down twice and none can be left behind by a field
+// edit.
 const OFF_SELF_PTR: u32 = offset_of!(PerCpu, self_ptr) as u32;
 const OFF_CPU_ID: u32 = offset_of!(PerCpu, cpu_id) as u32;
-const OFF_USER_RSP: u32 = offset_of!(PerCpu, user_rsp) as u32;
+/// The kernel stack `arch::syscall`'s entry switches to, and the one field of
+/// this type the hardware never reads for itself.
+pub(crate) const OFF_KERNEL_RSP: u32 = offset_of!(PerCpu, kernel_rsp) as u32;
+pub(crate) const OFF_USER_RSP: u32 = offset_of!(PerCpu, user_rsp) as u32;
 const OFF_CURRENT_TID: u32 = offset_of!(PerCpu, current_tid) as u32;
 const OFF_CURRENT_PID: u32 = offset_of!(PerCpu, current_pid) as u32;
 const OFF_IDLE_STACK_TOP: u32 = offset_of!(PerCpu, idle_stack_top) as u32;
-const OFF_SYSCALL_RIP: u32 = offset_of!(PerCpu, syscall_rip) as u32;
-const OFF_SYSCALL_NUM: u32 = offset_of!(PerCpu, syscall_num) as u32;
-const OFF_SYSCALL_RBP: u32 = offset_of!(PerCpu, syscall_rbp) as u32;
-const OFF_RING0_TIMER_FIRES: u32 = offset_of!(PerCpu, ring0_timer_fires) as u32;
+pub(crate) const OFF_SYSCALL_RIP: u32 = offset_of!(PerCpu, syscall_rip) as u32;
+pub(crate) const OFF_SYSCALL_NUM: u32 = offset_of!(PerCpu, syscall_num) as u32;
+pub(crate) const OFF_SYSCALL_RBP: u32 = offset_of!(PerCpu, syscall_rbp) as u32;
+pub(crate) const OFF_RING0_TIMER_FIRES: u32 = offset_of!(PerCpu, ring0_timer_fires) as u32;
 const OFF_LAST_SEEN_RING0_FIRES: u32 = offset_of!(PerCpu, last_seen_ring0_fires) as u32;
-const OFF_LAST_ARMED_TICKS: u32 = offset_of!(PerCpu, last_armed_ticks) as u32;
+pub(crate) const OFF_LAST_ARMED_TICKS: u32 = offset_of!(PerCpu, last_armed_ticks) as u32;
 /// `reserve_log_slot`'s naked read of this CPU's [`log::Shard`] pointer names
 /// this rather than an inline `offset_of!`, so no GS access spells a raw field.
 const OFF_LOG_SHARD: u32 = offset_of!(PerCpu, log_shard) as u32;
@@ -260,26 +260,6 @@ pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// instrument names no number of its own.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
-const _: () = assert!(OFF_SELF_PTR == 0);
-const _: () = assert!(OFF_CPU_ID == 8);
-const _: () = assert!(offset_of!(PerCpu, kernel_rsp) == 16);
-const _: () = assert!(OFF_USER_RSP == 24);
-const _: () = assert!(offset_of!(PerCpu, tss) == 32);
-const _: () = assert!(OFF_CURRENT_TID == 136);
-const _: () = assert!(OFF_CURRENT_PID == 140);
-const _: () = assert!(OFF_IDLE_STACK_TOP == 208);
-const _: () = assert!(OFF_SYSCALL_RIP == 216);
-const _: () = assert!(OFF_SYSCALL_NUM == 224);
-const _: () = assert!(OFF_SYSCALL_RBP == 232);
-const _: () = assert!(OFF_PREEMPT_COUNT == 240);
-const _: () = assert!(OFF_NEED_RESCHED == 244);
-const _: () = assert!(OFF_RING0_TIMER_FIRES == 248);
-const _: () = assert!(OFF_LAST_SEEN_RING0_FIRES == 252);
-const _: () = assert!(OFF_FAULT_STATE == 256);
-const _: () = assert!(OFF_LAST_ARMED_TICKS == 260);
-const _: () = assert!(OFF_LOG_SHARD == 264);
-const _: () = assert!(OFF_NMI_ACTIVE == 272);
-const _: () = assert!(OFF_IRQ_COUNTS == 280);
 
 /// Every GS-relative access this kernel makes, as `const`-generic primitives.
 ///
@@ -374,7 +354,7 @@ pub(crate) mod gs {
     ///
     /// Its own primitive rather than [`write_u8`] called with a constant,
     /// because the instruction differs: this is the one-instruction
-    /// `mov byte ptr gs:[244], 1`, where the register form would first
+    /// `mov byte ptr gs:[{off}], 1`, where the register form would first
     /// materialise the value.
     #[inline]
     pub fn write_u8_imm<const OFF: u32, const VAL: u8>() {

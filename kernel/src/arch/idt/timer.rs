@@ -35,9 +35,8 @@ pub(super) extern "sysv64" fn timer_entry() {
 
         // Re-arm before Rust runs so the timer survives even if the handler
         // path panics before scheduler::do_preempt → arm_one_shot.
-        // gs:[260] = PerCpu.last_armed_ticks (per-CPU one-shot re-arm value).
         "mov ecx, 0x838",
-        "mov eax, dword ptr gs:[260]",
+        "mov eax, dword ptr gs:[{armed_ticks}]",
         "xor edx, edx",
         "wrmsr",
 
@@ -73,17 +72,21 @@ pub(super) extern "sysv64" fn timer_entry() {
         "xor edx, edx",
         "wrmsr",
         "mov ecx, 0x838",       // X2APIC_TIMER_INIT — re-arm with last value;
-        "mov eax, dword ptr gs:[260]",  // PerCpu.last_armed_ticks; 0 = disabled.
+        "mov eax, dword ptr gs:[{armed_ticks}]",  // 0 = disabled.
         "xor edx, edx",
         "wrmsr",
-        "mov byte ptr gs:[244], 1",     // need_resched
-        "inc dword ptr gs:[248]",       // ring0_timer_fires (no lock: single writer, IF=0)
+        "mov byte ptr gs:[{need_resched}], 1",
+        // No lock on the fire count: single writer, IF=0.
+        "inc dword ptr gs:[{ring0_fires}]",
         "pop rdx",
         "pop rcx",
         "pop rax",
         "iretq",
         handler = sym timer_handler,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
+        armed_ticks = const crate::arch::percpu::OFF_LAST_ARMED_TICKS,
+        need_resched = const crate::arch::percpu::OFF_NEED_RESCHED,
+        ring0_fires = const crate::arch::percpu::OFF_RING0_TIMER_FIRES,
         irq_total = const crate::irq_census::slot_offset(crate::irq_census::TOTAL),
         irq_timer = const crate::irq_census::slot_offset(
             1 + crate::irq_census::Source::Timer as usize

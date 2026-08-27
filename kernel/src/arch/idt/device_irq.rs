@@ -36,13 +36,13 @@ macro_rules! device_irq_entry {
                 "push r10",
                 "push r11",
                 "push rbp",
-                "lock add dword ptr gs:[240], 1",
+                "lock add dword ptr gs:[{preempt_count}], 1",
                 // Ring 0 entry has unknown rsp alignment; align via the rbp save.
                 "mov rbp, rsp",
                 "and rsp, -16",
                 "call {handler}",
                 "mov rsp, rbp",
-                "lock sub dword ptr gs:[240], 1",
+                "lock sub dword ptr gs:[{preempt_count}], 1",
                 "test dword ptr [rsp + 88], 3", // CS = 10 GPRs + RIP above
                 "jz 1f",
                 // Ring 3: run the deferred-preempt epilogue with the user
@@ -65,6 +65,7 @@ macro_rules! device_irq_entry {
                 "iretq",
                 handler = sym $handler,
                 exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
+                preempt_count = const $crate::arch::percpu::OFF_PREEMPT_COUNT,
             );
         }
     };

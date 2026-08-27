@@ -422,11 +422,11 @@ extern "sysv64" fn common_entry() {
         "push r11", "push r10", "push r9",  "push r8",
         "push rbp", "push rdi", "push rsi", "push rdx",
         "push rcx", "push rbx", "push rax",
-        "lock add dword ptr gs:[240], 1",
+        "lock add dword ptr gs:[{preempt_count}], 1",
         "mov rdi, rsp",
         save_user_state!(),
         "call {dispatch}",
-        "lock sub dword ptr gs:[240], 1",
+        "lock sub dword ptr gs:[{preempt_count}], 1",
         // Run exit-to-user epilogue before restoring GPRs — the call clobbers
         // scratch regs, which would otherwise leak kernel state into user.
         "mov r11, [rsp + {fp_bytes}]",
@@ -444,6 +444,7 @@ extern "sysv64" fn common_entry() {
         "iretq",
         dispatch = sym trap_dispatch,
         exit_to_user = sym kernel_exit_to_user_check,
+        preempt_count = const percpu::OFF_PREEMPT_COUNT,
     );
 }
 
