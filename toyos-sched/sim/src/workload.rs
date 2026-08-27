@@ -282,6 +282,15 @@ pub struct Scenario {
     pub share: ShareShape,
     pub charge: ChargeShape,
     pub placement: PlacementShape,
+    /// A CPU that takes no scheduler pass for the whole run — the machine a
+    /// shed core leaves, where everything placed on it afterwards is lost.
+    ///
+    /// **An adversary and not a policy**, exactly like [`PlacementShape::AllOn`]:
+    /// nothing in the protocol produces one, and what the rest of the scheduler
+    /// does about it is a measurement only while it can be staged. The CPU keeps
+    /// whatever it last published, which is what makes it the one every
+    /// least-loaded reader prefers.
+    pub stopped: Option<usize>,
     /// What the balance path does. A scenario dimension for [`PlacementShape`]'s
     /// reason and with the same roles: the shipped answer
     /// ([`Balance::PushOnSurplus`], which is what `kernel::sched::driver::env`
@@ -401,6 +410,20 @@ impl Scenario {
             );
         }
         self.placement = placement;
+        self
+    }
+
+    /// Checked here for [`Scenario::with_placement`]'s reason: a CPU index
+    /// outside the machine is a scenario written wrong, and the first spawn of a
+    /// sweep is the wrong place to find out.
+    pub fn with_stopped(mut self, cpu: usize) -> Self {
+        assert!(
+            cpu < self.cpus,
+            "{}: stopping cpu{cpu} on a {}-cpu machine",
+            self.name,
+            self.cpus,
+        );
+        self.stopped = Some(cpu);
         self
     }
 

@@ -550,29 +550,19 @@ fn idle_ctx() -> KernelCtx {
     }
 }
 
-/// Least-loaded CPU by published ready count, scanning from a rotating start so
-/// that ties spread instead of piling on one CPU.
+/// Where a spawn goes. The rule is [`CpuHandles::place`]'s, in the core, where
+/// the simulator drives the same code; this supplies the rotating start.
 ///
 /// The rotation is load-bearing at boot and only there: `publish_load` runs at
 /// the end of a pass, and the init programs are all spawned before any CPU has
 /// run one, so every published load is still zero and a fixed scan order would
 /// put the whole system on CPU 0. Balance would pull them apart eventually,
 /// but "eventually" is measured in idle passes and boot has none to spare.
-fn placement() -> CpuId {
+fn placement(now: Nanos) -> CpuId {
     static ROTATE: AtomicU64 = AtomicU64::new(0);
-    let count = crate::arch::smp::cpu_count();
-    let start = (ROTATE.fetch_add(1, Ordering::Relaxed) % count as u64) as u32;
-    let mut best = CpuId(start);
-    let mut best_load = cpus().get(best).load();
-    for offset in 1..count {
-        let cpu = CpuId((start + offset) % count);
-        let load = cpus().get(cpu).load();
-        if load < best_load {
-            best_load = load;
-            best = cpu;
-        }
-    }
-    best
+    let count = crate::arch::smp::cpu_count() as u64;
+    let start = CpuId((ROTATE.fetch_add(1, Ordering::Relaxed) % count) as u32);
+    cpus().place(start, now)
 }
 
 /// Everything a new thread needs. `entry_rsp` points at the trampoline frame
@@ -613,6 +603,8 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
         // The one level `trampoline_entry` discharges before the first `iretq`.
         preempt: 1,
     };
+    // One clock read for the placement and the build: `HW.now` is a divide.
+    let now = HW.now();
     let handle = Arc::new(TaskHandle::new());
     let task = TaskBuilder {
         key: next_key(),
@@ -627,7 +619,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
         },
         rt: RtState::default(),
     }
-    .build(placement(), HW.now());
+    .build(placement(now), now);
     let sched = ThreadSched {
         handle,
         shared: task.shared().clone(),

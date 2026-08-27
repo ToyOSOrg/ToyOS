@@ -101,6 +101,13 @@ pub struct Outcome {
     /// Per CPU: when it first took an execution step — see
     /// [`crate::vm::Vm::first_exec_ns`].
     pub first_exec_ns: Vec<Option<u64>>,
+    /// Tasks that were created and never executed one op.
+    ///
+    /// **The only quantity a run with a stopped CPU has to offer**, because
+    /// every latency beside it is a wait that ended: a thread placed on a CPU
+    /// that takes no passes contributes to no distribution at all, and a suite
+    /// built from maxima and means reads such a run as quiet.
+    pub never_ran: usize,
     /// Per CPU: wakes out of `hlt` that found nothing to do — what a balance
     /// policy costs the idle path. See [`crate::vm::Vm::idle_wakes`].
     pub idle_wakes: Vec<u64>,
@@ -304,6 +311,7 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
         process_finish_ns: vm.finish_ns.clone(),
         migrations: vm.migrations,
         first_exec_ns: vm.first_exec_ns.clone(),
+        never_ran: vm.spawned.difference(&vm.ran).count(),
         idle_wakes: vm.idle_wakes.clone(),
         probe_gap_ns: vm.probe_gap_ns,
         pass_costs: (0..vm.handles.len())

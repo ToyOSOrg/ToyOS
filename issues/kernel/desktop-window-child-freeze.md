@@ -183,3 +183,27 @@ scheduler passes during a session and threads placed on them never run (`issues/
 promptly, with `code=0`. This entry must not be closed by it — though the
 freeze the test now reproduces is very likely that defect, which is the whole
 reason the test is worth keeping red.
+
+## What the placement work changed here, and it is not the signature
+
+The family's other half is closed: a CPU that stops taking passes no longer
+keeps being *chosen*. `CpuHandle::answering` refuses a CPU whose doorbell edge
+has stood longer than a pass may take, and spawn placement, the RT
+wake-forward, the surplus push and the steal probe's victim all ask it
+(`toyos-sched/src/cpu.rs`). So one route from "a core goes quiet" to "the
+machine gets progressively worse" is gone.
+
+**Nothing in that explains this entry.** The signature at the top is a machine
+that stops *entirely*, and a placement rule can only decide where work goes on a
+machine that is still running passes somewhere. Judge the next occurrence by the
+signature exactly as before; a green run of this test proves what it always
+proved, which is nothing.
+
+Two things a reader looking for the next sighting needs. The test is
+`Tier::Nightly` (`src/tiers.rs`), so a plain `cargo test` does not run it at all
+— `cargo test --test toyos-build -- --nightly desktop_window_child` does. And
+the one instrument that could name what a stopped CPU is doing has still never
+been fired at one: `sched::dump`'s NMI probe separates a CPU spinning with `IF`
+clear from one halted with its kick undelivered from one wedged below the
+interrupt layer. Take `info registers -a` over QMP before pressing Ctrl+Alt+D,
+which destroys what it reports on.

@@ -11,6 +11,13 @@ license = "MIT OR Apache-2.0"
 toyos-sched = { path = "..", features = ["std", "check", "protocol-port"] }
 rand = { version = "0.9", features = ["small_rng"] }
 
+[features]
+# Passthrough for the core's staleness negative control, so the arm can be
+# selected on the package the test runs in. Never on by default: with it every
+# path that chooses a CPU believes a stopped one's published load, which is what
+# `a_stopped_cpu_stops_taking_work` measures the cost of.
+placement-ignores-staleness = ["toyos-sched/placement-ignores-staleness"]
+
 [lib]
 name = "toyos_sched_sim"
 path = "src/lib.rs"
