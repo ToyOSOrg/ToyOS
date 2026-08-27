@@ -1099,10 +1099,9 @@ const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
 
 /// How far a corpus case gets before it stops, and what it says when it does.
 ///
-/// There is no `Run`. Seventeen of these built at the moment this list was
-/// written and nobody has ever asked whether they run; turning one on is a
-/// guest slot and possibly a hung lane, so the question is filed rather than
-/// answered here.
+/// There is no `Run`, and a [`Stage::Built`] entry is now a *decline* rather
+/// than an unanswered question: every case that compiles has been run, and the
+/// eight that stayed off the suite each say what their own output was.
 #[derive(Clone, Copy)]
 enum Stage {
     /// toyos-cc refuses it, and this is what the refusal says.
@@ -1162,26 +1161,32 @@ struct NotRun {
     why: Why,
 }
 
-/// Where the question about the `Built` set lives.
-const BUILT_NOT_RUN: &str = "issues/build/c-corpus-cases-build-and-are-not-run.md";
-
 const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "03_struct",
         stage: Stage::Refused("__attribute__((__cleanup__)) is not implemented"),
         why: Why::Declined("cleanup attributes; the entry used to say _Generic, which is 33_ternary_op's reason and not this one"),
     },
-    NotRun { case: "18_include", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "78_vla_label", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "79_vla_continue", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "31_args", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "32_led", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
+    NotRun {
+        case: "31_args",
+        stage: Stage::Built,
+        why: Why::Declined("its `.expect` is written for tcc's own runner, which passes it five arguments; every corpus binary here is run with none, so it prints `hello world 1` against an expected `hello world 6`. Nothing about this compiler is in it"),
+    },
     NotRun {
         case: "33_ternary_op",
         stage: Stage::Refused("_Generic type dispatch is not implemented"),
         why: Why::Declined("_Generic"),
     },
-    NotRun { case: "40_stdio", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
+    NotRun {
+        case: "40_stdio",
+        stage: Stage::Built,
+        why: Why::Declined("it writes `fred.txt` into the working directory and reads it back; the corpus runs from the read-only initrd root, so the write fails and the program prints `couldn't read fred.txt`. A writable working directory for the corpus is a harness change nothing else has needed"),
+    },
+    NotRun {
+        case: "79_vla_continue",
+        stage: Stage::Built,
+        why: Why::Declined("it asserts that a VLA declared inside a loop has the same address on every iteration — tcc reuses one stack slot and ours are heap allocations, so four of its five checks print `NOT OK` and the fifth is the allocator's accident. C99 requires no such thing, so this is tcc's implementation and not the language"),
+    },
     NotRun {
         case: "60_errors_and_warnings",
         stage: Stage::NoLink("main"),
@@ -1247,7 +1252,6 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::Refused("expected Semi, got Alignas"),
         why: Why::Declined("_Alignas. It stops as a parse error rather than by name, which reads worse and is still a stop"),
     },
-    NotRun { case: "103_implicit_memmove", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "104_inline",
         stage: Stage::Refused("unexpected token in expression: Attribute"),
@@ -1258,26 +1262,46 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::NoLink("PTHREAD_PROCESS_SHARED"),
         why: Why::Declined("pthread condition variables"),
     },
-    NotRun { case: "107_stack_safe", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "108_constructor",
         stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
         why: Why::Declined("constructor attributes"),
     },
-    NotRun { case: "109_float_struct_calling", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "112_backtrace", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "113_btdll",
         stage: Stage::NoLink("f_1"),
         why: Why::Declined("three shared libraries built from the same file under -DDLL=1,2,3 and loaded at run time; the harness builds one object and one binary"),
     },
     NotRun {
+        case: "112_backtrace",
+        stage: Stage::Built,
+        why: Why::Declined("a meta-test of tcc's `-b` runtime: it expects `RUNTIME ERROR: invalid memory access` and `BCHECK: invalid pointer` lines from a bounds-checking runtime this compiler does not have, and prints nothing"),
+    },
+    NotRun {
         case: "114_bound_signal",
         stage: Stage::Refused("expected Semi, got Ident(\"sj\")"),
         why: Why::Declined("sigaction and sigjmp_buf, which no header here declares, so the declaration does not parse"),
     },
-    NotRun { case: "115_bound_setjmp", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "116_bound_setjmp2", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
+    NotRun {
+        case: "115_bound_setjmp",
+        stage: Stage::Built,
+        why: Why::Declined("`libc panic: longjmp not implemented` (`userland/libc/src/misc.rs`), exit 134. The reason the old skip list gave for this pair — setjmp — is the one claim of its kind that turned out to be right"),
+    },
+    NotRun {
+        case: "116_bound_setjmp2",
+        stage: Stage::Built,
+        why: Why::Declined("the same `longjmp not implemented` panic, exit 134"),
+    },
+    NotRun {
+        case: "122_vla_reuse",
+        stage: Stage::Built,
+        why: Why::Declined("the same claim `79_vla_continue` makes, through a `goto` loop: it requires `&x[0]` to repeat across 100,000 iterations and stops on the second with `ERROR: 0xffff005ae0 0xffff000040`"),
+    },
+    NotRun {
+        case: "126_bound_global",
+        stage: Stage::Built,
+        why: Why::Declined("tcc's `-b` bounds checker again: it expects `BCHECK: … is outside of the region` and `RUNTIME ERROR: invalid memory access`, and prints nothing"),
+    },
     NotRun {
         case: "117_builtins",
         stage: Stage::NoLink("__builtin_abort"),
@@ -1288,8 +1312,6 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::Refused("__attribute__((alias)) is not implemented"),
         why: Why::Declined("symbol aliases. Its two `__asm__(_\"name\")` renames at lines 19 and 20 are refused too, but the attribute at line 9 comes first"),
     },
-    NotRun { case: "122_vla_reuse", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "123_vla_bug", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "124_atomic_counter",
         stage: Stage::Refused("cannot find system include file: stdatomic.h"),
@@ -1300,7 +1322,6 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::Refused("cannot find system include file: stdatomic.h"),
         why: Why::Declined("C11 atomics"),
     },
-    NotRun { case: "126_bound_global", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "127_asm_goto",
         stage: Stage::Refused("expected LParen, got Goto"),
@@ -1311,7 +1332,6 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
         why: Why::Declined("constructor attributes, and a -D per configuration to have a main at all"),
     },
-    NotRun { case: "132_bound_test", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "136_atomic_gcc_style",
         stage: Stage::Refused("cannot find system include file: stdatomic.h"),
