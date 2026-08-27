@@ -207,3 +207,28 @@ been fired at one: `sched::dump`'s NMI probe separates a CPU spinning with `IF`
 clear from one halted with its kick undelivered from one wedged below the
 interrupt layer. Take `info registers -a` over QMP before pressing Ctrl+Alt+D,
 which destroys what it reports on.
+
+## And the reproduction is unreachable again, for a reason nobody chose
+
+Measured 2026-08-27, four runs on the placement branch and one on `origin/main`
+at `16c05999`, identical in all five: the test stops at its **first** probe. The
+windowed child asks for a window, is answered `NotEndowed`, prints
+`WINDOW-CHILD-REFUSED this program was given no compositor` and exits `code=1`
+eight milliseconds after it is spawned. Serial flows for the whole drain and the
+dump answers `8/8 cpu(s) answered` every time, so by this entry's own
+discriminator it is not the freeze and it never gets near one.
+
+The cause is not in this file's subject at all and is filed as its own:
+`issues/build/a-harness-injected-program-can-be-endowed-with-nothing.md`. The
+harness's guest binaries enter an image as extra files, a `[programs.<name>]`
+row demands a crate at `userland/<name>`, and `/bin/init` endows a name the
+manifest does not carry with nothing. The one-row experiment was run and refused
+by the build before any guest booted.
+
+**So this entry's `EXPECTED_FAILURES` declaration is currently absorbing a
+failure it was not written about** — `the windowed child never reported leaving`
+is one of its six, and it has been meaning "the client was given no compositor"
+rather than "the desktop stopped answering". Nothing that reads a run can tell
+the two apart. Until the endowment is restored, no occurrence of the freeze can
+be produced here at all, and this entry's review date will arrive against a test
+that has not reached its own venue since the endowment work landed.
