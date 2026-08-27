@@ -1,6 +1,12 @@
-use filepicker_api::{PickerMode, MSG_FILEPICKER_REQUEST, MSG_FILEPICKER_RESULT};
+use filepicker_api::{
+    PickerMode, MAX_REQUEST_BYTES, MSG_FILEPICKER_REQUEST, MSG_FILEPICKER_RESULT,
+};
 use font::Font;
 use std::fs;
+use std::time::{Duration, Instant};
+use toyos::ipc::{self, RxStep};
+use toyos::poller::{Poller, READABLE};
+use toyos::AsHandle;
 use toyos::Connection;
 use toyos::endow;
 use std::path::{Path, PathBuf};
@@ -459,6 +465,36 @@ fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection) {
 
 // --- Main daemon loop ---
 
+/// How many connections may be waiting to say what they want. The kernel's own
+/// per-port queue depth (`listener::MAX_PENDING_CONNECTIONS`) one step further
+/// along; past it the picker refuses by name rather than growing.
+const MAX_PENDING_REQUESTS: usize = 32;
+
+/// How long an accepted connection may go without completing its request.
+/// Every caller sends its frame in the statement after `connect`, so what this
+/// bounds is the one that never sends it, and it is what drains the table.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// One caller's inbound framing.
+type RequestRx = ipc::FrameRx<MAX_REQUEST_BYTES>;
+
+/// A connection that has been accepted and has not yet said what it wants.
+struct Pending {
+    conn: Connection,
+    rx: RequestRx,
+    since: Instant,
+}
+
+const TOKEN_ACCEPTOR: u64 = 0;
+const TOKEN_PENDING_BASE: u64 = 1;
+
+/// Serve `filepicker` for the rest of the machine's life.
+///
+/// **A server never blocks on a client.** Accept and the request frame are two
+/// events and a frame is buffered until whole before anything acts on it, so a
+/// caller that connects and says nothing costs a slot and a deadline. A picker
+/// session is modal and does hold the loop — that is what a dialog is — but it
+/// begins only once a whole request has arrived.
 fn main() {
     // A statement about the manifest the image was built from, not a race: the
     // `filepicker` port exists before any process does, so an editor holding
@@ -467,28 +503,97 @@ fn main() {
     let acceptor = endow::acceptor("filepicker")
         .expect("the manifest declares this program serves `filepicker`");
 
+    let poller = Poller::new(1 + MAX_PENDING_REQUESTS as u32);
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut ready: Vec<u64> = Vec::new();
     loop {
-        let conn = acceptor.accept().expect("accept failed");
-        let Ok(header) = conn.recv_header() else {
-            continue;
-        };
-        if header.msg_type != MSG_FILEPICKER_REQUEST {
-            continue;
+        poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
+        for p in &pending {
+            poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
+        }
+        // A client that says nothing wakes nothing, so the wait is what is left
+        // of the oldest deadline rather than a fresh one.
+        let now = Instant::now();
+        let timeout = pending
+            .iter()
+            .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
+            .min()
+            .map_or(u64::MAX, |left| left.as_nanos() as u64);
+        ready.clear();
+        poller.wait(1, timeout, |token| ready.push(token));
+
+        let now = Instant::now();
+        for p in pending.iter().filter(|p| now.duration_since(p.since) >= HANDSHAKE_TIMEOUT) {
+            eprintln!(
+                "filepicker: dropping client {} — it never finished its request",
+                p.conn.as_handle().0
+            );
+        }
+        pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
+
+        if ready.contains(&TOKEN_ACCEPTOR) {
+            // An accept that fails costs one connection and never the picker.
+            match acceptor.accept() {
+                Err(e) => eprintln!("filepicker: a connection could not be accepted ({e:?})"),
+                Ok(conn) if pending.len() >= MAX_PENDING_REQUESTS => eprintln!(
+                    "filepicker: refusing client {} — {MAX_PENDING_REQUESTS} connections are \
+                     already waiting to say what they want",
+                    conn.as_handle().0
+                ),
+                Ok(conn) => {
+                    pending.push(Pending { conn, rx: RequestRx::new(), since: Instant::now() })
+                }
+            }
         }
 
-        let mut data = [0u8; 4096];
-        let n = conn.recv_bytes(&header, &mut data).unwrap_or(0);
-        let mode = if n > 0 && data[0] == PickerMode::Save as u8 {
-            PickerMode::Save
-        } else {
-            PickerMode::Open
-        };
-        let start_dir = if n > 1 {
-            core::str::from_utf8(&data[1..n]).unwrap_or("/")
-        } else {
-            "/"
-        };
-
-        run_picker(mode, start_dir, &conn);
+        // `remove` rather than `swap_remove`: the entries after `i` shift down,
+        // so leaving `i` alone visits each connection exactly once.
+        let mut i = 0;
+        while i < pending.len() {
+            let handle = pending[i].conn.as_handle();
+            if !ready.contains(&(TOKEN_PENDING_BASE + handle.0 as u64)) {
+                i += 1;
+                continue;
+            }
+            let step = {
+                let p = &mut pending[i];
+                p.rx.pump(&p.conn)
+            };
+            match step {
+                RxStep::Idle => i += 1,
+                // Unlogged: a caller may connect to find out whether it holds a
+                // picker at all and hang up, which is its business.
+                RxStep::Eof => {
+                    pending.remove(i);
+                }
+                RxStep::Malformed => {
+                    eprintln!(
+                        "filepicker: dropping client {} — it sent a frame this protocol cannot \
+                         describe",
+                        handle.0
+                    );
+                    pending.remove(i);
+                }
+                RxStep::Frame { msg_type, payload_len } => {
+                    let p = pending.remove(i);
+                    if msg_type == MSG_FILEPICKER_REQUEST {
+                        let data = p.rx.payload(payload_len);
+                        let mode = if data.first() == Some(&(PickerMode::Save as u8)) {
+                            PickerMode::Save
+                        } else {
+                            PickerMode::Open
+                        };
+                        let start_dir = data
+                            .get(1..)
+                            .and_then(|d| core::str::from_utf8(d).ok())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("/");
+                        run_picker(mode, start_dir, &p.conn);
+                    }
+                    // The session held the loop, so deadlines are re-read.
+                    break;
+                }
+            }
+        }
     }
 }

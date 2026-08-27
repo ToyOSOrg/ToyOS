@@ -601,8 +601,8 @@ userland/doom/src/input.rs 4 0
 userland/doom/src/main.rs 16 0
 userland/doom/src/sound.rs 189 0
 userland/editor/src/main.rs 45 0
-userland/filepicker-api/src/lib.rs 17 0
-userland/filepicker/src/main.rs 23 0
+userland/filepicker-api/src/lib.rs 21 0
+userland/filepicker/src/main.rs 46 0
 userland/files/src/main.rs 5 0
 userland/font/src/lib.rs 5 0
 userland/init/src/main.rs 196 0
