@@ -310,6 +310,30 @@ const RUST_SKIP: &[&str] = &[
     // was written that they are excluded from this boot; now they are.
     "audio_tone",
     "audio_tone_load",
+    // Its whole subject is a page of a file the host wrote onto the volume
+    // before the machine existed; the shared boot stages nothing, so it prints
+    // `did not open` and passes on its exit code. `log_backing_read_error`
+    // stages the file and reads the verdict.
+    "log_volume_reread",
+];
+
+/// Binaries a machine test drives that the shared boot also runs on purpose.
+///
+/// **A binary a machine test drives under a different name is still discovered
+/// by [`discover_rust_tests`]**, still runs on the shared boot, and there
+/// passes on its exit code with nothing staged for it to act on. `RUST_SKIP` is
+/// one answer to that; this list is the other, for the binaries whose shared
+/// run asserts something of its own. Every driven name is on one list or the
+/// other, so neither answer is silence — `suite_split` is the gate.
+/// `sched_stress` is the one whose two runs differ by *kernel* rather than by
+/// what the host staged: the shipping build here, `sched_check_build`'s
+/// assert-carrying build there.
+const DRIVEN_AND_SHARED: &[&str] = &[
+    "null_sink_client_exits",
+    "nvme_home_roundtrip",
+    "sched_stress",
+    "std_alloc",
+    "wall_clock_now",
 ];
 
 // Audio glitch tests. Each runs in its own QEMU boot per SMP config and
@@ -382,6 +406,13 @@ const CONSOLE_NONCE: &str = "zqjxk";
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
 const CONSOLE_PROMPT: &str = "/home/root>";
+/// The seed's witness on the panel.
+///
+/// `/bin/console` pushes the newest logs on `/log` into its scrollback before
+/// its first prompt, so a panel carrying one of their lines is a console that
+/// read them. This one is written hundreds of lines into a boot, which is what
+/// makes its *absence* two different things — see `screen_console_shell`.
+const CONSOLE_SEED_WITNESS: &str = "i8042:";
 
 /// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
 /// the brightest channel and a colour a glyph could contain would let a
@@ -1068,10 +1099,9 @@ const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
 
 /// How far a corpus case gets before it stops, and what it says when it does.
 ///
-/// There is no `Run`. Seventeen of these built at the moment this list was
-/// written and nobody has ever asked whether they run; turning one on is a
-/// guest slot and possibly a hung lane, so the question is filed rather than
-/// answered here.
+/// There is no `Run`, and a [`Stage::Built`] entry is now a *decline* rather
+/// than an unanswered question: every case that compiles has been run, and the
+/// eight that stayed off the suite each say what their own output was.
 #[derive(Clone, Copy)]
 enum Stage {
     /// toyos-cc refuses it, and this is what the refusal says.
@@ -1131,26 +1161,32 @@ struct NotRun {
     why: Why,
 }
 
-/// Where the question about the `Built` set lives.
-const BUILT_NOT_RUN: &str = "issues/build/c-corpus-cases-build-and-are-not-run.md";
-
 const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "03_struct",
         stage: Stage::Refused("__attribute__((__cleanup__)) is not implemented"),
         why: Why::Declined("cleanup attributes; the entry used to say _Generic, which is 33_ternary_op's reason and not this one"),
     },
-    NotRun { case: "18_include", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "78_vla_label", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "79_vla_continue", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "31_args", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "32_led", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
+    NotRun {
+        case: "31_args",
+        stage: Stage::Built,
+        why: Why::Declined("its `.expect` is written for tcc's own runner, which passes it five arguments; every corpus binary here is run with none, so it prints `hello world 1` against an expected `hello world 6`. Nothing about this compiler is in it"),
+    },
     NotRun {
         case: "33_ternary_op",
         stage: Stage::Refused("_Generic type dispatch is not implemented"),
         why: Why::Declined("_Generic"),
     },
-    NotRun { case: "40_stdio", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
+    NotRun {
+        case: "40_stdio",
+        stage: Stage::Built,
+        why: Why::Declined("it writes `fred.txt` into the working directory and reads it back; the corpus runs from the read-only initrd root, so the write fails and the program prints `couldn't read fred.txt`. A writable working directory for the corpus is a harness change nothing else has needed"),
+    },
+    NotRun {
+        case: "79_vla_continue",
+        stage: Stage::Built,
+        why: Why::Declined("it asserts that a VLA declared inside a loop has the same address on every iteration — tcc reuses one stack slot and ours are heap allocations, so four of its five checks print `NOT OK` and the fifth is the allocator's accident. C99 requires no such thing, so this is tcc's implementation and not the language"),
+    },
     NotRun {
         case: "60_errors_and_warnings",
         stage: Stage::NoLink("main"),
@@ -1216,7 +1252,6 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::Refused("expected Semi, got Alignas"),
         why: Why::Declined("_Alignas. It stops as a parse error rather than by name, which reads worse and is still a stop"),
     },
-    NotRun { case: "103_implicit_memmove", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "104_inline",
         stage: Stage::Refused("unexpected token in expression: Attribute"),
@@ -1227,26 +1262,46 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::NoLink("PTHREAD_PROCESS_SHARED"),
         why: Why::Declined("pthread condition variables"),
     },
-    NotRun { case: "107_stack_safe", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "108_constructor",
         stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
         why: Why::Declined("constructor attributes"),
     },
-    NotRun { case: "109_float_struct_calling", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "112_backtrace", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "113_btdll",
         stage: Stage::NoLink("f_1"),
         why: Why::Declined("three shared libraries built from the same file under -DDLL=1,2,3 and loaded at run time; the harness builds one object and one binary"),
     },
     NotRun {
+        case: "112_backtrace",
+        stage: Stage::Built,
+        why: Why::Declined("a meta-test of tcc's `-b` runtime: it expects `RUNTIME ERROR: invalid memory access` and `BCHECK: invalid pointer` lines from a bounds-checking runtime this compiler does not have, and prints nothing"),
+    },
+    NotRun {
         case: "114_bound_signal",
         stage: Stage::Refused("expected Semi, got Ident(\"sj\")"),
         why: Why::Declined("sigaction and sigjmp_buf, which no header here declares, so the declaration does not parse"),
     },
-    NotRun { case: "115_bound_setjmp", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "116_bound_setjmp2", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
+    NotRun {
+        case: "115_bound_setjmp",
+        stage: Stage::Built,
+        why: Why::Declined("`libc panic: longjmp not implemented` (`userland/libc/src/misc.rs`), exit 134. The reason the old skip list gave for this pair — setjmp — is the one claim of its kind that turned out to be right"),
+    },
+    NotRun {
+        case: "116_bound_setjmp2",
+        stage: Stage::Built,
+        why: Why::Declined("the same `longjmp not implemented` panic, exit 134"),
+    },
+    NotRun {
+        case: "122_vla_reuse",
+        stage: Stage::Built,
+        why: Why::Declined("the same claim `79_vla_continue` makes, through a `goto` loop: it requires `&x[0]` to repeat across 100,000 iterations and stops on the second with `ERROR: 0xffff005ae0 0xffff000040`"),
+    },
+    NotRun {
+        case: "126_bound_global",
+        stage: Stage::Built,
+        why: Why::Declined("tcc's `-b` bounds checker again: it expects `BCHECK: … is outside of the region` and `RUNTIME ERROR: invalid memory access`, and prints nothing"),
+    },
     NotRun {
         case: "117_builtins",
         stage: Stage::NoLink("__builtin_abort"),
@@ -1257,8 +1312,6 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::Refused("__attribute__((alias)) is not implemented"),
         why: Why::Declined("symbol aliases. Its two `__asm__(_\"name\")` renames at lines 19 and 20 are refused too, but the attribute at line 9 comes first"),
     },
-    NotRun { case: "122_vla_reuse", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
-    NotRun { case: "123_vla_bug", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "124_atomic_counter",
         stage: Stage::Refused("cannot find system include file: stdatomic.h"),
@@ -1269,7 +1322,6 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::Refused("cannot find system include file: stdatomic.h"),
         why: Why::Declined("C11 atomics"),
     },
-    NotRun { case: "126_bound_global", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "127_asm_goto",
         stage: Stage::Refused("expected LParen, got Goto"),
@@ -1280,7 +1332,6 @@ const NOT_RUN: &[NotRun] = &[
         stage: Stage::Refused("__attribute__((constructor)) is not implemented"),
         why: Why::Declined("constructor attributes, and a -D per configuration to have a main at all"),
     },
-    NotRun { case: "132_bound_test", stage: Stage::Built, why: Why::Open(BUILT_NOT_RUN) },
     NotRun {
         case: "136_atomic_gcc_style",
         stage: Stage::Refused("cannot find system include file: stdatomic.h"),
@@ -3054,10 +3105,18 @@ fn run_screen_test(
             serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
 
             let font = screen::ConsoleFont::load();
+            // **Both, because nothing orders them.** The seed's paint and the
+            // shell's first prompt are two independent writers, so a wait that
+            // stopped at the prompt could sample a panel the seed had not
+            // finished putting up and report it as a console that never read
+            // the log.
             let dump = qemu.screendump_while(
                 Duration::from_secs(30),
                 Duration::from_millis(200),
-                |d| d.console_text(&font).contains(CONSOLE_PROMPT),
+                |d| {
+                    let text = d.console_text(&font);
+                    text.contains(CONSOLE_PROMPT) && text.contains(CONSOLE_SEED_WITNESS)
+                },
             );
             let before = dump.console_text(&font);
             if !before.contains(CONSOLE_PROMPT) {
@@ -3072,12 +3131,44 @@ fn run_screen_test(
             // cleared the screen would have traded the diagnostic that works
             // today for one that might — and this is the line the metal track
             // keeps having to read.
-            if !before.contains("i8042:") {
-                return Err(format!(
-                    "no `i8042:` line above the prompt: `/boot/toyos/kernel.log` never \
-                     reached the scrollback, so this console starts blank where the \
-                     diagnostic boot starts with the log\ndecoded screen:\n{before}"
-                ));
+            if !before.contains(CONSOLE_SEED_WITNESS) {
+                // **Which of the two it is, from a number the guest published
+                // rather than from the panel.** `console: ready` reports the
+                // bytes of log it seeded, so a blank console and a console
+                // showing some other part of the log are told apart by that
+                // count — the panel cannot separate them, and a message that
+                // picked one sent the next reader after the wrong subsystem.
+                // The byte stream and not `boot_log`: the count is on the rest
+                // of the ready marker's own line, which the line channel has
+                // already consumed by the time the marker ends the boot wait.
+                let said = qemu.console_stream().since(0);
+                // Anchored on the whole of the console's own phrase: `logd`
+                // says "this boot's kernel log is …" on the same console, and
+                // a search for the shorter string finds that one first.
+                let seeded = said
+                    .split("cells), kernel log ")
+                    .nth(1)
+                    .and_then(|rest| rest.split(' ').next())
+                    .and_then(|n| n.parse::<u64>().ok());
+                return Err(match seeded {
+                    Some(0) => format!(
+                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and `console: \
+                         ready` reported 0 bytes of kernel log: this console started blank \
+                         where the diagnostic boot starts with the log\ndecoded \
+                         screen:\n{before}"
+                    ),
+                    Some(bytes) => format!(
+                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and the console \
+                         seeded {bytes} bytes of kernel log — so the log reached the \
+                         scrollback and what is on the panel is some other part of it. This \
+                         is not a console that started blank\ndecoded screen:\n{before}"
+                    ),
+                    None => format!(
+                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and no `kernel \
+                         log N bytes` on the console to say whether the seed happened at \
+                         all\nboot console:\n{said}\ndecoded screen:\n{before}"
+                    ),
+                });
             }
             // Non-vacuity, and not a formality: a boot checkpoint paints the
             // same lines off the same ring, so on a boot where the console
@@ -7707,7 +7798,7 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
     }
     // The guest's own case list, restated here so a case deleted on one side
     // is a red run rather than a quieter test.
-    const CASES: usize = 5;
+    const CASES: usize = 6;
     if !result
         .stdout
         .contains(&format!("compositor client death: {CASES} deaths survived"))
@@ -7734,6 +7825,18 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
         return Err(format!(
             "the compositor never served a request from a reaped creator, so this run says \
              nothing about what replaced the grant:\n{}",
+            result.stdout
+        ));
+    }
+
+    // The one case whose verdict is a line rather than survival: a payload
+    // past what any client may inline is refused by name, because storing the
+    // prefix a frame reader keeps is the silent half of the same event.
+    const OVERSIZE: &str = "compositor: refusing an inline payload past";
+    if !result.stdout.contains(OVERSIZE) {
+        return Err(format!(
+            "an over-long inline clipboard was not refused by name, so nothing here separates \
+             a refusal from a truncation:\n{}",
             result.stdout
         ));
     }
@@ -13832,12 +13935,88 @@ fn suite_split() -> Result<(), String> {
              each entry — coverage of the binary an image ships is what it costs."
         ));
     }
+    // **The other shape `check_no_collisions` cannot see**: a binary a machine
+    // test drives under a *different* name is still discovered here, still runs
+    // on the shared boot, and there passes on its exit code with nothing staged
+    // for it to act on.
+    let staged_driven = [
+        String::from("qemu.run_test(\"test_rs_a_driven_one\", Duration::from_secs(30))"),
+        String::from("Command::new(\"/bin/test_rs_another_driven\")"),
+        String::from("qemu.run_test(&format!(\"test_rs_{name}\"), ceiling)"),
+    ];
+    let found = driven_binaries(&staged_driven);
+    let want: BTreeSet<String> =
+        ["a_driven_one", "another_driven"].iter().map(|s| s.to_string()).collect();
+    if found != want {
+        return Err(format!("the driven-name reader does not work: it named {found:?}"));
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut harness = vec![fs::read_to_string(root.join("tests/toyos.rs"))
+        .map_err(|e| format!("read tests/toyos.rs: {e}"))?];
+    let common = root.join("tests/common");
+    for entry in fs::read_dir(&common).map_err(|e| format!("read {}: {e}", common.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            harness.push(fs::read_to_string(&path).map_err(|e| e.to_string())?);
+        }
+    }
+    let shared: BTreeSet<&str> = registry.iter().copied().collect();
+    let both: BTreeSet<String> = driven_binaries(&harness)
+        .into_iter()
+        .filter(|name| shared.contains(name.as_str()))
+        .collect();
+    let declared: BTreeSet<String> = DRIVEN_AND_SHARED.iter().map(|s| s.to_string()).collect();
+    let undeclared: Vec<&String> = both.difference(&declared).collect();
+    if !undeclared.is_empty() {
+        return Err(format!(
+            "{undeclared:?} are driven by a machine test and also run on the shared boot, where \
+             nothing stages what they need — so each passes on its exit code with no verdict. Add \
+             each to RUST_SKIP with the reason its driver exists, or to DRIVEN_AND_SHARED if its \
+             shared run asserts something of its own."
+        ));
+    }
+    let stale: Vec<&String> = declared.difference(&both).collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "DRIVEN_AND_SHARED names {stale:?}, which no machine test drives or the shared boot \
+             no longer runs. Delete each entry — a declaration nothing is true of is what makes \
+             the rest of the list unreadable."
+        ));
+    }
+
     println!(
-        "  [split] {} shared binaries on the shipping kernel, {} on the actuator one",
+        "  [split] {} shared binaries on the shipping kernel, {} on the actuator one, {} of them \
+         driven elsewhere and declared",
         registry.len() - listed.len(),
-        listed.len()
+        listed.len(),
+        both.len()
     );
     Ok(())
+}
+
+/// Every guest binary the harness drives by name, read out of its own sources.
+///
+/// A driver reaches a binary as the literal `test_rs_<name>`, so that is what
+/// says a binary has one; a `format!` over a variable name yields no literal
+/// and is not a driver of any particular binary. Pure, and the sources are a
+/// parameter, so `suite_split` stages its own before trusting it on the tree.
+fn driven_binaries(sources: &[String]) -> BTreeSet<String> {
+    const MARK: &str = "test_rs_";
+    let mut found = BTreeSet::new();
+    for text in sources {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(MARK) {
+            rest = &rest[at + MARK.len()..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            if end > 0 {
+                found.insert(rest[..end].to_string());
+            }
+        }
+    }
+    found
 }
 
 fn expected_failure_entries() -> Result<(), String> {

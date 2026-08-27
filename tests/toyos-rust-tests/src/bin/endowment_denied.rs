@@ -361,6 +361,13 @@ fn the_shipped_applet_reaches_both_answers() {
         String::from_utf8_lossy(&refused.stdout),
     );
 
+    // The rows do not sum to the machine, and `ps` says by how much rather than
+    // leaving the difference to be read as unattributed CPU.
+    assert!(
+        said.lines().last().is_some_and(|l| l.contains("have been reaped")),
+        "ps accounted for no reaped CPU at all: {said:?}",
+    );
+
     println!("  ps: {rows} processes with the bit, and a named refusal without it");
 }
 

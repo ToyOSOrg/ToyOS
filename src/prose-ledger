@@ -178,7 +178,7 @@ kernel/src/user_ptr.rs 247 0
 kernel/src/vfs.rs 308 0
 kernel/src/vma.rs 47 0
 kernel/src/writeback.rs 164 0
-src/assets.rs 103 0
+src/assets.rs 123 0
 src/build.rs 665 3
 src/buildlock.rs 378 5
 src/ci.rs 105 1
@@ -192,7 +192,7 @@ src/lib.rs 46 0
 src/libc.rs 31 1
 src/main.rs 65 0
 src/mergehealth.rs 229 3
-src/pr.rs 168 5
+src/pr.rs 172 5
 src/prosegate.rs 113 0
 src/qemu.rs 113 0
 src/redlist.rs 492 24
@@ -203,7 +203,7 @@ src/testargs.rs 97 0
 src/tiers.rs 338 26
 src/toolchain.rs 778 29
 src/wallpaper.rs 124 0
-src/worktree.rs 40 0
+src/worktree.rs 74 0
 tests/common/audio.rs 404 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
@@ -218,7 +218,7 @@ tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/qemu.rs 1588 11
+tests/common/qemu.rs 1603 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 260 1
 tests/common/stats.rs 44 0
@@ -252,7 +252,7 @@ tests/toyos-rust-tests/src/bin/audio_tone_load.rs 5 0
 tests/toyos-rust-tests/src/bin/blocking_read_stress.rs 32 0
 tests/toyos-rust-tests/src/bin/boot_volume_metadata_error.rs 29 0
 tests/toyos-rust-tests/src/bin/cache_eviction.rs 37 0
-tests/toyos-rust-tests/src/bin/compositor_client_death.rs 100 0
+tests/toyos-rust-tests/src/bin/compositor_client_death.rs 103 0
 tests/toyos-rust-tests/src/bin/compositor_stall.rs 71 0
 tests/toyos-rust-tests/src/bin/connect_before_serve.rs 46 0
 tests/toyos-rust-tests/src/bin/console_line_atomicity.rs 73 0
@@ -265,7 +265,7 @@ tests/toyos-rust-tests/src/bin/disk_backtrace_child.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 32 0
-tests/toyos-rust-tests/src/bin/endowment_denied.rs 146 2
+tests/toyos-rust-tests/src/bin/endowment_denied.rs 148 2
 tests/toyos-rust-tests/src/bin/esp_files.rs 48 0
 tests/toyos-rust-tests/src/bin/exit_wait_storm.rs 36 0
 tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs 49 0
@@ -346,7 +346,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4777 23
+tests/toyos.rs 4828 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
@@ -589,10 +589,10 @@ userland/calc/src/parser.rs 52 0
 userland/calc/src/prog.rs 17 0
 userland/calc/src/rational.rs 23 0
 userland/calc/tests/parser_identities.rs 26 0
-userland/compositor/src/client.rs 90 0
+userland/compositor/src/client.rs 92 0
 userland/compositor/src/main.rs 37 0
 userland/compositor/src/render.rs 40 0
-userland/compositor/src/session.rs 155 0
+userland/compositor/src/session.rs 158 0
 userland/compositor/src/stats.rs 24 0
 userland/console/src/main.rs 117 0
 userland/doom/build.rs 63 2
@@ -601,8 +601,8 @@ userland/doom/src/input.rs 4 0
 userland/doom/src/main.rs 16 0
 userland/doom/src/sound.rs 189 0
 userland/editor/src/main.rs 45 0
-userland/filepicker-api/src/lib.rs 17 0
-userland/filepicker/src/main.rs 23 0
+userland/filepicker-api/src/lib.rs 21 0
+userland/filepicker/src/main.rs 46 0
 userland/files/src/main.rs 5 0
 userland/font/src/lib.rs 5 0
 userland/init/src/main.rs 196 0
@@ -658,7 +658,7 @@ userland/toybox/src/main.rs 0 0
 userland/toybox/src/mkdir.rs 0 0
 userland/toybox/src/mv.rs 13 0
 userland/toybox/src/net.rs 1 0
-userland/toybox/src/ps.rs 13 0
+userland/toybox/src/ps.rs 34 0
 userland/toybox/src/pwd.rs 0 0
 userland/toybox/src/rm.rs 0 0
 userland/toybox/src/screen.rs 4 0
@@ -667,4 +667,4 @@ userland/toybox/src/spin.rs 0 0
 userland/toybox/src/stats.rs 2 0
 userland/toybox/src/tone.rs 10 0
 userland/window/src/framebuffer.rs 68 0
-userland/window/src/lib.rs 147 0
+userland/window/src/lib.rs 152 0

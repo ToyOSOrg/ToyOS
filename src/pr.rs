@@ -273,11 +273,27 @@ fn sync(root: &Path) -> Result<String, String> {
     let before = git(&primary, &["rev-parse", "--short", "main"])?;
     let behind = git(&primary, &["rev-list", "--count", "main..origin/main"])?;
     if behind.trim() == "0" {
-        return Ok(format!("fetched origin; this host's main is current at {before}"));
+        return Ok(format!(
+            "fetched origin; this host's main is current at {before}{}",
+            reclaimable(root)
+        ));
     }
     git(&primary, &["merge", "--ff-only", "origin/main"]).map_err(|_| stranded(&primary))?;
     let after = git(&primary, &["rev-parse", "--short", "main"])?;
-    Ok(format!("fetched origin; this host's main {before} -> {after} ({} commit(s))", behind.trim()))
+    Ok(format!(
+        "fetched origin; this host's main {before} -> {after} ({} commit(s)){}",
+        behind.trim(),
+        reclaimable(root),
+    ))
+}
+
+/// What this host could give back, said where it becomes true.
+///
+/// A worktree whose branch has landed has no reason to hold its build caches,
+/// and `--sync` runs at exactly the moment that becomes true of one.
+fn reclaimable(root: &Path) -> String {
+    crate::worktree::reclaim_line(&crate::worktree::survey(root, false))
+        .map_or_else(String::new, |line| format!("\n[pr] {line}"))
 }
 
 /// This host's `main` has commits GitHub does not, so it is not a cache of

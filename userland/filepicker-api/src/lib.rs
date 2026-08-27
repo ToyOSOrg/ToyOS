@@ -3,6 +3,12 @@ use toyos::endow::{self, EndowError};
 pub const MSG_FILEPICKER_REQUEST: u32 = 1;
 pub const MSG_FILEPICKER_RESULT: u32 = 2;
 
+/// The whole of a request: the mode byte and the starting directory.
+///
+/// One number both ends read. The picker buffers a request until it is whole
+/// and keeps this much of it, so a caller that sends more loses the tail.
+pub const MAX_REQUEST_BYTES: usize = 4096;
+
 #[derive(Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum PickerMode {
@@ -59,8 +65,8 @@ pub fn pick_file(mode: PickerMode, start_dir: &str) -> Result<Option<String>, Pi
     let conn = endow::service("filepicker")?;
 
     let path_bytes = start_dir.as_bytes();
-    let len = path_bytes.len().min(4095);
-    let mut data = [0u8; 4096];
+    let len = path_bytes.len().min(MAX_REQUEST_BYTES - 1);
+    let mut data = [0u8; MAX_REQUEST_BYTES];
     data[0] = mode as u8;
     data[1..1 + len].copy_from_slice(&path_bytes[..len]);
     conn.send_bytes(MSG_FILEPICKER_REQUEST, &data[..1 + len])
