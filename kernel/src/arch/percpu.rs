@@ -79,7 +79,6 @@ pub enum CpuFaultState {
 pub struct PerCpu {
     self_ptr: u64,
     cpu_id: u32,
-    lapic_id: u32,
     /// The syscall entry loads this as its kernel stack.
     pub kernel_rsp: u64,
     /// …and parks the user's RSP here across the switch.
@@ -506,7 +505,14 @@ const STACK_FILL: u8 = 0xA5;
 const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
 
 /// Allocate and initialize PerCpu for a CPU. Returns a raw pointer (lives forever).
-fn alloc_percpu(cpu_id: u32, lapic_id: u32) -> *mut PerCpu {
+///
+/// **One `write` of the whole struct, so the allocator zeroes nothing this
+/// function means.** A field added to [`PerCpu`] has to be given a value here or
+/// the initialiser does not compile; the partial form this replaced named 8 of
+/// the fields and left the rest to `alloc_zeroed`, where a new field's default
+/// is silently whatever zero means for it — and two of these fields have a
+/// non-zero idle state.
+fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     let layout = Layout::from_size_align(size_of::<PerCpu>(), 16).unwrap();
     // SAFETY: `size_of::<PerCpu>()` is non-zero and 16 is a power of two, which
     // is the whole of `alloc_zeroed`'s contract. Irreducible because the block
@@ -516,21 +522,51 @@ fn alloc_percpu(cpu_id: u32, lapic_id: u32) -> *mut PerCpu {
     let ptr = unsafe { alloc_zeroed(layout) } as *mut PerCpu;
     assert!(!ptr.is_null(), "percpu: alloc failed");
 
-    // SAFETY: the allocation above succeeded (asserted), is `size_of::<PerCpu>()`
-    // bytes at 16-byte alignment, and is zeroed — which is a valid `PerCpu`,
-    // every field being an integer, an array of them or an atomic over one. It
-    // is not published anywhere until this function returns, so this `&mut` is
-    // the only reference to it in the machine.
+    // SAFETY: the allocation above succeeded (asserted) and is
+    // `size_of::<PerCpu>()` bytes at 16-byte alignment, so it is a writable,
+    // aligned, uninhabited-by-anything-else place for one `PerCpu`. Nothing has
+    // a reference to it and nothing reads it until this function returns.
+    unsafe {
+        core::ptr::write(
+            ptr,
+            PerCpu {
+                self_ptr: ptr as u64,
+                cpu_id,
+                kernel_rsp: 0,
+                user_rsp: 0,
+                tss: Tss::new(),
+                // The idle sentinel, and an asm wire format: `current_tid` and
+                // `current_pid` are decoded to `Option` at this module's
+                // boundary, so zero here would name thread 0 of process 0.
+                current_tid: u32::MAX,
+                current_pid: u32::MAX,
+                gdt: GDT_ENTRIES,
+                idle_stack_top: 0,
+                syscall_rip: 0,
+                syscall_num: 0,
+                syscall_rbp: 0,
+                preempt_count: AtomicU32::new(0),
+                need_resched: AtomicU8::new(0),
+                _pad_after_need_resched: [0; 3],
+                ring0_timer_fires: AtomicU32::new(0),
+                last_seen_ring0_fires: 0,
+                fault_state: CpuFaultState::Normal as u8,
+                _pad_after_fault_state: [0; 3],
+                last_armed_ticks: AtomicU32::new(0),
+                log_shard: alloc_log_shard(cpu_id),
+                nmi_active: 0,
+                _pad_after_nmi_active: [0; 4],
+                irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
+            },
+        );
+    }
+
+    // SAFETY: the write above initialised the allocation, which nothing else
+    // references, so this `&mut` is the only one in the machine.
     let percpu = unsafe { &mut *ptr };
-    percpu.self_ptr = ptr as u64;
-    percpu.cpu_id = cpu_id;
-    percpu.lapic_id = lapic_id;
-    percpu.current_tid = u32::MAX;
-    percpu.current_pid = u32::MAX;
-    percpu.tss = Tss::new();
-    percpu.gdt = GDT_ENTRIES;
+    // After the write and not inside it: the descriptor holds the *address* of
+    // the TSS, which is a property of where this block was allocated.
     percpu.init_tss_descriptor();
-    percpu.log_shard = alloc_log_shard(cpu_id);
     // The counters themselves are reached through `gs:`; this is what lets a
     // *sibling* read them, and it is published here for the same reason the log
     // shard is — the whole block exists before the CPU it belongs to has run an
@@ -850,7 +886,7 @@ fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
 
 /// Initialize per-CPU data for the BSP. Call after paging + allocator but before IDT/syscall.
 pub fn init_bsp(lapic_id: u32) {
-    let ptr = alloc_percpu(0, lapic_id);
+    let ptr = alloc_percpu(0);
     // SAFETY: `alloc_percpu` just returned a live, initialised, never-freed
     // `PerCpu` that nothing else has a reference to — it is not published into
     // `IA32_GS_BASE` until the `wrmsr` below.
@@ -890,8 +926,8 @@ pub fn init_bsp(lapic_id: u32) {
 
 /// Allocate percpu for an AP on the BSP. Returns the raw pointer for the trampoline
 /// to write into IA32_GS_BASE before loading the IDT.
-pub fn alloc_ap(cpu_id: u32, lapic_id: u32) -> *mut PerCpu {
-    let ptr = alloc_percpu(cpu_id, lapic_id);
+pub fn alloc_ap(cpu_id: u32) -> *mut PerCpu {
+    let ptr = alloc_percpu(cpu_id);
     // SAFETY: `init_bsp`'s argument — a live, never-freed `PerCpu` nothing else
     // references. This one runs on the BSP for an AP that has not been sent its
     // INIT-SIPI yet, so the CPU it belongs to has executed no instruction.

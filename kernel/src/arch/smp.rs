@@ -244,7 +244,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         let ap_cpu_id = next_cpu_id;
         next_cpu_id += 1;
         CPU_APIC_IDS[ap_cpu_id as usize].store(ap_id, Ordering::Relaxed);
-        let ap_percpu = percpu::alloc_ap(ap_cpu_id, ap_id);
+        let ap_percpu = percpu::alloc_ap(ap_cpu_id);
 
         data.stack_top = stack_base as u64 + AP_STACK_SIZE as u64;
         data.entry = ap_entry as *const () as u64;
