@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -644,7 +644,8 @@ fn build_and_assemble(
     }
 
     if !config.assets.is_empty() {
-        initrd_files.extend(assets::collect(&config.assets));
+        let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
+        initrd_files.extend(assets::collect(&config.assets, &programs));
     }
 
     // Extra files (test binaries, shared libs)

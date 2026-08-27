@@ -2030,16 +2030,20 @@ pub const KNOWN_RED: &[Red] = &[
         what: "`no \\`i8042:\\` line above the prompt: \\`/boot/toyos/kernel.log\\` never reached the \
                scrollback` — **and the panel it printed disproves that sentence**: every line on \
                it is stamped `0.000` and comes from the first screenful of the boot, so the seed \
-               reached the console and the view was at its *head*. The assertion wants the end of \
-               the seed and `screendump_while` stops at the first frame carrying the prompt, so \
-               nothing orders the seed's paint against it. `ALONE: GREEN, and it was alone both \
-               times — a rate and not a classification`. **Not about the diff it was found on**, \
-               which is the i8042 interrupt tally: that change writes no boot line and removes \
-               none, so the set of `i8042:` lines this test looks for is identical either side of \
-               it",
+               reached the console and the view was at its *head*. `ALONE: GREEN, and it was \
+               alone both times — a rate and not a classification`. **Not about the diff it was \
+               found on**, which is the i8042 interrupt tally: that change writes no boot line \
+               and removes none, so the set of `i8042:` lines this test looks for is identical \
+               either side of it. **Both halves of the test have moved since.** The wait is now \
+               for the prompt *and* the seed's witness, where `screendump_while` stopped at the \
+               first frame carrying the prompt and nothing ordered the seed's paint against it; \
+               and the message no longer names a cause it did not establish — it reads the byte \
+               count `console: ready` publishes and says whether the log reached the scrollback \
+               at all. A recurrence therefore arrives already told apart, and would be a view \
+               that is not at the bottom rather than a console that started blank",
         evidence: "PR #111 run 32040411208, job 95418635461 (`guest (3)`); the isolated re-run in \
                    the same job was green",
-        source: "issues/diagnostics/console-scrollback-can-sit-at-the-head-of-the-seeded-log.md",
+        source: "issues/hardware/collapsed-scroll-paint-unasserted.md",
         measured: "2026-08-17",
     },
     // ---------------------------------------------------------------------

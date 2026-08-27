@@ -55,6 +55,7 @@ doorbell-kick-relaxed = []
 #   cargo test -p toyos-sched-loom --features push-fence-relaxed --test loom_push
 #
 push-fence-relaxed = []
+placement-ignores-staleness = []
 
 [dependencies]
 loom = "0.7"

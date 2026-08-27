@@ -565,6 +565,13 @@ fn kernel_died_here(line: &str) -> String {
 /// same words when they quote a report.
 pub const DIED_SAYING: &str = "--- what the kernel said as it died ---";
 
+/// The heading a verdict puts a never-announced test's window under.
+pub const NEVER_ANNOUNCED: &str =
+    "--- the guest never announced this test; the window it was given ---";
+
+/// How many of that window's lines the verdict carries.
+const WINDOW_LINES: usize = 40;
+
 /// Why a wait ended badly, carrying the guest's own account of it.
 ///
 /// **A newtype, because what this closes is an omission and an omission cannot
@@ -600,6 +607,30 @@ impl WaitVerdict {
             return Self(sentence);
         };
         Self(format!("{sentence}\n{DIED_SAYING}\n{report}"))
+    }
+
+    /// The same, for a test that may never have announced itself.
+    ///
+    /// **A test whose `===TEST_START` never arrived has an empty
+    /// [`TestResult::serial`] by construction**, so an arm that formats
+    /// `serial` prints nothing at all and [`TestResult::before`] is the only
+    /// record the boot left. [`Self::new`]'s silence on a capture nothing died
+    /// in holds everywhere else: a started test's window is in `serial`, where
+    /// its arm already looks.
+    pub fn for_test(sentence: String, before: &str, serial: &str, started: bool) -> Self {
+        let verdict = Self::new(sentence, &[before, serial]);
+        if started || verdict.0.contains(DIED_SAYING) || before.trim().is_empty() {
+            return verdict;
+        }
+        let lines: Vec<&str> = before.lines().collect();
+        let kept = lines.len().min(WINDOW_LINES);
+        let head = if lines.len() > kept {
+            format!("(the last {kept} of the {} lines in it)\n", lines.len())
+        } else {
+            String::new()
+        };
+        let tail = lines[lines.len() - kept..].join("\n");
+        Self(format!("{}\n{NEVER_ANNOUNCED}\n{head}{tail}", verdict.0))
     }
 
     /// The sentence, without the account under it.
@@ -912,11 +943,40 @@ pub fn ceiling_self_check() -> Result<(), String> {
         return Err(String::from("a verdict built on no capture invented a report"));
     }
 
+    // 5. **The pre-marker death, the other half of that omission.** A test that
+    //    never announced itself has an empty `serial`, so the arm formatting
+    //    `serial` prints nothing and `before` is the only record there is —
+    //    `sched_check_build`'s empty `serial:` block in run `31890991692`. Both
+    //    directions, because a started test's window is already where its arm
+    //    looks.
+    let never = WaitVerdict::for_test(slow.clone(), window_before, "", false);
+    if !never.to_string().contains(NEVER_ANNOUNCED)
+        || !never.to_string().contains("console_line_atomicity")
+    {
+        return Err(format!(
+            "a test that never announced itself kept its sentence and dropped the only window \
+             there was:\n{never}"
+        ));
+    }
+    if never.sentence() != slow {
+        return Err(format!(
+            "the window changed the sentence a summary quotes:\n{}\n{slow}",
+            never.sentence()
+        ));
+    }
+    let announced = WaitVerdict::for_test(slow.clone(), window_before, "AAAA\n", true);
+    if announced.to_string() != slow {
+        return Err(format!(
+            "a test that did announce itself grew the window before it:\n{announced}"
+        ));
+    }
+
     eprintln!(
         "  [ceiling] the panic, the stall, the slow test and the healthy run, each named apart \
-         from the other three; the panic's verdict carries the kernel's own {} lines and the \
-         other three carry nothing",
+         from the other three; the panic's verdict carries the kernel's own {} lines, a test \
+         that never announced itself carries the {} it was given, and the rest carry nothing",
         carried.to_string().lines().count() - 1,
+        never.to_string().lines().count() - 2,
     );
     Ok(())
 }
@@ -2881,7 +2941,7 @@ impl QemuInstance {
                 // after, so a kernel that died before this test announced
                 // itself has its report found in the first and one that died
                 // during it in the second.
-                let error = WaitVerdict::new(error, &[&before, &serial]);
+                let error = WaitVerdict::for_test(error, &before, &serial, in_test);
                 return TestResult {
                     name: name.to_string(),
                     exit_code: None,
@@ -2910,13 +2970,16 @@ impl QemuInstance {
                         let rest = rest.split_once("===").map_or(rest, |(head, _)| head);
                         let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                         // **A marker naming another test is the previous one's**,
-                        // and taking it was `issues/build/`'s cascade:
-                        // one timed-out test left the guest still producing its
-                        // output, every later member of the block read a window
-                        // that opened on it, and 110 of 238 went red on an
-                        // "actual" that was verbatim the previous expectation.
-                        // The name has been on the wire the whole time.
+                        // still on the wire because that test timed out and this
+                        // one's window opened over its output. Filed where any
+                        // other line of that window goes rather than dropped: it
+                        // is the one line that says the window is desynced, and
+                        // taking it as this test's end is what turned one
+                        // timed-out test into 110 red ones.
                         if parts[0] != want {
+                            let window = if in_test { &mut serial } else { &mut before };
+                            window.push_str(&line);
+                            window.push('\n');
                             continue;
                         }
                         // Everything before the marker is what some console
@@ -2958,7 +3021,8 @@ impl QemuInstance {
                         // handed over for the same reason: a runner reporting
                         // an error on a machine whose kernel had already died
                         // is reporting the smaller of the two facts.
-                        let error = error.map(|e| WaitVerdict::new(e, &[&before, &serial]));
+                        let error =
+                            error.map(|e| WaitVerdict::for_test(e, &before, &serial, in_test));
                         return TestResult {
                             name: name.to_string(),
                             exit_code,
@@ -2984,8 +3048,12 @@ impl QemuInstance {
                     // QEMU going away is a sentence about the host process, and
                     // a guest whose kernel panicked on the way out wrote down
                     // the reason first.
-                    let error =
-                        WaitVerdict::new(String::from("QEMU disconnected"), &[&before, &serial]);
+                    let error = WaitVerdict::for_test(
+                        String::from("QEMU disconnected"),
+                        &before,
+                        &serial,
+                        in_test,
+                    );
                     return TestResult {
                         name: name.to_string(),
                         exit_code: None,

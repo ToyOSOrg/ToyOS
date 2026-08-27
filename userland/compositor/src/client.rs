@@ -33,11 +33,13 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The largest client payload the compositor keeps.
 ///
-/// `MSG_CLIPBOARD_SET`'s 116 bytes is the widest of them; every typed payload
-/// it decodes is smaller (`CreateWindowRequest`, 40). A client may declare
-/// anything up to `ipc::MAX_FRAME_LEN` — the excess is counted down and
-/// discarded, never waited for.
-pub const MAX_KEPT_PAYLOAD: usize = 116;
+/// One byte past [`window::MAX_INLINE_PAYLOAD`], which is the whole of what a
+/// client inlines — `MSG_CLIPBOARD_SET` is the widest, every typed payload
+/// smaller (`CreateWindowRequest`, 40). The extra byte is what makes a longer
+/// payload refusable rather than silently truncated: a frame kept at exactly
+/// this length declared more than any sender may inline. Past it a client may
+/// declare up to `ipc::MAX_FRAME_LEN` and the excess is discarded unread.
+pub const MAX_KEPT_PAYLOAD: usize = window::MAX_INLINE_PAYLOAD + 1;
 
 /// The largest clipboard the compositor will hold for a client.
 ///
