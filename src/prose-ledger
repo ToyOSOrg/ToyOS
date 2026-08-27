@@ -265,7 +265,7 @@ tests/toyos-rust-tests/src/bin/disk_backtrace_child.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 32 0
-tests/toyos-rust-tests/src/bin/endowment_denied.rs 146 2
+tests/toyos-rust-tests/src/bin/endowment_denied.rs 148 2
 tests/toyos-rust-tests/src/bin/esp_files.rs 48 0
 tests/toyos-rust-tests/src/bin/exit_wait_storm.rs 36 0
 tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs 49 0
@@ -658,7 +658,7 @@ userland/toybox/src/main.rs 0 0
 userland/toybox/src/mkdir.rs 0 0
 userland/toybox/src/mv.rs 13 0
 userland/toybox/src/net.rs 1 0
-userland/toybox/src/ps.rs 13 0
+userland/toybox/src/ps.rs 34 0
 userland/toybox/src/pwd.rs 0 0
 userland/toybox/src/rm.rs 0 0
 userland/toybox/src/screen.rs 4 0
