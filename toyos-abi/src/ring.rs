@@ -7,7 +7,7 @@
 //! convenience: `Ring` is the kernel-side owner and holds every value the
 //! copies are bounded by, in kernel memory; `RingHeader` holds only what
 //! userland reads. Nothing in the header is read back by the kernel — same
-//! rule `kernel/src/io_uring.rs` states for its own tail.
+//! rule `kernel/src/inbox.rs` states for its own tail.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
