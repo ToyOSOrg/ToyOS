@@ -82,13 +82,13 @@ kernel/src/drivers/virtio_console.rs 94 0
 kernel/src/drivers/virtio_gpu.rs 70 0
 kernel/src/drivers/virtio_net.rs 100 1
 kernel/src/drivers/virtio_sound.rs 181 1
-kernel/src/drivers/xhci/device.rs 279 0
+kernel/src/drivers/xhci/device.rs 289 0
 kernel/src/drivers/xhci/hid.rs 103 0
 kernel/src/drivers/xhci/legacy.rs 99 0
-kernel/src/drivers/xhci/mod.rs 956 0
+kernel/src/drivers/xhci/mod.rs 959 0
 kernel/src/drivers/xhci/usbd.rs 53 0
 kernel/src/drivers/xhci/wait/boot.rs 232 0
-kernel/src/drivers/xhci/wait/mod.rs 219 0
+kernel/src/drivers/xhci/wait/mod.rs 243 0
 kernel/src/drivers/xhci/wait/msc.rs 562 0
 kernel/src/elf/cache.rs 73 0
 kernel/src/elf/index.rs 50 0
@@ -225,7 +225,7 @@ tests/common/serial.rs 260 1
 tests/common/stats.rs 44 0
 tests/common/storage.rs 57 0
 tests/common/toybox.rs 74 0
-tests/common/usb.rs 948 4
+tests/common/usb.rs 954 4
 tests/common/volumes.rs 556 3
 tests/common/wallclock.rs 144 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
@@ -552,7 +552,7 @@ toyos-xhci/sim/tests/scenarios.rs 43 0
 toyos-xhci/sim/tests/superspeed.rs 31 0
 toyos-xhci/sim/tests/teardown.rs 43 0
 toyos-xhci/sim/tests/teeth.rs 11 0
-toyos-xhci/src/enumerate.rs 106 0
+toyos-xhci/src/enumerate.rs 126 0
 toyos-xhci/src/invariants.rs 26 0
 toyos-xhci/src/job.rs 166 1
 toyos-xhci/src/lib.rs 6 0

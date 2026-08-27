@@ -6,9 +6,10 @@ use toyos_xhci::enumerate::{
 };
 use toyos_xhci::job::{Await, Outcome, Stages};
 use toyos_xhci::port::{self, Reset};
+use toyos_xhci::recovery;
 use super::{deadline, Answer, Trb, TrbRing, What, XhciController, PAGE};
 use super::{OFF_INPUT_CTX, OFF_DATA_BUF};
-use super::{DEV_INT_RING, DEV_EP0_RING, DEV_OUT_CTX, DEV_REPORT};
+use super::{DEV_INT_RING, DEV_EP0_RING, DEV_OUT_CTX, DEV_REPORT, EP0_DCI};
 use super::{TRB_ENABLE_SLOT, TRB_ADDRESS_DEVICE, TRB_CONFIGURE_EP, TRB_EVALUATE_CONTEXT};
 use super::{enqueue_control, CC_SUCCESS};
 
@@ -428,7 +429,12 @@ pub(super) fn stepped(ctrl: &mut XhciController, mut state: Enumerating, outcome
             match cmd {
                 enumerate::Command::AddressDevice => log!("xHCI: device addressed"),
                 enumerate::Command::ConfigureEndpoint => log!("xHCI: endpoint configured"),
-                enumerate::Command::EnableSlot | enumerate::Command::EvaluateEp0 => {}
+                enumerate::Command::SetEp0Dequeue => {
+                    log!("xHCI: EP0 on port {port} runs again after the stall")
+                }
+                enumerate::Command::EnableSlot
+                | enumerate::Command::EvaluateEp0
+                | enumerate::Command::ResetEp0 => {}
             }
             Learnt::Nothing
         }
@@ -439,8 +445,15 @@ pub(super) fn stepped(ctrl: &mut XhciController, mut state: Enumerating, outcome
         Act::Request(Request::SetProtocol) => {
             if !outcome.succeeded() {
                 log!("xHCI: SET_PROTOCOL on port {port}: {}", Answer(outcome));
+                // Going on is the decision; leaving EP0 halted behind it is
+                // not. The sequence answers with the controller's two
+                // recovery commands, which is the whole of what a stalled
+                // control endpoint owes — the device clears its own half on
+                // the next SETUP (USB 2.0 §8.5.3.4).
+                Learnt::Stalled
+            } else {
+                Learnt::Nothing
             }
-            Learnt::Nothing
         }
         Act::Request(request) => {
             let want = match request {
@@ -504,6 +517,25 @@ fn command(
             Some(evaluate_ep0_trb(ctrl, state.slot_id, state.packet))
         }
         enumerate::Command::ConfigureEndpoint => configure_endpoint_trb(ctrl, state),
+        // EP0's own recovery, which the sequence owes after an act the device
+        // stalled and it went on from. `recovery_trb` is the same builder the
+        // bulk and interrupt endpoints recover through, and its Set TR Dequeue
+        // arm is what re-initialises the ring — the controller is otherwise
+        // still pointing at the TRB that stalled.
+        enumerate::Command::ResetEp0 => Some(ctrl.recovery_trb(
+            recovery::Command::ResetEndpoint,
+            state.slot_id,
+            EP0_DCI,
+            &mut state.ep0_ring,
+            state.block + DEV_EP0_RING,
+        )),
+        enumerate::Command::SetEp0Dequeue => Some(ctrl.recovery_trb(
+            recovery::Command::SetDequeue,
+            state.slot_id,
+            EP0_DCI,
+            &mut state.ep0_ring,
+            state.block + DEV_EP0_RING,
+        )),
     }
 }
 
@@ -659,6 +691,8 @@ fn command_name(cmd: enumerate::Command) -> &'static str {
         enumerate::Command::AddressDevice => "Address Device",
         enumerate::Command::EvaluateEp0 => "Evaluate Context (EP0 packet size)",
         enumerate::Command::ConfigureEndpoint => "Configure Endpoint",
+        enumerate::Command::ResetEp0 => "Reset Endpoint (EP0)",
+        enumerate::Command::SetEp0Dequeue => "Set TR Dequeue Pointer (EP0)",
     }
 }
 

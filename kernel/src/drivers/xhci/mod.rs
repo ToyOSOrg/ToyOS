@@ -730,6 +730,11 @@ const SHARED_SIZE: usize   = 6 * PAGE;
 // needs to talk to a device *after* boot — Clear-Feature(HALT) and Bulk-Only
 // Reset are control transfers on the recovery path — so the ring has to belong
 // to the device rather than to the enumeration.
+/// The Device Context Index of the default control pipe, which is 1 for every
+/// device: DCI is `2 * endpoint + direction` and EP0 is bidirectional, so it
+/// has one context rather than a pair (xHCI 1.2 §4.5.1).
+const EP0_DCI: u8 = 1;
+
 const DEV_INT_RING: usize = 0;                 // 256 TRBs, exactly one page
 const DEV_EP0_RING: usize = PAGE;              // likewise
 const DEV_OUT_CTX: usize  = 2 * PAGE;          // 32 contexts, 2 KiB at ctx_size 64

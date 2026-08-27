@@ -1148,7 +1148,9 @@ impl XhciController {
     fn reset_the_device(&mut self, dev: &mut MscDevice, in_ep: Owed, out_ep: Owed) -> bool {
         let slot = dev.slot_id;
         let iface = dev.iface as u16;
-        let reset = self.control_transfer(slot, &mut dev.ep0_ring, 0x21, 0xFF, 0, iface, None, 0);
+        let block = dev.dev_block;
+        let reset =
+            self.control_transfer(slot, block, &mut dev.ep0_ring, 0x21, 0xFF, 0, iface, None, 0);
         if !reset.done() {
             log!("usb-storage: slot {slot} would not take a Bulk-Only Reset: {reset}");
         }
@@ -1156,8 +1158,8 @@ impl XhciController {
         // endpoints are what the next command touches, and leaving one halted
         // because another step failed turns a recoverable device into a
         // permanently offline one.
-        let cleared_in = self.clear_endpoint_halt(slot, &mut dev.ep0_ring, in_ep);
-        let cleared_out = self.clear_endpoint_halt(slot, &mut dev.ep0_ring, out_ep);
+        let cleared_in = self.clear_endpoint_halt(slot, block, &mut dev.ep0_ring, in_ep);
+        let cleared_out = self.clear_endpoint_halt(slot, block, &mut dev.ep0_ring, out_ep);
         reset.done() && cleared_in && cleared_out
     }
 }
