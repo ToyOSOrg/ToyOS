@@ -125,7 +125,160 @@ fn list(root: &Path) {
         .map_or_else(|_| "unlinked".to_string(), |p| p.display().to_string())
     );
     eprintln!();
-    git(root, &["worktree", "list"]);
+    let trees = survey(root, true);
+    for tree in &trees {
+        let branch = if tree.branch.is_empty() { "(detached)" } else { &tree.branch };
+        let note = match (tree.primary, tree.landed) {
+            (true, _) => "  primary",
+            (_, true) => "  landed — reclaimable",
+            _ => "",
+        };
+        eprintln!(
+            "{:<44} {:<26} {:>9} in {:>2} target dir(s){note}",
+            tree.path.display(),
+            branch,
+            gib(tree.bytes),
+            tree.targets,
+        );
+    }
+    eprintln!();
+    eprintln!(
+        "{} worktree(s), {} of build caches; the shared toolchain is not counted",
+        trees.len(),
+        gib(trees.iter().map(|t| t.bytes).sum()),
+    );
+    if let Some(line) = reclaim_line(&trees) {
+        eprintln!("{line}");
+    }
+}
+
+/// One worktree, and the two facts that decide whether it should still exist.
+///
+/// **Nothing ever reclaimed one**, and `add`'s disk check was the whole of what
+/// this subject had — a refusal is the last notice rather than the first. A
+/// worktree whose branch has landed has no reason to hold its build caches, and
+/// neither its size nor whether its branch is in `origin/main` is anything
+/// `git worktree list` says.
+pub struct Tree {
+    pub path: PathBuf,
+    /// Empty for a detached worktree.
+    pub branch: String,
+    /// What its build caches hold. The shared `rust/` is never counted.
+    pub bytes: u64,
+    pub targets: usize,
+    /// The checkout that owns `rust/`, the rustup link and `main`. Never
+    /// reclaimable whatever its branch says.
+    pub primary: bool,
+    /// Its branch is already in `origin/main`.
+    pub landed: bool,
+}
+
+/// Every worktree of `root`.
+///
+/// `all_sizes` walks every worktree's caches, which is a metadata walk of tens
+/// of gigabytes and takes seconds; `false` walks only the ones that could be
+/// given back, which is the only size `--sync` prints.
+pub fn survey(root: &Path, all_sizes: bool) -> Vec<Tree> {
+    let mut trees = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    let mut branch = String::new();
+    let listing = capture(root, &["worktree", "list", "--porcelain"]);
+    for line in listing.lines() {
+        if let Some(next) = line.strip_prefix("worktree ") {
+            if let Some(done) = path.replace(PathBuf::from(next)) {
+                let first = trees.is_empty();
+                trees.push(measure(root, done, std::mem::take(&mut branch), first, all_sizes));
+            }
+        } else if let Some(name) = line.strip_prefix("branch ") {
+            branch = name.trim_start_matches("refs/heads/").to_string();
+        }
+    }
+    if let Some(done) = path {
+        let first = trees.is_empty();
+        trees.push(measure(root, done, branch, first, all_sizes));
+    }
+    trees
+}
+
+/// What could be given back, or nothing to say.
+///
+/// `--sync` reports this as well as `list`, because `--sync` runs at the moment
+/// a branch lands, which is the moment its worktree stops having a reason to
+/// exist.
+pub fn reclaim_line(trees: &[Tree]) -> Option<String> {
+    let done: Vec<&Tree> = trees.iter().filter(|t| !t.primary && t.landed).collect();
+    if done.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} worktree(s) hold {} on branches already in origin/main: {}\n\
+         `cargo run -- --worktree remove <path>` gives each back, and refuses one carrying \
+         uncommitted work.",
+        done.len(),
+        gib(done.iter().map(|t| t.bytes).sum()),
+        done.iter().map(|t| t.path.display().to_string()).collect::<Vec<_>>().join(", "),
+    ))
+}
+
+fn measure(
+    root: &Path,
+    path: PathBuf,
+    branch: String,
+    primary: bool,
+    all_sizes: bool,
+) -> Tree {
+    let landed = !primary
+        && !branch.is_empty()
+        && ok(root, &["merge-base", "--is-ancestor", &branch, "origin/main"]);
+    let mut bytes = 0;
+    let mut targets = 0;
+    if all_sizes || landed {
+        caches(&path, &mut bytes, &mut targets);
+    }
+    Tree { path, branch, bytes, targets, primary, landed }
+}
+
+/// Directories a survey never enters: the shared toolchain and git's own store.
+const NOT_OURS: &[&str] = &["rust", ".git"];
+
+/// Ten `target/` directories per worktree is the design and not an accident —
+/// `Cargo.toml`'s `exclude` list keeps five cross-compiled crates out of the
+/// host workspace and each guest fixture resolves on its own — so `cargo clean`
+/// at the root reaches exactly one of them and a count is worth printing.
+fn caches(dir: &Path, bytes: &mut u64, targets: &mut usize) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if NOT_OURS.contains(&name.as_ref()) {
+            continue;
+        }
+        if name == "target" {
+            *bytes += bytes_under(&path);
+            *targets += 1;
+            continue;
+        }
+        caches(&path, bytes, targets);
+    }
+}
+
+fn bytes_under(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    let mut total = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        total += if meta.is_dir() { bytes_under(&path) } else { meta.len() };
+    }
+    total
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / 1024.0_f64.powi(3))
 }
 
 /// Remove a worktree and the branch it was made with.
@@ -156,4 +309,61 @@ fn git(dir: &Path, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("run git: {e}"));
     assert!(status.success(), "git {args:?} failed");
+}
+
+/// git's answer, for a question rather than an action.
+fn capture(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("run git: {e}"));
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Whether git says yes. A non-zero exit is the answer here, never a failure.
+fn ok(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(path: &str, primary: bool, landed: bool, bytes: u64) -> Tree {
+        Tree {
+            path: PathBuf::from(path),
+            branch: String::from("wt/x"),
+            bytes,
+            targets: 10,
+            primary,
+            landed,
+        }
+    }
+
+    /// **The primary checkout sits on `main`**, which is an ancestor of
+    /// `origin/main` by construction, so a rule that offered back every landed
+    /// worktree would offer back the one holding `rust/` and the rustup link.
+    #[test]
+    fn only_a_landed_worktree_that_is_not_the_primary_is_offered_back() {
+        assert!(reclaim_line(&[tree("/primary", true, true, 4 << 30)]).is_none());
+        assert!(reclaim_line(&[tree("/live", false, false, 8 << 30)]).is_none());
+        let line = reclaim_line(&[
+            tree("/primary", true, true, 4 << 30),
+            tree("/gone", false, true, 2 << 30),
+            tree("/live", false, false, 8 << 30),
+        ])
+        .expect("a landed worktree that is not the primary is reclaimable");
+        assert!(line.contains("/gone"), "{line}");
+        assert!(!line.contains("/live"), "{line}");
+        assert!(!line.contains("/primary"), "{line}");
+        assert!(line.contains("2.0 GiB"), "the offer has to say what it is worth: {line}");
+    }
 }
