@@ -82,14 +82,14 @@ kernel/src/drivers/virtio_console.rs 94 0
 kernel/src/drivers/virtio_gpu.rs 70 0
 kernel/src/drivers/virtio_net.rs 100 1
 kernel/src/drivers/virtio_sound.rs 181 1
-kernel/src/drivers/xhci/device.rs 262 0
+kernel/src/drivers/xhci/device.rs 279 0
 kernel/src/drivers/xhci/hid.rs 103 0
 kernel/src/drivers/xhci/legacy.rs 99 0
-kernel/src/drivers/xhci/mod.rs 948 0
+kernel/src/drivers/xhci/mod.rs 956 0
 kernel/src/drivers/xhci/usbd.rs 53 0
 kernel/src/drivers/xhci/wait/boot.rs 232 0
 kernel/src/drivers/xhci/wait/mod.rs 219 0
-kernel/src/drivers/xhci/wait/msc.rs 561 0
+kernel/src/drivers/xhci/wait/msc.rs 562 0
 kernel/src/elf/cache.rs 73 0
 kernel/src/elf/index.rs 50 0
 kernel/src/elf/mod.rs 214 0
@@ -347,7 +347,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4794 23
+tests/toyos.rs 4799 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

@@ -395,7 +395,7 @@ pub(super) fn slot_answered(
     let Some(block) = ctrl.layout.device(slot_id) else {
         log!("xHCI: slot {} is beyond the pool's {} device blocks, dropping port {}",
             slot_id, ctrl.layout.dev_blocks, port_idx + 1);
-        return finish(ctrl, port_idx, Some(slot_id));
+        return refuse(ctrl, port_idx, slot_id);
     };
     log!("xHCI: slot {} enabled (dma +{:#x})", slot_id, block);
 
@@ -423,7 +423,7 @@ pub(super) fn stepped(ctrl: &mut XhciController, mut state: Enumerating, outcome
         Act::Command(cmd) => {
             if !outcome.succeeded() {
                 log!("xHCI: {} on port {port}: {}", command_name(cmd), Answer(outcome));
-                return finish(ctrl, state.port_idx, Some(state.slot_id));
+                return refuse(ctrl, state.port_idx, state.slot_id);
             }
             match cmd {
                 enumerate::Command::AddressDevice => log!("xHCI: device addressed"),
@@ -450,11 +450,11 @@ pub(super) fn stepped(ctrl: &mut XhciController, mut state: Enumerating, outcome
             };
             let Some(delivered) = delivered(outcome, want) else {
                 log!("xHCI: {} on port {port}: {}", request_name(request), Answer(outcome));
-                return finish(ctrl, state.port_idx, Some(state.slot_id));
+                return refuse(ctrl, state.port_idx, state.slot_id);
             };
             match read_back(ctrl, &mut state, request, delivered) {
                 Ok(learnt) => learnt,
-                Err(()) => return finish(ctrl, state.port_idx, Some(state.slot_id)),
+                Err(()) => return refuse(ctrl, state.port_idx, state.slot_id),
             }
         }
     };
@@ -469,7 +469,7 @@ fn advance(ctrl: &mut XhciController, state: Enumerating, learnt: Learnt) {
         Next::Refuse => {
             log!("xHCI: no HID boot interface found on port {}, skipping it",
                 state.port_idx + 1);
-            finish(ctrl, state.port_idx, Some(state.slot_id))
+            refuse(ctrl, state.port_idx, state.slot_id)
         }
     }
 }
@@ -483,7 +483,7 @@ fn perform(ctrl: &mut XhciController, mut state: Enumerating, act: Act) {
         Act::Request(request) => Some(control(ctrl, &mut state, request)),
     };
     let Some((on, stages)) = submitted else {
-        return finish(ctrl, state.port_idx, Some(state.slot_id));
+        return refuse(ctrl, state.port_idx, state.slot_id);
     };
     ctrl.outstanding.submit(What::Enumerating(state), on, stages, deadline());
 }
@@ -783,27 +783,33 @@ fn hid_input_context(
 fn bind(ctrl: &mut XhciController, state: Enumerating) {
     let (_, function) = state.parsed.expect("a configuration named a function");
     let rings = state.rings.expect("Configure Endpoint named this device's rings");
-    match (function, rings) {
+    // Whether a device came of it, because that is what decides who keeps the
+    // slot: a class driver that refused this device leaves the controller
+    // holding a slot for something nothing will ever talk to.
+    let bound = match (function, rings) {
         (Function::Msc(info), Rings::Msc(msc)) => {
-            super::msc::bind(ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info);
+            super::msc::bind(ctrl, state.ep0_ring, state.slot_id, state.block, msc, &info)
         }
-        (Function::Hid(info), Rings::Hid(int_ring)) => {
-            bind_hid(ctrl, &state, &info, int_ring);
-        }
+        (Function::Hid(info), Rings::Hid(int_ring)) => bind_hid(ctrl, &state, &info, int_ring),
         // The rings are built from the function two acts earlier and nothing
         // between the two can change it, so a mismatch is a driver that lost
         // track of which device it is enumerating.
         _ => unreachable!("the rings were built for another function"),
+    };
+    if bound {
+        finish(ctrl, state.port_idx, Some(state.slot_id));
+    } else {
+        refuse(ctrl, state.port_idx, state.slot_id);
     }
-    finish(ctrl, state.port_idx, Some(state.slot_id));
 }
 
+/// `true` if a device came of it — the caller gives the slot back if not.
 fn bind_hid(
     ctrl: &mut XhciController,
     state: &Enumerating,
     info: &HidInterfaceInfo,
     int_ring: TrbRing,
-) {
+) -> bool {
     let report = ctrl.dma().subview(state.block + DEV_REPORT, 8);
     let report_size = match info.protocol {
         HidType::Keyboard => 8,
@@ -820,7 +826,7 @@ fn bind_hid(
             None => {
                 log!("xHCI: slot {} is past the pointers this machine can number, dropping it",
                     state.slot_id);
-                return;
+                return false;
             }
         },
     };
@@ -855,6 +861,7 @@ fn bind_hid(
         log!("xHCI: pointer on slot {} merges as source {}", state.slot_id, source.id());
     }
     ctrl.devices.push(dev);
+    true
 }
 
 /// The enumeration is over, however it went.
@@ -871,6 +878,25 @@ fn bind_hid(
 pub(super) fn finish(ctrl: &mut XhciController, port_idx: u8, slot: Option<u8>) {
     ctrl.ports[port_idx as usize].enumerated(slot.and_then(NonZeroU8::new));
     ctrl.acknowledge_port_read(port_idx);
+}
+
+/// The enumeration is over and the device is refused, with the device still in
+/// its port.
+///
+/// **The slot goes back here rather than at the unplug.** A slot is the
+/// controller's resource from the moment Enable Slot answers, and a device that
+/// is refused and stays plugged in — a hub, a camera, a fingerprint reader, a
+/// disk with no bulk pair — kept one for the life of the boot. On a controller
+/// with fewer slots than the machine has devices, that is a later device losing
+/// its slot to an earlier one nothing will ever talk to.
+///
+/// The port is left *attached with no slot*, which is `let_go`'s answer one
+/// stage earlier: a port that read as unattached would enumerate the same
+/// refused device again every debounce.
+pub(super) fn refuse(ctrl: &mut XhciController, port_idx: u8, slot_id: u8) {
+    ctrl.ports[port_idx as usize].enumerated(None);
+    ctrl.acknowledge_port_read(port_idx);
+    ctrl.submit_disable_slot(slot_id, super::AfterSlot::Refused);
 }
 
 /// Drop an enumeration outstanding for a port whose device has gone, for the

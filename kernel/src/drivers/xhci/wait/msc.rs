@@ -1250,6 +1250,7 @@ pub(in crate::drivers::xhci) fn prepare(
 /// No return value: every failure path below logs, so a `bool` would carry
 /// nothing the one caller wants — and it would be dropped in statement
 /// position, silently, because Rust does not warn about a discarded `bool`.
+/// `true` if a disk came of it — the caller gives the slot back if not.
 pub(in crate::drivers::xhci) fn bind(
     ctrl: &mut XhciController,
     ep0_ring: TrbRing,
@@ -1257,7 +1258,7 @@ pub(in crate::drivers::xhci) fn bind(
     dev_block: usize,
     rings: MscRings,
     info: &MscInterface,
-) {
+) -> bool {
     let MscRings { at, block, in_ring, out_ring } = rings;
     let mut dev = MscDevice {
         slot_id,
@@ -1280,7 +1281,7 @@ pub(in crate::drivers::xhci) fn bind(
     };
 
     if !bring_up(ctrl, &mut dev) {
-        return;
+        return false;
     }
     // The machine-wide number, taken here because here is where there is a disk
     // to give one to: it is what `usb_storage::open` indexes by and what a mount
@@ -1296,6 +1297,7 @@ pub(in crate::drivers::xhci) fn bind(
         block
     );
     ctrl.msc[at].disk = Some(Disk { index, dev });
+    true
 }
 
 /// TEST UNIT READY, INQUIRY and READ CAPACITY: everything between a configured

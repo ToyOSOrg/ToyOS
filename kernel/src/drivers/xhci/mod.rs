@@ -248,6 +248,12 @@ enum AfterSlot {
     /// A device this driver gave up on while it is still in its port, so the
     /// port stays marked attached — see [`XhciController::let_go`].
     LetGo,
+    /// An enumeration that ended in a refusal, with the device still plugged
+    /// in. Same shape as [`LetGo`](Self::LetGo) one stage earlier: the slot is
+    /// the controller's again at once rather than at the unplug, and the port
+    /// stays attached so the driver does not re-enumerate the device it just
+    /// refused on every debounce.
+    Refused,
 }
 
 /// The earlier of two instants something wants to be looked at again.
@@ -1822,6 +1828,9 @@ impl XhciController {
         // of the boot — and two of those is a machine with no disks at all,
         // boot stick included. A controller that will not disable a slot is
         // already past what this driver can repair.
+        // A refusal keeps its pool blocks until the device is pulled, which is
+        // when `teardown_port` releases them: the port is still attached, so
+        // the blocks have an owner and the slot does not.
         if let AfterSlot::Teardown(port_idx) = then {
             self.release_blocks(port_idx);
             self.ports[port_idx as usize].torn_down();

@@ -9999,6 +9999,17 @@ fn run_machine_test(
             if slots != [1] {
                 return Err(format!("slots {slots:?} got a block, want just slot 1:\n{log}"));
             }
+            // And every one of them gave its slot straight back. A slot is the
+            // controller's from the moment Enable Slot answers, so a device
+            // refused and left plugged in used to keep one for the life of the
+            // boot — which is this test's own bus five times over, on a
+            // controller the shortage is staged on.
+            let given_back = log.matches("disabled").count();
+            if given_back != over {
+                return Err(format!(
+                    "{given_back} slot(s) disabled for {over} refused device(s):\n{log}"
+                ));
+            }
 
             // The one device that did get the block was enumerated to
             // completion, which is what makes "the extra devices and nothing
