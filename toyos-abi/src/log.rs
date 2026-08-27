@@ -168,20 +168,28 @@ impl LogRecord {
     pub fn is_early(&self) -> bool {
         self.flags & FLAG_EARLY != 0
     }
-}
 
-/// One implementation of a rendered line, so the kernel's serial sink, the
-/// panel, `logd` and any diagnostic tool produce byte-identical text.
-///
-/// It renders the *body* — timestamp, origin and message — and no prefix of its
-/// own, because the three callers disagree about the prefix on purpose: `logd`
-/// writes a wall clock into `/log`, the panel writes a monotonic offset into 80
-/// columns, and both are the same record.
-impl core::fmt::Display for LogRecord {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    /// The same line with `tag` named inside the leading bracket:
+    /// `[kernel 0.123 cpu0 tid=3] …`.
+    ///
+    /// A sink that wants a tag cannot prepend one, because the bracket the
+    /// line opens with is the character the tag goes through. So the tag is a
+    /// parameter of the one formatter rather than a second rendering of the
+    /// line: `Display` is this with an empty tag, and there is no other
+    /// implementation to drift from.
+    pub fn tagged<'a>(&'a self, tag: &'a str) -> Tagged<'a> {
+        Tagged { record: self, tag }
+    }
+
+    fn fmt_with_tag(&self, f: &mut core::fmt::Formatter<'_>, tag: &str) -> core::fmt::Result {
         let secs = self.at_ns / 1_000_000_000;
         let millis = self.at_ns % 1_000_000_000 / 1_000_000;
-        write!(f, "[{secs}.{millis:03} cpu{}", self.cpu)?;
+        f.write_str("[")?;
+        if !tag.is_empty() {
+            f.write_str(tag)?;
+            f.write_str(" ")?;
+        }
+        write!(f, "{secs}.{millis:03} cpu{}", self.cpu)?;
         if self.is_early() {
             f.write_str(" boot")?;
         }
@@ -194,6 +202,32 @@ impl core::fmt::Display for LogRecord {
             write!(f, " …[{} bytes elided]", self.elided)?;
         }
         Ok(())
+    }
+}
+
+/// What [`LogRecord::tagged`] renders. `Display`, so a caller writes it
+/// straight into its own line and nothing buffers a record to tag it.
+pub struct Tagged<'a> {
+    record: &'a LogRecord,
+    tag: &'a str,
+}
+
+impl core::fmt::Display for Tagged<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.record.fmt_with_tag(f, self.tag)
+    }
+}
+
+/// One implementation of a rendered line, so the kernel's serial sink, the
+/// panel, `logd` and any diagnostic tool produce byte-identical text.
+///
+/// It renders the *body* — timestamp, origin and message — and no prefix of its
+/// own, because the three callers disagree about the prefix on purpose: `logd`
+/// writes a wall clock into `/log`, the panel writes a monotonic offset into 80
+/// columns, and both are the same record.
+impl core::fmt::Display for LogRecord {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.fmt_with_tag(f, "")
     }
 }
 
@@ -301,6 +335,21 @@ mod tests {
     #[test]
     fn a_record_renders_the_same_line_for_every_consumer() {
         assert_eq!(record("hello").to_string(), "[1.234 cpu2 tid=4] hello");
+    }
+
+    /// The tag lands *inside* the bracket, and an empty one leaves the line
+    /// byte for byte what `Display` writes — which is what makes a tagging sink
+    /// this formatter's caller rather than a second implementation of it.
+    #[test]
+    fn a_tag_goes_through_the_bracket_and_an_empty_one_changes_nothing() {
+        let r = record("hello");
+        assert_eq!(r.tagged("kernel").to_string(), "[kernel 1.234 cpu2 tid=4] hello");
+        assert_eq!(r.tagged("").to_string(), r.to_string());
+
+        let mut early = record("x");
+        early.flags = FLAG_EARLY;
+        early.tid = 0;
+        assert_eq!(early.tagged("kernel").to_string(), "[kernel 1.234 cpu2 boot] x");
     }
 
     /// The two decorations, each of which a consumer would otherwise invent.

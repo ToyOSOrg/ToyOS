@@ -354,7 +354,7 @@ toyos-abi/src/hda.rs 43 0
 toyos-abi/src/inbox.rs 58 0
 toyos-abi/src/input.rs 29 0
 toyos-abi/src/lib.rs 31 0
-toyos-abi/src/log.rs 130 0
+toyos-abi/src/log.rs 143 0
 toyos-abi/src/net.rs 11 0
 toyos-abi/src/ring.rs 124 0
 toyos-abi/src/syscall.rs 841 0
