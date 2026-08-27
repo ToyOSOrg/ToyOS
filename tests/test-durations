@@ -8,10 +8,10 @@
 08_while 11
 09_do_while 11
 100_c99array_decls 11
-103_implicit_memmove 18446744073709551615
+103_implicit_memmove 18
 105_local_extern 11
-107_stack_safe 18446744073709551615
-109_float_struct_calling 18446744073709551615
+107_stack_safe 11
+109_float_struct_calling 11
 10_pointer 11
 110_average 11
 111_conversion 11
@@ -19,12 +19,12 @@
 119_random_stuff 11
 11_precedence 11
 121_struct_return 11
-123_vla_bug 18446744073709551615
+123_vla_bug 20
 129_scopes 11
 12_hashdefine 11
 130_large_argument 11
 131_return_struct_in_reg 11
-132_bound_test 18446744073709551615
+132_bound_test 25
 133_old_func 11
 134_double_to_signed 11
 135_func_arg_struct_compare 11
@@ -56,7 +56,7 @@
 160_global_variadic 11
 16_nesting 11
 17_enum 11
-18_include 18446744073709551615
+18_include 27
 19_pointer_arithmetic 11
 200_variadic_float 11
 201_packed_layout 11
@@ -71,7 +71,7 @@
 28_strings 11
 29_array_address 11
 30_hanoi 2
-32_led 18446744073709551615
+32_led 18
 34_array_assignment 11
 35_sizeof 11
 36_array_initialisers 11
@@ -100,7 +100,7 @@
 75_array_in_struct_init 14
 76_dollars_in_identifiers 11
 77_push_pop_macro 11
-78_vla_label 18446744073709551615
+78_vla_label 20
 80_flexarray 11
 81_types 11
 82_attribs_position 11
@@ -230,7 +230,6 @@ log_partition_layout 477
 log_poll_outlives_a_close 4738
 log_reserve_window 7022
 log_reserve_window_negative 6791
-log_volume_reread 12
 metal_sim_client_death 4126
 metal_sim_compositor 8986
 metal_sim_compositor_stall 11390
