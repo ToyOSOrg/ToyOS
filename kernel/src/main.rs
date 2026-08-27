@@ -288,21 +288,6 @@ pub unsafe extern "sysv64" fn _start(_kernel_args: &KernelArgs) -> ! {
 }
 
 fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
-    crate::device::set_framebuffer_info(crate::device::Screen {
-        // A description carries handles into whichever process reads it, and
-        // that process does not exist yet: `try_claim` mints them.
-        info: toyos_abi::FramebufferInfo {
-            scanout: [toyos_abi::HANDLE_INVALID; 2],
-            cursor: toyos_abi::HANDLE_INVALID,
-            width: info.width,
-            height: info.height,
-            stride: info.stride,
-            pixel_format: info.pixel_format,
-            flags: info.flags,
-        },
-        scanout: info.scanout.clone(),
-        cursor: info.cursor.clone(),
-    });
     gpu::register(driver, info);
 }
 

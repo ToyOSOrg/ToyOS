@@ -98,7 +98,7 @@ kernel/src/fat32_adapter.rs 576 0
 kernel/src/file_backing.rs 77 0
 kernel/src/file_cache.rs 224 0
 kernel/src/gpt.rs 104 0
-kernel/src/gpu.rs 19 0
+kernel/src/gpu.rs 33 0
 kernel/src/heartbeat.rs 135 0
 kernel/src/hw.rs 347 0
 kernel/src/id_map.rs 8 0
