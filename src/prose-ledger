@@ -561,7 +561,7 @@ toyos-xhci/src/protocol.rs 54 0
 toyos-xhci/src/recovery.rs 86 0
 toyos/src/audio.rs 49 0
 toyos/src/census.rs 22 0
-toyos/src/device.rs 55 0
+toyos/src/device.rs 68 0
 toyos/src/endow.rs 83 0
 toyos/src/gpu.rs 15 0
 toyos/src/ipc.rs 162 0
