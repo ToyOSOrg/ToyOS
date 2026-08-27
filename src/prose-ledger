@@ -252,7 +252,7 @@ tests/toyos-rust-tests/src/bin/audio_tone_load.rs 5 0
 tests/toyos-rust-tests/src/bin/blocking_read_stress.rs 32 0
 tests/toyos-rust-tests/src/bin/boot_volume_metadata_error.rs 29 0
 tests/toyos-rust-tests/src/bin/cache_eviction.rs 37 0
-tests/toyos-rust-tests/src/bin/compositor_client_death.rs 100 0
+tests/toyos-rust-tests/src/bin/compositor_client_death.rs 103 0
 tests/toyos-rust-tests/src/bin/compositor_stall.rs 71 0
 tests/toyos-rust-tests/src/bin/connect_before_serve.rs 46 0
 tests/toyos-rust-tests/src/bin/console_line_atomicity.rs 73 0
@@ -346,7 +346,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4777 23
+tests/toyos.rs 4780 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
@@ -589,10 +589,10 @@ userland/calc/src/parser.rs 52 0
 userland/calc/src/prog.rs 17 0
 userland/calc/src/rational.rs 23 0
 userland/calc/tests/parser_identities.rs 26 0
-userland/compositor/src/client.rs 90 0
+userland/compositor/src/client.rs 92 0
 userland/compositor/src/main.rs 37 0
 userland/compositor/src/render.rs 40 0
-userland/compositor/src/session.rs 155 0
+userland/compositor/src/session.rs 158 0
 userland/compositor/src/stats.rs 24 0
 userland/console/src/main.rs 117 0
 userland/doom/build.rs 63 2
@@ -667,4 +667,4 @@ userland/toybox/src/spin.rs 0 0
 userland/toybox/src/stats.rs 2 0
 userland/toybox/src/tone.rs 10 0
 userland/window/src/framebuffer.rs 68 0
-userland/window/src/lib.rs 147 0
+userland/window/src/lib.rs 152 0

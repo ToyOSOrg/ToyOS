@@ -7707,7 +7707,7 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
     }
     // The guest's own case list, restated here so a case deleted on one side
     // is a red run rather than a quieter test.
-    const CASES: usize = 5;
+    const CASES: usize = 6;
     if !result
         .stdout
         .contains(&format!("compositor client death: {CASES} deaths survived"))
@@ -7734,6 +7734,18 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
         return Err(format!(
             "the compositor never served a request from a reaped creator, so this run says \
              nothing about what replaced the grant:\n{}",
+            result.stdout
+        ));
+    }
+
+    // The one case whose verdict is a line rather than survival: a payload
+    // past what any client may inline is refused by name, because storing the
+    // prefix a frame reader keeps is the silent half of the same event.
+    const OVERSIZE: &str = "compositor: refusing an inline payload past";
+    if !result.stdout.contains(OVERSIZE) {
+        return Err(format!(
+            "an over-long inline clipboard was not refused by name, so nothing here separates \
+             a refusal from a truncation:\n{}",
             result.stdout
         ));
     }

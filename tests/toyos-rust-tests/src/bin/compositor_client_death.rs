@@ -9,9 +9,9 @@
 //! be infallible over: a buffer travels as a handle and a client that has gone
 //! is a refused send.
 //!
-//! Five cases. The first is that one; the next three are the same shape found
+//! Six cases. The first is that one; the next four are the same shape found
 //! by reading for it — places where a message from any client reached a
-//! syscall whose refusal the compositor was not prepared to hear.
+//! syscall or a buffer whose refusal the compositor was not prepared to hear.
 //!
 //! The fifth is the other side of the same event, and it is the client's:
 //! **a window whose connection has gone must let its owner leave.** Nothing
@@ -124,6 +124,17 @@ fn run() {
     clipboard_shm(Some(shared), u32::MAX, "a clipboard longer than any region");
     probe("a clipboard longer than any region");
 
+    // An inline clipboard one byte past what any client may inline. The
+    // compositor keeps that one byte, so the frame is refusable here instead of
+    // being stored as the prefix `ipc::FrameRx` would otherwise hand it.
+    let over = window::MAX_INLINE_PAYLOAD + 1;
+    let mut frame = vec![b'x'; 8 + over];
+    frame[..4].copy_from_slice(&window::MSG_CLIPBOARD_SET.to_ne_bytes());
+    frame[4..8].copy_from_slice(&(over as u32).to_ne_bytes());
+    let conn = endow::service("compositor").expect("a connection to over-fill");
+    write_handle(conn.as_handle(), &frame, "an over-long inline clipboard");
+    probe("an over-long inline clipboard");
+
     // The other side of a window ending: the client has to be able to leave.
     // `MSG_DESTROY_WINDOW` makes the compositor drop the connection, after
     // which the handle is permanently read-ready at EOF — so a `poll_event` that
@@ -164,7 +175,7 @@ fn run() {
     }
     probe("a window closed from the inside");
 
-    println!("compositor client death: 5 deaths survived, compositor still serving");
+    println!("compositor client death: 6 deaths survived, compositor still serving");
 }
 
 /// The creator: connect, hand the connection to a process that will outlive
