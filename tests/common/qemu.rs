@@ -1168,7 +1168,11 @@ pub enum Profile {
     /// bus, and it is a claim nothing could test: with one controller, an
     /// xHCI slot id was a machine-wide name for a device. It is not — the
     /// device lists here are shaped so both pointers land on the same slot id
-    /// of their own controller.
+    /// of their own controller — with a *bound* device, because a refused one
+    /// gives its slot back the moment it is refused and shifts nothing after
+    /// it. The hub on the second controller is still there and is still walked
+    /// past; what balances the boot stick on the first is the second keyboard
+    /// beside it.
     MetalXhciBoth,
     /// The HID controller has no MSI-X, and nothing else can drain its ring.
     ///
@@ -1778,6 +1782,7 @@ impl Profile {
                     "usb-kbd,bus=xhci.0",
                     "usb-mouse,bus=xhci.0",
                     "usb-hub,bus=xhci1.0",
+                    "usb-kbd,bus=xhci1.0",
                     "usb-kbd,bus=xhci1.0",
                     "usb-mouse,bus=xhci1.0",
                 ],

@@ -8614,13 +8614,13 @@ fn run_machine_test(
             if found != 2 {
                 return Err(format!("{found} controller(s) initialised, want 2:\n{boot}"));
             }
-            if !boot.contains("xHCI: 2 controller(s), 4 HID device(s)") {
+            if !boot.contains("xHCI: 2 controller(s), 5 HID device(s)") {
                 return Err(format!(
-                    "the machine-wide totals are not 2 controllers and 4 HID devices:\n{boot}"
+                    "the machine-wide totals are not 2 controllers and 5 HID devices:\n{boot}"
                 ));
             }
             let binds = parse_xhci_binds(&boot);
-            for (want, count) in [("keyboard", 2), ("mouse", 2)] {
+            for (want, count) in [("keyboard", 3), ("mouse", 2)] {
                 let got = binds.iter().filter(|b| b.kind == want).count();
                 if got != count {
                     return Err(format!("{got} {want}(s) bound, want {count}: {binds:?}\n{boot}"));
@@ -8652,7 +8652,7 @@ fn run_machine_test(
             }
             serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
             eprintln!(
-                "  [xhci] 2 controllers, 4 HID; both pointers on slot {}, merging as sources {} \
+                "  [xhci] 2 controllers, 5 HID; both pointers on slot {}, merging as sources {} \
                  and {}",
                 pointers[0].0, pointers[0].1, pointers[1].1
             );
