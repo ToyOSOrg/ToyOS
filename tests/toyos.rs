@@ -310,6 +310,30 @@ const RUST_SKIP: &[&str] = &[
     // was written that they are excluded from this boot; now they are.
     "audio_tone",
     "audio_tone_load",
+    // Its whole subject is a page of a file the host wrote onto the volume
+    // before the machine existed; the shared boot stages nothing, so it prints
+    // `did not open` and passes on its exit code. `log_backing_read_error`
+    // stages the file and reads the verdict.
+    "log_volume_reread",
+];
+
+/// Binaries a machine test drives that the shared boot also runs on purpose.
+///
+/// **A binary a machine test drives under a different name is still discovered
+/// by [`discover_rust_tests`]**, still runs on the shared boot, and there
+/// passes on its exit code with nothing staged for it to act on. `RUST_SKIP` is
+/// one answer to that; this list is the other, for the binaries whose shared
+/// run asserts something of its own. Every driven name is on one list or the
+/// other, so neither answer is silence — `suite_split` is the gate.
+/// `sched_stress` is the one whose two runs differ by *kernel* rather than by
+/// what the host staged: the shipping build here, `sched_check_build`'s
+/// assert-carrying build there.
+const DRIVEN_AND_SHARED: &[&str] = &[
+    "null_sink_client_exits",
+    "nvme_home_roundtrip",
+    "sched_stress",
+    "std_alloc",
+    "wall_clock_now",
 ];
 
 // Audio glitch tests. Each runs in its own QEMU boot per SMP config and
@@ -13844,12 +13868,88 @@ fn suite_split() -> Result<(), String> {
              each entry — coverage of the binary an image ships is what it costs."
         ));
     }
+    // **The other shape `check_no_collisions` cannot see**: a binary a machine
+    // test drives under a *different* name is still discovered here, still runs
+    // on the shared boot, and there passes on its exit code with nothing staged
+    // for it to act on.
+    let staged_driven = [
+        String::from("qemu.run_test(\"test_rs_a_driven_one\", Duration::from_secs(30))"),
+        String::from("Command::new(\"/bin/test_rs_another_driven\")"),
+        String::from("qemu.run_test(&format!(\"test_rs_{name}\"), ceiling)"),
+    ];
+    let found = driven_binaries(&staged_driven);
+    let want: BTreeSet<String> =
+        ["a_driven_one", "another_driven"].iter().map(|s| s.to_string()).collect();
+    if found != want {
+        return Err(format!("the driven-name reader does not work: it named {found:?}"));
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut harness = vec![fs::read_to_string(root.join("tests/toyos.rs"))
+        .map_err(|e| format!("read tests/toyos.rs: {e}"))?];
+    let common = root.join("tests/common");
+    for entry in fs::read_dir(&common).map_err(|e| format!("read {}: {e}", common.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            harness.push(fs::read_to_string(&path).map_err(|e| e.to_string())?);
+        }
+    }
+    let shared: BTreeSet<&str> = registry.iter().copied().collect();
+    let both: BTreeSet<String> = driven_binaries(&harness)
+        .into_iter()
+        .filter(|name| shared.contains(name.as_str()))
+        .collect();
+    let declared: BTreeSet<String> = DRIVEN_AND_SHARED.iter().map(|s| s.to_string()).collect();
+    let undeclared: Vec<&String> = both.difference(&declared).collect();
+    if !undeclared.is_empty() {
+        return Err(format!(
+            "{undeclared:?} are driven by a machine test and also run on the shared boot, where \
+             nothing stages what they need — so each passes on its exit code with no verdict. Add \
+             each to RUST_SKIP with the reason its driver exists, or to DRIVEN_AND_SHARED if its \
+             shared run asserts something of its own."
+        ));
+    }
+    let stale: Vec<&String> = declared.difference(&both).collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "DRIVEN_AND_SHARED names {stale:?}, which no machine test drives or the shared boot \
+             no longer runs. Delete each entry — a declaration nothing is true of is what makes \
+             the rest of the list unreadable."
+        ));
+    }
+
     println!(
-        "  [split] {} shared binaries on the shipping kernel, {} on the actuator one",
+        "  [split] {} shared binaries on the shipping kernel, {} on the actuator one, {} of them \
+         driven elsewhere and declared",
         registry.len() - listed.len(),
-        listed.len()
+        listed.len(),
+        both.len()
     );
     Ok(())
+}
+
+/// Every guest binary the harness drives by name, read out of its own sources.
+///
+/// A driver reaches a binary as the literal `test_rs_<name>`, so that is what
+/// says a binary has one; a `format!` over a variable name yields no literal
+/// and is not a driver of any particular binary. Pure, and the sources are a
+/// parameter, so `suite_split` stages its own before trusting it on the tree.
+fn driven_binaries(sources: &[String]) -> BTreeSet<String> {
+    const MARK: &str = "test_rs_";
+    let mut found = BTreeSet::new();
+    for text in sources {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(MARK) {
+            rest = &rest[at + MARK.len()..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            if end > 0 {
+                found.insert(rest[..end].to_string());
+            }
+        }
+    }
+    found
 }
 
 fn expected_failure_entries() -> Result<(), String> {
