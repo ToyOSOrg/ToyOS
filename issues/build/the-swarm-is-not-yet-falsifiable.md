@@ -196,7 +196,7 @@ range): **76 standing (`Standing::Stands`), 32 retired (`Standing::Retired`),
 4 disputed (`Standing::Disputed`)**. Standing rows by instrument: Ci 50,
 `DevHostLoaded` 21, `DevHostAlone` 5.<sup>5</sup>
 
-**Open `kind: track` files** — 31 at `status: open`, 1 at `status: assigned`
+**Open `kind: track` files** — 30 at `status: open`, 1 at `status: assigned`
 (`issues/kernel/every-wait-in-this-kernel-is-a-spin.md`):<sup>6</sup>
 
 ```
@@ -226,7 +226,6 @@ issues/kernel/every-driver-is-still-in-the-kernel.md
 issues/kernel/every-interrupt-lands-on-the-boot-cpu.md
 issues/kernel/nothing-charges-kernel-memory-to-a-process.md
 issues/kernel/page-global-is-a-decision-nobody-has-made.md
-issues/kernel/pcid-tags-are-recycled-live.md
 issues/kernel/scheduler-policy-behavior-has-no-quantified-suite.md
 issues/kernel/the-capability-end-state-is-twelve-answers.md
 issues/kernel/the-iommu-stops-at-translation.md
