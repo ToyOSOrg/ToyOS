@@ -108,6 +108,10 @@ pub const MAX_PATH: usize = 4096;
 /// The most entries one `FileSystem::list` may materialise — per mount, not per directory.
 pub const MAX_LIST_ENTRIES: usize = 16_384;
 
+/// The most directories `created_dirs` holds before `mkdir` refuses: each is a
+/// userland-chosen key, bounded the way `list` is by [`MAX_LIST_ENTRIES`].
+pub const MAX_CREATED_DIRS: usize = 16_384;
+
 const _: () = assert!(core::mem::size_of::<(String, u64)>() == 32);
 
 /// The `created_dirs` key for a directory — the one construction its writer and readers share.
@@ -461,6 +465,10 @@ impl Vfs {
     pub fn create_dir(&mut self, path: &str) -> Result<(), SyscallError> {
         if path.len() > MAX_PATH {
             return Err(SyscallError::InvalidArgument);
+        }
+        // A new key past the cap is refused rather than grown; a repeat of one already held costs nothing and is let through.
+        if !self.created_dirs.contains(path) && self.created_dirs.len() >= MAX_CREATED_DIRS {
+            return Err(SyscallError::ResourceExhausted);
         }
         self.created_dirs.insert(String::from(path));
         Ok(())

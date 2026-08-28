@@ -206,6 +206,8 @@ const RUST_SKIP: &[&str] = &[
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
     "readdir_bound",
+    // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
+    "mkdir_cap",
     // Needs a live compositor, which `tests/testcases` does not boot.
     // `metal_sim_window_caps` runs it on the config that does.
     "window_caps",
@@ -548,6 +550,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
+    // A kernel log line from PCI enumeration; no clock and no real device in it.
+    ("pci_capability_walk", Sched::Parallel, Tier::Fast),
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
@@ -572,6 +576,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("nvme_wide_sector", Sched::Parallel, Tier::Fast),
     ("iommu_discovery", Sched::Parallel, Tier::Nightly),
     ("readdir_bound", Sched::Parallel, Tier::Fast),
+    // Its own boot: it fills the VFS `created_dirs` cap and leaves it there.
+    ("mkdir_cap", Sched::Parallel, Tier::Fast),
     // Two boots, and the verdict is that they answer differently. Nothing in it
     // is timed: every arm is a process exit code or a byte comparison — still
     // compute-bound, still Nightly: 11,075 ms in the sweep's final shard
@@ -9282,6 +9288,33 @@ fn run_machine_test(
             }
             Ok(())
         }
+        "mkdir_cap" => {
+            // `Vfs::create_dir` grew a kernel `HashSet` without a ceiling, so a
+            // `mkdir` loop ran the heap out. Its own boot: it fills the cap and
+            // leaves it there, which a shared boot's later `mkdir`s would trip.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions::default(),
+            );
+            serial::Serial::boot(&qemu).must_be_clean()?;
+
+            let result = qemu.run_test("test_rs_mkdir_cap", Duration::from_secs(60));
+            if let Some(err) = &result.error {
+                return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+            }
+            if !check_rust_result(&result) {
+                return Err(format!("mkdir_cap failed:\n{}", result.stdout));
+            }
+            // The refusal is an error return and nothing else: a panic in the VFS
+            // would strand its lock, which the guest exiting 0 does not rule out.
+            serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
+            for line in result.stdout.lines().filter(|l| l.contains("PASS")) {
+                eprintln!("  [mkdir]{}", line.trim_start_matches("  PASS"));
+            }
+            Ok(())
+        }
         "fpu_isolation" => {
             // Two boots that must answer
             // differently: the shipped kernel preserves the whole user machine
@@ -10907,6 +10940,43 @@ fn run_machine_test(
                 return Err(format!("a correct completion was refused on the ordinary path: {bad}"));
             }
             eprintln!("  [virtio] {}", verdict.trim());
+            Ok(())
+        }
+        "pci_capability_walk" => {
+            // A capability list is the device's, and QEMU publishes only
+            // well-formed ones, so the kernel drives eleven malformed layouts —
+            // a cycle, a spec-forbidden link, a BAR/offset/length past the window
+            // — over a crafted config space at init under this parameter.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["pci-cap-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            if let Some(bad) = log.lines().find(|l| l.contains("pci cap selftest FAILED")) {
+                return Err(format!("{bad}\n{log}"));
+            }
+            let Some(verdict) = log.lines().find(|l| l.contains("pci cap selftest")) else {
+                return Err(format!("the walk's self-test never ran:\n{log}"));
+            };
+            // `11/11`, not the absence of a FAILED line, which zero cases satisfy too.
+            if !verdict.contains("11/11") {
+                return Err(format!("not every malformed capability list was refused: {verdict}"));
+            }
+            // Once for the machine: it reads no real device.
+            let ran = log.matches("pci cap selftest").count();
+            if ran != 1 {
+                return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
+            }
+            // And the ordinary walk beside it: QEMU's real functions were enumerated.
+            if !log.contains("PCI: Enumeration complete") {
+                return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
+            }
+            eprintln!("  [pci] {}", verdict.trim());
             Ok(())
         }
         "xhci_descriptor_walk" => {
