@@ -2,7 +2,8 @@
 //!
 //! SMAP stays enabled; access goes through the direct map, never stac/clac.
 //! Values are copied out, never referenced; bulk buffers are a [`UserBytes`]/
-//! [`UserBytesMut`] window the kernel reads or writes but never borrows.
+//! [`UserBytesMut`] window that pins every frame it covers for its own life, so
+//! a sibling's `munmap` cannot reissue the backing under a copy across a park.
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
 
@@ -104,15 +105,23 @@ impl<'a> SyscallContext<'a> {
     /// A bulk buffer the kernel reads out of and never borrows.
     pub fn user_bytes(&self, ptr: UserAddr, len: u64) -> Option<UserBytes<'a>> {
         let len = len as usize;
-        let kptr = if len == 0 { core::ptr::NonNull::dangling().as_ptr() } else { window(ptr, len)? };
-        Some(UserBytes { kptr, len, _scope: PhantomData })
+        if len == 0 {
+            let kptr = core::ptr::NonNull::<u8>::dangling().as_ptr() as *const u8;
+            return Some(UserBytes { kptr, len, _pin: None, _scope: PhantomData });
+        }
+        let (kptr, pin) = window(ptr, len)?;
+        Some(UserBytes { kptr: kptr as *const u8, len, _pin: Some(pin), _scope: PhantomData })
     }
 
     /// A bulk buffer the kernel writes into and never borrows.
     pub fn user_bytes_mut(&self, ptr: UserAddr, len: u64) -> Option<UserBytesMut<'a>> {
         let len = len as usize;
-        let kptr = if len == 0 { core::ptr::NonNull::dangling().as_ptr() } else { window(ptr, len)? };
-        Some(UserBytesMut { kptr, len, _scope: PhantomData })
+        if len == 0 {
+            let kptr = core::ptr::NonNull::<u8>::dangling().as_ptr();
+            return Some(UserBytesMut { kptr, len, _pin: None, _scope: PhantomData });
+        }
+        let (kptr, pin) = window(ptr, len)?;
+        Some(UserBytesMut { kptr, len, _pin: Some(pin), _scope: PhantomData })
     }
 
     /// Copy a user string of at most [`MAX_USER_STR`] bytes into kernel memory; an over-long or non-UTF-8 string is `InvalidArgument`, not `BadAddress`.
@@ -152,6 +161,8 @@ impl<'a> SyscallContext<'a> {
 pub struct UserBytes<'a> {
     kptr: *const u8,
     len: usize,
+    /// Holds the frames covered pinned for this window's life; `None` for the empty window and for a [`sub`](UserBytes::sub) view, which borrows its parent's pin through the returned lifetime.
+    _pin: Option<FramePin>,
     _scope: PhantomData<&'a ()>,
 }
 
@@ -182,7 +193,7 @@ impl UserBytes<'_> {
             self.len
         );
         // SAFETY: the assert proves `off + len <= self.len`, so the result stays inside the window `window` validated.
-        UserBytes { kptr: unsafe { self.kptr.add(off) }, len, _scope: PhantomData }
+        UserBytes { kptr: unsafe { self.kptr.add(off) }, len, _pin: None, _scope: PhantomData }
     }
 }
 
@@ -190,6 +201,8 @@ impl UserBytes<'_> {
 pub struct UserBytesMut<'a> {
     kptr: *mut u8,
     len: usize,
+    /// As [`UserBytes::_pin`]: the frames stay pinned for this window's life.
+    _pin: Option<FramePin>,
     _scope: PhantomData<&'a mut ()>,
 }
 
@@ -235,7 +248,7 @@ impl UserBytesMut<'_> {
             self.len
         );
         // SAFETY: [`UserBytes::sub`]'s argument exactly.
-        UserBytesMut { kptr: unsafe { self.kptr.add(off) }, len, _scope: PhantomData }
+        UserBytesMut { kptr: unsafe { self.kptr.add(off) }, len, _pin: None, _scope: PhantomData }
     }
 }
 
@@ -265,24 +278,54 @@ impl ByteSource for UserBytes<'_> {
     }
 }
 
-/// Validate `[ptr, ptr+len)` as one physically contiguous user window and return its direct-map address — pages that are not adjacent would let an offset name a different physical page; the `wrapping_add` calls below are only ever compared against a translation, never dereferenced, so they stay defined on the non-contiguous run this function exists to catch.
-fn window(ptr: UserAddr, len: usize) -> Option<*mut u8> {
+/// A pin on the physical frames a user-copy window covers: the PMM reissues none of them while it lives, so the window's direct-map pointer stays backed even after a sibling unmaps and frees the range across a park.
+struct FramePin {
+    phys: u64,
+    len: usize,
+}
+
+impl Drop for FramePin {
+    fn drop(&mut self) {
+        crate::mm::pmm::unpin_range(self.phys, self.len);
+    }
+}
+
+/// Validate `[ptr, ptr+len)` as one physically contiguous user window, pin every frame it covers, and return its direct-map address with the pin. The pin is taken under the address-space lock over a translation that still names the frame, so a concurrent `munmap` — which needs that same lock to free the range — cannot reissue a frame between the confirmation and the pin.
+fn window(ptr: UserAddr, len: usize) -> Option<(*mut u8, FramePin)> {
     if !toyos_userbound::in_user_half(ptr.raw(), len as u64) {
         return None;
     }
-    let kptr = translate(ptr.raw())?;
     let start = ptr.raw();
     let end = start + len as u64;
+    // Fault every page of the range in; contiguity is confirmed under the lock below.
+    translate(start)?;
     let mut boundary = (start & !(crate::mm::PAGE_2M - 1)) + crate::mm::PAGE_2M;
     while boundary < end {
-        let k = translate(boundary)?;
-        if k != kptr.wrapping_add((boundary - start) as usize) {
+        translate(boundary)?;
+        boundary += crate::mm::PAGE_2M;
+    }
+    let pt = crate::process::current_address_space();
+    let guard = pt.lock();
+    let base = guard.translate(ptr)?;
+    let phys = base.phys();
+    let mut boundary = (start & !(crate::mm::PAGE_2M - 1)) + crate::mm::PAGE_2M;
+    while boundary < end {
+        if guard.translate(UserAddr::new(boundary))?
+            != crate::mm::DirectMap::from_phys(phys + (boundary - start))
+        {
             return None;
         }
         boundary += crate::mm::PAGE_2M;
     }
-    if len > 1 && translate(end - 1)? != kptr.wrapping_add(len - 1) {
+    if len > 1
+        && guard.translate(UserAddr::new(end - 1))?
+            != crate::mm::DirectMap::from_phys(phys + (len as u64 - 1))
+    {
         return None;
     }
-    Some(kptr)
+    if !crate::mm::pmm::pin_range(phys, len) {
+        return None;
+    }
+    drop(guard);
+    Some((base.as_mut_ptr(), FramePin { phys, len }))
 }

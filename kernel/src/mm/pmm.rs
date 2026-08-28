@@ -135,6 +135,8 @@ const MAX_PAGES: usize = 32768;
 struct Bitmap {
     /// One bit per 2MB page. 1 = free, 0 = allocated.
     bits: [u64; MAX_PAGES / 64],
+    /// Live user-copy windows covering each page; a non-zero count is never handed out by a scan, so a frame a syscall is mid-copy on cannot be reissued under it.
+    pins: [u32; MAX_PAGES],
     /// Physical address of page index 0 (lowest usable page).
     base: u64,
     /// Number of valid page indices (base..base + page_count * PAGE_2M).
@@ -149,12 +151,23 @@ impl Bitmap {
     const fn new() -> Self {
         Self {
             bits: [0; MAX_PAGES / 64],
+            pins: [0; MAX_PAGES],
             base: 0,
             page_count: 0,
             free_count: 0,
             total_usable: 0,
             next_hint: 0,
         }
+    }
+
+    /// The managed frame indices the byte range `[phys, phys + len)` touches; empty for a range outside this bitmap, which the PMM never allocates.
+    fn frame_span(&self, phys: u64, len: usize) -> core::ops::Range<usize> {
+        let lo = phys.max(self.base);
+        let hi = (phys + len as u64).min(self.base + self.page_count as u64 * PAGE_2M);
+        if lo >= hi {
+            return 0..0;
+        }
+        (((lo - self.base) / PAGE_2M) as usize)..(((hi - 1 - self.base) / PAGE_2M) as usize + 1)
     }
 
     fn set_free(&mut self, idx: usize) {
@@ -223,7 +236,7 @@ pub fn alloc_page(cat: Category) -> Option<PhysPage> {
     let start = bm.next_hint;
     for offset in 0..bm.page_count {
         let idx = (start + offset) % bm.page_count;
-        if bm.is_free(idx) {
+        if bm.is_free(idx) && bm.pins[idx] == 0 {
             bm.set_used(idx);
             bm.free_count -= 1;
             bm.next_hint = if idx + 1 < bm.page_count { idx + 1 } else { 0 };
@@ -252,7 +265,7 @@ pub fn alloc_contiguous(count: usize, cat: Category) -> Option<alloc::vec::Vec<P
     let mut run = 0usize;
     let mut run_start = 0usize;
     for idx in 0..bm.page_count {
-        if bm.is_free(idx) {
+        if bm.is_free(idx) && bm.pins[idx] == 0 {
             if run == 0 { run_start = idx; }
             run += 1;
             if run == count {
@@ -292,6 +305,39 @@ fn free_page(phys: u64) {
     bm.set_free(idx);
     bm.free_count += 1;
     bm.next_hint = bm.next_hint.min(idx);
+}
+
+/// Pin every managed frame `[phys, phys + len)` touches so no scan reissues one while a user-copy window covers it; `false`, and nothing pinned, on a pin-count overflow.
+pub fn pin_range(phys: u64, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let mut bm = BITMAP.lock();
+    let span = bm.frame_span(phys, len);
+    for idx in span.clone() {
+        if bm.pins[idx] == u32::MAX {
+            for undo in span.start..idx {
+                bm.pins[undo] -= 1;
+            }
+            return false;
+        }
+        bm.pins[idx] += 1;
+    }
+    true
+}
+
+/// Release a pin [`pin_range`] took over the same range.
+pub fn unpin_range(phys: u64, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let mut bm = BITMAP.lock();
+    let span = bm.frame_span(phys, len);
+    for idx in span {
+        bm.pins[idx] = bm.pins[idx]
+            .checked_sub(1)
+            .expect("unpin of a frame that was not pinned");
+    }
 }
 
 /// One past the highest physical frame this kernel manages; the IOMMU identity domain's exclusive upper bound.

@@ -244,6 +244,7 @@ metal_sim_window_drag 6256
 mkdir_cap 6878
 mmap_prot 32
 mmap_stress 45
+munmap_reissues_read_window 100
 nested_fault_is_recursive 5936
 netd_connection_caps 6538
 netd_gone_mid_bind 32
