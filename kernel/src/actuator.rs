@@ -37,6 +37,10 @@ actuators! {
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
+    /// Have `iod` null SS, force a switch, and report whether it reloaded — the
+    /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
+    sysret_ss_probe = "sysret-ss-probe";
+
     /// Log every i8042 drain: bytes seen, events queued, whether the queue woke.
     i8042_trace = "i8042-trace";
 

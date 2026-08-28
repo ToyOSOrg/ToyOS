@@ -1719,11 +1719,9 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         // regardless, and it would hold the CPU for a full quantum against a
         // ready RT sibling.
         let rt_due = self.cpu.rq.has_rt() && !current.serves_rt_band() && !self.cpu.aged_grant;
-        // The kill arm makes `handle_retire`'s `need_resched` mean what it says,
-        // rather than leaving a kill bounded by the quantum. Guarded by `aged_grant`
-        // like the RT arm — a corpse keeps its unwind chunk — and by the running
-        // word, `preempt`'s precondition: a killed task mid-commit still holds the
-        // preempt guard, so a real pass never reaches this against `Committing`.
+        // The kill arm makes `handle_retire`'s `need_resched` mean what it says, not a
+        // kill bounded by the quantum. Guarded by `aged_grant` like the RT arm (a corpse
+        // keeps its chunk) and the running word — `preempt`'s precondition, never mid-commit.
         let kill_due = current.shared().kill_pending()
             && !self.cpu.aged_grant
             && matches!(current.shared().state(), TaskState::Running(_));
@@ -2892,8 +2890,8 @@ mod tests {
     }
 
     /// A killed task loses the CPU on the next pass, not at the quantum it still
-    /// has left: with no quantum expiry and no ready RT task, the kill arm is the
-    /// only thing making this pass due. Without it `expiring` resumes a quantum on.
+    /// has left: with no quantum expiry and no ready RT task, only the kill arm
+    /// makes this pass due, and without it `expiring` resumes a quantum on.
     #[test]
     fn a_killed_task_loses_the_cpu_before_its_quantum_expires() {
         let mut w = World::new(1);
@@ -2903,7 +2901,7 @@ mod tests {
         expiring_shared.mark_kill();
 
         // A second teardown already waiting, so where the running corpse lands
-        // stays observable rather than handed straight back by the pick.
+        // stays observable rather than handed straight back by the pick alone.
         let (queued, queued_shared) = w.spawn(C0);
         queued_shared.mark_kill();
         {
@@ -2912,8 +2910,8 @@ mod tests {
             cpus[0].keep_dying(task, NOW);
         }
 
-        // NOW + 1 is inside the quantum: only the kill makes this pass due.
         {
+            // NOW + 1 is inside the quantum, so only the kill makes this due.
             let (cpus, env) = w.split();
             let pass = SchedPass::begin(&mut cpus[0], env, Nanos(NOW.0 + 1));
             let _ = pass.dispose_none().finish();

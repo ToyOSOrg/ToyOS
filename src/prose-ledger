@@ -21,7 +21,7 @@ kernel-loom/tests/reap_gate.rs 53 1
 kernel-loom/tests/sleep_lock.rs 80 1
 kernel-loom/tests/ticket_lock.rs 31 1
 kernel-loom/tests/tlb_shootdown.rs 93 2
-kernel/src/actuator.rs 85 0
+kernel/src/actuator.rs 87 0
 kernel/src/arch/apic.rs 54 0
 kernel/src/arch/control_regs.rs 66 0
 kernel/src/arch/cpu.rs 60 0
@@ -48,7 +48,7 @@ kernel/src/arch/percpu.rs 135 0
 kernel/src/arch/smp.rs 44 0
 kernel/src/arch/syscall/debug.rs 14 0
 kernel/src/arch/syscall/device.rs 12 0
-kernel/src/arch/syscall/dispatch.rs 92 0
+kernel/src/arch/syscall/dispatch.rs 91 0
 kernel/src/arch/syscall/fs.rs 12 0
 kernel/src/arch/syscall/gate.rs 23 0
 kernel/src/arch/syscall/handles.rs 21 0
@@ -100,11 +100,11 @@ kernel/src/file_cache.rs 65 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
 kernel/src/heartbeat.rs 24 0
-kernel/src/hw.rs 75 0
+kernel/src/hw.rs 83 0
 kernel/src/id_map.rs 5 0
 kernel/src/inbox.rs 76 0
 kernel/src/input_merge_test.rs 18 0
-kernel/src/iod.rs 9 0
+kernel/src/iod.rs 10 0
 kernel/src/iommu/mod.rs 31 0
 kernel/src/iommu/vtd/dmar.rs 33 0
 kernel/src/iommu/vtd/fault.rs 34 0
@@ -310,7 +310,7 @@ tests/toyos-rust-tests/src/bin/panic_recovery.rs 13 0
 tests/toyos-rust-tests/src/bin/poller_capacity.rs 33 0
 tests/toyos-rust-tests/src/bin/port_poll_churn.rs 49 0
 tests/toyos-rust-tests/src/bin/process_lifecycle.rs 94 0
-tests/toyos-rust-tests/src/bin/process_stats.rs 81 0
+tests/toyos-rust-tests/src/bin/process_stats.rs 72 0
 tests/toyos-rust-tests/src/bin/query_modules_size.rs 16 0
 tests/toyos-rust-tests/src/bin/readdir_bound.rs 34 0
 tests/toyos-rust-tests/src/bin/sched_stress.rs 22 0
@@ -352,7 +352,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4873 23
+tests/toyos.rs 4878 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
@@ -531,7 +531,7 @@ toyos-sched/sim/src/workload.rs 201 0
 toyos-sched/sim/tests/deadline_claim_race.rs 36 0
 toyos-sched/sim/tests/policy.rs 654 6
 toyos-sched/sim/tests/scenarios.rs 384 0
-toyos-sched/src/cpu.rs 1283 0
+toyos-sched/src/cpu.rs 1281 0
 toyos-sched/src/fair.rs 94 0
 toyos-sched/src/hw.rs 79 0
 toyos-sched/src/invariants.rs 26 0

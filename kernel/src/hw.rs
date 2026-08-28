@@ -392,6 +392,48 @@ unsafe fn switch_witness_mutate(restore: *const KernelCtx) {
     };
 }
 
+#[cfg(feature = "boot-actuators")]
+fn read_ss() -> u16 {
+    let ss: u16;
+    // SAFETY: reads a segment selector into a scratch register; touches nothing else.
+    unsafe { asm!("mov {0:x}, ss", out(reg) ss, options(nomem, nostack, preserves_flags)); }
+    ss
+}
+
+#[cfg(feature = "boot-actuators")]
+fn write_ss(sel: u16) {
+    // SAFETY: loading SS at CPL 0 cannot fault for a null or flat-data selector, and a null SS still allows stack references there.
+    unsafe { asm!("mov ss, {0:x}", in(reg) sel as u64, options(nomem, nostack, preserves_flags)); }
+}
+
+#[cfg(feature = "boot-actuators")]
+static PROBE_WATCH: crate::completion::Watch = crate::completion::Watch::new();
+
+/// Observes [`KernelHw::switch`]'s SS reload the one way a guest can (its `SYSRET`
+/// not reproducing the erratum): null SS, park, read SS; null means unreloaded.
+#[cfg(feature = "boot-actuators")]
+pub fn sysret_ss_probe(parkable: &crate::scheduler::Parkable) {
+    use crate::completion::{self, Subject, Token};
+    use crate::time::{Deadline, Duration};
+    use toyos_sched::task::WaitClass;
+    let Some(armed) = completion::arm(Subject::of(&PROBE_WATCH), Token::new(0), WaitClass::Other)
+    else {
+        crate::log!("sysret-ss: probe could not arm");
+        return;
+    };
+    let before = read_ss();
+    write_ss(0);
+    let deadline = Deadline::at(crate::clock::now() + Duration::from_millis(2));
+    let _ = completion::wait(parkable, &armed, deadline);
+    let after = read_ss();
+    write_ss(percpu::KERNEL_DS);
+    if after == percpu::KERNEL_DS {
+        crate::log!("sysret-ss: reloaded — a switch refreshed SS from null (entered at {before:#x})");
+    } else {
+        crate::log!("sysret-ss: NOT reloaded — SS stayed null across a switch; a sysretq here would fault userland");
+    }
+}
+
 impl Hw for KernelHw {
     type Payload = KernelPayload;
 
@@ -436,6 +478,15 @@ impl Hw for KernelHw {
             }
             RUNNING_CTX[percpu::cpu_id() as usize]
                 .store(restore as u64, core::sync::atomic::Ordering::Relaxed);
+            // AMD's `SYSRET` reloads SS's selector but not its cached descriptor, so
+            // a `sysretq` onto a task an IDT entry left with SS NULL hands userland an
+            // unusable SS; reloading it here keeps it valid (`X86_BUG_SYSRET_SS_ATTRS`).
+            // SAFETY: KERNEL_DS is a valid flat data selector; loading SS at CPL 0 cannot fault.
+            core::arch::asm!(
+                "mov ss, {ds:x}",
+                ds = in(reg) percpu::KERNEL_DS as u64,
+                options(nomem, nostack, preserves_flags),
+            );
             context_switch(&raw mut (*save).rsp, rsp);
         }
     }

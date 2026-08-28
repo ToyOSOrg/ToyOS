@@ -39,29 +39,21 @@ fn main() {
     println!("all process_stats tests passed");
 }
 
-/// Enough that the child spends almost all its CPU inside the refused-call loop,
-/// so `syscall_total_ns` and `cpu_ns` can be compared as a ratio the host speed
-/// cancels out of.
+/// Enough that the child spends almost all its CPU in the refused-call loop, so
+/// `syscall_total_ns` and `cpu_ns` compare as a ratio host speed cancels out of.
 const REFUSED_CALLS: u64 = 500_000;
 
-/// `SYS_SET_THREAD_NAME` with a name past `THREAD_NAME_LEN` (28) is refused by
-/// the argument check before any pointer is read: a cheap decode refusal, and
-/// the name is a `const` so the loop body is the call and nothing else.
 fn refused_child() {
-    const NAME: [u8; 64] = [0u8; 64];
+    const NAME: [u8; 64] = [0u8; 64]; // past THREAD_NAME_LEN (28): refused before any pointer read
+
     for _ in 0..REFUSED_CALLS {
         syscall::set_thread_name(&NAME);
     }
 }
 
-/// A refused syscall is counted *and* timed, not counted past the clock.
-///
-/// The child does almost nothing but issue refused calls, so their dispatch time
-/// is a large fraction of its CPU time — timing each call however it exits keeps
-/// `syscall_total_ns` above a tenth of `cpu_ns` (measured ~0.38 under TCG, higher
-/// on real silicon where the entry/exit costs less). A build that lets a refusal
-/// return past the clock times only its handful of successful calls, a hundredth
-/// of that CPU (measured ~0.01) — a separation the host speed cancels out of.
+/// A refused syscall is counted *and* timed: the child does little but refuse, so
+/// timing each keeps `syscall_total_ns` above a tenth of `cpu_ns` (~0.38 under TCG),
+/// where returning past the clock times only its few successful calls (~0.01).
 fn refused_calls_are_timed() {
     let mut child =
         Command::new(SELF_PATH).arg("refused").spawn().expect("spawn the refused child");

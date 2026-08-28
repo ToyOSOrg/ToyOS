@@ -107,8 +107,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
 
     let bad_addr = SyscallError::BadAddress.to_u64();
 
-    // The match is a closure so an arm's `return` lands here, not past the
-    // epilogue: a refused call is drained and timed like any other.
+    // A closure so an arm's `return` lands at the epilogue, not past it.
     let result = (move || -> u64 { match num {
         SYS_WRITE => {
             let Some(buf) = ctx.user_bytes(UserAddr::new(a2), a3) else { return bad_addr };

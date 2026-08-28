@@ -893,6 +893,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Fast),
     ("writeback_durability", Sched::Parallel, Tier::Fast),
+    // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
+    // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
+    // the day that `mov ss` leaves the switch.
+    ("sysret_ss_reload", Sched::Parallel, Tier::Fast),
     // The FAT32 read side's revocation gate, and a host-side volume oracle for
     // the same reason `writeback_durability` is one: whether the clusters the
     // unlink freed were really reissued, and whether the cycle left a volume, are
@@ -7932,6 +7936,31 @@ fn run_machine_test(
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
         "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
+        // `sysret-ss-probe` has iod null SS, force a switch, and log whether the
+        // switch reloaded it; a missing `mov ss` turns `reloaded` into `NOT`.
+        "sysret_ss_reload" => {
+            let options = BootOptions {
+                kernel_params: &["sysret-ss-probe"],
+                ..Default::default()
+            };
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let log =
+                qemu.boot_log().to_string() + &qemu.drain_serial(Duration::from_millis(500));
+            if log.contains("sysret-ss: NOT reloaded") {
+                return Err(format!(
+                    "the switch did not reload SS — a sysretq here would hand userland an \
+                     unusable one:\n{log}"
+                ));
+            }
+            if !log.contains("sysret-ss: reloaded") {
+                return Err(format!(
+                    "the SS-reload probe never reported — iod may not have run it:\n{log}"
+                ));
+            }
+            eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
+            Ok(())
+        }
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.
