@@ -1,55 +1,19 @@
 //! The unit that decides what a device may reach.
 //!
-//! **This module is the built half**: the machine's units are inventoried,
-//! every enumerated PCI function is given a context entry naming one
-//! identity-mapped domain, and translation is turned on. Interrupt remapping,
-//! per-driver domains and mapping, and refusing a machine with no usable unit
-//! are not built — `issues/kernel/the-iommu-stops-at-translation.md` is the
-//! entry. The refusal is sequenced last on purpose, because one landed before
-//! the first userspace driver has moved costs every machine and protects
-//! nothing.
+//! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, and turns translation on; an unusable unit is logged and left off rather than halting boot, and interrupt remapping and per-driver domains are not yet built (`issues/kernel/the-iommu-stops-at-translation.md`). Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
 //!
-//! So this module *refuses nothing*. Every condition that a machine with no
-//! usable unit would one day be refused on — no unit declared by firmware or
-//! none decodable, no interrupt remapping, no implemented address width, no
-//! 2 MiB pages, no queued invalidation — is reported here as a line naming the
-//! register it decided on, and the boot continues: a unit this kernel cannot
-//! program is left off rather than made into a halt. The messages themselves
-//! are not written yet either: a line saying "ToyOS requires one" on a kernel
-//! that boots happily without one is a comment that lies about its own code.
+//! The refusal is deliberately not yet built: landing it before any userspace driver exists would cost every machine and protect nothing.
 //!
-//! **Intel's register layout may not leak into the names above `vtd/`.**
-//! Everything in this file is stated in terms an ARM SMMU also answers, so a
-//! second backend drops in without the seam moving; nothing here says `Dmar`,
-//! `Sagaw` or `SourceId`.
-//!
-//! What this stage deliberately does *not* add, so the per-driver domain work
-//! does not have to unpick it: a `DomainId`, a `DmaPerm`, an `IommuError` and a
-//! `trait Iommu`. There is one domain on this machine and one backend, so each
-//! would be a type with a single value and a single implementor — a dead
-//! abstraction, and the seam is not the code that would name it.
+//! `DomainId`, `DmaPerm`, `IommuError`, and `trait Iommu` are deliberately not added: with one domain and one backend, each would be a type with a single value and a single implementor.
 
-// Every `unsafe` block under `iommu::` has either stopped existing or carries a
-// `SAFETY:` saying why it could not — the reduction-before-documentation sweep
-// `issues/build/clippy-has-never-run-here.md` records. `host-tests.yml`'s two
-// kernel clippy invocations both run with `-D warnings`, so `warn` here is what
-// gates: a new undocumented block anywhere in this module tree fails CI.
+// CI runs kernel clippy with `-D warnings`, so an undocumented `unsafe` block anywhere in this module tree fails the build.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod vtd;
 
 /// The address width a device's translations cover.
 ///
-/// A closed enum rather than a number, so `39` cannot be passed where a page
-/// table level count is wanted. VT-d's AGAW encoding and an SMMU's `T0SZ` are
-/// both derived from it inside their own backends, and the IOVA base — which
-/// starts above the top of physical memory, so a device address is never a
-/// valid physical address — is derived from it in the portable half.
-///
-/// Two variants and not three: 57-bit is out even on a unit that advertises it,
-/// because it is a fifth level of page tables for an address space nothing here
-/// needs — so a `Bits57` would be a variant with no producer and no consumer,
-/// which is an arm no machine in reach would ever execute.
+/// `Bits57` is omitted even where a unit advertises it, because it needs a fifth page-table level no machine in reach uses.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum AddressWidth {
     Bits39,
@@ -65,31 +29,19 @@ impl AddressWidth {
     }
 }
 
-/// The unit's name for whoever issued a request: VT-d's 16-bit source-id, an
-/// SMMU StreamID.
+/// The unit's name for whoever issued a request: VT-d's source-id, an SMMU StreamID.
 ///
-/// Wider than either, because the width is the backend's business and a
-/// StreamID is 32 bits on an SMMU. Nothing outside this module tree can build
-/// one, so the only values that exist are the ones a backend read off a
-/// firmware table or off the bus.
+/// `StreamId` is `u32`, wider than VT-d's 16-bit source-id, because an SMMU StreamID is 32 bits.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct StreamId(u32);
 
 impl StreamId {
-    /// From a PCIe requester id.
-    ///
-    /// Named for where the number comes from rather than `new`, because a
-    /// StreamID is not always a bus/device/function — an SMMU's comes out of
-    /// IORT — and a constructor that is should say so.
+    /// Named `pci`, not `new`: an SMMU StreamID is not always a bus/device/function triple.
     pub(in crate::iommu) const fn pci(bus: u8, device: u8, function: u8) -> Self {
         Self(((bus as u32) << 8) | ((device as u32) << 3) | function as u32)
     }
 
-    /// Which bus this stream is on, and where in that bus's table it sits.
-    ///
-    /// Split rather than handed out whole because that is the shape a VT-d
-    /// root/context pair indexes with, and an SMMU's stream table indexes with
-    /// the whole id — so a backend that wants the other form still has one.
+    /// The bus half of the id.
     pub(in crate::iommu) const fn bus(self) -> u8 {
         (self.0 >> 8) as u8
     }
@@ -100,23 +52,14 @@ impl StreamId {
 }
 
 /// An address a *device* uses. Never a physical address, never a virtual one.
-/// Distinct from a physical address because confusing them is the whole bug
-/// class this subsystem exists to close.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(transparent)]
 pub struct Iova(u64);
 
 impl Iova {
-    /// The identity policy, and the single site that states it.
+    /// This kernel always identity-maps: a device address equals its physical address, by policy, never because passthrough is unavailable.
     ///
-    /// This kernel never writes a passthrough context entry, on any unit,
-    /// regardless of what its `ECAP.PT` bit reports: an identity-mapped
-    /// translated domain is what every kernel-owned device gets, by policy
-    /// and not because passthrough happens to be unavailable. That makes
-    /// each of its device addresses numerically equal to a physical one — a
-    /// *policy*, not a fact about the two spaces. This constructor is where
-    /// the policy lives, so the stage that stops identity-mapping deletes it
-    /// and the compiler names every site that had assumed it.
+    /// This constructor is the single site the identity policy is stated in, so the stage that ends identity-mapping deletes it and the compiler flags every site that assumed it.
     pub(in crate::iommu) const fn identity(phys: u64) -> Self {
         Self(phys)
     }
@@ -126,35 +69,27 @@ impl Iova {
     }
 }
 
-/// `bb:dd.f`, so a line naming a stream can be matched against the one
-/// `pci::enumerate` printed for the same function.
+/// Formats as `bb:dd.f`, the same form `pci::enumerate` prints, so a stream id can be matched against it.
 impl core::fmt::Display for StreamId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:02x}:{:02x}.{}", self.0 >> 8, (self.0 >> 3) & 0x1f, self.0 & 0x7)
     }
 }
 
-/// Inventory this machine's units, give every enumerated function a device
-/// address space, and turn translation on.
+/// Inventories units and gives every enumerated function a context entry, before any driver `init` runs.
 ///
-/// Called from the boot phase that reads ACPI and enumerates PCI, before any
-/// driver `init`, because the unit has to be programmed before the first
-/// device is told to do DMA. *Every* function the walk returned gets a context
-/// entry, which is why the device list is an argument —
-/// enabling translation with an unenumerated device on the bus is how a
-/// machine bricks its own boot disk.
+/// Must run before any driver `init`, because a device must not be able to DMA before its unit is programmed.
 ///
-/// x86-64 has one backend and the kernel has one architecture; the dispatch
-/// this line will become is the seam, not the code.
+/// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
+///
+/// Calls `vtd::init` directly rather than through a dispatch, because x86-64 has one backend and the dispatch is not yet a real seam.
 pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice]) {
     vtd::init(rsdp_addr, devices);
 }
 
-/// The unit blocked a transaction and raised its fault event.
+/// Reached from the IDT gate the unit's own `FEDATA` names.
 ///
-/// Reached from the IDT gate the unit's own `FEDATA` names. Not a device's
-/// interrupt: it fires when a device has been told *no*, so what it reports is
-/// a bug in whoever owns that device.
+/// Fires when a device has been told no, so what it reports is a bug in whoever owns that device, not in the IOMMU.
 pub fn fault_interrupt() {
     vtd::fault::service();
 }
