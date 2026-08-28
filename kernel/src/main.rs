@@ -343,6 +343,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         .expect("ACPI: failed to find ECAM base address");
     let ecam = mm::paging::map_mmio(ecam_base, 256 * 32 * 8 * 4096, CachePolicy::DeferToMtrr);
     let pci_devices = pci::enumerate(&ecam);
+    #[cfg(feature = "boot-actuators")]
+    if actuator::pci_cap_selftest() {
+        drivers::virtio::cap_selftest();
+    }
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.
     iommu::init(kernel_args.rsdp_addr, &pci_devices);
