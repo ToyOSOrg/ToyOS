@@ -1,10 +1,8 @@
 //! What a syscall does to the object a handle names.
 //!
-//! Every function here dispatches on [`KObjectRef`] with no `_` arm, so a new
-//! object type is a compile error at each of them rather than a silent
-//! `PermissionDenied`. Authorization is *not* here: the caller has already
-//! resolved the handle with the rights the call needs, and this module never
-//! sees a handle number.
+//! Every function dispatches on [`KObjectRef`] with no `_` arm, so a new
+//! object type is a compile error here. Authorization is not here: the
+//! caller has already resolved the handle with the rights the call needs.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,24 +25,17 @@ use super::handle::{HandleEntry, HandleTable};
 use super::KObjectRef;
 
 /// What a freshly created object's one handle carries.
-///
-/// One function rather than a right chosen at each construction site, so
-/// "which rights does a pipe read end have?" has one answer and a new call site
-/// cannot invent a wider one. Narrowing is `SYS_HANDLE_DUP`'s job and happens
-/// after this.
 pub fn initial_rights(object: &KObjectRef) -> Rights {
     const BASE: Rights = Rights::DUP.union(Rights::TRANSFER).union(Rights::WAIT);
     match object {
-        // `MAP` is `SYS_PIPE_MAP`: the ring page is the pipe's, and either end
-        // may window it.
+        // `MAP` is `SYS_PIPE_MAP`: either end may window the pipe's ring page.
         KObjectRef::PipeRead(_) => BASE.union(Rights::READ).union(Rights::MAP),
         KObjectRef::PipeWrite(_) => BASE.union(Rights::WRITE).union(Rights::MAP),
         KObjectRef::Connection(_) => {
             BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
         }
         KObjectRef::File(_) => BASE.union(Rights::READ).union(Rights::WRITE),
-        // **No `DUP`.** A claim admits exactly one handle, which is what makes
-        // exclusivity a property of the type rather than of a check in `dup`.
+        // No `DUP`: a claim admits exactly one handle, exclusivity by type rather than a check in `dup`.
         KObjectRef::Device(_) => {
             Rights::TRANSFER.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE)
         }
@@ -53,25 +44,17 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Inbox(_) => {
             BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
         }
-        // Every bit on a `SysCap` is an authority init decides per program, so
-        // there is no sensible default and the creator states it.
+        // Every `SysCap` bit is authority init decides per program: no default, the creator states it.
         KObjectRef::SysCap(_) => Rights::NONE,
-        // `MAP` is the whole of it. A region is a thing to look at, and every
-        // question about what is in it is asked of the memory rather than of
-        // the handle.
+        // `MAP` is the whole of it: a region is examined through the memory, not the handle.
         KObjectRef::SharedMem(_) => {
             Rights::DUP.union(Rights::TRANSFER).union(Rights::MAP)
         }
-        // A connector is a ticket to a service and has no read or write path
-        // at all: the only things to do with one are put it in a namespace and
-        // give that namespace away.
+        // A connector has no read/write path: put it in a namespace, or give the namespace away.
         KObjectRef::Connector(_) => Rights::DUP.union(Rights::TRANSFER),
-        // `READ` is what resolving a name through it takes, and what narrowing
-        // one into a child's takes.
+        // `READ` is what resolving a name through it, and narrowing into a child's, both take.
         KObjectRef::Namespace(_) => Rights::DUP.union(Rights::TRANSFER).union(Rights::READ),
-        // `WAIT` takes the exit code, `MANAGE` kills, `READ` samples the
-        // accounting. A spawner gets all three, and narrows on the way to
-        // whoever it hands the process on to.
+        // A spawner gets everything a child handle offers: exit code, kill, and accounting.
         KObjectRef::Process(_) => BASE.union(Rights::READ).union(Rights::MANAGE),
     }
 }
@@ -85,13 +68,6 @@ pub fn install(table: &mut HandleTable, object: KObjectRef) -> Result<RawHandle,
 }
 
 /// A file opened at `path`, installed in `table`.
-///
-/// Takes the VFS lock itself and gives it up before the object exists, so a
-/// refused install drops the `OpenFileState` — and re-takes the lock in its
-/// `Drop` — without the *VFS* lock held. **Not with nothing held**, which this
-/// used to claim: its one caller runs it inside `with_process_data`, so the
-/// process's own lock is still there. What the sequencing buys is that the VFS
-/// lock is not taken twice, and that is all it buys.
 pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
     let writable = flags.contains(OpenFlags::WRITE);
     let create = flags.contains(OpenFlags::CREATE);
@@ -100,6 +76,7 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
 
     let opened = {
         let mut vfs = crate::vfs::lock();
+        // Scoped to this block: dropped before the object exists, since `OpenFileState::Drop` re-takes it.
 
         if create {
             let (_, file) = vfs.resolve_path("/", path);
@@ -110,20 +87,15 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
 
         if truncate && create {
             let mtime = crate::clock::nanos_since_boot();
-            // A name that was not there is the ordinary case and not a failure
-            // of this open. Anything else is: truncating past it would create a
-            // file over one the mount could not tell us about.
+            // `NotFound` is not a failure: truncating past a name that was not there is fine.
+            // Any `vfs.delete` error other than `NotFound` is propagated, not swallowed: truncating past it could silently create a file over one the mount could not confirm was missing.
             match vfs.delete(path) {
                 Ok(()) | Err(SyscallError::NotFound) => {}
                 Err(e) => return e.to_u64(),
             }
             vfs.create_file(path, mtime).map(|file_id| (file_id, mtime, 0))
         } else {
-            // **`CREATE` acts on `NotFound` and on nothing else.** This used to
-            // be the `None` arm of an `Option`, so a mount that would not
-            // answer took the same branch as a name that is not there: one
-            // refused transfer had a fresh empty file created over a file that
-            // exists, and the next write and flush made that permanent.
+            // `CREATE` acts on `NotFound` and nothing else — not on every refusal a mount can return.
             match vfs.open_file(path) {
                 Ok(file_id) => vfs.file_mtime(path).map(|mtime| {
                     let position =
@@ -149,10 +121,7 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         position,
         mtime,
     }));
-    // **`writable` is a right, not a field.** A write to a read-only file
-    // answers `PermissionDenied` because the handle does not carry `WRITE`,
-    // which is the same word the field's check produced and one fewer place
-    // for the two to disagree.
+    // `writable` is a right, not a field: a read-only write fails for lacking `WRITE`.
     let mut rights = initial_rights(&object);
     if !writable {
         rights = rights.without(Rights::WRITE);
@@ -165,16 +134,7 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
 
 /// Release one handle.
 ///
-/// What the object *holds* is given back by its own zero-handle hook. What is
-/// left here is the two things that are the *process's* and not the object's,
-/// and neither is written per object kind:
-///
-/// `pipe_maps` is the process's live `SYS_PIPE_MAP` windows. A window's warrant
-/// is the handle: past the last one naming a pipe, nothing holds the ring page
-/// and the PMM may hand it to anything, so the mapping has to go with the
-/// handle rather than with the process. [`close_all`] needs no such argument —
-/// its only caller is process teardown, which destroys the address space the
-/// windows are in.
+/// What the object holds is released by its own zero-handle hook; `close` releases only the two things that are the process's, not the object's (pipe-map windows, ended sources).
 pub fn close(
     table: &mut HandleTable,
     h: RawHandle,
@@ -182,9 +142,9 @@ pub fn close(
 ) -> Result<(), super::HandleError> {
     let entry = table.remove(h)?;
     let object = entry.object().clone();
-    // The decrement — and the deferred hook it may enqueue — happen here, with
-    // the table's own borrow already given up.
+    // The decrement, and any deferred hook it enqueues, run with the table's borrow already released.
     drop(entry);
+    // A map's warrant is the handle: past the last one naming this pipe, revoke its windows.
     for id in [pipe_id_read(&object), pipe_id_write(&object)].into_iter().flatten() {
         let still_held = table.iter().any(|(_, e)| {
             pipe_id_read(e.object()) == Some(id) || pipe_id_write(e.object()) == Some(id)
@@ -195,14 +155,8 @@ pub fn close(
             }
         }
     }
-    // **The sources this handle really ends, and the type is what decides.**
-    // `cancel_by_source` cancels by source across every ring in the machine, so a
-    // source the object does not own takes other processes' polls with it —
-    // which is what a `Device(Keyboard)` claim used to do to every terminal
-    // read there was, because `Console` names [`Source::Keyboard`] too. It
-    // cannot happen from here any more: `cancel_by_source` takes only
-    // `EndedSource`, and `Source::ended_by_its_last_handle` is the one place
-    // that can make one.
+    // Only `EndedSource` reaches `cancel_by_source`: a source this handle does not solely own
+    // (e.g. `Console` and `Device(Keyboard)` both naming `Source::Keyboard`) cannot cancel another's poll.
     let sources = [read_source(&object), write_source(&object)]
         .map(|s| s.and_then(Source::ended_by_its_last_handle));
     if sources.iter().any(|s| s.is_some()) {
@@ -212,10 +166,9 @@ pub fn close(
 }
 
 
-/// Release every handle a process holds. Called by exit *and by kill*, so the
-/// drops below are on the path a process taken down by another CPU follows —
-/// this kernel does not unwind, and a `Drop` that only ran on the orderly path
-/// would guarantee nothing.
+/// Release every handle a process holds; runs on the kill path too, which does not unwind.
+///
+/// `close_all` takes no `pipe_maps` argument: its only caller is process teardown, which destroys the whole address space the windows are in.
 pub fn close_all(table: &mut HandleTable) {
     for entry in table.drain() {
         drop(entry);
@@ -260,16 +213,7 @@ pub fn read_source(object: &KObjectRef) -> Option<Source> {
             device_registry::DeviceType::VirtioSound => Some(Source::VirtioSound),
             device_registry::DeviceType::Framebuffer => None,
         },
-        // **The `SysCap` is what a log reader parks on, and the rights on the
-        // handle are what decide whether either half means anything.** This
-        // function is handed the object and never the handle, so the source is
-        // named unconditionally; `WAIT` is what the poll path already demands
-        // before it gets here, and `Rights::LOG` is what `SYS_LOG_READ` demands
-        // to answer with a record. A cap holding one without the other can
-        // therefore park on a stream it may not read, or read a stream it may
-        // not park on — and `toyos_manifest`'s `logread` grants both, because
-        // the one program whose whole loop is read-then-park would be trapped
-        // by a name that granted only the first.
+        // Named unconditionally: the source alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(Source::Log),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
@@ -305,9 +249,7 @@ fn read_file(file: &FileObject, buf: &mut UserBytesMut) -> Option<u64> {
             let offset_in_page = abs_pos % 4096;
             let remaining_in_page = 4096 - offset_in_page;
             let to_read = remaining_in_page.min(count - read);
-            // A page the device would not give back is not a page of zeros.
-            // This stops short of it rather than handing the caller a hole
-            // under a success; short counts are what `read` means.
+            // A refused page is not a page of zeros: stop short rather than fake a hole under a success.
             if file_cache::read_page(
                 state.file_id,
                 page_idx,
@@ -329,28 +271,15 @@ fn read_file(file: &FileObject, buf: &mut UserBytesMut) -> Option<u64> {
     })
 }
 
-/// Read a device claim.
-///
-/// **It takes the table because the description installs handles.** A
-/// description is a set of buffers, and the process being told about them is
-/// the one that must be able to map them — which is never the process that
-/// minted the claim, because init mints every claim and holds none of them.
-/// Every other read runs under the borrow `get_ref` hands out, which is what
-/// keeps the two hottest syscalls in the kernel free of an atomic refcount.
+/// Read a device claim; takes `table` because describing a device installs handles into it.
 pub fn read_device(
     claim: &DeviceClaim,
     table: &mut HandleTable,
     buf: &mut UserBytesMut,
 ) -> Option<u64> {
     match claim.class() {
-        // **A read of an input device reads the queue and drives no
-        // hardware.** Both of these polled xHCI first, which made whichever
-        // thread happened to read the mouse into the driver's enumeration and
-        // recovery engine — on the laptop that was the compositor's own mouse
-        // read, and the desktop froze for multi-second stretches with a live
-        // kernel and nothing dropped. `drain_irqs` calls the same function at
-        // the top of every scheduler pass, so a reader gives up at most one
-        // pass of latency.
+        // Reads the queue only and drives no hardware: polling the controller here can block on its recovery engine.
+        // `drain_irqs` calls this same read at the top of every scheduler pass, so skipping the poll here still bounds staleness to one scheduler pass.
         device_registry::DeviceType::Keyboard | device_registry::DeviceType::Mouse => {
             match claim.class() {
             device_registry::DeviceType::Keyboard => {
@@ -396,19 +325,14 @@ pub fn read_device(
             if buf.len() < toyos_abi::audio::AudioCompletionRecord::SIZE {
                 return Some(SyscallError::InvalidArgument.to_u64());
             }
-            // Completion records, oldest first. Empty → None: blocking reads
-            // park on `waitqs::AUDIO`, nonblocking reads get WouldBlock.
+            // Completion records, oldest first; empty answers `None` so a blocking read parks.
             let n = crate::drivers::virtio_sound::drain_completed(buf);
             if n == 0 { None } else { Some(n as u64) }
         }
     }
 }
 
-/// Read whatever a handle names, except a device claim.
-///
-/// [`read_device`] is separate because it needs the table mutably and this runs
-/// under the borrow the handle was resolved through. Its arm here is
-/// unreachable and says so rather than silently answering `PermissionDenied`.
+/// Read whatever a handle names except a device claim; [`read_device`] needs the table mutably.
 pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
         KObjectRef::File(f) => read_file(f, buf),
@@ -459,10 +383,7 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
                 let offset_in_page = abs_pos % 4096;
                 let remaining_in_page = 4096 - offset_in_page;
                 let to_write = remaining_in_page.min(buf.len() - written);
-                // A partial write whose page could not be re-read off the
-                // device is refused rather than merged into zeros, so this
-                // stops short instead of claiming bytes that are not in the
-                // file.
+                // A page that cannot be re-read off the device is refused, not merged into zeros.
                 if file_cache::write_page(
                     state.file_id,
                     page_idx,
@@ -480,24 +401,14 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
                 return Some(SyscallError::Io.to_u64());
             }
             state.position += written;
-            // The file's dirty state is the cache's now, set in `write_page`;
-            // the handle keeps only the mtime to stamp on the eventual flush.
+            // Dirty state lives in the cache now, set by `write_page`; the handle keeps only the mtime.
             state.mtime = crate::clock::nanos_since_boot();
             Some(written as u64)
         }),
         KObjectRef::PipeWrite(w) => write_pipe(w.id(), buf),
         KObjectRef::Connection(c) => write_pipe(c.tx(), buf),
         KObjectRef::Console(c) => {
-            // Into this holder's line buffer, which emits whole lines under one
-            // `BackendGuard`. It used to be a lossless append to the byte
-            // ring that something else drained later, then a direct bounded
-            // write to the backend; both made the unit of interleaving a `write`
-            // syscall, and `println!` issues two of those per line. The
-            // `console-unbuffered` actuator restores the second of those states.
-            //
-            // **The whole write is always accepted.** The buffer is the kernel's
-            // and a short count would make a caller re-send bytes it already
-            // handed over.
+            // The whole write is always accepted: a short count would make a caller re-send bytes.
             c.write(buf);
             Some(buf.len() as u64)
         }
@@ -538,10 +449,6 @@ pub struct Stat {
 }
 
 /// What kind of thing this is, and how big.
-///
-/// Every object answers, so this returns a value rather than an `Option`: the
-/// one way to have no answer is a handle that does not resolve, which the
-/// caller has already ruled out.
 pub fn fstat(object: &KObjectRef) -> Stat {
     let plain = |t: FileType| Stat { file_type: t as u64, size: 0, mtime: 0 };
     match object {
@@ -578,95 +485,35 @@ pub fn fstat(object: &KObjectRef) -> Stat {
     }
 }
 
-/// `SYS_FSYNC`: the file's bytes on the device, **and the device told to commit
-/// them**.
+/// `SYS_FSYNC`: the file's bytes on the device, and the device told to commit them.
 ///
-/// **The second step is a change to a shipped syscall's semantics rather than
-/// an implementation detail**, and it arrived with `/bin/logd`. This used to be
-/// `flush_file` alone, which puts the data, the FAT and the directory entry on
-/// the volume and stops there — the stick's own write cache still holds them,
-/// so a power cut after a successful `fsync` could lose what it returned `Ok`
-/// for. The only caller in the machine that did the second step was
-/// `log_file.rs`, in the kernel, from the idle loop.
-///
-/// It is not optional now: `/bin/logd` publishes `LOG_DURABLE_NS` off this
-/// call's result, and a panicking kernel stops waiting for its own report when
-/// that word passes the report's timestamp. An `fsync` that stopped at the page
-/// cache would make the whole durability contract a claim about nothing. The
-/// alternative considered and rejected was a second syscall for logd alone,
-/// which needs a number, needs discussion, and would make every *other*
-/// `fsync` in the machine quietly weaker than the one program that noticed.
-///
-/// **What guards it is `usb_flush_optional`**, whose whole subject is a device
-/// that refuses SYNCHRONIZE CACHE: it reds the moment this call stops issuing
-/// one. `kernel_log_file`'s mid-run read of the image is the positive half.
-/// Neither separates *which* level a flush reached, so an `fsync` that went
-/// back to stopping at the page cache would still pass a clean shutdown — the
-/// refusing device is the only instrument that sees it.
-///
-/// # The retry loop: slow is not failed
-///
-/// **This is the operation level `crate::block`'s constants speak of, and the
-/// one depth on the flush path that holds no spinlock** — everything below
-/// `crate::vfs::lock()` runs with preemption off, four ticket locks deep at
-/// the device wait (`issues/audio/disk-wait-pins-a-cpu.md`), so no layer
-/// underneath can wait between attempts without pinning a CPU for the wait.
-/// Here the guard is dropped, the CPU is yielded or parked, and the whole
-/// sequence is retried with a fresh [`block::OPERATION`] per attempt: the
-/// per-attempt bound stays the slowness detector and never grows, and the run
-/// of attempts is what [`block::DEADMAN`] bounds.
-///
-/// A volume is declared failed on exactly three evidences — the device's own
-/// error status (any refusal but `WouldBlock`, passed through unchanged), a
-/// reset escalation that itself failed (the driver turns that into a device
-/// fact: `dev.failed`, `usb-storage: … reset recovery failed`), or this
-/// deadman expiring — and never on the elapsed time of a single attempt. A
-/// timed-out attempt discarded nothing: `Vfs::flush_file` returns before
-/// `clear_dirty` on any refused page and restores the file's `dirty_meta` when
-/// it fails (`file_cache::take_dirty`/`mark_dirty_meta`), and the driver's
-/// budget refusal is taken between commands with nothing in flight, so the
-/// retry re-runs against exactly the state the refusal left.
+/// The device-commit step is not optional: `/bin/logd` publishes `LOG_DURABLE_NS` off `fsync`'s result, so a flush that stopped at the page cache would make that durability contract a claim about nothing.
 pub fn fsync(object: &KObjectRef) -> u64 {
     let KObjectRef::File(file) = object else {
         return SyscallError::PermissionDenied.to_u64();
     };
     let (path, file_id, mtime) =
         file.with(|state| (state.path.clone(), state.file_id, state.mtime));
-    // The file's dirty state, not the handle's: a handle that did not itself
-    // write still makes durable what another handle to the same file dirtied.
-    // Nothing owed → nothing to make durable, and no device flush to pay for.
+    // The file's dirty state, not the handle's: another handle's write still gets made durable here.
     if !file_cache::dirty_meta(file_id) {
         return 0;
     }
     let began = crate::clock::now();
+    // Bounds the run of attempts, never a single attempt's elapsed time.
     let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
     #[cfg(feature = "boot-actuators")]
     let deadman = if crate::actuator::fsync_deadman_now() { Deadline::passed() } else { deadman };
     let mut attempt = 0u32;
+    // No spinlock is held at this depth, so waiting here (unlike everywhere below `vfs::lock()`) is safe.
     loop {
         attempt += 1;
         let refused = {
-            // Stage a first attempt whose budget is already spent, where the
-            // harness asked for one. An outer establishment narrows the
-            // operations below it, so what runs is the shipped refusal at the
-            // shipped site (`XhciController::scsi`, NVMe's `may_issue`) —
-            // exactly what a caller that lost its time to lock-wait or host
-            // descheduling looks like, which no host-side option stages
-            // (`usb-slow-device` is 2 ms against a 2 s bound, measured; QEMU
-            // answers everything in microseconds). `nvme_gate` uses the same
-            // shape and says so at more length.
+            // Stages a first attempt with its budget already spent, exercising the shipped refusal itself.
             #[cfg(feature = "boot-actuators")]
             let _spent = (attempt == 1 && crate::actuator::fsync_budget_spent())
                 .then(|| crate::scheduler::Operation::begin(Deadline::passed()));
-            // Outside `FileObject`'s own lock: the VFS lock is taken here and
-            // in `OpenFileState::drop`, and holding both in one order here and
-            // the other there is the deadlock this ordering exists to avoid.
-            //
-            // The sync under the same acquisition as the write-back,
-            // deliberately: two acquisitions would let another writer's data
-            // reach the volume between them and be committed by this caller's
-            // flush, which is harmless, and would let this caller's own file
-            // be *unmounted* between them, which is not.
+            // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
+            // Flush and sync share one acquisition so this file cannot be unmounted between them.
             let mut vfs = crate::vfs::lock();
             let done = vfs
                 .flush_file(&path, file_id, mtime)
@@ -683,17 +530,13 @@ pub fn fsync(object: &KObjectRef) -> u64 {
                         crate::clock::now() - began,
                     );
                 }
-                // A successful `flush_file` cleared the file's own `dirty_meta`;
-                // there is no per-handle flag left to clear.
+                // `flush_file` already cleared the file's own `dirty_meta`; there is no per-handle flag to clear.
                 return 0;
             }
-            // Not durable *yet* — a budget expired on a live device, never a
-            // device fact. Ask again on a fresh budget, off the pinned path.
+            // A budget expired on a live device, never a device fact: retry on a fresh budget.
+            // A refused attempt discards nothing — `Vfs::flush_file` restores `dirty_meta` before returning.
             Err(SyscallError::WouldBlock) => {
-                // A killed caller stops retrying at the first safe point: its
-                // parks come back cancelled, and a loop that kept spending
-                // pinned attempts on a corpse would starve the retire against
-                // its own tripwire. The return value dies with the task.
+                // A killed caller stops retrying at the first safe point; the return value dies with the task.
                 if crate::sched::driver::current_kill_pending() {
                     return SyscallError::WouldBlock.to_u64();
                 }
@@ -708,10 +551,7 @@ pub fn fsync(object: &KObjectRef) -> u64 {
                 }
                 crate::block::between_attempts(attempt);
             }
-            // The device's own word — an error status, or a recovery that
-            // gave up. Passed through unchanged: this is the evidence retrying
-            // cannot outwait, and the caller's give-up policy is entitled to
-            // it at once.
+            // The device's own word (an error status, or a recovery that gave up) is passed through unchanged.
             Err(e) => return e.to_u64(),
         }
     }
@@ -722,9 +562,7 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
         return SyscallError::PermissionDenied.to_u64();
     };
     file.with(|state| {
-        // `resize`, not `set_size`: a truncate changes the size the filesystem
-        // must record even when it dirties no page, so it marks the file's own
-        // dirty state so the flush is not skipped.
+        // `resize`, not `set_size`: marks the file dirty even when no page changed, so flush is not skipped.
         file_cache::resize(state.file_id, size);
         if state.position > size as usize {
             state.position = size as usize;
@@ -771,12 +609,7 @@ pub fn has_space(object: &KObjectRef) -> bool {
     }
 }
 
-/// Mark one end of a pipe as a terminal.
-///
-/// **Per end, not per pipe.** Its one caller marks both ends of a pair
-/// separately, so a flag on the shared ring would be a wider claim than
-/// anything ever makes — and `FileType::Tty` is then read off the end that was
-/// marked rather than off a variant the mark had to swap the handle into.
+/// Mark one end of a pipe as a terminal — per end, not per pipe.
 pub fn mark_tty(object: &KObjectRef) -> u64 {
     match object {
         KObjectRef::PipeRead(r) => {

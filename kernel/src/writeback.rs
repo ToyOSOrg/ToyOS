@@ -1,71 +1,11 @@
-//! The write-back queue: the flush a closed file's dirty pages owe, deferred
+//! The write-back queue: dirty-page teardown for a closed file, deferred
 //! off the closing thread onto `iod`.
 //!
-//! **Why it exists.** A `Drop` has no [`crate::scheduler::Parkable`], so once
-//! `vfs::VFS` becomes a sleep lock a closing thread's `Drop` cannot take it —
-//! and a device round trip inside a `Drop` blocks the closer on the disk
-//! whichever thread it lands on. So the flush leaves the closing thread. It
-//! leaves it here — the last close pins the file (`file_cache`'s
-//! `teardown_owed`), pushes it on this queue and returns; `iod` (and
-//! `SYS_SHUTDOWN`) drain the queue and run the teardown under the VFS lock.
-//! This chunk converts no lock: the VFS is still a spinlock and `iod` spins in
-//! the driver like any thread. It is the prerequisite for that conversion
-//! (`issues/kernel/every-wait-in-this-kernel-is-a-spin.md`).
-//!
-//! **The pin is the whole correctness argument.** A file on this queue is kept
-//! alive by `teardown_owed` even at `ref_count == 0`, and eviction never takes a
-//! dirty page — so the dirty pages a closed file owes outlive the handle that
-//! dirtied them, and a re-open before the drain finds them in the cache rather
-//! than reading a device that has not been written yet
-//! (`file_cache::release_to_writeback`).
-//!
-//! **The drain pops under the VFS lock, and that is a durability requirement,
-//! not a nicety.** `SYS_SHUTDOWN` drains the queue and then calls
-//! `Vfs::sync_all` to commit the devices' own write caches. If the drain popped
-//! an entry and released every lock before flushing it, `sync_all` could run in
-//! that gap and commit a device that had not yet received the file's bytes. So
-//! each entry is popped from the queue while the VFS lock is held: a pending
-//! file is always either still on the queue or being flushed under that lock,
-//! never in a gap `sync_all` can pass through.
-//!
-//! **The pin covers the file cache and nothing else, so a reader that goes
-//! round the cache has to settle the queue itself.** `Vfs::open_backing` hands
-//! out a view of the *device* — the extent list and the length a filesystem has
-//! recorded — and the whole point of this queue is that the device is not
-//! current while an entry is on it. So [`drain_held`] runs the queue out from
-//! `Vfs::open_backing` before any backing is derived, and the invariant it
-//! restores is stated once: **no device view is taken while this queue owes
-//! that device anything.** All of it and not the one path, because the queue is
-//! keyed by the path a handle was opened under and a symlink, a rename or a
-//! `cwd`-relative open name the same file differently — a matcher would answer
-//! "nothing owed" for exactly the cases nobody would test. What it costs the
-//! reader is the backlog — ~200 µs a file (`iod`'s header) — and it is the same
-//! work in either thread.
-//!
-//! **A budget refusal is not durable yet, and not a loss.** A flush can be
-//! refused on the block layer's operation budget (`block::OPERATION`) — a
-//! starved host descheduling the vCPU past two seconds mid-flush, never a device
-//! fact — and `SYS_CLOSE` did not wait, so this deferred flush is the only thing
-//! standing behind the pages the close promised. So a `WouldBlock` re-enqueues
-//! the file rather than tearing it down ([`Drained::Owed`]), and [`drain_all`]
-//! retries it on a fresh budget off the pinned path, bounded by `block::DEADMAN`,
-//! exactly as `SYS_FSYNC`'s loop does (`object/ops.rs`). The invariant is
-//! `SYS_FSYNC`'s: **a timed-out flush discards nothing.** The pin (not queue
-//! membership) is what guarantees it — a re-enqueue drops the entry from the
-//! queue for an instant, but the refused flush issued nothing to the device and
-//! the file stays pinned and dirty, so no `sync_all` in that instant can call it
-//! durable and no retry can lose it. Only the device's own word (`Io`) or the
-//! deadman ends the retries, and either tears the file down with a loud line,
-//! because at that point nothing can make it durable and a deferred flush has no
-//! caller to return the error to.
-//!
-//! **[`drain_held`] cannot park, so it does not retry — it re-enqueues and
-//! leaves the retry to `iod`.** Its caller holds the VFS spinlock across the
-//! backlog, and a backoff there would park a lock-holder. So a refusal on
-//! that path keeps the file owed for `drain_all` to re-drive off the lock; the
-//! spawn that drove it may read a device still a beat behind for that one file
-//! and get the loud short read `loader::spawn` reports, which a retry resolves —
-//! never the silent stale read the pin exists to prevent, and never a lost page.
+//! A queued file stays pinned (`teardown_owed`) until drained; eviction
+//! never takes a dirty page. Entries pop one at a time under the VFS lock.
+//! A flush refused on budget re-enqueues rather than tearing down — no
+//! flush is lost to a timeout. [`drain_held`] cannot park: a refusal there
+//! re-enqueues and leaves the retry to `iod`.
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -78,8 +18,6 @@ use crate::scheduler::Parkable;
 use crate::sync::Lock;
 use crate::time::Deadline;
 
-/// One file owing a write-back teardown: its cache id, the path the flush
-/// resolves through, and the mtime to stamp.
 struct Pending {
     file_id: FileId,
     path: String,
@@ -88,83 +26,47 @@ struct Pending {
 
 static QUEUE: Lock<VecDeque<Pending>> = Lock::new(VecDeque::new());
 
-/// The subject `iod` parks on. A closed file posts here; `iod` is the only
-/// waiter, and it holds one arm across its whole loop so a post that lands while
-/// it is draining still leaves a record its next wait returns on.
+/// The subject `iod` parks on: closes post here, and `iod` holds the sole arm across its loop.
 pub static WORK: Watch = Watch::new();
 
-/// Push a file whose last handle just dropped, and wake `iod`.
-///
-/// **Context-free**: it takes only the queue's leaf lock and posts — no VFS
-/// lock, no device — so it is callable from `OpenFileState::drop`, including
-/// from `ops::close_all` under the `ProcessData` lock. `completion::post` takes
-/// one leaf lock and stores, so it too is safe under a lock.
+/// Enqueues a dropped file's teardown and wakes `iod`; takes only the queue lock, so callable from `Drop`.
 pub fn enqueue(file_id: FileId, path: String, mtime: u64) {
     QUEUE.lock().push_back(Pending { file_id, path, mtime });
-    // Edge form: "state may have moved". The queue is the authoritative
-    // predicate; the record only ensures `iod`'s next wait does not park.
+    // Edge-triggered: `iod` rechecks the queue itself, never reads state off the post.
     completion::post(Subject::of(&WORK), Outcome::Ready);
 }
 
-/// The token `iod` arms with. Opaque — nothing reads it — but a post carries
-/// the waiter's own arm token, so it must match for the arm's drop-time
-/// invariant check to hold.
+/// The token `iod` arms with; opaque, but must match the post's arm token for the drop-time check.
 pub const TOKEN: Token = Token::new(0);
 
-/// Run every pending teardown now, making each file durable. Called by
-/// `SYS_SHUTDOWN` before `Vfs::sync_all` — a caller that holds no completion arm,
-/// so the inter-attempt backoff is `block::between_attempts` (which arms the
-/// task's own watch). `iod` cannot use this — it holds a standing [`WORK`] arm —
-/// and calls [`drain_all_iod`] instead.
-///
-/// The retry ladder and its `block::DEADMAN` bound are `SYS_FSYNC`'s; see the
-/// module header for why a refused flush loses nothing.
+/// Runs every pending teardown to durability; for callers holding no completion arm (`iod` uses [`drain_all_iod`]).
 pub fn drain_all() {
     drain_retrying(crate::block::between_attempts);
 }
 
-/// The same, for `iod`, whose standing [`WORK`] arm forbids a second
-/// (`completion::arm`'s one-arm-per-task rule). The backoff waits that arm out
-/// for `block::backoff_step` rather than arming the task again — a second arm
-/// panics the machine — so a new close posted to `WORK` wakes the retry early.
-///
-/// The first retry still only yields (no arm taken); the deadline arms come only
-/// at attempt >= 2, and they come to the arm `iod` already holds. `parkable` and
-/// `armed` are `iod`'s own, threaded down so the wait reuses them.
+/// Same as [`drain_all`], for `iod`: reuses its standing [`WORK`] arm since a second arm panics the machine.
 pub fn drain_all_iod(parkable: &Parkable, armed: &Armed<'_>) {
     drain_retrying(|attempt| {
         if attempt <= 1 {
-            // The budget was usually spent by lock-wait or a descheduled vCPU,
-            // over by the next slice; a yield takes no arm.
             crate::scheduler::yield_now();
         } else {
-            // Wait on the arm `iod` already holds, for the same span
-            // `between_attempts` would park — a `WORK` post (a new close) ends it
-            // early and the next pass drains that file too.
+            // Reuses `armed`; arming again panics.
             let deadline = Deadline::at(crate::clock::now() + crate::block::backoff_step(attempt));
             let _ = completion::wait(parkable, armed, deadline);
         }
     });
 }
 
-/// The retry loop shared by [`drain_all`] and [`drain_all_iod`]: pass over the
-/// queue, and while a pass left a flush refused on budget, run `backoff` (off the
-/// VFS lock, which every entry took and dropped) and pass again — until the queue
-/// is drained or `block::DEADMAN` turns the last refusals into give-ups. The two
-/// callers differ only in how `backoff` waits, because only one of them holds an
-/// arm.
+/// Shared retry loop for [`drain_all`] and [`drain_all_iod`]: passes over the queue, backing off between passes, until drained or `block::DEADMAN` gives up.
 fn drain_retrying(mut backoff: impl FnMut(u32)) {
     let deadman = Deadline::at(crate::clock::now() + crate::block::DEADMAN.duration());
     let mut attempt = 0u32;
     loop {
         let mut owed = false;
-        // Snapshot the length: an entry re-enqueued on a budget refusal waits
-        // for the next pass, not this one.
+        // Snapshot: a re-enqueued entry waits for the next pass, not this one.
         let n = QUEUE.lock().len();
         for _ in 0..n {
-            // A fresh VFS lock per entry, dropped before the next — so a backlog
-            // does not shut every other VFS caller out for its whole length, and
-            // the backoff below holds no lock.
+            // Fresh VFS lock per entry: backoff below holds no lock.
             match drain_one(&mut crate::vfs::lock(), deadman) {
                 Drained::Empty => break,
                 Drained::Done => {}
@@ -179,22 +81,9 @@ fn drain_retrying(mut backoff: impl FnMut(u32)) {
     }
 }
 
-/// Drain the queue for a caller that already holds the VFS across the backlog.
-///
-/// `Vfs::open_backing` is the caller and the module header says why: a backing
-/// is a view of the device, and an entry on this queue is the statement that the
-/// device is behind. The lock is held across the whole backlog here because the
-/// caller's own hold is what makes its next read coherent — releasing it between
-/// entries would let another close enqueue a file the caller is about to derive a
-/// backing for.
-///
-/// **It cannot park, so it does not retry.** A budget refusal here re-enqueues
-/// the file (with `Deadline::never()`, never a give-up) and leaves it for
-/// [`drain_all`] to re-drive off the lock — backing off under the caller's
-/// spinlock would park a lock-holder. A snapshot bounds the pass so a
-/// re-enqueued entry is not spun on. The module header says what that costs a
-/// spawn whose own file was the one refused.
+/// Drains the queue under the caller's held VFS lock (`Vfs::open_backing`) so no device view is taken while an entry is owed; cannot park, so a refusal re-enqueues for [`drain_all`] to retry.
 pub fn drain_held(vfs: &mut crate::vfs::Vfs) {
+    // Bounds the pass: a re-enqueued entry is not spun on within this call.
     let n = QUEUE.lock().len();
     for _ in 0..n {
         if let Drained::Empty = drain_one(vfs, Deadline::never()) {
@@ -203,39 +92,24 @@ pub fn drain_held(vfs: &mut crate::vfs::Vfs) {
     }
 }
 
-/// What became of one entry.
 enum Drained {
-    /// The queue was empty.
     Empty,
-    /// Flushed (or skipped) and torn down — or given up on a device error or the
-    /// deadman and torn down, its unflushed pages lost.
+    /// Torn down, including a give-up that left pages unflushed.
     Done,
-    /// The flush was refused on budget within the deadman: re-enqueued, still
-    /// pinned and owed, **never torn down**, for a caller's retry loop to
-    /// re-drive on a fresh budget.
+    /// Never torn down: still pinned and owed, for a caller's retry loop to re-drive.
     Owed,
 }
 
-/// One entry, popped and — under the VFS lock the caller holds — flushed and
-/// torn down: flush the dirty pages, re-check the last reference, drop the file
-/// and release its filesystem handle.
-///
-/// A flush refused on the operation budget (`WouldBlock`) within `deadman` is
-/// [`Drained::Owed`] instead: the entry is re-enqueued and the file left pinned,
-/// so the pages the close promised are not lost while a fresh budget is found.
+/// Pops one entry and flushes/tears it down under the caller's VFS lock; a budget refusal within `deadman` returns [`Drained::Owed`] instead.
 fn drain_one(vfs: &mut crate::vfs::Vfs, deadman: Deadline) -> Drained {
     let Some(pending) = QUEUE.lock().pop_front() else {
         return Drained::Empty;
     };
 
-    // (a) The flush. A deleted file has nothing worth flushing — its data is
-    // going away and its filesystem handle is already torn down — so it is
-    // skipped.
+    // A deleted file has nothing to flush; its handle is already torn down.
     let probe = file_cache::writeback_probe(pending.file_id);
     if probe.dirty_meta && !probe.deleted {
-        // Mark the flush as the drain's, so `fat-mirror-write-refuse` stages its
-        // budget expiry on this path and not on `SYS_FSYNC`. Folds to nothing
-        // without `boot-actuators`.
+        // Tags the flush as the drain's, for `fat-mirror-write-refuse` to stage on this path.
         #[cfg(feature = "boot-actuators")]
         crate::fat32_adapter::enter_drain_flush();
         let flushed = vfs.flush_file(&pending.path, pending.file_id, pending.mtime);
@@ -243,20 +117,13 @@ fn drain_one(vfs: &mut crate::vfs::Vfs, deadman: Deadline) -> Drained {
         crate::fat32_adapter::leave_drain_flush();
         match flushed {
             Ok(()) => {}
-            // Not durable *yet* — the caller's budget, not the device. Keep the
-            // file owed and pinned (no `finish_writeback`) and hand it back for a
-            // retry on a fresh budget, unless the deadman says the run of retries
-            // is over. `flush_file` already restored the file's `dirty_meta` and
-            // left every page dirty, so the re-enqueued entry re-delivers the same
-            // bytes. The push-back is under the held VFS lock — the same
-            // VFS-then-queue order every pop takes.
+            // Budget refusal, not a device fact: `flush_file` left `dirty_meta` set, so the re-enqueued entry redelivers the same bytes.
             Err(SyscallError::WouldBlock) if !deadman.reached(crate::clock::now()) => {
+                // Re-enqueued under the same held VFS lock the pop used: never absent from both at once.
                 QUEUE.lock().push_back(pending);
                 return Drained::Owed;
             }
-            // The device's own word, or the deadman: this cannot be made durable,
-            // and the pages go with it. Loud, because a deferred flush has no
-            // caller the error could reach otherwise.
+            // Device error or deadman: undurable; logged loudly since no caller can see this error.
             Err(e) => {
                 crate::log!(
                     "writeback: {} is not durable ({e:?}); its unflushed pages are lost",
@@ -266,9 +133,7 @@ fn drain_one(vfs: &mut crate::vfs::Vfs, deadman: Deadline) -> Drained {
         }
     }
 
-    // (b)/(c) The last-ref check, re-taken under the VFS lock a re-open would
-    // need — so either the re-open won (the file is adopted and left) or this
-    // drain won and removes the name too.
+    // Re-checked under the VFS lock a re-open needs: either re-open adopted it or this removes the name.
     match file_cache::finish_writeback(pending.file_id) {
         Teardown::Released => vfs.close_file(&pending.path, pending.file_id),
         Teardown::Adopted | Teardown::Vanished => {}

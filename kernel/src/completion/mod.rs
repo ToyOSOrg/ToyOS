@@ -1,39 +1,11 @@
-//! One completion primitive: a record, an inbox, and a watch a waiter lends to
+//! Completion primitive: a record, an inbox, and a watch a waiter lends to
 //! the object it is waiting on.
 //!
-//! The claim the whole design rests on is that **every wait in this kernel is
-//! "a record in an inbox"** — so the park-time recheck is one predicate with
-//! no source named in it, and a new
-//! wait source cannot re-open the lost-wake window because it has no way to add
-//! a second predicate.
+//! Every wait in the kernel rechecks one predicate, [`Inbox::has_record`], in
+//! [`wait_inner`] — no wait source can add a second one.
 //!
-//! **[`Inbox::has_record`] is the park predicate.** [`wait_inner`] rechecks it
-//! and nothing else, a park registers on the *thread's own* queue, and no queue
-//! in the kernel is woken as a queue.
-//!
-//! **Which subjects exist here.** All of them. The four device watches
-//! (`waitqs::{KEYBOARD, MOUSE, NETWORK, AUDIO}`), both ends of a pipe, the port
-//! acceptor, the process and thread objects, the inbox ring, the futex bucket,
-//! and a thread's own watch for the waits whose end is a deadline.
-//!
-//! **No registry, and no id.** A [`Subject`] is a borrowed reference to the
-//! object being waited on, so a destroyed subject cannot be named and the core
-//! maps no id to any object — structurally, not by discipline. A post is
-//! a walk of one object's own list under its own leaf lock, which is the shape
-//! `sched::waitqs` already has and which deletes the 128-core sharding risk a
-//! global `CORE` lock would have had.
-//!
-//! **The cost, counted rather than asserted.** A post to a subject nobody is
-//! armed on is *one relaxed load* and no lock at all — the same trick the log's
-//! `signal_after_commit` uses, and the reason the record path has no
-//! read-modify-write on it. A post that finds a waiter costs one `Lock` acquire
-//! plus a plain store per waiter. An arm costs one `Arc` clone and one `Lock`
-//! acquire; a disarm the same.
-//!
-//! **A killed task runs its own unwind and drops its [`Armed`] on the way
-//! out.** The `Arc<TaskHandle>` a watcher holds stays anyway, because it is what
-//! makes "rare" not have to be "never": an abandoned arm is then a bounded,
-//! census-visible leak, where a raw pointer would be a use-after-free.
+//! A [`Subject`] is a borrowed reference to the watched object: there is no
+//! registry and no id, so a destroyed subject cannot be named.
 
 pub mod inbox;
 
@@ -55,23 +27,15 @@ use crate::time::Deadline;
 pub use toyos_sched::waitq::Cancel;
 
 /// The waiters armed on one object.
-///
-/// Every waitable object owns one, beside the wait queue it already owns. The
-/// count is the whole of what a post pays when nobody is waiting: a relaxed
-/// load, read *before* the lock, so an idle machine's wakes take no lock.
 pub struct Watch {
     armed: AtomicUsize,
     waiters: Lock<Vec<Watcher>>,
 }
 
 struct Watcher {
-    /// The waiter's own inbox, held by `Arc` rather than by reference: a raw
-    /// pointer would make an abandoned arm a use-after-free instead of a
-    /// bounded leak.
+    /// `Arc`, not a reference: an abandoned arm becomes a bounded leak, not a use-after-free.
     task: Arc<TaskHandle>,
-    /// The waiter's rendezvous word, for the claim half of the post. Held
-    /// beside the handle because the two are minted at different instants and
-    /// a post needs both: the record, then the claim.
+    /// The claim half of the post; kept beside `task` since the two are minted separately.
     shared: Arc<KShared>,
     token: Token,
 }
@@ -85,7 +49,7 @@ impl Watch {
     }
 }
 
-/// What is being waited on. **A reference, never an id.**
+/// What is being waited on: a reference, never an id.
 #[derive(Clone, Copy)]
 pub struct Subject<'a>(&'a Watch);
 
@@ -96,32 +60,17 @@ impl<'a> Subject<'a> {
 }
 
 /// Proof that a record will arrive on the armed inbox for this token.
-///
-/// `#[must_use]` and not `Copy`; `Drop` disarms. [`wait`] taking one of these
-/// is what makes a park with nothing armed untypeable (RT3).
 #[must_use = "an arm must outlive the park it was made for"]
 pub struct Armed<'a> {
     subject: Subject<'a>,
     task: Arc<TaskHandle>,
     shared: Arc<KShared>,
     token: Token,
-    /// What this wait is, for the blocked-time breakdown. Decided here rather
-    /// than at the park, because the park is on this thread's own queue and
-    /// that queue has no subject to read a class off — see
-    /// `toyos_sched::waitq::WaitQueue::prepare_wait_as`.
+    /// Wait class for the blocked-time breakdown; the park queue carries no subject to read one from.
     class: WaitClass,
 }
 
 impl Drop for Armed<'_> {
-    /// Take the node off the list, then drain what arrived — **and check the
-    /// invariant the inbox's plain stores rest on while draining it.**
-    ///
-    /// One arm at a time means every record in this inbox was posted by the
-    /// subject this arm named, so it carries this arm's token. A record with
-    /// another token is two posters on one inbox, which is the one way the
-    /// lock-free `tail` store could be wrong. The overflow notice is the
-    /// exception by construction: it is minted by the taker and names no
-    /// subject.
     fn drop(&mut self) {
         let watch = self.subject.0;
         let mut waiters = watch.waiters.lock();
@@ -133,6 +82,8 @@ impl Drop for Armed<'_> {
         let inbox = self.task.inbox();
         inbox.disarm();
         while let Some(record) = inbox.take() {
+            // A mismatched token means two posters wrote this inbox; the
+            // overflow notice is exempt, minted by the taker without a subject.
             assert!(
                 record.token == self.token
                     || record.outcome == Outcome::Gone(Reason::Overflowed),
@@ -143,20 +94,7 @@ impl Drop for Armed<'_> {
     }
 }
 
-/// Arm a watch for the running task.
-///
-/// **This is the edge form**: the record a post leaves means "state may have
-/// moved", never "there is something for you", so the waiter's own predicate
-/// stays authoritative and is re-derived after this returns — which is what
-/// [`wait_until`]'s loop does.
-///
-/// `class` is what this wait's blocked time is attributed to. It belongs to the
-/// arm because it is a property of the *subject*: a thread parked on a pipe end
-/// is blocked on a pipe however it got there, and the queue it physically parks
-/// on is its own and says nothing.
-///
-/// `None` when there is no current task: boot has none, and neither has an
-/// idle CPU.
+/// Arms a watch for the running task; `None` when there is no current task.
 pub fn arm(subject: Subject<'_>, token: Token, class: WaitClass) -> Option<Armed<'_>> {
     let task = crate::sched::driver::current_handle()?;
     let shared = crate::sched::driver::current_shared()?;
@@ -178,69 +116,17 @@ pub fn arm(subject: Subject<'_>, token: Token, class: WaitClass) -> Option<Armed
     Some(Armed { subject, task, shared, token, class })
 }
 
-/// Tell everyone armed on `subject` that something happened.
-///
-/// Callable from an interrupt handler and from inside a lock: it takes one leaf
-/// lock and stores, exactly as the watcher-list walk it sits beside already
-/// does.
+/// Tell everyone armed on `subject` that something happened; callable from an interrupt handler or inside a lock.
 pub fn post(subject: Subject<'_>, outcome: Outcome) {
     post_with(subject, outcome, None)
 }
 
-/// The same, lending the poster's real-time window to whoever it wakes.
-///
-/// **A post that dropped the boost would silently turn an RT writer's signal
-/// into an ordinary one** — the poster's window is lent to whoever it wakes,
-/// and the audio path's whole latency argument rests on that.
+/// The same as [`post`], lending the poster's real-time window to whoever it wakes.
 pub fn post_boosted(subject: Subject<'_>, outcome: Outcome, until: Nanos) {
     post_with(subject, outcome, Some(until))
 }
 
-/// Tell at most `limit` of the waiters armed on `subject` **for this token**
-/// that something happened, and answer how many were told.
-///
-/// **The counted form, and the token is what makes counting mean anything.**
-/// `SYS_FUTEX_WAKE`'s ABI is "wake up to `count` threads waiting on `addr`,
-/// return the number woken", and a subject whose waiters are a *hash bucket*
-/// cannot honour either half: the bucket holds waiters of every word that
-/// hashes into it, so a count-limited walk over the bucket would spend the
-/// caller's single wake on a thread waiting for a different word and leave the
-/// intended one parked. A shared queue's spurious wake is harmless because
-/// every waiter re-checks; a shared queue's *stolen* wake is not.
-///
-/// The token closes it without the second channel a bucket would otherwise
-/// need: a futex waiter arms with its word's physical address as its token,
-/// so this walk names the word rather than the bucket. A waiter of another word
-/// in the same bucket is skipped and does not count against `limit`.
-///
-/// A `limit` of zero tells nobody, which is what a caller asking for zero
-/// wakes means; `usize::MAX` is the broadcast every `pthread_cond_broadcast`
-/// asks for.
-///
-/// **A waiter whose rendezvous word another claim already took is skipped, and
-/// it does not spend `limit`.** It is not a thread this call woke: it is a
-/// thread already on its way back to its own code, because a waker got there
-/// first or its own deadline did. Counting it is how one thread gets reported
-/// twice — `futex_wake(addr, 1)` twice in a row, against one waiter that has
-/// not been scheduled in between, answering 1 and 1. What discriminates is the
-/// claim's *catch-all*, not any one state. `TaskShared::claim_wake`
-/// (`toyos_sched::task`) takes `Blocked` and `Committing` and answers
-/// `Claim::Lost` for everything else. The first claim leaves the word
-/// `WakeQueued(cpu)`; `TaskShared::finish_wake` moves it to `Ready(cpu)` when
-/// that CPU drains its mailbox, which is before the task is dispatched and can
-/// be a quantum before; and the word reads `Running(cpu)` once it is. All three
-/// fall to that catch-all arm, so the second claim loses wherever in the span
-/// between the first claim and the waiter's return it arrives — not merely
-/// while the word still says `WakeQueued`.
-///
-/// The record is stored either way, before the claim is attempted, because
-/// invariant W's order is not conditional. A record delivered to a waiter this
-/// call did not wake costs that waiter one spurious return, which is legal at
-/// every park site, and skipping the *store* would be the lost wake the order
-/// exists to prevent.
-///
-/// `futex_wake_counts` is the gate: a tree that counts told-but-not-woken
-/// waiters answers 1 to a wake of a word whose waiters are all already gone.
+/// Tell at most `limit` waiters armed on `subject` for `token`; returns the count told.
 pub fn post_n(subject: Subject<'_>, outcome: Outcome, token: Token, limit: usize) -> usize {
     let watch = subject.0;
     if limit == 0 || watch.armed.load(Ordering::Relaxed) == 0 {
@@ -256,6 +142,7 @@ pub fn post_n(subject: Subject<'_>, outcome: Outcome, token: Token, limit: usize
         if waiter.token != token {
             continue;
         }
+        // A waiter another claim already won is skipped and does not spend `limit`.
         if post_to(waiter, outcome, at, None) {
             woken += 1;
         }
@@ -264,28 +151,7 @@ pub fn post_n(subject: Subject<'_>, outcome: Outcome, token: Token, limit: usize
 }
 
 /// End every wait armed on `subject` whose token lies in `[from, from + len)`,
-/// take those watchers off the list, and answer how many there were.
-///
-/// **The teardown form, and it is the only post that also *disarms*.** A token
-/// is opaque here, so what a range means is the caller's: the one caller names
-/// physical addresses, because a futex waiter's token is its word's physical
-/// address and a frame going back to the PMM is a range of them.
-///
-/// **Why a post alone would not do.** A `Ready` record leaves the waiter armed
-/// and its predicate authoritative — which for a futex is a load through the
-/// word's *physical* address, and the frame it names is about to be handed to
-/// somebody else. Worse, the watcher would stay on the bucket with a token that
-/// now names another process's memory, so the next [`post_n`] for that address
-/// would spend its caller's wake on it and count it. Taking the node off the
-/// list under the same leaf lock a post walks it under is what makes "a revoked
-/// watcher cannot be claimed later" a property of the structure rather than of
-/// a flag somebody has to check.
-///
-/// [`Reason::Closed`] is the outcome, and it is the existing vocabulary rather
-/// than a new one: "the object told its waiters it will never answer" is
-/// exactly what an unmapped word has said. [`wait_until`] returns on it without
-/// re-deriving the predicate, which is the half that keeps the freed frame
-/// undereferenced.
+/// remove those watchers, and answer how many there were.
 pub fn revoke_range(subject: Subject<'_>, from: u64, len: u64) -> usize {
     let watch = subject.0;
     if watch.armed.load(Ordering::Relaxed) == 0 {
@@ -301,9 +167,8 @@ pub fn revoke_range(subject: Subject<'_>, from: u64, len: u64) -> usize {
             at_index += 1;
             continue;
         }
-        // Off the list first, then told: after the `swap_remove` no post can
-        // reach this watcher, and the record it is leaving with is the last
-        // one its inbox will see for this arm.
+        // Removed before posted: a revoked token may already name something
+        // else, so no post can reach this watcher after the swap_remove.
         let waiter = waiters.swap_remove(at_index);
         post_to(&waiter, Outcome::Gone(Reason::Closed), at, None);
         ended += 1;
@@ -314,8 +179,7 @@ pub fn revoke_range(subject: Subject<'_>, from: u64, len: u64) -> usize {
 
 fn post_with(subject: Subject<'_>, outcome: Outcome, boost: Option<Nanos>) {
     let watch = subject.0;
-    // The whole cost on a subject nobody waits on. Read before the lock, so a
-    // wake that would otherwise be two stores does not become a lock acquire.
+    // Read before the lock: an idle subject's post costs no lock acquire.
     if watch.armed.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -326,14 +190,8 @@ fn post_with(subject: Subject<'_>, outcome: Outcome, boost: Option<Nanos>) {
     }
 }
 
-/// **Invariant W, in two statements**: the record first, under this
-/// subject's leaf lock, and then the claim. A parker that has published
-/// `Committing` is refused its park by the claim; one that has not yet
-/// re-checked finds the record; one already `Blocked` gets the message. There
-/// is no fourth case, which is what `kernel-loom/tests/inbox.rs` is about.
-///
-/// `true` means this call won the waiter's claim — see [`post_n`], the one
-/// caller that has to tell that apart from having merely left a record.
+/// Invariant W: the record is stored before the claim is attempted, both under `subject`'s leaf lock.
+/// Returns whether this call won the waiter's claim, not merely left a record.
 fn post_to(
     waiter: &Watcher,
     outcome: Outcome,
@@ -348,44 +206,17 @@ fn post_to(
     crate::scheduler::wake_sched(&waiter.shared, boost)
 }
 
-/// The right to park, and the answer a killed thread gets instead.
-///
-/// A zero-sized type kernel code cannot construct: the only way to hold one is
-/// to have been told, by the one `wait` that reports it, that this thread has
-/// been killed. That is what stops a caller manufacturing a cancel, and RT4 —
-/// the second cancel reported to one thread panics — is what stops one being
-/// swallowed.
+/// The answer a killed thread gets instead of a record; kernel code cannot construct one.
 #[derive(Debug)]
 pub struct Cancelled(());
 
-/// Park until a record arrives, the deadline passes, or this thread is
-/// cancelled.
-///
-/// **The one park site in the kernel.** Every blocking syscall reaches the
-/// machine through here, and the whole of its recheck is
-/// [`Inbox::has_record`] — one predicate, with no source named in it, which is
-/// what makes a new wait source unable to re-open the lost-wake window.
-///
-/// The arm is taken by reference and outlives the call, which is the edge
-/// contract rather than a per-wait signature: a caller loops, re-deriving its
-/// own predicate between waits, and a post landing in that window must find the
-/// watch still armed. An arm consumed per wait would lose exactly the wake
-/// that arm-before-check exists to catch.
-///
-/// A deadline that passes is an [`Outcome::Gone`] with [`Reason::Expired`] and
-/// not an error: the caller asked for it, and [`Deadline`] is the type that
-/// says whose business the expiry is.
+/// Park until a record arrives, the deadline passes, or this thread is cancelled.
 #[track_caller]
 pub fn wait(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -> Result<Record, Cancelled> {
     wait_inner(p, armed, deadline, Cancel::Answers)
 }
 
-/// The same, for a wait a kill may not end.
-///
-/// One caller — the retirer waiting for its victim's release — and its bound
-/// is its own tripwire, never the kill: a killed
-/// retirer that took `Cancelled` here could not propagate it (the retire is
-/// half done) and would spin on a commit that refuses to park.
+/// The same as [`wait`], for a wait a kill may not end.
 #[track_caller]
 pub fn wait_uncancellable(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -> Record {
     match wait_inner(p, armed, deadline, Cancel::Ignores) {
@@ -394,26 +225,7 @@ pub fn wait_uncancellable(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -
     }
 }
 
-/// Arm, then park until `ready()` holds, the deadline passes, or this thread is
-/// cancelled.
-///
-/// **The shape every blocking syscall in the kernel has.** The arm comes first
-/// and the predicate is re-derived after it — the edge contract — so a post
-/// that lands in the window between the two is found by the park's own recheck
-/// rather than lost.
-///
-/// A return is not proof of the condition: the loop is what holds the wait
-/// until the predicate is true, and a deadline that passes returns with it
-/// still false, which is what the one timed caller needs.
-///
-/// **Two outcomes end the loop without the predicate, and the second is a
-/// safety property rather than an economy.** A deadline is the caller's own,
-/// and [`Reason::Closed`] is a subject that has said it will never answer:
-/// re-deriving a predicate against a subject that is gone is at best a park
-/// nothing can end, and for the one caller [`revoke_range`] serves it is a load
-/// through a physical address whose frame has already gone back to the PMM.
-/// [`Reason::Overflowed`] is deliberately not one of the two — it means
-/// "re-derive", which is what looping does.
+/// Arm, then park until `ready()` holds, the deadline passes, or this thread is cancelled.
 #[track_caller]
 pub fn wait_until(
     p: &Parkable,
@@ -427,48 +239,25 @@ pub fn wait_until(
         return Ok(());
     }
     let Some(armed) = arm(subject, token, class) else {
-        // No current task: boot, or an idle CPU. Neither can park, and neither
-        // reaches a blocking syscall — this is the `Parkable` argument stated
-        // once more at runtime, for the one caller that could be reached from
-        // a kernel thread before the scheduler exists.
+        // No current task (boot or an idle CPU): neither reaches a blocking syscall.
         return Ok(());
     };
     loop {
         if ready() {
             return Ok(());
         }
+        // A record means state may have moved, not that `ready` now holds.
         let record = wait(p, &armed, deadline)?;
+        // Overflowed is excluded: it means re-derive, which the loop already does.
         if let Outcome::Gone(Reason::Expired | Reason::Closed) = record.outcome {
+            // Returns Ok without the predicate: the deadline is the caller's,
+            // and a closed subject cannot be re-derived against safely.
             return Ok(());
         }
     }
 }
 
-/// Arm, then park until `ready()` holds — for a wait a kill may not end and no
-/// deadline bounds.
-///
-/// **`SleepLock::lock`'s park, and it has no second caller.** The kill bit
-/// stays sticky and `WaitTicket::commit` refuses to park a killed task on an
-/// ordinary ticket, so the *ticket* is what says whether the kill is this
-/// wait's answer. A killed thread's teardown
-/// takes `ProcessData` and then the VFS, and a lock acquire that answered a
-/// kill would leave that teardown with nothing it could acquire.
-///
-/// Three differences from [`wait_until`], each of them the reason this is its
-/// own function rather than a flag on that one:
-///
-/// * **The loop exits on the predicate and on nothing else.** `wait_until`
-///   returns on [`Reason::Expired`] and [`Reason::Closed`] as well, which is
-///   right for a caller that asked for a deadline or waits on a subject that can
-///   end — and wrong for a lock acquire, where returning without the predicate
-///   means returning without the lock.
-/// * **No deadline.** What ends this wait is the holder's release; a timeout
-///   would be a second answer to a question that already has one, and
-///   `retire_task`'s tripwire is where an unwind that never finishes is caught.
-/// * **The class is [`WaitClass::Other`] and is not the caller's to choose.**
-///   Blocked time on a lock belongs to whatever the *holder* is doing, which is
-///   not a fact this side can see; naming a class here would attribute the
-///   holder's disk wait to the contender's own reason for wanting the lock.
+/// Arm, then park until `ready()` holds, for a wait a kill may not end and no deadline bounds.
 #[track_caller]
 pub fn wait_uncancellable_until(
     p: &Parkable,
@@ -479,24 +268,19 @@ pub fn wait_uncancellable_until(
     if ready() {
         return;
     }
-    // Unlike `wait_until`, "no current task" cannot be answered by returning:
-    // the caller would carry on believing it holds a lock it never took. It is
-    // also unreachable — `Parkable::at_entry` asserts a baseline boot cannot
-    // meet — so it is a kernel bug and says so.
+    // No current task cannot be answered by returning: the caller would carry
+    // on believing it holds a lock it never took.
+    // Class is fixed at `Other`: blocked time on a lock is the holder's reason, not the contender's.
     let armed = arm(subject, token, WaitClass::Other)
         .expect("completion: an uncancellable wait with no task to park");
+    // Exits only on the predicate: returning without it here means returning
+    // without the lock held.
     while !ready() {
         let _ = wait_inner(p, &armed, Deadline::never(), Cancel::Ignores);
     }
 }
 
-/// A kernel thread that has said everything it has to say.
-///
-/// **Armed on itself, where nothing posts.** The two log actuator threads park
-/// here rather than exiting, because a thread that exits frees a stack a
-/// producer may still be about to write to; what they must not do is spin,
-/// which is what they would be doing if they competed with the reader for the
-/// rest of the boot.
+/// Parks forever rather than exiting: exiting frees a stack a producer may still write to.
 #[cfg(feature = "boot-actuators")]
 #[track_caller]
 pub fn park_forever() -> ! {
@@ -531,10 +315,7 @@ fn wait_inner(
                 at: crate::clock::now(),
             });
         }
-        // Register on this thread's own parking place, re-check, park. The
-        // registration precedes the re-check, which is the whole of the
-        // lost-wake argument; the queue is never woken as a queue, because a
-        // post claims the rendezvous word directly.
+        // Registration precedes the recheck: that ordering is the whole lost-wake argument.
         let ticket = crate::scheduler::prepare_wait(task.park_queue(), cancel, armed.class);
         if task.inbox().has_record()
             || (cancel == Cancel::Answers && armed.shared.kill_pending())

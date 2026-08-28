@@ -1,20 +1,10 @@
 //! The Intel HDA stub: bring-up, one output stream, and the allow-list.
 //!
-//! **The line is who touches a register.** The kernel resets
-//! the controller, allocates the PCM ring and the buffer descriptor list,
-//! programs every register whose value is an address or indexes one of those
-//! structures, acknowledges the interrupt and derives the completion mask from
-//! `SDnLPIB`. The driver — soundd — decides everything: which codecs answered,
-//! which pin, which converter, the amplifiers, EAPD, the format. It reaches the
-//! five registers those decisions land in through [`reg_write`], and the two it
-//! has to poll through [`reg_read`], each checked against a positive list and
-//! refused by name.
-//!
-//! Nothing here decides. The moment this file has to know which codec or which
-//! pin, the line has moved and this stub has become a driver.
-//!
-//! Register offsets, bit positions and the descriptor layout come from the
-//! Intel High Definition Audio specification.
+//! The kernel touches only registers whose value is an address, indexes a
+//! kernel structure, or acknowledges the interrupt; everything else a driver
+//! reaches goes through [`reg_write`] and [`reg_read`], gated by a positive
+//! list and refused by name. Codec and pin decisions belong to soundd, never
+//! to this file.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -42,9 +32,7 @@ const COMMAND_MEMORY_SPACE: u16 = 1 << 1;
 const CAP_POWER_MANAGEMENT: u8 = 0x01;
 const PM_CONTROL_STATUS: u64 = 0x04;
 const PM_STATE_MASK: u16 = 0x3;
-/// The recovery a device gets after being taken out of D3hot, which it may
-/// not be asked anything during. A [`Delay`]: nothing is waited *for* and
-/// nothing expires — spending it is the whole requirement.
+/// The mandated D3hot-to-D0 recovery time; the device may not be asked anything during it.
 const PM_D3HOT_RECOVERY: Delay = Delay::from_spec(
     Duration::from_millis(10),
     "PCI Power Management: the mandated D3hot-to-D0 recovery time",
@@ -63,15 +51,12 @@ const IMMEDIATE_STATUS: u64 = 0x68;
 const GCTL_CRST: u32 = 1 << 0;
 const INTCTL_GIE: u32 = 1 << 31;
 
-/// The first stream descriptor's offset, and the stride between them. Input
-/// descriptors come first, then output, then bidirectional — so which one is
-/// the first output is a function of `GCAP.ISS` and never a constant.
+/// The first stream descriptor's offset; which one is the first output depends on `GCAP.ISS`.
 const STREAM_BASE: u64 = 0x80;
 const STREAM_STRIDE: u64 = 0x20;
 
 const SD_CTL: u64 = 0x00;
-/// The byte carrying the stream tag, which the codec's converter has to be
-/// told the same number.
+/// The byte carrying the stream tag; the codec's converter must be told the same number.
 const SD_CTL_TAG: u64 = 0x02;
 const SD_STS: u64 = 0x03;
 const SD_LPIB: u64 = 0x04;
@@ -92,72 +77,44 @@ const SD_STS_FIFOE: u8 = 1 << 3;
 const SD_STS_DESE: u8 = 1 << 4;
 const SD_STS_WRITE_CLEAR: u8 = SD_STS_BCIS | SD_STS_FIFOE | SD_STS_DESE;
 
-/// The pipeline, in periods and bytes.
-///
-/// The same shape virtio-sound presents, and deliberately: soundd's mix loop,
-/// its client ring depth and gate A's recorded counters are all sized against
-/// eight periods of 512 bytes, so a second backend that chose differently would
-/// be a second instrument as well as a second device.
+/// The pipeline shape; soundd's mix loop, its client ring depth and gate A's recorded counters are
+/// sized against it.
 const PERIODS: usize = 8;
 const PERIOD_BYTES: usize = 512;
 
-/// The stream tag this stream carries. One tag, one stream, and the number
-/// reaches the codec through a verb soundd sends — so it has to be a number
-/// both halves can name, which is what [`HdaInfo::stream_tag`] is for.
+/// The tag this stream carries; [`HdaInfo::stream_tag`] is how soundd's verb names the same number.
 const STREAM_TAG: u8 = 1;
 
-/// The smallest register window that can hold a stream descriptor. A BAR under
-/// this is a function that is not the controller this driver understands, and
-/// is refused by name rather than mapped and read past.
+/// The smallest register window that can hold a stream descriptor; a BAR under this is refused.
 const MIN_BAR_BYTES: u64 = 0x1000;
 
-/// How long a register bit is given to settle.
-///
-/// Policy, not physics: the specification's own numbers are microseconds, so an
-/// expiry here is a device that has stopped rather than one that is slow. The
-/// machine this ships on has no serial port, and a bring-up that spins forever
-/// leaves its owner a black screen.
+/// How long a register bit is given to settle; well past the spec's microsecond figures, so an
+/// expiry means the device stopped.
 const SETTLE_NS: u64 = 100_000_000;
 
-/// The delay the specification requires between releasing `CRST` and believing
-/// `STATESTS`: 25 frames at 48 kHz, rounded up to a millisecond.
+/// The delay between releasing `CRST` and believing `STATESTS`: 25 frames at 48 kHz.
 const CODEC_DETECT: Delay = Delay::from_spec(
     Duration::from_millis(1),
     "HD Audio: 25 frames at 48kHz between releasing CRST and believing STATESTS",
 );
 
-/// How many refused register accesses are named in the log before the driver is
-/// told to stop asking.
-///
-/// Policy: a refusal is a driver bug worth reading, and an unbounded one is a
-/// userland process choosing how much log the machine spends. Past this the
-/// call still fails — only the line stops.
+/// How many refused register accesses are named in the log before the call still fails silently.
 const MAX_NAMED_REFUSALS: usize = 16;
 
-// --- what the interrupt handler may touch ---
 
-/// The handler's whole view of the device.
-///
-/// Written once, before the vector is armed, and read with no lock afterwards —
-/// the same contract `virtio_sound`'s `TX_ISR` has, and for the same reason: the
-/// handler may interrupt a CPU holding [`CONTROLLER`].
+// No lock: the interrupt handler can run on a CPU already holding `CONTROLLER`.
 struct StreamIsr {
     stream: UnsafeCell<Option<Mmio>>,
-    /// The period the engine was last known to be playing. Written by the
-    /// handler while the stream runs, and by [`reg_write`] on the edge that
-    /// starts it — never both, because a stopped stream raises no interrupt.
+    /// Written by the handler while the stream runs, and by [`reg_write`] on the edge that starts
+    /// it — never both, since a stopped stream raises no interrupt.
     last: AtomicUsize,
-    /// Periods completed and not yet handed to the driver. Accumulating rather
-    /// than a ring: an interrupt carries nothing a later one does not, so there
-    /// is no queue for a slow reader to overflow.
+    /// Accumulating rather than a ring: an interrupt carries nothing a later one does not, so
+    /// there is no queue for a slow reader to overflow.
     mask: AtomicU32,
-    /// `nanos_since_boot` at the newest interrupt folded into `mask`. The DLL
-    /// measures a batch against its *last* grid point, which is why the newest
-    /// is the one kept.
+    /// The newest interrupt's timestamp: the DLL measures a batch against its last grid point.
     timestamp: AtomicU64,
-    /// FIFO and descriptor errors the device reported. Counted here and named
-    /// once from the drain path: a handler that logs is a handler that produces
-    /// work for the thing that failed.
+    /// Counted here and named once from the drain path: a handler that logs adds work for the
+    /// thing that failed.
     errors: AtomicU32,
     named_error: AtomicBool,
 }
@@ -181,10 +138,6 @@ fn isr_stream() -> Option<Mmio> {
 }
 
 /// Acknowledge one stream interrupt and record which periods it covered.
-///
-/// The order is the whole correctness of it: the status bit is cleared *before*
-/// `SDnLPIB` is read, so a period that completes in between raises a fresh
-/// interrupt rather than being acknowledged unseen.
 pub fn isr_complete() {
     let timestamp = crate::clock::nanos_since_boot();
     let Some(stream) = isr_stream() else { return };
@@ -193,6 +146,7 @@ pub fn isr_complete() {
     if status & SD_STS_WRITE_CLEAR == 0 {
         return;
     }
+    // Cleared before SDnLPIB is read, so a period completing in between raises a fresh interrupt.
     stream.write_u8(SD_STS, status & SD_STS_WRITE_CLEAR);
     if status & (SD_STS_FIFOE | SD_STS_DESE) != 0 {
         ISR.errors.fetch_add(1, Ordering::Relaxed);
@@ -203,9 +157,7 @@ pub fn isr_complete() {
 
     let position = stream.read_u32(SD_LPIB);
     let last = ISR.last.load(Ordering::Relaxed);
-    // A position the device cannot have is not a period to mark played.
-    // `completed` refuses it rather than masking it to fit, and the driver
-    // then sees no completion — which costs a wake, not a wrong buffer.
+    // A position the device cannot have yields no completion, rather than one masked to fit.
     let Some((mask, current)) = stream::completed(last, position, PERIOD_BYTES as u32, PERIODS)
     else {
         return;
@@ -220,8 +172,7 @@ pub fn isr_complete() {
     crate::preempt::set_need_resched();
 }
 
-/// Are completions pending? Lock-free — handle readiness, an inbox watch and
-/// the scheduler's park-time recheck all ask this.
+/// Are completions pending? Lock-free.
 pub fn has_pending() -> bool {
     ISR.mask.load(Ordering::Acquire) != 0
 }
@@ -245,11 +196,6 @@ pub fn inbox_watchers() -> alloc::vec::Vec<crate::inbox::InboxId> {
 }
 
 /// Take the pending completions, or `None`.
-///
-/// The timestamp is read after the mask is taken, so it is never older than the
-/// newest period in it. A handler landing in the window between the two makes
-/// the reported batch look microseconds late and leaves its own bits for the
-/// next read; nothing is lost and nothing is double-counted.
 fn take_completions() -> Option<AudioCompletionRecord> {
     let mask = ISR.mask.swap(0, Ordering::AcqRel);
     if mask == 0 {
@@ -258,6 +204,7 @@ fn take_completions() -> Option<AudioCompletionRecord> {
     Some(AudioCompletionRecord {
         mask,
         _pad: 0,
+        // Read after the mask, so never older than the newest period in it.
         timestamp_nanos: ISR.timestamp.load(Ordering::Acquire),
     })
 }
@@ -277,16 +224,12 @@ pub fn drain_completed(buf: &mut crate::user_ptr::UserBytesMut) -> usize {
     AudioCompletionRecord::SIZE
 }
 
-// --- the controller ---
 
 struct HdaController {
     regs: Mmio,
     stream: Mmio,
-    /// Kept so the pages outlive the mappings that name them — and so a
-    /// controller this driver refuses below gives them back, which is why these
-    /// are pools rather than leaked views. Nothing here holds a [`super::Dma`]
-    /// past `init`: the descriptor list is written once and the PCM ring is
-    /// soundd's, so the borrows all end inside that function.
+    /// Kept so the pages outlive the mappings that name them, and so a refused controller gives
+    /// them back.
     _bdl: super::DmaPool,
     _pcm: super::DmaPool,
 }
@@ -299,19 +242,9 @@ pub fn info() -> Option<(HdaInfo, Region)> {
     INFO.lock().clone()
 }
 
-// --- the allow-list ---
 
-/// Why a register is on the write list.
-///
-/// Every entry carries the same property — **its value is not an address, and
-/// it indexes nothing the kernel allocated.** The two registers that would fail
-/// that test, `SDnCBL` and `SDnLVI`, are absent because the kernel writes them
-/// itself from the descriptor list it built: an `SDnLVI` past the list's end is
-/// a DMA engine reading buffer descriptors out of memory nobody initialised.
-///
-/// The polarity is the guarantee. A missing entry costs a driver that cannot
-/// bring its stream up and says so; a refusal list missing an entry costs a
-/// device pointed at kernel memory.
+/// A register is on the list only if its value is not an address and indexes nothing the kernel
+/// allocated; `SDnCBL` and `SDnLVI` are absent because the kernel writes them itself.
 fn write_permit(stream_offset: u64, offset: u64, width: RegWidth) -> Result<&'static str, ()> {
     let sd = |field: u64| stream_offset + field;
     match (offset, width) {
@@ -324,12 +257,8 @@ fn write_permit(stream_offset: u64, offset: u64, width: RegWidth) -> Result<&'st
     }
 }
 
-/// The two registers a driver has to poll to get an answer out of a codec.
-///
-/// Everything else it would read is either in [`HdaInfo`] or is the kernel's:
-/// `SDnLPIB` is read in the handler and reaches the driver as a completion
-/// mask, and `SDnSTS` is the acknowledgement, which from userland would be an
-/// interrupt left asserted across a scheduling round trip.
+/// The two registers a driver has to poll; everything else is either in [`HdaInfo`] or the
+/// kernel's own.
 fn read_permit(offset: u64, width: RegWidth) -> Result<&'static str, ()> {
     match (offset, width) {
         (IMMEDIATE_STATUS, RegWidth::U16) => Ok("ICS"),
@@ -381,21 +310,10 @@ pub fn reg_write(offset: u64, width: RegWidth, value: u32) -> Result<(), Syscall
     Ok(())
 }
 
-/// `SDnCTL`'s first byte, which is where the driver starts and stops the engine.
-///
-/// Two things happen here that a plain store would not do, and both are
-/// bookkeeping rather than policy:
-///
-/// **`SRST` is refused.** Entering stream reset clears the descriptor's address
-/// and length registers, and the driver cannot write them back — so a stream
-/// reset from userland is a `RUN` away from a DMA engine pointed at physical
-/// address zero.
-///
-/// **The handler's position is re-anchored on the edge that starts the engine.**
-/// `SDnLPIB` does not restart at zero when a stopped stream is started again, so
-/// the period index the mask is derived from has to be read from the device at
-/// the one instant nothing is advancing it.
+/// `SDnCTL`'s first byte, where the driver starts and stops the engine.
 fn start_stop(controller: &HdaController, value: u8) -> Result<(), SyscallError> {
+    // Refused: stream reset clears the descriptor's address and length registers, which the
+    // driver cannot write back, so `RUN` would point the DMA engine at physical address zero.
     if value & SD_CTL_SRST != 0 {
         if REFUSALS.fetch_add(1, Ordering::Relaxed) < MAX_NAMED_REFUSALS {
             log!(
@@ -405,6 +323,7 @@ fn start_stop(controller: &HdaController, value: u8) -> Result<(), SyscallError>
         }
         return Err(SyscallError::PermissionDenied);
     }
+    // Re-anchored on the start edge: SDnLPIB does not restart at zero when the stream restarts.
     let running = controller.stream.read_u8(SD_CTL) & SD_CTL_RUN != 0;
     if value & SD_CTL_RUN != 0 && !running {
         let position = controller.stream.read_u32(SD_LPIB);
@@ -415,16 +334,9 @@ fn start_stop(controller: &HdaController, value: u8) -> Result<(), SyscallError>
     Ok(())
 }
 
-// --- bring-up ---
 
-/// Bring up the one HDA controller this machine has a codec behind.
-///
-/// **Every class-0403 function is taken out of reset and asked**, and exactly
-/// one live link is bound: zero is a machine with no HDA audio and more than one
-/// is a refusal naming every controller found. Choosing between two live links
-/// would mean walking their codec graphs, which is the driver's work and the
-/// thing this file must not do — and a first match is the defect `pci.rs`
-/// records one layer down.
+/// Bring up the one HDA controller this machine has a codec behind; more than one live link is a
+/// refusal naming every controller found, never a first match.
 pub fn init(devices: &[PciDevice]) {
     let controllers: alloc::vec::Vec<&PciDevice> = devices
         .iter()
@@ -487,25 +399,17 @@ pub fn init(devices: &[PciDevice]) {
 
     let bdl = super::DmaPool::alloc(PERIODS * 16);
     let pcm = super::DmaPool::alloc(PERIODS * PERIOD_BYTES);
-    // The unaligned discipline for the descriptor list: it is written here,
-    // once, and the controller is not told where it is until `SD_BDPL` thirty
-    // lines below — so nothing races these stores, and what is written is a
-    // layout the HDA specification chose (§3.6.2) rather than a Rust one. The
-    // PCM ring is only ever cleared and handed to soundd, so it takes the
-    // pool's own discipline and never reads or writes a `T` at all.
+    // Unaligned: the descriptor layout is the HDA specification's (§3.6.2), not a Rust one.
     let bdl_view = bdl.view().unaligned();
     let pcm_view = pcm.view();
-    // Exclusive: both pools were allocated on the two lines above and no address
-    // of either has reached the controller yet.
+    // Nothing races these writes: the controller is not told this address until `SD_BDPL`, below.
     bdl_view.zero();
     pcm_view.zero();
 
     let entries = stream::build_bdl(pcm_view.phys(), PERIOD_BYTES as u32, PERIODS)
         .expect("hda: the pipeline's own shape builds a descriptor list");
     for (i, entry) in entries.iter().enumerate() {
-        // Bounded by each write: `build_bdl` returns exactly `PERIODS` entries
-        // and the pool was allocated `PERIODS * 16` bytes, so the largest offset
-        // is `(PERIODS - 1) * 16 + 12`.
+        // `build_bdl` returns exactly `PERIODS` entries, matching the pool's `PERIODS * 16` bytes.
         bdl_view.write::<u64>(i * 16, entry.address);
         bdl_view.write::<u32>(i * 16 + 8, entry.length);
         bdl_view.write::<u32>(i * 16 + 12, u32::from(entry.interrupt_on_completion));
@@ -575,18 +479,8 @@ pub fn init(devices: &[PciDevice]) {
     }
 }
 
-/// Every arm of [`write_permit`] and [`read_permit`], run against the bound
-/// controller and reported by name.
-///
-/// **Nothing else can reach it.** The check is gated on holding the device
-/// claim, soundd takes that claim for the life of the boot, and a `Claim` is
-/// exclusive by construction — so no guest test can be the caller. The
-/// alternative, a boot with no soundd, is a machine with no audio, which
-/// answers nothing about a driver's refusals.
-///
-/// The permitted cases really write: `ICW` takes a null verb nothing has told
-/// the controller to send, and `SDnFMT` takes back the word it already holds,
-/// so what runs is the shipped path and not a rehearsal of the table.
+/// Every arm of [`write_permit`] and [`read_permit`], run against the bound controller and
+/// reported by name.
 #[cfg(feature = "boot-actuators")]
 fn allowlist_selftest(stream_offset: u64) {
     let sd = |field: u64| stream_offset + field;
@@ -595,15 +489,13 @@ fn allowlist_selftest(stream_offset: u64) {
         ("SDnFMT", sd(SD_FMT), RegWidth::U16, 0),
         ("SDnCTL", sd(SD_CTL), RegWidth::U8, SD_CTL_IOCE as u32),
         ("SDnCTL-tag", sd(SD_CTL_TAG), RegWidth::U8, (STREAM_TAG as u32) << 4),
-        // Every one below carries a value the kernel must own.
         ("SDnBDPL", sd(SD_BDPL), RegWidth::U32, 0),
         ("SDnBDPU", sd(SD_BDPU), RegWidth::U32, 0),
         ("SDnCBL", sd(SD_CBL), RegWidth::U32, 0),
         ("SDnLVI", sd(SD_LVI), RegWidth::U16, 0xFF),
         ("SDnSTS", sd(SD_STS), RegWidth::U8, 0),
         ("SDnCTL-srst", sd(SD_CTL), RegWidth::U8, SD_CTL_SRST as u32),
-        // A 32-bit write of SDnCTL reaches SDnSTS, which is the interrupt
-        // acknowledgement and the kernel's alone.
+        // A 32-bit SDnCTL write also reaches SDnSTS, the kernel's own interrupt acknowledgement.
         ("SDnCTL-wide", sd(SD_CTL), RegWidth::U32, 0),
         ("INTCTL", INTCTL, RegWidth::U32, 0),
         ("GCTL", GCTL, RegWidth::U32, 0),
@@ -629,14 +521,8 @@ fn allowlist_selftest(stream_offset: u64) {
     }
 }
 
-/// Take one controller out of reset and ask whether anything is on its link.
-///
-/// `None` for every way a function can fail to be one: an I/O BAR, an
-/// unassigned or undersized window, a register window that answers all ones, a
-/// controller that will not reset, and a link with no codec on it. Each says
-/// which, because on the machine this targets `STATESTS` reading zero means
-/// there is no codec to drive at all, and that must not look like a driver
-/// that gave up.
+/// Take one controller out of reset and ask whether anything is on its link; `None` for every way
+/// a function can fail to be one, each named in the log.
 fn probe(pci: &PciDevice) -> Option<(Mmio, u16, u16)> {
     let low = pci.read_config_u32(HEADER_BAR0);
     if low & 1 != 0 {
@@ -711,9 +597,8 @@ fn probe(pci: &PciDevice) -> Option<(Mmio, u16, u16)> {
     Some((regs, gcap, statests))
 }
 
-/// Put the function in D0 if firmware left it lower. A function in D3hot
-/// answers every register read with all ones, which is indistinguishable from a
-/// controller that is not there.
+/// Put the function in D0 if firmware left it lower; D3hot reads all ones, indistinguishable from
+/// an absent controller.
 fn power_up(pci: &PciDevice) {
     let Some(cap) = pci.capabilities().find(|c| c.id() == CAP_POWER_MANAGEMENT) else {
         return;
@@ -726,10 +611,8 @@ fn power_up(pci: &PciDevice) {
     spin_ns(PM_D3HOT_RECOVERY.nanos());
 }
 
-/// Hold the controller in reset and release it, waiting for both edges: the bit
-/// reads back only once the controller has acted on it, so a write that is not
-/// read back is a controller that is not there — and `STATESTS` read off one
-/// would report a codec that does not exist.
+/// Hold the controller in reset and release it, waiting for both edges: a write that never reads
+/// back is a controller that is not there.
 fn reset_controller(regs: Mmio) -> bool {
     regs.write_u32(GCTL, 0);
     if !crate::clock::settles(SETTLE_NS, || regs.read_u32(GCTL) & GCTL_CRST == 0) {
@@ -743,8 +626,8 @@ fn reset_controller(regs: Mmio) -> bool {
     true
 }
 
-/// The descriptor's own reset, which is what clears its address and length
-/// registers before the kernel writes the ones it means.
+/// The descriptor's own reset, clearing its address and length registers before the kernel
+/// writes them.
 fn reset_stream(stream: Mmio) -> bool {
     stream.write_u8(SD_CTL, SD_CTL_SRST);
     if !crate::clock::settles(SETTLE_NS, || stream.read_u8(SD_CTL) & SD_CTL_SRST != 0) {
@@ -754,11 +637,8 @@ fn reset_stream(stream: Mmio) -> bool {
     crate::clock::settles(SETTLE_NS, || stream.read_u8(SD_CTL) & SD_CTL_SRST == 0)
 }
 
-/// Arm the completion interrupt, or say why this machine has no HDA audio.
-///
-/// A refusal rather than a panic: a controller that cannot be told a period
-/// completed is one whose every period stays in flight forever, and a machine
-/// that boots and plays nothing is better than one that dies over a peripheral.
+/// Arm the completion interrupt, or say why this machine has no HDA audio; a refusal, never a
+/// panic, over a peripheral.
 fn arm_interrupt(pci: &PciDevice) -> bool {
     let vector = crate::arch::idt::HDA_VECTOR;
     if pci.enable_msix(vector) || pci.enable_msi(vector) {

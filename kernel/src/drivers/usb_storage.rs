@@ -1,48 +1,20 @@
-//! USB mass storage as a [`BlockDevice`].
-//!
-//! The disks themselves live inside the xHCI controller, because that is where
-//! their transfer rings and DMA blocks are and because every command has to
-//! serialise against the event ring the HID path also drains. What lives here
-//! is the handle: one per bound disk, holding nothing but an index and the
-//! geometry the device reported, so the controller lock is taken per operation
-//! and never held across one.
-//!
-//! **This is where an operation's device-time budget is established**
-//! ([`crate::block::begin_operation`]), because this is the layer at which one
-//! call is one operation: below here the driver batches, retries and recovers,
-//! and none of those loops knows what it is part of. What bounds a
-//! `read_blocks` of 64 blocks is therefore the same instant that bounds its
-//! first command.
-//!
-//! **Established on the running context and not passed down**: the deadline
-//! crosses `BlockAccess` and `BlockDevice`, two frames that cannot carry it,
-//! so `xhci::wait/msc.rs`'s three operation entry points
-//! recover it instead. The guard is a `let _op` and not a `let _`: `let _`
-//! drops at the end of the statement, which would end the operation before the
-//! call it bounds.
+//! USB mass storage as a [`BlockDevice`]. Disk state lives in the xHCI
+//! controller; this holds only an index and reported geometry, so the
+//! controller lock is taken per operation and never held across one.
+//! Each `read_blocks`/`write_blocks`/`flush` call opens its own operation
+//! budget via [`crate::block::begin_operation`]; `xhci::wait/msc.rs` recovers
+//! the deadline from the running context rather than a parameter, since it
+//! crosses `BlockAccess`/`BlockDevice` frames that cannot carry it.
+//! The guard must stay named `_op`; `let _` would drop it immediately, ending the operation before the call it bounds.
 
 use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId};
 use crate::log;
 use super::xhci;
 
-/// Where USB disks start in the [`DeviceId`] space. NVMe takes 1; the page
-/// cache keys itself on this, so two devices sharing a number would serve each
-/// other's blocks.
+/// Where USB disks start in the [`DeviceId`] space; must stay clear of NVMe's range since the page cache keys on this.
 const USB_DEVICE_ID_BASE: DeviceId = 16;
 
-/// Disk numbers issued this boot, so `0..count()` names every disk this machine
-/// has bound.
-///
-/// Numbers go out in bind order, which at boot is port order — so on a machine
-/// that boots off USB the stick it booted from is normally 0. *Normally* is not
-/// a guarantee: which device is the boot device is a question about the
-/// firmware's boot entry, not about port order, and answering it is not this
-/// driver's job.
-///
-/// A number never moves and is never reissued, which is what everything above
-/// here depends on: [`open`] hands out a handle keyed on one and a mount holds
-/// that handle for its whole life. An unplugged disk leaves its number behind
-/// naming nothing, rather than passing it to whatever is plugged in next.
+/// Disk numbers issued this boot; `0..count()` names every bound disk, and a number never moves or is reissued.
 pub fn count() -> usize {
     xhci::storage_count()
 }
@@ -62,23 +34,17 @@ pub struct UsbBlockDevice {
     index: usize,
     id: DeviceId,
     blocks: u64,
-    /// What the device addresses in, kept here because asking the controller a
-    /// second time is a second `None` — a skip nobody was going to log. One
-    /// `open` is one answer.
+    /// What the device addresses in; cached here because a second query can return `None`, which this `u32` can't hold.
     lba_bytes: u32,
 }
 
 impl UsbBlockDevice {
-    /// The device's own logical block size, for a caller that has to speak in
-    /// them: a GPT is laid out in these, not in the 4 KiB [`BlockDevice`]
-    /// transfers.
+    /// The device's own logical block size, as used by a GPT — not the 4 KiB [`BlockDevice`] transfer size.
     pub fn logical_block_bytes(&self) -> u32 {
         self.lba_bytes
     }
 
-    /// Count a budget refusal into the flush census on the way through. The
-    /// slow-vs-failed policy is sized off these counts, so they are fed where
-    /// the refusal is already being matched on for the log line.
+    /// Every result must pass through here so budget refusals reach the census the slow-vs-failed policy reads.
     fn noted(&self, done: BlockResult) -> BlockResult {
         if done == Err(BlockError::BudgetExpired) {
             block::census::budget_expired(self.id);
@@ -86,16 +52,7 @@ impl UsbBlockDevice {
         done
     }
 
-    /// Whether the controller will still speak to the disk under this index.
-    ///
-    /// Distinct from a failed transfer, which the trait reports: this answers
-    /// "is there still something there", which is what a caller asks after a
-    /// run of failures. The geometry cannot answer it — a device keeps that
-    /// after recovery has given up on it, which is wrong in the direction that
-    /// keeps a caller retrying.
-    ///
-    /// Read by `usb-storage-gate`'s report and by nothing a shipping kernel
-    /// compiles.
+    /// Whether the controller will still speak to the disk under this index, distinct from a failed transfer — unlike geometry, which stays valid after recovery has already given up on it.
     #[cfg(feature = "boot-actuators")]
     pub fn healthy(&self) -> bool {
         xhci::storage_online(self.index) == Some(true)
@@ -143,14 +100,8 @@ impl BlockDevice for UsbBlockDevice {
     }
 }
 
-/// What this layer's line says happened, which is not the same word for the
-/// two refusals.
-///
-/// **"failed" is a claim about the disk**, and a budget refusal is a claim
-/// about the caller's clock: the driver below already wrote the line naming
-/// [`block::OPERATION`], and repeating "failed" over it makes the composite log
-/// read as a broken stick. `Ok` is unreachable here — the caller
-/// checks — and answers the word that would be least wrong if it were not.
+/// "failed" is a claim about the disk; a budget refusal is a claim about the caller's clock, so the two need different words.
+/// Caller must have already matched `done.is_err()`; an `Ok` here would still print "failed".
 fn gave_up(done: BlockResult) -> &'static str {
     match done {
         Err(BlockError::BudgetExpired) => "ran out of its operation budget",

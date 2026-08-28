@@ -1,8 +1,4 @@
-// Every unsafe block under `mm::` carries a `SAFETY:` comment
-// (`issues/build/clippy-has-never-run-here.md` holds the per-area plan). CI's
-// kernel clippy step runs with `-D warnings`, so `warn` here is what gates: a
-// new undocumented block in this module tree fails CI, while the rest of the
-// kernel (not yet swept) stays silent.
+// CI runs kernel clippy with `-D warnings`; `warn` here gates only this subtree, not the unswept rest.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod pmm;
@@ -13,23 +9,16 @@ mod mmio;
 mod region;
 mod unmapped;
 
-/// Only the ladder in `sched::driver` reads a live allocation's bands, and it
-/// is behind the same feature — so exporting this unconditionally would be a
-/// name nothing in a shipping kernel can call.
+/// Behind the same feature as its only caller, `sched::driver`'s ladder.
 #[cfg(feature = "heap-tripwire")]
 pub use alloc::check_live as check_heap_bands;
-/// The sweep, behind its own feature for the same reason: it reads every live
-/// band in the heap, which is the only thing that tells a band that *absorbed*
-/// a stray write from one that merely *displaced* it.
+/// Reads every live band; only that tells an absorbed stray write from a merely displaced one.
 #[cfg(feature = "heap-sweep")]
 pub use alloc::sweep as sweep_heap_bands;
-/// The sweep's lock hold without the sweep, behind its own feature: the arm
-/// that asks whether what amplifies this class is the allocator's lock or the
-/// delay either instrument spends on the pass path.
+/// Isolates the sweep's lock hold from the sweep itself, to attribute contention correctly.
 #[cfg(feature = "heap-lockspin")]
 pub use alloc::hold_lock as hold_heap_lock;
-/// Unconditional, because `hw::report_contexts` runs on every kernel crash and
-/// a kernel that carries no sweep answers `None` rather than failing to build.
+/// Unconditional: `hw::report_contexts` runs on every crash and must build with no sweep present.
 pub use alloc::sweep_stats;
 pub use dma::{Dma, DmaPool, Unaligned};
 pub use mmio::Mmio;
@@ -42,31 +31,18 @@ pub use pmm::Region;
 /// All physical memory is mapped at this virtual offset.
 pub const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
-/// The kernel's one user page size, and the granularity a translation answers
-/// at. It lives in `toyos-userbound` with every refusal that turns on it; the
-/// rest of the kernel names it `mm::PAGE_2M`.
+/// The kernel's one user page size and translation granularity.
 pub use toyos_userbound::PAGE_2M;
 
-/// The hardware page size — every block-device transfer is a whole multiple
-/// of this, and it is what `paging::PAGE_SIZE_BIT` marks a PDE as mapping
-/// directly instead of through a PT.
+/// The hardware page size; `paging::PAGE_SIZE_BIT` marks a PDE mapping directly at this granularity.
 pub const PAGE_SIZE: u64 = 4096;
 
-/// Round `size` up to the next 2MB boundary.
-///
-/// Only for a size the kernel computed. Use [`align_2m_checked`] for one that
-/// came from outside it.
+/// Rounds `size` up to the next 2MB boundary; only for a size the kernel computed, not outside input.
 pub const fn align_2m(size: usize) -> usize {
     (size + PAGE_2M as usize - 1) & !(PAGE_2M as usize - 1)
 }
 
-/// [`align_2m`] for a size that crossed a trust boundary — an ELF field, a
-/// syscall argument, an extent firmware reported.
-///
-/// The round-up wraps, and a wrapped size is the worst possible failure: an
-/// allocation far *smaller* than the caller asked for, with every later offset
-/// still computed from the request. `None` says the size cannot be expressed,
-/// which is the honest answer and not the same as an allocation failure.
+/// [`align_2m`] for a size that crossed a trust boundary; returns `None` rather than silently wrapping to an undersized allocation.
 pub const fn align_2m_checked(size: usize) -> Option<usize> {
     match size.checked_add(PAGE_2M as usize - 1) {
         Some(sum) => Some(sum & !(PAGE_2M as usize - 1)),
@@ -74,26 +50,7 @@ pub const fn align_2m_checked(size: usize) -> Option<usize> {
     }
 }
 
-/// The largest single allocation the kernel heap can serve.
-///
-/// `KernelPageSource` hands out one 2 MiB page and can hand out no more.
-/// dlmalloc rounds a request up to a whole granule *plus* its own chunk and
-/// segment bookkeeping, so a request that merely fits in 2 MiB still asks the
-/// page source for more than one page — a 2,097,152-byte request asks for
-/// 2,162,688 — which is why the ceiling is not `PAGE_2M` itself.
-///
-/// The 4 KiB of headroom is policy: enough for dlmalloc's own bookkeeping,
-/// which is tens of bytes, so a request of exactly this size is served; and
-/// *not* enough to absorb an alignment, because `memalign` pads by the
-/// alignment before asking for backing, so this size with a 4096-byte
-/// alignment asks the page source for 2,162,688 as well and is refused.
-///
-/// Anything sized from outside the kernel must be refused above this rather
-/// than reaching the allocator. `KernelAllocator::alloc` asserts it for every
-/// heap allocation, before it takes dlmalloc's lock, and `OwnedAlloc::new`
-/// refuses its own; a bare `Vec::with_capacity` sized from untrusted input
-/// still has to check, because the assert is a fail-fast for kernel bugs and
-/// not an error return.
+/// The largest single allocation the kernel heap can serve; untrusted-sized requests must check it themselves, since `KernelAllocator::alloc` only asserts it.
 pub const MAX_HEAP_ALLOC: usize = PAGE_2M as usize - 4096;
 
 /// Whether an address is in the kernel's high-half direct map.
@@ -107,14 +64,10 @@ pub fn is_kernel_addr(addr: u64) -> bool {
 pub struct UserAddr(u64);
 
 impl UserAddr {
-    /// For an address the kernel computed — a region start, a stack top, a
-    /// mapping this address space owns. It asserts nothing about `v`.
+    /// For an address the kernel computed; asserts nothing about `v`.
     pub const fn new(v: u64) -> Self { Self(v) }
 
-    /// For an address that crossed the syscall boundary.
-    ///
-    /// The type's name is a claim, and this is the only constructor that makes
-    /// it true of a number userland chose.
+    /// For an address that crossed the syscall boundary; the only constructor that validates it.
     pub fn checked(v: u64) -> Option<Self> {
         toyos_userbound::is_user_addr(v).then_some(Self(v))
     }
@@ -156,8 +109,7 @@ impl core::fmt::LowerHex for UserAddr {
 }
 
 
-/// Converts between physical addresses and kernel virtual pointers.
-/// Use at the boundary between physical and virtual — not for storing pointers.
+/// Converts between physical addresses and kernel virtual pointers; use only at that boundary, not for storing pointers.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DirectMap(u64);
 
@@ -193,8 +145,7 @@ impl core::fmt::Debug for DirectMap {
     }
 }
 
-/// Initialize the memory subsystem. Call once at boot.
-/// Order: pmm (physical pages) → paging (direct map) → alloc (heap).
+/// Call once at boot, in order: pmm (physical pages) → paging (direct map) → alloc (heap).
 pub fn init(memory_map: &[MemoryMapEntry], reserved: &[Region]) {
     alloc::init_early();
     pmm::init(memory_map, reserved);
