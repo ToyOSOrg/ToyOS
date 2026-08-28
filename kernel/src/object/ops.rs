@@ -4,7 +4,6 @@
 //! object type is a compile error here. Authorization is not here: the
 //! caller has already resolved the handle with the rights the call needs.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
@@ -67,56 +66,68 @@ pub fn install(table: &mut HandleTable, object: KObjectRef) -> Result<RawHandle,
         .map_err(|_| SyscallError::ResourceExhausted)
 }
 
-/// A file opened at `path`, installed in `table`.
+/// A file opened at absolute `path`, installed in `table`.
 pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
     let writable = flags.contains(OpenFlags::WRITE);
     let create = flags.contains(OpenFlags::CREATE);
     let truncate = flags.contains(OpenFlags::TRUNCATE);
     let append = flags.contains(OpenFlags::APPEND);
+    let modifies = writable || create || truncate || append;
 
     let opened = {
         let mut vfs = crate::vfs::lock();
         // Scoped to this block: dropped before the object exists, since `OpenFileState::Drop` re-takes it.
 
+        let intent = if modifies {
+            crate::vfs::ResolveIntent::UserModify
+        } else {
+            crate::vfs::ResolveIntent::KernelOrRead
+        };
+        let target = match vfs.resolve_for_open(path, intent) {
+            Ok(target) => target,
+            Err(e) => return e.to_u64(),
+        };
+
         if create {
-            let (_, file) = vfs.resolve_path("/", path);
+            let (_, file) = vfs.resolve_path("/", target.as_str());
             if file.is_empty() {
                 return SyscallError::InvalidArgument.to_u64();
             }
         }
 
-        if truncate && create {
+        let built = if truncate && create {
             let mtime = crate::clock::nanos_since_boot();
             // `NotFound` is not a failure: truncating past a name that was not there is fine.
             // Any `vfs.delete` error other than `NotFound` is propagated, not swallowed: truncating past it could silently create a file over one the mount could not confirm was missing.
-            match vfs.delete(path) {
+            match vfs.delete(target.as_str()) {
                 Ok(()) | Err(SyscallError::NotFound) => {}
                 Err(e) => return e.to_u64(),
             }
-            vfs.create_file(path, mtime).map(|file_id| (file_id, mtime, 0))
+            vfs.create_file(target.as_str(), mtime).map(|file_id| (file_id, mtime, 0))
         } else {
             // `CREATE` acts on `NotFound` and nothing else — not on every refusal a mount can return.
-            match vfs.open_file(path) {
-                Ok(file_id) => vfs.file_mtime(path).map(|mtime| {
+            match vfs.open_target(&target) {
+                Ok(file_id) => vfs.mtime_target(&target).map(|mtime| {
                     let position =
                         if append { file_cache::size(file_id) as usize } else { 0 };
                     (file_id, mtime, position)
                 }),
                 Err(SyscallError::NotFound) if create => {
                     let mtime = crate::clock::nanos_since_boot();
-                    vfs.create_file(path, mtime).map(|file_id| (file_id, mtime, 0))
+                    vfs.create_file(target.as_str(), mtime).map(|file_id| (file_id, mtime, 0))
                 }
                 Err(e) => Err(e),
             }
-        }
+        };
+        built.map(|(file_id, mtime, position)| (target, file_id, mtime, position))
     };
 
-    let (file_id, mtime, position) = match opened {
+    let (target, file_id, mtime, position) = match opened {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
     };
     let object = KObjectRef::File(FileObject::new(OpenFileState {
-        path: String::from(path),
+        path: target.into_string(),
         file_id,
         position,
         mtime,
