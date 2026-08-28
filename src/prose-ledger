@@ -23,8 +23,8 @@ kernel-loom/tests/ticket_lock.rs 31 1
 kernel-loom/tests/tlb_shootdown.rs 93 2
 kernel/src/actuator.rs 84 0
 kernel/src/arch/apic.rs 54 0
-kernel/src/arch/control_regs.rs 61 0
-kernel/src/arch/cpu.rs 59 0
+kernel/src/arch/control_regs.rs 66 0
+kernel/src/arch/cpu.rs 60 0
 kernel/src/arch/entry.rs 30 0
 kernel/src/arch/fpu.rs 32 0
 kernel/src/arch/idt/device_irq.rs 12 0
@@ -180,7 +180,7 @@ kernel/src/vfs.rs 45 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/assets.rs 123 0
-src/build.rs 669 3
+src/build.rs 670 3
 src/buildlock.rs 378 5
 src/ci.rs 105 1
 src/day.rs 16 1
@@ -277,6 +277,8 @@ tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
 tests/toyos-rust-tests/src/bin/futex_wake_counts.rs 167 0
+tests/toyos-rust-tests/src/bin/gsbase_locked.rs 2 0
+tests/toyos-rust-tests/src/bin/gsbase_probe.rs 2 0
 tests/toyos-rust-tests/src/bin/handle_basic.rs 121 2
 tests/toyos-rust-tests/src/bin/handle_kill_policy.rs 207 4
 tests/toyos-rust-tests/src/bin/handle_lifetime.rs 94 1
@@ -349,7 +351,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4848 23
+tests/toyos.rs 4858 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

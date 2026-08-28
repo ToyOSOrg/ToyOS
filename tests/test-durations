@@ -181,6 +181,7 @@ fpu_isolation 14662
 fs_large_file 94
 fs_truncate_persist 17
 futex_wake_counts 1007
+gsbase_locked 13091
 handle_basic 19
 handle_kill_policy 515
 handle_lifetime 33

@@ -191,6 +191,8 @@ const RUST_SKIP: &[&str] = &[
     "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
+    // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
+    "gsbase_probe",
     "test_panic_child",
     "i8042_keyboard",
     "i8042_mouse",
@@ -225,6 +227,8 @@ const RUST_SKIP: &[&str] = &[
     // one — and a second boot on the kernel that saves nothing, which is the
     // only thing that proves the arms have teeth.
     "fpu_isolation",
+    // Its host driver boots two kernels to compare, so a bare run says nothing.
+    "gsbase_locked",
     // Needs netd with a NIC. `netd_connection_caps` runs it on tests/netcase.
     "netd_caps",
     // Same reason, same config: `netd_hostile_peer` runs it there.
@@ -574,6 +578,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // packing (run 31705986758) is a Cost row, the same shape
     // `desktop_window_child` carries, not a reclassification.
     ("fpu_isolation", Sched::Parallel, Tier::Nightly),
+    // Two boots, exit codes only (no clock, Parallel). Nightly for `Cost`: its
+    // second (`user-writable-gsbase`) kernel double-boots it over the ceiling.
+    ("gsbase_locked", Sched::Parallel, Tier::Nightly),
     // The fourth declared kernel build, booted so that the scheduler core's
     // `feature = "check"` instruments are compiled and executed by a CI run at
     // all. One of its verdicts is a *quantile* of the guest's published
@@ -9341,6 +9348,74 @@ fn run_machine_test(
             );
             Ok(())
         }
+        "gsbase_locked" => {
+            // Two boots that must differ: the shipped kernel #UDs the GS-base
+            // primitive; `user-writable-gsbase` (the fix reverted) leaves it.
+            let one_cpu = || BootOptions { smp: 1, ..BootOptions::default() };
+
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, one_cpu());
+            serial::Serial::boot(&qemu).must_be_clean()?;
+            let result = qemu.run_test("test_rs_gsbase_locked", Duration::from_secs(120));
+            if let Some(err) = &result.error {
+                return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+            }
+            if !check_rust_result(&result) {
+                return Err(format!("gsbase_locked failed on the shipped kernel:\n{}", result.stdout));
+            }
+            // Reached and refused, not skipped: the #UD is the kernel's `SIGILL`.
+            if !result.serial.contains("SIGILL") {
+                return Err(format!(
+                    "gsbase_locked passed but no SIGILL: the probe never reached the instruction\n{}",
+                    result.serial
+                ));
+            }
+            for line in result.stdout.lines() {
+                eprintln!("  [gsbase] {}", line.trim());
+            }
+            drop(qemu);
+
+            let mut blind = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { kernel_features: &["user-writable-gsbase"], ..one_cpu() },
+            );
+            serial::Serial::boot(&blind).must_be_clean()?;
+            let negative = blind.run_test("test_rs_gsbase_locked", Duration::from_secs(120));
+            if let Some(err) = &negative.error {
+                return Err(format!(
+                    "the negative-control guest stopped answering: {err}\nserial:\n{}",
+                    negative.serial
+                ));
+            }
+            if negative.exit_code == Some(0) {
+                return Err(format!(
+                    "the `user-writable-gsbase` kernel passed `gsbase_locked`, so the gate \
+                     asserts nothing:\n{}",
+                    negative.stdout
+                ));
+            }
+            // Present, not merely a different exit: a kernel-half GS base leaked.
+            let leaked = negative
+                .stdout
+                .lines()
+                .chain(negative.serial.lines())
+                .filter_map(|l| l.split("base=0x").nth(1))
+                .filter_map(|h| u64::from_str_radix(h.split_whitespace().next().unwrap_or(""), 16).ok())
+                .find(|&b| b >= 0xffff_8000_0000_0000);
+            if leaked.is_none() {
+                return Err(format!(
+                    "the control exited nonzero but leaked no kernel GS base:\n{}",
+                    negative.stdout
+                ));
+            }
+            eprintln!(
+                "  [gsbase] user-writable-gsbase: exit {:?}, which is the gate having teeth",
+                negative.exit_code
+            );
+            Ok(())
+        }
         "sched_check_build" => {
             // The scheduler core's own instruments, run on a real machine —
             // spec §10.2's on-target counterpart to everything the simulator
@@ -12069,7 +12144,9 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         (9, "OSFXSR", true),
         (10, "OSXMMEXCPT", true),
         (12, "LA57", false),
-        (16, "FSGSBASE", true),
+        // Clear: `CR4.FSGSBASE` gates RD/WR FS/GS BASE at every CPL (Intel SDM
+        // Vol. 3A §2.5, Vol. 2 `WRGSBASE`), so no Ring 3 thread aims `GS.base`.
+        (16, "FSGSBASE", false),
         (18, "OSXSAVE", false),
         // Not a bit the machine may withhold: `toyos_build::qemu::CPU_KVM` and
         // `CPU_TCG` are the only two CPUs this repository launches and both name
@@ -12165,7 +12242,7 @@ fn control_regs_verdict() -> Result<(), String> {
     /// The pre-fix machine, `smp=4`, TCG, read off this tree on 2026-08-08:
     /// firmware's registers on the BSP and INIT's on every AP.
     const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);
-    const DECLARED: (u64, u64) = (0x8001_0033, 0x0031_0668);
+    const DECLARED: (u64, u64) = (0x8001_0033, 0x0030_0668);
 
     fn log(cpus: &[(u64, u64)]) -> String {
         cpus.iter()
