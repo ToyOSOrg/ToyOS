@@ -3,20 +3,8 @@ use toyos_sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
 use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state};
 use crate::hw::HW;
 
-// Ring 0 path re-arms the one-shot timer itself: without re-arming, a fire
-// while in Ring 0 would silently disable preemption forever. need_resched
-// gets picked up at the next kernel→user exit.
-//
-// **The Ring 3 path runs `kernel_exit_to_user_check` like every other return
-// to userland, and it was the one vector that did not.** `apic::kick_cpu` sends
-// TIMER_VECTOR, so this stub is where a retire's own IPI lands — and a thread
-// killed while running in Ring 3 was preempted here, put in the dying list,
-// picked straight back off it with a fresh quantum, and returned to userland
-// with the kill pending and nothing on the path that reads it. Once per tick,
-// for as long as the thread cared to loop: "a killed thread is never dispatched
-// into *userland* again" was false without a bound. `exit_if_killed` lives in
-// that epilogue, which is why the fix is to join it rather than to add a second
-// check here.
+// Ring 0 re-arms the timer itself; without it, a fire in Ring 0 disables preemption for good, since the one-shot never refires on its own.
+// Ring 3 exit runs `kernel_exit_to_user_check` like every other return to userland: skipping it here let a thread killed in Ring 3 be redispatched to userland with the kill unread.
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn timer_entry() {
     ring3_naked_asm!(
@@ -24,7 +12,6 @@ pub(super) extern "sysv64" fn timer_entry() {
         "test dword ptr [rsp + 8], 3",
         "jz 2f",
 
-        // Ring 3: preempt — save GPRs
         "push 0", // dummy error code for stack layout consistency
         "push r15", "push r14", "push r13", "push r12",
         "push r11", "push r10", "push r9",  "push r8",
@@ -33,8 +20,7 @@ pub(super) extern "sysv64" fn timer_entry() {
 
         save_user_state!(),
 
-        // Re-arm before Rust runs so the timer survives even if the handler
-        // path panics before scheduler::do_preempt → arm_one_shot.
+        // Re-arm before Rust runs so the timer survives even if the handler path panics before scheduler::do_preempt → arm_one_shot.
         "mov ecx, 0x838",
         "mov eax, dword ptr gs:[{armed_ticks}]",
         "xor edx, edx",
@@ -42,14 +28,11 @@ pub(super) extern "sysv64" fn timer_entry() {
 
         "call {handler}",
 
-        // IF is 0 here (interrupt gate, and the handler never sti's), which is
-        // the epilogue's entry contract. The user machine state is parked on
-        // this kernel stack across it, exactly as `device_irq` parks it.
+        // IF is 0 here (interrupt gate, no sti), the epilogue's entry contract; user state stays parked on this kernel stack across it, as `device_irq` also parks it.
         "call {exit_to_user}",
 
         restore_user_state!(),
 
-        // Restore GPRs
         "pop rax",  "pop rbx",  "pop rcx",  "pop rdx",
         "pop rsi",  "pop rdi",  "pop rbp",
         "pop r8",   "pop r9",   "pop r10",  "pop r11",
@@ -58,10 +41,7 @@ pub(super) extern "sysv64" fn timer_entry() {
         "iretq",
 
         "2:",
-        // The census's two `add`s, written here because this branch has no
-        // Rust half to put them in — `timer_handler` carries the Ring 3 path's
-        // pair. No register and no `lock` (`irq_census`), and the flags they
-        // write are dead: the `test` above has already branched.
+        // No Rust half on this branch, so these two `add`s inline what `timer_handler` does for Ring 3; flags are dead after the `test` above, so none are saved.
         "add qword ptr gs:[{irq_total}], 1",
         "add qword ptr gs:[{irq_timer}], 1",
         "push rax",
@@ -96,21 +76,14 @@ pub(super) extern "sysv64" fn timer_entry() {
 
 extern "sysv64" fn timer_handler() {
     crate::irq_census::irq_took!(Timer);
-    // Only the Ring 3 tick reaches here — the stub above branches away first
-    // — so the interrupted context is user code and this CPU holds no `Lock`.
-    // Everything below rests on that: the pass at the bottom drains the input
-    // drivers. `Lock::lock` raises
-    // the preempt count, so a nonzero count here is that gate having gone.
+    // Only the Ring 3 tick reaches here, so the interrupted context is user code and holds no `Lock`; the assert below checks that gate.
     assert_eq!(
         crate::preempt::count(),
         0,
         "the timer handler ran in kernel context, where a lock may be held",
     );
 
-    // Through the `Machine` boundary rather than the ring directly: this
-    // handler is the driver entry the cutover builds on, and routing it now
-    // is what puts the boundary's trace path on the highest-rate event the
-    // kernel has.
+    // Routed through `Machine` rather than the ring directly: this handler is the driver entry the boundary cutover builds on.
     HW.trace(TraceEvent {
         ts: HW.now(),
         cpu: CpuId(crate::arch::percpu::cpu_id()),

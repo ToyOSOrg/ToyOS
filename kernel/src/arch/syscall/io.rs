@@ -1,18 +1,10 @@
-//! `read` and `write` — the hot path of the whole ABI — and the four places a
-//! read that came back empty parks.
+//! Blocking `read`/`write` register on the wait queue before re-checking the
+//! condition — closing the check-then-block window — and never park while
+//! holding a `with_process_data` guard.
 //!
-//! Both blocking calls are one loop: resolve the handle under the process's own
-//! lock, ask the object, and if it gave nothing decide *where* to wait from the
-//! object itself ([`ReadBlock`], [`WriteBlock`]) and park with the guard already
-//! gone. Each variant carries what its own re-check needs, because the queue is
-//! registered on *before* the condition is re-read — which is what closes the
-//! check-then-block window — and nothing may hold a `with_process_data` guard
-//! across the park, which the baseline tripwire refuses by construction.
-//!
-//! The buffers arrive already bounded: `super::dispatch` turned the caller's
-//! pointer and length into a [`UserBytes`] or [`UserBytesMut`] window before
-//! anything here ran, and neither type hands out a reference to a page userland
-//! can still write.
+//! Buffers arrive already bounded: `super::dispatch` converts the caller's
+//! pointer and length into a [`UserBytes`]/[`UserBytesMut`] window before
+//! this module runs.
 
 use crate::completion;
 use crate::object::{ops, KObjectRef};
@@ -32,27 +24,23 @@ use super::handles::with_object_ref;
 enum WriteBlock {
     Pipe(pipe::PipeId),
     Refused(u64),
-    /// Carried out of the process's lock rather than answered inside it:
-    /// `HandleError::refuse` may take the process down and cannot run under a
-    /// guard.
+    /// Carried out of the process's lock: `HandleError::refuse` may take the
+    /// process down and cannot run under a guard.
     BadHandle(crate::object::HandleError),
 }
 
-/// What `sys_read` parks on when the handle has nothing to give. Each variant
-/// carries what its own re-check needs — the queue is registered on *before*
-/// the condition is re-read, which is what closes the check-then-block window.
+/// What `sys_read` parks on when the handle has nothing to give.
 enum ReadBlock {
     Pipe(pipe::PipeEnd, pipe::PipeId),
     VirtioSound,
     Hda,
-    /// A console read re-polls, because nothing posts a serial key; a claimed
-    /// keyboard is woken by its own IRQ and waits with [`Deadline::never`].
+    /// A console read re-polls; a claimed keyboard waits with
+    /// [`Deadline::never`], woken by its own IRQ.
     Keyboard(Deadline),
     /// Nothing to wait for: the answer is this word.
     Refused(u64),
-    /// Carried out of the process's lock rather than answered inside it:
-    /// `HandleError::refuse` may take the process down and cannot run under a
-    /// guard.
+    /// Carried out of the process's lock: `HandleError::refuse` may take the
+    /// process down and cannot run under a guard.
     BadHandle(crate::object::HandleError),
 }
 
@@ -100,11 +88,8 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
     }
 }
 
-/// Where a read that came back empty parks, decided from the object itself.
-///
-/// Only these four wait. A mouse, a NIC and a framebuffer answer `NotFound` to
-/// a blocking read that has nothing — which is what they did as descriptors,
-/// and what their holders already build around.
+/// Only these four device classes block; the rest answer `NotFound` on an
+/// empty blocking read.
 fn read_block_device(claim: &crate::object::device::DeviceClaim) -> ReadBlock {
     match claim.class() {
         device::DeviceType::Keyboard => ReadBlock::Keyboard(Deadline::never()),
@@ -118,14 +103,8 @@ fn read_block(object: &KObjectRef) -> ReadBlock {
     match object {
         KObjectRef::Device(_) => unreachable!("a device claim blocks via `read_block_device`"),
         KObjectRef::Console(_) => {
-            /// **The only reason a serial-console read ever returns.**
-            /// The park is on `waitqs::KEYBOARD`, whose only waker is the
-            /// i8042/USB keyboard — a *different* device from the one this
-            /// read is about. The 16550's IER is written to zero and
-            /// `virtio_console` has no handler at all, so nothing posts a
-            /// serial key and what ends this wait is the re-poll and nothing
-            /// else. It is the [`Cadence`] of a poll on
-            /// `serial::has_data`, which C10 makes explicit.
+            // Parks on `waitqs::KEYBOARD` and re-polls: nothing posts a
+            // serial-console key, so the timer alone wakes it.
             const CONSOLE_REPOLL: Cadence = Cadence::every(
                 Duration::from_millis(10),
                 "nothing posts a serial-console key, so this rate is the whole of the wake",
@@ -148,12 +127,9 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                 Ok(object) => object,
                 Err(e) => return Err(ReadBlock::BadHandle(e)),
             };
-            // A device description installs handles for the buffers it names,
-            // so that one arm needs the table mutably and the borrow above has
-            // to end first. Resolving twice costs a slot lookup on a path that
-            // runs once per device per boot; cloning the `Arc` on the common
-            // path would cost an atomic read-modify-write on the hottest
-            // syscall in the kernel.
+            // Resolved twice rather than cached: this path runs once per
+            // device per boot, but cloning the `Arc` would cost an atomic
+            // RMW on the hottest syscall in the kernel.
             if matches!(object, KObjectRef::Device(_)) {
                 let claim = data
                     .handles
@@ -247,10 +223,7 @@ pub(super) fn sys_read_nonblock(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
             Ok(object) => object,
             Err(e) => return Err(e),
         };
-        // The two-step [`sys_read`] makes, for the same reason: a device
-        // description installs handles for the buffers it names, so that arm
-        // needs the table mutably and the borrow above has to end first. This
-        // is the path the compositor reads its keyboard and its mouse on.
+        // Same two-step as `sys_read`, for the same reason.
         if matches!(object, KObjectRef::Device(_)) {
             let claim = data
                 .handles
