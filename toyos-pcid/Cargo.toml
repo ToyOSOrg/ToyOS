@@ -1,0 +1,26 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-userbound,
+# toyos-dma and toyos-proclife: it is pure, it has no dependencies, and its
+# tests run on the host.
+#
+# What lives here is the one decision that keeps two live address spaces from
+# ever naming the same PCID: which tag a new address space is handed, and when a
+# returned tag is safe to hand out again. The kernel's `mm::paging` is the only
+# caller. It is a crate rather than a function in `paging.rs` because a tag
+# reissued while its address space is live aliases two spaces' translations with
+# no fault — a boundary defect that cannot be asked a question in a guest, only
+# survived — and because the host has no PCID, so the guest suite cannot exercise
+# the path at all.
+#
+# `counting-allocator` is the negative control: it reverts `PcidPool` to the bare
+# monotonic counter that wrapped at 4095 and reissued a live tag, and the
+# isolation tests red under it. Never a default and reached by no kernel build.
+
+[package]
+name = "toyos-pcid"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+counting-allocator = []

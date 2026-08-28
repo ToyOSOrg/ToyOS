@@ -1545,7 +1545,7 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     }
     dump_region("rip", rip);
 
-    let fs_base = crate::arch::cpu::rdfsbase();
+    let fs_base = crate::arch::cpu::read_fs_base();
     if fs_base != 0 {
         log!("  FS base: {:#x}", fs_base);
         if let Some(self_ptr) = read_user(fs_base) {
