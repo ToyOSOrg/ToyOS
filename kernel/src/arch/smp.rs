@@ -16,14 +16,10 @@ const TRAMPOLINE_VECTOR: u8 = 0x08;
 const AP_STACK_SIZE: usize = 64 * 1024;
 const DATA_OFFSET: usize = 0xF00;
 
-/// The token the latest-launched AP echoed once it reached `ap_entry`; `0` means
-/// no AP has answered for the current attempt. Its width is the attempt token,
-/// not a flag, so a stale AP from an earlier attempt cannot be read as this one.
+/// The token the latest-launched AP echoed at `ap_entry`, not a flag, so a stale
+/// AP cannot be read as this one; `0` means none has.
 static AP_STARTED: AtomicU32 = AtomicU32::new(0);
 
-/// The count, the id↔LAPIC map, and the one release/answer word. An id is
-/// committed only after its AP echoes the attempt token, so `0..cpu_count()` is
-/// the online set with no dead slot.
 static ROSTER: Roster = Roster::new();
 
 const _: () = assert!(crate::smp_roster::MAX_CPUS == crate::scheduler::MAX_CPUS);
@@ -38,14 +34,12 @@ pub fn apic_id_for(cpu_id: u32) -> u32 {
     ROSTER.apic_id(cpu_id)
 }
 
-/// True once a shootdown must wait for siblings; the same word the APs are
-/// released by, read by `arch::tlb`.
+/// True once a shootdown must wait for siblings; the word the APs are released by.
 pub(crate) fn answering() -> bool {
     ROSTER.answering()
 }
 
-/// Signal APs that the kernel is fully initialized and can join the scheduler; also the point a TLB shootdown waits for acknowledgements from.
-// One store: releasing the APs and answering their shootdowns are the same fact, so no CPU can see itself released while a shootdown still skips it.
+/// Release the APs into the scheduler and, by the same store, start answering their shootdowns.
 pub fn set_ready() {
     ROSTER.release();
 }
@@ -201,8 +195,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     for &ap_id in &madt.apic_ids {
         if ap_id == bsp_id { continue; }
 
-        // The roster refuses an id at or above `MAX_CPUS`, so a firmware
-        // over-reporting CPUs stops here rather than at an out-of-range store.
+        // Refused at MAX_CPUS, bounding a firmware that over-reports CPUs.
         let Some(attempt) = ROSTER.begin_attempt() else {
             log!("SMP: roster full at {} CPUs; ignoring further MADT entries", cpu_count());
             break;
@@ -230,7 +223,6 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         /// SDM §8.4.4.1 asks 200us here; a millisecond gives room and is paid once per AP.
         const BETWEEN_SIPIS: Delay =
             Delay::from_spec(Duration::from_millis(1), "SDM §8.4.4.1, between the two SIPIs");
-        // Staging the failed-AP arm QEMU never takes: skip this AP's startup so it never answers.
         if !skip_startup(attempt.id()) {
             apic::send_init(ap_id);
             delay(AFTER_INIT);
@@ -254,24 +246,19 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             core::hint::spin_loop();
         }
 
-        // Commit only on this attempt's own token: an id and its slot are spent
-        // here and nowhere else, so `0..cpu_count()` stays the dense online set.
+        // Commit only on this attempt's own token, so `0..cpu_count()` stays dense.
         if AP_STARTED.load(Ordering::Acquire) == attempt.token() {
             ROSTER.commit(attempt, ap_id);
             log!("SMP: AP cpu{} lapic={} online", attempt.id(), ap_id);
         } else {
-            // The AP never answered for this attempt. Its id may be held by a slow
-            // AP that will self-park, and the trampoline it read may still be live,
-            // so neither the id nor the page is reused: bring-up stops here.
+            // Neither the id nor the trampoline is reused after a failure: stop here.
             log!("SMP: AP cpu{} lapic={} failed to start! remaining APs stay offline", attempt.id(), ap_id);
             break;
         }
     }
 }
 
-/// Skip the startup IPI for the AP that would be cpu2, so a non-last AP never
-/// starts — the actuator that stages the failed-AP arm QEMU cannot reach.
-/// `false` without `boot-actuators`.
+/// The actuator staging a non-last AP that never starts; `false` without `boot-actuators`.
 fn skip_startup(id: u32) -> bool {
     crate::actuator::smp_skip_ap() && id == 2
 }
@@ -291,18 +278,15 @@ extern "C" fn ap_entry() -> ! {
     // Calibration is a one-time BSP measurement; nothing left for an AP to do here.
     apic::init_ap();
 
-    // Echo this attempt's token, not a bare flag, so the BSP counts this AP for
-    // the attempt that launched it and never for a later one.
+    // Echo this attempt's token, so the BSP counts this AP for its own attempt.
     AP_STARTED.store(percpu::ap_token(), Ordering::Release);
 
     while !ROSTER.released() {
         core::hint::spin_loop();
     }
 
-    // Only a CPU the roster committed may join. An AP whose handshake did not land
-    // for its own attempt is a CPU no shootdown targets and the scheduler built no
-    // slot for, so it parks here instead of entering a machine that has no place
-    // for it. The acquire on `released` makes the final count visible.
+    // Only a committed CPU may join: an uncommitted AP has no scheduler slot and
+    // no shootdown targets it, so it parks. The acquire above makes the count visible.
     let me = percpu::cpu_id();
     if me >= cpu_count() {
         log!("CPU {me}: bring-up did not commit; parking");
@@ -323,8 +307,7 @@ fn delay(span: Delay) {
     while clock::nanos_since_boot() - start < span.nanos() {}
 }
 
-/// An uncommitted AP halts for the life of the machine: it holds no scheduler
-/// slot and answers no shootdown, so it must never leave this loop.
+/// An uncommitted AP halts for the life of the machine.
 fn park_ap() -> ! {
     loop {
         // SAFETY: `cli; hlt` on this CPU only; it takes no lock and touches no shared state.

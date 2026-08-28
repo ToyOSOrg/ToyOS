@@ -362,7 +362,6 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 last_armed_ticks: AtomicU32::new(0),
                 log_shard: alloc_log_shard(cpu_id),
                 nmi_active: 0,
-                // Set by `alloc_ap` before the SIPI; the BSP never echoes it.
                 ap_token: 0,
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
             },
@@ -597,7 +596,6 @@ pub fn init_bsp(lapic_id: u32) {
 }
 
 /// Allocate percpu for an AP; the trampoline writes the pointer into IA32_GS_BASE.
-/// `token` is this attempt's bring-up token, echoed by `ap_entry` into `AP_STARTED`.
 pub fn alloc_ap(cpu_id: u32, token: u32) -> *mut PerCpu {
     let ptr = alloc_percpu(cpu_id);
     // SAFETY: `init_bsp`'s argument; this AP hasn't been sent its INIT-SIPI yet, so it ran no instruction.
@@ -643,7 +641,6 @@ pub fn cpu_id() -> u32 {
     gs::read_u32::<OFF_CPU_ID>()
 }
 
-/// This AP's bring-up token, written by the BSP before the SIPI.
 pub fn ap_token() -> u32 {
     gs::read_u32::<OFF_AP_TOKEN>()
 }

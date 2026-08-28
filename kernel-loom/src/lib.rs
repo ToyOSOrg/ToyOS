@@ -147,9 +147,7 @@ pub mod sync;
 #[path = "../../kernel/src/shootdown.rs"]
 pub mod shootdown;
 
-/// The CPU roster and the release/answer word, compiled against loom's atomics so
-/// `tests/smp_bringup.rs` can drive the real publication and release edges. It
-/// names nothing outside `core`/`loom`, which is what lets it compile here at all.
+/// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`.
 #[path = "../../kernel/src/smp_roster.rs"]
 pub mod smp_roster;
 

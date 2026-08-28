@@ -1732,8 +1732,7 @@ mod tests {
                 // for the same span, without the allocator's lock.
                 "pass-spin",
                 "reap-raise-relaxed",
-                // `src/smp_roster.rs`'s `commit` publishes the count relaxed and
-                // `kernel-loom/tests/smp_bringup.rs` reds. Costs no kernel build.
+                // `smp_roster.rs`'s count relaxed; `smp_bringup.rs` reds.
                 "roster-commit-relaxed",
                 "sched-check",
                 // The stray-write tripwire on the per-CPU `CpuSched` record: a
@@ -1754,8 +1753,7 @@ mod tests {
                 // `Relaxed` and `kernel-loom/tests/sleep_lock.rs` reds. Costs
                 // no kernel build, for the same reason as the six above it.
                 "sleeplock-acquire-off",
-                // `src/smp_roster.rs` grows the base's second release store back
-                // and `kernel-loom/tests/smp_bringup.rs` reds. Costs no kernel build.
+                // `smp_roster.rs`'s second release store; `smp_bringup.rs` reds.
                 "smp-ready-split",
                 // The two comparisons that ask who else is standing on a task's
                 // kernel stack: the words a Ring 3 entry takes its stack from,

@@ -1,42 +1,10 @@
-//! Loom: the two ordering edges of AP bring-up.
-//!
-//! Both properties are invisible to every guest test — x86's TSO gives each
-//! store release and each load acquire semantics, so a relaxed edge here behaves
-//! identically on the only architecture ToyOS boots. Each edge is a cargo
-//! feature the kernel never enables and this model must red under.
-//!
-//! **Publication.** A CPU that reads a count reads every slot the count covers:
-//!
-//! ```text
-//! cargo test --manifest-path kernel-loom/Cargo.toml --features roster-commit-relaxed \
-//!   --test smp_bringup
-//! ```
-//!
-//! makes `commit` publish the count relaxed and
-//! [`a_committed_count_never_outruns_its_slot`] reds — a reader sees a count over
-//! a slot the commit has not filled, which in the kernel is a shootdown waiting
-//! on, or an IPI resolving through, a cpu id whose LAPIC mapping is not there yet.
-//!
-//! **Release.** Releasing the APs and answering their shootdowns are one store,
-//! so no CPU sees itself released while a shootdown still skips it:
-//!
-//! ```text
-//! cargo test --manifest-path kernel-loom/Cargo.toml --features smp-ready-split \
-//!   --test smp_bringup
-//! ```
-//!
-//! grows the base's second store back and [`a_released_machine_is_answering`]
-//! reds — a CPU observes the machine released, so an AP may have joined and be
-//! holding translations, while `answering` is still false and a shootdown there
-//! takes the local-only branch that skips it.
-//!
-//! Each assertion is guarded by a static the winning interleaving sets, so a
-//! bounded exploration that never reached the interesting state cannot pass
-//! vacuously — the same guard `tlb_shootdown.rs` documents. The reader is a
-//! thread that has not itself touched the word it observes: a committer that
-//! reserved the id first, or a reader that read the release word first, pins
-//! loom's own view of the coherence order and would hide the very reorder the
-//! control stages.
+//! Loom: AP bring-up's two ordering edges, invisible to a guest test on x86 TSO.
+//! Each is a kernel-never-enabled feature this model must red under:
+//! `--features roster-commit-relaxed` reds publication (a reader sees a count over
+//! an unfilled slot) and `--features smp-ready-split` reds release (a CPU sees the
+//! machine released but not yet answering, so a shootdown skips a joined AP).
+//! The reader is a thread that never touched the word it observes: a thread that
+//! read it first pins loom's coherence order and hides the reorder.
 
 #![cfg(feature = "loom")]
 
@@ -45,23 +13,16 @@ use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use kernel_loom::smp_roster::Roster;
 use loom::sync::Arc;
 
-/// A LAPIC id no uncommitted slot holds; the roster fills a slot with `NO_LAPIC`
-/// (`u32::MAX`) until it commits, so reading this back proves the slot is filled.
+/// A LAPIC id no uncommitted slot holds (the roster fills a slot with `u32::MAX`).
 const LAPIC: u32 = 7;
 
-/// How many times the release reader looks before giving up. Bounded for loom's
-/// reason — an unbounded spin is an unbounded branch it never finishes — and each
-/// turn is a scheduling point at which the release store can land.
+/// Bounded for loom (an unbounded spin never finishes); each turn a scheduling point.
 const POLLS: usize = 4;
 
-/// Set by any interleaving that actually reached the state under test.
+/// Guards against a bounded exploration passing without reaching the state.
 static SAW: AtomicBool = AtomicBool::new(false);
 
 /// A reader that sees a committed count sees the slot it covers.
-///
-/// The BSP reserves cpu1's id, a committer thread fills and publishes it, and a
-/// separate reader thread — one that never read the count itself — observes the
-/// count and, if it has grown, the slot behind it.
 #[test]
 fn a_committed_count_never_outruns_its_slot() {
     SAW.store(false, SeqCst);
@@ -98,13 +59,8 @@ fn a_committed_count_never_outruns_its_slot() {
     );
 }
 
-/// A CPU that sees the machine released also sees it answering.
-///
-/// One thread releases; a reader thread is a shootdown initiator that only
-/// decides its branch once it has observed the release. In the kernel an AP that
-/// has observed the release may already have joined and be holding translations,
-/// so an initiator here that found `answering` false would take the local-only
-/// branch and never flush it.
+/// A CPU that sees the machine released also sees it answering — else a shootdown
+/// there is local-only and skips an AP that observed the release and joined.
 #[test]
 fn a_released_machine_is_answering() {
     SAW.store(false, SeqCst);
