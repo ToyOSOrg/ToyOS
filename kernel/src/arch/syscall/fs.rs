@@ -136,8 +136,10 @@ pub(super) fn sys_rmdir(path: &str) -> u64 {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
-    vfs.remove_dir(&resolved);
-    0
+    match vfs.remove_dir(&resolved) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
 }
 
 pub(super) fn sys_symlink(target: &str, link: &str) -> u64 {

@@ -3,13 +3,68 @@
 //! `head`/`tail` live in the 2 MiB page the process maps and writes itself, so
 //! `tail - head` is a userland-chosen number that must never size a kernel
 //! allocation or index past the ring depth.
+//!
+//! It also holds the one assertion in the tree on an `OP_WATCH` result word: a
+//! two-direction watch must report the readiness that occurred, not the interest.
 
 use core::sync::atomic::Ordering;
 
-use toyos_abi::inbox::{RingHeader, Submission, OP_NOP, SUBMISSION_RING_OFF, SUBMISSIONS_OFF};
+use toyos::AsHandle;
+use toyos_abi::inbox::{
+    Completion, RingHeader, Submission, COMPLETION_RING_OFF, OP_NOP, OP_WATCH, READABLE,
+    SUBMISSIONS_OFF, SUBMISSION_RING_OFF, WRITABLE,
+};
 use toyos_abi::syscall::{self, SyscallError};
 
 const DEPTH: u32 = 8;
+
+/// A `READABLE | WRITABLE` watch on a pipe read end that has a byte queued must
+/// complete with `READABLE` alone. The kernel refuses `WRITABLE` asked alone on
+/// that handle (a read end has no write source at all), so the word it hands
+/// back for the pair must not affirm a writability it denies.
+fn watch_reports_only_the_readiness_that_fired() {
+    let (read, write) = toyos::pipe_pair().expect("a pipe of our own");
+    write.write_nonblock(b"x").expect("one byte into the write end");
+
+    let (inbox, base) = unsafe { syscall::inbox_setup(DEPTH) }.expect("inbox_setup");
+    let ring = unsafe { &*(base.add(SUBMISSION_RING_OFF as usize) as *const RingHeader) };
+    let head = ring.head.load(Ordering::Acquire);
+    let idx = (head & (DEPTH - 1)) as usize;
+    let submission = unsafe {
+        &mut *(base.add(SUBMISSIONS_OFF as usize + idx * core::mem::size_of::<Submission>())
+            as *mut Submission)
+    };
+    *submission = Submission::default();
+    submission.op = OP_WATCH;
+    submission.handle = read.as_handle();
+    submission.op_flags = READABLE | WRITABLE;
+    submission.token = 0x5EED;
+    ring.tail.store(head.wrapping_add(1), Ordering::Release);
+
+    let completed = syscall::inbox_submit(inbox, 1, 1, 0).expect("watch submission");
+    assert_eq!(completed, 1, "the readable watch did not complete");
+
+    let cq = unsafe { &*(base.add(COMPLETION_RING_OFF as usize) as *const RingHeader) };
+    let ch = cq.head.load(Ordering::Acquire);
+    assert_ne!(ch, cq.tail.load(Ordering::Acquire), "no completion was posted");
+    let cidx = (ch & (cq.ring_size - 1)) as usize;
+    let completion = unsafe {
+        &*(base.add(COMPLETION_RING_OFF as usize
+            + core::mem::size_of::<RingHeader>()
+            + cidx * core::mem::size_of::<Completion>()) as *const Completion)
+    };
+    assert_eq!(completion.token, 0x5EED, "the completion is for another submission");
+    assert_eq!(
+        completion.result as u32,
+        READABLE,
+        "a READABLE|WRITABLE watch on a pipe read end reported {}, not READABLE alone — \
+         the kernel echoed the interest mask instead of the readiness that fired",
+        completion.result,
+    );
+
+    syscall::close(inbox);
+    println!("watch result: a two-direction watch reports the direction that fired");
+}
 
 fn main() {
     let (inbox, base) = unsafe { syscall::inbox_setup(DEPTH) }.expect("inbox_setup");
@@ -52,4 +107,6 @@ fn main() {
 
     syscall::close(inbox);
     println!("submission ring header abuse rejected, inbox still usable");
+
+    watch_reports_only_the_readiness_that_fired();
 }

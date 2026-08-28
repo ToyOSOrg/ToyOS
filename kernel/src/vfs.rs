@@ -466,10 +466,38 @@ impl Vfs {
         Ok(())
     }
 
-    pub fn remove_dir(&mut self, path: &str) {
-        self.created_dirs.remove(path);
-        let prefix = format!("{}/", path);
-        self.created_dirs.retain(|d| !d.starts_with(&prefix));
+    /// Remove an empty directory, reporting the real outcome — the `Result` is
+    /// the point, as in [`Self::create_dir`]. A mount root, a missing name, a
+    /// file, and a non-empty directory are each refused, not reported as removed.
+    pub fn remove_dir(&mut self, path: &str) -> Result<(), SyscallError> {
+        let (mount, subdir) = self.resolve_path("/", path);
+        // A mount point (and `/`) is not a directory a caller may remove.
+        if subdir.is_empty() {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let dir = directory(&mount, &subdir);
+
+        let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
+        let names = fs.list(MAX_LIST_ENTRIES)?;
+        let child_prefix = format!("{fs_path}/");
+        let is_file = names.iter().any(|(n, _)| *n == fs_path);
+        let has_file_child = names.iter().any(|(n, _)| n.starts_with(&child_prefix));
+
+        // The name resolves to a file, not a directory.
+        if is_file {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        let created_prefix = format!("{dir}/");
+        let has_created_child = self.created_dirs.iter().any(|d| d.starts_with(&created_prefix));
+        if !(self.created_dirs.contains(&dir) || has_file_child || has_created_child) {
+            return Err(SyscallError::NotFound);
+        }
+        if has_file_child || has_created_child {
+            return Err(SyscallError::InvalidArgument);
+        }
+        self.created_dirs.remove(&dir);
+        Ok(())
     }
 
     pub fn create_symlink(&mut self, path: &str, target: &str) -> Result<(), SyscallError> {
