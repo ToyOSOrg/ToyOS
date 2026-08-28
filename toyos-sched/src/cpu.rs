@@ -1701,8 +1701,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         }
     }
 
-    /// Quantum expiry and RT preemption, the two reasons a running task loses
-    /// the CPU without asking.
+    /// Quantum expiry, RT preemption and a pending kill: the reasons a running
+    /// task loses the CPU without asking.
     fn preempt_if_due(&mut self) {
         let Some(current) = self.cpu.running.as_ref() else {
             return;
@@ -1719,7 +1719,15 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         // regardless, and it would hold the CPU for a full quantum against a
         // ready RT sibling.
         let rt_due = self.cpu.rq.has_rt() && !current.serves_rt_band() && !self.cpu.aged_grant;
-        let due = self.now >= self.cpu.quantum_end || rt_due;
+        // The kill arm makes `handle_retire`'s `need_resched` mean what it says,
+        // rather than leaving a kill bounded by the quantum. Guarded by `aged_grant`
+        // like the RT arm — a corpse keeps its unwind chunk — and by the running
+        // word, `preempt`'s precondition: a killed task mid-commit still holds the
+        // preempt guard, so a real pass never reaches this against `Committing`.
+        let kill_due = current.shared().kill_pending()
+            && !self.cpu.aged_grant
+            && matches!(current.shared().state(), TaskState::Running(_));
+        let due = self.now >= self.cpu.quantum_end || rt_due || kill_due;
         if !due {
             return;
         }
@@ -2878,6 +2886,46 @@ mod tests {
             1,
             "and the one whose quantum expired went back to the dying list",
         );
+        assert_eq!(w.cpus[0].dying[0].task.key(), expiring);
+        assert!(w.cpus[0].rq.is_empty(), "never through the fair queue");
+        w.abandon();
+    }
+
+    /// A killed task loses the CPU on the next pass, not at the quantum it still
+    /// has left: with no quantum expiry and no ready RT task, the kill arm is the
+    /// only thing making this pass due. Without it `expiring` resumes a quantum on.
+    #[test]
+    fn a_killed_task_loses_the_cpu_before_its_quantum_expires() {
+        let mut w = World::new(1);
+        let (expiring, expiring_shared) = w.spawn(C0);
+        w.run_a_pass(C0);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(expiring));
+        expiring_shared.mark_kill();
+
+        // A second teardown already waiting, so where the running corpse lands
+        // stays observable rather than handed straight back by the pick.
+        let (queued, queued_shared) = w.spawn(C0);
+        queued_shared.mark_kill();
+        {
+            let (cpus, _env) = w.split();
+            let task = cpus[0].rq.remove(queued).expect("ready");
+            cpus[0].keep_dying(task, NOW);
+        }
+
+        // NOW + 1 is inside the quantum: only the kill makes this pass due.
+        {
+            let (cpus, env) = w.split();
+            let pass = SchedPass::begin(&mut cpus[0], env, Nanos(NOW.0 + 1));
+            let _ = pass.dispose_none().finish();
+        }
+
+        assert!(w.released().is_empty());
+        assert_eq!(
+            w.cpus[0].running().map(|t| t.key()),
+            Some(queued),
+            "the waiting corpse runs; the killed one did not keep the CPU",
+        );
+        assert_eq!(w.cpus[0].dying_len(), 1);
         assert_eq!(w.cpus[0].dying[0].task.key(), expiring);
         assert!(w.cpus[0].rq.is_empty(), "never through the fair queue");
         w.abandon();
