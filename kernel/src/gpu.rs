@@ -5,14 +5,7 @@ use crate::sync::Lock;
 
 pub const FLAG_HARDWARE_CURSOR: u32 = 1 << 0;
 
-/// What a display driver publishes about its screen.
-///
-/// The three regions are physical ranges and their memory types, not handles: a
-/// fresh [`SharedMemObject`] is minted over each one per claim, because an
-/// object whose handle count has reached zero is retired for good while the
-/// scanout under it outlives every compositor the machine runs.
-///
-/// [`SharedMemObject`]: crate::object::shm::SharedMemObject
+/// Physical scanout/cursor ranges and their memory types, not handles: a fresh shared-memory object is minted over each on every claim.
 pub struct GpuInfo {
     pub scanout: [Region; 2],
     pub cursor: Region,
@@ -23,29 +16,22 @@ pub struct GpuInfo {
     pub flags: u32,
 }
 
-/// Hardware-agnostic GPU interface. Implement this for any display driver
-/// (virtio-gpu, UEFI GOP, etc.) and register it with `gpu::register()`.
+/// Hardware-agnostic GPU interface; register an implementation with `gpu::register()`.
 pub trait Gpu: Send {
     fn present_rect(&mut self, x: u32, y: u32, w: u32, h: u32);
     fn set_cursor(&mut self, hot_x: u32, hot_y: u32);
     fn move_cursor(&mut self, x: u32, y: u32);
-    /// Width and height come straight from userspace. Implementations must
-    /// refuse a resolution they cannot back rather than panic on the way.
+    /// Width/height are unvalidated userspace values; must refuse a resolution it cannot back rather than panic.
     fn set_resolution(&mut self, width: u32, height: u32) -> Result<GpuInfo, SyscallError>;
 }
 
 static GPU: Lock<Option<Box<dyn Gpu>>> = Lock::new(None);
 static INFO: Lock<Option<GpuInfo>> = Lock::new(None);
 
-/// What the machine outside this module derives from the current mode.
-///
-/// One constructor, because the two callers are the two moments it changes —
-/// the driver registering and a resolution being set — and a second copy is how
-/// one of them ends up describing the mode before last.
+/// Derives the `Screen` the rest of the kernel sees from the current `GpuInfo`.
 pub fn screen(info: &GpuInfo) -> crate::device::Screen {
     crate::device::Screen {
-        // A description carries handles into whichever process reads it, and
-        // that process does not exist yet: `try_claim` mints them.
+        // Handles are minted per claim by `try_claim`; the process reading this doesn't exist yet.
         info: toyos_abi::FramebufferInfo {
             scanout: [toyos_abi::HANDLE_INVALID; 2],
             cursor: toyos_abi::HANDLE_INVALID,
@@ -92,10 +78,7 @@ pub fn set_resolution(width: u32, height: u32) -> Result<GpuInfo, SyscallError> 
     let new_info = {
         let mut gpu = GPU.lock();
         let gpu = gpu.as_mut().ok_or(SyscallError::NotSupported)?;
-        // A driver that honours this allocates a new framebuffer and frees the
-        // old one, so anything caching the address would be left writing into
-        // reallocated physical memory. Blind the panic console for the window;
-        // worst case it has no screen, never a wild write.
+        // The driver may free the old framebuffer; blind the panic console so it never writes into reallocated memory.
         crate::drivers::panic_console::detach();
         let result = gpu.set_resolution(width, height);
         if result.is_err() {
@@ -112,13 +95,7 @@ pub fn set_resolution(width: u32, height: u32) -> Result<GpuInfo, SyscallError> 
         pixel_format: new_info.pixel_format,
         flags: new_info.flags,
     });
-    // **Every cached description of the old mode is this function's to
-    // replace**, which is what it means for it to own the invalidation: the
-    // registry answers the *next* framebuffer claim out of these regions, and
-    // the absolute pointer's per-axis scale is a function of this geometry. A
-    // caller doing it for itself is a caller that has to know the driver freed
-    // something, and the panic console — the one consumer that caches an
-    // address rather than a region — is blinded above for the same reason.
+    // This function owns invalidating every cached description of the old mode.
     crate::device::set_framebuffer_info(screen(&new_info));
     Ok(new_info)
 }

@@ -1,44 +1,10 @@
 //! The machine-wide TLB shootdown.
 //!
-//! `arch::idt::tlb` owns vector 0xFE's entry stub; this owns what the vector is
-//! *for*. The protocol itself — the generation counter and the per-CPU
-//! publication — is `crate::shootdown`, which has no hardware in it so that
-//! `kernel-loom` can drive the real code.
-//!
-//! **A shootdown returns when every other CPU has flushed, not when the IPI has
-//! been written.** Callers free on the far side of it, so an early return is a
-//! use-after-free through a sibling's stale translation; and a sibling that
-//! still calls a page write-back while this CPU has made it write-combining is
-//! undefined by SDM Vol. 3A §11.12.4, which permits a machine to hang on it.
-//!
-//! ## The deadlock a synchronous shootdown opens, and why this one does not
-//!
-//! A target spinning with `IF` clear cannot take the IPI. An initiator that
-//! waits for it while holding what it is spinning on never finishes.
-//!
-//! **`IF` is clear for the whole of every syscall** — `arch::syscall`'s
-//! `MSR_FMASK` masks it on the `SYSCALL` gate and nothing sets it again before
-//! `sysretq` — and every IDT gate is entered with it clear too. So the class is
-//! not a window somebody could enumerate: it is every unmap-then-free the kernel
-//! performs, since all of them are reached from a syscall or a fault, plus every
-//! lock any handler takes.
-//!
-//! **So the target answers instead of the initiator abstaining.** `Lock::lock`'s
-//! spin calls [`poll`] on every turn, and the initiator's own wait below calls
-//! `Shootdown::wait_turn`, which answers before it asks — two CPUs that issue
-//! concurrently each spin for the other, so each must be able to answer while
-//! spinning. A flush is safe from anywhere — it takes no lock, allocates
-//! nothing, and a CPU that flushes more often than asked is merely slower — so a
-//! CPU that cannot take the interrupt acknowledges as promptly as one that did.
-//! That closes the class structurally, for locks nobody has written yet as much
-//! as for the ones in the tree today.
-//!
-//! What is left is an `IF=0` spin that is *not* a `Lock` and not this wait: a
-//! driver waiting on a device register inside a handler. Those are latency, not
-//! deadlock, because each carries its own deadline — but the deadline can be
-//! seconds (xHCI inside `drain_irqs`), so [`ACK_TIMEOUT`] is set above the
-//! largest of them and a CPU past it is named in a panic rather than waited for
-//! forever.
+//! `shootdown` returns only once every other CPU has flushed, so callers may
+//! free memory as soon as it returns; every `IF`-clear spin able to block one
+//! answers it directly instead of waiting on the interrupt vector. A stale
+//! memory-type translation surviving an early return is undefined per SDM
+//! Vol. 3A §11.12.4.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -49,59 +15,23 @@ use super::{apic, percpu, smp};
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
-/// Whether a shootdown waits for its siblings yet.
-///
-/// False for the whole of SMP bring-up, and that is not an optimisation. An AP
-/// that has been counted by `CPU_COUNT` is spinning on `SMP_READY` with `IF`
-/// clear — the trampoline's `cli` is never undone until the idle loop — so it
-/// cannot take the IPI, and a driver's `map_mmio` between `boot_aps` and
-/// `set_ready` would wait for a CPU that is structurally unable to answer.
-///
-/// What makes skipping the wait sound is [`join`]: every AP flushes and
-/// publishes on the far side of `SMP_READY`, so a shootdown issued while this
-/// was false is answered retroactively by the join of every CPU that could have
-/// been holding a stale entry for it.
+/// False until [`siblings_answer`] runs: an AP is still spinning on
+/// `SMP_READY` with `IF` clear and cannot answer an IPI yet.
 static SIBLINGS_ANSWER: AtomicBool = AtomicBool::new(false);
 
-/// How long a CPU gets to acknowledge before the machine is declared broken.
-///
-/// Generous on purpose: a target inside `drain_irqs` may be in xHCI enumeration
-/// or endpoint recovery, which spin on `USB_TIMEOUT_NS` = 2 s with `IF` clear.
-/// Anything past that is not a slow CPU, it is a CPU that will never answer, and
-/// a panic naming it is worth more than a hang that looks like every other
-/// freeze.
-///
-/// A [`Tripwire`]: it panics below, and neither a register nor a specification
-/// publishes it. Its *derivation* is `USB_TIMEOUT_NS`, which splits at C10 —
-/// so the number owes a new reason to whichever chunk does that, and the kind
-/// does not change with it.
+/// Set above `USB_TIMEOUT_NS`, xHCI's longest `IF`-clear device spin, so no
+/// legitimate wait trips it.
 const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(5),
     "above the longest IF-clear device spin a target can be inside",
 );
 
-/// Spins between deadline checks. `nanos_since_boot`'s 128-bit divide is
-/// `__udivti3`, an out-of-line call in `compiler_builtins`
-/// (`clock::tsc_deadline`'s doc comment is where that cost and its
-/// `dump_nmi_probe` symptom are recorded), so reading it every iteration
-/// would spend a large fraction of the wait's time outside the spinning code.
+/// Spins between deadline checks; `nanos_since_boot`'s 128-bit divide is too
+/// costly to call on every iteration.
 const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
 
-/// Flush this CPU and every other one, and do not return until they have.
-///
-/// Callers pair this with the page-table write it publishes: write first, then
-/// shoot down, then free. [`crate::mm::Unmapped`] is the type that makes the
-/// pairing hard to get wrong; this is what it calls.
-///
-/// The local flush is the whole TLB and not the one address the caller changed,
-/// because a shootdown answers mutations that are not one address: a direct-map
-/// leaf changing memory type is a 2 MiB window this CPU may hold under any tag,
-/// and a recycled PCID is every address there is. It is also exactly what the
-/// targets do, so the initiator and its siblings end in the same state.
-///
-/// The single address is `mm::paging`'s own and is derived there, in the address
-/// space that was written — never from `CR3`, which on a cross-process unmap
-/// names the caller's process rather than the one being unmapped.
+/// Write the page table, then call this, then free — it returns only once
+/// every CPU has flushed.
 pub fn shootdown() {
     let cpus = smp::cpu_count();
     if !SIBLINGS_ANSWER.load(Ordering::Acquire) || cpus <= 1 {
@@ -110,9 +40,7 @@ pub fn shootdown() {
     }
     let me = percpu::cpu_id() as usize;
     let generation = SHOOTDOWN.issue();
-    // The local flush and this CPU's own acknowledgement are one act: a sibling
-    // that issued while this CPU was writing page tables has the same claim on
-    // an answer from here as this one has on an answer from it.
+    // This CPU answers itself locally instead of by self-IPI.
     SHOOTDOWN.serve(me, crate::mm::paging::flush_tlb_all);
     apic::tlb_ipi();
     for cpu in 0..cpus {
@@ -122,14 +50,8 @@ pub fn shootdown() {
     }
 }
 
-/// Spin until `cpu` has flushed for `generation`, or declare it lost.
-///
-/// **Nothing here may log.** `drivers::serial` takes its backend lock under
-/// `save_and_cli`, so a line printed between the ICR write and the last
-/// acknowledgement is the deadlock this module's rule exists to prevent — the
-/// initiator would hold the one lock a target cannot wait for. The panic at the
-/// deadline is the exception and it is deliberate: by then the wait has already
-/// failed and the machine is going down either way.
+/// Never logs: `drivers::serial`'s lock under `save_and_cli` would deadlock a
+/// target that cannot answer while blocked on it.
 fn wait_for(me: usize, cpu: u32, generation: Generation) {
     let mut spins = 0u32;
     let mut deadline = None;
@@ -161,13 +83,8 @@ pub fn serve_ipi() {
     });
 }
 
-/// Answer a shootdown from a CPU that is not going to take the interrupt.
-///
-/// Called from `Lock::lock`'s spin, which is the one unbounded wait in the
-/// kernel that runs with `IF` clear often enough to matter — see this module's
-/// header. It takes no lock and allocates nothing, so it is safe from inside the
-/// lock primitive itself; the `SIBLINGS_ANSWER` check doubles as the guard that
-/// `percpu::cpu_id` is readable, since GS is set long before `set_ready`.
+/// Answers a pending shootdown without taking a lock or allocating, so it is
+/// safe from inside `Lock::lock`'s spin.
 #[inline]
 pub fn poll() {
     if !SIBLINGS_ANSWER.load(Ordering::Relaxed) {
@@ -177,20 +94,14 @@ pub fn poll() {
     SHOOTDOWN.serve_if_owed(cpu, crate::mm::paging::flush_tlb_all);
 }
 
-/// A CPU joining the machine settles every shootdown issued while it could not
-/// answer one.
-///
-/// Called once, after the AP observes `SMP_READY` and before it can run
-/// anything else — so the flush covers every page-table write the BSP made
-/// during bring-up, and the generation it publishes is the one those writes
-/// produced.
+/// Settle every shootdown issued before this CPU could answer one; called
+/// once after `SMP_READY`.
 pub fn join() {
     let cpu = percpu::cpu_id() as usize;
     SHOOTDOWN.serve(cpu, crate::mm::paging::flush_tlb_all);
 }
 
-/// From here on a shootdown waits. Called by `smp::set_ready`, which is also
-/// what releases the APs from the spin that made them unable to answer.
+/// From here on, `shootdown` waits for siblings; called once by `smp::set_ready`.
 pub fn siblings_answer() {
     SIBLINGS_ANSWER.store(true, Ordering::Release);
 }
@@ -208,23 +119,13 @@ mod delay {
     pub static UNTIL: AtomicU64 = AtomicU64::new(0);
 }
 
-/// How long an arming stays live.
-///
-/// It expires rather than latching: a one-shot arming would be spent by whatever
-/// shootdown came first — a daemon exiting, a `dlopen` — leaving the syscall
-/// under measurement to read zero, and a latch would outlive a test that
-/// panicked before disarming.
+/// Expires rather than latches, so a panicked test can't leave it armed
+/// forever.
 #[cfg(feature = "test-actuators")]
 const ARM_WINDOW_NANOS: u64 = 2_000_000_000;
 
-/// Hold this CPU's acknowledgement back, without holding its flush back.
-///
-/// The delay is *after* the flush and before the publication, so what it stages
-/// is a slow answer and never an incorrect one — a target that skipped its flush
-/// would be the defect rather than an instrument for measuring the fix. What
-/// nothing else can stage: QEMU has no way to make one vCPU answer an IPI late,
-/// and without a late answer the initiator's wait is unobservable, because a
-/// correct wait and no wait at all take the same measurable zero.
+/// Delays after the flush and before publication, so it can only slow a
+/// correct answer, never hide an incorrect one.
 #[cfg(feature = "test-actuators")]
 fn stage_ack_delay() {
     use core::sync::atomic::Ordering;
@@ -241,11 +142,8 @@ fn stage_ack_delay() {
     }
 }
 
-/// The CPU an initiator on this one waits for *last*.
-///
-/// The last rather than any, because [`shootdown`] walks its targets in order: a
-/// wait that covered only the first would still measure long if the delay sat on
-/// cpu 1, and what the gate is about is that every online CPU is waited for.
+/// The last CPU `shootdown` waits for, so the delay is measured regardless of
+/// iteration order.
 #[cfg(feature = "test-actuators")]
 fn last_target() -> Option<u32> {
     let top = smp::cpu_count().checked_sub(1)?;
@@ -255,11 +153,9 @@ fn last_target() -> Option<u32> {
     }
 }
 
-/// Make the last CPU this one waits for answer `nanos` late for the next
-/// [`ARM_WINDOW_NANOS`], take one shootdown, and report what it cost.
-///
-/// The return value is the gate on the primitive; the arming outlives it so the
-/// caller can then time an ordinary syscall and gate the *paths*.
+/// Arms the last-waited CPU to answer `nanos` late, takes one shootdown, and
+/// reports what it cost; the arming outlives the call, so a caller can then
+/// time what follows too.
 #[cfg(feature = "test-actuators")]
 pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
     use core::sync::atomic::Ordering;

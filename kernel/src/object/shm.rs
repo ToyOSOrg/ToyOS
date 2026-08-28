@@ -1,16 +1,8 @@
 //! A region of memory more than one process can see.
 //!
-//! A region is an object: holding a handle to one is the whole of being allowed
-//! to map it, and giving one away is `SYS_HANDLE_SEND`.
-//!
-//! **Two lifetimes, and keeping them apart is the point.** The *mappings* go
-//! when the last handle goes, from the deferred queue with nothing held,
-//! because that is a userland-visible event and a handle a killed thread
-//! stranded must not delay it. The *pages* go when the last `Arc` goes, which
-//! is strictly later — a handle holds an `Arc` — so the unmap and its shootdown
-//! are always in front of the free. A driver that keeps its own `Arc` past a
-//! mode change is relying on exactly that: the compositor's mapping of the old
-//! scanout stays valid until the compositor closes it, and nothing revokes.
+//! Holding a handle allows mapping it; giving one away is `SYS_HANDLE_SEND`.
+//! Mappings are torn down when the last handle goes; pages are freed when
+//! the last `Arc` goes, always later since a handle holds an `Arc`.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -25,15 +17,9 @@ use crate::{DirectMap, UserAddr};
 
 use super::{KObjectVariant, ObjectCore, ZeroHandles};
 
-/// Physical pages a region keeps alive.
-///
-/// Behind an `Arc` because one page set can back several objects: a device
-/// window is a fresh [`SharedMemObject`] per claim — an object whose handle
-/// count has reached zero is retired for good and can never be named again —
-/// while the pages under it are the driver's and outlive every claimant.
-// Never read: holding the vector *is* the job, and the pages go back to the
-// PMM when the last `Arc` to this drops. `expect` rather than `allow`, so a
-// reader that appears has to justify itself.
+/// Physical pages a region keeps alive; behind an `Arc` since one page set
+/// can back several objects.
+// Unread by design: the vector's job is only to stay alive.
 #[expect(dead_code)]
 pub struct Pages(Vec<pmm::PhysPage>);
 
@@ -43,26 +29,22 @@ impl Pages {
     }
 }
 
-/// A physical range and the memory type every mapping of it must carry.
-///
-/// One per region and not one per mapping: SDM Vol. 3A §11.12.4 rules out one
-/// physical page held under two memory types, and the panic console writes
-/// through the direct map while a compositor holds a mapping of the same
-/// scanout.
+/// A physical range and the memory type every mapping of it must carry:
+/// SDM Vol. 3A §11.12.4 forbids one physical page under two memory types.
 #[derive(Clone)]
 pub struct Region {
     pub phys: DirectMap,
     pub size: u64,
     pub cache: CachePolicy,
-    /// The pages, when somebody in the kernel owns them. `None` for a window
-    /// the kernel does not own — firmware's framebuffer, an MMIO aperture.
+    /// The pages, when the kernel owns them; `None` for firmware's
+    /// framebuffer or an MMIO aperture it does not own.
     #[expect(dead_code, reason = "the Arc is what keeps the pages alive; nothing reads it")]
     pub pages: Option<Arc<Pages>>,
 }
 
 impl Region {
-    /// A placeholder for a driver struct built before its buffers exist. Size
-    /// zero, so nothing can be mapped through it if one is ever left behind.
+    /// A placeholder for a driver struct built before its buffers exist:
+    /// size zero maps nothing.
     pub fn empty() -> Self {
         Self { phys: DirectMap::from_phys(0), size: 0, cache: CachePolicy::DeferToMtrr, pages: None }
     }
@@ -71,14 +53,13 @@ impl Region {
 pub struct SharedMemObject {
     pub(super) core: ObjectCore,
     region: Region,
-    /// Where this region is mapped, per process. Emptied by the zero-handle
-    /// hook, which is also the one place the shootdown happens.
+    /// Where this region is mapped, per process; the zero-handle hook empties it.
     mapped_in: Lock<Vec<(Pid, PageTables, UserAddr)>>,
 }
 
 impl SharedMemObject {
-    /// A region over memory somebody else owns: unmapped when the last handle
-    /// goes, never freed here.
+    /// A region over memory somebody else owns: unmapped when the last
+    /// handle goes, never freed here.
     pub fn over(region: Region) -> Arc<Self> {
         assert!(
             region.phys.phys() & (PAGE_2M - 1) == 0,
@@ -92,13 +73,10 @@ impl SharedMemObject {
         })
     }
 
-    /// A fresh allocation, rounded up to whole 2 MiB pages.
-    ///
-    /// Fallible because `size` crossed the syscall boundary: a size that cannot
-    /// be expressed in whole pages is `InvalidArgument` and memory the machine
-    /// does not have is `ResourceExhausted`. No bound is invented above that —
-    /// `alloc_contiguous` already refuses more than free physical memory, which
-    /// is a physical limit rather than a chosen one.
+    /// A fresh allocation, rounded up to whole 2 MiB pages; `InvalidArgument`
+    /// for an unrepresentable size, `ResourceExhausted` when memory is short
+    /// — no cap above that, since `alloc_contiguous` already refuses more
+    /// than free physical memory.
     pub fn create(size: u64) -> Result<Arc<Self>, SyscallError> {
         if size == 0 || (size as usize).checked_add(PAGE_2M as usize - 1).is_none() {
             return Err(SyscallError::InvalidArgument);
@@ -119,29 +97,15 @@ impl SharedMemObject {
         self.region.size
     }
 
-    /// The kernel's own view of the pages, for a subsystem that reads them
-    /// through the direct map — an inbox's ring headers are the one case.
-    ///
-    /// Says nothing about who else can see them. A region reached through this
-    /// while a process holds a mapping of it is memory two writers share, and
-    /// the reader has to treat it that way: atomics, or a volatile read of a
-    /// value it copies out once. `inbox.rs` is where that is spelled out.
+    /// The kernel's own view of the pages, through the direct map; a mapped
+    /// region is memory two writers can share — see `inbox.rs`.
     pub fn phys(&self) -> DirectMap {
         self.region.phys
     }
 
-    /// The same address, for a subsystem that is about to *fill* the pages
-    /// before anybody else can see them.
-    ///
-    /// **The assert is the whole method.** A kernel write through the direct
-    /// map is exclusive only while the region is mapped nowhere; the moment
-    /// [`map_into`](Self::map_into) has run, a sibling thread of the owning
-    /// process can be writing the same bytes and a kernel still initialising is
-    /// racing it. That ordering is easy to reverse by accident and impossible
-    /// to observe when it is wrong, so this states it.
-    ///
-    /// Cheap: one uncontended lock and a length test, once per region ever
-    /// created.
+    /// The same address, before anybody else can see the pages: asserts the
+    /// region is mapped nowhere yet, since after `map_into` a sibling thread
+    /// could otherwise write the same bytes while the kernel is still initialising.
     pub fn phys_before_mapping(&self) -> DirectMap {
         assert!(
             self.mapped_in.lock().is_empty(),
@@ -152,10 +116,8 @@ impl SharedMemObject {
         self.region.phys
     }
 
-    /// Map into `pt`, or answer the address it is already mapped at.
-    ///
-    /// Idempotent per process, so a second `SYS_SHM_MAP` is the first one's
-    /// answer rather than a second window onto the same pages.
+    /// Map into `pt`, or answer the address it is already mapped at;
+    /// idempotent per process.
     pub fn map_into(&self, pid: Pid, pt: &PageTables) -> Result<u64, SyscallError> {
         let mut mapped = self.mapped_in.lock();
         if let Some((_, _, vaddr)) = mapped.iter().find(|(p, _, _)| *p == pid) {
@@ -165,11 +127,9 @@ impl SharedMemObject {
             .lock()
             .alloc_and_map(self.region.phys.phys(), self.region.size, Prot::ReadWrite, self.region.cache)
             .ok_or(SyscallError::ResourceExhausted)?;
-        // A region whose memory type is not RAM's gets a line naming the
-        // process, because that process is the one paying the difference and
-        // nothing else in the machine says which one it is. Read back out of
-        // its page tables, so the line is about the mapping and not the
-        // request.
+        // Logged only for a non-default policy: this process is the one
+        // paying for it. Read back the installed policy, not the request,
+        // so the line describes the mapping.
         if self.region.cache != CachePolicy::DeferToMtrr {
             let installed = pt.lock().user_policy(addr).expect("shm: just mapped");
             crate::log!(
@@ -183,12 +143,8 @@ impl SharedMemObject {
         Ok(addr.raw())
     }
 
-    /// Take this process's mapping away, if it has one.
-    ///
-    /// The virtual address goes back to that process's allocator, so even where
-    /// no physical page is freed the caller still owes a shootdown: a sibling
-    /// holding a stale entry for the address reads whatever the next mapping
-    /// puts there.
+    /// Take this process's mapping away, if it has one; the caller owes a
+    /// shootdown before the freed address can be reissued.
     #[must_use = "the caller owes a shootdown before the address can be reissued"]
     pub fn unmap_from(&self, pid: Pid) -> Option<Unmapped<()>> {
         let mut mapped = self.mapped_in.lock();
@@ -199,10 +155,8 @@ impl SharedMemObject {
     }
 }
 
-/// Every mapping goes, and the flush happens here.
-///
-/// The pages do not: they belong to `Region::pages`, which the last `Arc`
-/// frees. A handle holds an `Arc`, so this always runs first.
+/// Every mapping goes, flushed here; the pages do not, since a handle holds
+/// an `Arc` and `Region::pages` frees them only when the last one drops.
 impl ZeroHandles for SharedMemObject {
     fn on_zero_handles(&self) {
         let mapped = core::mem::take(&mut *self.mapped_in.lock());
