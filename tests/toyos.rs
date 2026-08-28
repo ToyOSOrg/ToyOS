@@ -578,8 +578,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // packing (run 31705986758) is a Cost row, the same shape
     // `desktop_window_child` carries, not a reclassification.
     ("fpu_isolation", Sched::Parallel, Tier::Nightly),
-    // Two boots, exit codes only (no clock, Parallel); `UNMEASURED_MS` until the shards price it.
-    ("gsbase_locked", Sched::Parallel, Tier::Fast),
+    // Two boots, exit codes only (no clock, Parallel). Nightly for `Cost`: its
+    // second (`user-writable-gsbase`) kernel double-boots it over the ceiling.
+    ("gsbase_locked", Sched::Parallel, Tier::Nightly),
     // The fourth declared kernel build, booted so that the scheduler core's
     // `feature = "check"` instruments are compiled and executed by a CI run at
     // all. One of its verdicts is a *quantile* of the guest's published
