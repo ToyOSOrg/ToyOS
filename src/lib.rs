@@ -1,7 +1,12 @@
+/// The gate that an actuator's doc names a reader that exists, read by nothing
+/// but its own tests like `issuegate` and `sourcegate` below.
+#[cfg(test)]
+pub mod actuatorgate;
 pub mod assets;
 pub mod build;
 pub mod buildlock;
 pub mod ci;
+pub mod clippy;
 pub mod day;
 pub mod durations;
 pub mod forkcheck;

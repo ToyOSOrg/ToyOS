@@ -186,6 +186,12 @@ jobs:
       # of wall clock for all three, against this job's 398 s cold. It is placed
       # before the test steps so a lint finding answers without waiting for
       # them, and it pays for the three target directories the cache now keeps.
+      #
+      # `cargo run -- --clippy` runs exactly these five invocations on the dev
+      # host, so a branch verifies this gate's claim before a push rather than a
+      # narrower `cargo clippy -p <crate>`. `src/clippy.rs` holds that list and a
+      # `cargo test --lib` gate that reds if it and this step drift, so the two
+      # cannot verify different sets — keep any edit here in step with that file.
       - name: clippy
         run: |
           set -e -o pipefail
