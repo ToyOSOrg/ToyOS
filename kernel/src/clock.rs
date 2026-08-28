@@ -1,21 +1,7 @@
-//! The machine's clocks: monotonic since boot, and the wall clock anchored to
-//! it once.
-//!
-//! The monotonic half calibrates the TSC against the HPET at boot and reads the
-//! TSC afterwards. The wall-clock half reads the CMOS RTC **exactly once**, in
-//! [`init_wall`], and answers every later question as that reading plus
-//! [`nanos_since_boot`].
-//!
-//! Once and not per call: a CMOS read is a port-I/O handshake that can block on
-//! the update flag for as long as a second, so a process asking the time in a
-//! loop would drive one per iteration — and a per-caller read gives a machine
-//! with two FAT volumes two answers to what time it is and no rule about which
-//! wins.
-//!
-//! Once also means the answer can be *absent*: an RTC that never replies is a
-//! boot with no wall clock, [`local_secs`] and [`utc_secs`] say so in their
-//! return type, and every consumer decides what to do about it. Nothing here
-//! invents 1970.
+//! The machine's clocks: monotonic since boot, calibrated from the HPET at
+//! boot and read off the TSC after; and wall-clock, read from the CMOS RTC
+//! exactly once — a CMOS read can block for up to a second — in
+//! [`init_wall`], and answered after as that reading plus [`nanos_since_boot`].
 
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 
@@ -23,7 +9,6 @@ use crate::mm::paging::CachePolicy;
 use crate::arch::cpu;
 use crate::time::{Delay, Duration, Instant};
 
-// HPET register offsets
 const HPET_CAP: u64 = 0x000;
 const HPET_CFG: u64 = 0x010;
 const HPET_COUNTER: u64 = 0x0F0;
@@ -38,11 +23,9 @@ pub fn init(hpet_base: u64) {
     let hpet_period_fs = cap >> 32;
     assert!(hpet_period_fs > 0, "HPET: invalid counter period");
 
-    // Enable HPET main counter
     let cfg = hpet.read_u64(HPET_CFG);
     hpet.write_u64(HPET_CFG, cfg | 1);
 
-    // Calibrate TSC: measure TSC ticks over ~50ms of HPET time
     const CALIBRATION: Delay = Delay::to_measure(
         Duration::from_millis(50),
         "TSC ticks counted against the HPET; longer is a better ratio and boot time is what it costs",
@@ -68,83 +51,38 @@ pub fn init(hpet_base: u64) {
     log!("TSC: {}MHz (period={}fs, calibrated over {}ms)", tsc_freq_mhz, tsc_period_fs, calibration_ns / 1_000_000);
 }
 
-/// Whether [`nanos_since_boot`] measures anything yet. Before [`init`] the TSC
-/// period is zero and every reading is zero, so a caller that waits on a
-/// deadline would wait forever.
+/// Whether [`nanos_since_boot`] measures anything yet; false before [`init`].
 pub fn calibrated() -> bool {
     TSC_PERIOD_FS.load(Relaxed) != 0
 }
 
-/// Returns nanoseconds since boot. Lock-free, no MMIO, **and it cannot panic**.
-///
-/// [`TSC_BOOT`] is one global, stored by the BSP during [`init`]. A CPU whose
-/// TSC reads below it therefore subtracts to a negative number — and with
-/// overflow-checks on, which every guest build has, that is a panic. `log::emit`
-/// reads this clock inside its publication bracket, where a panic would fire
-/// with `IF` clear and a reservation taken and not yet committed, and the panic
-/// handler's own `log!` would reenter the same shard. **No panic site may be
-/// inside that bracket.**
-///
-/// Saturating, and the direction is the argument rather than the taste. A
-/// trailing CPU's records stamp zero, so they read as the oldest thing the
-/// machine has: `read.rs`'s merge sorts them last and its descent stops at
-/// them, which loses that CPU's lines from a bracketed report and costs nothing
-/// else. Wrapping would stamp them 584 years in the future, where they would
-/// sort ahead of every real record for the life of the boot and take the top of
-/// every panel with them. Losing a CPU's lines is recoverable; being lied to
-/// about which line is newest is not.
-///
-/// It stays an assumption that this does not happen: the log's cross-CPU record
-/// ordering rests on the TSC being invariant and firmware-synchronised, which it
-/// is on the 2020+ x86-64 machines this kernel targets, and
-/// `issues/kernel/ap-tsc-trail-is-assumed-and-never-checked.md` is the
-/// entry for the fact that nothing measures it.
+/// Nanoseconds since boot; lock-free, no MMIO, and never panics — `log::emit`
+/// reads it from inside a bracket where panicking would reenter the log.
+/// Saturating, not wrapping: a trailing CPU reads as oldest, not lying newest after a 584-year wrap.
 pub fn nanos_since_boot() -> u64 {
     let delta = cpu::rdtsc().saturating_sub(TSC_BOOT.load(Relaxed));
     let period_fs = TSC_PERIOD_FS.load(Relaxed);
     ((delta as u128 * period_fs as u128) / 1_000_000) as u64
 }
 
-/// The same reading as an [`Instant`], which is the type arithmetic on it is
-/// allowed in.
-///
-/// **The one bridge between the machine's clock and `crate::time`.** That
-/// module names nothing outside `core` so `kernel-loom` can compile it beside
-/// the completion core; the hardware read lives here, where it already did.
+/// The same reading as an [`Instant`], the type arithmetic on it is allowed in.
+/// The one bridge between hardware and `crate::time`, which stays `core`-only for `kernel-loom`.
 pub fn now() -> Instant {
     Instant::from_nanos_since_boot(nanos_since_boot())
 }
 
-/// A [`cpu::rdtsc`] value `nanos` in the future, for a wait whose loop may not
-/// call anything.
-///
-/// [`nanos_since_boot`]'s 128-bit divide is `__udivti3`, an out-of-line call in
-/// `compiler_builtins`, so a spin that reads the clock every iteration spends a
-/// large fraction of its time at an address that is not in the spinning
-/// function. That is invisible to everything except an instrument that samples
-/// the instruction pointer — and `sched::dump`'s NMI probe is exactly one: it
-/// reports `u128_div_rem` for a CPU that is in the deaf window all along.
+/// The [`cpu::rdtsc`] value `nanos` in the future, for a wait loop that must
+/// not call the nanosecond clock.
 pub fn tsc_deadline(nanos: u64) -> u64 {
     let period_fs = TSC_PERIOD_FS.load(Relaxed);
     let ticks = (nanos as u128 * 1_000_000) / period_fs.max(1) as u128;
     cpu::rdtsc().saturating_add(ticks as u64)
 }
 
-/// Poll `ready` until it holds, or until `nanos` have passed. `false` is the
-/// deadline, and every caller turns it into a refusal that names the register
-/// it was waiting on.
-///
-/// **The one bounded wait a driver spins in, and it reads the TSC rather than
-/// the nanosecond clock.** [`nanos_since_boot`]'s 128-bit divide is an
-/// out-of-line `compiler_builtins` call, while [`tsc_deadline`] and a 64-bit
-/// compare inline: a spin that calls out of itself is a spin an
-/// instruction-pointer sample attributes to `u128_div_rem` instead of to the
-/// loop, which is `src/redlist.rs`'s `dump_nmi_probe` red. Reading the
-/// nanosecond clock per iteration re-opens it, so this direction is a
-/// constraint and not a taste.
-///
-/// Before [`init`] the TSC period is zero, [`tsc_deadline`] saturates and the
-/// wait is unbounded — reachable only by a caller running before phase 2.
+/// Polls `ready` until it holds or `nanos` pass; `false` is the deadline.
+/// Reads the TSC, not [`nanos_since_boot`], because that clock's out-of-line divide
+/// would appear as `src/redlist.rs`'s `dump_nmi_probe` red under an NMI sample.
+/// Before [`init`] the TSC period is zero and the wait is unbounded.
 pub fn settles(nanos: u64, ready: impl Fn() -> bool) -> bool {
     let until = tsc_deadline(nanos);
     while !ready() {
@@ -158,26 +96,15 @@ pub fn settles(nanos: u64, ready: impl Fn() -> bool) -> bool {
 
 /// Unix seconds, in the machine's own zone, at `nanos_since_boot() == 0`.
 static BOOT_LOCAL_SECS: AtomicU64 = AtomicU64::new(0);
-/// Seconds to add to the machine's own zone to get UTC — firmware's
-/// `EFI_TIME::TimeZone`, whose relation is `Localtime = UTC - TimeZone`.
+/// Seconds to add to the machine's zone to get UTC (`Localtime = UTC - TimeZone`).
 static UTC_OFFSET_SECS: AtomicI64 = AtomicI64::new(0);
-/// Whether the two above mean anything. Not a sentinel in either: zero is a
-/// real instant and a real offset.
+/// Whether the two above mean anything; zero is a valid instant and offset, not a sentinel.
 static WALL_KNOWN: AtomicBool = AtomicBool::new(false);
 
-/// Read the RTC, once, and anchor the wall clock to the monotonic one.
-///
-/// Call after [`init`] and before anything that stamps a file or serves a
-/// clock syscall. A machine whose RTC will not answer logs why and boots with
-/// no wall clock, which is a state and not a failure.
+/// Reads the RTC once, after [`init`], and anchors the wall clock to it.
 pub fn init_wall(century_reg: Option<u8>, utc_offset_minutes: Option<i32>) {
-    // A machine whose firmware names a zone. OVMF ships
-    // `EFI_UNSPECIFIED_TIMEZONE` and nothing in QEMU sets the UEFI variable
-    // that would change it, so every emulated boot takes the "assume UTC"
-    // branch and the arithmetic that separates local time from UTC is
-    // otherwise never run. Two hours east, which is the owner's own zone and
-    // the sign that matters: UEFI's relation is `Localtime = UTC - TimeZone`,
-    // so UTC+2 reports -120 and UTC is *behind* what the RTC reads.
+    // OVMF never names a zone, so `rtc_zone_east` is a test actuator forcing
+    // UTC+2 (`Localtime = UTC - TimeZone`, so east is negative: -120).
     let utc_offset_minutes =
         if crate::actuator::rtc_zone_east() { Some(-120) } else { utc_offset_minutes };
 
@@ -201,25 +128,17 @@ pub fn init_wall(century_reg: Option<u8>, utc_offset_minutes: Option<i32>) {
     }
 }
 
-/// What time it is in the zone the machine keeps its clock in — what FAT
-/// entries are stamped with, since FAT stores local time by specification, and
-/// what this boot's log file is named for.
-///
-/// `None` is a machine that never said what time it is.
+/// Local wall-clock time — what FAT stamps use, since FAT stores local time
+/// by specification. `None` if the RTC never answered.
 pub fn local_secs() -> Option<u64> {
     WALL_KNOWN
         .load(Acquire)
         .then(|| BOOT_LOCAL_SECS.load(Relaxed) + nanos_since_boot() / 1_000_000_000)
 }
 
-/// The same instant as seconds since the Unix epoch, which is UTC by
-/// definition. What `SYS_CLOCK_EPOCH` serves and what `SystemTime` is built on.
+/// The same instant in Unix seconds (UTC) — what `SYS_CLOCK_EPOCH` serves.
 pub fn utc_secs() -> Option<u64> {
     let local = local_secs()?;
     Some(local.saturating_add_signed(UTC_OFFSET_SECS.load(Relaxed)))
 }
 
-// The calendar is `toyos-wallclock`'s, and the kernel is one of its callers
-// rather than a second copy of it: `kernel/src/rtc.rs` decodes into
-// `toyos_wallclock::Civil` and `SYS_CLOCK_REALTIME` answers out of it, and the
-// crate's host tests are what stand behind both.

@@ -1,53 +1,21 @@
 //! The one bracket every transition out of Ring 3 uses.
 //!
-//! **The invariant**: a transition out of Ring 3 that can reach another task
-//! must save and restore **the whole** user machine state, and restore it as
-//! the transition's last act before returning to Ring 3 — after any point at
-//! which the task could have been switched. These macros are the only text in
-//! the kernel naming an FP instruction, so "saved some of it" is not
-//! expressible — there is nothing to say it with.
-//!
-//! **Contract.** [`save_user_state`] may be invoked at any stack alignment; it
-//! leaves `rsp` aligned to [`UserFpState`]'s alignment, which is also what a
-//! System V call taken after it needs. [`restore_user_state`] puts `rsp` back
-//! exactly where the save found it. Between them `r11` is scratch: every entry
-//! has already pushed it as part of its GPR save, and one that has not would
-//! lose the user's `r11` regardless.
-//!
-//! **What it saves is everything this kernel permits to exist.** `CR4.OSXSAVE`
-//! is set nowhere, so `XCR0` is 1 and `FXSAVE64` is complete rather than cheap.
-//! Every user thread's x87 register file, control, status and tag words, XMM0-15
-//! and `MXCSR` cross a ring transition intact — including a *pending unmasked
-//! x87 exception*, which `FXSAVE64` carries across without raising it, so it
-//! reaches only the task that caused it.
-//!
-//! **The area is sized by the type, at every site, without the site saying so.**
-//! [`ring3_naked_asm`] appends the two `const` operands the templates name, so
-//! there is nowhere to write a number. That is the whole of the AVX-512 guard:
-//! `XCR0` is 1 today and `FXSAVE64` is therefore complete, and enabling any
-//! further state component means [`UserFpState`] grows and every reservation
-//! grows with it or the build stops. A comment saying the same thing would not.
+//! A transition out of Ring 3 that can reach another task must save and
+//! restore the whole user machine state, as the last act before returning to
+//! Ring 3, after any point the task could have switched. [`save_user_state`]
+//! leaves `rsp` aligned to [`UserFpState`]; [`restore_user_state`] restores it
+//! exactly, and `r11` is scratch between them.
 
 use core::mem::{align_of, size_of};
 
 use super::fpu::UserFpState;
 
-/// A gate whose handler can reach another task before it returns to Ring 3, and
-/// which therefore brackets the user machine state.
-///
-/// The type does not prove the bracket is there — nothing short of reading the
-/// assembly does. What it makes unrepresentable is installing a handler
-/// *without answering the question*, which is the same move `idt_vectors!`
-/// makes one level up for the error-code form: the classification is a column
-/// in one table and cannot silently disagree with the slot it fills.
+/// A gate whose handler can reach another task before returning to Ring 3,
+/// and therefore brackets the user machine state.
 #[derive(Clone, Copy)]
 pub struct Ring3Entry(unsafe extern "sysv64" fn());
 
 /// A gate whose handler cannot reach another task, so it saves nothing.
-///
-/// There are two, and each says why at its row in [`idt_vectors`].
-///
-/// [`idt_vectors`]: super::idt
 #[derive(Clone, Copy)]
 pub struct Ring0Entry(unsafe extern "sysv64" fn());
 
@@ -71,45 +39,21 @@ impl Ring0Entry {
     }
 }
 
-// The bracket reserves `fp_bytes + fp_align` and aligns down, so the area fits
-// whatever the entry's incoming alignment was, and stashes the caller's `rsp`
-// in the slack immediately above it.
+// `fp_bytes + fp_align`, aligned down, fits any incoming `rsp` alignment,
+// with room in the slack above it to stash the caller's `rsp`.
 const _: () = assert!(size_of::<UserFpState>().is_multiple_of(align_of::<UserFpState>()));
 const _: () = assert!(align_of::<UserFpState>() >= 8);
 
-/// `naked_asm!` for an entry that can reach another task, with the save area's
-/// size and alignment supplied from [`UserFpState`], and the **`cld` every Ring 0
-/// entry owes itself** ahead of the body.
-///
-/// **The direction flag is not cleared by the hardware and this kernel's own
-/// `memmove` sets it.** An interrupt or trap gate clears `TF`, `NT`, `RF`, `VM`
-/// and — for an interrupt gate — `IF`; `DF` is in none of those lists
-/// (SDM Vol. 3A §6.12.1). `SYSCALL` clears exactly the bits `IA32_FMASK` names,
-/// and `arch::syscall::init` now names `DF` among them for the same reason.
-/// Meanwhile `compiler_builtins::mem::memmove`'s overlapping-copy path is
-/// `std` … `rep movsb` / `rep movsq` / `rep movsb` … `cld`, three string
-/// operations wide and interruptible for all of it, so a timer tick landing
-/// inside a large overlapping copy hands the whole kernel a set `DF` — and
-/// `memcpy` and `memset` are `rep movs`/`rep stos` **forward**, which under a set
-/// `DF` write the `n` bytes *below* their destination instead of at it.
-///
-/// That writes real data — a return address, a rodata pointer, a live frame — at
-/// an address nothing meant to touch, and it does not stay in the interrupted
-/// flow: `context_switch`'s `pushfq` saves the set `DF` into a context's frame
-/// and a later `popfq` restores it onto a different execution.
-///
-/// Here rather than at each of the five sites, because a Ring 0 entry that forgot
-/// it would be invisible: the machine keeps running and something else dies, a
-/// boot later, somewhere else. The two `ring0` gates are not routed through this
-/// macro and answer for themselves — `idt::nmi` clears it, and `stub_halt_all`
-/// never executes another instruction.
-///
-/// The body must end with a trailing comma, as every `naked_asm!` in this
-/// kernel already does.
+/// `naked_asm!` for an entry that can reach another task: supplies the save
+/// area's size and alignment from [`UserFpState`], and prepends `cld`. The
+/// body must end with a trailing comma.
 #[cfg(not(feature = "entry-df-unclean"))]
 macro_rules! ring3_naked_asm {
     ($($body:tt)*) => {
         core::arch::naked_asm!(
+            // An interrupt/trap gate does not clear `DF`, and this kernel's
+            // forward-only `memmove`/`memcpy` write backward if a tick
+            // interrupts a copy with `DF` set.
             "cld",
             $($body)*
             fp_bytes = const core::mem::size_of::<$crate::arch::fpu::UserFpState>(),
@@ -118,13 +62,8 @@ macro_rules! ring3_naked_asm {
     };
 }
 
-/// The negative control (`entry-df-unclean`, declared in `kernel/Cargo.toml`):
-/// this kernel with the `cld` above taken out.
-///
-/// One instruction, and it replaces the *behaviour* rather than a verdict — the
-/// same argument `fpu-save-nothing` makes for the bracket it takes out.
-/// `arch::syscall::init` answers this name too, putting `DF` back out of the
-/// `SYSCALL` mask, so the control is the whole defect and not half of it.
+/// Negative control (`entry-df-unclean`): the `cld` above removed;
+/// `arch::syscall::init` matches it by taking `DF` back out of `IA32_FMASK`.
 #[cfg(feature = "entry-df-unclean")]
 macro_rules! ring3_naked_asm {
     ($($body:tt)*) => {
@@ -136,10 +75,8 @@ macro_rules! ring3_naked_asm {
     };
 }
 
-/// `naked_asm!` for a trampoline that puts a thread into Ring 3 for the first
-/// time, with the declared state's address supplied from [`fpu`].
-///
-/// [`fpu`]: super::fpu
+/// `naked_asm!` for a trampoline into Ring 3 for the first time: supplies
+/// the declared state's address from `fpu::INITIAL_IMAGE`.
 #[cfg(not(feature = "fpu-save-nothing"))]
 macro_rules! ring3_trampoline_asm {
     ($($body:tt)*) => {
@@ -158,7 +95,8 @@ macro_rules! initial_user_state {
     };
 }
 
-/// Park the user machine state on this kernel stack.
+/// Park the user machine state on this kernel stack, leaving `rsp` aligned
+/// for the System V `call` that follows.
 #[cfg(not(feature = "fpu-save-nothing"))]
 macro_rules! save_user_state {
     () => {
@@ -168,10 +106,8 @@ macro_rules! save_user_state {
             "sub rsp, {fp_align}\n",
             "and rsp, -{fp_align}\n",
             "mov [rsp + {fp_bytes}], r11\n",
-            // Non-waiting, which is the whole reason this family and not
-            // FSAVE: a pending unmasked x87 exception must be *saved*, not
-            // trapped on, and certainly not in Ring 0. The REX.W form, because
-            // plain FXSAVE keeps only the low 32 bits of FIP and FDP.
+            // fxsave64, not fsave/fxsave: non-waiting (won't trap a pending x87
+            // exception) and REX.W-wide (fxsave truncates FIP/FDP to 32 bits).
             "fxsave64 [rsp]\n",
         )
     };
@@ -188,10 +124,8 @@ macro_rules! restore_user_state {
     };
 }
 
-// The negative control (`fpu-save-nothing`, declared in `kernel/Cargo.toml`).
-// Everything the bracket does *except* move the state: the same reservation,
-// the same alignment, the same rsp bookkeeping, so what the gate then observes
-// is one missing instruction and not a different kernel.
+// Negative control (`fpu-save-nothing`): same reservation, alignment and
+// `rsp` bookkeeping as above, without moving the state.
 
 #[cfg(feature = "fpu-save-nothing")]
 macro_rules! ring3_trampoline_asm {

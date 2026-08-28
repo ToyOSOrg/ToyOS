@@ -1,21 +1,11 @@
-//! The virtio-sound stub: bring-up, the virtqueues, and the allow-list.
+//! virtio-sound: bring-up, the virtqueues, and the register allow-list.
 //!
-//! **The line is who writes an address**, and this device is the second to take
-//! that shape after `hda.rs`. A split virtqueue puts every address a virtio
-//! driver ever programs in one place: the descriptor table. So the three tables
-//! here live in a page no process maps,
-//! their chains are built once at bind out of offsets into a region the kernel
-//! allocated, and what the driver gets is the avail rings that select a chain by
-//! index, the used rings that say one came back, and one register write to ring
-//! the doorbell.
+//! Every DMA address lives in the descriptor tables, built once at bind from
+//! kernel-allocated offsets; after bind the driver's whole vocabulary is an
+//! avail-ring index and a doorbell write. Stream selection, format and timing
+//! are soundd's, not this driver's.
 //!
-//! Nothing here decides. Which stream, at what rate, in what format, when a
-//! period is published and when the stream runs are soundd's, and every one of
-//! them is a message the driver writes into a buffer of its own.
-//!
-//! Structure layouts and command codes come from the VirtIO 1.2 specification
-//! §5.14; the ones the kernel needs are the transfer header's size and nothing
-//! else, because the kernel never reads a response.
+//! Structure layouts and command codes follow VirtIO 1.2 §5.14.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -37,18 +27,16 @@ use crate::sync::Lock;
 const VIRTIO_VENDOR: u16 = 0x1AF4;
 const VIRTIO_SND_DEVICE: u16 = 0x1059; // 0x1040 + device_id 25
 
-/// The transfer header that leads every TX chain: one `le32` stream id, written
-/// by the driver into a buffer of its own. The kernel needs its *size* to build
-/// the chain and never its contents — QEMU derives the PCM byte count from the
-/// chain's total readable length minus this.
+/// Size of the TX transfer header, which QEMU subtracts from the chain's
+/// readable length to get the PCM byte count; the kernel never reads its contents.
 const XFER_HEADER_BYTES: u32 = 4;
 /// The per-period status the device writes back: status and latency, two `le32`.
 const STATUS_BYTES: u32 = 8;
 /// One event: a code and its data.
 const EVENT_BYTES: u32 = 8;
 
-/// The kernel-only DMA page: the three descriptor tables, and the TX used ring
-/// that only the interrupt handler consumes.
+/// Kernel-only DMA page: three descriptor tables plus the TX used ring the
+/// handler alone consumes.
 const OFF_CTRL_DESC: usize = 0x0000;
 const OFF_EVENT_DESC: usize = 0x0400;
 const OFF_TX_DESC: usize = 0x0800;
@@ -63,30 +51,22 @@ const _: () = {
     assert!(abi::used_bytes(abi::TX_QUEUE_SIZE) <= KERNEL_DMA_BYTES - OFF_TX_USED);
 };
 
-/// How many refused register accesses are named before the driver is told to
-/// stop asking. Policy, and the same one the HDA stub carries: a refusal is a
-/// driver bug worth reading, and an unbounded one is a userland process choosing
-/// how much log the machine spends.
+/// Cap on logged refusals, past which a misbehaving driver can't spend unbounded log.
 const MAX_NAMED_REFUSALS: usize = 16;
 
-// --- the interrupt handler ---
 
-/// The handler's whole view of the device.
-///
-/// Written once, before the vector is armed, and read with no lock afterwards:
-/// the handler may interrupt a CPU holding [`CONTROLLER`].
+/// Written once before the vector arms and read without a lock afterwards —
+/// not lock-guarded because the handler may interrupt a CPU holding [`CONTROLLER`].
 struct TxIsr {
     consumer: UnsafeCell<Option<UsedRingConsumer<'static>>>,
-    /// Used-ring entries naming a descriptor that heads no chain. Counted here
-    /// and named once from the drain path — the avail ring is the driver's, so
-    /// this is a userland bug and a handler that logs is a handler that produces
-    /// work for the thing that failed.
+    /// Stray used-ring entries (head names no chain); a userland bug, so counted
+    /// rather than logged from the ISR.
     stray: AtomicU32,
     named_stray: AtomicBool,
 }
 
-// SAFETY: `consumer` is written once at init before the vector can fire and is
-// read only by the handler afterwards; every other field is atomic.
+// SAFETY: `consumer` is write-once before the vector arms and read only by the
+// handler after; every other field is atomic.
 unsafe impl Sync for TxIsr {}
 
 static TX_ISR: TxIsr = TxIsr {
@@ -95,16 +75,11 @@ static TX_ISR: TxIsr = TxIsr {
     named_stray: AtomicBool::new(false),
 };
 
-/// Drain the TX used ring and return the periods it completed.
-///
-/// A used entry names the head descriptor the driver published, and the driver
-/// publishes an index — so a head that is not a chain's is untrusted input, not
-/// a device fault, and is counted rather than asserted on.
+/// Drain the TX used ring; a head naming no chain is untrusted input, counted not asserted.
 fn drain_tx() -> u32 {
     // SAFETY: sole accessor after init — see `TxIsr`.
     let consumer = unsafe { &mut *TX_ISR.consumer.get() };
-    // A configuration-change interrupt shares this vector and can arrive before
-    // init has installed the consumer.
+    // A configuration-change interrupt shares this vector and may arrive before init installs the consumer.
     let Some(consumer) = consumer.as_mut() else { return 0 };
     let mut mask = 0u32;
     let refused_before = consumer.refused();
@@ -116,10 +91,7 @@ fn drain_tx() -> u32 {
         }
         mask |= 1 << idx;
     }
-    // The consumer's own refusals join this driver's count, so one line names
-    // both. A head past the queue never reaches the loop above — the caller
-    // indexes with it — so without this it would be counted nowhere. The ISR
-    // cannot log, which is why both are counters and the naming is elsewhere.
+    // Folds in the consumer's own refusals; a head past the queue never reaches the loop above.
     let refused = consumer.refused() - refused_before;
     if refused != 0 {
         TX_ISR.stray.fetch_add(refused, Ordering::Relaxed);
@@ -137,32 +109,15 @@ pub fn isr_complete() {
     }
     isr_push_completion(mask, timestamp);
     crate::irq_ring::isr_publish(crate::irq_ring::IrqSource::Audio, timestamp);
-    // Force a scheduler entry on IRQ return so drain_irqs converts the record
-    // into wakes now, not at the next 10ms quantum tick.
+    // Force a scheduler entry on IRQ return so the record becomes wakes now, not at next tick.
     crate::preempt::set_need_resched();
 }
 
-// --- the completion record ring ---
 
 const RECORD_RING_CAP: u32 = 16;
 
-/// SPSC ring of completion records. Producer is the MSI-X handler (single CPU,
-/// IF=0 — never concurrent with itself); consumer is whoever holds
-/// [`CONTROLLER`] in [`drain_completed`]. Indices are free-running u32s.
-///
-/// One record per interrupt, and not one accumulating mask: soundd's DLL
-/// measures a batch against its own grid point, so folding two interrupts into
-/// one record would hand it a lateness it never saw. The HDA stub accumulates
-/// because its position read makes a second interrupt carry nothing a later one
-/// does not; a used ring is not that.
-///
-/// Occupancy is bounded by the period count while the driver behaves: pending
-/// records carry pairwise-disjoint masks, because a period's bit re-enters one
-/// only after its chain has been republished, and the driver republishes only
-/// what a record it has read told it was free. **But the driver is the one
-/// publishing**, so that bound is userland's to keep and this used to be an
-/// assertion a process could ask the kernel to fail. What a full ring costs
-/// instead is [`SPILL`] — exactly what the HDA stub costs always.
+/// SPSC: producer is the MSI-X handler (single CPU, IF=0); consumer holds [`CONTROLLER`].
+/// One record per interrupt, never accumulated — a folded mask would misreport lateness to soundd's DLL.
 struct RecordRing {
     slots: [UnsafeCell<AudioCompletionRecord>; RECORD_RING_CAP as usize],
     head: AtomicU32,
@@ -185,12 +140,8 @@ static RECORDS: RecordRing = RecordRing {
     tail: AtomicU32::new(0),
 };
 
-/// Where a completion goes when the ring is full: one mask and the newest
-/// timestamp, emitted after everything already queued.
-///
-/// It cannot be lost and it cannot grow — a mask is eight bits and OR is
-/// idempotent — so a driver that stops reading its completions costs itself
-/// timestamp granularity and nothing else costs anything.
+/// Overflow sink for a full ring: mask is OR'd (idempotent) and timestamp is
+/// newest-wins, so a driver that stops reading costs itself only timestamp granularity.
 struct Spill {
     mask: AtomicU32,
     timestamp: AtomicU64,
@@ -212,21 +163,16 @@ fn isr_push_completion(mask: u32, timestamp_nanos: u64) {
     unsafe {
         *ring.slots[slot].get() = AudioCompletionRecord { mask, _pad: 0, timestamp_nanos };
     }
-    // Release: publish the record contents before the consumer can observe the
-    // new head.
+    // Release publishes the record before the consumer can observe the new head.
     ring.head.store(head.wrapping_add(1), Ordering::Release);
 }
 
-/// Pop the oldest pending record. Called under [`CONTROLLER`], which serializes
-/// consumers — the tail store needs no CAS.
-///
-/// The spill comes last because it is the newest: it exists only for interrupts
-/// that arrived after everything the ring holds.
+/// Pop the oldest pending record; called under [`CONTROLLER`], so the tail store
+/// needs no CAS. Spill returns last because it is always newer than anything still queued.
 fn pop_completion() -> Option<AudioCompletionRecord> {
     let ring = &RECORDS;
     let tail = ring.tail.load(Ordering::Relaxed); // sole writer of tail
-    // Acquire pairs with the producer's Release head store: the record contents
-    // are visible before head covers them.
+    // Acquire pairs with the producer's Release store of head.
     let head = ring.head.load(Ordering::Acquire);
     if head == tail {
         let mask = SPILL.mask.swap(0, Ordering::AcqRel);
@@ -239,23 +185,14 @@ fn pop_completion() -> Option<AudioCompletionRecord> {
             timestamp_nanos: SPILL.timestamp.load(Ordering::Relaxed),
         });
     }
-    // SAFETY: irreducible — the ring is an `UnsafeCell` array because the
-    // producer is an ISR that may take no lock, so no `Lock`-shaped container
-    // can hold it; a `Cell` is not `Sync`, and `AudioCompletionRecord` is 16
-    // bytes, too wide for an atomic. Sound on the same single-producer,
-    // single-consumer discipline the producer states: `tail != head` was just
-    // established, so this slot is inside `[tail, head)` and the producer will
-    // not write it until the ring has wrapped past it — and the `Acquire` load
-    // of `head` above pairs with the producer's `Release` store, so the
-    // record's contents are visible. `pop_completion` runs under `CONTROLLER`,
-    // which serialises consumers.
+    // SAFETY: `tail != head` puts this slot in `[tail, head)`, unwritten by the
+    // producer until wrap; the Acquire load of `head` above pairs with its Release store.
     let rec = unsafe { *ring.slots[(tail % RECORD_RING_CAP) as usize].get() };
     ring.tail.store(tail.wrapping_add(1), Ordering::Release);
     Some(rec)
 }
 
-/// Readiness: are completion records pending? Lock-free — handle readiness,
-/// an inbox watch and the scheduler's park-time recheck all ask this.
+/// True if completion records are pending; lock-free.
 pub fn has_pending() -> bool {
     RECORDS.head.load(Ordering::Acquire) != RECORDS.tail.load(Ordering::Acquire)
         || SPILL.mask.load(Ordering::Acquire) != 0
@@ -304,27 +241,9 @@ pub fn inbox_watchers() -> alloc::vec::Vec<crate::inbox::InboxId> {
     INBOX_WATCHERS.lock().clone()
 }
 
-// --- the controller ---
 
-/// What the bring-up leaves behind: the notification region the driver's three
-/// doorbells are in, and the pages every descriptor points into.
-///
-/// The virtqueues are not here because after [`build_chains`] there is nothing
-/// left to do with one — their descriptors are written, their addresses are in
-/// the device, and their used rings are consumed by the handler and by the
-/// driver.
-/// The pools are not here, and that is the change of 2026-08-22: they are leaked
-/// at bring-up and what the driver holds is `Dma<'static>`.
-///
-/// They used to be held here to keep their pages alive, and the two were dropped
-/// on every refusal below — while [`TX_ISR`] was already holding a
-/// [`UsedRingConsumer`] over the TX used ring inside one of them, installed
-/// before the last refusal on purpose (see the comment at its store). Freeing
-/// the pages under a `static` that names them was a live dangling region; it
-/// was harmless only because no vector was armed on that path, and a borrowing
-/// view is what makes it unwritable rather than unnoticed. The cost is that a
-/// device whose MSI-X cannot be armed keeps its DMA for the boot, which is a
-/// machine with no audio either way.
+/// Notify region only; virtqueues and DMA pools are leaked at bring-up because
+/// `TX_ISR` holds a used-ring consumer into one of them for the life of the boot.
 struct Bound {
     notify: Mmio,
 }
@@ -337,18 +256,9 @@ pub fn info() -> Option<(abi::VirtioSoundInfo, Region)> {
     INFO.lock().clone()
 }
 
-// --- the allow-list ---
 
-/// The driver's whole write surface: three doorbells, one per queue.
-///
-/// Every entry carries the same property the HDA stub's do — **its value is not
-/// an address, and it indexes nothing the kernel allocated.** A doorbell takes a
-/// queue index, and which queue is already decided by which of the three offsets
-/// was named, so the value cannot reach anything the offset did not.
-///
-/// The polarity is the guarantee. A missing entry costs a driver that cannot
-/// notify a queue and says so; a refusal list missing an entry costs a device
-/// pointed at kernel memory.
+/// Allow-list for the three doorbells; a doorbell value is a queue index, not an
+/// address, so it can reach nothing the already-selected offset did not.
 fn write_permit(info: &abi::VirtioSoundInfo, offset: u64, width: RegWidth) -> bool {
     let Ok(offset) = u32::try_from(offset) else { return false };
     width == RegWidth::U16
@@ -362,9 +272,7 @@ fn refuse(what: &str, offset: u64, width: RegWidth) -> SyscallError {
     SyscallError::PermissionDenied
 }
 
-/// **This driver reads no register at all**, so the read list is empty and every
-/// call is a refusal. The device's answers reach it through memory: the used
-/// rings it polls and the completion records the handler pushes.
+/// No register is readable; every read is a refusal — answers arrive via memory, not MMIO.
 pub fn reg_read(offset: u64, width: RegWidth) -> Result<u32, SyscallError> {
     Err(refuse("read", offset, width))
 }
@@ -383,15 +291,9 @@ pub fn reg_write(offset: u64, width: RegWidth, value: u32) -> Result<(), Syscall
     Ok(())
 }
 
-// --- bring-up ---
 
-/// Bring up the machine's virtio-sound device, or leave it unclaimed and say
-/// why.
-///
-/// A refusal rather than a panic throughout: audio is optional, so a machine
-/// that boots and plays nothing is better than one that dies over a peripheral.
-/// [`info`] then answers `None`, the claim is `Absent`, and soundd falls back to
-/// the null sink.
+/// Bring up virtio-sound, or leave it unclaimed and log why — audio is optional,
+/// so a refusal beats a panic over a peripheral.
 pub fn init(devices: &[PciDevice]) {
     let Some(pci) = devices.iter().find(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_SND_DEVICE)) else {
         return;
@@ -408,14 +310,10 @@ pub fn init(devices: &[PciDevice]) {
         return;
     }
 
-    // After the refusal above, so a device with no stream to play into costs no
-    // physical memory; leaked because [`TX_ISR`] holds a used-ring consumer over
-    // one of these windows for the life of the boot — see [`Bound`].
+    // Placed after the stream check so a streamless device allocates nothing; see [`Bound`].
     let kernel_mem = DmaPool::alloc(KERNEL_DMA_BYTES).leak();
     let shared = DmaPool::alloc(abi::SHARED_BYTES).leak();
-    // Exclusive: the pool was allocated on the line above and nothing else holds
-    // a view of it — the device has not been told about it and the userland
-    // mapping of this window does not exist until `set_audio_info` publishes it.
+    // Exclusive: just allocated, not yet told to the device or mapped to userland.
     shared.zero();
 
     let mut controlq = queue(
@@ -430,9 +328,7 @@ pub fn init(devices: &[PciDevice]) {
         shared.subview(abi::OFF_EVENT_USED, abi::used_bytes(abi::EVENT_QUEUE_SIZE)),
         abi::EVENT_QUEUE_SIZE,
     );
-    // The one used ring the driver never sees: the handler is its only consumer,
-    // and a mask derived from a ring userland can rewrite would be a completion
-    // for a period that never played.
+    // TX used ring lives in kernel memory only — userland must never fabricate a completion by rewriting it.
     let mut txq = queue(
         kernel_mem.subview(OFF_TX_DESC, OFF_TX_USED - OFF_TX_DESC),
         shared.subview(abi::OFF_TX_AVAIL, abi::avail_bytes(abi::TX_QUEUE_SIZE)),
@@ -442,8 +338,7 @@ pub fn init(devices: &[PciDevice]) {
 
     build_chains(&mut controlq, &mut eventq, &mut txq, shared.phys());
 
-    // Install the used-ring consumer before the vector can fire, so no interrupt
-    // observes a half-written Option — configuration-change interrupts share it.
+    // Installed before the vector can fire, so no interrupt observes a half-written Option.
     // SAFETY: MSI-X is not enabled yet.
     unsafe { *TX_ISR.consumer.get() = Some(txq.split_used_consumer()) };
 
@@ -458,8 +353,7 @@ pub fn init(devices: &[PciDevice]) {
     device.enable_queue(abi::TX_QUEUE);
     device.activate();
 
-    // `DmaPool` allocations are whole 2 MiB pages, so the slice base is the page
-    // the driver maps and the ABI's offsets are relative to it.
+    // DmaPool allocations are whole 2 MiB pages; ABI offsets are relative to that page.
     let dma_region = Region {
         phys: crate::DirectMap::from_phys(shared.phys()),
         size: crate::mm::PAGE_2M,
@@ -499,13 +393,8 @@ fn queue<'pool>(
     Virtqueue::from_regions(&VirtqueueRegions::from_separate(desc, avail, used, size), size)
 }
 
-/// Every chain the driver will ever publish, built once out of offsets into the
-/// shared region.
-///
-/// This is where the boundary is: after this runs there is no descriptor left to
-/// write, so the driver's whole vocabulary is an index into an avail ring and a
-/// doorbell. One control chain serves every command because the device reads the
-/// header first and takes only what that command defines.
+/// Builds every chain once; after this no descriptor is ever written again — the
+/// driver's whole vocabulary becomes an avail-ring index and a doorbell write.
 fn build_chains(
     controlq: &mut Virtqueue<'_>,
     eventq: &mut Virtqueue<'_>,
@@ -514,6 +403,8 @@ fn build_chains(
 ) {
     let at = |offset: usize| base + offset as u64;
 
+    // One chain serves every command: the device reads the header first and
+    // takes only what that command defines.
     controlq.write_chain(
         0,
         &[
@@ -522,8 +413,7 @@ fn build_chains(
         ],
     );
 
-    // One descriptor per buffer, so a buffer index and a descriptor index are
-    // the same number and the driver reposts by index.
+    // One descriptor per buffer: buffer index equals descriptor index.
     for i in 0..abi::EVENT_BUFS {
         eventq.write_chain(
             i as u16,
@@ -543,12 +433,9 @@ fn build_chains(
     }
 }
 
-/// Arm this device's TX completion interrupt, or say why the machine has no
-/// audio.
-///
-/// A refusal rather than a panic, and one of the reasons is its own: the handler
-/// is the only consumer of the TX used ring, so a device that cannot deliver its
-/// completions is one whose every period stays in flight forever.
+/// Arm the TX completion interrupt, or refuse and log why; never panics. The
+/// handler is the TX used ring's only consumer, so an unarmed device leaves
+/// every period in flight forever.
 fn arm_interrupt(pci: &PciDevice, device: &VirtioDevice) -> bool {
     let vector = crate::arch::idt::VIRTIO_SOUND_VECTOR;
     if !pci.enable_msix(vector) {

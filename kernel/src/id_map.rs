@@ -2,7 +2,7 @@ use core::hash::Hash;
 use core::ops::Add;
 use hashbrown::HashMap;
 
-/// A HashMap with auto-incrementing keys. IDs are never reused.
+/// Map with auto-incrementing, never-reused keys.
 pub struct IdMap<K, V> {
     map: HashMap<K, V>,
     next: K,
@@ -13,10 +13,7 @@ pub trait IdKey: Copy + Eq + Hash + Ord + Add<Output = Self> {
     const ONE: Self;
 }
 
-// The four keys the tree has: two process-table ids and the two driver-side
-// ids below them. `u32`, `u64` and `usize` had impls of their own and no
-// `IdMap` was ever keyed by one — a bare integer is exactly the key this type
-// exists to stop a caller from inventing.
+// No impl for u32/u64/usize: that would let a bare integer key an IdMap.
 impl IdKey for toyos_abi::Pid {
     const ZERO: Self = Self(0);
     const ONE: Self = Self(1);
@@ -34,7 +31,7 @@ impl<K: IdKey, V> IdMap<K, V> {
         }
     }
 
-    /// Insert with auto-assigned ID. Returns the new ID.
+    /// Inserts `value`, returning its auto-assigned ID.
     pub fn insert(&mut self, value: V) -> K {
         let id = self.next;
         self.next = self.next + K::ONE;
@@ -42,8 +39,8 @@ impl<K: IdKey, V> IdMap<K, V> {
         id
     }
 
-    /// Insert with auto-assigned ID, providing the ID to a closure that constructs the value.
-    /// Eliminates the need for temporary invalid state (e.g. `pid: 0`).
+    /// Inserts the value `f` builds from the pre-assigned ID, returning it.
+    /// Avoids ever building the value with an invalid placeholder ID (e.g. `pid: 0`).
     pub fn insert_with(&mut self, f: impl FnOnce(K) -> V) -> K {
         let id = self.next;
         self.next = self.next + K::ONE;
