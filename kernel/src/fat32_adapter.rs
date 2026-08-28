@@ -19,6 +19,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_fat32::{BlockAccess, Error, Extent, Fat32, FatTime, IoError};
 
 use crate::block::BlockDevice;
+use crate::mm::PAGE_BYTES;
 use crate::drivers::{usb_storage, xhci};
 use crate::file_backing::FileBacking;
 use crate::file_cache::{self, FileId};
@@ -419,7 +420,7 @@ struct FatBacking {
 }
 
 impl FileBacking for FatBacking {
-    fn read_page(&self, file_offset: u64, buf: &mut [u8; 4096]) -> crate::block::BlockResult {
+    fn read_page(&self, file_offset: u64, buf: &mut [u8; PAGE_BYTES]) -> crate::block::BlockResult {
         buf.fill(0);
         if file_offset >= self.size {
             return Ok(());
@@ -729,7 +730,7 @@ impl FileSystem for FatFs {
         &mut self,
         file_id: FileId,
         page_idx: u32,
-        data: &[u8; 4096],
+        data: &[u8; PAGE_BYTES],
     ) -> Result<(), SyscallError> {
         let Self { role, fs, open, .. } = self;
         let role = *role;

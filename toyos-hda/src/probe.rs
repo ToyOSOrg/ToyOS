@@ -96,8 +96,8 @@ fn codec(verbs: &mut impl Verbs, address: Address) -> Result<Codec, CodecFault> 
     })
 }
 
-/// A modem or vendor function group is kept with its kind and not walked: §2.3
-/// step 1 says log and skip, and a group that vanished from the model could not
+/// A modem or vendor function group is kept with its kind and not walked: it
+/// is logged and skipped, and a group that vanished from the model could not
 /// be named in a refusal.
 fn group(verbs: &mut impl Verbs, codec: Address, node: Node) -> Option<FunctionGroup> {
     let kind = FunctionKind::decode(param(verbs, codec, node, verb::PARAM_FUNCTION_TYPE)?);
@@ -145,7 +145,7 @@ fn widget(verbs: &mut impl Verbs, codec: Address, node: Node) -> Option<Widget> 
 /// A pin with no configuration default is no pin at all.
 ///
 /// All ones decodes to a perfectly plausible pin — "jack, other, wired" — which
-/// is a name for a read that did not happen, and §2.3 chooses a pin off exactly
+/// is a name for a read that did not happen, and the pin is chosen off exactly
 /// this field.
 fn pin(verbs: &mut impl Verbs, codec: Address, node: Node) -> Option<Pin> {
     Some(Pin {
@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(walked.len(), 2);
         let path = find_output_path(&walked).expect("line-out is an output");
         assert_eq!(path.converter, Node(0x02));
-        // The other arrangement of §6.4 item 2: this pin has no amplifier at
+        // The other amp arrangement: this pin has no amplifier at
         // all and the converter carries both halves, where the laptop splits them.
         assert_eq!(path.output.amp, None);
         let amp = path.converter_amp.expect("QEMU's converter has an output amp");
@@ -375,7 +375,7 @@ mod tests {
     fn a_codec_statests_named_and_the_link_does_not_carry_is_named_not_skipped() {
         // Bit 3 of `STATESTS` with nothing behind it. A walk that dropped it
         // would report a machine with fewer codecs than the register named,
-        // which is the report §2.3 forbids.
+        // which is the report the probe forbids.
         let found = enumerate(&mut Fake { text: include_str!("../fixtures/laptop.txt") }, 0x000d);
         assert_eq!(found.len(), 3);
         assert_eq!(found[2].as_ref().err(), Some(&(Address::new(3).unwrap(), CodecFault::Silent)));
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn a_group_that_is_not_audio_is_kept_and_not_walked() {
-        // §2.3 step 1: modem groups are named, never silently dropped — a
+        // Modem groups are named, never silently dropped — a
         // driver has to be able to say what it found and did not use.
         struct Modem;
         impl Verbs for Modem {

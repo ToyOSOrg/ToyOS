@@ -24,7 +24,7 @@
 //! This file is the fourth thing: which of them the machine gets. A sound card
 //! this process was endowed with runs the device loop; anything else — no card,
 //! a card that cannot carry audio, a shape the mixer cannot render — runs the
-//! null sink, because §6 says soundd always runs and always accepts streams.
+//! null sink, because soundd always runs and always accepts streams.
 
 use toyos::endow;
 use toyos::port::Acceptor;
@@ -163,7 +163,7 @@ fn run_with_device(
     device_period_bytes: usize,
 ) {
     // A shape this mixer cannot render is named and the machine gets the null
-    // sink, which is what §6 is for. It is checked before any arithmetic
+    // sink, which keeps soundd always running and accepting streams. It is checked before any arithmetic
     // derives anything from it — a zero channel count divides by zero on the
     // way to a frame count, which is a panic that names neither the device nor
     // the reason.

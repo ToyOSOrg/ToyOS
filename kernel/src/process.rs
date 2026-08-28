@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use core::ptr::NonNull;
 use crate::arch::percpu;
 use crate::mm::paging::{CachePolicy, Prot, WindowProt};
-use crate::mm::PAGE_2M;
+use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::object::{ops, HandleTable};
 use crate::sync::Lock;
 use crate::symbols::SymbolTable;
@@ -1388,7 +1388,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
 
                     if vma_offset < *file_size {
                         let byte_offset = vma_offset + file_offset;
-                        let mut page_buf = [0u8; 4096];
+                        let mut page_buf = [0u8; PAGE_BYTES];
                         // Unhandled, not zero-filled: zeros here would be instructions/constants the program never had; `page_alloc` is a local, so returning drops it.
                         if backing.read_page(byte_offset, &mut page_buf).is_err() {
                             log!("fault: {:#x} is backed by a file byte {byte_offset} that the \

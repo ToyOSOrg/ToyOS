@@ -493,7 +493,7 @@ jobs:
           fi
 
       # **`toyos-sched-loom`'s own controls, wired for the first time
-      # 2026-08-17.** The mandatory preempt-disabled push (spec §7.2) has
+      # 2026-08-17.** The mandatory preempt-disabled push has
       # carried `no-preempt-guard` since before this file existed, and it was
       # never once run here — a control run only by hand is a control CI has
       # never shown has teeth, the same fact this whole batch of steps repairs.

@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use crate::file_backing::FileBacking;
 use crate::file_cache::{self, FileId};
 use crate::fs_rename::{self, Committed, ReplaceRename};
+use crate::mm::PAGE_BYTES;
 use toyos_abi::syscall::SyscallError;
 
 use crate::vfs::FileSystem;
@@ -16,7 +17,7 @@ struct TmpfsBacking {
 
 impl FileBacking for TmpfsBacking {
     /// Never `Err`: the pages are the file, so there is no device to refuse.
-    fn read_page(&self, file_offset: u64, buf: &mut [u8; 4096]) -> crate::block::BlockResult {
+    fn read_page(&self, file_offset: u64, buf: &mut [u8; PAGE_BYTES]) -> crate::block::BlockResult {
         // copy_page_out, not file_cache::read_page: reading through the miss path here would recurse.
         // A hole below the file size, left by a seek-and-write, reads as zero.
         if file_offset >= file_cache::size(self.file_id)
@@ -145,7 +146,7 @@ impl FileSystem for TmpFs {
         fs_rename::replace_rename(self, old, new)
     }
 
-    fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; 4096]) -> Result<(), SyscallError> {
+    fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {
         Ok(()) // tmpfs: data is already in the file cache (canonical storage)
     }
 

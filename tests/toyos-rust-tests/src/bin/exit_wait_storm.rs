@@ -46,7 +46,7 @@ fn main() {
     let exe = std::env::current_exe().expect("current_exe failed");
 
     // As `blocking_read_stress`: a lost publish must red as a count and never
-    // as the `STALL` §20.3 disqualifies.
+    // as the `STALL` the harness disqualifies.
     static COLLECTED: AtomicU32 = AtomicU32::new(0);
     static JOINED: AtomicU32 = AtomicU32::new(0);
     thread::spawn(|| {

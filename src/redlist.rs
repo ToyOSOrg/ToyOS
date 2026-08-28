@@ -805,7 +805,7 @@ pub const KNOWN_RED: &[Red] = &[
         standing: Standing::Retired(
             "soundd builds each line and issues one `write_all` (its local `say!`) now: 0 of 10 in \
              run 31283095698. The other 176 `eprintln!` sites in `userland/` still do not — and \
-             the shape that left open is closed at the kernel by L5 of the log architecture: a \
+             the shape that left open is closed at the kernel by the log architecture: a \
              `ConsoleObject` per holder buffers its line and emits it whole under one \
              `BackendGuard`, so a kernel record cannot land inside one. `console_line_atomicity` \
              is the gate, 0 of 2000, and 8 of 8 red under `console-unbuffered`",
@@ -849,7 +849,7 @@ pub const KNOWN_RED: &[Red] = &[
         finding: Finding::fires(2, 10),
         standing: Standing::Stands,
         what: "2 of 10, untouched by the three fixes that made the other names in the same arm \
-               green. It is the one name left between `main` and §10.4's three-consecutive-greens \
+               green. It is the one name left between `main` and the three-consecutive-greens \
                trigger",
         evidence: "probe-green fixed arm, run 31283095698, ten reps",
         source: "issues/kernel/desktop-window-child-freeze.md",
@@ -1167,7 +1167,7 @@ pub const KNOWN_RED: &[Red] = &[
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 3),
         standing: Standing::Retired(
-            "the splice is unrepresentable since L5 of the log architecture: a `ConsoleObject` per \
+            "the splice is unrepresentable in the log architecture: a `ConsoleObject` per \
              holder buffers its line and emits it whole under one `BackendGuard`, so the kernel \
              record that cut this needle open has nowhere to be acquired. `console_line_atomicity` \
              is the gate, 0 of 2000 with 8 of 8 red under `console-unbuffered` \
@@ -1673,10 +1673,10 @@ pub const KNOWN_RED: &[Red] = &[
         what: "`output mismatch`, expected `17` and the capture empty — the child's own line fell \
                outside the `===TEST_START===`/`===TEST_END===` window the C family compares whole. \
                Same shape and same test name the write-up records at `dbbdcbe`, which is before \
-               this branch existed. **The log spec's §4.3 said bounding the console drain took \
-               this to zero in five; fourteen suites here say roughly one in four whatever the \
-               console lock does**, so that was a lucky five rather than a fix, and §4.3 is \
-               corrected to say so. The console lock was never in it: what decided the rate was \
+               this branch existed. **A five-run sample once read as bounding the console drain \
+               taking this to zero; fourteen suites here say roughly one in four whatever the \
+               console lock does**, so that was a lucky five rather than a fix. The console lock \
+               was never in it: what decided the rate was \
                whether the writer after this program was the kernel, whose `[kernel ` prefix the \
                capture already cut at",
         evidence: "the same fourteen suites as the row above: 3 of the 9 with the window bounded \

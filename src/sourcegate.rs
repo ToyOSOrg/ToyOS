@@ -98,8 +98,8 @@ const BANS: &[Ban] = &[
             // Both in `cpu.rs`'s test module, and both are the drop bomb
             // rather than a leak: `Task`'s "the only legal death is
             // `DeadTask::finalize`" is a scheduler invariant, so a test that
-            // deliberately ends with a live task — which is most of the arms
-            // §7.2 rewrote — may not drop its world, and a registration held
+            // deliberately ends with a live task — which is what most of these
+            // arms do — may not drop its world, and a registration held
             // past a park it staged by hand is the same statement.
             ("toyos-sched/src/cpu.rs", 2),
         ],

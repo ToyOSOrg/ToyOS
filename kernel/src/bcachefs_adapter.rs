@@ -5,6 +5,7 @@ use hashbrown::HashMap;
 
 use bcachefs::{BlockIO, BlockBuf, BlockNum, DeviceError, FsError, Mounted, ReadWrite, ReadOnly, Formatted, SliceBlockIO, Extent};
 use crate::file_backing::{FileBacking, FileBlocks, NvmeBacking, InitrdBacking};
+use crate::mm::PAGE_BYTES;
 use crate::file_cache::{self, FileId, Residency};
 use crate::fs_rename::{self, Committed, ReplaceRename};
 use crate::page_cache;
@@ -264,7 +265,7 @@ impl FileSystem for BcacheFsAdapter {
         fs_rename::replace_rename(self, old, new)
     }
 
-    fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; 4096]) -> Result<(), SyscallError> {
+    fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {
         let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
         let name = info.name.clone();
         let blocks = Arc::clone(&info.blocks);
@@ -376,7 +377,7 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
         Err(SyscallError::PermissionDenied)
     }
 
-    fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; 4096]) -> Result<(), SyscallError> {
+    fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {
         Err(SyscallError::PermissionDenied)
     }
 
