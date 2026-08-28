@@ -9,7 +9,8 @@ bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 114 0
 bootloader/src/main.rs 198 0
 examples/imgstat.rs 16 0
-kernel-loom/src/lib.rs 144 0
+kernel-loom/src/lib.rs 146 0
+kernel-loom/tests/durability.rs 36 0
 kernel-loom/tests/i8042_tally.rs 95 0
 kernel-loom/tests/inbox.rs 126 3
 kernel-loom/tests/log_body_words.rs 31 0
@@ -90,13 +91,14 @@ kernel/src/drivers/xhci/usbd.rs 8 0
 kernel/src/drivers/xhci/wait/boot.rs 85 0
 kernel/src/drivers/xhci/wait/mod.rs 78 0
 kernel/src/drivers/xhci/wait/msc.rs 214 0
+kernel/src/durability.rs 16 0
 kernel/src/elf/cache.rs 24 0
 kernel/src/elf/index.rs 21 0
 kernel/src/elf/mod.rs 104 0
 kernel/src/elf/reloc.rs 37 0
 kernel/src/fat32_adapter.rs 165 0
 kernel/src/file_backing.rs 21 0
-kernel/src/file_cache.rs 65 0
+kernel/src/file_cache.rs 66 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
 kernel/src/heartbeat.rs 24 0
@@ -145,7 +147,7 @@ kernel/src/object/handle.rs 54 0
 kernel/src/object/inbox.rs 6 0
 kernel/src/object/mod.rs 51 0
 kernel/src/object/namespace.rs 9 0
-kernel/src/object/ops.rs 57 0
+kernel/src/object/ops.rs 58 0
 kernel/src/object/pipe.rs 14 0
 kernel/src/object/port.rs 21 0
 kernel/src/object/process.rs 14 0
@@ -176,11 +178,11 @@ kernel/src/tmpfs.rs 8 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
 kernel/src/user_ptr.rs 58 0
-kernel/src/vfs.rs 45 0
+kernel/src/vfs.rs 52 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/assets.rs 123 0
-src/build.rs 669 3
+src/build.rs 671 3
 src/buildlock.rs 378 5
 src/ci.rs 105 1
 src/day.rs 16 1
@@ -227,7 +229,7 @@ tests/common/stats.rs 44 0
 tests/common/storage.rs 57 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 954 4
-tests/common/volumes.rs 556 3
+tests/common/volumes.rs 575 3
 tests/common/wallclock.rs 144 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
@@ -276,6 +278,7 @@ tests/toyos-rust-tests/src/bin/fault_gates.rs 27 0
 tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
+tests/toyos-rust-tests/src/bin/fsync_flush_failed.rs 4 0
 tests/toyos-rust-tests/src/bin/futex_wake_counts.rs 167 0
 tests/toyos-rust-tests/src/bin/handle_basic.rs 121 2
 tests/toyos-rust-tests/src/bin/handle_kill_policy.rs 207 4
@@ -310,6 +313,7 @@ tests/toyos-rust-tests/src/bin/process_lifecycle.rs 94 0
 tests/toyos-rust-tests/src/bin/process_stats.rs 67 0
 tests/toyos-rust-tests/src/bin/query_modules_size.rs 16 0
 tests/toyos-rust-tests/src/bin/readdir_bound.rs 34 0
+tests/toyos-rust-tests/src/bin/redirty_mid_flush.rs 16 0
 tests/toyos-rust-tests/src/bin/sched_stress.rs 22 0
 tests/toyos-rust-tests/src/bin/segfault_child.rs 3 0
 tests/toyos-rust-tests/src/bin/shm_release_reclaims.rs 43 0
@@ -349,7 +353,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4848 23
+tests/toyos.rs 4856 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
