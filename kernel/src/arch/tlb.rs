@@ -6,18 +6,12 @@
 //! memory-type translation surviving an early return is undefined per SDM
 //! Vol. 3A §11.12.4.
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use crate::shootdown::{Generation, Shootdown};
 use crate::time::{Duration, Tripwire};
 
 use super::{apic, percpu, smp};
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
-
-/// False until [`siblings_answer`] runs: an AP is still spinning on
-/// `SMP_READY` with `IF` clear and cannot answer an IPI yet.
-static SIBLINGS_ANSWER: AtomicBool = AtomicBool::new(false);
 
 /// Set above `USB_TIMEOUT_NS`, xHCI's longest `IF`-clear device spin, so no
 /// legitimate wait trips it.
@@ -34,7 +28,7 @@ const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
 /// every CPU has flushed.
 pub fn shootdown() {
     let cpus = smp::cpu_count();
-    if !SIBLINGS_ANSWER.load(Ordering::Acquire) || cpus <= 1 {
+    if !smp::answering() || cpus <= 1 {
         crate::mm::paging::flush_tlb_all();
         return;
     }
@@ -87,7 +81,7 @@ pub fn serve_ipi() {
 /// safe from inside `Lock::lock`'s spin.
 #[inline]
 pub fn poll() {
-    if !SIBLINGS_ANSWER.load(Ordering::Relaxed) {
+    if !smp::answering() {
         return;
     }
     let cpu = percpu::cpu_id() as usize;
@@ -95,15 +89,10 @@ pub fn poll() {
 }
 
 /// Settle every shootdown issued before this CPU could answer one; called
-/// once after `SMP_READY`.
+/// once after the machine is released.
 pub fn join() {
     let cpu = percpu::cpu_id() as usize;
     SHOOTDOWN.serve(cpu, crate::mm::paging::flush_tlb_all);
-}
-
-/// From here on, `shootdown` waits for siblings; called once by `smp::set_ready`.
-pub fn siblings_answer() {
-    SIBLINGS_ANSWER.store(true, Ordering::Release);
 }
 
 #[cfg(not(feature = "test-actuators"))]

@@ -55,6 +55,15 @@ durability-settle-blind = []
 # loom (`src/sync.rs`'s `ACQUIRED` says so at the site); a parking acquire has
 # no unbounded branch, which is what makes this one modellable at all.
 sleeplock-acquire-off = []
+# The same arrangement for the CPU roster's publication edge: `src/smp_roster.rs`'s
+# `commit` publishes the count with a `Relaxed` store instead of the release the
+# slot store needs, so a reader can see a count over an unfilled slot, and
+# `kernel-loom/tests/smp_bringup.rs` reds.
+roster-commit-relaxed = []
+# The same for the release/answer word: `src/smp_roster.rs` grows the base's
+# second store back, so a shootdown can see the machine released while it is not
+# yet answering, and `kernel-loom/tests/smp_bringup.rs` reds.
+smp-ready-split = []
 # **Every actuator, and which one is armed comes from the boot parameter.**
 # `kernel/src/actuator.rs` declares every one of them with the claim each rests on; this
 # name is the whole of what a build decides about them. A kernel without it has

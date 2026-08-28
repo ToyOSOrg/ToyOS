@@ -92,6 +92,28 @@ reap-raise-relaxed = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 shootdown-serve-relaxed = []
+# The negative control for the CPU roster's publication. It makes
+# `smp_roster.rs`'s `commit` publish the count with a `Relaxed` store, so a
+# reader can see a count over a slot the commit has not filled, and
+# `smp_bringup.rs` must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features roster-commit-relaxed \
+#     --test smp_bringup
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+roster-commit-relaxed = []
+# The negative control for the release/answer word. It grows the base's second
+# store back — releasing the APs and enabling shootdown participation become two
+# stores — so a shootdown can see the machine released while it is not yet
+# answering, and `smp_bringup.rs` must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features smp-ready-split \
+#     --test smp_bringup
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+smp-ready-split = []
 # The negative control for W1, the record ring's publication. It makes
 # `shard.rs`'s last store — the one that publishes the sequence number —
 # `Relaxed`, so a reader can find the number with the body behind it stale or
