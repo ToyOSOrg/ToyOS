@@ -2,12 +2,12 @@
 //! a flush has that page copied but not yet marked clean must survive to the
 //! device (F6). The parent dirties [`PAGES`] pages and fsyncs; the child lands
 //! one 8-byte slot write in page 0 after a swept delay, so across [`ROUNDS`]
-//! the write falls inside the copy-to-clear window many times. Each round then
+//! the write falls inside the copy-to-clear window many times. Each round
 //! evicts page 0 (`test-small-caches` arms the pressure) and reads it back off
-//! the device: every slot written so far must be there. A kernel that clears a
-//! mid-flush redirty loses exactly one slot forever, and the read-back reds.
-//! `redirty_mid_flush` in `tests/common/volumes.rs` boots this and re-judges
-//! the final bytes off the image with the host's own FAT reader.
+//! the device: every slot written so far must be there, and a cleared
+//! mid-flush redirty loses exactly one slot forever.
+//! `tests/common/volumes.rs::redirty_mid_flush` boots this and re-judges the
+//! final bytes off the image.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};

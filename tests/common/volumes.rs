@@ -1104,14 +1104,11 @@ pub fn fat_backing_revoked(
     Ok(())
 }
 
-/// F5's negative control: under `usb-flush-fails` — SYNCHRONIZE CACHE answered
-/// with HARDWARE ERROR — a second `fsync` must refuse like the first, because
-/// the mount's device commit is still owed. On the pre-generation kernel the
-/// file's own flag was already clean, so the second call answered success
-/// without issuing anything; the guest (`test_rs_fsync_flush_failed`) asserts
-/// both refusals and is the whole verdict. The host half only proves the
-/// staging fired at the shipped site: the driver's own sense line, at least
-/// once, in a boot whose log volume really mounted.
+/// F5's negative control: under `usb-flush-fails` a second `fsync` must refuse
+/// like the first, because the mount's device commit is still owed — the
+/// pre-generation kernel answered the second call with success and issued
+/// nothing. The guest asserts both refusals; the host half proves the staging
+/// fired at the shipped site (the driver's own sense line, at least once).
 pub fn fsync_failed_commit(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -1177,12 +1174,10 @@ pub fn fsync_failed_commit(
 }
 
 /// F6's negative control, and its host-side oracle: after the guest's racing
-/// rounds (`test_rs_redirty_mid_flush`), the file is read off the image by the
-/// host's own FAT implementation — every slot the child confirmed written must
-/// be on the device, and `toyos-fat32-check` must stay silent over the volume.
-/// The guest reds first on a kernel that clears a mid-flush redirty; this half
-/// reds if the bytes the guest read back were the cache's word and not the
-/// device's.
+/// rounds the file is read off the image by the host's own FAT implementation
+/// — every slot must be on the device, `toyos-fat32-check` silent. The guest
+/// reds first on a kernel that clears a mid-flush redirty; this half reds if
+/// what the guest read back was the cache's word and not the device's.
 pub fn redirty_mid_flush(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

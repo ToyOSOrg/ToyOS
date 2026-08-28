@@ -10,7 +10,7 @@ bcachefs/tests/integration.rs 114 0
 bootloader/src/main.rs 198 0
 examples/imgstat.rs 16 0
 kernel-loom/src/lib.rs 146 0
-kernel-loom/tests/durability.rs 36 0
+kernel-loom/tests/durability.rs 29 0
 kernel-loom/tests/i8042_tally.rs 95 0
 kernel-loom/tests/inbox.rs 126 3
 kernel-loom/tests/log_body_words.rs 31 0
@@ -229,7 +229,7 @@ tests/common/stats.rs 44 0
 tests/common/storage.rs 57 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 954 4
-tests/common/volumes.rs 575 3
+tests/common/volumes.rs 570 3
 tests/common/wallclock.rs 144 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
@@ -278,7 +278,7 @@ tests/toyos-rust-tests/src/bin/fault_gates.rs 27 0
 tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
-tests/toyos-rust-tests/src/bin/fsync_flush_failed.rs 4 0
+tests/toyos-rust-tests/src/bin/fsync_flush_failed.rs 3 0
 tests/toyos-rust-tests/src/bin/futex_wake_counts.rs 167 0
 tests/toyos-rust-tests/src/bin/handle_basic.rs 121 2
 tests/toyos-rust-tests/src/bin/handle_kill_policy.rs 207 4

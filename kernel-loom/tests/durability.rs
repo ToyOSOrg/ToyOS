@@ -1,14 +1,12 @@
 //! Loom: the durability generations under a racing writer.
 //!
-//! The subject is `kernel/src/durability.rs` compiled into this crate
-//! unshimmed, driven in the exact call order `Vfs::flush_file` and
-//! `Vfs::sync_mount` use: snapshot-with-copy under the lock, device work with
-//! the lock dropped, settle with the snapshot. What the models prove is the
-//! accounting — no interleaving of one writer against one flusher ends with
-//! debt discharged over bytes the device does not hold. What they do not prove
-//! is that the kernel presents the snapshot only on its success paths; the
-//! type makes any other discharge unwritable, and the guest controls
-//! (`redirty_mid_flush`, `fsync_failed_commit`) hold the end-to-end claim.
+//! `kernel/src/durability.rs` compiles into this crate unshimmed and is driven
+//! in the exact call order `Vfs::flush_file` and `Vfs::sync_mount` use:
+//! snapshot-with-copy under the lock, device work with the lock dropped,
+//! settle with the snapshot. The models prove the accounting — no interleaving
+//! discharges debt over bytes the device does not hold; that the kernel
+//! settles only on success paths is the type's half (no other discharge
+//! compiles), held end-to-end by the guest controls.
 //!
 //! The negative control is a cargo feature rather than a comment:
 //!
@@ -17,9 +15,7 @@
 //!   --test durability
 //! ```
 //!
-//! turns `settle` back into the pre-generation blind clear, and both
-//! two-threaded models here must red — a write landing between the copy and
-//! the settle is marked delivered without having been copied.
+//! turns `settle` back into the blind clear, and both two-threaded models red.
 
 #![cfg(feature = "loom")]
 
@@ -32,9 +28,7 @@ struct Page {
     dirt: Owed,
 }
 
-/// `Vfs::flush_file`'s per-page protocol: copy and snapshot in one lock
-/// acquisition, write the copy to the device outside it, settle with what was
-/// copied.
+/// `Vfs::flush_file`'s per-page protocol.
 fn flush(page: &Mutex<Page>, device: &Mutex<u32>) {
     let (copied, upto) = {
         let page = page.lock().unwrap();
@@ -76,8 +70,7 @@ fn a_page_marked_clean_is_on_the_device() {
 }
 
 /// The mount's commit debt: a settle covers only writes the device flush could
-/// have committed — one recorded after the snapshot stays owed, so the next
-/// `fsync` still reaches the device (F5's second-call lie is unwritable).
+/// have committed, so F5's second-call lie is unwritable.
 #[test]
 fn a_settled_commit_covers_only_flushed_writes() {
     loom::model(|| {

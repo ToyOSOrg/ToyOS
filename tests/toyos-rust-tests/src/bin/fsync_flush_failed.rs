@@ -1,7 +1,6 @@
 //! Two fsyncs under a device that refuses SYNCHRONIZE CACHE (`usb-flush-fails`):
 //! both must refuse. The second returning success is the F5 lie — the failed
-//! device commit forgotten because the file's own flush had already settled.
-//! `fsync_failed_commit` in `tests/common/volumes.rs` boots and judges this.
+//! device commit forgotten. `tests/common/volumes.rs::fsync_failed_commit` boots this.
 
 use std::fs::File;
 use std::io::Write;
