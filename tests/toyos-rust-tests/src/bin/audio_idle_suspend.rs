@@ -1,8 +1,8 @@
-//! §5.8 idle-suspend certification: on a boot where no audio client ever
+//! Idle-suspend certification: on a boot where no audio client ever
 //! connects, soundd's CPU cost is exactly zero. Two sysinfo samples ~1s apart
 //! must show no cpu_ns movement on any soundd thread — a suspended soundd
 //! holds no timer and takes no wakes, so any nonzero delta is the mix or
-//! control loop running without a reason. This is the one §5.8 claim gate A
+//! control loop running without a reason. This is the one idle-suspend claim gate A
 //! structurally cannot see: its counters are streaming-scoped, and its boots
 //! always connect a client. No wav analysis — there is no signal, and the
 //! capture freezes while the voice is stopped anyway.

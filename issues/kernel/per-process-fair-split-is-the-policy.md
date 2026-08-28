@@ -89,7 +89,7 @@ trusting the answer, this one is a hole where the answer would be.
    the new code. Nothing measures it. A block drops a thread from I13's measured
    set, so I13's reach inverts exactly against the workloads that would exercise
    it — 96–99% on the fairness storms, where nothing blocks, against
-   `crash_md_exit_race` 37%, `rt_wake_latency` 29%, `fork_storm` 9%,
+   `double_drop_exit_race` 37%, `rt_wake_latency` 29%, `fork_storm` 9%,
    `futex_storm` 5% and `audio_pipeline` **0%**. **I13 would stay green straight
    through a redesign that got the wake path's ordering wrong**, and it is the
    check that nominally guards fairness. A wake-heavy workload with windows long

@@ -20,8 +20,8 @@ usage: toyos-sched-sim <command> [args]
                                seed sweep, then all ten negative gates and both
                                controls
   measure <scenario> [seeds]   seed sweep over ONE scenario, with its worst
-                               invariant-I5 service spread — the number spec
-                               §11 Stage 9 compares frontier designs by
+                               invariant-I5 service spread — the number
+                               frontier designs are compared by
   find <scenario> [seeds]      first seed that fails, for `shrink` to take
   shrink <scenario> <seed> [pct]
                                minimize a failing seed into a corpus trace
@@ -29,7 +29,7 @@ usage: toyos-sched-sim <command> [args]
   list                         scenario names
 
 `fairness_storm:<cpus>` names the fairness workload at any width, which is what
-spec §11 Stage 9 gates on; `list` shows only the two widths the sweeps carry.
+the frontier-design comparison gates on; `list` shows only the two widths the sweeps carry.
 The measured policy suite's workloads are parameterized the same way, and are
 what `sim/tests/policy.rs` states its bounds over:
 `share_gain:<threads>`, `interactive_mix:<cpus>:<hogs>`,

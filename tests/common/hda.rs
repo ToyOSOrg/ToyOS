@@ -124,7 +124,7 @@ pub fn hda_tone(
     }
     // The instrument the gap detector cannot be: an engine that replays a
     // period nobody refilled puts the tone back 0.28 of a cycle out, and
-    // nothing about that is silent (§5.3 item 5, risk 7). Zero here and zero on
+    // nothing about that is silent. Zero here and zero on
     // all four virtio configs, measured — so the check has a calibration and
     // not just a threshold.
     //
@@ -157,7 +157,7 @@ pub fn hda_tone(
 /// completing it, whatever soundd put there — so a period held back for a
 /// client is played as silence anyway and then completed a second time, which
 /// is a completion for a buffer soundd still holds. virtio-sound's queue plays
-/// nothing soundd has not submitted, so holding one costs nothing and §5.10's
+/// nothing soundd has not submitted, so holding one costs nothing and the
 /// deferral is exactly right there.
 ///
 /// So: the ring arm must report `underruns` (soundd filled the periods and had
@@ -194,7 +194,7 @@ pub fn hda_client_stall(
     }
     if queue.deferred == 0 {
         return Err(format!(
-            "the queue arm deferred nothing: §5.10 is what a stalled client is supposed to buy on \
+            "the queue arm deferred nothing: deferral is what a stalled client is supposed to buy on \
              a device that plays only what it is given\n{}",
             queue.serial
         ));

@@ -106,7 +106,7 @@ pub(crate) struct ClientStream {
     pub(crate) client_id: usize,
     pub(crate) slot_reader: AudioSlotReader,
     /// The write end of the signal pipe. soundd makes both ends and sends the
-    /// read end to the client, so §5.7's crash detection is by construction:
+    /// read end to the client, so crash detection is by construction:
     /// the moment the client's table goes, the read end goes with it and the
     /// next signal breaks.
     pub(crate) signal_write: RawHandle,
@@ -129,13 +129,13 @@ impl ClientStream {
     ///
     /// Outside it, silence is the design working. `MSG_STREAM_OPEN` arrives
     /// before the client has any audio — it still has to spawn its callback
-    /// thread — and after a close §5.5's ramp is deliberately fading it out,
+    /// thread — and after a close the disconnect ramp is deliberately fading it out,
     /// so it is entitled to stop filling.
     pub(crate) fn is_streaming(&self) -> bool {
         self.delivered && self.departure.is_none()
     }
 
-    /// Record a departure, and start §7.4's ramp-out the first time one is
+    /// Record a departure, and start the ramp-out the first time one is
     /// known.
     ///
     /// A later witness refines the word and leaves the ramp alone: it is

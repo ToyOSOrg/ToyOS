@@ -169,7 +169,7 @@ fn old_steal_port_is_caught() {
     assert!(
         kinds.contains_key("I8"),
         "expected the address-space-freed-while-referenced violation \
-         (the crash.md shape itself); got {kinds:?}",
+         (the double-drop shape itself); got {kinds:?}",
     );
 }
 
@@ -418,7 +418,7 @@ fn the_unwind_gate_lasts_one_chunk_and_not_one_unwind() {
 /// the drain answers a `Retire` aimed at the *running* task with `need_resched`
 /// and consumes it, and a task that then parks is never picked, never reaped,
 /// and holds its address space forever. Deleting that arm reproduced it in 3+
-/// of 400 `crash_md_exit_race` seeds.
+/// of 400 `double_drop_exit_race` seeds.
 ///
 /// The arm is gone and the sweeps are clean, which is only evidence about
 /// `WaitTicket::commit` if the case still *happens*. So it is counted.
@@ -431,7 +431,7 @@ fn a_retire_inside_the_registration_window_is_honoured_by_the_core() {
         } else {
             ChoiceStream::pct(seed, 2, 3)
         };
-        let outcome = run(scenarios::crash_md_exit_race(), &mut choices);
+        let outcome = run(scenarios::double_drop_exit_race(), &mut choices);
         assert!(outcome.passed(), "{}", outcome.report());
         killed += outcome.killed_at_park;
     }
@@ -476,7 +476,7 @@ fn a_pass_inside_the_registration_window_is_caught() {
     // And the control: the identical workload with the guard modelled comes
     // back clean over the same seeds, so the gate is measuring the guard and
     // not the workload.
-    let guarded = sweep::seed_sweep(&scenarios::crash_md_exit_race(), SEEDS, 1);
+    let guarded = sweep::seed_sweep(&scenarios::double_drop_exit_race(), SEEDS, 1);
     assert!(guarded.passed(), "{}", guarded.report());
 }
 
@@ -554,7 +554,7 @@ fn the_new_protocol_survives_the_schedule_that_breaks_the_old_one() {
     );
 
     let mut new = ChoiceStream::replay(decisions);
-    let new = run(scenarios::crash_md_exit_race(), &mut new);
+    let new = run(scenarios::double_drop_exit_race(), &mut new);
     assert!(
         new.passed(),
         "the new protocol must survive the very schedule that breaks the old \

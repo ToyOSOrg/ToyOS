@@ -90,8 +90,8 @@ pub fn iommu_discovery(
         expect(&field("ir")?, if unit.intremap { "y" } else { "n" }, "ir", name, line)?;
         // Not a profile dimension, and asserted because the whole suite rests
         // on it: `caching-mode=on` is what makes QEMU's IOTLB a real cache and
-        // the map-side invalidation load-bearing at stage I4 (§5.5), and 2 MiB
-        // leaf entries are what this kernel's one page size requires (§5.4).
+        // the map-side invalidation load-bearing, and 2 MiB
+        // leaf entries are what this kernel's one page size requires.
         expect(&field("cm")?, "y", "cm", name, line)?;
         expect(&field("sps2m")?, "y", "sps2m", name, line)?;
 
