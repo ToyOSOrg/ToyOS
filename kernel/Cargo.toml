@@ -224,7 +224,7 @@ stack-witness = []
 # asks its question at `hw::check_switch_frame`, which reads `ctx.rsp`, tests it
 # and returns it; the frame is popped in `sched::driver::context_switch` a few
 # hundred instructions later, past the preempt swap, the TSS handover, a
-# `mov cr3` and a `wrfsbase`, and nothing between them tests anything. 18,064
+# `mov cr3` and an FS-base write, and nothing between them tests anything. 18,064
 # boots of `stack-witness` say the value the check sees is always sound, and one
 # parked guest says the value the `popfq` used was not — a frame at
 # `0xffff800000c00640`, inside the per-CPU region, which every check that runs at
@@ -333,6 +333,16 @@ heap-lockspin = ["pass-spin"]
 # in a binary the shipping one no longer resembles. The gate would then certify
 # a bracket nothing ships.
 fpu-save-nothing = []
+# The kernel this tree had before `arch::control_regs` took `FSGSBASE` out of
+# `CR4`: the bit back in `CR4_REQUIRED`, so `WRGSBASE`/`RDGSBASE` are legal at
+# CPL 3 again and a Ring 3 thread can aim the `GS.base` every kernel entry
+# dereferences. The negative control for `gsbase_locked`, and its own kernel
+# build for `fpu-save-nothing`'s reason — the defect is one bit of the `CR4`
+# declaration every CPU is asserted against, which a boot parameter cannot reach
+# without becoming a branch on the path the doctrine forbids. It replaces the
+# machine and not a verdict: the MSR-based FS base, the entry paths and
+# `self_check` are the shipped kernel's, and only that one bit differs.
+user-writable-gsbase = []
 
 # The one profile every guest binary is built with.
 # Optimised, because an unoptimised guest mismeasures everything under TCG;
