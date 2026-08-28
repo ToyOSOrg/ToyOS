@@ -1,63 +1,10 @@
-//! What a crashing CPU may touch before it trusts the machine, and the evidence
-//! it leaves when it has nowhere left to report.
+//! Captures a crash's evidence before anything else can touch it, so a second
+//! panic during reporting cannot erase the first.
 //!
-//! Two dead ends end a crash with no report of their own. The **reentry guard**
-//! fires when the panic *report* panics, and the **`DOUBLE PANIC`** arm fires
-//! when a panic arrives on a CPU that is already inside a fault or a report.
-//! Without what follows, the one class of crash that is by definition two bugs
-//! deep is the one class that leaves no evidence at all — a `DOUBLE PANIC` or a
-//! `PANIC REENTRY: CPU halted` says neither what the first crash was, nor where
-//! (`issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md`).
-//!
-//! **The evidence is copied at the moment the first crash begins, before
-//! anything is printed.** [`record_panic`] runs as the first statement of the
-//! panic handler and [`record_fault`] as the first statement of
-//! `fatal_exception` after the state swap — both ahead of every formatter, every
-//! lock and every device this kernel has. What they do is a bounded byte copy
-//! into a static reserved when the image was linked: no allocation, no lock, no
-//! `core::fmt`, no page that can be absent, and nothing that can itself panic.
-//! Everything downstream of them may die without taking the report with it,
-//! which is the whole property — a mechanism that captured the first crash
-//! *while* reporting it would be a mechanism whose failure mode is this issue.
-//!
-//! **What it deliberately does not attempt.** No unwinding, and no second
-//! formatting pass: the message is taken from
-//! [`core::panic::PanicMessage::as_str`], which is `Some` exactly when the panic
-//! carries a literal and needs no runtime formatting, and is otherwise left out
-//! by name. Running `core::fmt` here would put a `Display` impl — free to lock,
-//! to allocate and to panic — inside the one mechanism whose value is that it
-//! cannot fail; the formatted text is `crash_report`'s job and reaches the
-//! record ring one instruction later. So `expect("…")` and `assert_eq!` leave a
-//! location and no message, and `panic!("…")`, `assert!` and `unwrap()` leave
-//! both.
-//!
-//! **The slot holds this CPU's *first* unfinished crash.** [`claim`] is a
-//! compare-exchange from `None`, so the second crash — the one that is doing the
-//! reporting, and whose `PanicInfo` is live on its own stack — never overwrites
-//! the first. [`forget`] releases it wherever a CPU declares itself normal
-//! again, so a *recovered* panic cannot be reported an hour later as somebody
-//! else's first event. The demand-paging return does not release it and does not
-//! need to: nothing that captures can reach that path without passing one of
-//! [`forget`]'s three call sites, and [`apic_id`] is a `CPUID` — not a thing to
-//! put on the fault path this kernel takes millions of.
-//!
-//! **Where the report goes.** [`last_words`] streams straight to the 16550
-//! through `serial::panic_raw`: no lock, no ring, no percpu, bounded per byte.
-//! That is the one channel a dead end may use, because the guard the log's
-//! console drain takes is exactly what the first crash may be holding — and a
-//! second panic that arrives while the first holds it is one plausible way a
-//! first panic becomes a double. The `DOUBLE PANIC` arm *also* says it as a
-//! record, because that is the only channel a machine with no serial port has:
-//! the on-screen panel and the virtio-console both read records. Raw first, so
-//! a wedge in the record path costs the second copy and never the first. On a
-//! UART-only machine the report therefore arrives twice, which is the same
-//! trade `log::console::drain_bypassed` already makes: twice beats never on a
-//! machine that is halting.
-//!
-//! The two renderings differ on purpose — the raw one carries APIC ids and hex,
-//! the record is the readable line a panel shows — and they are written ten
-//! lines apart in one function so they cannot drift into disagreeing about the
-//! evidence.
+//! [`record_panic`] and [`record_fault`] run before any lock, formatter or
+//! device: a bounded byte copy into statics, no allocation, nothing that can
+//! itself panic. [`last_words`] renders both crashes to the 16550 raw, and
+//! also as a record — the only channel a machine with no serial port has.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -66,46 +13,27 @@ use crate::arch::percpu::CpuFaultState;
 use crate::drivers::serial;
 
 /// Slots in every per-CPU array here: an APIC id masked to six bits.
-///
-/// See [`apic_id`] for why CPUID and not the percpu block, and
-/// [`PANIC_DEPTH`] for what masking costs.
 const SLOTS: usize = 64;
 
-/// Per-CPU panic-reentry depth, indexed by x2APIC id (masked). The panic path
-/// must not trust GS/percpu: a corrupted percpu block makes `swap_fault_state`
-/// itself fault, re-entering the panic handler in an unbounded recursion that
-/// smashes the stack down through the heap. CPUID is the only per-CPU
-/// discriminator that needs no memory access and no enabled unit at all.
-///
-/// A single global flag would stay set after a *recovered* panic and silently
-/// swallow every later, independent panic report, and a panic on one CPU would
-/// mask a concurrent first panic on another. Masking the APIC id to 64 slots
-/// only means colliding CPUs share a guard — a concurrent panic on both halts
-/// the second, which `halt_all_cpus` would do moments later anyway.
+/// Per-CPU panic-reentry depth, indexed by masked APIC id, not by percpu: a
+/// corrupted percpu block would make `swap_fault_state` itself fault here.
+/// Per-CPU rather than one global flag, so a panic on one CPU cannot mask a
+/// concurrent first panic on another; a masked-id collision is safe because
+/// `halt_all_cpus` halts the second CPU anyway.
 static PANIC_DEPTH: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 
 /// This CPU's APIC id, from CPUID.
 ///
-/// **Not `rdmsr(IA32_X2APIC_APICID)`**: `apic::init_ap` is three calls after
-/// `percpu::init_ap` in `ap_entry`, and that MSR is `#GP` until it has run, so
-/// a panic an AP takes in between would fault *inside the reentry guard* before
-/// the guard was armed and triple-fault the machine with the whole boot still
-/// unflushed in the log ring.
-///
-/// Leaf 0x1F and leaf 0xB give the full x2APIC id and leaf 1 the 8-bit initial
-/// one; the slot is masked to 64 either way, so the fallback loses nothing this
-/// array was keeping.
+/// Not `rdmsr(IA32_X2APIC_APICID)`: that MSR is `#GP` before `apic::init_ap`
+/// has run, and a panic an AP takes before then must not fault inside the
+/// reentry guard.
 pub fn apic_id() -> u32 {
     let (max_leaf, _, _, _) = cpu::cpuid(0, 0);
     for leaf in [0x1F, 0x0B] {
         if max_leaf >= leaf {
             let (_, ebx, _, edx) = cpu::cpuid(leaf, 0);
-            // Reaching the leaf index is not the existence test: SDM Vol. 2A,
-            // `CPUID` leaf 0BH, requires `EBX[15:0]` non-zero as well, and a CPU
-            // whose maximum leaf covers it without implementing it answers zero
-            // in every register. That is not a distinguisher — every CPU would
-            // take slot 0 and share one guard — and it is reached by skipping
-            // the leaf-1 fallback that is correct for exactly that machine.
+            // SDM Vol. 2A, CPUID leaf 0BH: EBX[15:0] == 0 means unimplemented,
+            // not id 0, so the leaf-1 fallback below must still run.
             if ebx & 0xFFFF != 0 {
                 return edx;
             }
@@ -120,28 +48,7 @@ pub fn depth_slot() -> &'static AtomicU32 {
     &PANIC_DEPTH[apic_id() as usize & (SLOTS - 1)]
 }
 
-/// How much of a crash site this keeps.
-///
-/// **96 bytes of path, and the *tail* of it.** `file!()` is whatever rustc was
-/// handed, and the two shapes differ by an order of magnitude. The kernel's own
-/// files are crate-relative, because `build.rs` runs cargo *in* `kernel/`:
-/// `src/main.rs`, and 32 characters at the longest this crate has
-/// (`src/drivers/panic_console/mod.rs`). Everything else is absolute — a
-/// dependency's, a `core` panic's — and its length is the checkout's: 39 for
-/// the `/__w/toyos/toyos/toyos-sched/src/cpu.rs` a CI capture carries, more on
-/// a dev host with a deep worktree. The head of such a path is the build host
-/// and the tail is the identity, so what overflows is cut off the front and
-/// marked.
-///
-/// **128 bytes of message.** A record's own bound is `MAX_RECORD_MESSAGE`, 992,
-/// and this is not a record: it holds a panic literal, which in this kernel's
-/// corpus is one sentence. A message longer than this is cut at a character
-/// boundary and the location — the part that is always a lead — is unaffected.
-///
-/// 260 bytes a slot, 16,640 for the machine, in `.bss` beside
-/// `panic_console`'s three 32 KiB snapshots. No alignment padding, because
-/// nothing writes these from a hot path: the two writers are a panic and a
-/// fatal exception.
+/// Path capture bound; overflow is cut from the front (see [`copy_tail`]).
 const FILE_BYTES: usize = 96;
 const MSG_BYTES: usize = 128;
 
@@ -159,33 +66,24 @@ impl Kind {
         match raw {
             1 => Self::Panic,
             2 => Self::Fault,
-            // A slot nothing claimed, or one whose byte is not a kind at all.
-            // The report says "nothing captured" either way, which is true of
-            // both and is the only honest answer to a corrupted one.
+            // An unclaimed slot and a corrupted kind byte both read as "nothing captured".
             _ => Self::None,
         }
     }
 }
 
-/// One CPU's first unfinished crash.
-///
-/// Every field is an atomic because there is no `unsafe` in this module and
-/// none is needed: the stores compile to the same `mov`s a plain array would
-/// take. The ordering is `Relaxed` throughout and that is not a weakening —
-/// one CPU writes its own slot and the same CPU reads it, with interrupts
-/// masked from the capture to the report, and no other CPU ever looks.
-///
-/// The lengths are stored *after* the bytes, so a slot read halfway through a
-/// fill — an NMI that panics between the claim and the copy — reports a short
-/// string rather than the previous crash's tail.
+/// One CPU's first unfinished crash. Every field is `Relaxed`: one CPU writes
+/// its own slot and the same CPU reads it, with interrupts masked throughout,
+/// and no other CPU ever looks. Lengths are stored after the bytes, so a slot
+/// read mid-fill — an NMI panicking between the claim and the copy — reports
+/// a short string rather than the previous crash's tail.
 struct Evidence {
     kind: AtomicU8,
     file_len: AtomicU8,
     msg_len: AtomicU8,
     /// The path did not fit and its head is what was dropped.
     file_cut: AtomicU8,
-    /// Which CPU filled this in, unmasked, so that two CPUs sharing a slot is
-    /// visible in the report rather than a quiet lie.
+    /// Unmasked, so two CPUs sharing a slot is visible in the report.
     apic: AtomicU32,
     line: AtomicU32,
     column: AtomicU32,
@@ -222,9 +120,7 @@ fn evidence() -> &'static Evidence {
     &FIRST[apic_id() as usize & (SLOTS - 1)]
 }
 
-/// Take this CPU's slot, or decline because the crash being reported already
-/// has it. The decline is the point: the *first* crash is the one nothing else
-/// can recover.
+/// Claims this CPU's slot for the first crash; declines if one is already claimed.
 fn claim(slot: &Evidence, kind: Kind) -> bool {
     slot.kind
         .compare_exchange(Kind::None as u8, kind as u8, Ordering::Relaxed, Ordering::Relaxed)
@@ -249,12 +145,9 @@ pub fn record_panic(info: &core::panic::PanicInfo) {
     }
 }
 
-/// Copy a fatal exception into this CPU's slot, before the fault has said
-/// anything about itself.
-///
-/// `name` is `exceptions::vector_name`'s answer and is copied rather than kept
-/// as a pointer, for the same reason the path is: the emitter dereferences
-/// nothing it was handed by a machine that has already failed once.
+/// Copies a fatal exception into this CPU's slot, before the fault reports
+/// itself. `name` is copied rather than kept as a pointer, like the path: a
+/// machine that has already failed once is not trusted to keep it valid.
 pub fn record_fault(name: &str, rip: u64, cr2: u64, error_code: u64) {
     let slot = evidence();
     if !claim(slot, Kind::Fault) {
@@ -267,12 +160,8 @@ pub fn record_fault(name: &str, rip: u64, cr2: u64, error_code: u64) {
     slot.error_code.store(error_code, Ordering::Relaxed);
 }
 
-/// This CPU is out of the crash it was in: release the slot so the next one
-/// captures its own first event.
-///
-/// Called wherever a CPU sets its fault state back to `Normal` and carries on —
-/// the panic recovery, the fault recovery, and the recursive-fault arm that
-/// ends a process instead of the machine.
+/// Releases this CPU's slot so the next crash captures its own first event.
+/// Called wherever a CPU's fault state returns to `Normal`.
 pub fn forget() {
     evidence().kind.store(Kind::None as u8, Ordering::Relaxed);
 }
@@ -327,19 +216,11 @@ fn state_name(state: CpuFaultState) -> &'static str {
 /// this module refused to run a formatter to find out.
 const NOT_CAPTURED: &str = "<formatted at runtime; not captured>";
 
-/// This CPU's last words: the crash it was already inside, and the panic that
-/// has just ended it.
-///
-/// `header` names the dead end. `prev` is the fault state the arriving panic
-/// found, where the caller has one — the reentry guard runs *before* the state
-/// swap and deliberately does not read percpu to get one. `second` is that
-/// panic, still live on this stack, so its site and literal are read straight
-/// out of it rather than captured.
-///
-/// `on_the_record` also says it as an `alert!`. False for the reentry guard,
-/// whose whole premise is that the report path is the suspect; true for
-/// `DOUBLE PANIC`, where the record ring is the only channel a machine with no
-/// serial port has.
+/// Reports this CPU's captured crash and the panic (`second`) that just
+/// reentered it. `prev` is `None` where the caller has no fault state to
+/// give — the reentry guard runs before the state swap. `on_the_record` also
+/// writes an `alert!`; false where the report path itself is the suspect, as
+/// in the reentry guard.
 pub fn last_words(
     header: &str,
     prev: Option<CpuFaultState>,
@@ -413,11 +294,8 @@ pub fn last_words(
     if !on_the_record {
         return;
     }
-    // ASCII and one line, because the last reader of this is a panel that
-    // renders codepoints 0x20..=0x7E and paints one record per row. Nothing
-    // here formats anything but `&str` and integers, whose `Display` cannot
-    // fail; what can still fail is `emit` itself, which is why the raw report
-    // above has already gone out.
+    // One ASCII line: the panel renders codepoints 0x20..=0x7E, one record per
+    // row. The raw report above already went out because `alert!` can still fail.
     let state = prev.map_or("", state_name);
     match kind {
         Kind::Panic => alert!(

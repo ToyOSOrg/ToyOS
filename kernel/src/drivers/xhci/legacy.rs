@@ -1,31 +1,8 @@
-//! Taking the xHC away from firmware before resetting it (xHCI spec §4.22.1).
+//! Takes the xHC from firmware before reset (xHCI spec §4.22.1).
 //!
-//! A PC's firmware often keeps the USB controller for its own use — legacy
-//! keyboard emulation, so a pre-boot menu works without a USB stack — and the
-//! mechanism it uses is SMM: an SMI fires on the events named in USBLEGCTLSTS
-//! and the handler drives the controller behind the OS's back. Resetting a
-//! controller SMM still owns does not fail loudly. It fails the way the laptop
-//! fails: the firmware and the kernel take turns programming the same
-//! registers, and the machine reaches userland with something dead and no line
-//! anywhere saying why.
-//!
-//! **The capability list is firmware's, so it is untrusted input.** CLAUDE.md's
-//! corollary applies literally: nothing here panics, nothing here loops on a
-//! number firmware chose, and a list that makes no sense costs the handoff and
-//! never the boot. The walk terminates for three independent reasons — the next
-//! pointer is a strictly positive *forward* delta (spec §7.1.1: dwords from the
-//! start of *this* capability, zero meaning end of list), every read is bounds
-//! checked against the mapped window, and the iteration count is capped — and it
-//! would still terminate with any *one* of them removed. Not any two: with the
-//! window check and the cap both gone the forward delta alone climbs through
-//! the u64 space, which is what the self-test's last case ("an endless chain
-//! inside a window that never ends") is a demonstration of.
-//!
-//! QEMU cannot exercise any of this. Its xHC publishes no Legacy Support
-//! capability and nothing owns the controller once OVMF's USB stack lets go at
-//! ExitBootServices, so on the only machine in reach the handoff is a walk that
-//! finds nothing. That is why the malformed lists have a self-test
-//! (`xhci-xecp-selftest`) rather than a boot to point at.
+//! The extended capability list is firmware's, so it is untrusted: nothing
+//! here panics or loops unbounded on firmware-supplied data, and a malformed
+//! list costs the handoff, never the boot.
 
 use crate::log;
 use crate::mm::Mmio;
@@ -46,42 +23,25 @@ const SMI_ENABLES: u32 = (1 << 0) | (1 << 4) | (1 << 13) | (1 << 14) | (1 << 15)
 /// Its write-1-to-clear SMI status bits: OS ownership change, PCI command, BAR.
 const SMI_STATUS: u32 = (1 << 29) | (1 << 30) | (1 << 31);
 
-/// How long firmware gets to let go.
-///
-/// A policy number and not a measurement — nothing in reach can make this wait,
-/// and no vendor firmware has been timed. One second is the conventional
-/// handoff wait: long enough that a machine which was going to release has,
-/// short enough that one which never will costs the boot a second rather than
-/// the controller.
-///
-/// A [`Budget`]: expiry is not fatal and deliberately so — the driver resets
-/// the controller anyway and logs what to suspect, which is a degraded answer
-/// and not a refusal.
+/// Grace period for firmware to release the controller; expiry is not fatal.
 const HANDOFF_TIMEOUT: Budget = Budget::of(
     Duration::from_secs(1),
     "the controller is reset out from under firmware, with a line naming the semaphore",
 );
 
-/// Capabilities the walk will visit before deciding the list is not a list.
-/// Every shipping controller publishes a handful; the bound is here because
-/// the number comes from firmware, not because any real one approaches it.
+/// Iteration cap for the capability walk, independent of firmware's link count.
 const MAX_CAPS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalkError {
-    /// A capability header that does not fit inside the mapped register
-    /// window. The pointer that led here was firmware's.
+    /// A capability header outside the mapped register window.
     OutOfWindow(u64),
     /// More links than `MAX_CAPS`.
     TooMany,
 }
 
-/// Byte offset of the first capability with `id`, or `None` if the list has
-/// none — walking from `xecp_dwords`, the HCCPARAMS1 field, in dwords from the
-/// base of the register window.
-///
-/// `read` returns `None` for any offset whose dword lies outside that window,
-/// which is what turns a firmware pointer into a refusal instead of a fault.
+/// Byte offset of the first capability with `id`, or `None` if the list has none.
+/// `read` must return `None` for any offset outside the mapped window.
 pub fn find(
     read: &dyn Fn(u64) -> Option<u32>,
     xecp_dwords: u32,
@@ -95,11 +55,7 @@ pub fn find(
     Ok(found)
 }
 
-/// Every capability with this id, in list order.
-///
-/// One id can legitimately appear more than once: a controller publishes one
-/// Supported Protocol capability per protocol, so taking the first is taking
-/// half the machine's description of itself.
+/// Every capability with `id`, in list order; an id may appear more than once.
 pub fn for_each(
     read: &dyn Fn(u64) -> Option<u32>,
     xecp_dwords: u32,
@@ -112,8 +68,7 @@ pub fn for_each(
     })
 }
 
-/// The walk. `visit` says whether to keep going, so a caller that wants the
-/// first match stops the list exactly where it used to.
+/// `visit` returns `false` to stop the walk early.
 fn walk(
     read: &dyn Fn(u64) -> Option<u32>,
     xecp_dwords: u32,
@@ -135,9 +90,7 @@ fn walk(
         if next == 0 {
             return Ok(());
         }
-        // At least one dword forward, at most 255 — so the offset strictly
-        // increases and cannot wrap, and the window check above is what ends
-        // the walk even if `MAX_CAPS` were raised to anything.
+        // Offset strictly increases (1..=255 dwords per step) and cannot wrap.
         offset += next as u64 * 4;
     }
     Err(WalkError::TooMany)
@@ -146,12 +99,8 @@ fn walk(
 /// Capability ID 2 — Supported Protocol (spec §7.2).
 pub const CAP_ID_PROTOCOL: u8 = 2;
 
-/// Ask firmware for the controller, and disable its SMIs whatever it answers.
-///
-/// Returns nothing and refuses nothing: the caller resets the controller either
-/// way, because a machine that cannot boot is worse than one whose firmware is
-/// fighting it. What this buys is that when the fight happens there is a line
-/// naming it, which is the whole difference on a laptop with no serial port.
+/// Asks firmware for the controller and disables its SMIs regardless of the answer.
+/// Never refuses: the caller resets the controller whether or not the handoff succeeded.
 pub fn take_ownership(bar: &Mmio, bar_size: u64, hccparams1: u32) {
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::xhci_xecp_selftest() {
@@ -192,9 +141,7 @@ pub fn take_ownership(bar: &Mmio, bar_size: u64, hccparams1: u32) {
     let waited_us = (crate::clock::nanos_since_boot() - started) / 1_000;
 
     if now & LEGSUP_BIOS_OWNED != 0 {
-        // Not fatal, and deliberately so: proceeding gives a machine that may
-        // work with a line saying what to suspect, and refusing gives one that
-        // certainly does not boot.
+        // Not fatal: the controller resets regardless of what firmware reports.
         log!(
             "xHCI: firmware still owns the controller after {}ms (USBLEGSUP {before:#010x} -> {now:#010x}) — resetting it anyway",
             HANDOFF_TIMEOUT.duration().millis()
@@ -205,23 +152,14 @@ pub fn take_ownership(bar: &Mmio, bar_size: u64, hccparams1: u32) {
         log!("xHCI: firmware did not claim the controller (USBLEGSUP {before:#010x})");
     }
 
-    // Whatever the semaphore said. Firmware that did not release is exactly the
-    // firmware whose SMI handler is about to meet a reset it did not expect,
-    // and firmware that never claimed ownership can still have SMI generation
-    // armed — the two bits are independent.
+    // SMIs are disabled whatever the ownership result; the two bits are independent.
     let ctl = bar.read_u32(legsup + LEGCTLSTS);
     bar.write_u32(legsup + LEGCTLSTS, (ctl & !SMI_ENABLES) | SMI_STATUS);
     let after = bar.read_u32(legsup + LEGCTLSTS);
     log!("xHCI: USBLEGCTLSTS {ctl:#010x} -> {after:#010x} (SMI generation off)");
 }
 
-/// The malformed lists no controller in reach can produce.
-///
-/// Every case here is a shape firmware can hand us and QEMU cannot: it
-/// publishes no extended capabilities the walk can go wrong on, so without this
-/// the bounds in [`find`] would ship having never been executed. Each expected
-/// value is the *refusal*, not the answer — the property under test is that a
-/// list which makes no sense costs the handoff and nothing else.
+/// Malformed capability lists QEMU's xHC cannot produce; exercises [`find`]'s bounds checks.
 #[cfg(feature = "boot-actuators")]
 fn selftest() {
     /// A 16-dword register window, so a dword at or past 0x40 is outside it.
@@ -245,8 +183,7 @@ fn selftest() {
         }
     };
 
-    // Dword `n` of the window is at byte offset `4n`. A real controller's own
-    // capability registers occupy the first few, so no list starts at zero.
+    // No case starts the list at dword 0 — real controllers occupy the first few.
     fn windowed(cells: &[u32; 16]) -> impl Fn(u64) -> Option<u32> + '_ {
         move |offset: u64| -> Option<u32> {
             if !offset.is_multiple_of(4) || offset.checked_add(4)? > WINDOW {
@@ -289,9 +226,7 @@ fn selftest() {
         Err(WalkError::OutOfWindow(16 + 1020)),
     );
 
-    // What an unmapped or powered-down region reads as. id 0xFF matches
-    // nothing and next 0xFF walks off the end, which is the refusal we want
-    // rather than 16384 reads of a dead bus.
+    // All-ones is what an unmapped region reads as; it must refuse, not spin.
     check(
         "a window reading all ones",
         &windowed(&[u32::MAX; 16]),
@@ -299,10 +234,7 @@ fn selftest() {
         Err(WalkError::OutOfWindow(16 + 1020)),
     );
 
-    // The pathological *conformant* list: every link one dword forward, which
-    // is as slowly as the encoding permits, over a window large enough that
-    // the bounds check never fires. Only the iteration cap can end this one,
-    // which is the point — it is the bound that has no other backstop.
+    // Conformant but endless; only the iteration cap can end it, the window check never fires.
     check(
         "an endless chain inside a window that never ends",
         &|_| Some(header(2, 1)),

@@ -1,12 +1,7 @@
-//! The only place a process can resolve a service name.
-//!
-//! A namespace is **immutable once built**: no insert, no remove, no replace.
-//! A narrower one is a new object built from an existing one, so a handle to a
-//! namespace is a handle to a fixed set — and a child given a subset cannot
-//! widen it back.
-//!
-//! There is no global registry behind this. A name a process was not given
-//! resolves to nothing, and there is no second place to ask.
+//! The only place a process can resolve a service name. Immutable once
+//! built — no insert, no remove, no replace — and a namespace narrowed
+//! for a child cannot be widened back. There is no global registry: a
+//! name a process was not given resolves to nothing.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -19,26 +14,20 @@ use super::{KObjectVariant, ObjectCore};
 
 pub struct Namespace {
     pub(super) core: ObjectCore,
-    /// Sorted by name, so a lookup is a binary search and a duplicate is
-    /// visible at construction.
+    /// Sorted by name: lookup binary-searches this order.
     entries: Box<[(Box<str>, Arc<Connector>)]>,
 }
 
 /// Why a namespace could not be built.
 pub enum BuildError {
-    /// More than [`MAX_NAMESPACE_ENTRIES`], or a name past
-    /// [`MAX_SERVICE_NAME`]. A caller asking for one more has a bug and is
-    /// refused by name rather than truncated to fit.
+    /// Too many entries, or a name past the length limit — refused, not truncated.
     TooMany,
-    /// Two entries for one name. Which one wins is not something a caller
-    /// should have to know.
+    /// Two entries share a name.
     Duplicate,
 }
 
 impl Namespace {
-    /// The entries must already carry every name this namespace is to hold —
-    /// a base's kept names are resolved by the caller, because only it can say
-    /// which of them to keep.
+    /// Entries must already carry every name this namespace is to hold.
     pub fn build(mut entries: Vec<(Box<str>, Arc<Connector>)>) -> Result<Arc<Self>, BuildError> {
         if entries.len() > MAX_NAMESPACE_ENTRIES {
             return Err(BuildError::TooMany);

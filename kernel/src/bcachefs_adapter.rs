@@ -14,13 +14,7 @@ use crate::vfs::FileSystem;
 /// BlockIO implementation that wraps the kernel's global PageCache.
 pub struct PageCacheBlockIO;
 
-/// The device error channel now runs the whole way: `BlockDevice` reports a
-/// refused transfer, the page cache propagates it, and `bcachefs::BlockIO`
-/// carries it into `FsError`. Nothing here invents a value.
-///
-/// This used to serve zeros and a log line, which was fail-closed rather than
-/// correct — zeros fail bcachefs's structural checks, so a read error reached
-/// the btree looking like corruption and a *write* error looked like a write.
+/// Errors propagate unchanged; nothing here invents a value for a refused transfer.
 impl BlockIO for PageCacheBlockIO {
     fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
         let mut guard = page_cache::lock();
@@ -50,13 +44,7 @@ impl BlockIO for PageCacheBlockIO {
     }
 }
 
-/// What an `FsError` means to the [`FileSystem`] trait's caller.
-///
-/// Exhaustive, so a variant added to `bcachefs` stops this compiling rather
-/// than joining a catch-all. Every corruption variant is [`SyscallError::Io`]
-/// and not `NotFound`: a btree node that does not decode is a volume that
-/// cannot answer the question, which is the same thing to a caller as a device
-/// that refused the transfer, and the opposite of a name that is not there.
+/// Exhaustive match: corruption maps to `Io`, never `NotFound` — a btree that won't decode isn't "not there".
 fn as_syscall_error(err: &FsError) -> SyscallError {
     match err {
         FsError::NotFound => SyscallError::NotFound,
@@ -76,13 +64,7 @@ fn as_syscall_error(err: &FsError) -> SyscallError {
     }
 }
 
-/// Log what went wrong and hand the caller the code for it.
-///
-/// The `FsError` carries a block number and a field name; `SyscallError` has
-/// room for neither, and a triage reads the log. This used to answer `None`
-/// instead, which put the sentinel `bcachefs::BlockIO` had just shed one layer
-/// further up: a device that would not read looked to every caller exactly like
-/// a file that was not there.
+/// Logs the error's detail, then maps it to the `SyscallError` a caller can act on.
 fn mapped<T>(op: &str, name: &str, result: Result<T, FsError>) -> Result<T, SyscallError> {
     result.map_err(|err| {
         log!("bcachefs: {} of '{}' failed: {:?}", op, name, err);
@@ -106,12 +88,9 @@ pub struct BcacheFsAdapter {
     fs: Mounted<PageCacheBlockIO, ReadWrite>,
     open_files: HashMap<FileId, OpenFileInfo>,
     name_to_id: HashMap<String, FileId>,
-    /// The one [`FileBlocks`] every backing for a name shares.
-    ///
-    /// Keyed by name and not by `FileId` because `open_backing` hands out a
-    /// backing without opening a file at all — that is the one a spawned
-    /// program's text lives behind, and it outlives every handle. `Weak` so the
-    /// entry costs nothing once the last backing is dropped.
+    /// The `FileBlocks` every backing for a name shares; keyed by name because
+    /// `open_backing` hands one out without opening a file at all. `Weak` so the
+    /// entry costs nothing once the last backing drops.
     blocks: HashMap<String, Weak<FileBlocks>>,
 }
 
@@ -125,12 +104,9 @@ impl BcacheFsAdapter {
         }
     }
 
-    /// The cell every backing for `name` reads through, made from `extents` if
-    /// this is the first one.
+    /// The cell every backing for `name` reads through; made from `extents` on first use.
     fn blocks_for(&mut self, name: &str, extents: Vec<Extent>) -> Arc<FileBlocks> {
-        // Names whose last backing has gone are swept here rather than on a
-        // timer: the map is only ever grown by this call, so this is the one
-        // place where dropping them costs nothing extra.
+        // Swept here, not on a timer: this is the only place the map grows.
         self.blocks.retain(|_, weak| weak.strong_count() > 0);
 
         if let Some(live) = self.blocks.get(name).and_then(Weak::upgrade) {
@@ -141,13 +117,8 @@ impl BcacheFsAdapter {
         blocks
     }
 
-    /// Give up every backing that reads `name`'s blocks.
-    ///
-    /// Called wherever the filesystem hands those blocks back to the
-    /// allocator — an unlink, a truncating create, a rename over an existing
-    /// name. The next file takes them, so a backing that still names them
-    /// reads that file's data: an information disclosure through ordinary
-    /// filesystem operations, with nothing crafted about it.
+    /// Give up every backing that reads `name`'s blocks; call before the blocks are
+    /// reused, or the next file's backing reads its data.
     fn revoke(&mut self, name: &str) {
         if let Some(blocks) = self.blocks.remove(name).as_ref().and_then(Weak::upgrade) {
             blocks.revoke();
@@ -156,14 +127,9 @@ impl BcacheFsAdapter {
 }
 
 impl FileSystem for BcacheFsAdapter {
-    /// The limit is checked on the result rather than before the work.
-    /// `bcachefs::Mounted::list` exposes no count and `btree::collect_all`
-    /// under it materialises the whole entry set first, so this makes the
-    /// refusal uniform without making the allocation bounded — that half is
-    /// the `bcachefs` crate's, and is filed.
+    /// Checked after the work, not before: `bcachefs::Mounted::list` exposes no count to check first.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
-        // An empty listing, which is what this used to return, is a lie a
-        // caller cannot tell from an empty directory.
+        // An empty listing on error would be a lie indistinguishable from an empty directory.
         let names = mapped("list", "/", self.fs.list())?;
         if names.len() > limit {
             return Err(SyscallError::ResourceExhausted);
@@ -209,8 +175,7 @@ impl FileSystem for BcacheFsAdapter {
             return Ok(file_id);
         }
 
-        // `Mounted::create` frees whatever answered to this name — the blocks
-        // of a program that is running out of it, if that is what it was.
+        // `Mounted::create` frees whatever answered to this name; revoke first.
         self.revoke(name);
         mapped("create", name, self.fs.create(name, &[], mtime))?;
 
@@ -252,13 +217,11 @@ impl FileSystem for BcacheFsAdapter {
             }
             self.name_to_id.remove(new);
         }
-        // The destination's blocks are freed by the rename; the source's are
-        // carried over to the new name, so only the destination is revoked.
+        // Only the destination is revoked; the source's blocks carry to the new name.
         self.revoke(new);
 
         mapped("rename", old, self.fs.rename(old, new))?;
 
-        // Update name_to_id: source's FileId now lives under new name
         if let Some(file_id) = self.name_to_id.remove(old) {
             self.name_to_id.insert(String::from(new), file_id);
             if let Some(info) = self.open_files.get_mut(&file_id) {
@@ -296,8 +259,7 @@ impl FileSystem for BcacheFsAdapter {
     }
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
-        // As `create`: the symlink displaces whatever answered to this name
-        // and the displaced entry's blocks go back to the allocator.
+        // As `create`: displaces whatever answered to this name; revoke first.
         self.revoke(name);
         mapped("create_symlink", name, self.fs.create_symlink(name, target))
     }
@@ -315,13 +277,7 @@ impl FileSystem for BcacheFsAdapter {
 
 /// VFS adapter for read-only bcachefs (initrd mounted in memory).
 ///
-/// It holds the image rather than the image's base address, because an
-/// [`InitrdBacking`] handed only a base can compute an address for any block
-/// the btree names and has nothing to compare it against. `SliceBlockIO` is
-/// `Copy`, so the mount and every backing check against the same length.
-///
-/// The `unsafe impl Send` this used to carry went with the raw pointer: a
-/// `SliceBlockIO` is `Send + Sync` in its own crate, on its own argument.
+/// Holds the image, not its base address, so every backing bounds-checks against the same length.
 pub struct ReadOnlyBcacheFsAdapter {
     fs: Mounted<SliceBlockIO, ReadOnly>,
     image: SliceBlockIO,
@@ -335,11 +291,7 @@ impl ReadOnlyBcacheFsAdapter {
 }
 
 impl FileSystem for ReadOnlyBcacheFsAdapter {
-    /// The limit is checked on the result rather than before the work.
-    /// `bcachefs::Mounted::list` exposes no count and `btree::collect_all`
-    /// under it materialises the whole entry set first, so this makes the
-    /// refusal uniform without making the allocation bounded — that half is
-    /// the `bcachefs` crate's, and is filed.
+    /// Checked after the work, not before: `bcachefs::Mounted::list` exposes no count to check first.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         let names = mapped("list", "/", self.fs.list())?;
         if names.len() > limit {
@@ -386,10 +338,7 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
         }
     }
 
-    /// Every write path answers `PermissionDenied`, which is what the mount
-    /// *is* — the initrd is a read-only image and nothing on it can change.
-    /// Distinct from `Io` on purpose: a caller retrying a refused write is
-    /// right about a device and wrong about this.
+    /// `PermissionDenied`, not `Io`: retrying this write is never right, unlike a device retry.
     fn delete(&mut self, _name: &str) -> Result<(), SyscallError> {
         Err(SyscallError::PermissionDenied)
     }
@@ -422,16 +371,12 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
 
 /// Format a new bcachefs filesystem on the NVMe device via PageCache.
 ///
-/// Destroys everything on the device. [`probe`] is the only caller that is
-/// entitled to reach it, and only on [`Storage::Designated`].
+/// Destroys everything on the device; only [`probe`] may call it, and only on [`Storage::Designated`].
 fn format() -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
     match Formatted::format(PageCacheBlockIO) {
         Ok(fs) => Some(fs.mount()),
         Err(err) => {
-            // The disk said we may destroy what is on it and then would not
-            // take the new volume. `open_home` falls back to a tmpfs `/home`,
-            // the same as for a disk that is not ours: a half-written volume
-            // is not one to mount.
+            // A half-written volume is not one to mount; `open_home` falls back to tmpfs.
             log!("storage: formatting the designated device failed: {:?}", err);
             None
         }
@@ -446,16 +391,11 @@ fn mount() -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
 
 /// What the machine's block device is, as far as we are entitled to care.
 ///
-/// The whole point of this enum is that there is no fourth arm and no default
-/// that writes. `Foreign` is the state of every disk that has ever belonged to
-/// anyone else, and it is also the state of a blank one — which is exactly why
-/// it cannot be treated as permission.
+/// No fourth arm and no default that writes: `Foreign` covers both someone else's disk and a blank one.
 pub enum Storage {
-    /// A ToyOS volume, mounted read-write. Identified positively, by its own
-    /// superblock, not by elimination.
+    /// A ToyOS volume, mounted read-write, identified by its own superblock.
     Ours(Mounted<PageCacheBlockIO, ReadWrite>),
-    /// The device carries a designation stamp naming its own size: somebody
-    /// deliberately said we may destroy what is here.
+    /// Carries a designation stamp naming its own size: consent to destroy what is here.
     Designated,
     /// Anything else. Never written to, under any circumstances.
     Foreign,
@@ -463,19 +403,8 @@ pub enum Storage {
 
 /// Decide what the device is, from one read of block 0.
 ///
-/// **A failed mount is not consent.** It is the single most likely state of a
-/// disk that belongs to someone else: an unformatted disk, a disk holding
-/// another operating system, and a ToyOS volume too corrupt to open are all
-/// indistinguishable from each other and all three arrive here as "mount
-/// returned None". The kernel used to format on that, which meant the first
-/// boot on any machine with a disk in it would take the disk. The only reason
-/// the laptop's first boot did not is that an unrelated panic in `page_cache::init`
-/// happened to come first, and that panic has since been fixed — so the bug we
-/// removed was the interlock.
-///
-/// One read decides all three because bcachefs puts its superblock at block 0
-/// too, so a disk cannot be both ours and awaiting designation. Reading is
-/// safe on any disk whatsoever; nothing below writes.
+/// A failed mount is not consent: an unformatted disk, another OS, and a corrupt volume all read as `None`.
+/// One read decides all three because bcachefs's own superblock also lives at block 0.
 pub fn probe() -> Storage {
     if let Some(fs) = mount() {
         log!("storage: mounted the ToyOS volume at block 0");
@@ -494,15 +423,12 @@ pub fn probe() -> Storage {
 
 /// Whether block 0 carries a designation stamp for a device of *this* size.
 ///
-/// The size is half the stamp and not decoration: without it, a designated
-/// image copied or restored onto a different disk would designate that disk
-/// too. With it, designation does not survive being moved.
+/// The size is checked so a copied image cannot designate a different disk.
 fn designated() -> bool {
     let mut guard = page_cache::lock();
     let blocks = guard.block_count();
     let (cache, dev) = guard.cache_and_dev();
-    // A disk whose block 0 cannot be read has not said this kernel may format
-    // it, and a read error is the least convincing consent there is.
+    // A read error is not consent to format.
     let Ok(block0) = cache.read(dev, 0) else {
         log!("storage: block 0 could not be read; this disk is not ours to format");
         return false;
@@ -532,9 +458,8 @@ fn designated() -> bool {
 
 /// The `/home` filesystem, and the only path on which `format` runs.
 ///
-/// `None` means the device is not ours: the caller mounts a tmpfs instead, so
-/// a machine whose disk we may not touch still boots to a working system with
-/// a volatile `/home` rather than panicking or, far worse, helping itself.
+/// `None` means the device is not ours; the caller falls back to a volatile tmpfs
+/// rather than panicking or formatting without consent.
 pub fn open_home() -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
     match probe() {
         Storage::Ours(fs) => Some(fs),
@@ -543,19 +468,9 @@ pub fn open_home() -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
     }
 }
 
-/// Mount a read-only bcachefs filesystem from an image already in memory
-/// (initrd).
+/// Mount a read-only bcachefs filesystem from an image already in memory (initrd).
 ///
-/// **It takes the image and not `(ptr, len)`, and that is the whole of what
-/// this function used to get wrong about its own signature.** A raw pointer and
-/// a length handed to something that reads through them is a call that ought to
-/// be `unsafe` — `elf::read_backing_into` and
-/// `elf::index::RelocationIndex::apply_to_page` were the last two of that shape
-/// in this kernel, and both take a `mm::KernelSlice` now, which carries the
-/// length the allocation gave it. Taking a `SliceBlockIO` moves the claim to
-/// `SliceBlockIO::new`, which is already an `unsafe fn` and already states it,
-/// so there is one claim about the initrd region in the whole kernel and it is
-/// made where the region is named.
+/// Takes a `SliceBlockIO`, not `(ptr, len)`: the unsafety claim belongs at `SliceBlockIO::new`.
 pub fn mount_initrd(image: SliceBlockIO) -> Mounted<SliceBlockIO, ReadOnly> {
     Mounted::<SliceBlockIO, ReadOnly>::open(image).expect("Failed to mount bcachefs initrd")
 }

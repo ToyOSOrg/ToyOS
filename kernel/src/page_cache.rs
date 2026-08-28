@@ -6,7 +6,6 @@ use hashbrown::HashMap;
 use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId};
 use crate::sync::Lock;
 
-// Separate locks: device I/O and cache data structures.
 // Lock ordering: BLOCK_CACHE → BLOCK_DEV (never reversed).
 static BLOCK_CACHE: Lock<Option<PageCache>> = Lock::new(None);
 static BLOCK_DEV: Lock<Option<Box<dyn BlockDevice>>> = Lock::new(None);
@@ -21,8 +20,7 @@ pub fn init(dev: Box<dyn BlockDevice>) {
     *BLOCK_DEV.lock() = Some(dev);
 }
 
-/// Lock both cache and device for metadata operations (bcachefs btree, etc.).
-/// Lock ordering: cache first, then device.
+/// Locks cache then device, in that order, for metadata operations.
 pub fn lock() -> PageCacheGuard {
     let cache = BLOCK_CACHE.lock();
     let dev = BLOCK_DEV.lock();
@@ -55,9 +53,7 @@ impl core::ops::DerefMut for PageCacheGuard {
     fn deref_mut(&mut self) -> &mut PageCache { self.cache.as_mut().expect("page cache not initialized") }
 }
 
-/// Read a block directly from disk, bypassing the cache.
-/// Locks only the device — no contention with metadata cache operations.
-/// Used by NvmeBacking for file data reads (file cache is the sole data cache).
+/// Reads a block directly from disk, bypassing the cache; locks only the device.
 #[must_use = "a failed read leaves the buffer holding whatever it held before"]
 pub fn raw_block_read(block: u64, buf: &mut [u8; 4096]) -> BlockResult {
     let mut dev = BLOCK_DEV.lock();
@@ -65,9 +61,7 @@ pub fn raw_block_read(block: u64, buf: &mut [u8; 4096]) -> BlockResult {
     dev.read_blocks(block, 1, buf)
 }
 
-/// Write a block directly to disk, bypassing the cache.
-/// Locks only the device.
-/// Used by filesystem write_page for file data writeback.
+/// Writes a block directly to disk, bypassing the cache; locks only the device.
 #[must_use = "a failed write did not reach the device"]
 pub fn raw_block_write(block: u64, buf: &[u8; 4096]) -> BlockResult {
     let mut dev = BLOCK_DEV.lock();
@@ -75,43 +69,29 @@ pub fn raw_block_write(block: u64, buf: &[u8; 4096]) -> BlockResult {
     dev.write_blocks(block, 1, buf)
 }
 
-/// The block number of a slot that names nothing — see [`PageCache::unbind`].
-/// No device can have this block: `block_count` is a byte count over 4096.
+// No device reaches u64::MAX blocks, so this value is safe as a sentinel.
 const NO_BLOCK: u64 = u64::MAX;
 
-/// Pages per chunk. 256 pages = 1MB per chunk allocation.
+/// 256 pages per chunk so each chunk allocation is exactly 1MB.
 const PAGES_PER_CHUNK: usize = 256;
 const CHUNK_SIZE: usize = PAGES_PER_CHUNK * 4096;
 
 pub struct PageCache {
-    /// Maps block number → slot index. Keyed by the cached set, never sized
-    /// by the device: one index entry per *device* block costs 4 bytes of
-    /// heap per KiB of disk, which a 244 GB laptop NVMe turns into a 238 MB
-    /// request the object allocator refuses outright.
+    /// Maps block number → slot index; sized by the cached set, never by the device block count.
     block_to_slot: HashMap<u64, u32>,
-    /// Maps slot index → block number (for sync and for eviction, which has
-    /// to un-index the block it is taking the slot from).
+    /// Maps slot index → block number, for sync and eviction.
     slot_to_block: Vec<u64>,
     dirty: Vec<bool>,
-    /// CLOCK's second-chance bit: set on every hit, cleared when the hand
-    /// passes. Without it a full cache degenerates to FIFO and evicts the
-    /// superblock — touched by every btree walk — as readily as a leaf.
+    /// CLOCK's second-chance bit: set on every hit, cleared when the hand passes.
+    /// Without it the cache degenerates to FIFO and can evict the superblock like any other slot.
     referenced: Vec<bool>,
-    /// Page data stored in fixed-size 1MB chunks to avoid giant reallocations.
-    ///
-    /// `Box<[u8]>` and not `Box<[u8; CHUNK_SIZE]>`: the array type forced a
-    /// hand-written `alloc_zeroed` + `Box::from_raw`, because `Box::new` of a
-    /// 1 MiB array builds it on the kernel stack first. Every use of a chunk
-    /// is a `[off..off + 4096]` slice, which the unsized type serves
-    /// identically — and `vec![0u8; CHUNK_SIZE]` reaches the same
-    /// `alloc_zeroed` through `alloc`'s own zeroing specialization for `u8`,
-    /// with no stack temporary and no `unsafe`.
+    /// Allocated in fixed 1MB chunks rather than one buffer, to avoid reallocating the whole cache as it grows.
+    /// `Box<[u8]>`, not `Box<[u8; CHUNK_SIZE]>`: the array type would build a 1 MiB stack temporary before boxing.
     chunks: Vec<Box<[u8]>>,
     hand: u32,
     max_slots: usize,
     evictions: u64,
-    /// The device's size, which the filesystem needs. Nothing in here may
-    /// size an allocation by it.
+    /// The device's size; nothing in this struct may size an allocation by it.
     block_count: u64,
     _device_id: DeviceId,
 }
@@ -120,9 +100,7 @@ impl PageCache {
     fn new(block_count: u64, device_id: DeviceId) -> Self {
         let max_slots = block::metadata_cache_blocks();
         Self {
-            // Reserved up front so `index_capacity` reports the real ceiling
-            // from the first boot line rather than after the workload has
-            // grown into it.
+            // Reserved up front so `index_capacity` reports the real ceiling immediately.
             block_to_slot: HashMap::with_capacity(max_slots),
             slot_to_block: Vec::with_capacity(max_slots),
             dirty: Vec::with_capacity(max_slots),
@@ -140,18 +118,12 @@ impl PageCache {
         self.block_count
     }
 
-    /// Blocks the index has room for. A value anywhere near `block_count`
-    /// means someone sized the index by the device again — which is what the
-    /// boot line reports and `nvme_large_device` asserts against.
+    /// Blocks the index has room for; must stay far below `block_count`.
     pub fn index_capacity(&self) -> usize {
         self.block_to_slot.capacity()
     }
 
-    /// A slot bound to `block`, or `None` when nothing could be freed for it.
-    ///
-    /// `None` is reachable only when every resident slot is dirty *and* the
-    /// write-back that would clean them failed, which is a device error and
-    /// not the fail-fast this used to be.
+    /// Returns `None` only when every resident slot is dirty and write-back failed.
     fn alloc_slot(&mut self, dev: &mut dyn BlockDevice, block: u64) -> Option<u32> {
         let slot = if self.slot_to_block.len() < self.max_slots {
             let slot = self.slot_to_block.len() as u32;
@@ -168,10 +140,7 @@ impl PageCache {
             self.slot_to_block[slot as usize] = block;
             self.dirty[slot as usize] = false;
             self.evictions += 1;
-            // One line per full turnover of the cache, so the series scales
-            // with the bound instead of with a number picked here: it is the
-            // only evidence from outside the kernel that residency stays flat
-            // while the eviction count climbs.
+            // Logs once per full cache turnover, not on a fixed count, so the cadence scales with the bound.
             if self.evictions == 1 || self.evictions.is_multiple_of(self.max_slots as u64) {
                 log!("page cache: {} evictions, {}/{} slots resident",
                     self.evictions, self.slot_to_block.len(), self.max_slots);
@@ -183,14 +152,7 @@ impl PageCache {
         Some(slot)
     }
 
-    /// Undo a binding whose fill never happened.
-    ///
-    /// The slot still holds the evicted block's bytes, so the one thing that
-    /// must not survive is the *label*. With the index entry gone and the slot
-    /// naming nothing, the next reader misses and asks the device again
-    /// instead of being handed the previous tenant's data under the new
-    /// number — which is what a discarded read status used to produce, and it
-    /// parses, because it is a real block.
+    /// Clears the block's index entry so a later reader misses instead of reading stale data.
     fn unbind(&mut self, slot: u32, block: u64) {
         self.block_to_slot.remove(&block);
         self.slot_to_block[slot as usize] = NO_BLOCK;
@@ -198,29 +160,21 @@ impl PageCache {
         self.referenced[slot as usize] = false;
     }
 
-    /// Free a slot for reuse, writing back first if that is what it takes.
-    ///
-    /// Writing a dirty metadata block back early is not a new hazard: the
-    /// filesystem has no journal and `sync` already commits every dirty slot
-    /// in whatever order the block numbers fall, so eviction can only reorder
-    /// writes that were never ordered.
+    /// Frees a slot for reuse, writing back first when every clean slot is exhausted.
+    /// Writing back early is safe: there is no journal, so eviction only reorders writes that were never ordered.
     fn take_victim(&mut self, dev: &mut dyn BlockDevice) -> Option<u32> {
         if let Some(slot) = self.clock_pick() {
             return Some(slot);
         }
-        // Every resident block is dirty. One coalesced write-back is the same
-        // work unmount does and turns the whole cache clean, so the next scan
-        // cannot fail — unless the device refused the write-back, in which
-        // case the slots that stayed dirty are the ones this cannot have.
+        // Every resident slot is dirty; one write-back clears them all unless the device refuses.
         if self.sync(dev).is_err() {
             log!("page cache: write-back failed; no slot could be freed");
         }
         self.clock_pick()
     }
 
-    /// CLOCK second chance over clean slots. Two revolutions: the first can
-    /// spend clearing reference bits, the second then finds an unreferenced
-    /// slot unless every one of them is dirty.
+    /// CLOCK second-chance eviction over two revolutions of the hand.
+    /// First revolution clears reference bits; second finds a victim unless every slot is dirty.
     fn clock_pick(&mut self) -> Option<u32> {
         let n = self.slot_to_block.len() as u32;
         for _ in 0..2 * n {
@@ -284,17 +238,12 @@ impl PageCache {
         };
         self.dirty[slot as usize] = true;
         let page = self.slot_data_mut(slot);
-        // A reused slot still holds the evicted block's bytes, and the caller
-        // is entitled to a blank block.
+        // A reused slot still holds the evicted block's bytes; zero it before returning.
         page.fill(0);
         Ok(page)
     }
 
-    /// Write every dirty slot back, coalescing runs of consecutive blocks.
-    ///
-    /// The run walks slots rather than block numbers, so the write-back needs
-    /// no index lookups at all — `slot_to_block` is the direction this pass
-    /// wants, and the index is the wrong way round for it.
+    /// Writes every dirty slot back, coalescing runs of consecutive blocks.
     pub fn sync(&mut self, dev: &mut dyn BlockDevice) -> BlockResult {
         let mut pending: Vec<u32> = (0..self.slot_to_block.len() as u32)
             .filter(|&s| self.dirty[s as usize])
@@ -306,11 +255,7 @@ impl PageCache {
         pending.sort_unstable_by_key(|&s| self.slot_to_block[s as usize]);
 
         let mut buf = vec![0u8; 32 * 4096];
-        // **The worst of the parts, not the first.** One write-back is many
-        // runs plus a flush, and a caller told "your budget expired" for a
-        // composite that also contained a run the device refused would ask
-        // again for a write it can never make. `BlockError::worse` is where
-        // that rule is stated.
+        // Errors combine via `worse`, not first-wins, so a caller sees the one that blocks retry.
         let mut failed: Option<BlockError> = None;
         let mut i = 0;
         while i < pending.len() {
@@ -329,10 +274,7 @@ impl PageCache {
                 buf[j * 4096..(j + 1) * 4096].copy_from_slice(page);
             }
 
-            // A run that did not land stays dirty, so a later sync tries it
-            // again and `take_victim` will not hand the slot to another block.
-            // Carrying on with the remaining runs is deliberate: one bad run
-            // is not a reason to leave the rest of the cache unwritten.
+            // A failed run stays dirty for retry; the loop continues rather than aborting on it.
             match dev.write_blocks(start, count as u32, &buf[..count * 4096]) {
                 Ok(()) => {
                     for j in 0..count {

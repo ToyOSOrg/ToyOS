@@ -1,55 +1,10 @@
-// Page tables and address spaces.
-//
-// The only code that writes page table entries. Manages the kernel direct map
-// (all physical memory at PHYS_OFFSET) and per-process user address spaces.
-//
-// **An invalidation is derived from the entry that was replaced, never chosen
-// by the caller.** Every write into a paging structure the hardware may already
-// be walking goes through `PageTablePage::write`, `write_pde` — the writer every
-// leaf-mapping path uses — or `widen`, each of which returns the `Owed` their
-// prior value implies; `Owed` is `#[must_use]` and the three ways to end one are
-// the three answers there are. The rule is the SDM's:
-// a not-present entry creates no TLB entry and no paging-structure-cache entry
-// (Vol. 3A §4.10.2.3), so a write over one can leave nothing stale and an
-// `invlpg` there is pure cost — §4.10.4.3 says so as a permission. A write over
-// a present entry is invalidated whatever the caller believes, because a missing
-// invalidation is silent and a redundant one is only slow.
-//
-// **What is discharged here reaches this CPU and no other.** Telling the rest of
-// the machine is `arch::tlb::shootdown`, and it stays the caller's: which other
-// CPUs hold a translation is not knowable from the entry.
-//
-// **Every user mapping states one `Prot`, and W^X is the variant that does not
-// exist.** There is no writable-and-executable page a call site can ask for.
-// `EFER.NXE` is `arch::control_regs`' to declare; without it bit 63 would be
-// reserved rather than a permission, and every `Prot::ReadWrite` would fault.
-//
-// **User mappings are 2 MiB except where a program's own segments forbid it.**
-// One binary has one window where `.text` ends and `.data` begins, and
-// `map_window` splits exactly that window into 4 KiB entries over the same
-// frame — `WindowProt` carries the measurement that ruled out the alternatives.
-// A split is one-way: nothing coalesces a window back, and the page table lives
-// in `children` until the address space does.
-//
-// **A window a fault filled is claimed under the lock that installs it.** The
-// demand pager fills 2 MiB with this address space unlocked, so the "is it
-// mapped?" it asked before filling is stale by the whole fill and two threads of
-// one process both pass it. `map_window_if_absent` is where that question is
-// asked the second time, in the same critical section as the write it decides,
-// and the loser's frame is dropped rather than installed over the winner's — a
-// second install would leave the first thread's CPU holding a translation
-// nothing else can see, because what `write_pde` derives reaches this CPU alone.
-//
-// **No mapping in this kernel is global.** There is no `PAGE_GLOBAL` and
-// `CR4.PGE` is not in `arch::control_regs`'s declaration, which is what makes
-// the single-address forms complete here: INVPCID type 0 and INVLPG both leave
-// global translations alone. Adding PGE means revisiting every `discharge`.
-//
-// **The tagged branches are not exercised on the dev host.** Its QEMU is
-// `-cpu qemu64`, which offers no PCID, so `pcid_active()` is false and a guest
-// there boots holding `cr4=0x00310668`. Only a KVM runner with `-cpu host`
-// executes an `INVPCID` at all, so what answers for those branches is the
-// derivation and not the harness.
+// Page tables and address spaces: the only code that writes page table
+// entries, for the kernel direct map and per-process user address spaces.
+// A live-structure write's TLB invalidation is derived from the entry it
+// replaced, never chosen by the caller, and discharges only on this CPU —
+// `arch::tlb::shootdown` is the caller's job for the rest of the machine.
+// No mapping here is global, which is what makes a single-address
+// invalidation (INVPCID or INVLPG) complete.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -68,58 +23,38 @@ const PAGE_WRITE: u64 = 1 << 1;
 const PAGE_USER: u64 = 1 << 2;
 const PAGE_WRITE_THROUGH: u64 = 1 << 3;
 const PAGE_CACHE_DISABLE: u64 = 1 << 4;
-/// Set by the CPU on any access and on any write, so a mapping that has been
-/// used no longer equals the entry its mapper wrote.
+/// Set by hardware on access or write; masked out when comparing entries.
 const PAGE_ACCESSED: u64 = 1 << 5;
 const PAGE_DIRTY: u64 = 1 << 6;
 const PAGE_SIZE_BIT: u64 = 1 << 7;
-/// The PAT bit of a 2 MiB PDE. In a 4 KiB PTE the same bit is bit 7, so a PDE's
-/// flags cannot be carried across a split without moving it.
+/// In a 4 KiB PTE this bit is bit 7 instead, so flags can't cross a split unmoved.
 const PAGE_PAT_2M: u64 = 1 << 12;
-/// The `XD` bit. Means *not executable* only while `EFER.NXE` is set, and
-/// *reserved* otherwise — `arch::control_regs` declares `NXE` on every CPU and
-/// asserts it on each, so nothing here has to ask.
+/// Not-executable only because `arch::control_regs` asserts `EFER.NXE` on every CPU.
 const PAGE_NX: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
 
-/// The flags an upper-level table entry carries: present, writable, user. Every
-/// PML4E, PDPTE and page-table-pointing PDE is created with exactly these, and
-/// `ensure_table` masks whatever leaf flags a caller hands it down to this set —
-/// bit 12 of an upper entry is part of the next table's address, not the PDE's
-/// PAT bit, so leaf flags cannot move a page table 4 KiB.
+/// Every upper-level table entry's flags: present, writable, user.
 const TABLE_FLAGS: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
 
 /// 4 KiB pages in one 2 MiB page.
 const PAGES_PER_2M: usize = (PAGE_2M / 4096) as usize;
 
-/// What a user mapping may be used for.
-///
-/// **W^X is the missing fourth variant.** Nothing can name a page that is both
-/// writable and executable, so no call site can produce one by passing the
-/// wrong pair of booleans.
-///
-/// Read is implied by all three: this kernel has no execute-only and no
-/// write-only mapping, because `PAGE_USER` grants read wherever it grants
-/// anything at all.
+/// What a user mapping may be used for: no variant is both writable and
+/// executable, and every variant implies read since `PAGE_USER` grants it
+/// unconditionally.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Prot {
-    /// A program's read-only segment, and a mapping a caller asked to be
-    /// unwritable. Neither writable nor executable.
+    /// Read-only: neither writable nor executable.
     Read,
-    /// Data: the stack, the heap, `mmap`, shared memory, a TLS block, a pipe's
-    /// ring, an `io_uring`'s rings. Never executable.
+    /// Data: readable and writable, never executable.
     ReadWrite,
     /// Code. Never writable.
     ReadExec,
 }
 
 impl Prot {
-    /// The permission bits a leaf entry carries, at either granularity.
-    ///
-    /// The address, `PAGE_SIZE_BIT` and the cache policy stay the caller's —
-    /// the cache policy has to, because the PAT bit is bit 12 of a 2 MiB PDE
-    /// and bit 7 of a 4 KiB PTE.
+    /// The permission bits a leaf entry carries; address and cache policy stay the caller's.
     fn leaf_bits(self) -> u64 {
         let common = PAGE_PRESENT | PAGE_USER;
         match self {
@@ -130,32 +65,17 @@ impl Prot {
     }
 }
 
-/// What each 4 KiB page of one 2 MiB window may be used for.
-///
-/// **The reason this kernel has 4 KiB user mappings at all.** `toyos-ld` emits
-/// three `PT_LOAD`s at 4 KiB alignment, so a binary has exactly one 2 MiB
-/// window holding both the end of `.text` and the start of `.data`. Over the
-/// boot set: 20 binaries, 33 windows, **20 of them mixed**. One [`Prot`] for
-/// such a window has to be wrong in one direction, and both wrong answers were
-/// measured: at 2 MiB granularity only 48.9 % of 44.96 MiB of text can be
-/// write-protected, and **0 %** of 2.96 MiB of program data can be made
-/// non-executable, because every writable byte in the boot set shares a window
-/// with code. Aligning the linker's segments to 2 MiB instead costs +4 MiB of
-/// physical memory per process; one page table per mixed window costs 4 KiB.
-///
-/// [`AddressSpace::map_window`] is the only consumer, and a window whose pages
-/// agree stays one 2 MiB PDE and pays no page table.
+/// What each 4 KiB page of a 2 MiB window may be used for: split because
+/// `toyos-ld` can align a window across the end of `.text` and start of `.data`.
 pub struct WindowProt([Prot; PAGES_PER_2M]);
 
 impl WindowProt {
-    /// A window whose pages all say the same thing — every mapping in this
-    /// kernel that is not an ELF image.
+    /// A window whose pages all say the same thing.
     pub const fn uniform(prot: Prot) -> Self {
         Self([prot; PAGES_PER_2M])
     }
 
-    /// Set the protection of the 4 KiB page `offset` bytes into the window. An
-    /// offset past the window is the caller's arithmetic and panics here.
+    /// Sets the 4 KiB page `offset` bytes in; an out-of-window offset panics.
     pub fn set(&mut self, offset: u64, prot: Prot) {
         self.0[(offset / 4096) as usize] = prot;
     }
@@ -167,21 +87,13 @@ impl WindowProt {
     }
 }
 
-/// Which PAT entry a 2 MiB mapping selects, and so what memory type its pages
-/// have.
-///
-/// Every mapping states one. PAT, PCD and PWT together choose the entry; this
-/// kernel leaves PCD and PWT clear everywhere, so the PAT bit alone decides and
-/// only two of the eight entries are ever reachable.
+/// Which PAT entry a 2 MiB mapping selects; PCD/PWT stay clear everywhere, so
+/// the PAT bit alone chooses between the two reachable entries.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CachePolicy {
-    /// PAT entry 0, which is WB and never rewritten. A WB entry takes the
-    /// MTRR's type for the physical range (SDM Vol. 3A Table 11-7), so these
-    /// pages are whatever firmware decided they are —
-    /// [`mtrr::range_type`](crate::arch::mtrr::range_type) is the answer.
+    /// PAT entry 0 (WB); the range's actual type is the MTRR's (SDM Vol. 3A Table 11-7).
     DeferToMtrr,
-    /// PAT entry [`pat::WC_ENTRY`](crate::arch::pat::WC_ENTRY), which
-    /// [`pat::init`](crate::arch::pat::init) programs to WC on every CPU.
+    /// PAT entry [`pat::WC_ENTRY`](crate::arch::pat::WC_ENTRY).
     WriteCombining,
 }
 
@@ -193,10 +105,7 @@ impl CachePolicy {
         }
     }
 
-    /// The policy a 2 MiB PDE carries.
-    ///
-    /// PCD or PWT set means an entry this kernel did not write, and its memory
-    /// type is not one of the two named here.
+    /// PCD or PWT set means an entry this code never wrote.
     fn from_pde(pde: u64) -> Self {
         assert!(
             pde & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH) == 0,
@@ -222,25 +131,14 @@ impl PageTablePage {
     }
 
     /// # Safety
-    /// `phys` must be the physical address of a `PageTablePage` this module
-    /// itself built and linked into a live paging structure: every present
-    /// non-leaf entry this file ever writes names a `Box<PageTablePage>`
-    /// pushed into some `AddressSpace.children`, which owns it for that
-    /// address space's whole life — the split is one-way and nothing
-    /// coalesces a child table back (module header). The caller's use of the
-    /// returned reference must not outlive that address space.
+    /// `phys` must be a `PageTablePage` this module built and linked in;
+    /// the returned reference must not outlive its address space.
     unsafe fn from_phys<'a>(phys: u64) -> &'a PageTablePage {
         &*super::DirectMap::from_phys(phys).as_ptr::<PageTablePage>()
     }
 
     /// # Safety
-    /// Same address requirement as [`from_phys`], plus exclusivity: the
-    /// caller must hold the only live reference into this page for as long
-    /// as the returned `&mut` is live. Every call site reaches this through
-    /// `&mut AddressSpace` (directly or via `ensure_table`/`guard_4k`, which
-    /// take `&mut self`), which is what supplies that — nothing else in this
-    /// module ever borrows a child table without going through the owning
-    /// `AddressSpace`.
+    /// Same as [`from_phys`], plus exclusivity: hold the only live reference.
     unsafe fn from_phys_mut<'a>(phys: u64) -> &'a mut PageTablePage {
         &mut *super::DirectMap::from_phys(phys).as_mut_ptr::<PageTablePage>()
     }
@@ -248,11 +146,8 @@ impl PageTablePage {
     fn child(&self, index: usize) -> Option<&PageTablePage> {
         let entry = self[index];
         if entry & PAGE_PRESENT != 0 {
-            // SAFETY: `entry`'s PRESENT bit is checked above, so `entry &
-            // ADDR_MASK` is a table `ensure_table`/`map_window`/`guard_4k`
-            // installed (see `from_phys`'s `# Safety`). `child`'s elided
-            // lifetime ties the returned `&` to `&self`, so it cannot outlive
-            // the address space that keeps the child alive.
+            // SAFETY: PRESENT checked, so `entry & ADDR_MASK` names a table
+            // this module installed (see `from_phys`).
             Some(unsafe { PageTablePage::from_phys(entry & ADDR_MASK) })
         } else {
             None
@@ -262,36 +157,21 @@ impl PageTablePage {
     fn child_mut(&mut self, index: usize) -> Option<&mut PageTablePage> {
         let entry = self[index];
         if entry & PAGE_PRESENT != 0 {
-            // SAFETY: same address argument as `child` above. `&mut self`
-            // here is exclusive over this whole table (and everything
-            // reachable from it), which is exactly the exclusivity
-            // `from_phys_mut` requires for the child it names.
+            // SAFETY: same as `child`; `&mut self` gives the exclusivity needed.
             Some(unsafe { PageTablePage::from_phys_mut(entry & ADDR_MASK) })
         } else {
             None
         }
     }
 
-    /// Write one entry of a table the hardware may already be walking, and say
-    /// what the write owes the TLB.
-    ///
-    /// The only way to change a live entry, leaf or not: the answer to "does
-    /// this need an invalidation" is the prior value, and this is the only place
-    /// that still has it. `va` is any address the entry covers — for a 2 MiB PDE
-    /// that is the page's own address, for an upper level any address below it.
+    /// Write one entry of a table the hardware may already be walking; what
+    /// it owes the TLB is derived from the prior value.
     fn write(&mut self, idx: usize, va: u64, value: u64) -> Owed {
         Owed::of(core::mem::replace(&mut self.0[idx], value), va)
     }
 
-    /// Write one entry of a *page directory*, where a present entry is either a
-    /// 2 MiB leaf or a page table — and the two owe different invalidations.
-    ///
-    /// A leaf covers one linear address's translation and `invlpg` on any
-    /// address in it is complete. A page table has 512 leaves under it, each of
-    /// which may have its own TLB entry, and one linear address reaches exactly
-    /// one of them; the other 511 would keep a translation to a frame the PDE
-    /// no longer names. So a PDE that stops naming its page table owes the
-    /// context, derived here rather than chosen by whoever unmapped it.
+    /// A present entry that named a page table (not a 2 MiB leaf) owes
+    /// `Owed::Context`: one address can't invalidate its 512 leaves.
     fn write_pde(&mut self, idx: usize, va: u64, value: u64) -> Owed {
         let prior = core::mem::replace(&mut self.0[idx], value);
         if prior & PAGE_PRESENT != 0 && prior & PAGE_SIZE_BIT == 0 {
@@ -301,47 +181,32 @@ impl PageTablePage {
         }
     }
 
-    /// Widen an upper-level entry, which x86-64 requires to be at least as
-    /// permissive as any leaf below it.
-    ///
-    /// A widening that changes nothing owes nothing, and today none of them
-    /// changes anything: [`AddressSpace::ensure_table`] masks to `TABLE_FLAGS`
-    /// and every live upper entry was created carrying them. One that did would
-    /// owe a flush rather than a hope — a stale narrower paging-structure-cache
-    /// entry raises a spurious fault, which this kernel resolves against no
-    /// region and turns into a dead process.
+    /// Owes `Context` only if the widen actually changed a bit — a stale
+    /// narrower entry can raise a spurious fault.
     fn widen(&mut self, idx: usize, flags: u64) -> Owed {
         let before = self.0[idx];
         self.0[idx] = before | flags;
         if self.0[idx] == before { Owed::Nothing } else { Owed::Context }
     }
 
-    /// Write into a table no CPU can be walking yet, because it has not been
-    /// linked into a live paging structure. Nothing can be stale, so nothing is
-    /// returned to discharge.
+    /// Not yet linked into a live structure, so nothing can be stale.
     fn init_entry(&mut self, idx: usize, value: u64) {
         self.0[idx] = value;
     }
 }
 
-/// What a write into a live paging structure owes this CPU's TLB.
-///
-/// A pure consequence of the entry that was there — [`Owed::of`] is the whole
-/// decision, and it takes the prior entry and nothing else. The caller cannot
-/// pick: it can only say which of the three true things is true, and each of the
-/// three is a claim the site has to be able to defend.
+/// What a write into a live paging structure owes this CPU's TLB, derived by
+/// [`Owed::of`] from the prior entry alone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[must_use = "an invalidation that is owed and not discharged is silent"]
 enum Owed {
-    /// Nothing. The slot held a not-present entry, from which no TLB entry and
-    /// no paging-structure-cache entry is ever created (SDM Vol. 3A §4.10.2.3),
+    /// The slot was not-present (SDM Vol. 3A §4.10.2.3: creates no TLB entry),
     /// or the write changed no bit.
     Nothing,
     /// One linear address, whose leaf changed under it.
     Address { va: u64, prior: u64 },
-    /// Everything under an upper-level entry whose permissions widened, or
-    /// under a page directory entry that stopped naming the page table its 512
-    /// leaves came from.
+    /// Everything under an upper-level entry that widened, or a PDE that
+    /// stopped naming its page table.
     Context,
 }
 
@@ -355,19 +220,11 @@ impl Owed {
         }
     }
 
-    /// Pay it, on this CPU, in the address space the entry belongs to.
-    ///
-    /// `target` is the written address space's `CR3` and never the live one.
-    /// With PCID a TLB entry carries the tag of the address space it came from,
-    /// and `INVPCID` names that tag directly (SDM Vol. 3A §4.10.4.1) — so a
-    /// kernel writing a *child's* tables from the parent's CPU, which
-    /// `loader::map_libs` does on every spawn, invalidates the child's entries
-    /// and not the parent's live ones.
-    ///
-    /// Without PCID there is no tag to name and none is needed: every `CR3`
-    /// write flushes the whole TLB, so a CPU holds entries for the address space
-    /// it has loaded and for no other, and there is nothing to invalidate for
-    /// one it has not.
+    /// `target` is the written space's CR3, never the live one: with PCID,
+    /// `INVPCID` names its tag directly (SDM Vol. 3A §4.10.4.1), so writing a
+    /// child's tables invalidates only the child; without PCID, a CPU holds
+    /// entries only for its loaded CR3, so nothing is owed unless `target`
+    /// is that CR3.
     fn discharge(self, target: Cr3) {
         match self {
             Self::Nothing => {}
@@ -388,9 +245,8 @@ impl Owed {
         }
     }
 
-    /// The write installed into a slot the caller has already proven empty, and
-    /// an empty slot owes nothing. The proof is this value rather than a check
-    /// the caller makes and throws away.
+    /// Assert the slot the caller proved empty actually was: an empty slot
+    /// owes nothing.
     fn expect_install(self, what: &str) {
         match self {
             Self::Nothing => {}
@@ -401,9 +257,8 @@ impl Owed {
         }
     }
 
-    /// The caller flushes more than this entry could owe before the mapping is
-    /// used — a machine-wide shootdown, or a local full flush for an address
-    /// space only this CPU can be holding. Both subsume a single address.
+    /// No-op: the caller already flushes more than this entry could owe (a
+    /// shootdown, or a full local flush).
     fn subsumed_by_flush(self) {}
 }
 
@@ -426,15 +281,8 @@ fn indices(addr: u64) -> (usize, usize, usize) {
 const CR3_NOFLUSH: u64 = 1 << 63;
 const CR3_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// Whether `CR4.PCIDE` is in the machine's control-register declaration, and
-/// therefore whether a targeted flush exists. Without INVPCID there is no way
-/// to flush all PCIDs, so `control_regs` declares neither without the other and
-/// a context switch flushes the whole TLB instead.
-///
-/// The answer is [`PcidActive`] rather than a `bool`, because it is also
-/// `cpu::invpcid`'s only argument against a `#UD` — one question asked in one
-/// place, whose answer is the thing the instruction needs. Callers that want the
-/// bare fact ask `.is_some()`.
+/// Whether `CR4.PCIDE` is declared; `Some` also serves as `cpu::invpcid`'s
+/// `#UD` guard, so callers wanting only the bool ask `.is_some()`.
 pub fn pcid_active() -> Option<PcidActive> {
     crate::arch::control_regs::PcidActive::ask()
 }
@@ -444,12 +292,9 @@ pub fn flush_tlb_all() {
     if let Some(have) = pcid_active() {
         crate::arch::cpu::invpcid(have, Invpcid::AllIncludingGlobal, 0, 0);
     } else {
-        // SAFETY: `write_cr3` requires a valid CR3 (its own `# Safety`); the
-        // value here is exactly what `read_cr3` just read back from this
-        // same CPU, so it is already the active CR3 — writing it back
-        // changes nothing but the TLB, which is the whole point: a CR3
-        // write flushes every non-global entry (there is no `PAGE_GLOBAL`
-        // in this kernel — module header).
+        // SAFETY: the value is exactly what `read_cr3` just read on this
+        // CPU, so writing it back is a valid CR3 write that only flushes
+        // the TLB (there is no `PAGE_GLOBAL` in this kernel).
         unsafe {
             let cr3 = crate::arch::cpu::read_cr3();
             crate::arch::cpu::write_cr3(cr3);
@@ -473,9 +318,7 @@ impl Cr3 {
         (self.0 & 0xFFF) as u16
     }
 
-    /// Switch to this address space. With PCID, sets NOFLUSH to preserve
-    /// other processes' TLB entries. Without PCID, plain CR3 write.
-    ///
+    /// Sets NOFLUSH when PCID is active, to preserve other processes' TLB entries.
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn activate(self) {
@@ -486,8 +329,7 @@ impl Cr3 {
         }
     }
 
-    /// Load CR3 with a TLB flush. Used during boot before PCID is enabled.
-    ///
+    /// Load CR3 with a flush; used during boot before PCID is enabled.
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn load_flush(self) {
@@ -498,18 +340,9 @@ impl Cr3 {
 /// Next PCID to allocate. Range 1..4095. PCID 0 is reserved for the kernel.
 static NEXT_PCID: Lock<u16> = Lock::new(1);
 
-/// Allocate a unique PCID for a new user address space.
-/// On wrap past 4095, flushes all TLBs on all CPUs before recycling.
-///
-/// The shootdown is outside the lock, because it waits for every other CPU and
-/// may hold nothing while it does. That costs no atomicity: what has to be true
-/// is that no CPU still carries a translation under a recycled tag by the time
-/// the caller *activates* it, and the caller is `new_user`, which has not
-/// returned an address space yet — so a second CPU that takes tag 2 out of the
-/// same wrap is covered by a flush that names every tag on every CPU.
-///
-/// Recycling a live tag at all is a defect in its own right and stays open;
-/// making the tag an owned resource is what deletes this branch.
+/// On wrap past 4095, flushes every CPU's TLB before recycling; the shootdown
+/// runs outside the lock, safe because the caller (`new_user`) has not yet
+/// activated the recycled tag.
 fn alloc_pcid() -> u16 {
     {
         let mut next = NEXT_PCID.lock();
@@ -524,11 +357,7 @@ fn alloc_pcid() -> u16 {
     1
 }
 
-/// Unified address space: hardware page tables + virtual memory region tracking.
-///
-/// PML4[0..255] = user mappings (per-process), PML4[256..511] = kernel direct map (shared).
-/// `regions` tracks all mapped virtual memory areas (ELF segments, mmap, stack, etc.)
-/// and serves as the source of truth for the virtual address allocator.
+/// PML4[0..255] user, PML4[256..511] kernel direct map (shared).
 pub struct AddressSpace {
     root: Box<PageTablePage>,
     children: Vec<Box<PageTablePage>>,
@@ -540,20 +369,15 @@ pub struct AddressSpace {
     pcid: u16,
 }
 
-/// What a range already in `regions` runs into — [`AddressSpace::occupancy`].
-///
-/// A *placed* mapping names its own range instead of taking a free one from
-/// `find_gap`, so the question the allocator answers silently for everybody
-/// else has to be asked out loud for it. There is exactly one such caller, the
-/// FIXED arm of `sys_mmap`, and the address it asks about came from userland.
+/// Needed because a *placed* mapping (`sys_mmap`'s FIXED arm) skips
+/// `find_gap`'s implicit check.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Occupancy {
     /// Nothing is registered over any part of it.
     Free,
     /// One region covers it end for end, and that region is all it runs into.
     Whole,
-    /// Anything else: part of a region, several regions, or a region that
-    /// merely starts where this one does.
+    /// Part of a region, several regions, or one that merely starts here.
     Partial,
 }
 
@@ -586,11 +410,7 @@ impl AddressSpace {
         Cr3(self.root.phys() | self.pcid as u64)
     }
 
-    /// Map a contiguous physical region into user space as 2MB pages.
-    /// Asserts: vaddr and phys are 2MB-aligned, all PDE slots are empty.
-    ///
-    /// The empty slots are what makes this free of the TLB: nothing was present,
-    /// so nothing anywhere can be stale, and no CPU is told anything.
+    /// Empty PDE slots (aligned, asserted) mean nothing can be stale.
     pub fn map_range(
         &mut self,
         vaddr: UserAddr,
@@ -620,11 +440,8 @@ impl AddressSpace {
         }
     }
 
-    /// Unmap a contiguous range of 2MB pages.
-    ///
-    /// Private: unmapping a range without unregistering it leaves a placed
-    /// `mmap` invisible to the placement search, so the only way out of this
-    /// module is [`free_and_unmap`](Self::free_and_unmap), which does both.
+    /// Private: leaves a placed `mmap` invisible to the placement search
+    /// unless paired with unregistering — [`free_and_unmap`](Self::free_and_unmap) does both.
     fn unmap_range(&mut self, vaddr: UserAddr, size: u64) {
         let mut offset = 0u64;
         while offset < size {
@@ -633,17 +450,7 @@ impl AddressSpace {
         }
     }
 
-    /// Map a single 2MB page, replacing any existing mapping.
-    /// Used by demand paging and shared library RW overlay.
-    ///
-    /// **The invalidation is this method's, and it is derived.** A demand-paging
-    /// fault replaces a not-present PDE — the kernel's hottest paging path — and
-    /// pays nothing for the TLB; a replacement of a live mapping is invalidated
-    /// in *this* address space, whatever this CPU happens to have loaded. What
-    /// the other CPUs are owed is not derivable from the entry and stays with the
-    /// caller: `sys_dlopen` replaces a mapping a sibling thread can be running
-    /// on and shoots down, `loader::map_libs` writes a child no CPU has ever
-    /// loaded and does not.
+    /// Discharges only in this address space — a caller whose mapping may be live elsewhere (e.g. `sys_dlopen`) must shoot down itself.
     pub fn remap(&mut self, vaddr: UserAddr, phys: u64, prot: Prot) {
         let va = vaddr.raw();
         assert!(
@@ -662,34 +469,9 @@ impl AddressSpace {
             .discharge(target);
     }
 
-    /// Map one 2 MiB frame at whatever granularity its protections need.
-    ///
-    /// A window whose pages agree is a 2 MiB PDE, exactly as [`remap`] writes
-    /// one. A window whose pages disagree — the one per binary where `.text`
-    /// ends and `.data` begins — becomes a page table of 512 entries into the
-    /// same frame, each carrying its own page's [`Prot`]. See [`WindowProt`]
-    /// for why that is the design and what the alternatives were measured at.
-    ///
-    /// The frame stays one contiguous 2 MiB allocation either way, so the split
-    /// costs a page table and nothing else: no second physical page, and the
-    /// demand pager still fills one frame per fault.
-    ///
-    /// **The page table is written before it is linked**, so nothing can be
-    /// walking it while it is filled and its 512 entries owe no invalidation;
-    /// what the PDE write owes is derived from what was there, as everywhere
-    /// else. The split is one way — a window is never coalesced back — and
-    /// `children` owns the table for the address space's life, which is why
-    /// this may not be called repeatedly on one address: the second call's PDE
-    /// orphans the first call's table inside `children`, where it stays until
-    /// the address space dies.
-    ///
-    /// Both callers owe that. `dlopen` maps into a range `alloc_region` has
-    /// just handed out and no address is written twice; the demand-paging fault
-    /// goes through [`map_window_if_absent`], which is the same guarantee made
-    /// by asking rather than by argument.
-    ///
-    /// [`remap`]: Self::remap
-    /// [`map_window_if_absent`]: Self::map_window_if_absent
+    /// A mixed window's page table is written before being linked, so nothing
+    /// can be walking it while filled. Must not be called twice on one
+    /// address — the second call's PDE orphans the first call's table.
     pub fn map_window(&mut self, vaddr: UserAddr, phys: u64, prot: &WindowProt) {
         if let Some(uniform) = prot.agreed() {
             self.remap(vaddr, phys, uniform);
@@ -707,10 +489,7 @@ impl AddressSpace {
 
         let mut table = Box::new(PageTablePage([0; 512]));
         for (i, &page_prot) in prot.0.iter().enumerate() {
-            // No cache bits: a split window is RAM the PMM handed out, whose
-            // policy is `DeferToMtrr` — which is the zero pattern at both
-            // granularities. A window that ever needed another memory type
-            // would have to place the PAT bit at bit 7 here, not bit 12.
+            // No cache bits: `DeferToMtrr` is the zero pattern at both granularities.
             table.init_entry(i, (phys + i as u64 * 4096) | page_prot.leaf_bits());
         }
         let table_phys = table.phys();
@@ -719,48 +498,15 @@ impl AddressSpace {
         let pd_idx = indices(va).2;
         let target = self.cr3();
         let pd = self.ensure_table(va, TABLE_FLAGS);
-        // The PDE carries no `Prot` of its own: an upper-level entry must be at
-        // least as permissive as any leaf below it, so the permissions live in
-        // the 512 entries and this one only has to be present, writable and
-        // user — `NX` here would make the whole window non-executable whatever
-        // the leaves say.
+        // No `Prot` here: `NX` would make the whole window non-executable
+        // whatever the leaves say.
         pd.write_pde(pd_idx, va, table_phys | TABLE_FLAGS).discharge(target);
     }
 
-    /// Install a demand-filled window, unless this address already has one.
-    /// `true` if this call installed it; `false` leaves the mapping exactly as
-    /// it was found and makes `phys` the caller's to free.
-    ///
-    /// **The question and the write are one critical section, and that is the
-    /// whole method.** The demand pager cannot hold this lock while it fills —
-    /// a fill is a 2 MiB zeroing or up to 512 device reads — so it asks whether
-    /// the window is mapped, releases the lock, fills, and comes back. Two
-    /// threads of one process both get "no" to that first question, and without
-    /// this both would install: the PDE would name the second frame, the first
-    /// thread's CPU would keep a translation to the first (an `Owed` reaches
-    /// this CPU alone, and no shootdown is issued on the fault path), and two
-    /// threads would disagree about the contents of one address. Asking again
-    /// here makes the loser a wasted fill instead.
-    ///
-    /// Exhaustively, for two threads A and B filling one window, with this
-    /// lock's critical sections the only ordering that exists between them:
-    /// either A's section precedes B's or B's precedes A's. The first of the
-    /// two finds the PDE absent — nothing else in this kernel installs a user
-    /// window at an address a region already covers — and installs. The second
-    /// finds what the first wrote, because it reads the same table under the
-    /// same lock, and returns `false`. So exactly one frame is installed per
-    /// window and no install ever lands on a present entry, which is what makes
-    /// the fault path's "no invalidation is owed here" true rather than usually
-    /// true. More than two threads is the same argument: only the first section
-    /// finds an absent PDE.
-    ///
-    /// The check is a walk of three already-hot table lines, paid once per
-    /// *fill* and never on the common already-mapped fault, which
-    /// `handle_page_fault` answers before it allocates anything.
-    ///
-    /// Linux answers the same race the same way at the same granularity:
-    /// `mm/huge_memory.c`'s `__do_huge_pmd_anonymous_page` re-tests `pmd_none`
-    /// under `pmd_lock` and `folio_put`s the loser's already-zeroed 2 MiB folio.
+    /// `false` leaves the mapping as found and `phys` the caller's to free.
+    /// The check and the write are one critical section: the demand pager
+    /// fills unlocked, so two threads can both see "unmapped" first, and the
+    /// second must lose here rather than strand the winner's CPU translation.
     pub fn map_window_if_absent(
         &mut self,
         vaddr: UserAddr,
@@ -774,26 +520,10 @@ impl AddressSpace {
         true
     }
 
-    /// Unmap one 2MB page and free its physical memory.
-    ///
-    /// **A wait armed on a word in this frame ends here**, because there is
-    /// nothing left for it to be woken by. A futex waiter's completion token is
-    /// its word's *physical* address — that is what makes a futex in shared
-    /// memory work across processes — and nothing pins the frame behind it, so
-    /// the moment the entry below goes and the page reaches the PMM that token
-    /// names whatever is mapped there next. `revoke_futex_range` is the
-    /// deletion of that hazard rather than bookkeeping against it: the waiter is
-    /// told `Gone(Closed)` and taken off the bucket, so no later `futex_wake`
-    /// can find it. See `sched::waitqs::revoke_futex_range`.
-    ///
-    /// It runs on every present entry rather than only on the frames this
-    /// address space owns. A shared-memory page is unmapped here too and its
-    /// frame outlives the unmap, so a waiter in *another* process is ended
-    /// where it did not have to be — a spurious futex return, which every park
-    /// site is allowed and every futex loop in userland already re-checks. The
-    /// converse mistake is not survivable, and telling the two apart would put
-    /// the ownership question on a path whose only wrong answer is a
-    /// use-after-free.
+    /// Runs on every present entry, including shared pages this space does
+    /// not own: unmapping ends any futex wait on the frame (its token is a
+    /// physical address) before the frame can reach the PMM and be reused
+    /// under a waiter's nose — a spurious wake is safe, a use-after-free isn't.
     pub fn unmap(&mut self, vaddr: UserAddr) {
         let va = vaddr.raw();
         assert!(
@@ -808,48 +538,28 @@ impl AddressSpace {
             if let Some(pd) = pdpt.child_mut(pdpt_idx) {
                 let pde = pd[pd_idx];
                 if pde & PAGE_PRESENT != 0 {
-                    // A split window's frame is not in the PDE — the PDE names
-                    // the page table. Every entry in that table addresses one
-                    // 4 KiB page of the same 2 MiB frame (`map_window` builds
-                    // no other shape), so the first one names the frame.
+                    // A split window's PDE names a table; every entry in it
+                    // addresses the same 2 MiB frame, so entry 0 names it.
                     let phys = if pde & PAGE_SIZE_BIT != 0 {
                         pde & ADDR_MASK_2M
                     } else {
-                        // SAFETY: `pde & PAGE_PRESENT` was checked above and
-                        // this is the not-2-MiB branch, so `pde & ADDR_MASK`
-                        // is a page table `map_window` built and pushed into
-                        // `children` (see `from_phys`'s `# Safety`). Read
-                        // -only and dropped before `pd.write_pde` below
-                        // touches the same slot, so nothing here conflicts
-                        // with the `&mut self` this method otherwise holds.
+                        // SAFETY: PRESENT and not-2-MiB, so this names a
+                        // `map_window`-built table, dropped before `write_pde` touches the slot.
                         let table = unsafe { PageTablePage::from_phys(pde & ADDR_MASK) };
                         table[0] & ADDR_MASK_2M
                     };
-                    // `write_pde` and not `write`: clearing a PDE that named a
-                    // page table owes the context, because 512 leaves could
-                    // each be in the TLB and this one address reaches one.
+                    // `write_pde`: a PDE naming a page table owes the context.
                     pd.write_pde(pd_idx, va, 0).discharge(target);
-                    // Before the page can reach the PMM, and after the entry is
-                    // gone: a waiter that translated this word already is on
-                    // the bucket for this walk to find, and one arriving after
-                    // it has nothing to translate.
+                    // Before the frame is freed, so waiters stay findable.
                     crate::sched::waitqs::revoke_futex_range(phys, PAGE_2M);
-                    // Remove the page from our owned list — Drop frees it.
-                    // No-op for shared memory pages (not in this map).
                     self.pages.remove(&phys);
                 }
             }
         }
     }
 
-    /// Translate a user virtual address to a DirectMap handle.
-    /// Returns None if the page is not mapped, or if `vaddr` is not a user
-    /// address at all.
-    ///
-    /// The bound is here rather than at the eight callers because a user
-    /// address space shallow-copies the kernel's PML4 half: a kernel address
-    /// walks to the direct map's own 2 MiB leaf, and the caller gets a
-    /// writable pointer into kernel memory.
+    /// Checked here, not at the callers: a user space shallow-copies the
+    /// kernel PML4 half, so a kernel address would otherwise walk to a writable kernel page.
     pub fn translate(&self, vaddr: UserAddr) -> Option<super::DirectMap> {
         let va = vaddr.raw();
         if !toyos_userbound::is_user_addr(va) {
@@ -913,13 +623,7 @@ impl AddressSpace {
         Some(addr)
     }
 
-    /// Allocate a region and map physical memory into it, one protection for
-    /// the whole of it.
-    ///
-    /// An image whose pages do not agree — a shared library, whose `.text` may
-    /// not be writable and whose `.data` may not be executable — takes
-    /// [`alloc_region`](Self::alloc_region) and then one
-    /// [`map_window`](Self::map_window) per 2 MiB instead.
+    /// A mixed-`Prot` image uses [`alloc_region`](Self::alloc_region) plus [`map_window`](Self::map_window) per 2 MiB instead.
     pub fn alloc_and_map(
         &mut self,
         phys: u64,
@@ -971,14 +675,7 @@ impl AddressSpace {
         }
     }
 
-    /// What `[addr, addr + size)` runs into, as the one question a placed
-    /// mapping has to ask before it can be registered.
-    ///
-    /// `find_gap` answers it by construction for every allocated region, and
-    /// a range that is `Free` here is one `insert_region` can take. The end is
-    /// saturating so that no caller's arithmetic can wrap into a smaller range
-    /// than it asked about; every real call has already bounded its own end at
-    /// [`vma::ALLOC_CEILING`].
+    /// The end is saturating so a caller's arithmetic cannot wrap into a smaller range.
     pub fn occupancy(&self, addr: UserAddr, size: u64) -> Occupancy {
         let end = UserAddr::new(addr.raw().saturating_add(size));
         let mut over = self.overlapping_regions(addr, end);
@@ -998,19 +695,13 @@ impl AddressSpace {
         start: UserAddr,
         end: UserAddr,
     ) -> impl Iterator<Item = (&UserAddr, &Region)> {
-        // A region starting at s with size n overlaps [start, end) iff s < end && s+n > start.
-        // Use range(..end) to skip regions starting at or after end, then filter the lower bound.
+        // Overlaps [start, end) iff s < end && s+n > start; `range(..end)` prunes the first half.
         self.regions
             .range(..end)
             .filter(move |(&s, r)| s.raw() + r.size > start.raw())
     }
 
-    /// Map a physical region into the direct map using 2MB pages.
-    /// Returns an Mmio handle for bounds-checked register access.
-    ///
-    /// Private, because the mapping is not usable until every CPU has been told
-    /// about it and this method holds the lock that stops it saying so — the
-    /// free function [`map_mmio`] is the whole operation.
+    /// Private: not safe to use until every CPU is told — the free fn [`map_mmio`] is the whole operation.
     fn map_mmio(&mut self, phys: u64, size: u64, cache: CachePolicy) -> super::Mmio {
         let start = phys & !(PAGE_2M - 1);
         let end = (phys + size + PAGE_2M - 1) & !(PAGE_2M - 1);
@@ -1022,11 +713,7 @@ impl AddressSpace {
         super::Mmio::new(super::DirectMap::from_phys(phys), size)
     }
 
-    /// The policy the 2 MiB entry covering `virt` carries, or `None` where
-    /// nothing is mapped.
-    ///
-    /// Read out of the page table rather than remembered, so a caller that
-    /// reports a mapping's memory type reports the installed one.
+    /// Read from the table rather than remembered, or `None` if unmapped.
     fn policy_at(&self, virt: u64) -> Option<CachePolicy> {
         let (pml4_idx, pdpt_idx, pd_idx) = indices(virt);
         let pde = self.root.child(pml4_idx)?.child(pdpt_idx)?[pd_idx];
@@ -1034,11 +721,8 @@ impl AddressSpace {
             return None;
         }
         if pde & PAGE_SIZE_BIT == 0 {
-            // A page table below: `guard_4k` and `map_window` are the two that
-            // build one, and both write leaves whose cache bits are all clear
-            // — entry 0 of the PAT, which is `DeferToMtrr`. Asserted rather
-            // than assumed, because reading a memory type off the wrong bit
-            // position is exactly the mistake the two granularities invite.
+            // A split table: leaves have cache bits clear (`DeferToMtrr`),
+            // asserted since the two granularities put the PAT bit at different offsets.
             let pte = self.root.child(pml4_idx)?.child(pdpt_idx)?.child(pd_idx)?
                 [((virt >> 12) & 0x1FF) as usize];
             assert!(
@@ -1059,19 +743,8 @@ impl AddressSpace {
         self.policy_at(addr.raw())
     }
 
-    /// Take one 4 KiB page of the direct map away, splitting the 2 MiB leaf
-    /// that covers it into 4 KiB entries first.
-    ///
-    /// The direct map is the kernel's only view of physical memory, so this is
-    /// the only way to make a kernel address fault. It exists for stack guard
-    /// pages: a kernel stack that runs off its bottom otherwise writes into
-    /// whatever the allocator put underneath and the damage surfaces
-    /// somewhere else entirely.
-    ///
-    /// The split is permanent — the replacement entries are never coalesced
-    /// back — so the caller must own `phys` for the life of the machine.
-    /// Handing the enclosing 2 MiB page back to the PMM would reissue memory
-    /// with a hole in its direct map.
+    /// Permanent: the caller must own `phys` for the machine's life, since
+    /// handing the enclosing 2 MiB page back to the PMM would reissue memory with a hole.
     pub fn guard_4k(&mut self, phys: u64) {
         assert!(phys & 0xFFF == 0, "guard_4k: phys {phys:#x} not 4 KiB-aligned");
         let virt = super::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
@@ -1082,21 +755,13 @@ impl AddressSpace {
             assert!(entry & PAGE_PRESENT != 0, "guard_4k: no PD over the direct map");
             entry & ADDR_MASK
         };
-        // SAFETY: `pd_phys` is `entry & ADDR_MASK` off a direct-map PDPT
-        // entry just asserted PRESENT — the direct map's page directory is
-        // built once in `init` and, being part of the kernel address space,
-        // lives forever ([`kernel`]'s doc); `map_2m` may only ever *replace*
-        // its leaf entries, never the PD itself. `&mut self` here is the
-        // kernel `AddressSpace`'s own lock (held by every caller through
-        // `kernel().lock()`), which is the exclusivity `from_phys_mut`
-        // requires.
+        // SAFETY: `pd_phys` names the direct map's PD, living forever;
+        // `&mut self` here is `kernel().lock()`'s required exclusivity.
         let pd = unsafe { PageTablePage::from_phys_mut(pd_phys) };
         let pde = pd[pd_idx];
         assert!(pde & PAGE_PRESENT != 0, "guard_4k: {phys:#x} is not in the direct map");
 
-        // Already split by an earlier guard in the same 2 MiB region — which
-        // is the ordinary case on a wide machine, where several CPUs' idle
-        // stacks come out of one heap segment.
+        // Already split: an earlier guard in the same 2 MiB region.
         if pde & PAGE_SIZE_BIT != 0 {
             let base = pde & ADDR_MASK_2M;
             let flags = pde & !ADDR_MASK_2M & !PAGE_SIZE_BIT;
@@ -1110,43 +775,28 @@ impl AddressSpace {
             }
             let pt_phys = pt.phys();
             self.children.push(pt);
-            // Both writes are covered by the flush below, which is this CPU's
-            // whole TLB and so wider than either could owe.
+            // Covered by the flush below, wider than either write could owe.
             pd.write_pde(pd_idx, virt, pt_phys | PAGE_PRESENT | PAGE_WRITE)
                 .subsumed_by_flush();
         }
 
-        // SAFETY: past the branch above, `pd[pd_idx]` names a page table and
-        // not a 2 MiB leaf either way — freshly linked just above
-        // (`self.children.push(pt)`) or already a split table from an
-        // earlier guard in the same region (the comment above the branch).
-        // A guard split is permanent (this function's own doc: "never
-        // coalesced back"), so the address stays valid for the kernel
-        // address space's whole life. Same lock-held exclusivity as the
-        // `from_phys_mut` above.
+        // SAFETY: `pd[pd_idx]` names a page table either way, permanently —
+        // same lock exclusivity as above.
         let pt = unsafe { PageTablePage::from_phys_mut(pd[pd_idx] & ADDR_MASK) };
         let idx = ((phys >> 12) & 0x1FF) as usize;
         assert!(pt[idx] & PAGE_PRESENT != 0, "guard_4k: {phys:#x} is already unmapped");
         pt.write(idx, virt, 0).subsumed_by_flush();
 
-        // This CPU only, and that is sufficient rather than lucky: the page is
-        // one CPU's guard, `alloc_idle_stack` runs on the BSP for every CPU,
-        // and an AP's TLB is empty until it starts. The 511 pages around the
-        // hole keep the mapping they had, so a sibling's stale 2 MiB entry
-        // stays correct for all of them.
+        // Local only: the guard belongs to one CPU, so only it dereferences
+        // the removed page; `alloc_idle_stack` runs on the BSP before an
+        // AP's TLB exists, and a sibling's stale 2 MiB entry stays correct
+        // for the other 511 pages it still maps unchanged.
         flush_tlb_all();
     }
 
-    /// Map one 2 MiB page of the direct map, replacing whatever was there.
-    ///
-    /// Replacing and not skipping, because the boot map blankets every physical
-    /// address the memory map reaches and an MMIO window inside that span is
-    /// already mapped by the time its driver asks for it. Only the boot map's
-    /// own 2 MiB leaf may be overwritten that way. Two windows in one page
-    /// asking for different memory types would be decided by call order, and
-    /// the loser would write through a type it did not ask for; an entry
-    /// `guard_4k` has split into a page table would lose the guard and leak the
-    /// table.
+    /// Replaces whatever is there — the boot map covers every physical
+    /// address, so an MMIO window's target is pre-mapped by the time its
+    /// driver asks; a page `guard_4k` already split must not reach here.
     fn map_2m(&mut self, phys: u64, flags: u64) {
         let virt = super::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
         let pd_idx = indices(virt).2;
@@ -1160,21 +810,13 @@ impl AddressSpace {
                     && CachePolicy::from_pde(existing) == CachePolicy::DeferToMtrr),
             "map_2m: {phys:#x} is mapped {existing:#x} and cannot also be {entry:#x}"
         );
-        // Neither caller wants the single address this could owe. [`map_mmio`]
-        // flushes every CPU because the memory type may have changed under a
-        // sibling, which the entry cannot tell it; `init` runs before any TLB
-        // exists and ends by loading `CR3` with a flush.
+        // Neither caller wants the single address: [`map_mmio`] flushes every
+        // CPU (type may have changed under a sibling); `init` has no TLB yet.
         pd.write_pde(pd_idx, virt, entry).subsumed_by_flush();
     }
 
-    /// Everything an upper-level entry may carry besides the address of the
-    /// table below it. A leaf's remaining flags are address bits here — bit 12
-    /// of a PML4E or PDPTE is part of the next table's physical address, not
-    /// the PAT bit it is in a 2 MiB PDE — so the mask below applies at both
-    /// levels, and a caller passing leaf flags cannot move a page table 4 KiB.
-    ///
-    /// `flags` is one value, not a per-level pair: no caller has ever wanted a
-    /// PML4E to carry bits its PDPTE below does not.
+    /// Masks `flags` to `TABLE_FLAGS`: bit 12 is a leaf's PAT bit but an
+    /// upper entry's address bit, so leaf flags can't move a table 4 KiB.
     fn ensure_table(&mut self, va: u64, flags: u64) -> &mut PageTablePage {
         let flags = flags & TABLE_FLAGS;
         let (pml4_idx, pdpt_idx, _) = indices(va);
@@ -1187,17 +829,13 @@ impl AddressSpace {
                 .expect_install("ensure_table: pml4");
             self.children.push(child);
         } else {
-            // x86-64: upper-level entries must be at least as permissive as any
-            // leaf entry below them. Widen only (OR), never narrow.
+            // Upper-level entries: widen only (OR), never narrow.
             self.root.widen(pml4_idx, flags).discharge(target);
         }
 
-        // SAFETY: the branch above just guaranteed `self.root[pml4_idx]` is
-        // PRESENT — either a fresh `child` this call linked (and pushed into
-        // `self.children`) or an entry that already was — so `& ADDR_MASK`
-        // names a table this address space owns for its whole life (see
-        // `from_phys_mut`'s `# Safety`). `&mut self` for this whole method
-        // is the exclusivity it requires.
+        // SAFETY: the branch above guaranteed PRESENT, so `& ADDR_MASK`
+        // names a table this space owns for life; `&mut self` gives the
+        // exclusivity `from_phys_mut` requires.
         let pdpt = unsafe { PageTablePage::from_phys_mut(self.root[pml4_idx] & ADDR_MASK) };
 
         if pdpt[pdpt_idx] & PAGE_PRESENT == 0 {
@@ -1209,28 +847,16 @@ impl AddressSpace {
             pdpt.widen(pdpt_idx, flags).discharge(target);
         }
 
-        // SAFETY: same argument as the `pdpt` binding above, one level down —
-        // the branch just guaranteed `pdpt[pdpt_idx]` PRESENT, naming a table
-        // this address space owns for its whole life, and the caller gets
-        // back the `&mut self` exclusivity this function was given.
+        // SAFETY: same argument as `pdpt` above, one level down.
         unsafe { PageTablePage::from_phys_mut(pdpt[pdpt_idx] & ADDR_MASK) }
     }
 }
 
 const MIN_PHYS_MAP: u64 = 4 * 1024 * 1024 * 1024;
 
-/// The kernel address space, in the same shape a process's is.
-///
-/// **An `Arc<Lock<AddressSpace>>` and not a `Lock<Option<AddressSpace>>`,
-/// because a task has to be able to *name* it.** A kernel thread runs here —
-/// `driver::spawn` gives it the `cr3` every CPU is already in between two user
-/// threads — so `KernelPayload.address_space` is *the address space this task
-/// runs in*, for every task, with no `Option` and no second answer.
-///
-/// Published once at boot from a leaked `Arc` and read with one acquire load —
-/// `log::console`'s `KLOGD` has the same shape for the same reason. Leaked
-/// deliberately: the kernel address space outlives every task by construction,
-/// so no task's payload may hold the last reference to it.
+/// `Arc<Lock<AddressSpace>>`, not `Lock<Option<_>>`: a kernel thread names it
+/// as `KernelPayload.address_space` with no second answer. Leaked, since the
+/// kernel address space outlives every task by construction.
 static KERNEL: core::sync::atomic::AtomicPtr<alloc::sync::Arc<Lock<AddressSpace>>> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
@@ -1241,9 +867,8 @@ static KERNEL_CR3: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 pub fn kernel() -> &'static alloc::sync::Arc<Lock<AddressSpace>> {
     let ptr = KERNEL.load(core::sync::atomic::Ordering::Acquire);
     assert!(!ptr.is_null(), "paging not initialized");
-    // SAFETY: written once in `init` from a leaked `Box`, with the `Release`
-    // this `Acquire` pairs with, and never cleared — so the pointer is live for
-    // the rest of the machine's life.
+    // SAFETY: written once in `init` with the `Release` this `Acquire` pairs
+    // with, never cleared, so the pointer is live for the machine's life.
     unsafe { &*ptr }
 }
 
@@ -1252,57 +877,27 @@ pub fn kernel_cr3() -> Cr3 {
     Cr3(KERNEL_CR3.load(core::sync::atomic::Ordering::Relaxed))
 }
 
-/// Leave whatever user address space is current for the kernel's own.
-///
-/// **Safe, where [`Cr3::activate`] is not, and the difference is which tables.**
-/// `activate` is `unsafe` because an arbitrary `Cr3` may name page tables that
-/// have been freed, or that do not map the code about to execute. Neither is
-/// reachable for *this* one: the kernel address space is built once in `init`,
-/// is never torn down, and maps the whole kernel image and the direct map —
-/// which includes every stack a caller could be standing on. There is no
-/// argument left for a caller to get wrong, so there is nothing for `unsafe`
-/// to mark.
-///
-/// The one obligation it does carry is not a memory-safety one: everything the
-/// outgoing user address space mapped stops being addressable at this line.
+/// Leave whatever user address space is current for the kernel's own. Safe,
+/// unlike [`Cr3::activate`]: the kernel tables never move, so there's no
+/// argument left for a caller to get wrong. Outgoing user mappings stop
+/// being addressable at this line.
 pub fn activate_kernel() {
-    // SAFETY: the doc comment above is the whole argument — `KERNEL_CR3` names
-    // the boot-built kernel tables, live for the machine's lifetime, mapping
-    // the code and the stack this call returns onto. Irreducible only in that
-    // a CR3 write is a machine facility with no Rust operation behind it; the
-    // *caller's* half of `activate`'s contract is what this function exists to
-    // discharge once rather than at every site.
+    // SAFETY: `KERNEL_CR3` names the boot-built tables, mapping the code and
+    // stack this call returns onto.
     unsafe { kernel_cr3().activate() };
 }
 
-/// [`activate_kernel`] for a CPU that does not have `CR4.PCIDE` yet.
-///
-/// Safe for exactly [`activate_kernel`]'s reason — the tables are the
-/// boot-built kernel ones — and separate from it because `activate` sets
-/// `CR3[63]` (`NOFLUSH`) whenever the *machine* has declared `PCIDE`, and that
-/// bit is reserved on a CPU that has not set it yet. An AP reaches this before
-/// `percpu::init_ap` runs `control_regs::init` on it, so the machine says yes
-/// and this CPU is not ready to be asked.
+/// [`activate_kernel`] for a CPU without `CR4.PCIDE` yet: `activate` sets the
+/// reserved `NOFLUSH` bit once the *machine* declares PCIDE, which an AP
+/// reaches before setting it on itself.
 pub fn load_kernel_flush() {
-    // SAFETY: `load_flush`'s requirement is page tables that are valid and
-    // live; `KERNEL_CR3` names the kernel address space, built once in `init`,
-    // never torn down, mapping the whole kernel image and the direct map — so
-    // the code and stack this call returns onto stay mapped across it.
+    // SAFETY: same as `activate_kernel` above.
     unsafe { kernel_cr3().load_flush() };
 }
 
-/// Map a device's registers into the kernel's direct map and tell every CPU.
-///
-/// The lock and the shootdown are separate statements, and that is the whole
-/// reason this is a free function rather than a method: the shootdown waits for
-/// siblings and may hold nothing, while the mapping needs the address space.
-///
-/// **The shootdown is not bookkeeping on this path.** `map_2m` is allowed to
-/// replace the boot map's own leaf, so a window inside a range the memory map
-/// covers changes memory type here — write-combining for the framebuffer, most
-/// of all. A sibling holding the old write-back entry for the same physical page
-/// is SDM Vol. 3A §11.12.4 undefined behaviour, and hanging is a permitted
-/// outcome.
+/// Free function (not a method): the lock and the shootdown are separate
+/// statements. Not optional — `map_2m` may change memory type under a
+/// sibling's stale entry, which is SDM Vol. 3A §11.12.4 undefined behaviour.
 pub fn map_mmio(phys: u64, size: u64, cache: CachePolicy) -> super::Mmio {
     let mmio = kernel().lock().map_mmio(phys, size, cache);
     crate::arch::tlb::shootdown();
@@ -1310,10 +905,8 @@ pub fn map_mmio(phys: u64, size: u64, cache: CachePolicy) -> super::Mmio {
 }
 
 
-/// Take the 4 KiB page holding `addr` out of the kernel's direct map.
-///
-/// `addr` must be a direct-map address whose page the caller owns forever —
-/// see [`AddressSpace::guard_4k`].
+/// Take the 4 KiB page holding `addr` out of the kernel direct map; `addr`'s
+/// page must be owned by the caller forever (see [`AddressSpace::guard_4k`]).
 pub fn guard_kernel_page(addr: u64) {
     assert!(super::is_kernel_addr(addr), "guard_kernel_page: {addr:#x} is not a kernel address");
     kernel().lock().guard_4k(super::DirectMap::phys_of(addr as *const u8));
@@ -1353,13 +946,9 @@ pub(super) fn init(memory_map: &[MemoryMapEntry]) {
         published as *const _ as *mut _,
         core::sync::atomic::Ordering::Release,
     );
-    // SAFETY: `load_flush` requires page tables that are valid and live (its
-    // own `# Safety`). `cr3` names the `AddressSpace` this function just
-    // finished building — every physical page the memory map reaches was
-    // just linked in by the `map_2m` loop above, and nothing has run under
-    // it yet, so "live" reduces to "self-consistent", which that loop
-    // guarantees one 2 MiB leaf at a time. PCID is not enabled yet, so this is
-    // the flushing form.
+    // SAFETY: `cr3` names the space this function just finished building via
+    // the `map_2m` loop above; nothing has run under it yet, so live reduces
+    // to self-consistent.
     unsafe {
         cr3.load_flush();
     }
@@ -1373,28 +962,13 @@ fn has(entry: u64, flag: u64) -> u8 {
     }
 }
 
-/// Whether `addr` resolves to a present page in the *currently loaded* CR3.
-/// Lock-free, allocation-free, and silent, for the panic path to prove a
-/// mapping still exists before writing through it.
-///
-/// The current CR3 and not `kernel_cr3()`: a panic in syscall context runs on
-/// a user address space, which copies the kernel's top-half PML4 entries at
-/// creation. Shared page directories propagate later `map_2m`s, but a crash
-/// handler should prove that rather than assume it.
+/// The *currently loaded* CR3, not `kernel_cr3()` (a panic can run on a user
+/// space); lock-free and silent, for the panic path to prove a mapping
+/// before writing through it.
 pub fn present_in_current_cr3(addr: u64) -> bool {
-    // SAFETY: `Cr3::current().phys()` is the address space *this CPU is
-    // executing under right now* — the MMU itself is walking this exact
-    // structure, so the physical address it names is a real, currently
-    // -linked page table by definition, and it cannot be freed while this
-    // CPU runs under it (a table lives for its address space's whole life,
-    // and this CPU is that address space's proof of life). No lock is taken,
-    // by design (this doc's own header) — a sibling CPU may be mutating an
-    // entry in the same live address space concurrently, but every entry
-    // read here is one 8-byte-aligned `u64`, atomic at the hardware level,
-    // so no read is ever torn; what a concurrent write can produce is a
-    // stale-but-consistent answer across the multi-level walk, which is
-    // exactly the caveat this function's doc already owns ("a crash handler
-    // should prove that rather than assume it").
+    // SAFETY: `Cr3::current().phys()` names the table this CPU runs under
+    // right now, so it can't be freed meanwhile. No lock: each entry read is
+    // one aligned `u64`, atomic at the hardware level, so no read is torn.
     let mut table = unsafe { PageTablePage::from_phys(Cr3::current().phys()) };
     for level in 0..3 {
         let entry = table[((addr >> (39 - level * 9)) & 0x1FF) as usize];
@@ -1404,10 +978,8 @@ pub fn present_in_current_cr3(addr: u64) -> bool {
         if level > 0 && entry & PAGE_SIZE_BIT != 0 {
             return true;
         }
-        // SAFETY: `entry & PAGE_PRESENT` was just checked, and `entry` came
-        // from a table this same walk already proved live — see the
-        // `SAFETY` above this loop for why a present entry under the
-        // currently-loaded CR3 always names a real, still-linked table.
+        // SAFETY: PRESENT just checked; same argument as above the loop — a
+        // present entry under the current CR3 names a live table.
         table = unsafe { PageTablePage::from_phys(entry & ADDR_MASK) };
     }
     table[((addr >> 12) & 0x1FF) as usize] & PAGE_PRESENT != 0
@@ -1416,12 +988,7 @@ pub fn present_in_current_cr3(addr: u64) -> bool {
 /// Dump page table entries for an address. Lock-free for crash safety.
 pub fn debug_page_walk(addr: u64) {
     let cr3 = Cr3::current();
-    // SAFETY: same argument as `present_in_current_cr3` above — `cr3.phys()`
-    // is the address space this CPU is executing under right now, so it
-    // names a real, currently-linked PML4 that cannot be freed while this
-    // CPU runs under it. Lock-free by design (this function's own doc,
-    // "for crash safety"); a diagnostic dump accepts a stale-but-consistent
-    // read the same way `present_in_current_cr3` does.
+    // SAFETY: same argument as `present_in_current_cr3` above.
     let pml4 = unsafe { PageTablePage::from_phys(cr3.phys()) };
     let (pml4_idx, pdpt_idx, pd_idx) = indices(addr);
     let pt_idx = ((addr >> 12) & 0x1FF) as usize;
@@ -1449,9 +1016,7 @@ pub fn debug_page_walk(addr: u64) {
         return;
     }
 
-    // SAFETY: `pml4e & PAGE_PRESENT` was just checked; see the `SAFETY` on
-    // `pml4` above for why a present entry under the currently-loaded CR3
-    // always names a real, still-linked table.
+    // SAFETY: PRESENT checked; same argument as `pml4` above.
     let pdpt = unsafe { PageTablePage::from_phys(pml4e & ADDR_MASK) };
     let pdpte = pdpt[pdpt_idx];
     log!(
@@ -1465,8 +1030,7 @@ pub fn debug_page_walk(addr: u64) {
         return;
     }
 
-    // SAFETY: `pdpte & PAGE_PRESENT` was just checked; same reasoning as the
-    // `pdpt` binding above, one level down.
+    // SAFETY: PRESENT checked; same reasoning as `pdpt` above, one level down.
     let pd = unsafe { PageTablePage::from_phys(pdpte & ADDR_MASK) };
     let pde = pd[pd_idx];
     log!(
@@ -1485,9 +1049,8 @@ pub fn debug_page_walk(addr: u64) {
         return;
     }
 
-    // SAFETY: `pde & PAGE_PRESENT` was just checked and the 2 MiB branch
-    // above already returned, so this is a page table `map_window` or
-    // `guard_4k` built; same reasoning as the `pdpt`/`pd` bindings above.
+    // SAFETY: PRESENT checked and the 2 MiB branch already returned, so
+    // this is a table `map_window`/`guard_4k` built; same reasoning as above.
     let pt = unsafe { PageTablePage::from_phys(pde & ADDR_MASK) };
     let pte = pt[pt_idx];
     log!(

@@ -31,7 +31,6 @@ const VIRTIO_GPU_F_EDID: u64 = 1 << 1;
 const FORMAT_B8G8R8A8_UNORM: u32 = 1;
 const FORMAT_B8G8R8X8_UNORM: u32 = 2;
 
-// DMA layout (byte offsets)
 const OFF_CONTROLQ: usize      = 0x0000;
 const OFF_CONTROLQ_BUFS: usize = 0x1000;
 const OFF_CURSORQ: usize       = 0x2000;
@@ -169,14 +168,8 @@ struct RespEdid {
     edid: [u8; 1024],
 }
 
-/// The two scanout buffers, as the driver and as a claimant see them.
-///
-/// **The pages are behind an `Arc` and the driver is one holder of it.** A
-/// resolution change drops this and allocates again; whatever compositor
-/// mapped the old buffers keeps them until it closes its handles, and the
-/// pages go back to the PMM when the last of the two lets go. That replaces a
-/// forced unmap-everyone, which is the one thing a capability system may not
-/// do.
+/// Ref-counted scanout pages: a resolution change drops this without forcing
+/// existing holders (e.g. a compositor) to unmap.
 struct FbAlloc {
     regions: [Region; 2],
     phys_addrs: [u64; 2],
@@ -188,22 +181,8 @@ struct GpuController {
     cursorq: Virtqueue<'static>,
     control_slot: Option<DescSlot>,
     cursor_slot: Option<DescSlot>,
-    /// The four command and response buffers, as [`Dma`] views rather than the
-    /// raw pointer/physical-address pairs they replaced — which is what makes
-    /// every field of this struct `Send` on its own and deleted
-    /// `unsafe impl Send for GpuController {}`.
-    ///
-    /// **The request buffers take the unaligned discipline and the response
-    /// buffers the volatile one**, and that is the difference between writing a
-    /// command and reading an answer. A command is written between one
-    /// `submit_and_wait` and the next, so no descriptor names the buffer while
-    /// the write lands and the bytes are a specification's layout rather than an
-    /// ABI's. A response is memory the device filled, and volatile is what says
-    /// the bytes are not this CPU's to cache.
-    ///
-    /// `'static` because the pool is leaked at `init`: the compositor's display
-    /// is never unbound, and the `static Lock<Option<DmaPool>>` this replaces was
-    /// never cleared either — it just did not say so.
+    /// req buffers are `Unaligned` (CPU-written); resp buffers are volatile
+    /// (device-written).
     req: Dma<'static, Unaligned>,
     resp: Dma<'static>,
     cursor_req: Dma<'static, Unaligned>,
@@ -217,27 +196,15 @@ struct GpuController {
 }
 
 impl GpuController {
-    /// What the device wrote into the control response buffer.
-    ///
-    /// **The one reader of DMA memory in this driver**, and the reason `resp`
-    /// carries the volatile discipline: the device wrote these bytes, so the
-    /// load is not this CPU's to cache, and it is bounded for the whole `T`
-    /// where `ptr_at` would only have bounded the offset.
+    /// Reads what the device wrote into the response buffer.
     fn answer<T: Copy>(&self) -> T {
-        // Bounded for all of `T` against a 0x800-byte buffer, and the transfer
-        // that filled it has completed: `submit_and_wait` returned, and
-        // `poll_used`'s `fence(Acquire)` orders the device's writes before this
-        // read.
+        // Safe only because submit_and_wait's fence(Acquire) already ordered
+        // the device's write before this read.
         self.resp.read(0)
     }
 
-    /// Put one command struct in the request buffer, submit it, and answer with
-    /// whatever the device wrote back.
-    ///
-    /// Typed rather than `&[u8]`: `command_raw` took a byte slice, so every
-    /// caller built one out of its command with `from_raw_parts` — three more
-    /// unsafe blocks for a view nothing else used. Writing the `T` itself
-    /// writes the same bytes.
+    /// Writes `req` into the request buffer, submits it, and returns what the
+    /// device answered.
     fn command_of<Req: Copy, Resp: Copy>(&mut self, req: &Req) -> Resp {
         self.req.write(0, *req);
 
@@ -257,11 +224,11 @@ impl GpuController {
         self.answer()
     }
 
-    /// A command whose answer is only its response header's type field, which
-    /// is every command but GET_EDID.
+    /// Every command but GET_EDID: answers with just the response header's
+    /// type field.
     fn command<T: Copy>(&mut self, req: &T) -> u32 {
-        // `CtrlHeader` and not `u32` as the response size: the device is told
-        // how much room it has, and a header is what it writes.
+        // CtrlHeader sized, not u32: the device must be told how much room it
+        // has to write.
         let hdr: CtrlHeader = self.command_of(req);
         hdr.cmd_type
     }
@@ -298,8 +265,8 @@ impl GpuController {
     }
 
     fn attach_backing(&mut self, id: u32, addr: u64, len: u32) {
-        // This command has a variable-length payload: header + mem_entry array.
-        // We write them consecutively into the request buffer.
+        // Variable-length payload: header followed by mem_entry array, written
+        // consecutively.
         let cmd = ResourceAttachBacking {
             hdr: CtrlHeader::new(CMD_RESOURCE_ATTACH_BACKING),
             resource_id: id,
@@ -401,9 +368,8 @@ impl GpuController {
         self.cursor_command(&cmd);
     }
 
-    /// Allocate framebuffer backing stores and register as shared memory.
-    /// `None` when the physical memory is not there — the caller decides
-    /// whether that is fatal.
+    /// `None` when the physical memory isn't there; the caller decides whether
+    /// that is fatal.
     fn alloc_framebuffer(&mut self, fb_size: u32) -> Option<FbAlloc> {
         let fb_size = fb_size as usize;
         let fb_pages = fb_size.div_ceil(PAGE_2M as usize);
@@ -480,8 +446,8 @@ impl Gpu for GpuController {
 
         log!("VirtIO GPU: changing resolution {}x{} -> {}x{}", self.width, self.height, width, height);
 
-        // Allocate new framebuffer backing. The old pair stays live until the
-        // swap below, so a refusal here leaves the display exactly as it was.
+        // Old framebuffer stays live until the swap below: a failure here
+        // leaves the display unchanged.
         let new_fb = self.alloc_framebuffer(fb_size).ok_or(SyscallError::ResourceExhausted)?;
 
         let old_resource = self.resource;
@@ -493,8 +459,8 @@ impl Gpu for GpuController {
         self.set_scanout(0, self.resource, rect);
 
         self.destroy_resource(old_resource);
-        // The old pages go when the last holder lets go, which may be a
-        // compositor that has not yet mapped the new ones. Nothing is revoked.
+        // Old pages free only when the last holder drops them; nothing is
+        // force-revoked.
         drop(core::mem::replace(&mut self.fb, new_fb));
 
         self.width = width;
@@ -506,11 +472,9 @@ impl Gpu for GpuController {
     }
 }
 
-/// Framebuffer bytes for a resolution, or `None` if the device could never
-/// back it: zero-sized, or past the u32 length `attach_backing` carries.
-/// Both dimensions are userland-chosen via `SYS_GPU_SET_RESOLUTION`, so the
-/// product is computed in u64 — `width * height * 4` in u32 wraps.
+/// Byte size for a resolution, or `None` if zero or too large to fit `u32`.
 fn fb_size_bytes(width: u32, height: u32) -> Option<u32> {
+    // u64: width * height * 4 can overflow u32.
     let bytes = (width as u64).checked_mul(height as u64)?.checked_mul(4)?;
     if bytes == 0 || bytes > u32::MAX as u64 {
         return None;
@@ -518,7 +482,7 @@ fn fb_size_bytes(width: u32, height: u32) -> Option<u32> {
     Some(bytes as u32)
 }
 
-/// Initialize the VirtIO GPU. Returns the driver and display info on success.
+/// Probes for the VirtIO GPU; `None` if absent.
 pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     let pci_dev = *devices.iter().find(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_GPU_DEVICE))?;
     log!("VirtIO GPU: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
@@ -545,8 +509,7 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
 
     let ctrl_bufs = dma.subview(OFF_CONTROLQ_BUFS, 0x1000);
     let cursor_bufs = dma.subview(OFF_CURSORQ_BUFS, 0x1000);
-    // Each half of a buffer page: request at 0, response at `RESP_OFFSET`, and
-    // the length is what every write and read is bounded against.
+    // Each half of a buffer page: request at 0, response at `RESP_OFFSET`.
     const HALF: usize = RESP_OFFSET - REQ_OFFSET;
 
     let mut gpu = GpuController {
@@ -569,9 +532,8 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
         cursor: Region::empty(),
     };
 
-    // EDID reports firmware-set resolution (often 640x480 from OVMF), not the
-    // host-configured preferred resolution. Query EDID for the preferred mode
-    // from the first Detailed Timing Descriptor.
+    // EDID's reported resolution is often a stale firmware default; the
+    // preferred mode is the first Detailed Timing Descriptor.
     let edid = gpu.get_edid(0);
     let (width, height) = if edid.hdr.cmd_type == RESP_OK_EDID {
         let dtd = &edid.edid[54..72];
@@ -587,9 +549,7 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     };
     log!("VirtIO GPU: display {}x{}", width, height);
 
-    // Allocate framebuffer backing stores (2MB-aligned). Boot-time, and the
-    // dimensions come from EDID or the default above — a failure here is a
-    // machine that cannot run, so it dies loudly.
+    // Boot-time: failure here means the machine can't run, so it dies loudly.
     let fb_size = fb_size_bytes(width, height).expect("VirtIO GPU: nonsense display dimensions");
     gpu.fb = gpu.alloc_framebuffer(fb_size).expect("VirtIO GPU: framebuffer alloc failed");
 
@@ -599,7 +559,6 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     let rect = Rect { x: 0, y: 0, width, height };
     gpu.set_scanout(0, gpu.resource, rect);
 
-    // Create cursor resource (64x64, BGRA with alpha)
     let cursor_bytes = (CURSOR_SIZE * CURSOR_SIZE * 4) as usize;
     let cursor_pages = crate::mm::pmm::alloc_contiguous(1, crate::mm::pmm::Category::Framebuffer).expect("VirtIO GPU: cursor alloc failed");
     let cursor_ptr = cursor_pages[0].direct_map().as_mut_ptr::<u8>();
