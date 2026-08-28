@@ -105,7 +105,7 @@ pub(crate) fn submit(cmd_ring: &CommandRing, cmd_pipe_write: RawHandle, cmd: Mix
 /// Tell the mix thread a stream ended, and how.
 ///
 /// Every removal the control thread issues goes through here, so the witness it
-/// holds — which of §7's four ways this stream ended — travels with the command
+/// holds — which of the four ways this stream ended — travels with the command
 /// instead of being reconstructed from a flag on the other side.
 pub(crate) fn remove(
     cmd_ring: &CommandRing,

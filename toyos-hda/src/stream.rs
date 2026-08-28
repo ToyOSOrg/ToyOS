@@ -121,7 +121,7 @@ pub fn last_valid_index(periods: usize) -> Option<u8> {
 ///
 /// A caller that sleeps through the whole ring sees the position where it left
 /// it and is told nothing completed. That aliasing is why the buffer is zeroed
-/// at completion (§2.4) — the engine replays silence rather than the last
+/// at completion — the engine replays silence rather than the last
 /// period — and why the pipeline is deeper than any expected wake.
 pub fn completed(
     last: usize,

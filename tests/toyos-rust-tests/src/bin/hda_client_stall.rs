@@ -2,7 +2,7 @@
 //! is a cyclic DMA ring.
 //!
 //! The stall is the whole actuator. soundd's mix loop may leave a freed period
-//! unfilled while a streaming client is still producing it (§5.10), and on
+//! unfilled while a streaming client is still producing it, and on
 //! virtio-sound that costs nothing: a period soundd has not submitted is a
 //! period the device does not have. HDA's engine owns every period for as long
 //! as it runs and replays the ones nobody refilled, so a period held across a

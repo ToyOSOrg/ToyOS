@@ -7,7 +7,7 @@
 //!
 //! The capture timeline is NOT wall clock. QEMU's wav backend writes only
 //! while the guest voice is enabled, so the file freezes across every
-//! suspended stretch (audio spec §5.8) and splices the next resume directly
+//! suspended stretch and splices the next resume directly
 //! onto the last stopped sample. Verified empirically: 25s of wall clock with
 //! the stream stopped adds zero PCM bytes. Consequence: `analyze` reports an
 //! underrun for ANY two signal regions in one capture, at ANY wall-clock gap
@@ -35,7 +35,7 @@ use super::qemu::{self, BootOptions, QemuInstance};
 /// silence, and the bound is tight: `P(|s| = 1) = 0.25`.
 ///
 /// Testing `s == 0` instead would be a detector that only works against a
-/// truncating quantizer, which is a spec §5.4 defect, not a property to rely
+/// truncating quantizer, which is a defect, not a property to rely
 /// on: with a correct quantizer 75% of silent samples are 0, so the longest
 /// run of exact zeros in 4M silent samples measures 47 — well under the
 /// `MIN_GAP_SECS` floor of 88. Such a detector reports "no dropouts" forever.
@@ -433,7 +433,7 @@ pub struct SounddCounters {
     /// the window that set the maximum rather than maximised on its own: two
     /// independently-worst halves describe a wake that never happened.
     pub worst: WorstWake,
-    /// Cycles that found the whole DMA pipeline free (§5.9 recovery).
+    /// Cycles that found the whole DMA pipeline free.
     pub drains: u32,
     /// Periods submitted with no client audio behind them: silence that
     /// actually went on the wire while a client was streaming.
@@ -636,7 +636,7 @@ pub fn check_counters(counters: &SounddCounters, limits: &CounterLimits) -> Vec<
     problems
 }
 
-/// Structural §5.8 suspend assertions, per-run and yes/no: the device stream
+/// Structural suspend assertions, per-run and yes/no: the device stream
 /// must start only for a client and must be stopped — with soundd suspended
 /// and silent — once the last client is gone. TCG-immune, so a violation is
 /// categorical, never a rare event to be averaged.
@@ -672,7 +672,7 @@ pub fn check_suspend_structure(serial: &str) -> Vec<String> {
     match serial.find(STARTED) {
         None => problems.push(
             "suspend structure: the stream never started inside the test window — \
-             either the device was already running at boot (the §5.8 boot state is \
+             either the device was already running at boot (the boot state is \
              SUSPENDED) or the resume path is broken"
                 .to_string(),
         ),
@@ -731,7 +731,7 @@ pub fn departures(serial: &str) -> Vec<String> {
 /// anyway, and did so on 5 of 44 runs whose client exited `code=0`
 /// (`issues/audio/`, closed). Two things are asserted here, and the
 /// second is the one with teeth: every removal names how the stream ended, in
-/// the vocabulary §7 fixes, and no line claims a death.
+/// the fixed departure vocabulary, and no line claims a death.
 ///
 /// `expect` is how many removals the window must carry: a capture where no
 /// client ever left would otherwise satisfy every check above it vacuously.
@@ -750,7 +750,7 @@ pub fn check_departures(serial: &str, expect: usize) -> Vec<String> {
         if !KNOWN.contains(&how.as_str()) {
             problems.push(format!(
                 "a client was removed with no departure soundd established ({how:?}); \
-                 §7's four are {KNOWN:?}"
+                 the four soundd establishes are {KNOWN:?}"
             ));
         }
     }

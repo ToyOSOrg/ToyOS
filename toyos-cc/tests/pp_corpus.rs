@@ -19,7 +19,7 @@
 //! tcc's own harness pipes through `diff -bB`, and what that means differs
 //! between implementations: this host's BSD `diff` reports a moved blank line
 //! as a change where GNU diffutils would not, and GNU is not installed here so
-//! the two cannot be compared. The rule below is what §5.1's verdicts were
+//! the two cannot be compared. The rule below is what the verdicts were
 //! taken under and it decides `05`, `16` and `24` by itself.
 
 mod common;

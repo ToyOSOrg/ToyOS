@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn present_reports_every_codec_and_not_the_first() {
         // The laptop's own STATESTS: the analogue codec at 0 and display audio at
-        // 2. A `first()` here is the defect §2.3 exists to prevent.
+        // 2. A `first()` here is the defect `present` exists to prevent.
         let found: Vec<u8> = present(0x0005).map(Address::raw).collect();
         assert_eq!(found, [0, 2]);
     }

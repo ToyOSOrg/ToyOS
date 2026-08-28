@@ -30,7 +30,7 @@ fn test_syscall_fault() {
     println!("  PASS: syscall fault killed process (exit={})", status.code().unwrap_or(-1));
 }
 
-/// A kernel spinlock held across a scheduler entry → spec §6.4's baseline
+/// A kernel spinlock held across a scheduler entry → the baseline
 /// assert fires at the call site instead of the pass parking with the lock on a
 /// stack nothing returns to. Without the assert the syscall returns normally and
 /// the child exits 0, so this case has teeth in the negative direction too.

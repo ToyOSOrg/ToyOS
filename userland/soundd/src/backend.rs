@@ -66,7 +66,7 @@ pub(crate) trait Backend {
     /// refills is *replayed* — audible harm gate A's gap detector cannot see.
     /// Zeroing it as it frees makes a late soundd cost silence instead, which
     /// is exactly what virtio-sound's device does when it runs dry, so one
-    /// instrument certifies both (§2.4). virtio's own implementation is empty
+    /// instrument certifies both. virtio's own implementation is empty
     /// for that reason and not by omission: nothing is published for a period
     /// that was not filled, so the device is never given it again.
     fn released(&mut self, idx: usize);

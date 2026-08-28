@@ -102,7 +102,7 @@ fn a_halted_cpu_with_queued_work_was_kicked() {
             assert!(
                 world.ipis.load(Ordering::SeqCst) >= 1,
                 "halted with {} of 2 messages queued and no IPI in flight — \
-                 a sleep-through (spec §7.5)",
+                 a sleep-through",
                 2 - drained.len(),
             );
         }
