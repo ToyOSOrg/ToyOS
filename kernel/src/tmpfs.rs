@@ -65,7 +65,7 @@ impl FileSystem for TmpFs {
 
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
         let (file_id, _) = self.files.get(name).ok_or(SyscallError::NotFound)?;
-        file_cache::open(*file_id);
+        file_cache::open(*file_id).commit();
         Ok((*file_id, None)) // tmpfs: no backing, data is in the file cache
     }
 

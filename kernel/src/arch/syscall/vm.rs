@@ -206,9 +206,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         // The module's own program headers decide which pages are writable
         // and which executable; mapping the whole image writable would make
         // it executable too.
-        let Some(vaddr) = lib.map_into(&pt) else {
-            return Err(SyscallError::ResourceExhausted);
-        };
+        let vaddr = lib.map_into(&pt).ok_or(SyscallError::ResourceExhausted)?;
         // A `Shared` module's windows may reuse a range already handed out;
         // `map_window`'s shootdown reached only this CPU, so the rest of the
         // machine is told here.
@@ -220,18 +218,33 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             crate::elf::rebase_relative_relocs(&lib, delta);
         }
         lib.user_base = vaddr;
-        Ok(())
+        Ok::<UserAddr, SyscallError>(vaddr)
     });
-    if let Err(e) = mapped {
-        log!("dlopen: {}: out of virtual address space", resolved);
-        return e.to_u64();
-    }
+    let base = match mapped {
+        Ok(base) => base,
+        Err(e) => {
+            log!("dlopen: {}: out of virtual address space", resolved);
+            return e.to_u64();
+        }
+    };
+
+    // The mapping is committed before the fallible copy-out below; this guard
+    // unwinds it — VA region and its shootdown — if the copy-out refuses, so a
+    // refused dlopen leaves no library mapped or registered.
+    let mapping = {
+        let pt = pt.clone();
+        crate::rollback::Rollback::new(move || {
+            process::with_process_data(|_data| {
+                pt.lock().free_and_unmap(base);
+            });
+            crate::arch::tlb::shootdown();
+        })
+    };
 
     let lib_has_tls = lib.tls_memsz > 0;
-
     let data_arc = process::process_data();
-    {
-        let mut data = data_arc.lock();
+    let (init_info, tls_module) = {
+        let data = data_arc.lock();
         crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
 
         if data.elf.tls_total_memsz > 0 {
@@ -242,46 +255,51 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls_total_memsz, &tls_info);
         }
 
-        if lib_has_tls {
+        // The module id is reserved but not registered: the `tls_modules` push and
+        // the `next_tls_module_id` bump happen only once the copy-out has succeeded.
+        // A self-defined TLS symbol resolves to this id directly, so the not-yet-pushed
+        // module is not needed here.
+        let tls_module = lib_has_tls.then(|| {
             let module_id = data.elf.next_tls_module_id;
-            data.elf.next_tls_module_id += 1;
-            data.elf.tls_modules.push(crate::elf::TlsModule {
-                template: lib.tls_template,
-                memsz: lib.tls_memsz, base_offset: 0, module_id,
-                is_static: false,
-            });
-            // DTV entries are left DTV_UNALLOCATED; `__tls_get_addr` allocates
-            // on first access.
             let tls_info = crate::elf::TlsModuleInfo {
                 libs: &data.elf.loaded_libs,
                 modules: &data.elf.tls_modules,
             };
             crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
-        }
-    }
+            crate::elf::TlsModule {
+                template: lib.tls_template,
+                memsz: lib.tls_memsz,
+                base_offset: 0,
+                module_id,
+                is_static: false,
+            }
+        });
 
-    // init_info layout: [init_array_vaddr, init_array_count], vaddr rebased to
-    // user_base.
-    let init_info = [
-        if lib.init_array_vaddr != 0 { lib.user_base.raw() + lib.init_array_vaddr } else { 0 },
-        lib.init_array_size / 8,
-    ];
-
-    let idx = {
-        let mut data = data_arc.lock();
-        let idx = data.elf.loaded_libs.len();
-        data.elf.lib_paths.push(resolved);
-        data.elf.loaded_libs.push(lib);
-        idx
+        // init_info layout: [init_array_vaddr, init_array_count], vaddr rebased to user_base.
+        let init_info = [
+            if lib.init_array_vaddr != 0 { lib.user_base.raw() + lib.init_array_vaddr } else { 0 },
+            lib.init_array_size / 8,
+        ];
+        (init_info, tls_module)
     };
 
-    // Registered before this copy_out: on failure the caller loses its
-    // handle, not the address space its mapping.
+    // The point of no return: copy the init info out first, then register. A
+    // refused copy-out registers nothing and the mapping guard rolls back.
     if let Some(out) = init_out {
         if ctx.copy_out(out, &init_info).is_err() {
             return SyscallError::BadAddress.to_u64();
         }
     }
+    mapping.commit();
+
+    let mut data = data_arc.lock();
+    let idx = data.elf.loaded_libs.len();
+    if let Some(module) = tls_module {
+        data.elf.next_tls_module_id = module.module_id + 1;
+        data.elf.tls_modules.push(module);
+    }
+    data.elf.lib_paths.push(resolved);
+    data.elf.loaded_libs.push(lib);
     idx as u64
 }
 

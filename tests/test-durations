@@ -218,6 +218,7 @@ klogd_hosted 17870
 lapic_spurious_vector 6829
 late_storage_connect 6455
 launcher_refusals 2106
+leak_rollback_selftest 18446744073709551615
 locale_detect 5588
 locale_detect_unrecognized 5082
 log_backing_read_error 4887

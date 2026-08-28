@@ -287,6 +287,16 @@ fn injected_read_failure(role: Role) -> bool {
     !boot_volume_reads() && role == Role::Boot && BOOT_MOUNTED.load(Ordering::Relaxed)
 }
 
+/// Armed only around the leak-rollback self-test's reopen, to fail [`FatFs::backing`].
+#[cfg(feature = "boot-actuators")]
+static SELFTEST_BACKING_FAIL: AtomicBool = AtomicBool::new(false);
+
+/// Self-test hook: make [`FatFs::backing`] fail like a transient device error.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn selftest_fail_backing(on: bool) {
+    SELFTEST_BACKING_FAIL.store(on, Ordering::Relaxed);
+}
+
 /// Which byte ranges hold one file's data, shared by every [`FatBacking`] for
 /// that name so an unlink revokes all of them at once.
 struct FatExtents {
@@ -545,6 +555,11 @@ impl FatFs {
 
     fn backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         let role = self.role;
+        // Self-test: the transient-device-error trigger of the reopen leak.
+        #[cfg(feature = "boot-actuators")]
+        if SELFTEST_BACKING_FAIL.load(Ordering::Relaxed) {
+            return Err(SyscallError::Io);
+        }
         let size = self.fs.metadata(name).map_err(|e| refused(role, "metadata", name, e))?.len;
         let runs = self
             .fs
@@ -616,8 +631,10 @@ impl FileSystem for FatFs {
 
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
         if let Some(&file_id) = self.by_name.get(name) {
-            file_cache::open(file_id);
-            return Ok((file_id, Some(self.backing(name)?)));
+            let held = file_cache::open(file_id);
+            let backing = self.backing(name)?;
+            held.commit();
+            return Ok((file_id, Some(backing)));
         }
         let role = self.role;
         let file = self.fs.open(name).map_err(|e| refused(role, "open", name, e))?;

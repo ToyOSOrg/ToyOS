@@ -197,6 +197,26 @@ impl HandleTable {
         Ok(RawHandle::new(slot, 0))
     }
 
+    /// Install every object all-or-nothing: a batch that would overflow the
+    /// table is refused whole, leaving the table exactly as it was found.
+    // `has_room` reserves the slots before any `HandleEntry::new`, so a refusal
+    // builds and installs nothing — undoing a partial install would retire the objects.
+    pub fn install_all(
+        &mut self,
+        objects: Vec<(KObjectRef, Rights)>,
+    ) -> Result<Vec<RawHandle>, TableFull> {
+        if !self.has_room(objects.len()) {
+            return Err(TableFull);
+        }
+        Ok(objects
+            .into_iter()
+            .map(|(object, rights)| {
+                self.install(HandleEntry::new(object, rights))
+                    .expect("has_room reserved every slot")
+            })
+            .collect())
+    }
+
     /// Install at a caller-chosen slot, replacing whatever is there.
     #[must_use = "the displaced entry must be dropped by the caller"]
     pub fn install_at(
@@ -387,6 +407,15 @@ impl HandleTable {
             }
             Slot::Retired => None,
         })
+    }
+
+    /// Self-test: fill the table to `room` slots of capacity with empty,
+    // non-free slots `install` can neither reuse nor grow past.
+    #[cfg(feature = "boot-actuators")]
+    pub fn stage_room(&mut self, room: usize) {
+        while self.slots.len() < MAX_HANDLES - room {
+            self.slots.push(Slot::Serving { generation: 0, entry: None });
+        }
     }
 
     /// Test actuator: park a free slot at its last generation and answer the handle its next install will carry.

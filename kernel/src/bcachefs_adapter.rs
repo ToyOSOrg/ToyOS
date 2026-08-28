@@ -147,12 +147,13 @@ impl FileSystem for BcacheFsAdapter {
 
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
         if let Some(&file_id) = self.name_to_id.get(name) {
-            file_cache::open(file_id);
+            let held = file_cache::open(file_id);
             let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
             let backing = Arc::new(NvmeBacking::new(
                 Arc::clone(&info.blocks),
                 file_cache::size(file_id),
             ));
+            held.commit();
             return Ok((file_id, Some(backing)));
         }
 
@@ -311,7 +312,7 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
         let (extents, size) = present("open", name, self.fs.file_extents(name))?;
         if let Some(&file_id) = self.name_to_id.get(name) {
-            file_cache::open(file_id);
+            file_cache::open(file_id).commit();
             let backing = Arc::new(InitrdBacking::new(self.image, extents, size));
             return Ok((file_id, Some(backing)));
         }
