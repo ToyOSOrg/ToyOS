@@ -27,7 +27,9 @@
 //! here, and a ledger that does not sum to it exactly is refused. So a file's
 //! dated entry rises only in a change that edits this file too — and a file
 //! absent from the ledger is admitted at a dated column of zero, which is what
-//! makes a date in a new file two deliberate edits away rather than none.
+//! makes a date in a new file two deliberate edits away rather than none. A
+//! `CLAUDE.md` carries no date at all: it is pointers and caveats, and a date
+//! is the story that belongs in the commit message.
 //!
 //! **No density target, and that is the design.** A share of comment lines is
 //! a diagnostic and never a definition of quality: a file that is 70% comment
@@ -36,15 +38,23 @@
 //! as easily as the kinds that do not. This gate has no opinion about how much
 //! prose a file carries; it has one about prose being added to it.
 //!
+//! **The writing law prices what the ratchet declares.** A branch may add at
+//! most one comment line per four lines of code it adds, and a `CLAUDE.md` it
+//! changes may not grow: `crate::writinglaw::judge` measures every file the
+//! branch changes by the methodology below and refuses at `--pr` and in CI
+//! both. Like the ratchet it has no opinion about how much prose a file
+//! carries — only about the prose a landing adds, which the landing may fund
+//! by cutting prose anywhere in the tree.
+//!
 //! **The methodology, stated once and applied to every file.** A comment line
 //! is one whose first non-whitespace characters are `//`, `/*` or `*`; a dated
-//! comment line is such a line also carrying a `20NN-NN`. It counts a block
-//! comment's `*`-led continuation lines and its `*/` closer, and it does not
-//! count a comment trailing code on the same line — so a file's real prose is
-//! higher than its entry, which costs a ceiling nothing. Its one false
-//! positive is a statement opening with a dereference;
-//! `rg -n '^[[:space:]]*\*[^ /]' $(git ls-files '*.rs')` names every line in
-//! the tree it miscounts.
+//! comment line is such a line also carrying a `20NN-NN`; a code line is any
+//! other non-blank line. It counts a block comment's `*`-led continuation
+//! lines and its `*/` closer, and it does not count a comment trailing code on
+//! the same line — so a file's real prose is higher than its entry, which
+//! costs a ceiling nothing. Its one false positive is a statement opening with
+//! a dereference; `rg -n '^[[:space:]]*\*[^ /]' $(git ls-files '*.rs')` names
+//! every line in the tree it miscounts.
 //!
 //! **Every `.rs` file the repository holds is ledgered.** [`UNLEDGERED`] is
 //! the whole of the exclusion — the compiler fork and build output — so there
@@ -60,39 +70,51 @@
 //! prose: a comments-only sweep flags it and never edits it, because resolving
 //! it changes program output or a public name.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
 /// The ledger, relative to the repository root.
+#[cfg(test)]
 const LEDGER: &str = "src/prose-ledger";
 
-/// The only directories the walk does not enter.
-const UNLEDGERED: &[&str] = &["rust", "target", ".git"];
+/// The only directories the walk does not enter, and the writing law does not
+/// judge.
+pub(crate) const UNLEDGERED: &[&str] = &["rust", "target", ".git"];
 
 /// [`LEDGER`]'s dated column, summed.
 ///
 /// Declared apart from the ledger so admitting one dated comment line costs an
 /// edit here as well as there. It only goes down: a sweep that removes
 /// chronology lowers this and the rows together.
+#[cfg(test)]
 const DATED_TOTAL: usize = 226;
 
 /// The sentence a raised entry has to be worth.
+#[cfg(test)]
 const RAISING: &str =
     "raising the ledger is the deliberate act; the same PR edits it or the prose goes";
 
-/// One file's prose: measured from its text, or permitted by its ledger row.
+/// One file's lines by kind: measured from its text, or — comments and dated
+/// only — permitted by its ledger row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-struct Prose {
-    comments: usize,
-    dated: usize,
+pub(crate) struct Prose {
+    pub(crate) comments: usize,
+    pub(crate) dated: usize,
+    pub(crate) code: usize,
 }
 
 /// One file's [`Prose`], by the methodology in this module's header.
-fn measure(text: &str) -> Prose {
+pub(crate) fn measure(text: &str) -> Prose {
     let mut prose = Prose::default();
     for line in text.lines() {
         let line = line.trim_start();
+        if line.is_empty() {
+            continue;
+        }
         if !(line.starts_with("//") || line.starts_with("/*") || line.starts_with('*')) {
+            prose.code += 1;
             continue;
         }
         prose.comments += 1;
@@ -115,19 +137,33 @@ fn dated(line: &str) -> bool {
 }
 
 /// `path` relative to the repository root, with forward slashes.
+#[cfg(test)]
 fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
 /// Every `.rs` file the tree holds, as `(relative path, text)`.
+#[cfg(test)]
 fn sources(root: &Path) -> Vec<(String, String)> {
+    files(root, |path| path.extension().is_some_and(|e| e == "rs"))
+}
+
+/// Every `CLAUDE.md` the tree holds, as `(relative path, text)`.
+#[cfg(test)]
+fn guides(root: &Path) -> Vec<(String, String)> {
+    files(root, |path| path.file_name().is_some_and(|n| n == "CLAUDE.md"))
+}
+
+#[cfg(test)]
+fn files(root: &Path, keep: fn(&Path) -> bool) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    walk(root, root, &mut out);
+    walk(root, root, keep, &mut out);
     out.sort();
     out
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+#[cfg(test)]
+fn walk(root: &Path, dir: &Path, keep: fn(&Path) -> bool, out: &mut Vec<(String, String)>) {
     let entries = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
     for entry in entries.flatten() {
@@ -137,9 +173,9 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
                 UNLEDGERED.iter().any(|dir| name.to_str() == Some(*dir))
             });
             if !skipped {
-                walk(root, &path, out);
+                walk(root, &path, keep, out);
             }
-        } else if path.extension().is_some_and(|e| e == "rs") {
+        } else if keep(&path) {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
             out.push((rel(root, &path), text));
@@ -147,11 +183,26 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
     }
 }
 
+/// Every dated line in `files`, as `path:line`.
+#[cfg(test)]
+fn chronology(files: &[(String, String)]) -> Vec<String> {
+    let mut at = Vec::new();
+    for (path, text) in files {
+        for (n, line) in text.lines().enumerate() {
+            if dated(line) {
+                at.push(format!("{path}:{}", n + 1));
+            }
+        }
+    }
+    at
+}
+
 /// The ledger's rows, or the first line that is not one.
 ///
 /// Byte order is refused rather than sorted away: rows land where a reader and
 /// a merge both expect them, and an appended row that sorts elsewhere is a
 /// mistake worth naming at the line it is on.
+#[cfg(test)]
 fn read_ledger(text: &str) -> Result<BTreeMap<String, Prose>, String> {
     let mut rows = BTreeMap::new();
     let mut previous = String::new();
@@ -162,7 +213,10 @@ fn read_ledger(text: &str) -> Result<BTreeMap<String, Prose>, String> {
             let path = fields.next()?;
             let comments = fields.next()?.parse().ok()?;
             let dated = fields.next()?.parse().ok()?;
-            fields.next().is_none().then(|| (path.to_string(), Prose { comments, dated }))
+            fields
+                .next()
+                .is_none()
+                .then(|| (path.to_string(), Prose { comments, dated, code: 0 }))
         })();
         let Some((path, prose)) = row else {
             return Err(format!(
@@ -182,6 +236,7 @@ fn read_ledger(text: &str) -> Result<BTreeMap<String, Prose>, String> {
 ///
 /// Takes both sides and the declared total rather than reading any of them, so
 /// the negative control stages a tree that is not on disk.
+#[cfg(test)]
 fn refusals(
     permitted: &BTreeMap<String, Prose>,
     measured: &BTreeMap<String, Prose>,
@@ -242,6 +297,7 @@ fn refusals(
 }
 
 /// The rows a re-record would rewrite, each already in the ledger's own form.
+#[cfg(test)]
 fn shrinkage(
     permitted: &BTreeMap<String, Prose>,
     measured: &BTreeMap<String, Prose>,
@@ -306,10 +362,39 @@ mod tests {
         );
     }
 
+    /// A `CLAUDE.md` carries no date: each one it does is named at its line.
+    #[test]
+    fn no_claude_md_carries_a_date() {
+        let found = guides(&repo_root());
+        assert!(
+            found.iter().any(|(path, _)| path == "CLAUDE.md"),
+            "the walk did not reach the root CLAUDE.md: {found:?}"
+        );
+        let dated = chronology(&found);
+        assert!(
+            dated.is_empty(),
+            "{} dated line(s) in a CLAUDE.md; a date is the story, and the story goes in the \
+             commit message:\n  {}",
+            dated.len(),
+            dated.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn the_date_gate_names_the_file_and_the_line() {
+        let staged = |path: &str, text: &str| (path.to_string(), text.to_string());
+        let files = [
+            staged("CLAUDE.md", "# ToyOS\n\nfine\n"),
+            staged("src/CLAUDE.md", "fine\n- ruled on 2026-08-25\nfine\n(2026-08-19)\n"),
+        ];
+        assert_eq!(chronology(&files), ["src/CLAUDE.md:2", "src/CLAUDE.md:4"]);
+        assert!(chronology(&files[..1]).is_empty());
+    }
+
     fn staged(rows: &[(&str, usize, usize)]) -> BTreeMap<String, Prose> {
         rows.iter()
             .map(|(path, comments, dated)| {
-                (path.to_string(), Prose { comments: *comments, dated: *dated })
+                (path.to_string(), Prose { comments: *comments, dated: *dated, code: 0 })
             })
             .collect()
     }
@@ -390,6 +475,13 @@ mod tests {
         // opening with a dereference reads as a block comment's continuation.
         assert_eq!(counted("        *p += 1;\n"), 1);
 
+        let code = |text: &str| measure(text).code;
+        assert_eq!(code("let x = 1;\n"), 1);
+        assert_eq!(code("let x = 1; // a trailing comment is code's line\n"), 1);
+        assert_eq!(code("// prose\nlet x = 1;\n\n   \n}\n"), 2);
+        assert_eq!(code("/* opened\n * continued\n */\n"), 0);
+        assert_eq!(code(""), 0);
+
         let chronology = |text: &str| measure(text).dated;
         assert_eq!(chronology("// owner ruling 2026-08-25\n"), 1);
         assert_eq!(chronology("// measured 1999-01-01\n"), 0);
@@ -433,5 +525,9 @@ mod tests {
         );
         // And it reads the files rather than merely listing them.
         assert!(found["src/prosegate.rs"].comments > 0);
+
+        let guides = guides(&repo_root());
+        assert!(guides.iter().all(|(path, _)| path.ends_with("CLAUDE.md")), "{guides:?}");
+        assert!(guides.iter().any(|(path, _)| path == "kernel/CLAUDE.md"), "{guides:?}");
     }
 }
