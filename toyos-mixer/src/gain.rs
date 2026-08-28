@@ -6,7 +6,7 @@
 //! the one artefact a listener cannot fail to notice.
 
 /// A gain that has already crossed the trust boundary: finite, and within
-/// §7.4's [0.0, 1.0].
+/// [0.0, 1.0].
 ///
 /// The check has to be a type rather than a `clamp` at each call site: `clamp`
 /// returns NaN unchanged, and a NaN gain reaches the *shared* mix bus through
@@ -18,7 +18,7 @@ impl Gain {
     pub const SILENT: Gain = Gain(0.0);
     pub const UNITY: Gain = Gain(1.0);
 
-    /// §7.4 clamps out-of-range values, and ±inf is out of range. NaN is not a
+    /// Out-of-range values are clamped, and ±inf is out of range. NaN is not a
     /// value at all, so it is refused rather than guessed at; the control
     /// thread treats a refusal as any other malformed message.
     pub fn from_wire(gain: f32) -> Option<Gain> {
@@ -66,7 +66,7 @@ impl GainRamp {
         self.current
     }
 
-    /// Advance the ramp across a period of silence (§7.3: the ramp applies to
+    /// Advance the ramp across a period of silence (the ramp applies to
     /// silence when the ring is empty — otherwise a drained closing client
     /// would never finish its ramp and never be removed).
     pub fn advance_frames(&mut self, frames: u32) {

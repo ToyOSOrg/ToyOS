@@ -637,8 +637,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // boot phases at the marker, no userland — so Parallel and, pending its
     // first measured run, Fast.
     ("nested_fault_is_recursive", Sched::Parallel, Tier::Fast),
-    // §9.1's conservation law across `SYS_LOG_READ`, one registered name per
-    // width, and §9.2's nesting gate at one CPU. **Three names because one over
+    // The conservation law across `SYS_LOG_READ`, one registered name per
+    // width, and the nesting gate at one CPU. **Three names because one over
     // three boots measured 17,112 ms in CI** — over the fast tier's line, and
     // the gate the whole design turns on may not sit in the nightly tier — and
     // because the three widths are different subjects rather than one subject
@@ -737,7 +737,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // `test_rs_locale_gate layout` holding an idle keyboard open until a fixed
     // deadline expired, against half a second of injection; it exits on the End
     // key's release now, which is `i8042_keyboard`'s own sentinel and the fix
-    // §7.5 made for that whole family. Carrying `UNMEASURED_MS` until the shards
+    // made for that whole family. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("swiss_german_layout", Sched::Parallel, Tier::Fast),
     ("locale_detect", Sched::Parallel, Tier::Fast),
@@ -1751,7 +1751,7 @@ fn check_symbols_were_read(test: &str, serial: &str) -> bool {
     false
 }
 
-/// The §6.4 tripwire must fire, and its `panicked at` must name the syscall
+/// The lock-across-switch tripwire must fire, and its `panicked at` must name the syscall
 /// that held the lock rather than the scheduler that caught it — which is the
 /// only thing `#[track_caller]` on `assert_baseline` buys.
 ///
@@ -1766,7 +1766,7 @@ fn check_tripwire_attribution(serial: &str) -> Result<(), String> {
     const HEADER: &str = "PANIC:";
     let msg_at = serial
         .find(MSG)
-        .ok_or("expected the §6.4 lock-across-switch tripwire to fire")?;
+        .ok_or("expected the lock-across-switch tripwire to fire")?;
     let header_at = serial[..msg_at]
         .rfind(HEADER)
         .ok_or("tripwire message with no panic header before it")?;
@@ -1816,7 +1816,7 @@ fn check_audio_idle_suspend(result: &TestResult) -> bool {
 /// misreport: `client N died` for a process that exited `code=0`, because the
 /// mix loop's signal pipe broke before the control thread read the peer. What
 /// it asserts is that neither outcome of that race is worded as a death, and
-/// that both removals name a departure soundd actually established (§7).
+/// that both removals name a departure soundd actually established.
 ///
 /// **The count is per removal and stays exact**, because the vocabulary is
 /// asserted per removal: a capture where no client ever left would satisfy
@@ -2310,7 +2310,7 @@ fn measure_audio_run(
     }
     // Without this the gate can go green while measuring nothing: the underrun
     // detector's silence band is derived from soundd applying TPDF dither into
-    // a rounding quantizer (spec §5.4). Lose the dither and silence becomes
+    // a rounding quantizer. Lose the dither and silence becomes
     // exact zero everywhere, the band collapses, and dropouts stop being
     // visible — the exact failure this instrument was rebuilt to remove.
     match analysis.dither_ratio {
@@ -2356,7 +2356,7 @@ fn measure_audio_run(
         problems.push(msg);
     }
 
-    // §5.8 suspend structure — categorical per-run assertions, so they belong
+    // Suspend structure — categorical per-run assertions, so they belong
     // with the instrument checks: fatal in both tiers, never a counted rate.
     problems.extend(audio::check_suspend_structure(&serial));
 
@@ -8881,7 +8881,7 @@ fn run_machine_test(
             // things came of the copy and both were defects: nothing paced the
             // injection, so a key the host sent while the guest was behind was
             // indistinguishable from one this controller lost — the exact
-            // reading `xhci_second_controller` moved off (§5.5.2) — and nothing
+            // reading `xhci_second_controller` moved off — and nothing
             // sent the right-button release `test_rs_input_events` ends on, so
             // every green run waited out the client's whole 30 s fallback
             // deadline. `input_events_end`'s own doc says every caller owes it
@@ -9451,7 +9451,7 @@ fn run_machine_test(
         }
         "sched_check_build" => {
             // The scheduler core's own instruments, run on a real machine —
-            // spec §10.2's on-target counterpart to everything the simulator
+            // the on-target counterpart to everything the simulator
             // does.
             //
             // `kernel/Cargo.toml` has forwarded `sched-check =

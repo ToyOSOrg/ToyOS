@@ -46,13 +46,13 @@ fn report(stats: &MixStats, clients: usize) {
 /// Signal every client before the wait so priority inheritance can fill their
 /// rings while soundd blocks, and reap the ones that died doing it.
 ///
-/// §5.7/§7.3: a broken pipe here is the client's departure, caught here rather
+/// A broken pipe here is the client's departure, caught here rather
 /// than left to the control connection — a client that goes mid-stream would
 /// otherwise stay `is_streaming()` and keep the loop deferring buffers for a
 /// producer that no longer exists. Departure is exactly `Err(NotFound)`, the
 /// kernel's broken-pipe error; a full pipe is `Err(WouldBlock)` and means the
 /// client is merely behind on consuming signals, which must leave it untouched
-/// — a §6.4-paused client stops reading its pipe indefinitely and is alive.
+/// — a paused client stops reading its pipe indefinitely and is alive.
 ///
 /// It says nothing on its own: [`Departure::SignalPipeGone`] is the weakest of
 /// the four witnesses and the control thread's is on the way, so the word waits
@@ -94,9 +94,9 @@ fn apply_commands(cmd_ring: &CommandRing, streams: &mut Vec<ClientStream>, ramp_
     }
 }
 
-/// Drop clients whose disconnect ramp has finished. Paused clients (§6.4) mix
+/// Drop clients whose disconnect ramp has finished. Paused clients mix
 /// silence and are never removed here; a disconnecting client leaves only after
-/// its §5.5 ramp-out reaches idle, so its tail plays out first.
+/// its ramp-out reaches idle, so its tail plays out first.
 ///
 /// This is where a departure is finally worded, and the last moment at which it
 /// can be: both witnesses have had the whole ramp to arrive, and the removal is
@@ -135,7 +135,7 @@ pub(crate) fn mix_thread(
     let refill_floor_nanos = deferral_floor_nanos(num_buffers, period_nanos);
 
     let mut streams: Vec<ClientStream> = Vec::new();
-    // Boot starts SUSPENDED (§5.8): every buffer free, nothing submitted, the
+    // Boot starts SUSPENDED: every buffer free, nothing submitted, the
     // PCM stream never started. There is no unconditional silence prime — the
     // first client's ordinary refill fills the whole pipeline through the
     // dithering mix path, and the kernel starts the stream on that submit.
@@ -243,7 +243,7 @@ pub(crate) fn mix_thread(
 
         // The prediction this wait is armed against, when there is one.
         // Lateness is only defined relative to an instant soundd asked to be
-        // woken at, and two waits name none: the idle path (§5.8) arms no timer
+        // woken at, and two waits name none: the idle path arms no timer
         // at all, and before the DLL locks there is no prediction to arm on.
         let mut armed_on: Option<f64> = None;
 
@@ -319,7 +319,7 @@ pub(crate) fn mix_thread(
                         // Every period played and the mask says no more than
                         // that. The cursor stays where it was: the fill order
                         // from here is a guess either way, and a lap of silence
-                        // has already gone out — §5.9 counts it as the drain it
+                        // has already gone out — it counts as the drain it
                         // is, and the next record re-anchors.
                         Some(stream::Completed::Lapped) => {}
                         None => panic!(
@@ -331,7 +331,7 @@ pub(crate) fn mix_thread(
                 }
                 unplayed = unplayed.saturating_sub(n as usize);
                 free_mask |= rec.mask;
-                // §2.4's zero-on-complete, before anything can decide to leave
+                // Zero-on-complete, before anything can decide to leave
                 // this buffer unfilled: the engine returns to it in
                 // `num_buffers` periods whatever soundd does.
                 for idx in 0..num_buffers {
@@ -385,7 +385,7 @@ pub(crate) fn mix_thread(
             stats.empty_wake();
         }
 
-        // §5.9: nothing unplayed left means the pipeline drained. What died with
+        // Nothing unplayed left means the pipeline drained. What died with
         // it is the *clock*, not the audio — the device restarts its period grid
         // from whatever we submit next, so the DLL estimate must be dropped or
         // the next update reads the discontinuity as drift and drags the
@@ -396,7 +396,7 @@ pub(crate) fn mix_thread(
         // Counting a drain is narrower than detecting one. `drains` means
         // "soundd was late enough that the device ran out of audio", so the
         // three ways to see an empty pipeline without being late must not raise
-        // it: the idle path (§5.8) empties the pipeline by design and is the
+        // it: the idle path empties the pipeline by design and is the
         // only wake with `was_streaming` false; a device retiring faster than
         // it plays is rejected arithmetically by `min_drain_nanos`, which no
         // device playing at its own rate can beat; and a previous cycle's
@@ -442,7 +442,7 @@ pub(crate) fn mix_thread(
         let mut refilled = false;
         let mut deferred: u32 = 0;
         // With no clients there is nothing to mix: leaving the freed buffers
-        // unsubmitted is what drains the pipeline (§5.8) instead of feeding
+        // unsubmitted is what drains the pipeline instead of feeding
         // the device silence forever.
         while free_mask != 0 && !streams.is_empty() {
             let idx = match pipeline {
@@ -460,7 +460,7 @@ pub(crate) fn mix_thread(
             assert!(free_mask & (1 << idx) != 0, "soundd: buffer {idx} is not free to fill");
             free_mask &= !(1 << idx);
 
-            // §5.10's "wait until clients have filled", reached by deferring
+            // "Wait until clients have filled", reached by deferring
             // the buffer rather than blocking on the client — which needs no
             // reverse notification, since the ring indices soundd already maps
             // say the same thing.
@@ -548,7 +548,7 @@ pub(crate) fn mix_thread(
 
         retain_active(&mut streams);
 
-        // §5.8 DRAINING → SUSPENDED, on the completion that plays out the last
+        // DRAINING → SUSPENDED, on the completion that plays out the last
         // filled period. The stop is immediate: grace between the drain and the PCM
         // STOP is zero, and that is policy like `refill_floor_nanos` above,
         // not physics. virtio STOP does not RELEASE — SET_PARAMS and PREPARE
@@ -610,7 +610,7 @@ pub(crate) fn mix_thread(
 /// no DMA pipeline, so no DLL, no completion records, no dither, and no submit.
 /// After mixing one period it throws the samples away.
 ///
-/// Idle discipline matches §5.8: with no streams it holds no timer and takes no
+/// Idle discipline: with no streams it holds no timer and takes no
 /// wakes, blocking on the command pipe alone, so an audience of zero costs
 /// exactly zero CPU. It does not request the RT band — it protects no audible
 /// output, so there is nothing for the band to protect.
@@ -650,7 +650,7 @@ pub(crate) fn null_sink_thread(
 
         signal_clients(&mut streams, ramp_frames);
 
-        // Idle discipline (§5.8): no streams → no timer, no wakes. A connect
+        // Idle discipline: no streams → no timer, no wakes. A connect
         // arrives as a command-pipe byte, the only wake source the null sink
         // has. While streaming, wake at the next grid point.
         let timeout = if streams.is_empty() {
