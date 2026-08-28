@@ -11,22 +11,13 @@ pub(crate) fn kernel_backtrace(start_rbp: u64, max_frames: usize) {
     let mut rbp = start_rbp;
     for _ in 0..max_frames {
         if rbp == 0 || !rbp.is_multiple_of(8) || !mm::is_kernel_addr(rbp) { break; }
-        // SAFETY: `rbp` is non-zero, 8-aligned and a kernel address, all just
-        // checked, so both reads are inside the direct map — which covers every
-        // byte of physical memory and is mapped for the life of the machine, so
-        // neither can fault. What the words *mean* is not checked and cannot be:
-        // this walks a frame chain on a stack that has already failed, and
-        // `return_addr` is filtered on the next line rather than trusted.
+        // SAFETY: `rbp` is checked non-zero, 8-aligned and a kernel address, so
+        // both reads land in the direct map, mapped for the life of the machine.
         //
-        // **Irreducible for the frame chain and not for the read.** `rbp` is a
-        // register out of a `TrapFrame`, so there is no allocation to borrow and
-        // no `KernelSlice` to carry — but the read itself should be a
-        // `read_volatile` like `safe_read_kernel`'s, and the argument the two
-        // differ on is the root-file sweep's open finding
-        // (`issues/kernel/user-pages-still-read-through-a-plain-deref.md`).
+        // Not `read_volatile` like `safe_read_kernel`: tracked as
+        // issues/kernel/user-pages-still-read-through-a-plain-deref.md.
         let saved_rbp = unsafe { *(rbp as *const u64) };
-        // SAFETY: the same argument, for the return address one word up — `rbp`
-        // is 8-aligned and a kernel address, and the direct map is contiguous.
+        // SAFETY: same as above, for the return address one word up.
         let return_addr = unsafe { *((rbp + 8) as *const u64) };
         if return_addr == 0 || !mm::is_kernel_addr(return_addr) { break; }
         symbols::resolve_kernel_return(return_addr);
@@ -34,11 +25,8 @@ pub(crate) fn kernel_backtrace(start_rbp: u64, max_frames: usize) {
     }
 }
 
-/// Walk RBP chain for user backtrace through page tables.
-///
-/// The names come off the running task's own symbol table, so this takes no pid:
-/// a user backtrace is always the backtrace of the process whose CPU is
-/// producing the report.
+/// Walk RBP chain for user backtrace through page tables. Takes no pid: this
+/// always backtraces the process running on this CPU.
 fn user_backtrace(start_rbp: u64, pml4: *const u64, max_frames: usize) {
     let mut rbp = start_rbp;
     for _ in 0..max_frames {
@@ -63,23 +51,20 @@ fn kernel_backtrace_safe(start_rbp: u64, max_frames: usize) {
     }
 }
 
-// Safe memory reads — for exception handlers
 
 /// Safe kernel memory read. Only reads kernel direct-map addresses.
 fn safe_read_kernel(addr: u64) -> Option<u64> {
     if !addr.is_multiple_of(8) || !mm::is_kernel_addr(addr) {
         return None;
     }
-    // SAFETY: `addr` is 8-aligned and a kernel address, checked immediately
-    // above, so the read is inside the direct map and cannot fault. Irreducible
-    // for `kernel_backtrace`'s reason: the address is a raw stack word, not a
-    // borrow of anything. `read_volatile` because this runs on the crash path
-    // and the values it reads are memory another CPU may still be writing.
+    // SAFETY: `addr` is 8-aligned and a kernel address, checked just above, so
+    // the read is inside the direct map. `read_volatile`: this runs on the
+    // crash path and another CPU may still be writing the memory.
     Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
 }
 
-/// Safely read a u64 from memory. For user addresses, translates through page
-/// tables to avoid triggering demand-paging faults inside exception handlers.
+/// Reads a u64; for a user address, walks page tables by hand to avoid
+/// demand-paging faults inside an exception handler.
 fn safe_read_u64(addr: u64, user_pml4: *const u64) -> Option<u64> {
     if !addr.is_multiple_of(8) || addr == 0 {
         return None;
@@ -88,20 +73,16 @@ fn safe_read_u64(addr: u64, user_pml4: *const u64) -> Option<u64> {
         let pml4_idx = ((addr >> 39) & 0x1FF) as usize;
         let pdpt_idx = ((addr >> 30) & 0x1FF) as usize;
         let pd_idx = ((addr >> 21) & 0x1FF) as usize;
-        // SAFETY: the four reads below are one page walk, and each is guarded
-        // by the present bit of the entry before it. `user_pml4` is a direct-map
-        // pointer to the live PML4 the caller read out of `CR3`; every index is
-        // masked to nine bits, so `add` stays inside that 512-entry table; and
-        // each next-level pointer is a direct-map address of the physical frame
-        // the previous entry named, which the direct map covers by construction.
-        // The last read is `page_phys + offset` with `offset` masked to 2 MiB,
-        // so it is inside the leaf the walk just resolved.
+        // SAFETY: each read is guarded by the present bit of the entry before
+        // it; `user_pml4` is a direct-map pointer to the live PML4 from `CR3`;
+        // every index is masked to nine bits, so `add` stays inside the
+        // 512-entry table, and each next-level pointer and the final
+        // `page_phys + offset` stay inside the direct map by the same walk.
         //
-        // **This is why the walk is here rather than through `mm::paging`**: the
-        // caller is an exception handler on a faulted CPU, which may not take
-        // the address space's lock and may not itself demand-page — the whole
-        // reason a translation is done by hand instead of dereferencing `addr`.
-        // The reads should still be volatile; see `kernel_backtrace`.
+        // Hand-rolled instead of `mm::paging`: a faulted CPU may not take the
+        // address space lock and may not demand-page.
+        //
+        // Not `read_volatile` either: see `kernel_backtrace`.
         let pml4e = unsafe { *user_pml4.add(pml4_idx) };
         if pml4e & 1 == 0 { return None; }
         let pdpt = crate::DirectMap::from_phys(pml4e & 0x000F_FFFF_FFFF_F000).as_ptr::<u64>();
@@ -136,7 +117,6 @@ impl ExceptionContext<'_> {
         Vector::from_raw(self.frame.vector)
     }
 
-    /// The privilege level this frame arrived from.
     fn ring(&self) -> Ring {
         Ring::of_cs(self.frame.cs)
     }
@@ -156,40 +136,13 @@ impl ExceptionContext<'_> {
     }
 }
 
-// DESIGN RULE: crash_report and everything it calls must be panic-free.
-// No unwrap/expect/[], no allocation, no blocking locks. try_lock only.
-// log!() is verified panic-free (let _ = write!(), serial::write is direct outb).
-// Symbol resolution is lock-free (AtomicPtr, linear scan over static ELF data).
-//
-// "try_lock only" was not sufficient on its own, and the gap was not in this
-// file. `Lock::try_lock` raises the preempt count on entry, and both its
-// failure path and its guard's `Drop` lower it again — so on the pass that
-// takes the count back to zero with `need_resched` set, `preempt::enable`
-// dispatched `do_preempt` and the crash report reached the scheduler from
-// inside a fault. `panic_console` had already refused `try_lock` for exactly
-// this reason and said so in its own comment; the rest of the crash path kept
-// using it, and two uses are still behind this one — the process table here,
-// and `dump_crash_diagnostics`.
-//
-// **A symbol is no longer one of them.** `resolve_user_symbol` took the process
-// table too, and a `try_lock` that must not wait is one that sometimes loses:
-// what it lost was the faulting function's name, on a report that had already
-// resolved the same address a line later. It reads the running task's own
-// symbols now, with no lock in the path at all — `process`'s module header is
-// the rule and `sched::driver::current_symbols` is the read.
-//
-// Fixed centrally rather than per call site: `preempt::enable` now declines
-// the slow path while `PerCpu::fault_state` is non-zero. That is the honest
-// place for it — a CPU inside a fault or panic report must not be rescheduled
-// whatever it happens to call — and it covers uses this rule has not been
-// applied to yet, which chasing call sites would not.
+// DESIGN RULE: crash_report and everything it calls must stay panic-free — no
+// unwrap/expect/index, no allocation, no blocking lock; try_lock only. log!()
+// and symbol resolution are pre-verified panic-free and lock-free, so calling
+// them here does not itself break the rule.
 
-/// What a vector is called in a report.
-///
-/// Read by `crash_report_exception`, which has the frame in front of it, and by
-/// `fatal_exception`, which hands it to `panic::record_fault` before the report
-/// runs — so a `DOUBLE PANIC` names the fault it landed on top of in the same
-/// words the report would have.
+/// Name of a vector, shared by the crash report and `panic::record_fault` so
+/// a DOUBLE PANIC names the fault it landed on in the same words.
 fn vector_name(vector: Vector) -> &'static str {
     match vector {
         Vector::DivideError => "divide error",
@@ -211,8 +164,8 @@ fn vector_name(vector: Vector) -> &'static str {
         Vector::SimdFloatingPoint => "SIMD floating-point exception",
         Vector::Virtualization => "virtualization exception",
         Vector::ControlProtection => "control protection",
-        // Vectors with a `direct` gate never reach this report: their entries
-        // do not go through `trap_dispatch`.
+        // Vectors with a `direct` gate never reach this report: they skip
+        // `trap_dispatch`.
         _ => "exception",
     }
 }
@@ -232,13 +185,9 @@ pub(crate) fn crash_report(info: &CrashInfo) {
 }
 
 fn crash_report_exception(ctx: &ExceptionContext) {
-    // **The verdict follows the blame and the report follows the ring**, and
-    // they are two questions. A pointer that crossed the syscall boundary is
-    // the process's fault and the process is what dies — but the frame that
-    // faulted is Ring 0, so its `rip` is kernel text and its `rbp` walks a
-    // kernel stack. One `is_user` used to answer both, which is why that case
-    // resolved a kernel address through the process's symbol table and printed
-    // a user backtrace off a kernel frame pointer.
+    // `theirs` (who is blamed) and `ring3` (which report format) are separate
+    // questions: a syscall fault is the process's fault even though the frame
+    // is Ring 0, with a kernel `rip` and a kernel-stack `rbp`.
     let theirs = ctx.blame() != Blame::Kernel;
     let ring3 = ctx.ring().is_user();
     let tid = percpu::current_tid().unwrap_or(crate::process::Tid(0));
@@ -301,21 +250,16 @@ fn crash_report_exception(ctx: &ExceptionContext) {
     log!("    r10={:#018x}  r11={:#018x}", ctx.frame.r10, ctx.frame.r11);
     log!("    r12={:#018x}  r13={:#018x}", ctx.frame.r12, ctx.frame.r13);
     log!("    r14={:#018x}  r15={:#018x}", ctx.frame.r14, ctx.frame.r15);
-    // A #GP error code is a selector or it is nothing, and a selector says
-    // nothing without the segments the faulting context was running with.
+    // A #GP error code is a selector, meaningless without the segments it ran
+    // with.
     log!("    cs={:#06x}  ss={:#06x}  rflags={:#018x}",
         ctx.frame.cs, ctx.frame.ss, ctx.frame.rflags);
 
-    // **Ahead of both backtraces, because a crash report can die before it
-    // finishes.** A 2026-08-20 storm capture of the `BTreeMap` class ended
-    // `FAULT rip=… cr2=0x0 … RECURSIVE` one line into the user backtrace, and
-    // everything the report had left to say went with it. This is the part that
-    // decides between the two readings of that class, so it goes where a later
-    // fault cannot take it.
+    // Ahead of both backtraces: a crash report can die mid-print, and this is
+    // the part that decides between the two readings of a recursive fault.
     //
-    // Only where the kernel is the one that failed: a Ring 3 fault says nothing
-    // about which CPU is on which kernel stack, and these lines under every user
-    // segfault would bury the report that is about the process.
+    // Only for kernel faults — a Ring 3 segfault says nothing about which CPU
+    // is on which kernel stack, and would bury the report about the process.
     if !theirs {
         crate::hw::report_contexts(ctx.frame.rsp, None);
     }
@@ -328,12 +272,9 @@ fn crash_report_exception(ctx: &ExceptionContext) {
     } else {
         kernel_backtrace(ctx.frame.rbp, 32);
 
-        // The `Syscall:` line below is where the faulting thread *called in
-        // from*, not where the fault is — reading it as the fault site cost the
-        // AMD `#GP` investigation its first day. It is printed only while this
-        // CPU is inside that thread's own syscall, because the words are its
-        // entry's and nobody else's; a stale `syscall_rbp` walked through the
-        // current address space faults and takes the rest of the report with it.
+        // `Syscall:` is where the thread called in from, not where it faulted.
+        // Printed only inside that thread's own syscall: a stale `syscall_rbp`
+        // walked through another address space would fault and lose the report.
         let user_rip = percpu::syscall_rip();
         if percpu::in_syscall() && pid.is_some() {
             log!("  Syscall: num={} user_rip={:#x} user_rsp={:#x}",
@@ -361,20 +302,18 @@ fn crash_report_exception(ctx: &ExceptionContext) {
 }
 
 fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
-    // Before the first word of the report, which is the state
-    // `panic::record_panic` exists to survive: what the machine says now comes
-    // from the copy the handler took, or it is `DOUBLE PANIC` and nothing else.
+    // Must run first: if this panics, only DOUBLE PANIC speaks for it —
+    // everything else comes from the copy `panic::record_panic` took.
     if crate::actuator::panic_in_report() {
         panic!("panic-in-report: the crash report panicked before it said anything");
     }
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::fault_in_report() {
-        // Canonical, high-half, and past any physical memory this kernel boots
-        // on, so the read faults rather than hitting the direct map.
+        // Canonical, high-half, past any physical memory this kernel boots on:
+        // the read faults instead of hitting the direct map.
         const UNMAPPED: u64 = 0xFFFF_8FFF_FFFF_F000;
-        // SAFETY: none, and the absence is what is staged — a `#PF` taken
-        // between two statements of the panic's own report, on a CPU already
-        // `Panic`. Reached only when the boot parameter named it.
+        // SAFETY: none — deliberately unsafe, staged only when the boot
+        // actuator asked for it, to fault a CPU already `Panic` mid-report.
         unsafe { core::ptr::read_volatile(UNMAPPED as *const u64) };
     }
     alert!("PANIC: {}", info);
@@ -382,17 +321,11 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
     log!("  Backtrace:");
     kernel_backtrace(rbp, 20);
 
-    // **A panic is where this class of defect actually surfaces**, which is why
-    // it is here and not only on the fault path: the two `BTreeMap` deaths and
-    // the two `cpu N has no CpuSched` deaths on record are all Rust panics with
-    // no register dump at all, and every one of them turns on whether a sibling
-    // was standing on this stack. The address of a local is the stack pointer
-    // the containment test wants — this frame is on the crashing stack, which is
-    // the whole of what it asks.
+    // The address of a local stands in for the stack pointer: this frame is on
+    // the crashing stack, which is all the containment test needs.
     let here = 0u64;
     crate::hw::report_contexts(core::ptr::addr_of!(here) as u64, None);
 
-    // Process/thread context (try_lock only)
     if let Some(pid) = percpu::current_pid() {
         let tid = percpu::current_tid();
         log!("  Running: pid={} tid={:?}", pid, tid);
@@ -406,8 +339,8 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
             log!("  [Process: PROCESS_TABLE locked, skipping]");
         }
 
-        // `in_syscall` and not a non-zero word: the three diagnostics belong to
-        // the entry of the task named above, and are a lie about any other.
+        // `in_syscall`, not a non-zero word: these diagnostics belong to the
+        // task named above and lie about any other.
         let user_rip = percpu::syscall_rip();
         if percpu::in_syscall() {
             log!("  Syscall: num={} user_rip={:#x} user_rsp={:#x}",
@@ -420,13 +353,8 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
     }
 }
 
-/// Terminate after a fatal fault.
-///
-/// One argument, and it is [`Blame`]: this used to take `is_user` and
-/// `is_ring3` as separate `bool`s, whose fourth combination — a user fault from
-/// a frame that was not Ring 3 and was not in a syscall either — meant nothing
-/// and was writable all the same. The three arms below are the three states
-/// there are.
+/// Terminate after a fatal fault, by [`Blame`] — its three states are
+/// exhaustive; there is no fourth case to write.
 pub(crate) fn recover_or_halt(blame: Blame) -> ! {
     match blame {
         // True user-mode fault — no kernel locks held, safe to use normal exit.
@@ -441,32 +369,24 @@ pub(crate) fn recover_or_halt(blame: Blame) -> ! {
     }
 }
 
-/// Recover from a panic in syscall context. Hands the faulted thread to the
-/// idle loop through the poison set, then rejoins the scheduler via lock-free
-/// schedule_no_return.
-///
-/// Nothing here touches the process table, and that is the point. The faulted
-/// thread may hold any kernel lock, including the table's, so blocking on it
-/// can deadlock and a `try_lock` can fail. Cleanup has exactly one home: the
-/// poison set is both the "do not re-schedule" mark and the cleanup request,
-/// and `schedule_no_return` jumps into `cpu_idle_loop`, which reaps it —
-/// zombify plus the waiter's wake — before it picks another task.
+/// Recovers from a panic in syscall context: poisons the faulted thread for
+/// the idle loop to reap, then rejoins the scheduler lock-free.
+// Never touches the process table: the faulted thread may hold its lock, so
+// only the poison set (read by the idle loop) is safe to use here.
 pub(crate) fn try_recover_from_panic() -> ! {
     if let Some(tid) = percpu::current_tid() {
         let pid = percpu::current_pid().unwrap_or(crate::process::Pid(u32::MAX));
         scheduler::poison_tid(scheduler::TaskId(pid, tid));
     }
     percpu::set_fault_state(CpuFaultState::Normal);
-    // The crash this CPU was in is over, so its captured evidence dies with it
-    // — the same reason `panic_console::discard_capture` is called beside this
-    // on the panic path. Left standing, the next `DOUBLE PANIC` on this CPU
-    // would name a panic the machine survived an hour ago as the crash it had
-    // just landed on top of.
+    // Clears this CPU's captured fault, the same evidence
+    // `panic_console::discard_capture` clears on the panic path: left
+    // standing, the next DOUBLE PANIC here would misname an already-survived
+    // crash.
     crate::panic::forget();
     scheduler::schedule_no_return();
 }
 
-// Exception handlers — called from trap_dispatch in mod.rs
 
 /// Double fault handler — runs on IST1. Always from kernel. Never returns.
 pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
@@ -484,10 +404,9 @@ pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
     symbols::resolve_kernel(frame.rip);
     kernel_backtrace_safe(frame.rbp, 20);
 
-    // Scan the original kernel stack for the interrupt frame that started
-    // the exception chain. Our entry stubs push [error_code] [vector] then
-    // common_entry pushes GPRs. The CPU interrupt frame sits above:
-    //   [GPRs (15×8)] [vector (8)] [error_code (8)] [RIP] [CS] [RFLAGS] [RSP] [SS]
+    // Stack layout the scan below assumes: entry stubs push [error_code]
+    // [vector], then common_entry pushes GPRs — [GPRs 15×8][vector 8]
+    // [error_code 8][RIP][CS][RFLAGS][RSP][SS].
     let kernel_rsp = frame.rsp;
     log!("  Scanning kernel stack at {:#x} for original exception context...", kernel_rsp);
 
@@ -512,8 +431,7 @@ pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
             log!("    rip={:#018x}  cs={:#x}  rflags={:#x}", maybe_rip, maybe_cs, maybe_rflags);
             log!("    rsp={:#018x}", maybe_rsp);
 
-            // error_code is at addr - 8, vector at addr - 16,
-            // GPRs start at addr - 16 - 15*8
+            // error_code at addr-8, vector at addr-16, GPRs start at addr-16-15*8.
             let error_code_addr = addr.wrapping_sub(8);
             let saved_regs_base = addr.wrapping_sub(16 + 15 * 8);
             if let Some(error_code) = safe_read_kernel(error_code_addr) {
@@ -554,14 +472,10 @@ pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
     apic::halt_all_cpus();
 }
 
-/// #MC — an abort, and the one exception a Ring 3 frame does not make the
-/// process's fault. There is no instruction to return to and the state that
-/// reported it is not trustworthy, so this halts whichever ring it came from
-/// rather than killing a process and carrying on over a broken machine.
-///
-/// Deliverable and untested: firmware leaves CR4.MCE set and this kernel never
-/// clears it, so a machine check arrives here rather than shutting the
-/// processor down. Nothing in the suite can stage one.
+/// #MC halts whichever ring faulted rather than killing a process: there is
+/// no instruction to return to, and the reporting state is not trustworthy.
+// Untested: firmware leaves CR4.MCE set, so a machine check reaches here, but
+// nothing in the suite can stage one.
 pub(super) fn machine_check_handler(frame: &TrapFrame) -> ! {
     log!("MACHINE CHECK on CPU {}", percpu::cpu_id());
     let ctx = ExceptionContext { frame, cr2: 0 };
@@ -569,16 +483,13 @@ pub(super) fn machine_check_handler(frame: &TrapFrame) -> ! {
     apic::halt_all_cpus();
 }
 
-/// Returns normally if the fault was resolved (page mapped in).
-/// Diverges (never returns) if the fault is fatal.
+/// Returns if the fault was resolved (page mapped in); diverges if fatal.
 pub(super) fn page_fault_handler(frame: &TrapFrame) {
     let prev = percpu::swap_fault_state(percpu::CpuFaultState::PageFault);
     if prev != percpu::CpuFaultState::Normal {
-        // **Put back what this swap took.** [`fatal_exception`] classifies a
-        // recursive fault by the state it finds, and a `#PF` that overwrote a
-        // `Panic` or a `Fatal` with its own reads there as the first crash on
-        // this CPU — so the short-circuit that bounds a faulting renderer never
-        // fires for the nested `#PF` it exists for.
+        // Restores the prior fault state: `fatal_exception` classifies a
+        // recursive fault by what it finds, and overwriting Panic/Fatal here
+        // would hide the recursion.
         percpu::set_fault_state(prev);
         let cr2 = cpu::read_cr2();
         let ctx = ExceptionContext { frame, cr2 };
@@ -620,7 +531,6 @@ pub(super) fn page_fault_handler(frame: &TrapFrame) {
     fatal_exception(&ctx);
 }
 
-// Fatal exception handler — shared by #UD, #GP, #PF
 
 /// Fatal exception handler for #UD and #GP. Never returns.
 pub(super) fn exception_handler(frame: &TrapFrame) -> ! {
@@ -635,11 +545,8 @@ fn fatal_exception(ctx: &ExceptionContext) -> ! {
     let prev = percpu::swap_fault_state(CpuFaultState::Fatal);
     let recursive = prev == CpuFaultState::Fatal || prev == CpuFaultState::Panic;
 
-    // Before this fault has said one word about itself, because a panic taken
-    // anywhere below — inside `emit`, inside a symbol walk, inside the page
-    // walk — reaches the panic handler with this CPU already `Fatal` and gets
-    // the `DOUBLE PANIC` arm, which can then only report what was captured
-    // here. `panic.rs` owns the argument; the ordering is the whole of it.
+    // Must run first: a panic anywhere below reaches the panic handler as
+    // DOUBLE PANIC, which can only report what was captured here.
     crate::panic::record_fault(
         vector_name(ctx.vector()),
         ctx.frame.rip,
@@ -659,10 +566,8 @@ fn fatal_exception(ctx: &ExceptionContext) -> ! {
             ctx.frame.rip, ctx.cr2, ctx.frame.error_code, cpu::read_cr3(), ctx.frame.rsp, tid_raw);
     }
 
-    // A second fault while reporting the first: no second report, and the
-    // normal exit path even for the `ProcessThroughKernel` case — this CPU is
-    // not going to survive `try_recover_from_panic`'s rejoin either way, and
-    // ending the process is the only thing left that can keep the machine.
+    // Recursive fault: no second report. Even ProcessThroughKernel can't
+    // survive `try_recover_from_panic`'s rejoin here, so end the process or halt.
     if recursive {
         if blame != Blame::Kernel {
             percpu::set_fault_state(CpuFaultState::Normal);
