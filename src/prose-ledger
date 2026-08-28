@@ -154,7 +154,7 @@ kernel/src/object/process.rs 14 0
 kernel/src/object/service.rs 14 0
 kernel/src/object/shm.rs 35 0
 kernel/src/object/syscap.rs 8 0
-kernel/src/page_cache.rs 30 0
+kernel/src/page_cache.rs 36 0
 kernel/src/panic.rs 55 0
 kernel/src/pipe.rs 34 0
 kernel/src/preempt.rs 10 0
