@@ -101,7 +101,8 @@ pub struct PerCpu {
     log_shard: u64,
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
-    _pad_after_nmi_active: [u8; 4],
+    /// The token of the attempt that booted this AP; the AP echoes it into `AP_STARTED` so a stale AP cannot answer for a later attempt. Zero on the BSP.
+    ap_token: u32,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so growing `SLOTS` moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
 }
@@ -196,6 +197,8 @@ pub(crate) const OFF_NEED_RESCHED: u32 = offset_of!(PerCpu, need_resched) as u32
 pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
 /// Set/cleared only by `arch::idt::nmi`'s naked entry, via this constant.
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
+/// The AP's bring-up token, read by `ap_entry` to answer for its own attempt.
+const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
@@ -359,7 +362,8 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 last_armed_ticks: AtomicU32::new(0),
                 log_shard: alloc_log_shard(cpu_id),
                 nmi_active: 0,
-                _pad_after_nmi_active: [0; 4],
+                // Set by `alloc_ap` before the SIPI; the BSP never echoes it.
+                ap_token: 0,
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
             },
         );
@@ -593,10 +597,12 @@ pub fn init_bsp(lapic_id: u32) {
 }
 
 /// Allocate percpu for an AP; the trampoline writes the pointer into IA32_GS_BASE.
-pub fn alloc_ap(cpu_id: u32) -> *mut PerCpu {
+/// `token` is this attempt's bring-up token, echoed by `ap_entry` into `AP_STARTED`.
+pub fn alloc_ap(cpu_id: u32, token: u32) -> *mut PerCpu {
     let ptr = alloc_percpu(cpu_id);
     // SAFETY: `init_bsp`'s argument; this AP hasn't been sent its INIT-SIPI yet, so it ran no instruction.
     let percpu = unsafe { &mut *ptr };
+    percpu.ap_token = token;
     alloc_idle_stack(percpu);
     alloc_ist_stacks(percpu);
     ptr
@@ -635,6 +641,11 @@ pub unsafe fn entry_stacks() -> (u64, u64) {
 /// Read this CPU's ID from GS-relative percpu data.
 pub fn cpu_id() -> u32 {
     gs::read_u32::<OFF_CPU_ID>()
+}
+
+/// This AP's bring-up token, written by the BSP before the SIPI.
+pub fn ap_token() -> u32 {
+    gs::read_u32::<OFF_AP_TOKEN>()
 }
 
 /// Read the Tid of the thread currently running on this CPU. None means idle.

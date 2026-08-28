@@ -370,6 +370,44 @@ jobs:
             exit 1
           fi
 
+      - name: kernel-loom CPU roster publication has teeth
+        run: |
+          set -o pipefail
+          echo "=== kernel-loom --features roster-commit-relaxed --test smp_bringup (must red)" \
+            | tee -a /tmp/host.log
+          if cargo test --manifest-path kernel-loom/Cargo.toml \
+               --features roster-commit-relaxed --test smp_bringup 2>&1 \
+               | tee /tmp/roster-commit-relaxed.log | tee -a /tmp/host.log; then
+            echo "smp_bringup passed with the count published relaxed: the model has no teeth" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'a_committed_count_never_outruns_its_slot \.\.\. FAILED' \
+               /tmp/roster-commit-relaxed.log; then
+            echo "the roster-commit-relaxed build failed without the publication model reaching a verdict: this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
+      - name: kernel-loom release-and-answer are one word
+        run: |
+          set -o pipefail
+          echo "=== kernel-loom --features smp-ready-split --test smp_bringup (must red)" \
+            | tee -a /tmp/host.log
+          if cargo test --manifest-path kernel-loom/Cargo.toml \
+               --features smp-ready-split --test smp_bringup 2>&1 \
+               | tee /tmp/smp-ready-split.log | tee -a /tmp/host.log; then
+            echo "smp_bringup passed with release and answer split into two stores: the model has no teeth" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'a_released_machine_is_answering \.\.\. FAILED' \
+               /tmp/smp-ready-split.log; then
+            echo "the smp-ready-split build failed without the release model reaching a verdict: this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
       - name: kernel-loom W1 record publication has teeth
         run: |
           set -o pipefail

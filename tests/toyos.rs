@@ -315,6 +315,10 @@ const RUST_SKIP: &[&str] = &[
     // `did not open` and passes on its exit code. `log_backing_read_error`
     // stages the file and reads the verdict.
     "log_volume_reread",
+    // Needs a boot the harness armed with `smp-skip-ap`, so a non-last AP fails
+    // to start; on the shared boot every CPU comes up and it just frees pages.
+    // `smp_failed_ap_leaves_no_hole` runs it on that boot.
+    "smp_hole_shootdown",
 ];
 
 /// Binaries a machine test drives that the shared boot also runs on purpose.
@@ -442,6 +446,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("irq_census_conservation", Sched::Parallel, Tier::Fast),
     ("control_regs", Sched::Parallel, Tier::Fast),
     ("control_regs_negative", Sched::Parallel, Tier::Fast),
+    ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Fast),
     ("input_merge", Sched::Parallel, Tier::Fast),
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
     // One boot from here to `metal_sim_compositor_stall` (`METAL_SIM_DESKTOP`).
@@ -10393,6 +10398,9 @@ fn run_machine_test(
             control_regs(qemu.boot_log(), CPUS)
         }
         "control_regs_negative" => control_regs_negative(test_config, c_bins, rust_bins),
+        "smp_failed_ap_leaves_no_hole" => {
+            smp_failed_ap_leaves_no_hole(test_config, c_bins, rust_bins)
+        }
         "input_merge" => {
             // The check runs in the kernel and panics on mismatch, so a
             // failure arrives as a dead boot; the marker is the only proof it
@@ -12318,6 +12326,73 @@ fn control_regs_negative(
         }
     }
     eprintln!("  [control_regs] a real divergent AP, refused: {refusal}");
+    Ok(())
+}
+
+/// A non-last AP that never starts must leave no dead slot in `0..cpu_count()`.
+///
+/// The boot arms `smp-skip-ap`, which skips the startup IPI for the AP that
+/// would be cpu2 on this four-vCPU machine. On the unfixed kernel cpu2's id and
+/// slot were spent before it ran and a later AP was counted anyway, so
+/// `0..cpu_count()` gained a slot no physical CPU carried; the first shootdown
+/// after `set_ready` waited on it to the 5 s tripwire and the machine died. The
+/// fixed kernel commits an id only after the AP answers for its own attempt, so
+/// the roster stays dense and bring-up stops at the failed AP.
+///
+/// The verdict is survival plus density: `smp_hole_shootdown` frees pages back
+/// to the PMM eight times — each a shootdown to every counted CPU — and prints
+/// its marker; cpu1 comes online before the failed AP; and neither cpu2 nor the
+/// cpu3 behind it ever joins, so no counted id is a phantom.
+fn smp_failed_ap_leaves_no_hole(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions {
+        smp: 4,
+        kernel_params: &["smp-skip-ap"],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let boot = qemu.boot_log().to_string();
+
+    // The premise, not just a dead boot: a non-last AP failed. cpu1 came up and
+    // cpu2 is the one the actuator skipped.
+    if !boot.contains("SMP: AP cpu1 lapic=") || !boot.contains(" online") {
+        return Err(format!(
+            "cpu1 never came online, so the boot did not stage a non-last failed AP:\n{boot}"
+        ));
+    }
+    if !boot.contains("SMP: AP cpu2 lapic=") || !boot.contains("failed to start!") {
+        return Err(format!("the actuator did not fail cpu2's bring-up:\n{boot}"));
+    }
+
+    let result = qemu.run_test("test_rs_smp_hole_shootdown", Duration::from_secs(30));
+    if let Some(err) = &result.error {
+        // The unfixed kernel's signature: a shootdown after the failed AP waits
+        // on the dead slot until the tripwire and the guest stops answering.
+        return Err(format!(
+            "the guest stopped answering — a shootdown after a failed AP took the machine \
+             down:\n{err}\nserial:\n{}",
+            result.serial
+        ));
+    }
+    if !check_rust_result(&result) {
+        return Err(format!("smp_hole_shootdown failed:\n{}", result.stdout));
+    }
+
+    // Density: the set that joined is exactly `0..cpu_count()`. cpu2 was skipped
+    // and cpu3 behind it never launched, so a "joining" line for either is a hole.
+    let serial = format!("{boot}\n{}", result.serial);
+    for phantom in ["CPU 2: joining scheduler", "CPU 3: joining scheduler"] {
+        if serial.contains(phantom) {
+            return Err(format!(
+                "a CPU past the failed AP joined, so `0..cpu_count()` is not the online \
+                 set: {phantom:?}\n{serial}"
+            ));
+        }
+    }
+    eprintln!("  [smp] a non-last AP failed and the dense machine survived its shootdowns");
     Ok(())
 }
 
