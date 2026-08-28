@@ -1,10 +1,9 @@
 //! Loom: AP bring-up's two ordering edges, invisible to a guest test on x86 TSO.
-//! Each is a kernel-never-enabled feature this model must red under:
 //! `--features roster-commit-relaxed` reds publication (a reader sees a count over
-//! an unfilled slot) and `--features smp-ready-split` reds release (a CPU sees the
-//! machine released but not yet answering, so a shootdown skips a joined AP).
-//! The reader is a thread that never touched the word it observes: a thread that
-//! read it first pins loom's coherence order and hides the reorder.
+//! an unfilled slot); `--features smp-ready-split` reds release (a CPU sees the
+//! machine released but not yet answering, so a shootdown skips a joined AP). The
+//! reader is a thread that never read the word first, which would pin loom's
+//! coherence order and hide the reorder.
 
 #![cfg(feature = "loom")]
 
@@ -56,8 +55,7 @@ fn a_committed_count_never_outruns_its_slot() {
     );
 }
 
-/// A CPU that sees the machine released also sees it answering — else a shootdown
-/// there is local-only and skips an AP that observed the release and joined.
+/// A CPU that sees the machine released also sees it answering.
 #[test]
 fn a_released_machine_is_answering() {
     SAW.store(false, SeqCst);
