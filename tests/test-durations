@@ -293,6 +293,7 @@ screen_recoverable_untouched 5117
 serial_vocabulary 2
 shm_release_reclaims 29
 short_sleep_livelock 4823
+smp_failed_ap_leaves_no_hole 6672
 sshd_fail_closed 2307
 stall_is_not_a_verdict 0
 std_alloc 12
