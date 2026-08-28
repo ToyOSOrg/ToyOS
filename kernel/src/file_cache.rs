@@ -17,8 +17,7 @@ const PAGE_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 struct CachedPage {
     data: Box<[u8; PAGE_SIZE]>,
     dirty: bool,
-    /// CLOCK's second-chance bit: set on every hit, cleared when the sweep
-    /// passes it over.
+    /// CLOCK's second-chance bit: set on every hit, cleared when the sweep passes it over.
     referenced: bool,
 }
 
@@ -26,35 +25,18 @@ struct CachedFile {
     pages: BTreeMap<u32, CachedPage>,
     size: u64,
     evictable: bool,
-    /// Where an evicted page comes back from. A file with no backing is one
-    /// nothing can re-read — a tmpfs file, or a disk file created in this
-    /// boot whose blocks the filesystem has not allocated yet — and dropping
-    /// one of its pages loses the only copy.
+    /// Where an evicted page comes back from; `None` means a dropped page cannot be re-read.
     backing: Option<Arc<dyn FileBacking>>,
     ref_count: u32,
     deleted: bool,
-    /// This file owes the filesystem a write-back and nothing yet holds it
-    /// for one. Set when the last handle drops
-    /// ([`release_to_writeback`]); it is the write-back queue's single
-    /// reference to the file and pins it alive at `ref_count == 0`, so neither
-    /// [`mark_deleted`] nor [`finish_writeback`] may drop the file while it is
-    /// set — the pinned pages are what a re-open before the drain reads instead
-    /// of the device. Cleared by [`finish_writeback`], the one drainer.
+    /// Pins the file alive at `ref_count == 0` for the write-back queue; cleared only by [`finish_writeback`].
     teardown_owed: bool,
-    /// The file — not any one handle — owes a metadata/data flush. Set on every
-    /// write ([`apply_write`]) and on a size change that dirties no page
-    /// ([`resize`]); cleared when a flush takes the dirty set ([`take_dirty`])
-    /// and re-set if that flush fails. It moved here from
-    /// `object::file::OpenFileState.modified` because two handles to one path
-    /// share one `CachedFile` but had independent flags — a reader closing last
-    /// would skip a flush the file still owed.
+    /// The file, not any one handle, owes a metadata/data flush; cleared by [`take_dirty`].
     dirty_meta: bool,
 }
 
 impl CachedFile {
-    /// Whether this file's pages are a *copy* of something on disk. Only
-    /// those are governed by the budget and only those may be evicted:
-    /// a tmpfs page is the file, not a cache of it.
+    /// Whether this file's pages are a copy of disk data — only those count toward the budget or are evictable.
     fn is_cache(&self) -> bool {
         self.evictable && self.backing.is_some()
     }
@@ -67,8 +49,7 @@ struct FileCache {
     cached_pages: usize,
     max_pages: usize,
     evictions: u64,
-    /// CLOCK hand, in (file, page) key order. Kept across calls so the sweep
-    /// costs one step per eviction rather than a scan of the whole cache.
+    /// CLOCK hand, in (file, page) key order; kept across calls so eviction costs one step, not a full scan.
     hand: (FileId, u32),
 }
 
@@ -76,16 +57,13 @@ static FILE_CACHE: Lock<FileCache> = Lock::new(FileCache {
     files: BTreeMap::new(),
     next_id: 1,
     cached_pages: 0,
-    // Zero, not `usize::MAX`: a budget that was never installed has to be a
-    // loud kernel bug, and this one shipped for the life of the boot as a
-    // ceiling nothing could reach.
+    // Zero, not `usize::MAX`: an uninstalled budget must fail loudly, not silently allow everything.
     max_pages: 0,
     evictions: 0,
     hand: (0, 0),
 });
 
-/// Install the memory budget. Must run after the PMM knows how much RAM the
-/// machine has and before any file is opened.
+/// Install the memory budget; must run after the PMM sizes RAM and before any file is opened.
 pub fn init() {
     let max_pages = block::file_cache_pages();
     FILE_CACHE.lock().max_pages = max_pages;
@@ -110,8 +88,7 @@ pub fn create_file(evictable: bool) -> FileId {
     id
 }
 
-/// Point a file at the store its evicted pages come back from. Idempotent:
-/// every open of the same file hands over an equivalent backing.
+/// Point a file at the store its evicted pages come back from; idempotent across opens of the same file.
 pub fn set_backing(file_id: FileId, backing: Arc<dyn FileBacking>) {
     let mut cache = FILE_CACHE.lock();
     let now_governed;
@@ -125,23 +102,12 @@ pub fn set_backing(file_id: FileId, backing: Arc<dyn FileBacking>) {
     evict_if_needed(&mut cache);
 }
 
-/// Whether an evicted page of this file could be read back. False for tmpfs,
-/// and for a disk file created in this boot until its blocks exist.
+/// Whether an evicted page of this file could be read back; false for tmpfs and for a disk file with no blocks yet.
 pub fn has_backing(file_id: FileId) -> bool {
     FILE_CACHE.lock().files.get(&file_id).is_some_and(|f| f.backing.is_some())
 }
 
-/// Increment ref_count for one more open handle.
-///
-/// **`ref_count` is only ever bumped from under the VFS lock**, and that is
-/// load-bearing: every caller reaches here through `Vfs::open_file`/`create_file`
-/// (the adapters call this) while the VFS lock is held, and
-/// [`finish_writeback`]'s decision to drop a file whose last handle went reads
-/// `ref_count` under that same lock — so a re-open racing a write-back teardown
-/// cannot bump the count between the read and the drop. A future caller that
-/// bumps `ref_count` without the VFS lock breaks the write-back queue's re-open
-/// serialisation (see `crate::writeback` and
-/// `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`).
+/// Increment ref_count for one more open handle; caller must hold the VFS lock, which [`finish_writeback`] also reads `ref_count` under to serialise re-opens against teardown.
 pub fn open(file_id: FileId) {
     let mut cache = FILE_CACHE.lock();
     if let Some(file) = cache.files.get_mut(&file_id) {
@@ -154,29 +120,13 @@ pub fn open(file_id: FileId) {
 pub enum Release {
     /// Other handles still hold the file. Nothing is owed.
     StillHeld,
-    /// This was the last handle: the file has been pinned for a write-back
-    /// teardown and the caller must [`crate::writeback::enqueue`] it.
+    /// This was the last handle: the file is pinned for write-back and the caller must [`crate::writeback::enqueue`] it.
     TeardownOwed,
-    /// This was the last handle, but a teardown was already owed and already
-    /// enqueued — a re-open adopted the file and dropped it again before the
-    /// drain ran. Nothing to enqueue.
+    /// This was the last handle, but a teardown was already owed and enqueued; nothing to enqueue.
     AlreadyOwed,
 }
 
-/// Drop one open reference and, if it was the last, **pin the file for
-/// write-back rather than dropping it here**.
-///
-/// This is the last-ref half of what `release` used to do, split so that
-/// `object::file::OpenFileState::drop` touches neither the VFS lock nor the
-/// device: it decrements, and a file that reaches `ref_count == 0` is left
-/// alive with `teardown_owed` set for `iod`/shutdown to flush and drop under the
-/// VFS lock. The pin is what makes a closed file's dirty pages outlive the
-/// handle that dirtied them — eviction never takes a dirty page — so a re-open
-/// before the drain reads the buffered pages and not the device.
-///
-/// `AlreadyOwed` (an already-pinned file reaching zero a second time) is what
-/// stops one file being enqueued twice: the single queue entry drives the whole
-/// lifecycle, and [`finish_writeback`] re-reads the final `ref_count`.
+/// Drop one open reference; if it was the last, pins the file for write-back instead of dropping it here — eviction never takes a dirty page, so a re-open before the drain reads the pinned data, not the device.
 pub fn release_to_writeback(file_id: FileId) -> Release {
     let mut cache = FILE_CACHE.lock();
     let Some(file) = cache.files.get_mut(&file_id) else { return Release::StillHeld };
@@ -191,32 +141,26 @@ pub fn release_to_writeback(file_id: FileId) -> Release {
     Release::TeardownOwed
 }
 
-/// What [`finish_writeback`] found, and what the drainer does with the
-/// filesystem-side handle.
+/// What [`finish_writeback`] found, and what the drainer does with the filesystem-side handle.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Teardown {
-    /// The file left the cache (or is a live tmpfs file whose pages stay):
-    /// release the filesystem-side handle with `Vfs::close_file`.
+    /// The file left the cache (or is a live tmpfs file whose pages stay): release the handle with `Vfs::close_file`.
     Released,
-    /// A re-open adopted the file (`ref_count > 0`) between the enqueue and the
-    /// drain, so it is left alive and its filesystem handle stays.
+    /// A re-open adopted the file between the enqueue and the drain, so it is left alive with its handle.
     Adopted,
     /// The file is already gone from the cache. Nothing to close.
     Vanished,
 }
 
-/// What `iod`/shutdown needs to know before it flushes a queued file, read in
-/// one lock: whether the file still owes a flush, and whether it was deleted
-/// (in which case there is nothing worth flushing — its data is going away).
+/// What `iod`/shutdown needs to know before flushing a queued file, read in one lock.
 #[derive(Clone, Copy)]
 pub struct WritebackProbe {
     pub dirty_meta: bool,
+    /// A deleted file's drain skips the flush — its data is going away.
     pub deleted: bool,
 }
 
-/// Read a queued file's flush state. A file the queue pinned is always present,
-/// so `None`-shaped absence is answered as "nothing to flush" rather than
-/// panicking.
+/// Read a queued file's flush state; a file the queue pinned is always present, so absence reads as "nothing to flush" rather than a panic.
 pub fn writeback_probe(file_id: FileId) -> WritebackProbe {
     let cache = FILE_CACHE.lock();
     match cache.files.get(&file_id) {
@@ -225,15 +169,7 @@ pub fn writeback_probe(file_id: FileId) -> WritebackProbe {
     }
 }
 
-/// The FILE_CACHE half of a write-back teardown, run by `iod`/shutdown **under
-/// the VFS lock** after the flush.
-///
-/// Re-reading `ref_count` here, under the VFS lock a re-open would need, is what
-/// serialises the drain against a re-open: either the re-open won
-/// (`ref_count > 0` → [`Teardown::Adopted`], leave the file) or this drain won
-/// (drop it, and `Vfs::close_file` removes the name — a re-open then opens
-/// fresh and reads what the flush already wrote). A live tmpfs file (not
-/// evictable, not deleted) keeps its pages exactly as the old `release` did.
+/// The FILE_CACHE half of a write-back teardown; must run under the VFS lock, which serialises the drain against a re-open.
 pub fn finish_writeback(file_id: FileId) -> Teardown {
     let mut cache = FILE_CACHE.lock();
     let Some(file) = cache.files.get_mut(&file_id) else { return Teardown::Vanished };
@@ -253,15 +189,7 @@ pub fn finish_writeback(file_id: FileId) -> Teardown {
     Teardown::Released
 }
 
-/// Read from a file page into `buf`. Handles cache miss via the file's backing.
-/// Lock is NOT held during disk I/O (unlock-fetch-relock pattern).
-///
-/// `Err` means the page could not be fetched and `buf` holds zeros rather than
-/// the file's bytes. Fallible for the same reason [`write_page`] is, and it is
-/// the *read* half of the same defect: this returned `()`, so a process reading
-/// a file off a stick that refused the transfer got a page of zeros and a
-/// success, which is the one answer nothing downstream can tell from a file
-/// that really is zeros there.
+/// Read a file page into `buf`; on `Err` the fetch failed and `buf` holds zeros, not the file's bytes.
 pub fn read_page(
     file_id: FileId,
     page_idx: u32,
@@ -292,10 +220,7 @@ pub fn read_page(
 
     let mut fetched = blank_page();
     if let Some(backing) = &backing {
-        // A fetch that failed must not become a resident page: caching the
-        // zeros would let the next partial write through `write_page` find the
-        // page resident, merge into them and flush the result back over the
-        // file.
+        // A failed fetch must not become a resident page: a later partial write would merge into cached zeros and flush them over the file.
         if let Err(e) = backing.read_page(page_idx as u64 * PAGE_SIZE as u64, &mut fetched) {
             buf.fill_zero(0, buf.len());
             return Err(e);
@@ -323,35 +248,15 @@ pub fn read_page(
     Ok(())
 }
 
-/// Write data into a file page. Handles cache miss via the file's backing.
-/// Lock is NOT held during disk I/O for cache misses.
-///
-/// `Err` means the page could not be re-read and **nothing was written**. A
-/// partial write into a page the cache does not hold has to fetch the bytes it
-/// is not overwriting; if that fetch fails, the only two options are to merge
-/// into zeros — which `flush_file` then persists, destroying 4 KiB of a file
-/// that was fine — or to refuse. It refuses. The caller decides what to do
-/// about a write that did not happen, which is a decision this layer does not
-/// have the standing to make silently.
-///
-/// **The machine's own log arrives here, and a resident tail page is no
-/// defence.** `/bin/logd` is an ordinary process appending to an ordinary file,
-/// and it `fsync`s every batch — which clears the dirty bit and makes its tail
-/// page an ordinary eviction candidate. Once that page is off the stick the
-/// next append is a partial write that has to fetch it back, so the refusal
-/// above is the only thing standing between a device that has stopped
-/// answering and a boot's log merged into zeros and flushed over what was
-/// already written. `fat-backing-read-fails` stages exactly that, on a file the
-/// host put on the volume before the machine existed.
+/// Write data into a file page; the lock is not held during disk I/O on a cache miss.
+/// `Err` means the page could not be re-read and nothing was written — merging into zeros would destroy 4 KiB of a file that was fine.
 pub fn write_page<S: ByteSource + ?Sized>(
     file_id: FileId,
     page_idx: u32,
     offset: usize,
     data: &S,
 ) -> Result<(), block::BlockError> {
-    // A resident page is written under the acquisition that found it. The
-    // fetch path below drops the lock, and a sibling CPU's eviction inside
-    // that window would otherwise leave the write merging into a blank page.
+    // A resident page is written under the same lock acquisition that found it; the fetch path below drops the lock, and a sibling's eviction in that window would otherwise merge the write into a blank page.
     let backing;
     {
         let mut cache = FILE_CACHE.lock();
@@ -374,16 +279,13 @@ pub fn write_page<S: ByteSource + ?Sized>(
     let mut fetched = blank_page();
     if let Some(backing) = &backing {
         let page_start = page_idx as u64 * PAGE_SIZE as u64;
-        // Past the end there is nothing to preserve, so no fetch and no way
-        // for one to fail: this is a pure extension of the file.
+        // Past the end there is nothing to preserve, so no fetch and no way for one to fail.
         if page_start < backing.file_size() {
             backing.read_page(page_start, &mut fetched)?;
         }
     }
 
-    // Re-fetching after a sibling's eviction is always correct: only clean
-    // pages are ever evicted, and a clean page is by definition what the
-    // backing returns.
+    // Re-fetching after a sibling's eviction is always correct: only clean pages are ever evicted.
     let mut cache = FILE_CACHE.lock();
     let mut added = 0;
     {
@@ -411,9 +313,7 @@ fn apply_write<S: ByteSource + ?Sized>(
     data.read_at(0, &mut page.data[offset..end]);
     page.dirty = true;
     page.referenced = true;
-    // Both under the one FILE_CACHE lock, so a flush that takes the dirty set
-    // sees this page's `dirty` bit and this file's `dirty_meta` bit together —
-    // never one without the other.
+    // Both set under the one FILE_CACHE lock, so a flush never observes one without the other.
     file.dirty_meta = true;
 
     let write_end = page_idx as u64 * PAGE_SIZE as u64 + end as u64;
@@ -422,14 +322,8 @@ fn apply_write<S: ByteSource + ?Sized>(
     }
 }
 
-/// Copy a resident page out. `false`, and `buf` untouched, when the page is not
-/// resident.
-///
-/// The answer is a return value and not a zero-filled buffer because the two
-/// callers want opposite things from an absent page: a tmpfs read is looking at
-/// a hole, and a flush is looking at a page a truncate took away between
-/// `take_dirty` and here. Zeros would be a page of data to both of them, and
-/// the flush would put them on the device.
+/// Copy a resident page out; returns `false` with `buf` untouched when the page is not resident.
+/// A return value, not zero-fill: callers must tell an absent page from a page that really is zero.
 #[must_use]
 pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) -> bool {
     let cache = FILE_CACHE.lock();
@@ -439,16 +333,8 @@ pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) 
     true
 }
 
-/// Take the dirty page set for a flush and clear the file's `dirty_meta` flag,
-/// in one lock.
-///
-/// Clearing here rather than at the end of the flush is what makes the flag
-/// race-safe: a write that lands after this re-sets `dirty_meta` (and marks its
-/// page dirty) and is caught by the next flush, instead of being cleared by a
-/// flush that never saw it. The page `dirty` bits are **not** cleared here —
-/// `clear_dirty` does that per page the flush actually wrote — and a failed
-/// flush restores `dirty_meta` (see [`mark_dirty_meta`], called by
-/// `Vfs::flush_file`).
+/// Take the dirty page set for a flush and clear `dirty_meta`, in one lock; page `dirty` bits are cleared separately by [`clear_dirty`].
+/// Clearing here, not after the flush, lets a write landing afterward re-set the flag and be caught by the next flush.
 pub fn take_dirty(file_id: FileId) -> BTreeSet<u32> {
     let mut cache = FILE_CACHE.lock();
     let Some(file) = cache.files.get_mut(&file_id) else { return BTreeSet::new() };
@@ -456,27 +342,19 @@ pub fn take_dirty(file_id: FileId) -> BTreeSet<u32> {
     file.pages.iter().filter(|(_, p)| p.dirty).map(|(&i, _)| i).collect()
 }
 
-/// Whether a file owes a write-back. `fsync` reads this in place of the handle
-/// flag it used to keep, so a handle that did not itself write still flushes a
-/// file another handle dirtied.
+/// Whether a file owes a write-back; `fsync` reads this so a handle that did not itself write still flushes a file another handle dirtied.
 pub fn dirty_meta(file_id: FileId) -> bool {
     FILE_CACHE.lock().files.get(&file_id).is_some_and(|f| f.dirty_meta)
 }
 
-/// Re-mark a file as owing a write-back: used to restore the flag when a flush
-/// fails, so pages that are still dirty are not stranded with a clear flag.
+/// Re-mark a file as owing a write-back, to restore the flag when a flush fails.
 pub fn mark_dirty_meta(file_id: FileId) {
     if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
         file.dirty_meta = true;
     }
 }
 
-/// Mark the pages a flush actually wrote as clean.
-///
-/// Only those: the flush drops the lock between reading the dirty set and
-/// writing each page, so a page dirtied in that window has not reached disk.
-/// Clearing the whole file marks it clean, and a clean page is one eviction
-/// is free to drop — which turns a lost write into a silent one.
+/// Mark only the pages a flush actually wrote as clean — a page dirtied while the flush's lock was dropped has not reached disk.
 pub fn clear_dirty(file_id: FileId, flushed: &BTreeSet<u32>) {
     let mut cache = FILE_CACHE.lock();
     if let Some(file) = cache.files.get_mut(&file_id) {
@@ -493,19 +371,13 @@ pub fn size(file_id: FileId) -> u64 {
     FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.size)
 }
 
-/// Set file size. Removes pages past the new size on truncation.
-///
-/// This is the *establishing* form — a mount telling the cache the size a file
-/// already has on disk — and does not mark the file dirty. A user truncate is
-/// [`resize`].
+/// Set file size and drop pages past it; the establishing form (mount-time), does not mark the file dirty — see [`resize`] for a user truncate.
 pub fn set_size(file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
     set_size_locked(&mut cache, file_id, new_size);
 }
 
-/// A user truncate: [`set_size`], and mark the file as owing a write-back even
-/// when it dirtied no page — a shrink, or a grow into a hole, changes the size
-/// the filesystem must record without touching a `CachedPage`.
+/// A user truncate: [`set_size`], plus marks the file dirty even when no page changed.
 pub fn resize(file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
     set_size_locked(&mut cache, file_id, new_size);
@@ -538,31 +410,19 @@ fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
 /// What the cache holds for a file after an operation that may have freed it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Residency {
-    /// Something still holds it — an open handle, or the write-back queue
-    /// (`teardown_owed`) — so its pages and its id are still live and the
-    /// filesystem-side handle must survive until that holder's teardown calls
-    /// `close_file`.
+    /// Something still holds it — an open handle, or the write-back queue — so its filesystem handle must survive until that holder's teardown.
     Held,
-    /// The cache holds nothing for this id, and a filesystem may drop whatever
-    /// it keeps alongside.
+    /// The cache holds nothing for this id; a filesystem may drop whatever it keeps alongside.
     Gone,
 }
 
 /// Mark a file as deleted (unlink). If no handles hold it, free immediately.
-///
-/// The verdict is returned rather than left to be re-derived from a refcount,
-/// because a refcount read after the unlock is a different question asked at a
-/// different moment: every caller wants to know what *this* unlink did.
 #[must_use]
 pub fn mark_deleted(file_id: FileId) -> Residency {
     let mut cache = FILE_CACHE.lock();
     let Some(file) = cache.files.get_mut(&file_id) else { return Residency::Gone };
     file.deleted = true;
-    // A file the write-back queue holds (`teardown_owed`, last handle gone) is
-    // pinned: it is dropped by `finish_writeback` and by nothing else, so this
-    // marks it deleted — the drain skips flushing a deleted file — and leaves
-    // it. `Held` because the cache does still hold it and its filesystem-side
-    // handle must survive until the drain's `close_file`.
+    // A pinned file (teardown_owed) is left marked deleted for `finish_writeback` to drop; `Held` because the cache still holds it.
     if file.ref_count > 0 || file.teardown_owed {
         return Residency::Held;
     }
@@ -576,17 +436,7 @@ impl CachedPage {
     }
 }
 
-/// A blank page, built on the heap and never on the stack.
-///
-/// Both miss paths below used `[0u8; PAGE_SIZE]` and handed it to `Box::new`,
-/// which is a 4 KiB stack frame and a 4 KiB copy per miss. The copy was waste;
-/// the frame was a hazard, because `log_file` reached `write_page` from the idle
-/// loop, whose per-CPU stack is 16 KiB of ordinary heap with no guard page. **The
-/// idle loop no longer reaches here at all** (log architecture L6), which makes
-/// the hazard historical and the measurement below the record of why the fix
-/// was made rather than a live bound.
-/// Measured there, at the block layer with the USB command path still below:
-/// 11,505 bytes of the 16,384 with these two frames present, 6,209 without.
+/// A blank page, allocated directly on the heap: never construct via a stack-sized array.
 fn blank_page() -> Box<[u8; PAGE_SIZE]> {
     match alloc::vec![0u8; PAGE_SIZE].into_boxed_slice().try_into() {
         Ok(page) => page,
@@ -631,15 +481,11 @@ fn evict_if_needed(cache: &mut FileCache) {
     let before = cache.evictions;
     while cache.cached_pages > cache.max_pages {
         if !evict_one(cache) {
-            // Everything resident is dirty. Write-back is the handle layer's job
-            // (`vfs::flush_file` on fsync and on close), so the only bound on
-            // dirty pages is the writer's un-flushed working set.
+            // Everything resident is dirty: write-back is the handle layer's job, so nothing here bounds dirty pages further.
             break;
         }
     }
-    // One line per full turnover of the cache, so the series scales with the
-    // bound instead of with a number picked here: it is the only evidence from
-    // outside the kernel that residency stays flat while evictions climb.
+    // Logs once per full turnover of the cache so the rate scales with the budget, not a fixed count.
     let turnover = cache.max_pages as u64;
     if cache.evictions != before && (before == 0 || before / turnover != cache.evictions / turnover) {
         log!("file cache: {} evictions, {}/{} pages resident",
@@ -647,12 +493,9 @@ fn evict_if_needed(cache: &mut FileCache) {
     }
 }
 
-/// One CLOCK step-and-evict. Returns false when a full revolution found no
-/// page it was allowed to take.
+/// One CLOCK step-and-evict; returns false when a full revolution found no page it was allowed to take.
 fn evict_one(cache: &mut FileCache) -> bool {
-    // Two passes over the resident set: the first may spend itself clearing
-    // reference bits, the second then cannot find every candidate referenced.
-    // `+ 2` covers the wrap step at each end.
+    // Two full passes: the first may only clear reference bits, so the second must be able to evict; `+2` covers each wrap.
     let steps = cache.cached_pages * 2 + 2;
     for _ in 0..steps {
         let Some((fid, idx)) = seek_hand(cache) else { return false };
@@ -691,9 +534,7 @@ fn seek_hand(cache: &mut FileCache) -> Option<(FileId, u32)> {
 
 fn page_at_or_after(cache: &FileCache, from: (FileId, u32)) -> Option<(FileId, u32)> {
     for (&fid, file) in cache.files.range(from.0..) {
-        // Whole files, not pages at a time: a tmpfs file's pages can never be
-        // taken, and stepping through a large one would exhaust the sweep's
-        // budget before it reached a page it was allowed to evict.
+        // Skip whole files, not page by page: a tmpfs file's pages can never be evicted, and stepping through one would exhaust the sweep's budget.
         if !file.is_cache() {
             continue;
         }

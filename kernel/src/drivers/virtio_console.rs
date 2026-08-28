@@ -1,15 +1,7 @@
-//! VirtIO console — single-port (no MULTIPORT). Replaces the 16550 UART
-//! as the kernel log channel after init. Per byte, the UART takes two
-//! port-IO vmexits (LSR poll + data write); the FIFO drain bit defeats
-//! the 16-byte FIFO so a 100-byte log line eats ~200 vmexits. virtio-console
-//! takes one notify per submission — host writes the chardev directly with
-//! no per-byte stalls.
+//! VirtIO console: single-port (no MULTIPORT), replacing the 16550 UART as
+//! the kernel log channel after init. Uses queues 0 (RX) and 1 (TX).
 //!
-//! Single-port mode uses queues 0 (RX) and 1 (TX). MULTIPORT is offered by
-//! QEMU but not negotiated; the device falls back to port-0-only with no
-//! control queues. RX is poll-driven, matching the UART semantics (see
-//! `arch/idt/mod.rs` — the legacy PIC is disabled and no UART IRQ handler is
-//! wired, so input is polled).
+//! RX is poll-driven: no UART IRQ handler is wired (see `arch/idt/mod.rs`).
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -29,7 +21,6 @@ const TX_BUF_SIZE: usize = 4096;
 const RX_BUF_SIZE: u32 = 256;
 const RX_BUF_COUNT: usize = 8;
 
-// DMA layout (4KB-aligned regions in a 16KB pool):
 const OFF_TX_BUF:  usize = 0x0000; // 1 page (4KB)
 const OFF_RX_BUFS: usize = 0x1000; // 8 × 256 = 2KB, fits in 1 page
 const OFF_RXVQ:    usize = 0x2000; // virtqueue desc/avail/used
@@ -43,51 +34,28 @@ struct RxPending {
     pos: u32,
 }
 
-/// **The buffers are [`Dma`] views and not raw pointers**, which is why this
-/// type needs no `unsafe impl Send`: every field is `Send` on its own, and a
-/// view carries the bounds a bare `*mut u8` does not, so the TX copy and the RX
-/// byte read below are checked against the buffer's length rather than against
-/// a comment.
-///
-/// `'static` because the pool is leaked at `init`: this console is the kernel's
-/// log channel for the life of the boot and is never unbound, and
-/// `Dma<'static>` is that claim made in the type rather than in a `static`
-/// nobody reads.
+// Every field must stay individually `Send` (no raw pointers), or this needs an explicit `unsafe impl Send`.
 struct VConsole {
     device: VirtioDevice,
     rx: Virtqueue<'static>,
     tx: Virtqueue<'static>,
     tx_buf: Dma<'static>,
     tx_slot: Option<DescSlot>,
-    /// The RX buffers under the unaligned discipline: what is read out of one is
-    /// a single byte the device has already delivered — its descriptor came back
-    /// through the used ring and has not been refilled — so nothing is racing
-    /// the read and there is no alignment to keep.
+    // Read only after the used ring returns the descriptor, so no read races a fill.
     rx_bufs: [Dma<'static, Unaligned>; RX_BUF_COUNT],
     /// Maps virtqueue desc id → rx_buf index (filled at refill, read at poll).
     desc_to_rx: [u8; QUEUE_SIZE as usize],
-    /// Currently-draining RX buffer (slot recovered from used ring but not
-    /// yet refilled, because not all bytes have been consumed).
+    // Draining RX buffer: slot recovered from the used ring, refilled once fully consumed.
     rx_pending: Option<RxPending>,
 }
 
 struct ConsoleCell(UnsafeCell<MaybeUninit<VConsole>>);
-// SAFETY: irreducible — a `static` needs `Sync` and the payload is a
-// `MaybeUninit` that has to be written after `init` has built it, which no
-// `Sync` type in this kernel expresses (a `Lock` cannot be taken from the
-// panic path, and `VConsole` is far too large for an atomic). What makes it
-// sound is stated on `CONSOLE` below and enforced at every reader: `READY`
-// (Acquire) gates construction, and the three accessors go through
-// `with_console`, which every caller reaches holding `serial::BackendGuard`
-// with interrupts disabled — that outer lock is the mutual exclusion this impl
-// does not provide.
+// SAFETY: sound because every access goes through `with_console`, gated by
+// `READY` and serialized by the caller's `serial::BackendGuard`.
 unsafe impl Sync for ConsoleCell {}
 
-/// Initialized exactly once in `init()` and then never written. Reads are
-/// gated by `READY` (Acquire); mutation goes through `write_bytes_locked`,
-/// `try_read_byte_locked`, and `has_data_locked`, all of which require the
-/// caller to be holding `serial::BackendGuard` with interrupts disabled — that
-/// outer lock is what serializes concurrent access to the VConsole state.
+// Written once in `init`; every reader/writer goes through `with_console`,
+// gated by `READY` and serialized by the caller's `serial::BackendGuard`.
 static CONSOLE: ConsoleCell = ConsoleCell(UnsafeCell::new(MaybeUninit::uninit()));
 static READY: AtomicBool = AtomicBool::new(false);
 
@@ -96,33 +64,19 @@ pub fn is_ready() -> bool {
     READY.load(Ordering::Acquire)
 }
 
-/// Disable the virtio-console fast path. After this, `is_ready()` returns
-/// false and the log macro falls back to UART. Used by the panic handler
-/// to bypass any potentially-wedged virtqueue state.
+/// Disables the fast path; `is_ready()` then returns false and logging falls back to UART.
 pub fn disable() {
     READY.store(false, Ordering::Release);
 }
 
-/// Run `f` against the live console, or answer `None` because there is not one.
-///
-/// **The readiness check and the dereference are one thing.** Split, each
-/// caller holds a copy of the obligation and a chance to write the dereference
-/// without the check; here it is structural, and the three call sites are
-/// ordinary safe code.
+// Check-then-deref stays one function: split, a caller could deref without checking.
 #[inline]
 fn with_console<R>(f: impl FnOnce(&mut VConsole) -> R) -> Option<R> {
     if !is_ready() {
         return None;
     }
-    // SAFETY: irreducible — `MaybeUninit::assume_init_mut` is the only way to
-    // reach a value written into a `static` after its declaration, and the
-    // `&mut` out of an `UnsafeCell` is what `ConsoleCell`'s `Sync` impl exists
-    // for. Initialisation is proved by the `READY` Acquire load above, which
-    // pairs with the Release store `init` makes after `CONSOLE` is written and
-    // is the only thing that ever sets it. Exclusion is *not* proved here and
-    // cannot be: every caller of this function is reached only through
-    // `serial::BackendGuard`, which is a global spinlock held with interrupts
-    // disabled, and that is the lock serialising these `&mut`s.
+    // SAFETY: `READY`'s Acquire load (checked above) pairs with `init`'s Release
+    // store, proving initialization; the caller's `serial::BackendGuard` provides exclusion.
     Some(f(unsafe { (*CONSOLE.0.get()).assume_init_mut() }))
 }
 
@@ -137,21 +91,15 @@ fn refill_rx(c: &mut VConsole, buf_idx: usize, slot: DescSlot) {
     c.desc_to_rx[desc_id as usize] = buf_idx as u8;
 }
 
-/// Write to the host. Caller must hold `serial::BackendGuard` with IRQs disabled.
-/// Synchronous: waits for the host to consume each chunk before returning,
-/// matching the existing UART writer's "byte is on the wire when we return"
-/// guarantee. With QEMU/TCG the host processes the notify vmexit inline,
-/// so this is one vmexit per chunk, not per byte.
+/// Synchronous: blocks until the host consumes each chunk. Caller must hold `serial::BackendGuard` with IRQs disabled.
 pub fn write_bytes_locked(bytes: &[u8]) {
     with_console(|c| {
         let mut off = 0;
         while off < bytes.len() {
             let n = (bytes.len() - off).min(TX_BUF_SIZE);
-            // Bounded by `copy_from`, which refuses more than `tx_buf.size()`
-            // — `TX_BUF_SIZE`, which `n` is `min`ed against. Nothing else may be
-            // touching the buffer: the caller holds `serial::BackendGuard`, and
-            // the previous chunk's `submit_and_wait` returned, so the device is
-            // done with it.
+            // `n` is bounded to `TX_BUF_SIZE`; the `BackendGuard` excludes other
+            // callers, and the previous chunk's `submit_and_wait` already
+            // returned, so the device is done with `tx_buf` too.
             c.tx_buf.copy_from(0, &bytes[off..off + n]);
             let slot = c.tx_slot.take().expect("vconsole: no tx slot");
             c.tx_slot = Some(c.tx.submit_and_wait(
@@ -170,20 +118,16 @@ pub fn write_bytes_locked(bytes: &[u8]) {
 pub fn try_read_byte_locked() -> Option<u8> {
     with_console(|c| {
         if c.rx_pending.is_none() {
-            // Both numbers are bounded by `poll_used`: the id indexes
-            // `desc_to_rx`, which is exactly `QUEUE_SIZE` long, and `len` is at
-            // most the `RX_BUF_SIZE` this driver posted, so the walk below
-            // stays inside the buffer it started in. Unchecked, an over-long
-            // `len` hands kernel memory to the console as typed input: the read
-            // at the bottom of this function is inside the direct map.
+            // `slot`/`len` are bounded by `poll_used`: id indexes `desc_to_rx`
+            // (length `QUEUE_SIZE`), len is at most `RX_BUF_SIZE` — unchecked,
+            // an over-long `len` would hand kernel memory to the console as input.
             let (slot, len) = c.rx.poll_used()?;
             let buf_idx = c.desc_to_rx[slot.id() as usize] as usize;
             c.rx_pending = Some(RxPending { buf_idx, slot, len, pos: 0 });
         }
         let p = c.rx_pending.as_mut().unwrap();
-        // Bounded twice over: `read` refuses `pos + 1 > RX_BUF_SIZE`, and
-        // `pos < len` is the loop condition below with `len` already bounded by
-        // `poll_used` to the chain this driver published.
+        // Bounded twice: `read` refuses `pos + 1 > RX_BUF_SIZE`, and `pos < len`
+        // is already bounded by `poll_used` above.
         let byte: u8 = c.rx_bufs[p.buf_idx].read(p.pos as usize);
         p.pos += 1;
         if p.pos >= p.len {
@@ -210,9 +154,7 @@ pub fn init(devices: &[PciDevice]) -> bool {
     };
     log!("virtio-console: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
 
-    // Leaked rather than held in a `static`: the console is never unbound, and
-    // `Dma<'static>` says that where a `Lock<Option<DmaPool>>` nobody read only
-    // implied it.
+    // Leaked, not held in a `static`: the console is never unbound.
     let dma = DmaPool::alloc(DMA_SIZE).leak();
 
     let device = VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1);
@@ -253,14 +195,9 @@ pub fn init(devices: &[PciDevice]) -> bool {
     }
     drop(rx_slots);
 
-    // SAFETY: irreducible — this is the write that initialises the
-    // `MaybeUninit` payload of a `static`, and there is no safe form of it
-    // without a `Sync` container the panic path may not take a lock on.
-    // Sound because it happens exactly once: `init` is called once from the
-    // boot sequence, before any AP is started and before `READY` is set, so
-    // nothing can be reading `CONSOLE` — every reader goes through
-    // `with_console`, which loads `READY` with `Acquire` and the `Release`
-    // store below is what publishes this write to it.
+    // SAFETY: single write, called once before `READY` is set and before any
+    // AP starts, so nothing is reading `CONSOLE` yet; `with_console` only reads
+    // after this function's Release store below.
     unsafe { (*CONSOLE.0.get()).write(console); }
     READY.store(true, Ordering::Release);
     crate::drivers::serial::console_changed();
