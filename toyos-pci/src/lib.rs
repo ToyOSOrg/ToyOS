@@ -23,5 +23,6 @@
 #![forbid(unsafe_code)]
 
 pub mod bar;
+pub mod caps;
 pub mod msi;
 pub mod msix;
