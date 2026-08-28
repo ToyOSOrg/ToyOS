@@ -132,7 +132,7 @@ kernel/src/mm/dma.rs 34 0
 kernel/src/mm/mmio.rs 17 0
 kernel/src/mm/mod.rs 20 0
 kernel/src/mm/paging.rs 198 0
-kernel/src/mm/pmm.rs 23 0
+kernel/src/mm/pmm.rs 27 0
 kernel/src/mm/region.rs 17 0
 kernel/src/mm/unmapped.rs 5 0
 kernel/src/mouse.rs 20 0
@@ -175,7 +175,7 @@ kernel/src/time.rs 47 0
 kernel/src/tmpfs.rs 8 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
-kernel/src/user_ptr.rs 53 0
+kernel/src/user_ptr.rs 58 0
 kernel/src/vfs.rs 45 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
@@ -295,6 +295,7 @@ tests/toyos-rust-tests/src/bin/locale_gate.rs 64 0
 tests/toyos-rust-tests/src/bin/log_volume_reread.rs 27 0
 tests/toyos-rust-tests/src/bin/mmap_prot.rs 62 0
 tests/toyos-rust-tests/src/bin/mmap_stress.rs 31 0
+tests/toyos-rust-tests/src/bin/munmap_reissues_read_window.rs 29 0
 tests/toyos-rust-tests/src/bin/netd_caps.rs 64 0
 tests/toyos-rust-tests/src/bin/netd_gone_mid_bind.rs 72 0
 tests/toyos-rust-tests/src/bin/netd_hostile_peer.rs 73 0
@@ -543,6 +544,7 @@ toyos-untrusted/src/lib.rs 151 0
 toyos-userbound/src/fault.rs 111 1
 toyos-userbound/src/lib.rs 25 0
 toyos-userbound/src/span.rs 38 0
+toyos-userpin/src/lib.rs 36 0
 toyos-wallclock/src/lib.rs 131 2
 toyos-xhci/sim/src/driver.rs 160 0
 toyos-xhci/sim/src/hub.rs 40 0
