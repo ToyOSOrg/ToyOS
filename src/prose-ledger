@@ -193,8 +193,8 @@ src/lib.rs 46 0
 src/libc.rs 31 1
 src/main.rs 65 0
 src/mergehealth.rs 229 3
-src/pr.rs 172 5
-src/prosegate.rs 113 0
+src/pr.rs 177 5
+src/prosegate.rs 128 0
 src/qemu.rs 113 0
 src/redlist.rs 501 24
 src/soundfont.rs 133 0
@@ -205,6 +205,7 @@ src/tiers.rs 338 26
 src/toolchain.rs 778 29
 src/wallpaper.rs 124 0
 src/worktree.rs 74 0
+src/writinglaw.rs 21 0
 tests/common/audio.rs 404 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
