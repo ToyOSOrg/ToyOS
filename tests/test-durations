@@ -241,6 +241,7 @@ metal_sim_pointer_churn 16658
 metal_sim_scanout_wc 0
 metal_sim_window_caps 148
 metal_sim_window_drag 6256
+mkdir_cap 18446744073709551615
 mmap_prot 32
 mmap_stress 45
 nested_fault_is_recursive 5936
@@ -257,6 +258,7 @@ nvme_large_device 6052
 nvme_wide_sector 3500
 operation_nesting 5075
 panic_recovery 130
+pci_capability_walk 18446744073709551615
 poller_capacity 36
 port_poll_churn 84
 pre_idle_wedge_speaks 3688

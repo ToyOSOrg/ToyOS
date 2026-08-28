@@ -31,4 +31,4 @@ pub mod fault;
 pub mod span;
 
 pub use fault::{blame, Blame, Faulted, Ring};
-pub use span::{in_user_half, is_user_addr, is_user_object, PAGE_2M, USER_TOP};
+pub use span::{in_user_half, is_user_addr, is_user_object, rebase_base, PAGE_2M, USER_TOP};
