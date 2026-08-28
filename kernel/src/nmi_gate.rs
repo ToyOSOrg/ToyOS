@@ -1,53 +1,10 @@
-//! An NMI delivered into the window where CPL is 0 and `rsp` is not.
+//! Per-CPU counters for `syscall_window_nmi`'s aimed-NMI storm and
+//! `nmi_nested`'s staged re-entrancy hazard.
 //!
-//! **The one machine state `arch::idt`'s IST2 row exists for, and the one
-//! nothing outside the guest can stage.** `SYSCALL` switches no stack, so three
-//! instructions of `arch::syscall`'s entry and one of its exit run at CPL 0 with
-//! the user's `rsp`; an exception taken there builds its frame on a user page
-//! from CPL 0, SMAP refuses the write, and the `#PF` escalates to `#DF`. Which
-//! instruction an asynchronous interrupt lands on is decided inside the guest by
-//! the guest's own timing — there is no QEMU device, machine property or monitor
-//! command that aims one — so the actuator is the only instrument, and it fakes
-//! nothing: another CPU really sends the NMI, the victim really takes it
-//! wherever it is, and what is counted is where the CPU's own frame says it was.
-//!
-//! Three counters per CPU, and the classification is the defect's own signature
-//! rather than a symbol range:
-//!
-//! - **window** — a Ring 0 frame whose saved `rsp` is a user address. The only
-//!   code in this kernel that runs that way is the entry window and the
-//!   `pop rsp`/`sysretq` pair, so this counts arrivals *in* the window without
-//!   knowing where either one begins.
-//! - **ring3** — the frame was Ring 3, which is the same victim's user loop and
-//!   is what the expected window count is derived against (`tests/common/faults.rs`).
-//! - **ring0** — everything else, which on an aimed storm is the victim inside
-//!   the syscall it was making.
-//!
-//! **Which accelerator is running the guest decides how often the window is
-//! reached, and on KVM it is the host that decides.** Under TCG, QEMU checks for
-//! a pending interrupt between translation blocks and `syscall` ends one, so an
-//! NMI pending across it is delivered at `syscall_entry+0` — the dev host reads
-//! 36 to 58 window arrivals per 3,000, run after run. Under KVM an NMI to a
-//! running vCPU is a host kick, a VM exit and an injection at the next VM entry,
-//! and **that entry is wherever the kick's exit landed**: both ends of that have
-//! been measured on the hosted lane, **0 of 6,000** and **64 of 64**. Neither
-//! number is a fact about this kernel, which is why the gate asserts on neither.
-//! What every host witnesses is the machine taking aimed NMIs with IST2 in place
-//! and going on working, and what proves the *window* everywhere is the
-//! `nmi-without-ist` control's `#DF`.
-//!
-//! **The storm is triggered by the victim and aimed at it.** A CPU's syscall
-//! count is the victim's own signal that it is spinning, and it is also which
-//! CPU to aim at; a wall-clock arm is two clocks with no handshake between them,
-//! so it can fire at a machine where nothing is spinning yet and spend the one
-//! shot.
-//!
-//! `nmi-nested` is the second arm and it stages the *other* hazard: an NMI
-//! handler that returns early through `iretq` un-masks NMIs while still standing
-//! on IST2 (SDM Vol. 3A §6.7.1). It is staged rather than asserted — a real
-//! pending NMI, a real `iretq`, a real second entry on the same stack — so what
-//! it measures is whether `nmi_entry`'s re-entrancy check fires or whether the
-//! frame is quietly overwritten.
+//! [`observe`] classifies each NMI by its interrupted frame: `window` when
+//! CPL is 0 and `rsp` is a user address — the gap in `arch::syscall`'s
+//! entry/exit — `ring3` when the frame was Ring 3, `ring0` otherwise. Runs on
+//! IST2: no lock, no allocation, nothing that can fault.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -62,12 +19,7 @@ static RING3: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 /// Where the first window arrival was, for the report to symbolize.
 static FIRST_WINDOW_RIP: AtomicU64 = AtomicU64::new(0);
 
-/// Called from `arch::idt::nmi`'s handler, on every NMI, before anything else.
-///
-/// Three relaxed adds and a compare. It may not do more: it runs on IST2 with
-/// the rules that module's header states — no lock, no allocation, nothing that
-/// can fault — and `log!` in particular is what the whole facility exists to
-/// stay out of.
+/// Records one NMI arrival for the current CPU; called from `arch::idt::nmi` before anything else.
 pub fn observe(rip: u64, cs: u64, rsp: u64) {
     if !crate::actuator::syscall_window_nmi() {
         return;
@@ -76,8 +28,7 @@ pub fn observe(rip: u64, cs: u64, rsp: u64) {
     if me >= MAX_CPUS {
         return;
     }
-    // Release, and the sender's load is Acquire: the storm below paces itself on
-    // this word, so it is a handshake and not only a statistic.
+    // Release: storm()'s load of this word is Acquire, so it is a handshake and not only a counter.
     SEEN[me].fetch_add(1, Ordering::Release);
     if toyos_userbound::Ring::of_cs(cs).is_user() {
         RING3[me].fetch_add(1, Ordering::Relaxed);
@@ -94,19 +45,7 @@ pub fn observe(rip: u64, cs: u64, rsp: u64) {
     }
 }
 
-/// Un-mask NMIs from inside the NMI handler, with one already pending.
-///
-/// **`nmi-nested`'s whole content, and it is the hazard rather than a verdict.**
-/// The architecture blocks NMI delivery until the handler's `iretq`, so the only
-/// way a second one can enter on IST2 is an `iretq` executed early — which is
-/// what a handler that faults gets for free, and what Linux's nested-NMI
-/// machinery is built around. Here it is written out: send this CPU an NMI,
-/// which latches while blocked, then `iretq` to the next instruction of this
-/// same function, which clears the block. The second NMI enters immediately,
-/// with `nmi_active` still raised.
-///
-/// One shot per boot. The state it stages ends in a halt either way — either the
-/// entry's check fires, or the outer frame is gone and nothing is coming back.
+/// Stages one nested NMI entry (an early `iretq` on IST2) if `nmi_nested` is armed; one shot per boot.
 pub fn stage_nested_if_armed() {
     if !crate::actuator::nmi_nested() {
         return;
@@ -116,14 +55,8 @@ pub fn stage_nested_if_armed() {
         return;
     }
     apic::send_nmi(percpu::cpu_id());
-    // SAFETY: irreducible — "return through `iretq` without leaving the
-    // function" is not expressible in Rust, and it is the whole of what this
-    // stages. The frame is built from this CPU's own `ss`, `rsp`, `RFLAGS` and
-    // `cs`, and the `rip` is the label below, so the `iretq` lands on the next
-    // instruction with `rsp` exactly where it was: control flow and the stack
-    // are unchanged, and the one observable effect is the NMI block clearing.
-    // No `nomem`/`nostack`: the block pushes five words and the delivery it
-    // admits may observe any memory.
+    // No nomem/nostack: the block pushes five words and the NMI it admits may touch any memory.
+    // SAFETY: the frame is this CPU's own ss/rsp/rflags/cs with rip = the label below, so `iretq` resumes here with control flow and the stack unchanged.
     unsafe {
         core::arch::asm!(
             "mov {tmp}, rsp",
@@ -144,43 +77,19 @@ pub fn stage_nested_if_armed() {
     }
 }
 
-/// Syscalls one CPU must have taken before the storm believes a victim is
-/// spinning on that CPU.
-///
-/// **The trigger, and it is the victim's own work rather than a clock.** A
-/// wall-clock arm is two clocks with no handshake between them: on a loaded
-/// shard the spinner starts *after* the instant, so the storm fires at an idle
-/// machine, reports nothing, and leaves `FIRED` set. A CPU that has taken a
-/// million syscalls is a CPU with a program on it in the entry window as often
-/// as a program can be, and no daemon on an idle machine reaches it.
-///
-/// The spinner measures ~5.3 million syscalls a second (188 ns each), so this is
-/// reached about 190 ms after it starts and cannot be reached before it does.
+/// Syscalls one CPU must reach before the storm treats it as spinning.
 const SPINNING_SYSCALLS: u64 = 1_000_000;
 
-/// How many NMIs the storm will send before giving up on the window.
-///
-/// A ceiling and not a schedule: the loop stops at [`ENOUGH`] arrivals, and this
-/// is what bounds a boot where the victim stopped spinning halfway through.
+/// NMI ceiling per storm; bounds a boot where the victim stops spinning.
 const MAX_NMIS: u64 = 3_000;
 
-/// Window arrivals that end the storm. More than one, because one is a fact and
-/// a rate is a measurement; few enough that a healthy boot spends milliseconds
-/// here.
+/// Window arrivals that end the storm early: more than one, since one arrival is a fact, not a rate.
 const ENOUGH: u64 = 64;
 
-/// How long one NMI gets to be taken before the next goes out. An NMI needs
-/// nothing of the target but the interrupt itself — `sched::dump`'s probe budgets
-/// a millisecond for one — and this only paces the storm: an NMI that misses it
-/// is counted as sent and shows up in the difference.
+/// Wait budget per NMI before the next goes out; a delivery that misses it still counts as sent.
 const DELIVERY_BUDGET_NS: u64 = 100_000;
 
-/// One syscall on this CPU, counted only while the actuator is armed.
-///
-/// Called from `arch::syscall::syscall_dispatch`, which is every syscall in the
-/// machine, so it is a relaxed load and a predictable branch and nothing else —
-/// and in a shipping kernel this module does not exist and the call is not
-/// compiled at all.
+/// Counts one syscall on this CPU while `syscall_window_nmi` is armed; called from every `syscall_dispatch`.
 pub fn note_syscall() {
     if !crate::actuator::syscall_window_nmi() {
         return;
@@ -191,11 +100,7 @@ pub fn note_syscall() {
     }
 }
 
-/// The sibling CPU with the most syscalls behind it, and how many.
-///
-/// Recomputed every round rather than fixed at the start: the scheduler may move
-/// the spinner, and a storm aimed at where it used to be is a storm at an idle
-/// CPU.
+/// Sibling CPU with the most syscalls, recomputed each round since the scheduler may move the spinner.
 fn victim(me: usize, cpus: usize) -> Option<(usize, u64)> {
     SYSCALLS
         .iter()
@@ -206,21 +111,7 @@ fn victim(me: usize, cpus: usize) -> Option<(usize, u64)> {
         .max_by_key(|&(_, n)| n)
 }
 
-/// Storm the CPU that is spinning on `syscall` and report where the NMIs landed.
-///
-/// Called from the idle loop, once, by whichever CPU reaches it first **while a
-/// sibling is already inside the window as often as a program can be**. The idle
-/// loop rather than a pass, for `dump::deaf_window`'s reason: the storming CPU
-/// has no task and the CPU under observation is the one that does — and
-/// whichever CPU, not cpu0, because the scheduler decides where the spinner
-/// runs. `syscall-window-nmi` implies `diag-tick` so that a quiet CPU keeps
-/// reaching the loop rather than sleeping through the whole run.
-///
-/// **The arming condition is the victim's own syscall count and not a clock**
-/// ([`SPINNING_SYSCALLS`]), so the
-/// storm cannot fire before there is something to storm — and `FIRED` is swapped
-/// only once that is true, which is what keeps a premature look from consuming
-/// the one shot.
+/// Storms whichever sibling CPU is spinning in `syscall`, once per boot, and logs where the NMIs landed.
 pub fn storm() {
     static FIRED: AtomicBool = AtomicBool::new(false);
 
@@ -229,35 +120,28 @@ pub fn storm() {
     if cpus < 2 {
         return;
     }
+    // Trigger is the victim's syscall count, not a wall clock: a clock could fire before the spinner starts and waste the look.
     match victim(me, cpus) {
         Some((_, taken)) if taken >= SPINNING_SYSCALLS => {}
         _ => return,
     }
+    // Checked before this swap so a premature look can't spend the one shot.
     if FIRED.swap(true, Ordering::AcqRel) {
         return;
     }
 
-    // The victim's own syscall count either side of the storm. **This is how a
-    // reader knows the victim went on running Ring 3 code through all of it**,
-    // and it is the one witness that costs nothing: waiting for the spinner's
-    // own last line would cost its whole spin on every run, and a delivered
-    // count alone cannot tell a CPU that kept working from one that stopped
-    // after the first NMI.
+    // Syscall count either side of the storm proves the victim kept running throughout.
     let spun_before: u64 = SYSCALLS.iter().map(|n| n.load(Ordering::Relaxed)).sum();
 
     let mut sent = 0u64;
     while sent < MAX_NMIS {
-        // Aimed, not broadcast: every NMI that goes to an idle sibling is a
-        // sample of the idle loop, and what is being measured is a window three
-        // instructions wide on the CPU that is executing it.
+        // Aimed at the victim CPU only: broadcasting would sample idle siblings instead of the window.
         let Some((cpu, _)) = victim(me, cpus) else { break };
         let seen = &SEEN[cpu];
         let before = seen.load(Ordering::Acquire);
         apic::send_nmi(cpu as u32);
         sent += 1;
-        // Wait for it to be *taken* before sending the next. Two NMIs in flight
-        // at one CPU are one NMI plus one latched, so an unpaced storm measures
-        // the APIC's latch rather than the victim's timing.
+        // Waits for delivery before the next send: two NMIs in flight collapse to one delivered plus one latched.
         let deadline = crate::clock::nanos_since_boot().saturating_add(DELIVERY_BUDGET_NS);
         while seen.load(Ordering::Acquire) == before
             && crate::clock::nanos_since_boot() < deadline
@@ -281,13 +165,7 @@ fn total(counter: &[AtomicU64; MAX_CPUS]) -> u64 {
     counter.iter().map(|c| c.load(Ordering::Relaxed)).sum()
 }
 
-/// One line the gate reads, plus one per CPU that saw anything.
-///
-/// Every count is written after the word that names it, so the reader takes the
-/// field from the word and not from a position in the line — and the total is
-/// **last**, after the per-CPU lines and after the symbolized `rip`, because it
-/// is what a reader waits for: a drain that ends on the summary has everything
-/// under it already.
+/// Logs one line per CPU that saw anything, then the summary line the gate reads last; each field is key=value, read by name not position.
 fn report(sent: u64, spun: u64, cpus: usize) {
     for cpu in 0..cpus {
         let seen = SEEN[cpu].load(Ordering::Relaxed);

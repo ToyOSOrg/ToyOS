@@ -1,55 +1,4 @@
-//! DMA memory, as a view rather than as a pointer.
-//!
-//! [`DmaPool`] owns physical pages; [`Dma`] is the only way to touch what is in
-//! them, and every one of its accessors is **safe**. That is the same claim
-//! [`Mmio`](super::Mmio) makes for a memory-mapped register window and it rests
-//! on the same three things: construction is private to this module, so no
-//! caller can name a region the pool did not hand out; every access is bounded
-//! for `size_of::<T>()` and not for the offset alone; and the view carries the
-//! pool's lifetime, so the region cannot outlive the pages behind it.
-//!
-//! # Two disciplines, and a driver cannot take the wrong one by accident
-//!
-//! One accessor set cannot serve both kinds of DMA memory, so there are two and
-//! the difference is in the type:
-//!
-//! - [`Volatile`] — **memory the device may be touching at this instant.**
-//!   Descriptor tables, available and used rings, transfer and event rings,
-//!   completion queues, device and input contexts, the xHCI DCBAA, its
-//!   scratchpad array and its ERST. Every access is `read_volatile` /
-//!   `write_volatile`, so it cannot be elided, merged, split or reordered
-//!   against its neighbours — which is what makes a poll observe a Cycle or
-//!   Phase bit flip rather than reading it once — and it is asserted naturally
-//!   aligned for `T`, because that is what those two intrinsics require.
-//!
-//! - [`Unaligned`] — **memory the protocol has already fenced.** A structure
-//!   written before the device is told where it is, or read after the device has
-//!   said it is done with it: a Command Block Wrapper and its status block
-//!   (`xhci::wait::msc`), an NVMe PRP list and its Identify Namespace answer, an
-//!   HDA buffer descriptor list, a virtio-gpu command header, one byte out of a
-//!   virtio-console RX buffer. Their fields sit where a specification put them
-//!   rather than where an ABI would, so every access is `read_unaligned` /
-//!   `write_unaligned` and carries no alignment requirement — and none of them
-//!   needs volatile, because nothing else is looking at the bytes while the
-//!   access runs.
-//!
-//! [`DmaPool::view`] and [`DmaPool::leak`] hand out the volatile discipline,
-//! because racing the device is what DMA memory is *for*; the other is reached
-//! by naming [`Dma::unaligned`], which is a word a driver has to write. There is
-//! no way back: a region that has been declared quiescent stays that way for the
-//! expression that declared it.
-//!
-//! # The lifetime, and what it closes
-//!
-//! `Dma<'pool>` borrows the [`DmaPool`] it came out of, so a view can never
-//! outlive the pages it names. That is the residual
-//! `issues/design-debt/kernelslice-outlives-its-allocation.md` still records for
-//! [`super::KernelSlice`] — closed for DMA memory here by construction rather
-//! than by adjacency.
-//!
-//! A driver whose device outlives every scope is served by [`DmaPool::leak`],
-//! which consumes the pool, never gives its pages back, and answers with a
-//! `Dma<'static>` — a value that cannot be built any other way.
+//! DMA memory, as a bounds-checked view rather than a raw pointer; [`DmaPool`] owns the pages, and [`Dma`] is the only safe way to touch them.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -63,13 +12,12 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// Which accessor set a [`Dma`] carries. Sealed: the two below are the whole
-/// set, and a third would be a third answer to a question with two.
+/// Sealed: exactly two disciplines exist, [`Volatile`] and [`Unaligned`].
 pub trait Discipline: sealed::Sealed {}
 
-/// The discipline for memory that races the device. See the module header.
+/// The discipline for memory that races the device.
 pub enum Volatile {}
-/// The discipline for memory the protocol has fenced. See the module header.
+/// The discipline for memory the protocol has fenced.
 pub enum Unaligned {}
 
 impl sealed::Sealed for Volatile {}
@@ -77,19 +25,11 @@ impl sealed::Sealed for Unaligned {}
 impl Discipline for Volatile {}
 impl Discipline for Unaligned {}
 
-/// A bounds-checked, safe view of DMA memory, valid for as long as the
-/// [`DmaPool`] it came out of.
-///
-/// `Copy`, like [`Mmio`](super::Mmio): it is an address, a length and a
-/// discipline, and copying one grants nothing the original did not have. The
-/// lifetime travels with the copy, which is what [`super::KernelSlice`] does
-/// not carry.
+/// A bounds-checked, `Copy` view of DMA memory, scoped to its [`DmaPool`]'s lifetime.
 pub struct Dma<'pool, D: Discipline = Volatile> {
     base: *mut u8,
     size: usize,
-    /// What the view may not outlive.
     pool: PhantomData<&'pool DmaPool>,
-    /// Which accessor set is in scope, and nothing at run time.
     how: PhantomData<D>,
 }
 
@@ -100,24 +40,12 @@ impl<D: Discipline> Clone for Dma<'_, D> {
 }
 impl<D: Discipline> Copy for Dma<'_, D> {}
 
-// SAFETY: `Dma` is `Copy` and carries no lock, so moving or sharing the
-// `(base, size)` pair itself is inert — it is a bounds-checked address, a
-// length and a marker, never a claim of ownership or of who else may touch the
-// memory behind it. The pages it names are physical memory reachable through
-// the direct map on every CPU, so the address means the same thing wherever it
-// is read. What the impl does *not* promise is a discipline for concurrent
-// *use*: that is the driver's, exactly as it is for `Mmio`, whose `Send`/`Sync`
-// rest on the same sentence. It is sound to write here where it is not for an
-// arbitrary `*mut u8` because the region cannot be freed under the view — the
-// lifetime says so, and `DmaPool::leak` is the only way to reach `'static`.
+// SAFETY: `base` is a direct-mapped address, valid identically from any CPU; `Dma` is `Copy` with no lock, so sharing it shares only that address and length, never exclusive access to the memory it names.
 unsafe impl<D: Discipline> Send for Dma<'_, D> {}
-// SAFETY: see the `Send` impl above — same reasoning.
+// SAFETY: see the `Send` impl above.
 unsafe impl<D: Discipline> Sync for Dma<'_, D> {}
 
 impl<'pool, D: Discipline> Dma<'pool, D> {
-    /// The one constructor, private to `mm::dma`: a `Dma` can only come from a
-    /// [`DmaPool`] that is holding the pages, or from a [`subview`](Self::subview)
-    /// of one that already does.
     #[inline]
     fn new(base: *mut u8, size: usize) -> Self {
         Self { base, size, pool: PhantomData, how: PhantomData }
@@ -129,34 +57,24 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         self.size
     }
 
-    /// The physical address of the first byte, which is what a descriptor,
-    /// a PRP entry or a base-address register is programmed with.
+    /// The physical address of the first byte.
     #[inline]
     pub fn phys(self) -> u64 {
         DirectMap::phys_of(self.base)
     }
 
-    /// The `size` bytes at `offset`, as a view of their own.
-    ///
-    /// Refuses anything that is not wholly inside `self`, so a region carved out
-    /// of a pool is never larger than the pool and a structure carved out of a
-    /// region is never larger than the region.
+    /// The `size` bytes at `offset`, refused if not wholly inside `self`.
     #[inline]
     pub fn subview(self, offset: usize, size: usize) -> Self {
         self.check(offset, size);
-        // SAFETY: `check` just refused anything but `offset + size <= self.size`,
-        // so every byte of the result is inside the region `self` covers — which
-        // is inside the pool that constructed it, since this is the only way to
-        // narrow one.
+        // SAFETY: `check` refused anything but `offset + size <= self.size`.
         Self::new(unsafe { self.base.add(offset) }, size)
     }
 
     /// Clear the whole view.
     #[inline]
     pub fn zero(self) {
-        // SAFETY: exactly `self.size` bytes from `self.base`, which is the
-        // region this view was constructed for and nothing else. `u8` has no
-        // alignment requirement and no drop glue.
+        // SAFETY: exactly `self.size` bytes from `self.base`, the region this view covers.
         unsafe { write_bytes(self.base, 0, self.size) }
     }
 
@@ -164,35 +82,19 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
     #[inline]
     pub fn copy_from(self, offset: usize, src: &[u8]) {
         self.check(offset, src.len());
-        // SAFETY: `check` bounded the destination for `src.len()` bytes, and
-        // `src` is a live `&[u8]` of exactly that length. The two cannot overlap:
-        // `src` is kernel heap or stack and `self` is a physical page out of the
-        // DMA category, which the heap is never allocated from.
+        // SAFETY: `check` bounded the destination for `src.len()` bytes; `src` and `self` cannot overlap since the heap is never allocated from DMA pages.
         unsafe { copy_nonoverlapping(src.as_ptr(), self.base.add(offset), src.len()) }
     }
 
-    /// Copy `dst.len()` bytes out of the view at `offset` into `dst`.
-    ///
-    /// A copy and not a `&[u8]`: a reference into DMA memory would outlive the
-    /// instant at which the driver knows the device is not writing it, and every
-    /// caller here wants the bytes rather than the borrow.
+    /// Copy `dst.len()` bytes at `offset` into `dst`, never a borrow into DMA memory.
     #[inline]
     pub fn copy_to(self, offset: usize, dst: &mut [u8]) {
         self.check(offset, dst.len());
-        // SAFETY: `check` bounded the source for `dst.len()` bytes, `dst` is a
-        // live `&mut [u8]` of exactly that length, and the two cannot overlap for
-        // the reason `copy_from` gives.
+        // SAFETY: `check` bounded the source for `dst.len()` bytes; the two cannot overlap, as `copy_from` explains.
         unsafe { copy_nonoverlapping(self.base.add(offset), dst.as_mut_ptr(), dst.len()) }
     }
 
-    /// Refuse an access that is not wholly inside this view.
-    ///
-    /// A panic and not a `Result`: every offset and length that reaches here is
-    /// the driver's own arithmetic over its own layout constants, so a refusal is
-    /// a kernel bug — the one thing this tree answers with a panic rather than
-    /// with a refusal. Nothing a device chose reaches it: a device-chosen number
-    /// is an [`toyos_untrusted::Untrusted`] and is bounded before it becomes an
-    /// offset.
+    // Panics, not `Result`: every offset/length here is the driver's own arithmetic, never a device-chosen number (those arrive as `Untrusted` and are bounded before becoming an offset).
     #[inline]
     fn check(self, offset: usize, len: usize) {
         if let Err(why) = toyos_dma::within(offset, len, self.size) {
@@ -201,13 +103,7 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
     }
 }
 
-/// The refusal, out of line and marked cold, so the accessors above stay small
-/// enough for the inliner.
-///
-/// **Measured, not assumed.** With the panic in the accessor body LLVM declines
-/// to inline `Dma::read` at all: `Virtqueue::poll_used` compiles to three
-/// `callq _R…Dma4read…` per turn of its loop. Out of line and cold, the emitted
-/// `poll_used` is one `movzwl` per volatile read.
+// Out of line and cold: inlined, the panic keeps LLVM from inlining the volatile accessors themselves.
 #[cold]
 #[inline(never)]
 fn refuse(why: toyos_dma::Refused, base: *mut u8) -> ! {
@@ -215,45 +111,26 @@ fn refuse(why: toyos_dma::Refused, base: *mut u8) -> ! {
 }
 
 impl<'pool> Dma<'pool, Volatile> {
-    /// Read the `T` at `offset` with a volatile load.
-    ///
-    /// Bounded for all of `T` and asserted naturally aligned for it — the two
-    /// things `read_volatile` needs.
+    /// Read the `T` at `offset` with a volatile load; bounded and aligned for `T`.
     #[inline]
     pub fn read<T: Copy>(self, offset: usize) -> T {
-        // SAFETY: `at` refused anything but a naturally aligned `size_of::<T>()`
-        // bytes inside this view, which is the whole of what `read_volatile`
-        // requires of the pointer. Volatile because the device may be writing
-        // these bytes concurrently — that is what this discipline names — so the
-        // load may not be elided, merged or reordered against its neighbours.
-        // The value is a `T: Copy`, so nothing is duplicated that has drop glue.
+        // SAFETY: `at` bounded and aligned the pointer for `size_of::<T>()`; volatile because the device may write concurrently, so the load may not be elided or reordered.
         unsafe { read_volatile(self.at::<T>(offset) as *const T) }
     }
 
     /// Write `value` to the `T` at `offset` with a volatile store.
     #[inline]
     pub fn write<T: Copy>(self, offset: usize, value: T) {
-        // SAFETY: `at` refused anything but a naturally aligned `size_of::<T>()`
-        // bytes inside this view, which is what `write_volatile` requires.
-        // Volatile because the device may be reading these bytes concurrently —
-        // a Cycle bit, an available index or a doorbell's worth of descriptor —
-        // so the store may not be elided, split, merged or reordered.
+        // SAFETY: `at` bounded and aligned the pointer for `size_of::<T>()`; volatile because the device may read concurrently, so the store may not be elided or reordered.
         unsafe { write_volatile(self.at::<T>(offset), value) }
     }
 
-    /// The same memory, under the discipline for a region the protocol has
-    /// fenced: `read_unaligned`/`write_unaligned`, no alignment requirement, no
-    /// volatile.
-    ///
-    /// A driver has to write the word, and the header says which regions have
-    /// earned it. There is no way back: nothing in this tree wants both
-    /// disciplines over the same expression.
+    /// Switches to the unaligned discipline; one-way, since nothing here needs both over the same memory.
     #[inline]
     pub fn unaligned(self) -> Dma<'pool, Unaligned> {
         Dma::new(self.base, self.size)
     }
 
-    /// A pointer to a naturally aligned `T` wholly inside this view.
     #[inline]
     fn at<T>(self, offset: usize) -> *mut T {
         self.check(offset, core::mem::size_of::<T>());
@@ -262,14 +139,11 @@ impl<'pool> Dma<'pool, Volatile> {
         {
             refuse_unaligned(why, core::any::type_name::<T>());
         }
-        // SAFETY: `check` on the line above refused anything but
-        // `offset + size_of::<T>() <= self.size`, so the whole `T` is inside the
-        // region this view covers.
+        // SAFETY: `check` above refused anything but `offset + size_of::<T>() <= self.size`.
         unsafe { self.base.add(offset) as *mut T }
     }
 }
 
-/// The alignment refusal, out of line and cold for [`refuse`]'s reason.
 #[cold]
 #[inline(never)]
 fn refuse_unaligned(why: toyos_dma::Refused, what: &str) -> ! {
@@ -281,11 +155,7 @@ impl Dma<'_, Unaligned> {
     #[inline]
     pub fn read<T: Copy>(self, offset: usize) -> T {
         self.check(offset, core::mem::size_of::<T>());
-        // SAFETY: `check` refused anything but `size_of::<T>()` bytes inside this
-        // view, and `read_unaligned` asks nothing else of the pointer. Not
-        // volatile, and this discipline is what says so: every caller reads a
-        // structure the device has finished writing — the transfer that filled it
-        // completed, and the completion is what ordered the two.
+        // SAFETY: `check` refused anything but `size_of::<T>()` bytes; not volatile, since this discipline is for a structure the device has finished writing.
         unsafe { read_unaligned(self.base.add(offset) as *const T) }
     }
 
@@ -293,23 +163,12 @@ impl Dma<'_, Unaligned> {
     #[inline]
     pub fn write<T: Copy>(self, offset: usize, value: T) {
         self.check(offset, core::mem::size_of::<T>());
-        // SAFETY: `check` refused anything but `size_of::<T>()` bytes inside this
-        // view, and `write_unaligned` asks nothing else of the pointer. Not
-        // volatile, and this discipline is what says so: every caller writes a
-        // structure before the device is told where it is.
+        // SAFETY: `check` refused anything but `size_of::<T>()` bytes; not volatile, since this discipline is for a structure written before the device is told where it is.
         unsafe { write_unaligned(self.base.add(offset) as *mut T, value) }
     }
 }
 
-/// Contiguous DMA memory backed by 2 MiB physical pages from the PMM.
-///
-/// The pages are the pool's; [`view`](Self::view) is how a driver reaches them
-/// and [`Dma`] is the only thing that can. A pool dropped gives every page back,
-/// which is what makes a device this kernel refuses cost no physical memory.
-///
-/// **`Send` is derived, not asserted**: `PhysPage` and `DirectMap` are
-/// integers, so the auto trait already holds and a manual `unsafe impl` would
-/// be a hand-written claim standing in for it.
+/// Contiguous DMA memory backed by 2 MiB physical pages; dropping it frees them.
 pub struct DmaPool {
     pages: Vec<PhysPage>,
     base: DirectMap,
@@ -326,27 +185,12 @@ impl DmaPool {
         Self { pages, base, size: pages_2m * super::PAGE_2M as usize }
     }
 
-    /// The whole pool, as a view that may not outlive it.
-    ///
-    /// Enforced rather than argued: `alloc_contiguous` returned physically
-    /// contiguous pages, `pages[0].direct_map()` is their first byte in the
-    /// direct map, `self` is holding every one of them, and the borrow is what
-    /// says the caller may not keep the view past that.
+    /// The whole pool as a view, borrowed so it cannot outlive `self`.
     pub fn view(&self) -> Dma<'_> {
         Dma::new(self.base.as_mut_ptr(), self.size)
     }
 
-    /// Consume the pool, never give its pages back, and answer with a view that
-    /// outlives everything.
-    ///
-    /// **For a device that outlives every scope**, which is every device this
-    /// kernel binds: nothing here is ever unbound, so the alternative is a
-    /// `static` per driver holding a pool no code reads again, purely to keep
-    /// the pages alive. This says the same thing once and says it in the type.
-    ///
-    /// It is called at the point where the driver has committed, so every refusal
-    /// *above* it still drops the pool and gives the pages back. The `Vec`'s own
-    /// heap allocation is not leaked; the pages are, deliberately and for good.
+    /// Consumes the pool and leaks its pages for a `'static` view; never freed, deliberately.
     pub fn leak(self) -> Dma<'static> {
         let Self { pages, base, size } = self;
         for page in pages {

@@ -6,34 +6,10 @@ use super::PHYS_OFFSET;
 use super::PAGE_2M;
 use super::pmm;
 
-/// DESIGN RULE: nothing this type does may panic.
-///
-/// Every method here runs inside `KernelAllocator`'s `dlmalloc.lock()`, in the
-/// middle of dlmalloc mutating its own chunk and segment lists, and the kernel
-/// does not unwind — so a panic from in here abandons the heap in whatever
-/// state it was in, with the lock held forever, and the next `alloc` or `free`
-/// on any CPU spins in `Lock::lock`.
-///
-/// So a size this source cannot back is a `null`, not an assert: dlmalloc
-/// hands the null back to the caller with its structures consistent and the
-/// lock drops, and whatever the caller does about it happens outside. The
-/// fail-fast for a caller asking the heap for page-scale memory is
-/// [`MAX_HEAP_ALLOC`], checked in `KernelAllocator::alloc` *before* the lock.
-///
-/// `pmm::alloc_page` is the only thing reached from here, and it is
-/// panic-free by the same rule.
+/// Invariant: no method here may panic — it runs inside `dlmalloc.lock()`, which cannot unwind.
 struct KernelPageSource;
 
-// SAFETY: `dlmalloc::Allocator` trusts its implementer to hand out memory the
-// caller owns exclusively until it comes back through `free`/`free_part`, at
-// the size `alloc` itself reported — dlmalloc never touches memory outside
-// the `(ptr, size)` pair it was given. `alloc` here always answers in whole
-// `PAGE_2M` pages from `pmm::alloc_page`, so `free`'s `PhysPage::from_raw`
-// only ever reconstructs a page `pmm` actually handed out at that address —
-// `free` is what returns it, never a bare drop. `remap`/`free_part`/
-// `can_release_part` all refuse (null or `false`), so dlmalloc can never ask
-// this source to reshape a live allocation into something that no longer
-// matches a real page's bounds.
+// SAFETY: `alloc` only ever hands out whole `PAGE_2M` pages from `pmm::alloc_page`, and `free` is the only path that returns one.
 unsafe impl dlmalloc::Allocator for KernelPageSource {
     fn alloc(&self, size: usize) -> (*mut u8, usize, u32) {
         if size > PAGE_2M as usize {
@@ -79,63 +55,19 @@ unsafe impl dlmalloc::Allocator for KernelPageSource {
     }
 }
 
-/// The heap tripwire: a band of known bytes on each side of every allocation,
-/// read back when it is freed and, for the allocations that matter most, while
-/// they are still live.
-///
-/// **It exists because the allocator's own answer is too expensive.**
-/// `dlmalloc`'s `debug` feature walks all 32 smallbins, all 32 treebins and
-/// every chunk of every segment at the head of *every* `malloc` and `free` —
-/// O(heap) per allocation over a heap that runs to several MiB by the end of
-/// boot, which a TCG guest does not finish a boot under. The bands below cost
-/// two writes per allocation and two reads per free, and they answer the
-/// question this class poses — *is something writing outside an allocation it
-/// owns* — rather than whether the free lists still hang together afterwards.
-///
-/// What each side catches:
-///
-/// * The **tail** catches an overrun off the end. 32 bytes, which is
-///   `dlmalloc`'s `min_chunk_size` on x86-64, so a near miss lands here and not
-///   in the next chunk's header where it would be indistinguishable from
-///   allocator state.
-/// * The **head** catches an underrun, and it is as wide as the request's
-///   alignment. That is not a rounding accident: a task's kernel stack is
-///   `OwnedAlloc::new(KERNEL_STACK_SIZE, 4096)`, so under this feature it gets
-///   **4096 bytes of head band**, and a kernel stack that walks off its own
-///   bottom writes into that band instead of into the neighbouring chunk. It is
-///   the guard page `arch::percpu` gives every *idle* stack, in the one form
-///   available to an allocation that comes out of the heap.
-///
-/// Without `heap-sweep` no band is walked, so one is read at `dealloc`, which
-/// is late, and by [`check_live`] at whatever site cares, which is not.
-/// `sched::driver`'s pass reads the running task's bands every pass: a band
-/// broken at the entry to a pass was broken before that pass ran a statement.
-///
-/// **The one behaviour it changes.** A request within `head + TAIL` bytes of
-/// `MAX_HEAP_ALLOC` fits the ceiling and its banded form does not, so it is
-/// answered `null` here and would have succeeded without the feature. This is
-/// a diagnostic build and the window is 4 KiB wide at the very top of a 2 MiB
-/// ceiling, so it is recorded rather than papered over.
+/// Bands of known bytes around every heap allocation, checked at free and, for live allocations, by [`check_live`] and [`sweep`].
 #[cfg(feature = "heap-tripwire")]
 mod tripwire {
     use core::alloc::Layout;
 
-    /// The record: `OPEN`, the size, the alignment, `CLOSE`. It is what makes a
-    /// band self-describing, which is what [`super::sweep`] needs — a walk that
-    /// finds a magic word in a heap page learns from the next three what the
-    /// allocation around it is, with no registry of live allocations anywhere.
+    /// Bytes in one band record: `OPEN`, size, alignment, `CLOSE`.
     pub const RECORD: usize = 32;
 
-    /// The record's two magic words are **tied to the address they are written
-    /// at**, and that is what makes [`super::sweep`] sound rather than tidy: a
-    /// bare constant is a value this module's own code spills to locals on a
-    /// task kernel stack, which is 128 KiB of the same heap the sweep walks, so
-    /// the walk would find its own reader's leftovers. XORing the address in
-    /// means a copy of the word anywhere but where it was written is not one.
+    // Magic words are XORed with the address they're written at, so a copy spilled elsewhere (e.g. to a stack on the same heap) never reads as a record.
     const OPEN: u64 = 0x4845_4144_5a4f_4e45;
     const CLOSE: u64 = 0x5a4f_4e45_4441_4548;
 
-    /// The word that stands at `record`, and the one 24 bytes above it.
+    /// Words written at `record` and 24 bytes above it.
     pub const fn open_word(record: u64) -> u64 { OPEN ^ record }
     pub const fn close_word(record: u64) -> u64 { CLOSE ^ record }
 
@@ -143,33 +75,6 @@ mod tripwire {
     pub const FILL: u8 = 0x5a;
     pub const FILL_WORD: u64 = u64::from_ne_bytes([FILL; 8]);
 
-    /// **The three shapes, and why there is more than one.** Bands on both
-    /// sides of every allocation both *absorb* a bounded overrun that would
-    /// land in the neighbouring chunk and *displace* every allocation, so a
-    /// victim computed from a layout assumption no longer lands on anything
-    /// that matters — and one band per side cannot separate the two readings.
-    /// A band cannot be made zero-width and keep its placement — the padding
-    /// *is* the displacement — so the separation is per side instead:
-    ///
-    /// | arm | head | tail | absorbs under | absorbs over | displaces |
-    /// |---|---|---|---|---|---|
-    /// | default | `max(align, 32)` | 32 | yes | yes | +64/alloc |
-    /// | `heap-band-notail` | `max(align, 32)` | 0 | yes | **no** | +32/alloc |
-    /// | `heap-band-nohead` | 0 | 64 | **no** | yes | +64/alloc |
-    ///
-    /// `heap-band-nohead` moves the record above the payload instead of below
-    /// it, so every arm still has one; for an alignment of 32 or less it asks
-    /// `dlmalloc` for exactly the same outer size as the default, which makes
-    /// the pair as close to a one-variable comparison as a heap admits — the
-    /// same chunks at the same addresses, with the payload at the other end of
-    /// its own chunk. `heap-band-notail`'s outer size is the payload plus the
-    /// head alone, and `dlmalloc` rounds a request to a 16-byte granule either
-    /// way, so the slack past the payload's end is byte-for-byte what an
-    /// unbanded build has.
-    ///
-    /// **The band width is not what governs this class's rate; the layout it
-    /// happens to produce is.** Do not read a quiet arm here as a fix, and do
-    /// not read a loud one as a regression.
     #[cfg(all(feature = "heap-band-notail", feature = "heap-band-nohead"))]
     compile_error!("heap-band-notail and heap-band-nohead are two arms of one sweep; build one");
 
@@ -191,19 +96,13 @@ mod tripwire {
 
     pub use shape::{HEAD_MIN, TAIL};
 
-    /// Where the record sits inside the tail band, and how much fill follows
-    /// it. With a head band the record is below the payload and the whole tail
-    /// is fill; without one the record is the first 32 bytes above the payload.
+    /// Where the record sits in the tail band, and how much of it is fill.
     pub const TAIL_FILL_OFF: usize = if HEAD_MIN == 0 { RECORD } else { 0 };
     pub const TAIL_FILL: usize = TAIL - TAIL_FILL_OFF;
-    /// Every band walk here steps eight bytes and stops on `!=`, which is only
-    /// the same loop as `<` while the step divides the band.
+    // Band walks step 8 bytes, so this must stay a multiple of 8 for the walk to land exactly on `TAIL_FILL`.
     const _: () = assert!(TAIL_FILL.is_multiple_of(8), "the tail band's fill is walked in words");
 
-    /// Head bytes for a request of this alignment. A head band is as wide as
-    /// the alignment because that is what keeps the payload aligned, which is
-    /// why `alloc_kernel_stack`'s `(KERNEL_STACK_SIZE, 4096)` gets 4096 bytes
-    /// of it — a guard page in the one form a heap allocation admits.
+    /// Head band width for an allocation of this alignment.
     pub const fn head(align: usize) -> usize {
         if HEAD_MIN == 0 {
             0
@@ -217,13 +116,11 @@ mod tripwire {
     /// What is actually asked of `dlmalloc`.
     pub fn outer(layout: Layout) -> Layout {
         let size = layout.size() + head(layout.align()) + TAIL;
-        // The alignment is unchanged and the size only grew, so the only way
-        // this fails is a size past `isize::MAX` — which the `MAX_HEAP_ALLOC`
-        // assert in the caller has already refused.
+        // Only fails past `isize::MAX`, already excluded by the caller's `MAX_HEAP_ALLOC` check.
         Layout::from_size_align(size, layout.align()).expect("heap-tripwire: banded layout")
     }
 
-    /// The record's first byte, for an allocation whose payload is `payload`.
+    /// The record's first byte for an allocation whose payload is `payload`.
     ///
     /// # Safety
     /// `payload`/`size` describe an allocation this module armed.
@@ -231,8 +128,7 @@ mod tripwire {
         if HEAD_MIN == 0 { payload.add(size) } else { payload.sub(RECORD) }
     }
 
-    /// Write the bands and hand back the payload. A null base stays null: a
-    /// refused allocation is still refused.
+    /// Write the bands and hand back the payload; a null base passes through unchanged.
     ///
     /// # Safety
     /// `base` is null, or points at `outer(layout)` bytes the caller owns.
@@ -251,27 +147,16 @@ mod tripwire {
         payload
     }
 
-    /// Read the bands back, retire the record and hand back what `dlmalloc`
-    /// was given.
+    /// Read the bands back, retire the record and hand back what `dlmalloc` was given.
     ///
-    /// **The retirement is what makes [`super::sweep`] sound.** A freed chunk
-    /// keeps whatever bytes it held until `dlmalloc` writes its free-list links
-    /// over them, so a record left standing in one would be found by a later
-    /// walk and read as a live allocation whose bands are now allocator state.
-    /// Both magic words go, so neither half of a retired record can be
-    /// mistaken for a live one.
+    /// Invariant: both magic words must be cleared, or a freed chunk's leftover record reads as a live allocation to [`super::sweep`].
     ///
     /// # Safety
     /// `ptr` and `layout` are a pair this module's [`arm`] produced.
     pub unsafe fn disarm(ptr: *mut u8, layout: Layout) -> (*mut u8, Layout) {
         check(ptr, layout, "dealloc");
         let head = head(layout.align());
-        // The rest of the head band, which [`check`] deliberately skips. Only
-        // here: it is `align - 32` bytes wide, 4064 of them on a kernel stack,
-        // and a live site pays that on every visit. A `while` and not a `for`,
-        // in this loop and every other band walk here: a shape whose band is
-        // zero wide makes that range empty at compile time, which is a clippy
-        // denial rather than a loop that runs no times.
+        // `while`, not `for`: a zero-width band makes the range empty at compile time, which clippy denies.
         let fill_bytes = head.saturating_sub(RECORD);
         let mut i = 0;
         while i < fill_bytes {
@@ -291,19 +176,12 @@ mod tripwire {
         (ptr.sub(head), outer(layout))
     }
 
-    /// The edges of an allocation that is still live: the record, and the fill
-    /// that shares a band with it.
+    /// Checks the live edges of an allocation: the record, and the fill band beside it.
     ///
-    /// **The record and not the whole head band, and that is the design.** In
-    /// the default shape the record sits at the very top of the head band,
-    /// immediately below the payload, which is the first thing a stack walking
-    /// off its own bottom writes. Widening this to the full band would buy
-    /// nothing a stack overflow does not already trip, at 508 more reads per
-    /// pass.
+    /// Checks the record only, not the whole head band: in the default shape it sits at the top of the head band, the first thing a stack running off its own bottom reaches.
     ///
     /// # Safety
-    /// `ptr` and `layout` are a pair this module's [`arm`] produced, and
-    /// nothing is freeing that allocation concurrently.
+    /// `ptr` and `layout` are a pair this module's [`arm`] produced, and nothing is freeing that allocation concurrently.
     pub unsafe fn check(ptr: *mut u8, layout: Layout, site: &str) {
         let record = record_ptr(ptr, layout.size());
         let open = record.cast::<u64>().read_unaligned();
@@ -323,17 +201,13 @@ mod tripwire {
         check_tail_fill(ptr, layout.size(), site);
     }
 
-    /// The fill bytes of the tail band, which is the whole of it in the default
-    /// shape and the 32 bytes above the record without a head band.
+    /// Checks the tail band's fill bytes.
     ///
     /// # Safety
     /// `ptr`/`size` describe an allocation this module armed.
     pub unsafe fn check_tail_fill(ptr: *mut u8, size: usize, site: &str) {
         let fill = ptr.add(size).add(TAIL_FILL_OFF);
-        // `!=` and not `<`, which the `heap-band-notail` shape makes a
-        // comparison against a type's minimum and clippy denies. The step
-        // divides the band, asserted beside the constant, so the two are the
-        // same loop.
+        // `!=`, not `<`: with `heap-band-notail` the band can be zero-width, and `< 0` is a clippy denial.
         let mut off = 0;
         while off != TAIL_FILL {
             let word = fill.add(off).cast::<u64>().read_unaligned();
@@ -352,14 +226,7 @@ mod tripwire {
         }
     }
 
-    /// The first four words of a band, for the message a fire produces.
-    ///
-    /// **One dirty word does not say what wrote it and four often do**: a
-    /// `stack_top + 16` at `stack_top` followed by a stack segment selector and
-    /// two untouched words reads as an interrupt frame's saved `RSP`, and that
-    /// reading is unfalsifiable from a report that printed one word. A shape
-    /// whose band is shorter than four words reads `FILL_WORD` past the end of
-    /// it, which is what an untouched word reads as anyway.
+    /// First four words of a band, for the fire message: one dirty word alone can't be told from a plausible false read.
     ///
     /// # Safety
     /// `fill` is the first byte of a band this module armed.
@@ -393,54 +260,20 @@ mod tripwire {
     pub unsafe fn disarm(ptr: *mut u8, layout: Layout) -> (*mut u8, Layout) { (ptr, layout) }
 }
 
-/// Read the bands of a *live* heap allocation.
+/// Reads the bands of a live heap allocation, before it is freed.
 ///
-/// For an allocation whose corruption would otherwise not be found until it is
-/// freed, and whose freeing is far too late — the kernel stacks, which are
-/// freed only once the task that ran off one is already gone.
-///
-/// Behind the feature rather than a no-op without it, because its one caller is
-/// too: a shipping kernel that could call this could only be told "no".
+/// Gated on the feature rather than a no-op without it: its one caller is gated too.
 ///
 /// # Safety
-/// `ptr` and `layout` are a pair `GlobalAlloc::alloc` returned, and nothing is
-/// freeing that allocation concurrently.
+/// `ptr` and `layout` are a pair `GlobalAlloc::alloc` returned, and nothing is freeing that allocation concurrently.
 #[cfg(feature = "heap-tripwire")]
 pub unsafe fn check_live(ptr: *mut u8, layout: Layout, site: &str) {
     tripwire::check(ptr, layout, site)
 }
 
-/// The sweep: every live band in the heap, read at a point of the caller's
-/// choosing rather than at the free that may never come.
+/// Reads every live band in the heap, at a point the caller chooses rather than waiting for a free that may never come.
 ///
-/// **What it is for, and it is one question.** A band is only ever read at
-/// `dealloc` and, for the running task's kernel stack, at every pass: an
-/// allocation live from early boot to `compositor: ready` is never freed inside
-/// a boot, so its band is never read at all, and a write that the bands
-/// *absorb* is indistinguishable from one they *displace*. This reads them, so
-/// "no band fired" becomes either a named victim or a real negative.
-///
-/// **No registry, and that is the design.** [`KernelPageSource`] is the only
-/// thing that hands `dlmalloc` a page, so the kernel already knows every 2 MiB
-/// page the heap owns; a band is self-describing (`tripwire::RECORD`), so a
-/// walk of those pages at eight-byte alignment finds every live band in the
-/// machine with no per-allocation bookkeeping, no intrusive list and no second
-/// lock.
-///
-/// **The lock is held across the walk and dropped before the panic.** Held,
-/// because `dlmalloc` carving or coalescing a chunk under the walk would read
-/// as corruption; dropped, because `KernelAllocator`'s DESIGN RULE is exactly
-/// that a panic under that lock abandons the heap with the lock held, and the
-/// report would never reach the wire. So the walk answers with a value and the
-/// panic happens outside it.
-///
-/// **This reader is not free of the machine it reads.** It compiles no
-/// decision, so it is not causing corruption — what it does is take
-/// `dlmalloc`'s lock on the pass path every 25 ms and hold it for a walk of
-/// every heap page, and that is enough to move this class's rate from "does not
-/// happen" to the unbanded baseline's own. **A kernel carrying this is not the
-/// kernel a rate was measured on**; hold the instrument set fixed across any
-/// two arms that are being compared.
+/// Invariant: the panic must happen after the lock guarding the walk is dropped, or a panicking sweep abandons the heap with the lock held.
 #[cfg(feature = "heap-sweep")]
 pub fn sweep(site: &str) {
     SWEPT.0.fetch_add(1, Ordering::Relaxed);
@@ -467,24 +300,14 @@ pub fn sweep(site: &str) {
     );
 }
 
-/// Hold `dlmalloc`'s lock for `ns` of guest time and do nothing with it.
-///
-/// **The sweep's cost without the sweep.** The two things `heap-sweep` does
-/// that a bandless kernel does not are *spend time on the pass path* and *hold
-/// this lock while it does*, and the lock has never been separated from the
-/// delay. This is the half with the lock; `sched::driver`'s `pass-spin` is the
-/// same visit without it, and the pair is one experiment in two arms.
-///
-/// Nothing is read or written through the guard, so a kernel carrying this
-/// allocates exactly what one without it allocates — later.
+/// Holds `dlmalloc`'s lock for `ns` of guest time; touches nothing through it.
 #[cfg(feature = "heap-lockspin")]
 pub fn hold_lock(ns: u64) {
     let _held = ALLOCATOR.dlmalloc.lock();
     crate::sched::driver::spin_for(ns);
 }
 
-/// How many sweeps have run and how many live records the last one saw, for
-/// [`crate::hw::report_contexts`]. `None` from a kernel that carries no sweep.
+/// Sweep count and live records from the last sweep, or `None` without `heap-sweep`.
 #[cfg(feature = "heap-sweep")]
 pub fn sweep_stats() -> Option<(u64, u64, bool)> {
     Some((
@@ -505,8 +328,7 @@ pub fn sweep_stats() -> Option<(u64, u64, bool)> {
 static SWEPT: (core::sync::atomic::AtomicU64, core::sync::atomic::AtomicU64) =
     (core::sync::atomic::AtomicU64::new(0), core::sync::atomic::AtomicU64::new(0));
 
-/// One band byte that is not what [`tripwire::arm`] wrote. Plain data, because
-/// the walk that produces it runs under `dlmalloc.lock()` and may not panic.
+/// A band byte that didn't match; plain data because the walk that builds it may not panic.
 #[cfg(feature = "heap-sweep")]
 #[derive(Clone, Copy)]
 struct Bad {
@@ -519,29 +341,20 @@ struct Bad {
     want: u64,
 }
 
-/// Every heap page the kernel has handed `dlmalloc`.
-///
-/// Maintained by [`KernelPageSource`], so it is written under `dlmalloc.lock()`
-/// and read by the sweep under the same one.
+/// Every heap page handed to `dlmalloc`; written and read only under `dlmalloc.lock()`.
 #[cfg(feature = "heap-sweep")]
 mod pages {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    /// 512 pages is 1 GiB of kernel heap. Measured, this boot reaches single
-    /// digits; the table is sized so the walk stays complete under any
-    /// workload this kernel has, not so it is tight.
+    /// Sized so the walk stays complete for any workload this kernel has.
     const MAX: usize = 512;
 
     pub static BASES: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
 
-    /// Set if the table ever filled, and reported by
-    /// [`crate::hw::report_contexts`]: past that point the sweep covers some of
-    /// the heap rather than all of it, which is a weaker instrument and worth
-    /// knowing about, but it is not a reason to kill the machine.
+    /// Set once the table fills; past that point the sweep covers only part of the heap.
     pub static OVERFLOWED: AtomicBool = AtomicBool::new(false);
 
-    /// DESIGN RULE, inherited from [`super::KernelPageSource`]: this runs
-    /// inside `dlmalloc.lock()` and may not panic.
+    /// Invariant: runs inside `dlmalloc.lock()` and may not panic.
     pub fn add(base: u64) {
         for slot in &BASES {
             if slot.compare_exchange(0, base, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
@@ -561,9 +374,7 @@ mod pages {
     }
 }
 
-/// Walk every heap page for band records and read each one's bands back.
-///
-/// **It answers rather than asserts.** Its caller holds `dlmalloc.lock()`.
+/// Walks every heap page for band records; answers rather than asserting. Caller holds `dlmalloc.lock()`.
 #[cfg(feature = "heap-sweep")]
 fn walk() -> Option<Bad> {
     let mut seen = 0u64;
@@ -573,10 +384,7 @@ fn walk() -> Option<Bad> {
         if base == 0 {
             continue;
         }
-        // SAFETY: `base` is a 2 MiB page `pmm` handed this heap and has not
-        // taken back — `KernelPageSource::free` clears the slot before it
-        // returns the page — so the whole span is mapped in the direct map and
-        // this reads it as words, which any byte pattern is a valid one of.
+        // SAFETY: `KernelPageSource::free` clears this slot before returning the page, so `base` is still live and mapped — any byte pattern here is valid to read as words.
         let words = unsafe {
             core::slice::from_raw_parts(base as *const u64, PAGE_2M as usize / 8)
         };
@@ -585,14 +393,11 @@ fn walk() -> Option<Bad> {
             if *word != tripwire::open_word(record) {
                 continue;
             }
-            // SAFETY: `record` is a word inside this page, and `identify`
-            // reads no further than the three words above it before it has
-            // decided the four are a record.
+            // SAFETY: `record` is a word inside this page; `identify` reads no further than the three words above it before validating.
             let Some(found) = (unsafe { identify(record, base) }) else { continue };
             seen += 1;
             if bad.is_none() {
-                // SAFETY: `identify` has placed the whole banded allocation
-                // inside this page.
+                // SAFETY: `identify` placed the whole banded allocation inside this page.
                 bad = unsafe { inspect(found) };
             }
         }
@@ -601,8 +406,7 @@ fn walk() -> Option<Bad> {
     bad
 }
 
-/// A record the walk has decided really is one, resolved to the allocation
-/// around it.
+/// A record the walk confirmed, resolved to its allocation.
 #[cfg(feature = "heap-sweep")]
 #[derive(Clone, Copy)]
 struct Found {
@@ -611,29 +415,9 @@ struct Found {
     align: usize,
 }
 
-/// Is the word at `record` the start of a real record, and where is the
-/// allocation it describes?
+/// Checks whether `record` is the start of a real band record and, if so, resolves the allocation it describes.
 ///
-/// **Every test here exists to make a false positive impossible, not merely
-/// unlikely.** The walk has no registry to check a candidate against: what it
-/// has is a word that matched, and the walk runs over payload bytes as well as
-/// band bytes — over kernel stacks, which are 128 KiB heap allocations, and
-/// over anything else the kernel stores. So a candidate has to be structurally
-/// a record before its bands are read:
-///
-/// * both magic words, each tied to the address it stands at, so a copy of one
-///   somewhere else is not one;
-/// * a size no larger than a heap allocation can be, and an alignment that is a
-///   power of two the allocator can serve;
-/// * a payload actually aligned to the alignment the record claims;
-/// * the whole banded allocation inside the page the walk is in.
-///
-/// A candidate that fails any of these is **skipped and not reported**. A
-/// record whose own magic a stray write destroyed is invisible to this walk,
-/// which is a real limit and the right trade: `dealloc` and the pass-time check
-/// read the record against the layout its *holder* names, which is the check
-/// that catches that case, and the thing this walk exists to find is a dirty
-/// *fill* band on an allocation nobody will free before the boot ends.
+/// A candidate that fails any structural check is skipped, not reported.
 ///
 /// # Safety
 /// `record` is a word inside the 2 MiB page at `base`.
@@ -688,11 +472,8 @@ unsafe fn inspect(found: Found) -> Option<Bad> {
             want: tripwire::FILL_WORD,
         })
     };
-    // The tail band's fill, then the head band's. Both are what a bounded
-    // overrun lands in, and neither is read anywhere else for an allocation
-    // that is never freed.
+    // Checks the tail band first, then the head band.
     let tail = payload.add(size).add(tripwire::TAIL_FILL_OFF);
-    // `!=` for `check_tail_fill`'s reason.
     let mut off = 0;
     while off != tripwire::TAIL_FILL {
         let word = tail.add(off).cast::<u64>().read_unaligned();
@@ -735,21 +516,7 @@ impl KernelAllocator {
     }
 }
 
-// SAFETY: `GlobalAlloc` requires `alloc(layout)` to return either null or
-// `layout.size()` bytes valid for reads/writes at `layout.align()`, and
-// `dealloc(ptr, layout)` to only ever be called with the exact `(ptr,
-// layout)` pair a prior `alloc` on this same allocator returned — Rust's
-// allocation machinery (`Box`, `Vec`, `Arc`, …) is the caller and upholds
-// that pairing by construction. The three phases keep the contract true
-// across boot: a pointer `alloc` minted during `PHASE_EARLY` (out of
-// `EARLY_BUF`, bump-allocated) is recognized on `dealloc` by address range
-// (`is_early_ptr`), not by re-reading the current phase, so it is freed
-// correctly even after `init()` has since switched the allocator to
-// `PHASE_READY`; a `PHASE_READY` pointer is always one `dlm.malloc` itself
-// returned, freed through the same `dlmalloc` instance, per dlmalloc's own
-// bookkeeping. The struct's own DESIGN RULE is what keeps every path here
-// panic-free, which is load-bearing: `dlmalloc.lock()` cannot be poisoned
-// and recovered from.
+// SAFETY: an early-phase pointer is recognized on `dealloc` by address range (`is_early_ptr`), not by re-reading the phase, so it frees correctly even after `init()` switches to PHASE_READY.
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match self.phase.load(Ordering::Acquire) {
@@ -758,31 +525,11 @@ unsafe impl GlobalAlloc for KernelAllocator {
             PHASE_READY => {
                 assert!(layout.align() < PAGE_2M as usize,
                     "GlobalAlloc: {:#x} bytes with {:#x} align — use PageAlloc", layout.size(), layout.align());
-                // Before the lock, deliberately: this is the ceiling every
-                // bound upstream of the heap is derived against, and a panic
-                // inside `dlmalloc.lock()` costs the machine rather than the
-                // process.
-                //
-                // `MAX_HEAP_ALLOC` rather than whatever dlmalloc's padding
-                // happens to permit, so the documented number is the enforced
-                // number — the way `MAX_HANDLES` and `MAX_USER_STR` are at their
-                // own primitives: 2,097,152 asks the page source for 2,162,688,
-                // which it cannot back.
-                //
-                // Being past this is sufficient for a request to fail and not
-                // necessary, which is why the page source is total rather
-                // than merely unreachable: 2,093,056 with 4096-byte alignment
-                // satisfies the check and still asks for 2,162,688, because
-                // `memalign` pads by the alignment first.
+                // Checked before the lock: a panic inside `dlmalloc.lock()` would abandon the heap with the lock held.
                 assert!(layout.size() <= MAX_HEAP_ALLOC,
                     "GlobalAlloc: {} bytes exceeds MAX_HEAP_ALLOC ({}) — a caller is using alloc for page-scale memory",
                     layout.size(), MAX_HEAP_ALLOC);
-                // The bands are written after the lock is dropped and read
-                // before it is taken, so the tripwire never runs inside
-                // `dlmalloc.lock()` — the DESIGN RULE above is what makes that
-                // placement load-bearing rather than tidy: a band that fails
-                // inside the lock would abandon the heap with the lock held,
-                // and the report would never reach the wire.
+                // Bands are armed after the lock drops, so a failing band never fires inside `dlmalloc.lock()`.
                 let outer = tripwire::outer(layout);
                 let base = {
                     let mut dlm = self.dlmalloc.lock();
@@ -790,9 +537,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 };
                 tripwire::arm(base, layout)
             }
-            // The three phases are the only bytes `init_early`/`init` ever
-            // store; any other value is a corrupted phase, which is
-            // unrecoverable — fail loudly rather than serve it as READY.
+            // Any byte other than the three phases is corrupt state — fail loudly rather than serve it as READY.
             other => panic!("KernelAllocator: corrupt phase byte {other:#x}"),
         }
     }
