@@ -9,13 +9,6 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::vfs::FileSystem;
 
-/// Reads a tmpfs file for the ELF loader, which demand-pages every executable
-/// through a `FileBacking` and had no way to reach a mount whose pages are its
-/// only storage. Without this nothing under /tmp was spawnable or dlopenable.
-///
-/// `copy_page_out`, not `file_cache::read_page`: a tmpfs page *is* the file, so
-/// there is no miss for a backing to satisfy — and the miss path is what calls
-/// a backing, so reading through it here would recurse.
 struct TmpfsBacking {
     file_id: FileId,
 }
@@ -23,8 +16,8 @@ struct TmpfsBacking {
 impl FileBacking for TmpfsBacking {
     /// Never `Err`: the pages are the file, so there is no device to refuse.
     fn read_page(&self, file_offset: u64, buf: &mut [u8; 4096]) -> crate::block::BlockResult {
-        // An absent page below the file size is a hole a seek-and-write left,
-        // and a hole reads as zeros.
+        // copy_page_out, not file_cache::read_page: reading through the miss path here would recurse.
+        // A hole below the file size, left by a seek-and-write, reads as zero.
         if file_offset >= file_cache::size(self.file_id)
             || !file_cache::copy_page_out(self.file_id, (file_offset / 4096) as u32, buf)
         {
@@ -38,8 +31,7 @@ impl FileBacking for TmpfsBacking {
     }
 }
 
-/// In-memory filesystem. File data lives in the unified file cache
-/// (non-evictable pages). tmpfs only stores the namespace mapping.
+/// In-memory filesystem: file data lives in the file cache.
 pub struct TmpFs {
     /// name → (FileId, mtime)
     files: BTreeMap<String, (FileId, u64)>,
@@ -53,9 +45,7 @@ impl TmpFs {
 }
 
 impl FileSystem for TmpFs {
-    /// The one implementation that can honour the limit before it allocates,
-    /// and the one that needs to: nothing caps how many files a process may
-    /// create here.
+    // Nothing else caps file count here.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         if self.files.len() > limit {
             return Err(SyscallError::ResourceExhausted);
@@ -65,8 +55,6 @@ impl FileSystem for TmpFs {
         }).collect())
     }
 
-    /// Never `Err`. There is no device under this mount to refuse, which is the
-    /// same reason `TmpfsBacking::read_page` cannot fail.
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
         self.files.get(name).map(|(_, mtime)| *mtime).ok_or(SyscallError::NotFound)
     }
@@ -91,7 +79,7 @@ impl FileSystem for TmpFs {
     }
 
     fn close_file(&mut self, _file_id: FileId) {
-        // tmpfs: no-op. Pages persist in file cache (non-evictable).
+        // No-op: tmpfs pages already persist in the non-evictable file cache.
     }
 
     fn delete(&mut self, name: &str) -> Result<(), SyscallError> {

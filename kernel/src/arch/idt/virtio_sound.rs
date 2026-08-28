@@ -1,8 +1,6 @@
 use super::device_irq::device_irq_entry;
 
-/// Rust half of the MSI-X handler. Lock-free and heap-free: it may interrupt a
-/// CPU that holds the controller lock, which disables preemption and not
-/// interrupts.
+// Lock-free and heap-free: may interrupt a CPU holding the controller lock, which disables preemption but not interrupts.
 extern "sysv64" fn virtio_sound_handler() {
     crate::irq_census::irq_took!(Sound);
     crate::drivers::virtio_sound::isr_complete();

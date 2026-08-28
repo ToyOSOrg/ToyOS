@@ -1,16 +1,11 @@
-//! The caller's own address space, and the modules loaded into it.
+//! The caller's own address space: `mmap`/`munmap` place and remove anonymous
+//! regions, `dlopen` maps a library image, `SYS_TLS_ALLOC_BLOCK` maps a
+//! thread's per-module TLS block, `SYS_QUERY_MODULES` reports what is loaded.
+//! Exhausting address space is an error return, never an `.expect`.
 //!
-//! Four things share this file because they share one resource: `mmap` and
-//! `munmap` place and remove anonymous regions, `dlopen` maps a library image
-//! into the same space, `SYS_TLS_ALLOC_BLOCK` maps a thread's per-module block,
-//! and `SYS_QUERY_MODULES` reports what is in there. A process's virtual address
-//! space is a resource like any other, so exhausting it is an error return and
-//! never an `.expect` in syscall context.
-//!
-//! **Pages leave a mapping under no lock but their own.** The `Unmapped` a
-//! removal produces is dropped outside `with_process_data`, because the drop
-//! shoots down and waits and a sibling thread can be spinning on that same lock
-//! with `IF` clear.
+//! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
+//! shoots down and waits, and a sibling thread can be spinning on that same
+//! lock with `IF` clear.
 
 use crate::mm::paging::{CachePolicy, Occupancy, Prot};
 use crate::user_ptr::UserBytesMut;
@@ -19,59 +14,24 @@ use crate::{log, process, vfs};
 
 use toyos_abi::syscall::*;
 
-/// Map anonymous memory, honouring `prot`.
-///
-/// A mapping made readable and writable whatever the caller asked for turns
-/// `userland/libc`'s translation of POSIX `PROT_NONE` into a writable guard
-/// page, and the stack-overflow detection built on it into nothing.
-///
-/// With 2 MiB pages and no `mprotect`, protection is decided once, here. A
-/// mapping without `WRITE` gets a read-only PDE, and `MmapProt::NONE` gets no
-/// PDE at all: the range is reserved so nothing else lands in it, no physical
-/// memory is pinned behind a page whose purpose is to fault, and
-/// `process::handle_page_fault` refuses to fill a `RegionKind::Mapped` region
-/// so the reservation cannot be demand-paged back into existence.
-///
-/// `MmapFlags::FIXED` places the mapping at exactly `req_addr` rather than
-/// wherever the placement search would put it, and the range it names is its
-/// own to answer for: it may replace exactly one whole mapping this same
-/// syscall made, and every other overlap — part of a region, several regions,
-/// a range belonging to the loader or a device claim — is refused with
-/// `InvalidArgument`. POSIX unmaps whatever is in the way and says nothing;
-/// this kernel does not have that silence to give, and the address a C program
-/// passes is as untrusted as any other syscall argument.
+/// Map anonymous memory honouring `prot`; `MmapFlags::FIXED` places it at
+/// exactly `req_addr`, replacing at most one whole mapping this process made.
 pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlags) -> u64 {
-    // `size` crossed the trust boundary. Zero is a request for nothing and a
-    // size whose 2 MiB rounding does not fit cannot be expressed at all;
-    // neither is an allocation failure, so neither is ResourceExhausted. The
-    // rounding must not be allowed to wrap — that would silently turn a huge
-    // request into a small one. No policy ceiling is needed above that: the
-    // PMM's own `free_count` check is a physical limit.
+    // `size` crossed the trust boundary: zero, and a size whose 2 MiB rounding
+    // would wrap, are refused rather than silently turned into a small request.
+    // No cap beyond that: the PMM's own `free_count` check is the physical limit.
     if size == 0 || (size as usize).checked_add(crate::mm::PAGE_2M as usize - 1).is_none() {
         return SyscallError::InvalidArgument.to_u64();
     }
     let aligned = crate::mm::align_2m(size as usize);
     let fixed = flags.contains(MmapFlags::FIXED);
-    // **Anonymous memory is never executable, and `MmapProt` has no bit that
-    // asks for it.** There is no JIT in this system and no `mprotect` to turn
-    // a page into code afterwards, so the heap, every guard page and every
-    // `MAP_ANONYMOUS` arena a libc hands out are data — which is what makes a
-    // stack or heap overflow a fault instead of a foothold.
+    // Anonymous memory is never executable: `MmapProt` has no bit for it and
+    // there is no `mprotect` to add one later.
     let mapping_prot = if prot.contains(MmapProt::WRITE) { Prot::ReadWrite } else { Prot::Read };
 
-    // A fixed mapping bypasses `find_gap`, so it has to respect `find_gap`'s
-    // range itself: `PageTables::remap` only asserts 2 MiB alignment, so a
-    // kernel-half `req_addr` reaches `ensure_table`, which ORs PAGE_USER onto
-    // the *shared* kernel PML4 entry (`new_user` shallow-copies PML4[256..512])
-    // and writes a PDE into the shared kernel page directory — a user-writable
-    // window visible to the kernel and every other process.
-    //
-    // A 2 MiB-page kernel cannot honour a finer-grained `req_addr`, and there
-    // is nothing to clamp a request to when the granularity itself is what
-    // cannot be met, so a misaligned one is refused rather than rounded. That
-    // is also what `toyos-abi`'s `mmap` documents, and it keeps `start ==
-    // req_addr`, so the address recorded in `mmap_regions` is the one handed
-    // back and `munmap` can find it.
+    // A misaligned or kernel-half `req_addr` is refused, not rounded or
+    // clamped: `ensure_table` would OR `PAGE_USER` onto the shared kernel PML4
+    // entry, opening a user-writable window in every process's page tables.
     let fixed_start = if fixed && req_addr != 0 {
         let Some(end) = req_addr.checked_add(aligned as u64) else {
             return SyscallError::InvalidArgument.to_u64();
@@ -83,14 +43,17 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
         {
             return SyscallError::InvalidArgument.to_u64();
         }
+        // Never rounded: `mmap_regions` and `munmap` key on this exact address.
         Some(req_addr)
     } else {
         None
     };
 
     // Allocate only once the request is known to be satisfiable, so a refused
-    // fixed mapping does not leak its pages.
+    // fixed mapping leaks no pages.
     let pages = if prot == MmapProt::NONE {
+        // No physical page is pinned behind a reservation whose purpose is to
+        // fault: `handle_page_fault` refuses to fill a `Mapped` region.
         None
     } else {
         match process::PageAlloc::new(aligned, crate::mm::pmm::Category::Mmap) {
@@ -103,25 +66,12 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
         let pt = process::current_address_space();
         let start = UserAddr::new(start);
         // Both ledgers move together, under both locks, in the same order as
-        // the arm below: the process data, then the address space.
+        // the arm below: process data, then address space.
         let replaced = process::with_process_data(|data| {
             let mut as_guard = pt.lock();
-            // A placed mapping names its own range, so the question `find_gap`
-            // answers for every other mapping has to be asked here. A mapping
-            // that reached `mmap_regions` and not `regions` — which is what
-            // the placement search reads — would hand the next anonymous
-            // `mmap` the range this one is living in, and `map_range` would
-            // assert on a present PDE: three ordinary syscalls from any C
-            // program that passes `MAP_FIXED`, and the machine is gone.
-            //
-            // One whole mapping of this process's own making is replaced — the
-            // address keeps its meaning and changes what it names. Every other
-            // overlap is refused: taking part of a region would need a split
-            // the address space has no machinery for, and a range an ELF
-            // segment, a library image, the stack or a shared window owns is
-            // not `mmap`'s to take. Neither is honoured halfway, and neither
-            // reaches `map_range`, whose assert is a kernel-bug assert again
-            // rather than one syscall away.
+            // Only a whole mapping this process itself made may be replaced;
+            // a partial overlap is refused — `map_range` would otherwise
+            // assert on an already-present PDE.
             let replacing = match as_guard.occupancy(start, aligned as u64) {
                 Occupancy::Free => None,
                 Occupancy::Whole => {
@@ -137,8 +87,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
                 Occupancy::Partial => return Err(SyscallError::InvalidArgument),
             };
             // Out of both ledgers before the new mapping goes into either, so
-            // `insert_region` is never asked to overlap and the pages of what
-            // was there leave with it.
+            // `insert_region` never overlaps.
             let old = replacing.map(|idx| {
                 let old = data.mmap_regions.swap_remove(idx);
                 as_guard
@@ -171,12 +120,8 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
             Ok(old.map(crate::mm::Unmapped::new))
         });
         match replaced {
-            // Dropped out here, with nothing held: the drop shoots down and
-            // waits, and a replacement is what owes that wait — a sibling
-            // thread holds a translation for exactly this range and the pages
-            // behind the old mapping are on their way back to the PMM. A
-            // mapping placed where nothing was owes none, which is why the arm
-            // below shoots down nowhere either.
+            // Dropped here with no lock held: the drop shoots down and waits,
+            // and only a replaced mapping owes that wait.
             Ok(old) => {
                 drop(old);
                 req_addr
@@ -206,12 +151,8 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
     }
 }
 
-/// The pages go back to the PMM here, so this is the syscall the shootdown
-/// matters most on: a sibling thread of the same process holds translations for
-/// exactly this range and has to be told.
-///
-/// One path for every mapping, placed or not — a second free path that cleared
-/// page-table entries would leave the mapping registered nowhere.
+/// Frees an anonymous mapping and shoots down every sibling thread's
+/// translation for its range.
 pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
     let pt = process::current_address_space();
     let taken = process::with_process_data(|data| {
@@ -226,9 +167,8 @@ pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
     let Some(unmapped) = taken else {
         return SyscallError::NotFound.to_u64();
     };
-    // Dropped out here, not inside the closure: the drop shoots down and waits,
-    // and the process-data lock the closure holds is one a sibling can be spinning
-    // on with `IF` clear.
+    // Dropped here, outside the closure: the drop shoots down and waits, and a
+    // sibling can be spinning on the process-data lock with `IF` clear.
     drop(unmapped);
     0
 }
@@ -261,23 +201,17 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         }
     };
 
-    // A process's virtual address space is a resource like any other, and
-    // `SYS_DLOPEN` neither dedups a path nor frees anything on `SYS_DLCLOSE`,
-    // so exhausting it is a loop any process can write. Exhaustion is an error
-    // return, not an `.expect` in syscall context.
     let pt = process::current_address_space();
     let mapped = process::with_process_data(|_data| {
-        // One `map_into` for both ownership modes, and the module's own program
-        // headers decide which of its pages may be written and which may be
-        // executed. An arm that mapped the whole image writable would make
-        // every library in every process writable *and* executable.
+        // The module's own program headers decide which pages are writable
+        // and which executable; mapping the whole image writable would make
+        // it executable too.
         let Some(vaddr) = lib.map_into(&pt) else {
             return Err(SyscallError::ResourceExhausted);
         };
-        // A `Shared` module's windows are written over a range this address
-        // space may already have handed out and reused, and a sibling thread
-        // can be running in it: what `map_window` discharged reaches this CPU
-        // only, and the rest of the machine is told here.
+        // A `Shared` module's windows may reuse a range already handed out;
+        // `map_window`'s shootdown reached only this CPU, so the rest of the
+        // machine is told here.
         if matches!(lib.memory, crate::elf::LibMemory::Shared { .. }) {
             crate::arch::tlb::shootdown();
         }
@@ -300,8 +234,6 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         let mut data = data_arc.lock();
         crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
 
-        // Apply TPOFF relocs for cross-module IE references (symbols from static-linked modules
-        // like std/core whose TLS lives in the static block with known TP-relative offsets).
         if data.elf.tls_total_memsz > 0 {
             let tls_info = crate::elf::TlsModuleInfo {
                 libs: &data.elf.loaded_libs,
@@ -318,10 +250,8 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
                 memsz: lib.tls_memsz, base_offset: 0, module_id,
                 is_static: false,
             });
-            // Apply DTPMOD64/DTPOFF64: write module_id + per-symbol offset into GOT slot pairs.
-            // For cross-module GD TLS (r_sym != 0, symbol undefined), resolve to the
-            // defining module's ID and TLS offset. DTV entries are left DTV_UNALLOCATED;
-            // __tls_get_addr allocates on first access.
+            // DTV entries are left DTV_UNALLOCATED; `__tls_get_addr` allocates
+            // on first access.
             let tls_info = crate::elf::TlsModuleInfo {
                 libs: &data.elf.loaded_libs,
                 modules: &data.elf.tls_modules,
@@ -330,8 +260,8 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         }
     }
 
-    // Format: [init_array_vaddr: u64, init_array_count: u64], the vaddr rebased
-    // to the library's user_base.
+    // init_info layout: [init_array_vaddr, init_array_count], vaddr rebased to
+    // user_base.
     let init_info = [
         if lib.init_array_vaddr != 0 { lib.user_base.raw() + lib.init_array_vaddr } else { 0 },
         lib.init_array_size / 8,
@@ -345,9 +275,8 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         idx
     };
 
-    // After the library is registered, because it is mapped either way: a
-    // failure here is the caller losing its handle, not the address space
-    // losing track of a mapping.
+    // Registered before this copy_out: on failure the caller loses its
+    // handle, not the address space its mapping.
     if let Some(out) = init_out {
         if ctx.copy_out(out, &init_info).is_err() {
             return SyscallError::BadAddress.to_u64();
@@ -356,18 +285,9 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     idx as u64
 }
 
-/// Allocate a TLS block for the current thread's DTV entry for `module_id`.
-/// Called by __tls_get_addr's slow path when the DTV entry is DTV_UNALLOCATED.
-/// Returns the block's virtual address, also written into the DTV.
-///
-/// `module_id` crosses the trust boundary: every rejection here is an error
-/// return, never a panic.
-///
-/// The DTV is found through the thread's own kernel-side TLS allocation, never
-/// by chasing a pointer out of the FS base: CR4.FSGSBASE is on, so userland
-/// owns that register, and a raw `AddressSpace::translate` of TCB[8] applies no
-/// user-half check and resolves kernel addresses through the direct map
-/// shallow-copied into every user PML4.
+/// Allocates a TLS block for the current thread's DTV entry for `module_id`,
+/// returning its virtual address. `module_id` crosses the trust boundary:
+/// every rejection is an error return, never a panic.
 pub(super) fn sys_tls_alloc_block(module_id: u64) -> u64 {
     match tls_alloc_block(module_id) {
         Ok(vaddr) => vaddr,
@@ -380,9 +300,8 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
     if module_id == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    // The DTV is a fixed-capacity array the kernel wrote; a module past its
-    // end has nowhere to be recorded. Bounded by the kernel's own constant,
-    // never by the `len` field in the DTV, which the process can rewrite.
+    // Bounded by the kernel's own `DTV_INITIAL_CAPACITY`, never the DTV's own
+    // `len` field, which the process can rewrite.
     if module_id > crate::loader::DTV_INITIAL_CAPACITY as u64 {
         return Err(SyscallError::ResourceExhausted);
     }
@@ -395,11 +314,9 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
         (m.memsz, m.template)
     };
 
-    // A DTV entry leaves DTV_UNALLOCATED once and never returns, so a repeat
-    // call for the same (thread, module) is the same block asked for twice.
-    // Serving a fresh one frees pages userland still points into while the
-    // first mapping stays present, USER and writable, over whatever the PMM
-    // hands out next.
+    // A DTV entry leaves DTV_UNALLOCATED once and never returns; serving a
+    // fresh block on a repeat call would leave the first mapping present,
+    // USER and writable, over whatever the PMM hands out next.
     let tid = process::current_tid();
     let existing = process::with_process_data(|data| {
         data.elf.dynamic_tls_blocks.get(&(tid, module_id)).map(|b| b.vaddr())
@@ -410,20 +327,10 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
         None => {
             let page_alloc = process::PageAlloc::new(tls_memsz.max(1), crate::mm::pmm::Category::Tls)
                 .ok_or(SyscallError::ResourceExhausted)?;
-            // SAFETY: `page_alloc` is a fresh `PageAlloc` of at least
-            // `tls_memsz.max(1)` bytes that nothing else has a pointer to yet —
-            // it is mapped into the process below, not above. `template` is the
-            // module's TLS image out of the loaded ELF, live for as long as the
-            // module is, and `template.size()` is its own length, which
-            // `elf::tls_modules` derives from the same program header as
-            // `m.memsz`. The two regions are a fresh physical page and kernel
-            // image data, so they cannot overlap.
-            //
-            // Irreducible only for want of a bounded window over `PageAlloc`:
-            // the length checked here is the *source's*, and nothing types the
-            // destination's — the root-file sweep filed exactly that
-            // (`issues/kernel/pagealloc-has-no-checked-window.md`), and this is a
-            // third site of the same shape.
+            // SAFETY: `page_alloc` is a fresh, unaliased allocation of at
+            // least `tls_memsz.max(1)` bytes; `template.size()` comes from the
+            // same program header as `m.memsz`; the two regions (a fresh
+            // physical page, kernel ELF image data) cannot overlap.
             unsafe {
                 if let Some(template) = &tls_template {
                     core::ptr::copy_nonoverlapping(template.base(), page_alloc.ptr(), template.size());
@@ -443,24 +350,17 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
         }
     };
 
-    // The DTV lives at offset 0 of the thread's own TLS allocation. Every user
-    // thread gets one from `setup_tls`/`setup_combined_tls`, so its absence is
-    // a kernel bug.
+    // Found through the thread's own kernel-side TLS allocation, never by
+    // chasing a pointer out of the FS base: FSGSBASE lets userland set that
+    // register. Every thread gets an allocation from `setup_tls`/
+    // `setup_combined_tls`; its absence here is a kernel bug.
     process::with_current_data(|data| {
         let tls = data.tls_pages.as_ref().expect("sys_tls_alloc_block: thread has no TLS allocation");
         let dtv_kern = tls.ptr() as *mut u64;
-        // SAFETY: `module_id` crossed the trust boundary and is bounded at the
-        // top of `tls_alloc_block` — non-zero and at most
-        // `loader::DTV_INITIAL_CAPACITY`, checked against the kernel's own
-        // constant and never against the `len` word in the DTV, which the
-        // process can rewrite. `loader` lays the DTV out at offset 0 of the
-        // thread's kernel-side TLS allocation with `DTV_INITIAL_CAPACITY` entries
-        // after the two header words, so `2 + (module_id - 1)` is in bounds. The
-        // allocation is this thread's own and this thread is the one running.
-        //
-        // **The bound and the write are fifty lines and one function apart**,
-        // which is the same missing type as the `copy_nonoverlapping` above:
-        // nothing here would notice the check moving.
+        // SAFETY: `module_id` is bounded non-zero and at most
+        // `DTV_INITIAL_CAPACITY` at the top of this function, so
+        // `2 + (module_id - 1)` indexes within the DTV's entries after its two
+        // header words, in this thread's own allocation.
         unsafe { *dtv_kern.add(2 + (module_id - 1) as usize) = tls_vaddr.raw(); }
     });
     Ok(tls_vaddr.raw())
@@ -479,23 +379,9 @@ pub(super) fn sys_dlsym(handle: u64, name: &str) -> u64 {
     }
 }
 
-/// Describe every loaded module into `buf`; return the length it *needs*.
-///
-/// Same contract as `sys_getcwd` and `sys_readdir`, and for the same reason: a
-/// bare `InvalidArgument` leaves a caller no way to size a retry, because
-/// `SyscallError` cannot carry the length it would need.
-///
-/// The answer is a byte length and never a module count: the records carry
-/// packed path strings, so a count cannot size the buffer. Nothing is written
-/// unless all of it fits, which makes an empty buffer a size query.
-///
-/// The record array is `buf[..records[0].path_offset]` — every module writes
-/// its path after the last record, so the first module's `path_offset` is
-/// where the array ends.
-///
-/// Every module holds address space for as long as it is loaded, so the count
-/// is bounded by the process's own arena and the required length stays far
-/// below the range `SyscallError` encodes — it can never be misread as one.
+/// Describes every loaded module into `buf`, returning the required byte
+/// length; nothing is written unless the whole answer fits, and the length
+/// never lands in `SyscallError`'s encoded range.
 pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
     use toyos_abi::syscall::ModuleInfo;
     let info_size = core::mem::size_of::<ModuleInfo>();
@@ -512,6 +398,8 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
             return required as u64;
         }
 
+        // Record array ends at the first module's `path_offset`; paths are
+        // packed after it in module order.
         let mut path_offset = (module_count * info_size) as u32;
 
         let (eh_vaddr, eh_size) = (data.elf.exe_eh_frame_hdr_vaddr, data.elf.exe_eh_frame_hdr_size);

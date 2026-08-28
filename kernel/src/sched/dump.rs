@@ -1,48 +1,11 @@
 //! Ctrl+Alt+D: what every CPU is holding, and what nothing is holding at all.
 //!
-//! The one instrument for a machine that has stopped without panicking. It
-//! answers three questions that look identical from outside and have different
-//! causes — a thread parked on a deadline that never fired, a thread parked on
-//! a deadline nobody could ever reach, and a thread no CPU has at all — and it
-//! is designed to be read off a photograph of a panel, so the verdict is the
-//! last thing printed and the report takes the screen.
-//!
-//! **No CPU may read another's scheduler state.** `CpuSched` is `!Sync` by
-//! design, so this is a request rather than a walk: the asking CPU marks every
-//! sibling, kicks it, and each one prints its own tasks from `drain_irqs` at
-//! the top of its next pass. A CPU that does not reach a pass inside the
-//! budget is named, and *that is a finding* — it is the only way this report
-//! can say "cpu 3 is not scheduling at all".
-//!
-//! Nothing here allocates, nothing waits on a lock it could find held, and
-//! every list is bounded. See `issues/diagnostics/` for what it was built
-//! to settle.
-//!
-//! **This report cannot describe the state it is summoned to describe, and the
-//! deadline columns are where that bites.** Asking is a keystroke, a keystroke
-//! is an interrupt, and an interrupt is exactly what a halted CPU was waiting
-//! for — so by the time any CPU prints a line it has already taken a pass,
-//! re-armed its timer and fired whatever was due. A machine frozen on an
-//! unfired deadline therefore reports `0 OVERDUE`: not because its deadlines
-//! were healthy, but because summoning the report repaired them. Everything
-//! under `== deadlines:` postdates the repair.
-//!
-//! What survives is identity and place — which threads exist, which CPU holds
-//! each, which never ran, which CPUs did not answer — because waking a CPU does
-//! not move a task between containers. To learn what the *frozen* machine
-//! looked like, capture it before touching it: `info registers -a` over QMP
-//! gives every vCPU's `RIP` and `HLT` with nothing woken, and has settled a
-//! freeze whose cause this report's deadline columns named the opposite of.
-//!
-//! It is also what the NMI probe below buys and a kick does not: an answer that
-//! does not require the CPU to schedule in order to give it.
-//!
-//! **The panel is the deliverable, and it is bracketed and held.** `request`
-//! marks the log before its first line and after its last, so what the console
-//! paints is this report rather than the newest screenful of a ring every
-//! process writes into — and `panic_console::hold_report` puts it back for as
-//! long as the hold lasts, because a compositor that is still composing does
-//! not know the kernel drew and will overwrite it inside a frame.
+//! No CPU reads another's scheduler state: the asking CPU marks and kicks
+//! every sibling, and each prints its own tasks from `drain_irqs` next pass.
+//! Nothing here allocates, waits on a lock it could find held, or leaves a
+//! list unbounded. A CPU that misses the budget is named silent. Asking is
+//! itself an interrupt, so a machine frozen on an unfired deadline reports
+//! `0 OVERDUE`: summoning the report repairs the deadline it names.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -53,49 +16,32 @@ use crate::time::{Budget, Duration, Floor};
 use super::driver;
 use super::MAX_CPUS;
 
-/// A deadline further out than this is not a wait, it is arithmetic that got
-/// away: no kernel site parks for an hour, and a `saturating_add` that
-/// overflowed lands at `u64::MAX` nanoseconds, which is 584 years.
-///
-/// A [`Floor`] rather than any of the waiting kinds: nothing waits for it and
-/// nothing expires. It is a predicate *on* another duration, which is the one
-/// thing that kind is for.
+/// A [`Floor`]: nothing waits for this value, it only bounds another duration.
 const ABSURD_HORIZON: Floor = Floor::policy(
     Duration::from_secs(3_600),
     "no kernel site parks for an hour, and an overflowed saturating_add lands 584 years out",
 );
 
-/// How long the asking CPU waits for its siblings before naming the silent
-/// ones. It spends this with preemption off, which is what any bounded wait in
-/// `drain_irqs` costs; a quarter second is far past a scheduler pass and far
-/// short of anything a person notices after pressing a key.
+/// How long the asking CPU spins with preemption off before naming the silent ones.
 const ANSWER_BUDGET: Budget = Budget::of(
     Duration::from_millis(250),
     "the silent CPUs are named and their part of the report is missing",
 );
 
-/// Ordinary parked lines one CPU may print. A line the verdict depends on —
-/// overdue, absurd — is never counted against this, so truncation cannot hide
-/// the thing being looked for.
+/// Cap on ordinary parked lines per CPU; anomaly lines are never truncated.
 const LINES_PER_CPU: u32 = 16;
 
 /// Census lines, which carry only the threads the parked lists do not.
 const CENSUS_LINES: u32 = 16;
 
-/// How long the census retries the process table. Whoever holds it in the
-/// ordinary case — a spawn, an exit — is finished inside microseconds, and
-/// giving up on the first refusal costs the owner the half of the report that
-/// names a thread no CPU has. Whoever holds it in the case this facility is
-/// for is not going to finish, which is what the ceiling is for.
+/// How long the census retries a held process table before giving up.
 const TABLE_BUDGET: Budget = Budget::of(
     Duration::from_millis(20),
     "the summary says the census is missing rather than naming the threads no CPU has",
 );
 
-/// How long a silent CPU gets to answer the NMI. Two orders of magnitude below
-/// the kick's budget because an NMI needs nothing of the target but the
-/// interrupt itself: no pass, no lock, no scheduler state. A CPU that has not
-/// answered in a millisecond is not going to.
+/// How long a silent CPU gets to answer the NMI: far less than
+/// [`ANSWER_BUDGET`] since an NMI needs no scheduler pass.
 const NMI_BUDGET: Budget = Budget::of(
     Duration::from_millis(1),
     "the CPU is reported silent with no instruction pointer beside it",
@@ -104,23 +50,19 @@ const NMI_BUDGET: Budget = Budget::of(
 static IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static OWES: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
-/// The NMI handshake, in two arrays because the handler may not allocate, may
-/// not log and may not take a lock (`arch/idt/nmi.rs`): it stores and clears,
-/// and the CPU that asked does the rest.
+/// NMI handshake: the handler (`arch/idt/nmi.rs`) may not allocate, log, or
+/// lock, so it only stores and clears; the asking CPU reads.
 static NMI_OWES: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static NMI_RIP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
-/// What the CPUs report, summed as each one answers. Reset by `request`
-/// before any CPU is asked.
+/// What the CPUs report, summed as each one answers; reset by `request`.
 mod tally {
     use core::sync::atomic::AtomicU32;
 
     pub static PARKED: AtomicU32 = AtomicU32::new(0);
     pub static READY: AtomicU32 = AtomicU32::new(0);
-    /// Killed threads unwinding, or waiting on a CPU to unwind. **A container
-    /// of its own**, because their state words read `Ready` and the census
-    /// counts them as such, so a verdict built without this one reports them as
-    /// held by nobody.
+    /// Killed threads unwinding; counted separately since the census reads
+    /// their state word as `Ready`.
     pub static DYING: AtomicU32 = AtomicU32::new(0);
     pub static RUNNING: AtomicU32 = AtomicU32::new(0);
     pub static NO_DEADLINE: AtomicU32 = AtomicU32::new(0);
@@ -142,16 +84,14 @@ mod tally {
     ];
 }
 
-/// What a parked task's deadline says about it. The three-way split this whole
-/// facility exists to make legible.
+/// What a parked task's deadline says about it.
 #[derive(Clone, Copy, PartialEq)]
 enum Verdict {
     /// No deadline: only an event ends this wait, which is what a server does.
     Event,
     /// A deadline still in the future.
     Pending,
-    /// A deadline that has passed. The timer that should have ended this wait
-    /// did not fire.
+    /// A deadline that passed without firing.
     Overdue,
     /// A deadline no wait could have meant.
     Absurd,
@@ -187,13 +127,9 @@ fn online_cpus() -> usize {
     (smp::cpu_count() as usize).min(MAX_CPUS)
 }
 
-/// Ctrl+Alt+D. Called from `drain_irqs` on whichever CPU decoded the key, and
-/// from nowhere else.
+/// Ctrl+Alt+D. Called from `drain_irqs` on the CPU that decoded the key, from nowhere else.
 pub fn request() {
-    // `pass` owns the one level; a `Lock` guard would add another. The whole
-    // design below — `try_lock`, bounded waits, no allocation — assumes this
-    // runs holding nothing, and this is what keeps that true as `drain_irqs`
-    // grows.
+    // Runs holding nothing: a `Lock` guard would raise preempt depth above 1.
     let depth = crate::preempt::count();
     assert!(depth <= 1, "the blocked-task dump ran under a lock: preempt depth {depth}");
     if IN_PROGRESS.swap(true, Ordering::AcqRel) {
@@ -205,24 +141,18 @@ pub fn request() {
 
     let cpus = online_cpus();
     let me = percpu::cpu_id() as usize;
-    // The bracket is two instants rather than two byte positions in one stream,
-    // because there is no one stream: a byte position has no meaning across
-    // shards. It is also exact where a byte range is not — the dump's own
-    // records are stamped by this same clock, so nothing a sibling CPU logs
-    // meanwhile can widen it.
+    // Two instants, not byte positions: there is no single stream across CPUs.
     let from = crate::clock::nanos_since_boot();
     log!("=== blocked-task dump: {cpus} cpu(s), and this report takes the screen ===");
 
-    // A CPU number, not a walk of `OWES`: it is compared against `me`, and
-    // `OWES` is `MAX_CPUS` long whatever `cpus` is.
+    // Indexed by cpu id: `OWES` is `MAX_CPUS` long regardless of `cpus`.
     #[allow(clippy::needless_range_loop)]
     for cpu in 0..cpus {
         if cpu != me {
             OWES[cpu].store(true, Ordering::Release);
         }
     }
-    // Kick after every flag is set, so a CPU that answers instantly cannot
-    // find its own flag still unwritten and go back to sleep.
+    // Every flag set before any kick, so an instant answer can't race its own flag.
     for cpu in 0..cpus {
         if cpu != me {
             apic::kick_cpu(cpu as u32);
@@ -231,9 +161,7 @@ pub fn request() {
 
     report_this_cpu();
 
-    // A pass reached by preemption cannot be holding a `Lock` — taking one
-    // raises the preempt count — so spinning here cannot be blocking a sibling
-    // on a lock this CPU's interrupted context owns.
+    // A pass reached by preemption holds no `Lock`, so spinning can't block a sibling.
     let deadline = crate::clock::nanos_since_boot().saturating_add(ANSWER_BUDGET.nanos());
     let mut silent = 0;
     loop {
@@ -261,18 +189,8 @@ pub fn request() {
     IN_PROGRESS.store(false, Ordering::Release);
 }
 
-/// Ask each CPU that ignored its kick where it is, with the one interrupt it
-/// cannot mask.
-///
-/// A kick that goes unanswered has three causes and the report cannot act on
-/// any of them, because they look identical from here: the CPU is spinning with
-/// `IF` clear, it is halted and its kick was never delivered, or it is wedged
-/// below the interrupt layer entirely. An NMI separates all three in one round
-/// — a `rip` in a spin loop, a `rip` at the `hlt`, or no answer at all — and
-/// that is the whole reason this exists.
-///
-/// Bounded and lock-free on both sides. The handler stores one word; this
-/// symbolizes it afterwards, from a context that may take the ring lock.
+/// Sends an NMI to each CPU that ignored its kick: unlike a kick, an NMI
+/// reaches a CPU regardless of IF, halt, or where it is wedged.
 fn probe_silent(asked: &[bool; MAX_CPUS], cpus: usize) {
     let any = (0..cpus).any(|cpu| asked[cpu]);
     if !any {
@@ -284,9 +202,8 @@ fn probe_silent(asked: &[bool; MAX_CPUS], cpus: usize) {
             NMI_OWES[cpu].store(true, Ordering::Release);
         }
     }
-    // Every flag set before any NMI goes out, for the same reason the kicks are
-    // batched above: an instant answer must not find its own flag unwritten.
-    // A CPU number, not a walk of `asked`: it is the APIC id the NMI goes to.
+    // Every flag set before any NMI, so an instant answer can't race its own flag.
+    // Indexed by cpu id: `cpu` doubles as the APIC id the NMI goes to.
     #[allow(clippy::needless_range_loop)]
     for cpu in 0..cpus {
         if asked[cpu] {
@@ -315,38 +232,19 @@ fn probe_silent(asked: &[bool; MAX_CPUS], cpus: usize) {
     }
 }
 
-/// Stage the one machine state this report exists to describe and that QEMU
-/// cannot produce: a CPU that ignores a kick.
-///
-/// Nothing on the host side can make a guest CPU deaf. QEMU delivers every IPI
-/// it is given, and a guest that stops scheduling stops for reasons — a spin
-/// with `IF` clear, a lock nobody releases — that are properties of the code
-/// under test rather than of the machine, so there is no `-device` and no
-/// monitor command that stages one. A kernel feature is the only actuator, and
-/// it replaces the *state* rather than the verdict: the victim really does
-/// disable interrupts and really does spin, so the kick really is unanswered
-/// and the NMI really is what reaches it.
-///
-/// Bounded and self-healing on purpose. The window is longer than
-/// [`ANSWER_BUDGET`] so the CPU is named silent, and short enough that it
-/// rejoins and the guest shuts down cleanly — which is itself part of the
-/// assertion, since a CPU the NMI merely interrupted must come back.
+/// Stages a CPU that ignores its kick: QEMU cannot make a guest CPU deaf on
+/// its own, so a kernel actuator disables interrupts and spins on the victim.
+/// Bounded and self-healing: the window is longer than [`ANSWER_BUDGET`] and
+/// short enough that the guest still shuts down cleanly.
 #[cfg(feature = "boot-actuators")]
 pub(super) fn deaf_window() {
     /// Late enough that the machine is up and every CPU has joined.
     const ARM_AT_NS: u64 = 3_000_000_000;
-    /// Comfortably past [`ANSWER_BUDGET`], so "silent" is not a race — and
-    /// bounded, so the CPU rejoins and the guest still shuts down.
+    /// Comfortably past [`ANSWER_BUDGET`], so silence isn't a race, and
+    /// bounded so the guest still shuts down.
     const DEAF_NS: u64 = 400_000_000;
-    /// How long cpu0 waits for the victim to reach its idle loop and go deaf.
-    ///
-    /// **A kicked CPU does not arrive at the top of its loop promptly and there
-    /// is no bound to give**: `drain_irqs` reaches USB enumeration from a pass,
-    /// so a kicked CPU's arrival is a string of bulk transfers away. 251 ms of
-    /// it has been measured — cpu0 gave up before the victim went deaf, so
-    /// nothing was staged, no dump ran, and a CPU sat deaf for 400 ms for
-    /// nobody. So this is generous, and expiring it leaves the machine as it
-    /// found it and lets the next pass ask again.
+    /// How long cpu0 waits for the victim to reach its idle loop; generous
+    /// because `drain_irqs` may reach USB enumeration first, leaving arrival unbounded.
     const ACK_BUDGET_NS: u64 = 1_000_000_000;
 
     const IDLE: u64 = 0;
@@ -369,25 +267,18 @@ pub(super) fn deaf_window() {
             .is_ok()
         {
             let began = crate::clock::nanos_since_boot();
-            // The counter and not the nanoseconds, because half of what this
-            // actuator stages is *where* the CPU is: `nanos_since_boot` divides
-            // 128 bits, which is a call into `compiler_builtins`, and a probe
-            // that samples the rip then names `u128_div_rem` for a CPU that
-            // never left this loop. `rdtsc` and a 64-bit compare inline.
+            // `rdtsc`, not `nanos_since_boot`: the latter calls into
+            // `compiler_builtins`, which would misname where a stuck CPU is.
             let until = crate::clock::tsc_deadline(DEAF_NS);
-            // The actuator's whole content. Interrupts come back on below and
-            // the loop is bounded by the clock. Not an `IrqGuard`, for the
-            // reason `driver::execute`'s idle arm gives: this must *set* IF on
-            // the way out, and a CPU that reached the idle loop through panic
-            // recovery has IF already 0 for a guard to restore.
+            // Not an `IrqGuard`: this must unconditionally set IF on exit, and
+            // panic recovery may already have left IF clear.
             crate::arch::cpu::disable_interrupts();
             while crate::arch::cpu::rdtsc() < until {
                 core::hint::spin_loop();
             }
             crate::arch::cpu::enable_interrupts();
-            // The victim is the only thing that can witness its own return, and
-            // half of what the probe claims is that an NMI interrupts a CPU
-            // rather than killing it.
+            // The victim's own log line is what proves the NMI interrupted it
+            // rather than killed it.
             let deaf_ms = (crate::clock::nanos_since_boot() - began) / 1_000_000;
             log!("dump-deaf-cpu: cpu{me} rejoined after {deaf_ms}ms deaf");
         }
@@ -399,19 +290,14 @@ pub(super) fn deaf_window() {
     if FIRED.swap(true, Ordering::AcqRel) {
         return;
     }
-    // Drive the whole sequence from here rather than across idle-loop
-    // iterations: cpu0 may halt between two of them, and the window it has to
-    // ask inside is only as long as the victim stays deaf.
+    // Driven from here, not idle-loop iterations: cpu0 may halt between them.
     STAGE.store(ASKED, Ordering::Release);
     apic::kick_cpu(victim as u32);
     let deadline = crate::clock::nanos_since_boot().saturating_add(ACK_BUDGET_NS);
     while STAGE.load(Ordering::Acquire) != DEAF {
         if crate::clock::nanos_since_boot() >= deadline {
-            // Take the ask back, and only then give up. The CAS is what makes
-            // the give-up safe rather than a second race: if it fails the
-            // victim has just gone deaf and the window is open after all, so
-            // this asks for the report instead of leaving a deaf CPU nobody
-            // looked at.
+            // The CAS takes the ask back before giving up: if it fails, the
+            // victim just went deaf and the window is still open.
             if STAGE
                 .compare_exchange(ASKED, IDLE, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
@@ -427,13 +313,8 @@ pub(super) fn deaf_window() {
     request();
 }
 
-/// The NMI handler's whole contribution: where this CPU was. Called from
-/// `arch/idt/nmi.rs` and from nowhere else.
-///
-/// Stores unconditionally rather than only when owed. An NMI this kernel did
-/// not send is a fact worth keeping too, and the alternative — reading the flag
-/// first — is a branch on state the sender owns, from a context that cannot
-/// afford to be wrong about it.
+/// Where this CPU was, for the NMI probe. Called only from `arch/idt/nmi.rs`.
+/// Stores unconditionally: reading the flag first would race the requester that owns it.
 pub fn note_nmi(rip: u64) {
     let me = percpu::cpu_id() as usize;
     if me >= MAX_CPUS {
@@ -443,8 +324,7 @@ pub fn note_nmi(rip: u64) {
     NMI_OWES[me].store(false, Ordering::Release);
 }
 
-/// Print this CPU's own tasks if it was asked to. Called from `drain_irqs` on
-/// every CPU, every pass.
+/// Prints this CPU's own tasks if asked. Called from `drain_irqs` every pass.
 pub fn serve_if_owed() {
     let me = percpu::cpu_id() as usize;
     if me >= MAX_CPUS || !OWES[me].load(Ordering::Acquire) {
@@ -468,13 +348,8 @@ fn report_this_cpu() {
     let ready = driver::ready_len() as u32;
     tally::READY.fetch_add(ready, Ordering::Relaxed);
 
-    // **The dying list, which no reader of this dump could otherwise see.** A
-    // killed thread's word says `Ready(cpu)`, so the census below counts it —
-    // while `ready_len()` counts only `rq` and `for_each_parked` walks only
-    // `parked`, which without this list makes every teardown in flight an
-    // `unheld` false positive. The whole point of the verdict is to tell "a task
-    // nothing will ever run" from a busy machine, and this is a task that runs
-    // *next*.
+    // Read separately: a killed thread's state word reads `Ready(cpu)`, so
+    // without this list every teardown in flight is an `unheld` false positive.
     let mut dying = 0u32;
     let read_dying = driver::for_each_dying(|id| {
         dying += 1;
@@ -529,13 +404,8 @@ struct Census {
     never_ran: u32,
 }
 
-/// Every thread the process table knows, and one line for each that the CPUs'
-/// parked lists do not already carry.
-///
-/// A thread whose state word says Ready is either about to run or has never
-/// run at all, and `cpu_ns == 0` is the difference. That is the whole reason
-/// this half exists: a task no CPU ever picked up appears in nobody's parked
-/// list, so a report built from the schedulers alone cannot see it.
+/// Every thread the process table knows, one line for each the CPUs' parked
+/// lists do not carry.
 fn census() -> Census {
     let mut c = Census::default();
     let mut printed = 0u32;
@@ -546,12 +416,8 @@ fn census() -> Census {
             c.zombie += 1;
             return;
         }
-        // **A kernel thread is named whatever it is doing, and it is the one
-        // exception to the rule below.** `klogd`, `usbd` and `iod` are almost
-        // always blocked, so the CPUs' parked lines are where they appear — and
-        // those lines carry a pid and a tid and no name. On a machine that has
-        // gone quiet the question is *which* of the three is stuck, and a pid is
-        // not an answer to it.
+        // Kernel threads are named even though usually blocked: their parked
+        // lines carry only a pid, and a frozen machine needs to know which.
         let kernel = crate::sched::kthread::is_kernel_task(crate::scheduler::TaskId(
             thread.pid,
             thread.tid,
@@ -559,6 +425,7 @@ fn census() -> Census {
         let (bucket, tag) = match thread.sched {
             Some(SCHED_RUNNING) => (&mut c.running, kernel.then_some("kernel")),
             Some(SCHED_BLOCKED) => (&mut c.blocked, kernel.then_some("kernel")),
+            // `cpu_ns == 0` on a Ready thread means it has never run.
             Some(SCHED_READY) if thread.cpu_ns == 0 => {
                 c.never_ran += 1;
                 (&mut c.ready, Some("!! ready and has never run"))
@@ -567,14 +434,10 @@ fn census() -> Census {
             _ => (&mut c.unscheduled, Some("!! no scheduler record")),
         };
         *bucket += 1;
-        // Blocked and running threads are the CPUs' lines; printing them again
-        // would push the ones only this half can see off the page.
+        // Blocked and running threads are already the CPUs' lines; skip them here.
         let Some(tag) = tag else { return };
-        // The three kernel threads do not count against the budget and cannot
-        // flood it: `sched::kthread::MAX_KERNEL_TASKS` is the ceiling, and a
-        // shipping kernel's is three. Counting them would let a machine with
-        // enough ready threads push the very lines this exception exists for
-        // off the page.
+        // Kernel threads don't count against the budget: `MAX_KERNEL_TASKS`
+        // bounds them at three, so counting them can't push these lines off the page.
         if !kernel {
             printed += 1;
             if printed > CENSUS_LINES {
@@ -592,8 +455,7 @@ fn census() -> Census {
     c
 }
 
-/// `process::try_for_each_thread` until `deadline`. Separated so the retry is
-/// one loop rather than a condition tangled into the walk.
+/// Retries `try_for_each_thread` until `deadline`.
 fn walk_threads(deadline: u64, mut f: impl FnMut(crate::process::ThreadCensus<'_>)) -> bool {
     loop {
         if crate::process::try_for_each_thread(&mut f) {
@@ -606,20 +468,12 @@ fn walk_threads(deadline: u64, mut f: impl FnMut(crate::process::ThreadCensus<'_
     }
 }
 
-/// The verdict, printed last because it is the only part that needs every CPU
-/// to have answered — and because the panel shows the newest page, so last is
-/// what a photograph catches.
+/// The verdict, printed last since it needs every CPU to have answered.
 fn summary(cpus: usize, silent: u32, c: Census) {
     let answered = cpus - silent as usize;
-    // Where this machine's interrupts have been landing, before the verdict and
-    // after the per-CPU lines. A CPU that answered nothing still reports here:
-    // the counters are its own `PerCpu`'s and a sibling reads them, so this part
-    // of the report needs nothing of the CPU it describes — which is exactly the
-    // question a silent CPU leaves open.
+    // Needs nothing from the CPU it describes: the counters are `PerCpu`'s own, read by a sibling.
     crate::irq_census::log_census();
-    // Every count in the summary is written before the word it counts, so a
-    // reader — and the gate — takes the field from the word rather than from a
-    // position in the line.
+    // Each count is written before the word it counts, so the gate parses by word, not position.
     if !c.read {
         log!("== census: the process table is held; no thread census this dump");
     } else {
@@ -643,21 +497,12 @@ fn summary(cpus: usize, silent: u32, c: Census) {
         tally::OVERDUE.load(Ordering::Relaxed),
         tally::ABSURD.load(Ordering::Relaxed),
     );
-    // The three-way split, said in one line, and degraded field by field
-    // rather than withdrawn: a report that answers two of three questions is
-    // worth having, and a photograph of "incomplete" is worth nothing.
-    //
     // `unheld` compares what the state words claim against what the CPUs
-    // actually hold. A thread the words call blocked or ready that no CPU has
-    // is one nothing will ever run, and it is the whole reason the census is
-    // here — the schedulers alone cannot see a task none of them was given.
+    // actually hold: a thread claimed but not held will never run.
     let overdue = tally::OVERDUE.load(Ordering::Relaxed);
     let absurd = tally::ABSURD.load(Ordering::Relaxed);
     if c.read {
-        // `DYING` is in the sum for the same reason `READY` is: the census
-        // counted those threads under `ready`, and a container the CPU half
-        // cannot see is exactly what `unheld` is meant to name — so leaving it
-        // out reports a healthy teardown as a lost task.
+        // `DYING` is summed with `READY`: the census counts those threads as ready too.
         let scheduled = tally::PARKED.load(Ordering::Relaxed)
             + tally::READY.load(Ordering::Relaxed)
             + tally::DYING.load(Ordering::Relaxed)
@@ -675,10 +520,7 @@ fn summary(cpus: usize, silent: u32, c: Census) {
              open, so nothing here can say what no cpu holds",
         );
     }
-    // The one thread the report cannot ask about by walking a queue, because
-    // what it is doing is the reason this report is readable at all. `lost` is
-    // the number a reader of the console can never derive: it names the lines
-    // that are not there.
+    // `lost` is the one count a console reader could never derive on their own.
     let (drained, lost, parks) = crate::log::console::stats();
     log!("== klogd: {drained} record(s) drained, {lost} lost, {parks} park(s)");
     let unprinted = tally::UNPRINTED.load(Ordering::Relaxed);
@@ -688,8 +530,7 @@ fn summary(cpus: usize, silent: u32, c: Census) {
     log!("=== end of dump ===");
 }
 
-/// A thread by the two names it has. Most threads never take a name of their
-/// own, and `soundd/` reads as a truncation rather than as an absence.
+/// A thread by its two names; empty `thread` falls back to `process` alone.
 struct Named<'a> {
     process: &'a str,
     thread: &'a str,
@@ -704,8 +545,7 @@ impl core::fmt::Display for Named<'_> {
     }
 }
 
-/// Milliseconds, because every duration in this report is one and a bare
-/// nanosecond count is unreadable on a photograph.
+/// Milliseconds: every duration in this report is one.
 struct Ms(u64);
 
 impl core::fmt::Display for Ms {
@@ -729,8 +569,7 @@ impl core::fmt::Display for Deadline {
                 write!(f, "OVERDUE by {}", Ms(self.now.saturating_sub(at)))
             }
             (Verdict::Absurd, Some(at)) => write!(f, "ABSURD, due in {}", Ms(at - self.now)),
-            // `Verdict::of` reads the same `Option` this does, so a verdict
-            // that names a deadline cannot come with none.
+            // Unreachable in practice: `Verdict::of` reads the same `Option`.
             (_, None) => write!(f, "no deadline"),
         }
     }
