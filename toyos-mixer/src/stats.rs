@@ -41,13 +41,13 @@ pub struct MixStats {
     /// state, not a field of the report; a run crossing a window boundary is
     /// counted in both, which understates it and never invents one.
     pub starve_run: u32,
-    /// Cycles that found the whole DMA pipeline free (§5.9) *and* could only
+    /// Cycles that found the whole DMA pipeline free *and* could only
     /// have got there by soundd being late. A device that retires the pipeline
     /// faster than it plays it empties the free list without soundd having
     /// missed anything; see the count site.
     pub drains: u32,
-    /// Worst overshoot of a DLL prediction soundd actually armed a timer on
-    /// (§5.1). Waits that named no wake time contribute nothing; see the
+    /// Worst overshoot of a DLL prediction soundd actually armed a timer on.
+    /// Waits that named no wake time contribute nothing; see the
     /// sample site.
     pub max_wake_lat_ns: u64,
     /// [`max_wake_lat_ns`](Self::max_wake_lat_ns) taken apart — see
@@ -69,7 +69,7 @@ pub struct MixStats {
     pub late_wakes: u32,
     pub max_batch: u32,
     /// Free buffers left unfilled because a streaming client was still
-    /// producing the period that belongs in them (§5.10) — an activity signal,
+    /// producing the period that belongs in them — an activity signal,
     /// not a fault, and so uncapped.
     pub deferred: u32,
 }

@@ -7,6 +7,7 @@ use hashbrown::HashMap;
 use core::ops::{Deref, DerefMut};
 use toyos_abi::syscall::SyscallError;
 use crate::file_cache::FileId;
+use crate::mm::PAGE_BYTES;
 use crate::sync::{Lock, LockGuard};
 
 static VFS: Lock<Option<Vfs>> = Lock::new(None);
@@ -53,7 +54,7 @@ pub trait FileSystem: Send {
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError>;
 
     /// Write one dirty page to the device, allocating its block if needed.
-    fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; 4096]) -> Result<(), SyscallError>;
+    fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError>;
     /// Update file metadata (size, mtime) after flushing dirty pages.
     fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError>;
 
@@ -402,8 +403,8 @@ impl Vfs {
         if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
 
         // On the heap: the idle loop's 16 KiB stack has no guard page.
-        let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
-        let buf: &mut [u8; 4096] = (&mut heap[..]).try_into().expect("4096 bytes");
+        let mut heap = alloc::vec![0u8; PAGE_BYTES].into_boxed_slice();
+        let buf: &mut [u8; PAGE_BYTES] = (&mut heap[..]).try_into().expect("4096 bytes");
         for &page_idx in dirty {
             // The `?` runs before `clear_dirty`: a refused write-back leaves every page dirty for the retry.
             if crate::file_cache::copy_page_out(file_id, page_idx, buf) {

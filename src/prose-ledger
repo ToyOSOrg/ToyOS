@@ -9,7 +9,7 @@ bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 114 0
 bootloader/src/main.rs 198 0
 examples/imgstat.rs 16 0
-kernel-loom/src/lib.rs 144 0
+kernel-loom/src/lib.rs 145 0
 kernel-loom/tests/i8042_tally.rs 95 0
 kernel-loom/tests/inbox.rs 126 3
 kernel-loom/tests/log_body_words.rs 31 0
@@ -19,9 +19,10 @@ kernel-loom/tests/log_wake.rs 59 0
 kernel-loom/tests/log_zeroed_init.rs 24 1
 kernel-loom/tests/reap_gate.rs 53 1
 kernel-loom/tests/sleep_lock.rs 80 1
+kernel-loom/tests/smp_bringup.rs 11 0
 kernel-loom/tests/ticket_lock.rs 35 1
 kernel-loom/tests/tlb_shootdown.rs 93 2
-kernel/src/actuator.rs 85 0
+kernel/src/actuator.rs 86 0
 kernel/src/arch/apic.rs 54 0
 kernel/src/arch/control_regs.rs 66 0
 kernel/src/arch/cpu.rs 60 0
@@ -44,8 +45,8 @@ kernel/src/arch/idt/xhci.rs 3 0
 kernel/src/arch/mod.rs 18 0
 kernel/src/arch/mtrr.rs 28 0
 kernel/src/arch/pat.rs 22 0
-kernel/src/arch/percpu.rs 135 0
-kernel/src/arch/smp.rs 44 0
+kernel/src/arch/percpu.rs 137 0
+kernel/src/arch/smp.rs 53 0
 kernel/src/arch/syscall/debug.rs 14 0
 kernel/src/arch/syscall/device.rs 12 0
 kernel/src/arch/syscall/dispatch.rs 89 0
@@ -58,7 +59,7 @@ kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
 kernel/src/arch/syscall/vm.rs 74 0
-kernel/src/arch/tlb.rs 35 0
+kernel/src/arch/tlb.rs 32 0
 kernel/src/bcachefs_adapter.rs 50 0
 kernel/src/block.rs 33 0
 kernel/src/clock.rs 25 0
@@ -130,7 +131,7 @@ kernel/src/main.rs 69 0
 kernel/src/mm/alloc.rs 88 0
 kernel/src/mm/dma.rs 34 0
 kernel/src/mm/mmio.rs 17 0
-kernel/src/mm/mod.rs 20 0
+kernel/src/mm/mod.rs 21 0
 kernel/src/mm/paging.rs 206 0
 kernel/src/mm/pmm.rs 27 0
 kernel/src/mm/region.rs 17 0
@@ -169,6 +170,7 @@ kernel/src/sched_gate.rs 7 0
 kernel/src/scheduler.rs 150 0
 kernel/src/shootdown.rs 21 0
 kernel/src/sleeplock.rs 28 0
+kernel/src/smp_roster.rs 22 0
 kernel/src/symbols.rs 39 0
 kernel/src/sync.rs 26 0
 kernel/src/time.rs 47 0
@@ -181,7 +183,7 @@ kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 27 0
 src/assets.rs 123 0
-src/build.rs 670 3
+src/build.rs 672 3
 src/buildlock.rs 378 5
 src/ci.rs 105 1
 src/clippy.rs 35 0
@@ -208,7 +210,7 @@ src/toolchain.rs 778 29
 src/wallpaper.rs 124 0
 src/worktree.rs 74 0
 src/writinglaw.rs 21 0
-tests/common/audio.rs 404 0
+tests/common/audio.rs 397 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
 tests/common/console.rs 249 2
@@ -318,6 +320,7 @@ tests/toyos-rust-tests/src/bin/readdir_bound.rs 34 0
 tests/toyos-rust-tests/src/bin/sched_stress.rs 22 0
 tests/toyos-rust-tests/src/bin/segfault_child.rs 3 0
 tests/toyos-rust-tests/src/bin/shm_release_reclaims.rs 43 0
+tests/toyos-rust-tests/src/bin/smp_hole_shootdown.rs 6 0
 tests/toyos-rust-tests/src/bin/std_alloc.rs 1 0
 tests/toyos-rust-tests/src/bin/std_fs.rs 11 0
 tests/toyos-rust-tests/src/bin/std_fs_write.rs 0 0
@@ -354,7 +357,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4873 23
+tests/toyos.rs 4885 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
@@ -486,7 +489,7 @@ toyos-mixer/src/format.rs 123 0
 toyos-mixer/src/gain.rs 43 0
 toyos-mixer/src/lib.rs 43 0
 toyos-mixer/src/mix.rs 38 0
-toyos-mixer/src/shape.rs 103 0
+toyos-mixer/src/shape.rs 102 0
 toyos-mixer/src/stats.rs 122 0
 toyos-pci/src/bar.rs 97 0
 toyos-pci/src/caps.rs 13 0
@@ -632,7 +635,7 @@ userland/libc/src/stdio.rs 92 0
 userland/libc/src/string.rs 8 0
 userland/libc/src/time.rs 9 0
 userland/logd/src/main.rs 188 1
-userland/logd/src/policy.rs 151 5
+userland/logd/src/policy.rs 150 5
 userland/logd/src/store.rs 109 0
 userland/logd/src/wall.rs 100 3
 userland/netd/src/main.rs 237 0

@@ -1,12 +1,13 @@
 use core::arch::global_asm;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use alloc::alloc::{alloc_zeroed, Layout};
 
 use crate::arch::{apic, percpu, syscall};
 use crate::clock;
 use crate::drivers::acpi::MadtInfo;
+use crate::smp_roster::Roster;
 use crate::time::{Budget, Delay, Duration};
 use crate::{log, process};
 
@@ -15,29 +16,32 @@ const TRAMPOLINE_VECTOR: u8 = 0x08;
 const AP_STACK_SIZE: usize = 64 * 1024;
 const DATA_OFFSET: usize = 0xF00;
 
-static AP_STARTED: AtomicBool = AtomicBool::new(false);
-static SMP_READY: AtomicBool = AtomicBool::new(false);
-static CPU_COUNT: AtomicU32 = AtomicU32::new(1); // BSP counts as 1
+/// The token the latest-launched AP echoed at `ap_entry`, not a flag, so a stale
+/// AP cannot be read as this one; `0` means none has.
+static AP_STARTED: AtomicU32 = AtomicU32::new(0);
 
-// cpu_id → LAPIC id; cpu ids are kernel-assigned and dense, LAPIC ids from the MADT need not be.
-static CPU_APIC_IDS: [AtomicU32; crate::scheduler::MAX_CPUS] =
-    [const { AtomicU32::new(0) }; crate::scheduler::MAX_CPUS];
+static ROSTER: Roster = Roster::new();
+
+const _: () = assert!(crate::smp_roster::MAX_CPUS == crate::scheduler::MAX_CPUS);
 
 pub fn cpu_count() -> u32 {
-    CPU_COUNT.load(Ordering::Relaxed)
+    ROSTER.count()
 }
 
 /// LAPIC id of `cpu_id`; panics if `cpu_id` is not online.
 pub fn apic_id_for(cpu_id: u32) -> u32 {
     assert!(cpu_id < cpu_count(), "apic_id_for: cpu {cpu_id} not online");
-    CPU_APIC_IDS[cpu_id as usize].load(Ordering::Relaxed)
+    ROSTER.apic_id(cpu_id)
 }
 
-/// Signal APs that the kernel is fully initialized and can join the scheduler; also the point a TLB shootdown waits for acknowledgements from.
-// Before this, every counted AP is parked with `IF` clear and cannot take the shootdown IPI, so waiting for its ack here would hang.
+/// True once a shootdown must wait for siblings; the word the APs are released by.
+pub(crate) fn answering() -> bool {
+    ROSTER.answering()
+}
+
+/// Release the APs into the scheduler and, by the same store, start answering their shootdowns.
 pub fn set_ready() {
-    SMP_READY.store(true, Ordering::Release);
-    crate::arch::tlb::siblings_answer();
+    ROSTER.release();
 }
 
 // Field offsets are hardcoded in the global_asm! trampoline below; the static assertion at the bottom checks the match.
@@ -181,16 +185,21 @@ fn build_trampoline_data() -> TrampolineData {
 /// Boot all Application Processors found in the MADT, using `boot_cr3` — the bootloader's identity+high-half PML4 — until each AP switches to the kernel PML4 in `ap_entry`.
 pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     let bsp_id = apic::id();
-    CPU_APIC_IDS[0].store(bsp_id, Ordering::Relaxed);
+    ROSTER.set_bsp(bsp_id);
     copy_trampoline();
 
     let mut data = build_trampoline_data();
     data.cr3 = boot_cr3;
     let target = crate::DirectMap::from_phys(TRAMPOLINE_PAGE + DATA_OFFSET as u64).as_mut_ptr::<TrampolineData>();
 
-    let mut next_cpu_id = 1u32; // BSP is 0
     for &ap_id in &madt.apic_ids {
         if ap_id == bsp_id { continue; }
+
+        // Refused at MAX_CPUS, bounding a firmware that over-reports CPUs.
+        let Some(attempt) = ROSTER.begin_attempt() else {
+            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", cpu_count());
+            break;
+        };
 
         let stack_layout = Layout::from_size_align(AP_STACK_SIZE, 4096).unwrap();
         // SAFETY: `AP_STACK_SIZE` is non-zero and 4096 is a power of two, `alloc_zeroed`'s whole contract.
@@ -198,18 +207,15 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         let stack_base = unsafe { alloc_zeroed(stack_layout) };
         assert!(!stack_base.is_null(), "SMP: failed to allocate AP stack");
 
-        let ap_cpu_id = next_cpu_id;
-        next_cpu_id += 1;
-        CPU_APIC_IDS[ap_cpu_id as usize].store(ap_id, Ordering::Relaxed);
-        let ap_percpu = percpu::alloc_ap(ap_cpu_id);
+        let ap_percpu = percpu::alloc_ap(attempt.id(), attempt.token());
 
         data.stack_top = stack_base as u64 + AP_STACK_SIZE as u64;
         data.entry = ap_entry as *const () as u64;
         data.percpu_ptr = ap_percpu as u64;
-        // SAFETY: `target` is reserved physical memory written only here; unaligned because `TrampolineData` is `repr(C, packed)`; this AP has not been sent its SIPI yet, and the previous AP already signaled `AP_STARTED` before this loop wrote again, so no CPU is reading it.
+        // SAFETY: `target` is reserved physical memory written only here; unaligned because `TrampolineData` is `repr(C, packed)`; this AP has not been sent its SIPI yet, and the loop reaches a second write only after the previous AP committed — which happens in `ap_entry` past every trampoline read — so no CPU is reading it; a failed AP breaks the loop below instead of reaching another write.
         unsafe { core::ptr::write_unaligned(target, data); }
 
-        AP_STARTED.store(false, Ordering::Release);
+        AP_STARTED.store(0, Ordering::Release);
 
         // Both delays are spent, not waited on: nothing is polled across either.
         const AFTER_INIT: Delay =
@@ -217,35 +223,44 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         /// SDM §8.4.4.1 asks 200us here; a millisecond gives room and is paid once per AP.
         const BETWEEN_SIPIS: Delay =
             Delay::from_spec(Duration::from_millis(1), "SDM §8.4.4.1, between the two SIPIs");
-        apic::send_init(ap_id);
-        delay(AFTER_INIT);
+        if !skip_startup(attempt.id()) {
+            apic::send_init(ap_id);
+            delay(AFTER_INIT);
 
-        apic::send_sipi(ap_id, TRAMPOLINE_VECTOR);
-        delay(BETWEEN_SIPIS);
-
-        if !AP_STARTED.load(Ordering::Acquire) {
             apic::send_sipi(ap_id, TRAMPOLINE_VECTOR);
+            delay(BETWEEN_SIPIS);
+
+            if AP_STARTED.load(Ordering::Acquire) != attempt.token() {
+                apic::send_sipi(ap_id, TRAMPOLINE_VECTOR);
+            }
         }
 
-        // Budget, not Tripwire or panic: a slow AP degrades to one fewer CPU rather than crashing, and a panic here would be a behaviour change C1's gate forbids.
+        // Budget, not Tripwire or panic: a slow AP degrades the machine rather than crashing it, and a panic here would be a behaviour change C1's gate forbids.
         const AP_START: Budget = Budget::of(
             Duration::from_millis(100),
-            "the AP is named as failed to start and the machine boots one CPU short",
+            "the machine boots with the CPUs that came up before the first that did not",
         );
         let deadline = clock::nanos_since_boot() + AP_START.nanos();
-        while !AP_STARTED.load(Ordering::Acquire) {
+        while AP_STARTED.load(Ordering::Acquire) != attempt.token() {
             if clock::nanos_since_boot() >= deadline { break; }
             core::hint::spin_loop();
         }
 
-        // Only place that logs the cpu_id↔lapic_id pairing.
-        if AP_STARTED.load(Ordering::Acquire) {
-            CPU_COUNT.fetch_add(1, Ordering::Relaxed);
-            log!("SMP: AP cpu{} lapic={} online", ap_cpu_id, ap_id);
+        // Commit only on this attempt's own token, so `0..cpu_count()` stays dense.
+        if AP_STARTED.load(Ordering::Acquire) == attempt.token() {
+            ROSTER.commit(attempt, ap_id);
+            log!("SMP: AP cpu{} lapic={} online", attempt.id(), ap_id);
         } else {
-            log!("SMP: AP cpu{} lapic={} failed to start!", ap_cpu_id, ap_id);
+            // Neither the id nor the trampoline is reused after a failure: stop here.
+            log!("SMP: AP cpu{} lapic={} failed to start! remaining APs stay offline", attempt.id(), ap_id);
+            break;
         }
     }
+}
+
+/// The actuator staging a non-last AP that never starts; `false` without `boot-actuators`.
+fn skip_startup(id: u32) -> bool {
+    crate::actuator::smp_skip_ap() && id == 2
 }
 
 extern "C" fn ap_entry() -> ! {
@@ -263,17 +278,26 @@ extern "C" fn ap_entry() -> ! {
     // Calibration is a one-time BSP measurement; nothing left for an AP to do here.
     apic::init_ap();
 
-    AP_STARTED.store(true, Ordering::Release);
+    // Echo this attempt's token, so the BSP counts this AP for its own attempt.
+    AP_STARTED.store(percpu::ap_token(), Ordering::Release);
 
-    while !SMP_READY.load(Ordering::Acquire) {
+    while !ROSTER.released() {
         core::hint::spin_loop();
     }
 
+    // Only a committed CPU may join: an uncommitted AP has no scheduler slot and
+    // no shootdown targets it, so it parks. The acquire above makes the count visible.
+    let me = percpu::cpu_id();
+    if me >= cpu_count() {
+        log!("CPU {me}: bring-up did not commit; parking");
+        park_ap();
+    }
+
     // A parked AP could not take a shootdown IPI, so this flush stands in for the ones missed while spinning.
-    // Must run before touching anything not self-mapped: the acquire on `SMP_READY` makes the BSP's mappings visible, and this flush discards what the spin cached over them.
+    // Must run before touching anything not self-mapped: the acquire on `released` makes the BSP's mappings visible, and this flush discards what the spin cached over them.
     crate::arch::tlb::join();
 
-    log!("CPU {}: joining scheduler", percpu::cpu_id());
+    log!("CPU {me}: joining scheduler");
     process::ap_idle();
 }
 
@@ -281,6 +305,14 @@ extern "C" fn ap_entry() -> ! {
 fn delay(span: Delay) {
     let start = clock::nanos_since_boot();
     while clock::nanos_since_boot() - start < span.nanos() {}
+}
+
+/// An uncommitted AP halts for the life of the machine.
+fn park_ap() -> ! {
+    loop {
+        // SAFETY: `cli; hlt` on this CPU only; it takes no lock and touches no shared state.
+        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
+    }
 }
 
 // Real mode → protected mode → long mode → Rust entry, copied to 0x8000 at runtime; addresses below are offsets into TrampolineData at 0x8F00.

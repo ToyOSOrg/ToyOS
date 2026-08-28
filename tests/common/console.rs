@@ -138,7 +138,7 @@ pub fn console_line_atomicity(
     // **The buffer's other half: a process that exits mid-line.** The third
     // writer says `midline` bytes in two `write`s, ends them with nothing and
     // exits; the only thing that can put them on the wire is
-    // `ConsoleObject::drop` flushing what the last handle left behind (§4.4).
+    // `ConsoleObject::drop` flushing what the last handle left behind.
     // A tree without that flush loses them silently, which is a buffer that
     // drops a dying process's last words — so the assertion is the run's
     // *length*, and it is exact on both sides: shorter means bytes were lost,
