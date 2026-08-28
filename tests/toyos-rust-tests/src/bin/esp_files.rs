@@ -19,6 +19,8 @@
 use std::fs;
 use std::io::Write;
 
+use toyos_abi::syscall::{self, OpenFlags};
+
 /// Mirrored in `tests/common/volumes.rs`. Two halves of one fixture; a change
 /// to either without the other shows up as a mismatch here, not as a silent
 /// pass.
@@ -46,6 +48,16 @@ fn names(dir: &str) -> Vec<String> {
         .collect();
     out.sort();
     out
+}
+
+/// The first 64 bytes of `kernel.elf`; a plain WRITE at offset 0 shows in content, not length.
+fn kernel_prefix() -> [u8; 64] {
+    let h = syscall::open(KERNEL.as_bytes(), OpenFlags::READ).expect("open kernel.elf for read");
+    let mut buf = [0u8; 64];
+    let n = syscall::read(h, &mut buf).expect("read kernel.elf prefix");
+    syscall::close(h);
+    assert_eq!(n, buf.len(), "short read of kernel.elf prefix");
+    buf
 }
 
 fn main() {
@@ -112,6 +124,24 @@ fn boot_refuses_every_way_of_changing_it() {
         assert!(!toyos.iter().any(|n| n == absent), "a refused operation left {absent} behind");
     }
     println!("  PASS create, delete, mkdir, rename and symlink are all refused on /boot");
+
+    // The path checked must be the path opened, and plain WRITE is the hole: CREATE/TRUNCATE unlink the link.
+    let before = kernel_prefix();
+    assert_eq!(&before[..4], b"\x7fELF", "kernel.elf is not an ELF before the symlink attack");
+    syscall::symlink(b"../boot/toyos/kernel.elf", b"/tmp/evil").expect("a /tmp symlink is allowed");
+    assert!(
+        syscall::open(b"/tmp/evil", OpenFlags::WRITE).is_err(),
+        "a /tmp symlink opened {KERNEL} for writing",
+    );
+
+    let reader = syscall::open(KERNEL.as_bytes(), OpenFlags::READ).expect("read /boot is allowed");
+    assert!(
+        syscall::open(b"/tmp/evil", OpenFlags::WRITE).is_err(),
+        "a /tmp symlink opened {KERNEL} for writing while a /boot read handle was held",
+    );
+    syscall::close(reader);
+    assert_eq!(kernel_prefix(), before, "a refused symlink write still changed kernel.elf");
+    println!("  PASS a /tmp symlink to {KERNEL} is refused for writing");
 }
 
 /// The write direction, on the volume userland is allowed to have.
