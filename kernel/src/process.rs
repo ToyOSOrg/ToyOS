@@ -1675,7 +1675,7 @@ pub fn handle_fault(error: crate::object::HandleError) -> ! {
     exit(HANDLE_FAULT_EXIT_CODE)
 }
 
-/// AP entry into the scheduler. Called from smp::ap_entry after SMP_READY.
+/// AP entry into the scheduler. Called from smp::ap_entry once the machine is released.
 pub fn ap_idle() -> ! {
     scheduler::enter_idle_loop();
 }
