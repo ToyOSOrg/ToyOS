@@ -1,17 +1,10 @@
 use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state};
 
-/// TLB flush IPI handler.
-///
-/// The GPR save is `device_irq_entry`'s, for its reasons: the Rust half may
-/// clobber every System V scratch register, and leaving one unsaved leaks
-/// kernel state into a user register on `iretq`. The user machine state is
-/// parked for the Ring 3 epilogue alone, which is the only window here that can
-/// context-switch — a comment used to point at `xhci_entry` for the rationale
-/// and then not follow it, which is how this vector spent its life returning to
-/// userland with another thread's XMM registers.
+/// IDT entry point for the TLB-shootdown IPI vector.
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn tlb_flush_entry() {
     ring3_naked_asm!(
+        // Every pushed register must be popped before `iretq`: `flush` may clobber any System V scratch register.
         "push rax",
         "push rcx",
         "push rdx",
@@ -32,6 +25,7 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "xor edx, edx",
         "wrmsr",
         "lock sub dword ptr gs:[{preempt_count}], 1",
+        // Only this branch can context-switch; user state is saved and restored around it alone.
         "test dword ptr [rsp + 88], 3",
         "jz 1f",
         "cli",

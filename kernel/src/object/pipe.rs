@@ -1,15 +1,11 @@
 //! A pipe's two ends, as two object types.
 //!
-//! "Write to a read end" is a state that cannot be written rather than a
-//! runtime `PermissionDenied`: [`PipeReadEnd`] has no write path, and the typed
-//! accessor refuses the handle before any policy runs.
+//! [`PipeReadEnd`] has no write path and [`PipeWriteEnd`] has no read path,
+//! so the wrong direction is refused by the type before any policy runs.
 //!
-//! **The ring, its refcounts and its `PipeId` stay in `crate::pipe` until
-//! chunk 6.** `SYS_PIPE_OPEN`, `SYS_PIPE_ID` and `SYS_SOCKET_CREATE` are live
-//! until then and every one of them is addressed by that id, so a `PipeShared`
-//! here would be a second owner of the same counts. What these two types own is
-//! the *end* — one counted reference each — and giving it back on the last
-//! handle is what makes EOF ride `handle_count`.
+//! The ring, its refcounts and `PipeId` stay in `crate::pipe`: adding them
+//! here would double their ownership. These two types each own one counted
+//! reference, released on the last handle so EOF rides `handle_count`.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -20,12 +16,8 @@ use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
 pub struct PipeReadEnd {
     pub(super) core: ObjectCore,
-    /// A plain copy, because every read reaches for it and an `Arc` clone or a
-    /// second lock on that path is an atomic read-modify-write TCG cannot emit
-    /// inline — a few hundred a boot of one was measured at 350 ms of boot on
-    /// the log path. It names
-    /// nothing once the reference below is given back: `IdMap` never reissues
-    /// a `PipeId`.
+    /// A plain copy, not an `Arc` clone: the hot read path can't pay for one,
+    /// and a released `PipeId` is never reissued.
     id: PipeId,
     tty: AtomicBool,
     reference: Held<PipeReader>,
@@ -39,8 +31,8 @@ pub struct PipeWriteEnd {
 }
 
 impl PipeReadEnd {
-    /// A second counted reference to the same pipe, for a caller building
-    /// another object over it — `SYS_CONNECTION_JOIN` is the one.
+    /// A second counted reference to the same pipe, for `SYS_CONNECTION_JOIN`
+    /// to build another object over it.
     pub fn reference(&self) -> PipeReader {
         self.reference.get().expect("a live handle names this end")
     }
@@ -62,11 +54,8 @@ impl PipeReadEnd {
         self.tty.load(Ordering::Relaxed)
     }
 
-    /// A mark on this end, not on the pipe.
-    ///
-    /// `SYS_MARK_TTY` converts one handle and its one caller marks both ends of
-    /// a pair separately (std's `Command`), so a flag on the shared ring would
-    /// be a wider claim than anything ever makes.
+    /// A mark on this end, not the pipe: `SYS_MARK_TTY` converts one handle
+    /// at a time.
     pub fn mark_tty(&self) {
         self.tty.store(true, Ordering::Relaxed);
     }

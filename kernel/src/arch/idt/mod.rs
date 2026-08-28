@@ -23,50 +23,33 @@ use super::cpu::{outb, io_wait};
 use super::percpu;
 use crate::sync::Lock;
 
-// PIC ports
 const PIC1_CMD: u16 = 0x20;
 const PIC1_DATA: u16 = 0x21;
 const PIC2_CMD: u16 = 0xA0;
 const PIC2_DATA: u16 = 0xA1;
 
-/// The vector both PS/2 lines are routed to. Public because the driver has to
-/// name it when it programs the I/O APIC.
+/// The vector both PS/2 lines are routed to.
 pub const I8042_VECTOR: u8 = Vector::I8042 as u8;
 
-/// The vector an IOMMU writes into its own `FEDATA`. Public for the same
-/// reason: the unit is told which vector to raise, and only one place knows.
+/// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
 
-/// The vector the HDA controller's message-signalled interrupt carries. Public
-/// for the same reason: the driver arms whichever of MSI-X and MSI the function
-/// offers, and only one place knows the number.
+/// The vector the HDA controller's message-signalled interrupt carries.
 pub const HDA_VECTOR: u8 = Vector::Hda as u8;
 
-/// The vector the virtio-sound device's MSI-X entry carries, for the same
-/// reason.
+/// The vector the virtio-sound device's MSI-X entry carries.
 pub const VIRTIO_SOUND_VECTOR: u8 = Vector::VirtioSound as u8;
 
-/// The vector `log-nested-emit` sends itself, and the one gate that is not in
-/// the table below.
-///
-/// **It is installed only in a kernel built with `boot-actuators`**, after
-/// `install_gates`, because nothing but that actuator can ever raise it: a
-/// shipping IDT with a gate no interrupt reaches is a gate nothing deletes. It
-/// is `direct` in every sense the table means — its own entry, never
-/// `trap_dispatch` — and it sits one past the last device vector.
+/// The vector `log-nested-emit` sends itself; installed only in a kernel built with `boot-actuators`.
 #[cfg(feature = "boot-actuators")]
 pub const LOG_NEST_VECTOR: u8 = 0x27;
 
-// Page fault error code bits
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
 const PF_INSTRUCTION_FETCH: u64 = 1 << 4;
 
-// The ring a `cs` names is `toyos_userbound::Ring`'s to decide and nobody
-// else's: a second reading of the RPL field beside it is a second place the
-// crash path can be told the wrong privilege level.
+// The ring `cs` names is `toyos_userbound::Ring`'s to decide; nothing else re-reads the RPL bits.
 
-// IDT entry (16 bytes in 64-bit mode)
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct IdtEntry {
@@ -134,12 +117,9 @@ struct IdtPointer {
     base: u64,
 }
 
-/// Complete CPU state at exception entry. Pushed by stub + common_entry + CPU.
-/// Layout (lowest address = first field):
-///   [GPRs: 15×8=120]  [vector: 8]  [error_code: 8]  [rip cs rflags rsp ss: 5×8=40]
+/// Field order mirrors `common_entry`'s push order (reversed) and the CPU's own frame; both must change together.
 #[repr(C)]
 pub struct TrapFrame {
-    // GPRs pushed by common_entry (lowest address first)
     pub rax: u64,
     pub rbx: u64,
     pub rcx: u64,
@@ -155,11 +135,8 @@ pub struct TrapFrame {
     pub r13: u64,
     pub r14: u64,
     pub r15: u64,
-    // Pushed by stub
     pub vector: u64,
-    // Pushed by CPU (or dummy 0 by stub for exceptions without error code)
     pub error_code: u64,
-    // CPU interrupt frame
     pub rip: u64,
     pub cs: u64,
     pub rflags: u64,
@@ -167,14 +144,8 @@ pub struct TrapFrame {
     pub ss: u64,
 }
 
-/// A `dispatched` gate's entry point: push the vector, and where the CPU
-/// pushes no error code, a zero in its place so [`TrapFrame`] has one shape.
-///
-/// Which vectors those are is SDM Vol. 3A Table 6-1 and nothing else: get it
-/// wrong and every field above `error_code` is off by eight, so the handler
-/// reads the vector as an error code and returns through whatever `iretq`
-/// finds. The number lives in [`Vector`], so the slot a stub is installed in
-/// and the number it pushes cannot disagree.
+/// Pushes the vector, and a zero error code where the CPU pushes none, so [`TrapFrame`] has one shape.
+/// Misclassifying a vector's error-code column shifts every `TrapFrame` field above `error_code` by eight bytes.
 macro_rules! exception_stub {
     ($stub:ident, $variant:ident, no_error_code) => {
         #[unsafe(naked)]
@@ -201,31 +172,7 @@ macro_rules! exception_stub {
     };
 }
 
-/// Declares the IDT: the vector numbers, their stubs, and the one function
-/// that installs them.
-///
-/// One table, because the three statements a gate is made of have to agree and
-/// nothing else makes them. A `dispatched` vector gets a generated stub, a slot
-/// in [`install_gates`], and an arm in [`Vector::from_raw`] — so a gate the
-/// dispatcher does not know cannot be installed, which matters because
-/// `from_raw` runs on the crash path and that path may not panic.
-///
-/// A `direct` vector is its own naked entry and never reaches
-/// [`trap_dispatch`]: the device IRQs, the halt IPI, the shootdown IPI, and the
-/// NMI, whose handler must not touch the preempt count or reschedule.
-///
-/// Each `direct` row also answers whether its handler can reach another task
-/// before returning to Ring 3 — `ring3` if it can, and it must therefore
-/// bracket the user machine state (`arch::entry`), `ring0` if it cannot. There
-/// is no third spelling and no default, for the same reason the error-code
-/// column has none. Every `dispatched` vector goes through `common_entry`,
-/// which brackets, so their rows do not repeat the answer.
-///
-/// **The `ist` column is a claim about `rsp` and not about depth**: a vector
-/// that carries one takes its frame on the stack `percpu::IST_STACKS` names
-/// whatever `rsp` holds, which is the only answer for a vector that can arrive
-/// while `rsp` is not a kernel stack at all. Both kinds of row may have one, and
-/// [`IST_VECTORS`] is what the assertions below read.
+/// Builds the vector enum, stubs, and `install_gates` from one table so the slot, stub, and dispatch arm cannot disagree.
 macro_rules! idt_vectors {
     (
         dispatched { $($ex:ident = $exnum:literal, $stub:ident, $err:ident $(, ist $ist:literal)?;)* }
@@ -240,9 +187,7 @@ macro_rules! idt_vectors {
         }
 
         impl Vector {
-            /// The number a stub pushed. Total over every dispatched gate, so
-            /// the arm below is reachable only from a vector this module does
-            /// not install — which the CPU cannot deliver.
+            /// The number a stub pushed; the wildcard arm is unreachable for any vector this module installs.
             fn from_raw(v: u64) -> Self {
                 match v {
                     $($exnum => Self::$ex,)*
@@ -253,11 +198,7 @@ macro_rules! idt_vectors {
 
         $(exception_stub!($stub, $ex, $err);)*
 
-        /// Every vector whose row carries an `ist` index, and the index.
-        ///
-        /// Read by the assertions under the table: which vectors need one is a
-        /// property of where they can arrive, so it is stated once, checked at
-        /// compile time, and never re-derived from the entries at runtime.
+        /// Every vector whose row carries an `ist` index, paired with the index.
         const IST_VECTORS: &[(usize, u8)] = &[
             $($((Vector::$ex as usize, $ist),)?)*
             $($((Vector::$direct as usize, $dist),)?)*
@@ -276,7 +217,7 @@ macro_rules! idt_vectors {
     };
 }
 
-/// The two answers a `direct` row may give, and the whole of what each means.
+/// The two answers a `direct` row may give.
 macro_rules! direct_gate {
     (ring3, $entry:path) => {
         IdtEntry::ring3(Ring3Entry::new($entry))
@@ -286,30 +227,7 @@ macro_rules! direct_gate {
     };
 }
 
-// Every vector Intel names for 64-bit mode has a gate, because a vector without
-// one does not fault the process: the CPU takes the missing gate as a second,
-// contributory fault and escalates to #DF, which halts the machine.
-//
-// The ones Intel reserves — 9, 15 and 22..=31 — are left out on purpose:
-// nothing can deliver them, and `from_raw`'s panic is the honest answer if one
-// ever arrives. Every gate is DPL 0, so `int n` from Ring 3 raises #GP against
-// the gate rather than entering it.
-//
-// **Six of these gates nothing in this tree can raise, and each for its own
-// reason** — the list a later change makes reachable, so a change that reaches
-// one is a change to this comment. Four are unreachable by construction: #NM (7)
-// needs `CR0.TS` or `CR0.EM`, and `arch::control_regs` declares both clear on
-// every CPU, so only a lazy-FPU scheme would raise it and there is none; #TS
-// (10) needs a task switch or an `iretq` to a bad TSS, and this kernel does
-// neither; #NP (11) needs a descriptor with `P = 0` inside the GDT limit, which
-// this seven-entry GDT does not have; #MC (18) is a machine check no guest can
-// stage, and `machine_check_handler` treats it as the abort it is rather than
-// killing a process over a machine that stopped being trustworthy. The other
-// two are architectural on metal and absent under TCG: QEMU raises `EXCP0D_GPF`
-// for every non-canonical access and models #SS (12) for none, and it delivers
-// no #XM (19) whatever `MXCSR` says. `fault_gates` spawns both of those arms
-// anyway and its child prints the status word that says why each came back
-// alive.
+// Every non-reserved vector needs a gate: a missing one escalates to #DF.
 idt_vectors! {
     dispatched {
         DivideError        = 0x00, stub_de, no_error_code;
@@ -333,13 +251,7 @@ idt_vectors! {
         ControlProtection  = 0x15, stub_cp, error_code;
     }
     direct {
-        // Diagnostic only, and sent by `sched::dump` alone — see `idt/nmi.rs`.
-        // Ring 0 because it arrives between arbitrary instructions, including
-        // inside another entry's own save, and it reschedules nothing. IST2
-        // because "arbitrary instructions" includes the three of `SYSCALL` entry
-        // that run at CPL 0 on the user's stack, where a frame pushed at `rsp`
-        // is a supervisor write to a user page: SMAP refuses it, the `#PF` lands
-        // on the same stack, and the machine takes a `#DF`.
+        // ring0: reschedules nothing. ist 2: SYSCALL's brief CPL0-on-user-stack window would fault SMAP without it.
         ring0 Nmi          = 0x02, nmi::nmi_entry, ist 2;
         ring3 Timer        = 0x20, timer::timer_entry;
         ring3 Xhci         = 0x21, xhci::xhci_entry;
@@ -351,38 +263,12 @@ idt_vectors! {
         // Ring 0 because it never returns: `cli; hlt` forever.
         ring0 HaltAll      = 0xFD, stub_halt_all;
         ring3 TlbFlush     = 0xFE, tlb::tlb_flush_entry;
-        // The vector this kernel names by writing it into the SVR, which is
-        // why it is on a table whose rule is Intel's names: a vector the CPU
-        // can deliver through a `P = 0` slot is the escalation above, and the
-        // platform names this one. Ring 0 because the handler reaches no task —
-        // it counts the delivery and acknowledges it only if the in-service
-        // register says it is one that may be acknowledged.
+        // Named via the SVR, not Intel's vector list; ring0 because the handler reaches no task.
         ring0 Spurious     = 0xFF, spurious::spurious_entry;
-        // The vector this kernel names by writing it into the SVR, which is
-        // why it is on a table whose rule is Intel's names: a vector the CPU
-        // can deliver through a `P = 0` slot is the escalation above, and the
-        // platform names this one. Ring 0 because the handler reaches no task —
-        // it counts the delivery and acknowledges it only if the in-service
-        // register says it is one that may be acknowledged.
     }
 }
 
-/// The three vectors that can arrive while `rsp` is not a kernel stack, and
-/// therefore the three that must carry an IST index.
-///
-/// **Checked here rather than tested, because a missing index is invisible
-/// until the machine is already dying.** `SYSCALL` switches CPL and `RIP` and
-/// nothing else, so `arch::syscall`'s entry runs three instructions at CPL 0 on
-/// the user's stack and its exit one more between `pop rsp` and `sysretq`; a
-/// frame the CPU builds there is a supervisor write to a user page, SMAP refuses
-/// it, and the `#PF` escalates to `#DF`. `#DF` is on the list because it is
-/// where that escalation lands, NMI
-/// because nothing masks it, `#MC` because an abort with no report is a machine
-/// that went down saying nothing.
-///
-/// A vector *without* an IST is not asserted about: an ordinary fault from Ring
-/// 3 arrives after the CPU has already switched to `tss.rsp0`, and one from
-/// Ring 0 arrives on a kernel stack by definition.
+/// Checked at compile time, not tested: a missing IST index would be invisible until the machine is already dying.
 const _: () = {
     const fn ist_of(vector: usize) -> u8 {
         let mut i = 0;
@@ -397,9 +283,7 @@ const _: () = {
     assert!(ist_of(0x08) == 1, "#DF must take its frame on IST1");
     assert!(ist_of(0x02) == 2, "an NMI must take its frame on IST2");
     assert!(ist_of(0x12) == 3, "#MC must take its frame on IST3");
-    // Every index names a stack `percpu::alloc_ist_stacks` actually allocates,
-    // and no two vectors share one: an IST stack is not re-entrant, so two
-    // vectors on one index is a frame written over another frame.
+    // No two vectors may share an IST index: it is not re-entrant.
     let mut i = 0;
     while i < IST_VECTORS.len() {
         let (_, ist) = IST_VECTORS[i];
@@ -413,22 +297,14 @@ const _: () = {
     }
 };
 
-/// Halt IPI — received when another CPU calls halt_all_cpus(). Never returns.
+/// Halt IPI from `halt_all_cpus()`; never returns.
 #[unsafe(naked)]
 extern "sysv64" fn stub_halt_all() {
     naked_asm!("cli", "2: hlt", "jmp 2b");
 }
 
-/// Every exception vector's second half, #PF included.
-///
-/// It reaches [`kernel_exit_to_user_check`] and therefore `do_preempt`, so a
-/// fault taken from Ring 3 can return through another task: without the bracket
-/// it would carry whatever that task left in the registers, and a demand-paging
-/// fault that corrupts XMM produces a wrong number rather than a signal.
-///
-/// `rdi` is taken before the bracket because the bracket moves `rsp`: the frame
-/// [`trap_dispatch`] is handed is the one the pushes above built, and the CS
-/// test after the call reads it back out of the bracket's stash.
+/// Every exception vector's second half; the bracket exists because `trap_dispatch` can return through another task, which would otherwise leak that task's registers to Ring 3.
+/// `rdi` (the frame pointer) is captured before the state-save macro moves `rsp`.
 #[unsafe(naked)]
 extern "sysv64" fn common_entry() {
     ring3_naked_asm!(
@@ -441,8 +317,7 @@ extern "sysv64" fn common_entry() {
         save_user_state!(),
         "call {dispatch}",
         "lock sub dword ptr gs:[{preempt_count}], 1",
-        // Run exit-to-user epilogue before restoring GPRs — the call clobbers
-        // scratch regs, which would otherwise leak kernel state into user.
+        // Exit-to-user epilogue runs before the GPR pops: the call clobbers scratch regs that must not leak into user state.
         "mov r11, [rsp + {fp_bytes}]",
         "test dword ptr [r11 + 144], 3",
         "jz 9f",
@@ -462,44 +337,19 @@ extern "sysv64" fn common_entry() {
     );
 }
 
-/// Deferred-preempt epilogue. Caller must have IF=0 on entry; returns IF=0.
-/// Briefly enables interrupts only inside the yield, so the final
-/// iretq/sysretq stays race-free without each caller juggling IF itself.
-///
-/// `do_preempt` owns the `need_resched` clear (see its doc) — clearing here
-/// would silently drop requests its re-entry guard defers. A request that
-/// survives `do_preempt` on this path means the IN_SCHEDULE guard leaked;
-/// spinning on it would hang the CPU silently, so die loudly instead.
-///
-/// **The kill is checked at the *last* boundary and not the first, and the
-/// difference is a thread reaching Ring 3 after it was killed.** The loop below
-/// re-enables interrupts and gives this CPU away for a whole pass; a retire
-/// landing in that window — and the retire's kick is a targeted IPI aimed at
-/// exactly this CPU — is invisible to a check that has already run. So the
-/// check is the loop's own condition: it runs before every
-/// pass and again after the last one, with IF=0, and the return to Ring 3 is
-/// the statement immediately after it.
-///
-/// What remains is one instant wide and not one quantum: the kill bit is set
-/// by a remote CPU's plain atomic, so it can be raised between this check and
-/// the `iretq`. The bound that leaves is one interrupt delivery — the retire's
-/// `Urgency::Preempt` kick is already on its way, and the thread takes it in
-/// Ring 3 and comes straight back here.
+/// Deferred-preempt epilogue; caller must have IF=0 on entry and it returns with IF=0.
 pub(crate) extern "sysv64" fn kernel_exit_to_user_check() {
     flush_ring0_timer_fires_to_trace();
     loop {
-        // A killed thread returns to Ring 3 exactly once more: never. Its
-        // kernel stack is empty here by definition, so this is where the
-        // unwind ends.
+        // A killed thread returns to Ring 3 exactly once more: never.
         crate::scheduler::exit_if_killed();
+        // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
         if !crate::preempt::need_resched() {
             return;
         }
         assert!(!crate::scheduler::in_schedule_self(),
             "exit-to-user inside a scheduler pass");
-        // The pair is `arch::cpu`'s, which is that exact `sti`/`cli` with those
-        // exact options — not an `IrqGuard`, because both of this loop's exits
-        // have to *set* IF rather than restore whatever the caller had.
+        // Not an IrqGuard: both loop exits must set IF, not restore a saved value.
         cpu::enable_interrupts();
         crate::scheduler::do_preempt();
         cpu::disable_interrupts();
@@ -516,30 +366,12 @@ fn flush_ring0_timer_fires_to_trace() {
     }
 }
 
-/// Rust exception dispatcher — routes by vector to the appropriate handler.
-///
-/// The default arm is every other fault, and it is the one that decides on the
-/// saved CS: from Ring 3 the process dies named, from Ring 0 the kernel says so
-/// and halts. The two ahead of it are the exceptions that are not that — #DF
-/// and #MC are aborts with no instruction to return to.
-///
-/// **#DB is on the default arm.** Vector 1 is reachable from Ring 3 by two
-/// ordinary instruction sequences — `INT1`, which is not subject to `INT n`'s
-/// DPL check against the gate, and an `RFLAGS.TF` a `popfq` sets — so it is a
-/// userland bug like `#BP` and `#UD` and ends the process the same way. Nothing
-/// in this kernel arms a watchpoint, so there is no handler that could disarm
-/// `DR7`/`DR6` and resume instead — and a Ring 3 trap that resumed with `TF`
-/// still set would come back once per instruction. The gate stays: a vector
-/// without one escalates to `#DF`, which halts the machine.
+/// Routes by vector to the appropriate handler; #DF and #MC get dedicated arms because they are aborts with no instruction to return to.
+/// #DB stays on the default arm: nothing in this kernel arms a watchpoint to resume from it.
 extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("trap_dispatch");
-    // SAFETY: `frame` is `rsp` at the moment `common_entry` finished its pushes,
-    // handed straight to this call — so it points at the `TrapFrame` those
-    // pushes and the CPU's own interrupt frame just built, on this CPU's kernel
-    // stack, which nothing else can be holding a reference to. Irreducible
-    // because the frame is built by naked assembly and its `&mut` is the only
-    // way a handler can write `rip`/`rsp` back for the `iretq`.
+    // SAFETY: `frame` is `rsp` from common_entry's pushes on this CPU's kernel stack, held nowhere else.
     let frame = unsafe { &mut *frame };
     match Vector::from_raw(frame.vector) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
@@ -554,21 +386,8 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
 }
 
 /// Disable the legacy 8259 PIC.
-///
-/// The four ports at the top of this file are the pair's fixed architectural
-/// addresses and the only I/O ports this module names.
 fn disable_pic() {
-    // SAFETY: `outb` asks its caller to own the port and the byte it sends.
-    // Every port here is one of the 8259 pair's four, which no other device
-    // decodes on any machine this kernel targets; the bytes are the documented
-    // ICW1..ICW4 initialisation followed by `0xFF` in both mask registers, which
-    // silences the device rather than arming it, and none of them reaches memory.
-    //
-    // **One block, because the sequence is the safety argument.** A PIC left
-    // half-initialised keeps delivering its power-on vectors — 8..15 and 112..119
-    // — into an IDT whose gates at those numbers belong to `#DF`, `#GP`, `#PF`
-    // and the rest, and there is no point between these writes where that is a
-    // state the machine may be left in.
+    // SAFETY: every port is one of the 8259 pair's four; kept as one block so the PIC is never left half-initialised delivering stray vectors.
     unsafe {
         outb(PIC1_CMD, 0x11);
         io_wait();
@@ -601,11 +420,7 @@ pub fn init() {
     install_gates(&mut IDT.lock());
     #[cfg(feature = "boot-actuators")]
     install_actuator_gates(&mut IDT.lock());
-    // The negative control on vector 2's `ist 2`: the gate keeps its handler and
-    // its ring and loses the one byte that decides which stack the CPU builds
-    // the frame on.
-    // Nothing on the host side can reach that state — the IDT is the guest's own
-    // memory, and no QEMU device or machine property edits it.
+    // Negative control: clears only the IST byte on vector 2's gate, keeping the handler and ring intact.
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::nmi_without_ist() {
         IDT.lock().entries[Vector::Nmi as usize].ist = 0;
@@ -616,30 +431,20 @@ pub fn init() {
         base: IDT.data_ptr() as u64,
     };
 
-    // SAFETY: `lidt` asks for a valid IDT descriptor. `ptr` is one, built two
-    // lines above out of `size_of::<Idt>()` and the address of the `static IDT`
-    // this function has just filled — a `'static` whose entries `install_gates`
-    // wrote from the one table, so every slot is either a classified handler or
-    // `IdtEntry::EMPTY`. The descriptor itself is a local, which is what `lidt`
-    // wants: the CPU copies the base and limit out of it.
+    // SAFETY: `ptr` is a valid IDT descriptor built from `size_of::<Idt>()` and the just-filled static IDT.
     unsafe {
         cpu::lidt(&ptr as *const IdtPointer as *const u8);
     }
 }
 
-/// The one gate outside the table, and the reason it is outside it: nothing but
-/// an actuator raises [`LOG_NEST_VECTOR`], so a shipping kernel installs no
-/// entry for it and has no handler to install.
+/// The one gate outside the table: only an actuator raises [`LOG_NEST_VECTOR`], so a shipping kernel never installs it.
 #[cfg(feature = "boot-actuators")]
 fn install_actuator_gates(idt: &mut Idt) {
     idt.entries[LOG_NEST_VECTOR as usize] =
         IdtEntry::ring3(Ring3Entry::new(log_nest::log_nest_entry));
 }
 
-/// Take IF=1 on this CPU. Split from `init` so `ioapic::init` can mask every
-/// entry firmware left behind while exception handlers are already installed:
-/// an unmasked entry aimed at a vector with no gate would otherwise become a
-/// #GP the moment the boot enables interrupts.
+/// Take IF=1 on this CPU; split from `init` so `ioapic::init` can mask firmware-left entries before interrupts are live.
 pub fn enable_interrupts() {
     cpu::enable_interrupts();
 }

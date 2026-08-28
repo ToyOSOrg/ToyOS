@@ -18,27 +18,10 @@ const CAPABILITIES_PTR: u64 = 0x34;
 const MULTI_FUNCTION: u8 = 0x80;
 const INVALID_VENDOR: u16 = 0xFFFF;
 
-/// The one MSI-X table entry this kernel programs.
-///
-/// A device here raises one vector, so one entry carries it — and a virtio
-/// device is told this number too, because the entry it points its queues at
-/// has to be the entry [`PciDevice::enable_msix`] wrote.
+/// The one MSI-X table entry this kernel programs; a device's queues must point at it too.
 pub const MSIX_ENTRY: u16 = 0;
 
-/// The address a message-signalled interrupt is DMA'd to, in either form:
-/// the LAPIC window, physical destination 0, fixed delivery, edge. Every
-/// device in this kernel already targets it, so every device interrupt lands
-/// on the boot CPU and is spread from there by `irq_ring` plus the scheduler
-/// rather than by the interrupt controller. Written once because MSI and
-/// MSI-X differ in where the address is configured and not in what it is.
-///
-/// **What that costs, so nobody reads the simplicity as free.** Whatever
-/// thread cpu0 is running is preempted for every ISR in the machine, however
-/// far from cpu0 the work is finally done; one CPU's ISR throughput is the
-/// machine's whole device-interrupt ceiling; and a cpu0 wedged with `IF`
-/// clear stops every device interrupt at once, which couples "one CPU is
-/// stuck" to "all I/O is stuck" in a way no other CPU's wedge does.
-/// `kernel/src/irq_census.rs` is what measures the concentration.
+// Every device interrupt in this kernel targets this LAPIC address, so all land on cpu0.
 const MSG_ADDR: u32 = 0xFEE0_0000;
 
 pub struct Capability<'a> {
@@ -109,18 +92,9 @@ impl PciDevice {
         self.mmio.read_u32(offset)
     }
 
-    /// The physical address Memory Space BAR `index` names, or why this
-    /// register describes no memory.
-    ///
-    /// A `Result`, not a `u64`, because there are three answers a BAR can give
-    /// that are not an address and the caller has to say what it does without
-    /// one — `toyos_pci::bar` decodes them and this reads the registers the
-    /// decode asks for, the second one only when the device said it is part of
-    /// this BAR. An index past [`bar::MAX_INDEX`] is a kernel bug rather than a
-    /// device's claim (every caller writes a literal, and `enable_msix`'s comes
-    /// from `msix`, which refuses the reserved indicators first), so it is a
-    /// fail-fast and not a refusal.
+    /// The physical address Memory Space BAR `index` names, or why it names none; `index` must be ≤ [`bar::MAX_INDEX`].
     pub fn memory_bar(&self, index: u8) -> Result<bar::Memory, bar::Unusable> {
+        // A bad index is a caller bug, not a device's claim, so this fails fast instead of returning Err.
         assert!(index <= bar::MAX_INDEX, "PCI: BAR {index} — a Type 0 header has six");
         let offset = bar::BASE + index as u64 * 4;
         match bar::decode(self.mmio.read_u32(offset))? {
@@ -143,13 +117,7 @@ impl PciDevice {
         self.mmio.write_u16(COMMAND, cmd | 0x06);
     }
 
-    /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it.
-    ///
-    /// `false` is "this function's MSI-X cannot be armed", which is either the
-    /// absence of the capability or a table this kernel declines to believe —
-    /// the log line names which. What to *do* about it is the driver's
-    /// decision and differs: an xHC falls back to [`Self::enable_msi`], a
-    /// virtio device has nothing to fall back to and refuses itself.
+    /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it, or return false if MSI-X cannot be armed.
     pub fn enable_msix(&self, vector: u8) -> bool {
         let Some(cap) = self.capabilities().find(|c| c.id() == msix::CAP_ID) else {
             return false;
@@ -163,11 +131,7 @@ impl PciDevice {
                 return false;
             }
         };
-        // The BAR the capability named, decoded rather than assumed to be
-        // memory: `msix` refuses a reserved *indicator*, and this is the other
-        // half — a device may name BAR 2 and BAR 2 may be an I/O BAR, which is
-        // the one path in this kernel where a device-supplied index reaches a
-        // BAR decode.
+        // Decoded, not assumed memory: a device may name a BAR that is an I/O BAR.
         let base = match self.memory_bar(table.bir()) {
             Ok(memory) => memory.address(),
             Err(why) => {
@@ -198,12 +162,6 @@ impl PciDevice {
     }
 
     /// Point this function's single MSI message at `vector` and enable it.
-    ///
-    /// Not a lesser or older mechanism than MSI-X: the device performs the
-    /// same LAPIC write, with the address and data configured in config space
-    /// instead of in a table in a BAR. A PCIe function that omits MSI-X
-    /// essentially always offers this one, which is the difference between a
-    /// controller this kernel can be told about and one it cannot.
     pub fn enable_msi(&self, vector: u8) -> bool {
         let Some(cap) = self.capabilities().find(|c| c.id() == msi::CAP_ID) else {
             return false;
@@ -260,22 +218,10 @@ impl<'a> Iterator for CapabilityIter<'a> {
     }
 }
 
-/// The most functions [`enumerate`] will hand back.
-///
-/// The address space allows 65536 of them — 256 buses of 32 devices of 8
-/// functions — and which of those firmware leaves decoded is not the kernel's
-/// choice, so the walk needs a ceiling that is not the address space's. The
-/// owner's laptop presents 30; QEMU's q35 with every profile's devices presents
-/// fewer. A machine past this loses only the functions past it, and says so.
+/// The most functions [`enumerate`] will hand back; the rest are logged, not enumerated.
 const MAX_DEVICES: usize = 256;
 
-/// Every PCIe function ECAM decodes, in bus/device/function order.
-///
-/// One walk for the whole kernel, with each driver selecting out of the
-/// result — and selecting *all* of what it can drive, not the first. A first
-/// match is the wrong answer on the machine this targets: Tiger Lake puts an
-/// xHCI in the Thunderbolt block at 00:0d.0 and the PCH's at 00:14.0, both
-/// class 0c03 prog_if 30, and the laptop's keyboard hangs off the second one.
+/// Every PCIe function ECAM decodes, in bus/device/function order; drivers must select all matches, not the first.
 pub fn enumerate(ecam: &crate::mm::Mmio) -> Vec<PciDevice> {
     log!("PCI: Enumerating devices...");
 

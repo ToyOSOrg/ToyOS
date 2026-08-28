@@ -1,25 +1,11 @@
 //! Intel VT-d. Every register layout and every Intel name in this subsystem is
-//! at or below this module, by rule: nothing above `vtd/` may say `Dmar`,
-//! `Sagaw` or `SourceId`.
+//! at or below this module: nothing above `vtd/` may say `Dmar`, `Sagaw` or
+//! `SourceId`.
 //!
-//! What is built: the units are found, their capabilities decoded and
-//! described, every enumerated PCI function given a context entry naming one
-//! identity-mapped domain, and translation turned on. Nothing is *refused*:
-//! every observation that will one day refuse a machine appears here as a line
-//! naming the register value it decided on, and a unit this kernel cannot
-//! program is left switched off rather than made into a halt — which leaves
-//! that machine exactly as it boots today. A refusal that says only
-//! "unsupported" is a
-//! refusal nobody can act on, and these are the lines that will be read off a
-//! laptop panel with no serial port.
-//!
-//! Register offsets, and the field positions inside `CAP` and `ECAP`, come
-//! from the VT-d architecture specification's register chapter. What makes
-//! them *checked* rather than cited is the harness: it stages units that
-//! differ in `CAP.SAGAW` and in `ECAP.IR`, and asserts the guest reports the
-//! difference. A decode reading the wrong bits cannot track a register it is
-//! not looking at — and from I2 on, a unit programmed through the wrong offset
-//! does not translate at all, which every profile in the suite now depends on.
+//! Finds units, decodes capabilities, gives every enumerated PCI function a
+//! context entry naming one identity-mapped domain, and turns translation on.
+//! A capability the kernel cannot use leaves the unit switched off rather than
+//! halting, logged by register value rather than a bare "unsupported".
 
 pub mod dmar;
 pub mod fault;
@@ -38,9 +24,7 @@ use dmar::{Dmar, Malformed, Scope, Scopes, Structure};
 use queue::Queue;
 use table::{Table, Tables};
 
-/// A unit's register window. The architecture defines 4 KiB, and this kernel
-/// reads and writes only inside it — including the fault recording registers,
-/// whose declared extent is checked against this rather than assumed to fit.
+/// A unit's 4 KiB register window; every read and write stays inside it.
 const REGISTER_WINDOW: u64 = 4096;
 
 const VER_REG: u64 = 0x00;
@@ -57,55 +41,36 @@ const FEUADDR_REG: u64 = 0x44;
 const IQT_REG: u64 = 0x88;
 const IQA_REG: u64 = 0x90;
 
-/// `GCMD` bits, and the `GSTS` bit each is confirmed in. The two registers put
-/// the same field at the same position, which is why one constant serves both.
+/// `GCMD` bits; `GSTS` confirms each at the same bit position.
 const TRANSLATION_ENABLE: u32 = 1 << 31;
 const SET_ROOT_TABLE_POINTER: u32 = 1 << 30;
 const QUEUED_INVALIDATION_ENABLE: u32 = 1 << 26;
-/// `GSTS.RTPS` — the root table pointer has been taken. It sits where `GCMD`'s
-/// one-shot `SRTP` does.
+/// `GSTS.RTPS`: the root table pointer has been taken; shares `GCMD`'s `SRTP` bit position.
 const ROOT_TABLE_SET: u32 = 1 << 30;
 
-/// How long a `GCMD` write is given to appear in `GSTS`.
-///
-/// Not a measurement: it is the bound past which the kernel stops waiting for
-/// hardware that is not answering. Expiry is a panic for the same reason an
-/// unacknowledged invalidation is — a unit half-way through being
-/// enabled is a unit whose reach nothing can state.
+/// How long a `GCMD` write is given to appear in `GSTS` before the kernel
+/// panics: a half-enabled unit's reach cannot be stated.
 const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(1),
     "a unit half-way through being enabled is a unit whose reach nothing can state",
 );
 
-/// x86-64's architectural physical-address ceiling is 52 bits, so a register
-/// base at or above this is not an address at all. It is also what stops
-/// `DirectMap::as_ptr`'s unchecked `+ PHYS_OFFSET` wrapping a firmware-supplied
-/// `u64` round into the user half — the same bound `drivers::acpi` puts on a
-/// table pointer, for the same reason.
+/// x86-64's 52-bit physical-address ceiling: a register base at or above this
+/// is not an address at all, and would otherwise wrap `DirectMap::as_ptr`'s
+/// unchecked offset into the user half.
 const MAX_PHYS: u64 = 1 << 52;
 
-/// How many units this kernel will inventory.
-///
-/// Policy, not physics: a walk over a list firmware wrote needs a ceiling that
-/// is not the list's own. This is far above anything a chipset publishes, and
-/// what a machine past it loses is the description of the units past it —
-/// which it is told, rather than left to infer from a short log.
+/// Ceiling on units inventoried; a machine past it is told, not silently truncated.
 pub(super) const MAX_UNITS: usize = 16;
 
-/// Every remapping table on this machine, in one place because they outlive
-/// the call that built them: the unit walks them for as long as it is on, and
-/// a `Vec<PhysPage>` dropped at the end of `init` would hand the pages the
-/// unit is reading back to the PMM.
+/// Remapping tables outlive `init`: the unit keeps reading them while it is on.
 static TABLES: Lock<Tables> = Lock::new(Tables::new());
 
 pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     let dmar = match Dmar::open(rsdp_addr) {
         Ok(dmar) => dmar,
-        // Firmware omits the table both when the platform has no VT-d silicon
-        // and when VT-d is switched off in firmware setup, and ACPI cannot
-        // separate the two. Probing a hardcoded MCHBAR-relative window
-        // to tell them apart is exactly the model-table guessing this project
-        // bans, so the line names both and names the setting.
+        // ACPI cannot distinguish "no VT-d silicon" from "VT-d disabled in
+        // firmware"; the line names both rather than guess.
         Err(TableError::Absent) => {
             log!(
                 "iommu: no DMAR table — this platform has no IOMMU, or VT-d is disabled in \
@@ -131,11 +96,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
 
     let mut units = 0usize;
     let mut regions = 0usize;
-    // One identity domain for the whole machine, built out of page tables
-    // because the units in reach report `ECAP.PT` clear. Its depth
-    // is the unit's, so a machine whose units disagree about `CAP.SAGAW` gets
-    // one set of tables per width rather than one shared set programmed at the
-    // wrong depth.
+    // One identity-domain table set per address width: units may disagree on
+    // `CAP.SAGAW`, and a shared set would be programmed at the wrong depth for one.
     let mut domains: [Option<Table>; 2] = [None, None];
     for structure in dmar.structures() {
         match structure {
@@ -149,12 +111,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
                 }
                 units += 1;
             }
-            // A kernel-owned device is in the passthrough domain and its
-            // reserved regions are satisfied for free, and a device carrying
-            // one is refused for userspace handoff. Here the region is reported
-            // so that a machine which has one says
-            // so on its first boot. QEMU publishes none, so this arm is
-            // untestable in the harness and the laptop is its first exercise.
+            // Kernel devices get RMRR regions for free and userspace handoff of
+            // one is refused elsewhere; QEMU publishes none, so this arm is
+            // untested by the harness.
             Ok(Structure::Rmrr(rmrr)) => {
                 log!(
                     "iommu: rmrr{regions} seg={} {:#018x}..{:#018x}",
@@ -186,16 +145,13 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     }
 }
 
-/// A unit whose window decodes, with the capabilities it advertises and the
-/// state of its global command register.
+/// A unit whose register window decodes, with its capabilities and `GCMD` state.
 struct Unit {
     index: usize,
     base: u64,
     regs: Mmio,
     caps: Capabilities,
-    /// What has been switched on in `GCMD`. The register is not
-    /// read-modify-write safe — a write names every persistent bit that is to
-    /// stay set — so this is the only record of which those are.
+    /// Bits switched on in `GCMD`; the register is not read-modify-write safe, so this is the only record.
     gcmd: u32,
 }
 
@@ -222,13 +178,10 @@ impl Unit {
     }
 }
 
-/// Firmware's register base, mapped only if it is one.
-///
-/// The one address in the `DMAR` the kernel dereferences. A window that is not
-/// 4 KiB-aligned, or that is outside the architectural physical range, is not
-/// an address at all — never clamped to fit. A base pointing into usable RAM
-/// would read plausible garbage as a capability register, which costs a wrong
-/// log line and, from I2 on, a register write into somebody's heap.
+/// Firmware's register base, mapped only if 4 KiB-aligned and within the
+/// physical range — never clamped to fit, since a base in usable RAM would
+/// decode as a plausible capability register until a write lands in
+/// somebody's heap.
 fn window(base: u64) -> Option<Mmio> {
     if base == 0 || !base.is_multiple_of(REGISTER_WINDOW) || base >= MAX_PHYS {
         return None;
@@ -249,9 +202,7 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
     };
 
     let version = regs.read_u32(VER_REG);
-    // The one case here that is distinguishable from "no unit
-    // at all": firmware described a unit whose window does not decode, either
-    // because it is a firmware bug or because the unit was left powered down.
+    // A described unit whose window does not decode: firmware bug, or the unit is powered down.
     if version == u32::MAX || (version >> 4) & 0xF == 0 {
         log!(
             "iommu: unit{index} @{base:#x}: register window reads ver={version:#010x}, the unit \
@@ -271,9 +222,7 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
         version & 0xF,
         caps.cap,
         caps.ecap,
-        // The one decision on this line rather than a register field: the
-        // widest of 48 and 39 the unit advertises, and a unit offering neither
-        // is refused.
+        // Widest of 48/39 the unit advertises; a unit offering neither is refused.
         match caps.address_width() {
             Some(aw) => aw.bits(),
             None => 0,
@@ -298,19 +247,8 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
     Some(Unit { index, base, regs, caps, gcmd: 0 })
 }
 
-/// Program this unit and turn translation on.
-///
-/// The order is the unit's own, minus the interrupt-remapping half this kernel
-/// does not program yet: the invalidation queue first, then the root table
-/// pointer, then a global
-/// invalidation of everything the unit may have cached, and only then `TE`.
-/// Each step is confirmed in `GSTS` before the next is issued.
-///
-/// A capability this kernel needs and the unit does not have leaves it
-/// switched off, with a line naming the register. That is the refusal one
-/// stage early in everything but severity: the machine boots exactly as it
-/// does today, because what a unit that is never enabled does to DMA is
-/// nothing.
+/// Programs the unit in its own order — queue, root pointer, global
+/// invalidation, then `TE` — each confirmed in `GSTS` before the next.
 fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2]) {
     let index = unit.index;
     let Some(width) = unit.caps.address_width() else {
@@ -373,39 +311,22 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
             }
         };
 
-        // Every function `pci::enumerate` returned, before translation is
-        // enabled. Enabling it with a device on the bus that has no context
-        // entry is how a machine bricks its own boot disk — and the corollary
-        // still holds, that a device appearing after boot has none and faults.
+        // Every enumerated function needs a context entry before `TE`: one
+        // missing bricks the boot disk instead of merely faulting later.
         let root = tables.alloc();
         for device in devices {
             let stream = StreamId::pci(device.bus, device.dev, device.func);
-            // The two isolation negative controls, and neither is reachable
-            // from the host side: a root table, a context entry and a
-            // second-level table are the guest's own memory, so no QEMU device
-            // or machine property can take one function's entry away, or point
-            // it at a domain with nothing in it, while leaving the rest of the
-            // machine correct.
-            //
-            // Both sabotage the same function and both are answered on its
-            // first *read*, which is deliberate: QEMU caches a translation
-            // with the permissions of the access that populated it and lets
-            // its memory core drop a later access the entry does not allow,
-            // silently and with no fault. A control that
-            // waited for a device's first write would therefore hang the boot
-            // instead of faulting.
+            // Unreachable from the host side, so these actuators substitute for
+            // it; both are answered on the device's first *read*, since a
+            // first-write access would cache write permission and never fault.
             if crate::actuator::iommu_context_absent()
                 && device.matches_class(NVME_CLASS, NVME_SUBCLASS, None)
             {
                 log!("iommu: unit{index} leaves {stream} out of the root table (actuator)");
                 continue;
             }
-            // A present context entry naming a table with no mappings. What it
-            // separates from the control above: a context entry that named
-            // *passthrough* would fault identically for a function with no
-            // entry at all, and would ignore every second-level table this
-            // kernel writes. Only a device whose empty domain is walked can
-            // fault on this.
+            // A present context entry naming an empty domain, distinct from a
+            // missing entry: passthrough would fault identically either way.
             if crate::actuator::iommu_empty_domain()
                 && device.matches_class(NVME_CLASS, NVME_SUBCLASS, None)
             {
@@ -420,8 +341,7 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
         let mut queue = Queue::new(&mut tables, unit.regs);
         drop(tables);
 
-        // Before `TE`, so the first transaction this unit blocks is one it can
-        // report rather than one that is merely counted.
+        // Before `TE`: the first blocked transaction must be reportable, not merely counted.
         fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);
 
         unit.command(
@@ -452,17 +372,13 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
     );
 }
 
-/// The class both actuators name their victim by. Chosen rather than a
-/// bus/device/function because which slot QEMU puts a controller in is not
-/// this kernel's business — and because the harness reads the same answer out
-/// of `pci::enumerate`'s own lines, so neither side is told the other's.
+/// Device class the actuators target, not a bus/device/function: QEMU's slot
+/// choice is not this kernel's business, and the harness reads the same
+/// class independently out of `pci::enumerate`.
 const NVME_CLASS: u8 = 0x01;
 const NVME_SUBCLASS: u8 = 0x08;
 
-/// Which slot of the per-width domain cache a unit's tables live in.
-///
-/// An exhaustive match rather than the discriminant, so a third width added to
-/// `AddressWidth` fails to compile here instead of indexing past the array.
+/// Slot of the per-width domain cache; exhaustive match so a new `AddressWidth` fails to compile here.
 fn domain_slot(width: AddressWidth) -> usize {
     match width {
         AddressWidth::Bits39 => 0,
@@ -489,9 +405,8 @@ fn log_scope(owner: &str, index: usize, scope: &Scope) {
             scope.kind_name(),
             scope.enumeration_id()
         ),
-        // The requester id is not in the table for a device behind a bridge —
-        // see `Scope::stream_id`. What is printed is what firmware wrote, so
-        // the line is still a name a bus walk can be matched against.
+        // No requester id for a device behind a bridge; print what firmware
+        // wrote instead.
         None => log!(
             "iommu: {owner}{index} scope {} bus={:#04x} path={} id={} — requester id needs a \
              bridge walk",
@@ -503,12 +418,7 @@ fn log_scope(owner: &str, index: usize, scope: &Scope) {
     }
 }
 
-/// `CAP` and `ECAP`, read once and decoded on demand.
-///
-/// Read once at init, logged once, and then never re-read. Holding the
-/// two raw values and deriving from them is what makes that true — a decode
-/// that went back to the register per field would be re-reading it a dozen
-/// times per boot.
+/// `CAP` and `ECAP`, read once at init and decoded on demand.
 struct Capabilities {
     cap: u64,
     ecap: u64,
@@ -520,26 +430,19 @@ impl Capabilities {
         1u32 << (4 + 2 * (self.cap & 0x7))
     }
 
-    /// `CAP.CM`. Read for the log line only: this kernel invalidates after
-    /// every table modification in both directions and refuses to branch on it,
-    /// because the arm a machine in reach does not execute is the arm that is
-    /// wrong when somebody finally runs it.
+    /// `CAP.CM`: read for the log only; the kernel invalidates unconditionally,
+    /// since an arm no machine here exercises is presumed wrong.
     fn caching_mode(&self) -> bool {
         self.cap & (1 << 7) != 0
     }
 
-    /// `CAP.SAGAW`, raw. Bit *n* of this field is a page-table depth covering
-    /// `30 + 9n` address bits, so bit 1 is 39-bit and bit 2 is 48-bit.
+    /// `CAP.SAGAW`, raw: bit *n* covers `30 + 9n` address bits (bit 1 = 39-bit, bit 2 = 48-bit).
     fn sagaw(&self) -> u8 {
         ((self.cap >> 8) & 0x1F) as u8
     }
 
-    /// The widest depth this kernel implements that the unit advertises.
-    ///
-    /// `None` is a unit offering neither, which is a refusal. 57-bit is
-    /// not considered even when advertised: it is a fifth level of page
-    /// tables for an address space nothing here needs, and an unused level is
-    /// an untested one.
+    /// Widest depth this kernel implements that the unit advertises; `None`
+    /// refuses. 57-bit is never considered: an unused level is untested.
     fn address_width(&self) -> Option<AddressWidth> {
         let sagaw = self.sagaw();
         if sagaw & (1 << 2) != 0 {
@@ -551,23 +454,17 @@ impl Capabilities {
         }
     }
 
-    /// `CAP.MGAW`: the widest address the unit will accept, encoded one less
-    /// than it is. It bounds every IOVA, so an address width is only usable if
-    /// it fits under this.
+    /// `CAP.MGAW`, encoded one less than it is: bounds every IOVA.
     fn mgaw(&self) -> u8 {
         (((self.cap >> 16) & 0x3F) + 1) as u8
     }
 
-    /// `CAP.SPS` bit 0: 2 MiB leaf entries. Required, because the
-    /// kernel is 2 MiB-page-only and a 4 KiB-leaf path would be 512× the
-    /// page-table memory for the same mapping and dead code on every machine
-    /// in reach.
+    /// `CAP.SPS` bit 0: 2 MiB leaf entries, required because the kernel is 2 MiB-page-only.
     fn superpage_2m(&self) -> bool {
         self.cap & (1 << 34) != 0
     }
 
-    /// `CAP.PSI`. Without it every invalidation is domain-wide, which is
-    /// correct and coarser — never a refusal.
+    /// `CAP.PSI`; absent means invalidation falls back to domain-wide, correct but coarser.
     fn page_selective_invalidation(&self) -> bool {
         self.cap & (1 << 39) != 0
     }
@@ -582,22 +479,17 @@ impl Capabilities {
         ((self.cap >> 24) & 0x3FF) * 16
     }
 
-    /// `ECAP.C`: page-table walks snoop the CPU cache. Read for this
-    /// log line and for nothing else — the flush is unconditional, because the
-    /// `C=0` arm is one no machine anybody here can boot would execute.
+    /// `ECAP.C`: page-table walks snoop the cache; read for the log line only, the flush stays unconditional.
     fn coherent(&self) -> bool {
         self.ecap & (1 << 0) != 0
     }
 
-    /// `ECAP.QI`. Absent means invalidation goes through `CCMD_REG`/
-    /// `IOTLB_REG`, which is correct and slower.
+    /// `ECAP.QI`; absent falls back to `CCMD_REG`/`IOTLB_REG`, correct but slower.
     fn queued_invalidation(&self) -> bool {
         self.ecap & (1 << 1) != 0
     }
 
-    /// `ECAP.IR`: this unit can remap interrupts. Its absence is a
-    /// refusal rather than a reduced mode — without remapping, a driver
-    /// process with a mapped BAR can inject an arbitrary vector.
+    /// `ECAP.IR`; absence refuses rather than degrades — without it a driver with a mapped BAR can inject an arbitrary vector.
     fn interrupt_remapping(&self) -> bool {
         self.ecap & (1 << 3) != 0
     }
@@ -607,29 +499,22 @@ impl Capabilities {
         self.ecap & (1 << 4) != 0
     }
 
-    /// `ECAP.SC`: a second-level page-table entry may carry the snoop-force
-    /// bit, which makes a device's DMA snoop the CPU cache whatever the device
-    /// itself requested. Read because an audio driver needs it: an Intel HDA
-    /// controller carries a vendor no-snoop control in its
-    /// config space, and setting this bit in every mapping makes that control
-    /// irrelevant — one layer down, with no config-write syscall.
+    /// `ECAP.SC`: a second-level entry can force DMA to snoop the cache,
+    /// overriding a device's own no-snoop setting — the HDA driver relies on
+    /// this to override vendor no-snoop with no config-write syscall.
     fn snoop_control(&self) -> bool {
         self.ecap & (1 << 7) != 0
     }
 
-    /// `ECAP.PT`: a context entry may name passthrough translation, which is
-    /// what every kernel-owned device gets. Absent means those devices
-    /// get identity-mapped translated domains instead: same protection, more
-    /// page tables.
+    /// `ECAP.PT`; absent falls back to identity-mapped translated domains for
+    /// kernel-owned devices — same protection, more page tables.
     fn passthrough(&self) -> bool {
         self.ecap & (1 << 6) != 0
     }
 }
 
-/// One character per boolean, so a line carrying twelve of them still fits a
-/// laptop panel's row. `n` is printed rather than omitted: a field whose
-/// absence is its value is a field a reader cannot tell from a field the
-/// kernel forgot.
+/// One character per boolean; `n` is printed rather than omitted, since an
+/// absent field would look like a forgotten one.
 fn yn(v: bool) -> char {
     if v {
         'y'

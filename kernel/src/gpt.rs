@@ -1,30 +1,10 @@
-//! Which partitions this machine was given, and where they are.
+//! Resolves the partitions the bootloader handed off ([`KernelArgs`]) to
+//! locations on a probed block device ([`probe`]).
 //!
-//! Two halves that must not be confused. **Identity** comes from the
-//! bootloader: the unique partition GUID of the volume firmware loaded it
-//! from, read out of its own `LoadedImage` device path while Boot Services are
-//! alive, and the unique GUID of the log partition, read out of a file on that
-//! same volume. Both arrive in [`KernelArgs`]. **Location** comes from the
-//! disk: [`probe`] parses a block device's GPT and looks for those exact GUIDs.
-//!
-//! The kernel is *given* both. It never goes looking for either. The difference
-//! is not academic — "mount whatever looks like an ESP" is the same shape as
-//! "format whatever fails to mount", and the second one nearly took the owner's
-//! 244 GB NVMe (`5dff9aa`, and `bcachefs_adapter::probe`'s comment). It is the
-//! reason the log partition is not found by its type or by being the only other
-//! FAT32 on the stick, both of which would have needed no handoff at all.
-//!
-//! The two identities are not equally sourced and the code says so. The boot
-//! partition has two independent accounts, firmware's and the table's, and a
-//! disagreement refuses it. The log partition has one, so it is anchored to the
-//! boot partition instead: it counts only on the device that carries the boot
-//! partition, because the file that named it is on that volume.
-//!
-//! Nothing here writes. Parsing is [`toyos_gpt`], which treats the table as
-//! hostile bytes and has no panicking path; this file is the adapter from the
-//! kernel's 4 KiB `BlockDevice` down to the device's own logical block, plus
-//! the two things only the kernel can decide: whether firmware and the table
-//! agree, and what to do when two devices claim the same partition.
+//! The boot partition's location must match firmware's account or is
+//! refused; the log partition is trusted only on the device already found
+//! to carry the boot partition, since its GUID names a file on that volume.
+//! Nothing here writes.
 
 use crate::block::{BlockDevice, DeviceId};
 use crate::sync::Lock;
@@ -35,8 +15,7 @@ use toyos_gpt::{GptError, Guid, Sectors};
 #[derive(Clone, Copy, Debug)]
 pub struct BootPartition {
     pub guid: Guid,
-    /// In the boot device's logical blocks, whose size firmware does not tell
-    /// us — so these two are for cross-checking a GPT entry, never for I/O.
+    /// In the boot device's logical blocks; for cross-checking a GPT entry, never I/O.
     pub start_lba: u64,
     pub blocks: u64,
 }
@@ -45,26 +24,15 @@ pub struct BootPartition {
 #[derive(Clone, Copy, Debug)]
 pub struct Volume {
     pub device: DeviceId,
-    /// The device's logical block size. Both LBAs below are in these units,
-    /// not in the 4 KiB blocks `BlockDevice` speaks.
+    /// The device's logical block size; both LBAs below are in these units.
     pub lba_bytes: u32,
     pub start_lba: u64,
     pub blocks: u64,
 }
 
-/// What the kernel knows about where the partitions it was given live.
-///
-/// `Ambiguous` is a state and not an error return because it is a property of
-/// the machine, not of a call: two devices carrying one unique partition GUID
-/// means one is a clone of the other, and nothing on this side can tell which
-/// one firmware read. The only safe answer to "which is mine" is then "I do
-/// not know", forever, and never "the first one I saw".
-///
-/// `log` is an `Option` inside `Found` because that is a state a real stick
-/// reaches: an image flashed before the log partition existed, or a table that
-/// no longer carries the entry the ESP names. It means the machine keeps its
-/// `/boot` and has no `/log`, and it is a refusal that says which GUID it could
-/// not find — never a fallback onto some other partition.
+/// What the kernel knows about where the given partitions live. `Ambiguous`
+/// is permanent: two devices carrying one partition GUID means one is a
+/// clone, and nothing here can tell which one firmware read.
 enum Resolution {
     Unknown,
     Found { boot: Volume, log: Option<Volume> },
@@ -72,9 +40,7 @@ enum Resolution {
 }
 
 static FIRMWARE: Lock<Option<BootPartition>> = Lock::new(None);
-/// The log partition's identity. `None` only before [`init`] — the handoff
-/// always carries one, because the bootloader refuses a volume that does not
-/// name it.
+/// The log partition's identity; `None` only before [`init`] runs.
 static LOG_GUID: Lock<Option<Guid>> = Lock::new(None);
 static RESOLVED: Lock<Resolution> = Lock::new(Resolution::Unknown);
 
@@ -105,9 +71,6 @@ pub fn boot_partition() -> Option<BootPartition> {
 }
 
 /// Where the boot partition is, if a device has been found to carry it.
-///
-/// This is what a filesystem mount asks: the answer is an LBA range on a named
-/// device, or nothing at all. There is no third answer and no "probably".
 pub fn boot_volume() -> Option<Volume> {
     match *RESOLVED.lock() {
         Resolution::Found { boot, .. } => Some(boot),
@@ -115,15 +78,7 @@ pub fn boot_volume() -> Option<Volume> {
     }
 }
 
-/// Whether looking at another disk could still produce a boot volume.
-///
-/// Three states, two answers, and the distinction is the whole point:
-/// `Unknown` means nothing has carried the partition *yet*, which a disk that
-/// has not finished enumerating can still change; `Ambiguous` means two devices
-/// carry it and nothing on this side can say which, which a third device cannot
-/// repair. A caller that waits for a late disk has to be able to tell them
-/// apart, or it spends its whole ceiling waiting for something that cannot
-/// happen — and `boot_volume()` answers `None` to both.
+/// True only while resolution is still `Unknown`; `Ambiguous` is permanent.
 pub fn boot_volume_still_possible() -> bool {
     matches!(*RESOLVED.lock(), Resolution::Unknown)
 }
@@ -137,10 +92,6 @@ pub fn log_volume() -> Option<Volume> {
 }
 
 /// Ask one block device whether it carries the boot partition.
-///
-/// Read-only, and called once per device as the device is discovered. A device
-/// that does not carry it is not a failure of any kind — most machines have
-/// several disks and at most one of them is the one we booted from.
 pub fn probe(dev: &mut dyn BlockDevice, lba_bytes: u32) {
     let id = dev.device_id();
     let Some(firmware) = boot_partition() else {
@@ -160,11 +111,7 @@ pub fn probe(dev: &mut dyn BlockDevice, lba_bytes: u32) {
         }
     };
 
-    // Two independent accounts of the same extent: firmware's, read from a
-    // device path before ExitBootServices, and the table's, read from the
-    // platter just now. They describe the same partition or this is not the
-    // disk firmware was looking at, and there is no repair for that — only a
-    // refusal, because the next thing anyone does with this answer is write.
+    // Firmware's and the table's accounts must agree; a mismatch refuses, never repairs.
     let part = found.partition;
     if part.first_lba != firmware.start_lba || part.lba_count() != firmware.blocks {
         log!(
@@ -189,10 +136,7 @@ pub fn probe(dev: &mut dyn BlockDevice, lba_bytes: u32) {
     let mut resolved = RESOLVED.lock();
     match *resolved {
         Resolution::Unknown => {
-            // Only here, and so only on this device. The GUID came off a file
-            // on the volume this table has just placed, so a partition of that
-            // name on some *other* disk is not the one that file meant — and a
-            // machine whose boot volume is ambiguous has no such file to trust.
+            // Only here: the log GUID names a file on this volume, not on any other disk.
             let log = locate_log(&mut sectors, id, lba_bytes);
             log!(
                 "gpt: device {id} carries the boot partition at LBA {}+{} ({}-byte blocks), \
@@ -222,13 +166,7 @@ pub fn probe(dev: &mut dyn BlockDevice, lba_bytes: u32) {
     }
 }
 
-/// The log partition on the device that has just proved it carries the boot
-/// partition, or a refusal that names what it looked for.
-///
-/// No second account to cross-check against: firmware describes one partition
-/// and this is not it. What stands in for that is where the name came from —
-/// `\toyos\log.guid` on the volume firmware *did* describe — plus this call
-/// being reachable only from the device carrying that volume.
+/// The log partition on the device already proven to carry the boot partition, or `None`.
 fn locate_log(sectors: &mut DeviceSectors<'_>, id: DeviceId, lba_bytes: u32) -> Option<Volume> {
     let target = LOG_GUID.lock().expect("gpt::init runs before any device is probed");
     match toyos_gpt::locate(sectors, target) {
@@ -259,12 +197,7 @@ fn locate_log(sectors: &mut DeviceSectors<'_>, id: DeviceId, lba_bytes: u32) -> 
     }
 }
 
-/// The kernel's 4 KiB `BlockDevice`, seen in the device's own logical blocks.
-///
-/// A GPT is laid out in the device's blocks, so the parser reads 512-byte LBAs
-/// off a driver whose smallest read is 4096. One block of cache turns the 34
-/// LBA reads a parse needs into 5 device round trips; without it every one of
-/// them is a separate NVMe command for bytes we already had.
+/// The kernel's 4 KiB `BlockDevice`, seen in the device's own logical blocks; caches one block.
 struct DeviceSectors<'a> {
     dev: &'a mut dyn BlockDevice,
     lba_bytes: u32,
@@ -275,9 +208,7 @@ struct DeviceSectors<'a> {
 
 impl<'a> DeviceSectors<'a> {
     fn new(dev: &'a mut dyn BlockDevice, lba_bytes: u32) -> Self {
-        // Zero for a block size that does not divide 4096, which makes
-        // `lba_count` zero and every read fail — the parser then refuses on
-        // `UnsupportedLbaSize` before asking for anything.
+        // Zero when lba_bytes doesn't divide 4096; that fails every read cleanly.
         let lbas_per_block = if lba_bytes != 0 && 4096 % lba_bytes == 0 {
             (4096 / lba_bytes) as u64
         } else {
@@ -305,11 +236,8 @@ impl Sectors for DeviceSectors<'_> {
             return false;
         }
         if self.cached != Some(block) {
-            // The tag has to be dropped with the read, not just the read
-            // refused: a failed read leaves the buffer holding the *previous*
-            // block, and a cache still claiming this one would serve those
-            // bytes to the next LBA in the same block with nothing to mark
-            // them stale.
+            // Must clear `cached` on a failed read too, or the buffer's previous block
+            // looks valid for the next LBA in this block.
             if self.dev.read_blocks(block, 1, &mut self.buf).is_err() {
                 self.cached = None;
                 return false;
