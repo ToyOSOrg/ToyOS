@@ -1,8 +1,6 @@
-//! Building a thread's TLS block.
-//!
-//! The layout arithmetic is `toyos_elf::tls`, which is pure and host-tested
-//! over the whole space a file can name; what is here is the allocation, the
-//! template copies and the DTV the kernel writes in front of the data.
+//! A thread's TLS block: x86-64 variant II with the DTV in front of the data, built holding
+//! physical addresses that `rebase_block` shifts once the block is mapped. The layout
+//! arithmetic is `toyos_elf::tls`; this is the allocation, the template copies and the DTV.
 
 use crate::elf::TlsModule;
 use crate::mm::KernelSlice;
@@ -11,10 +9,9 @@ use crate::DirectMap;
 use toyos_elf::Layout;
 
 const TCB_SIZE: usize = 64;
-/// Module entries a thread's DTV can hold. `SYS_TLS_ALLOC_BLOCK` refuses a
-/// module id above it, because there is nowhere to record the answer.
+/// Module entries a thread's DTV can hold; `SYS_TLS_ALLOC_BLOCK` refuses a module id above it: there is nowhere to record the answer.
 pub const DTV_INITIAL_CAPACITY: usize = 64;
-/// Generation (8) + length (8).
+/// Generation word, then length word.
 const DTV_HEADER_SIZE: usize = 16;
 const DTV_BYTES: usize = DTV_HEADER_SIZE + DTV_INITIAL_CAPACITY * 8;
 /// A DTV slot for a module whose block has not been allocated yet.
@@ -39,21 +36,7 @@ pub fn setup_tls(
     )
 }
 
-/// Allocate and populate one thread's TLS block for every static module.
-///
-/// x86-64 variant II, with the DTV in front:
-///
-/// ```text
-/// [DTV] [padding] [TLS data (.tdata + .tbss)] [TCB]
-///                                              ^ TP (FS base)
-/// ```
-///
-/// TCB: `TP+0x00` is the self-pointer the ABI requires, `TP+0x08` the DTV
-/// pointer, both user-visible physical addresses — `spawn` rebases them once
-/// the block has a virtual address. DTV: generation, length, then one entry per
-/// module id.
-///
-/// `None` for a layout no allocation can hold.
+/// One thread's TLS block for every static module; `None` when no allocation holds the layout.
 pub fn setup_combined_tls(
     modules: &[TlsModule],
     total_memsz: usize,
@@ -69,29 +52,14 @@ pub fn setup_combined_tls(
     let page_alloc = PageAlloc::new(plan.alloc_size, crate::mm::pmm::Category::InitTls)?;
     let block = page_alloc.ptr();
 
-    // SAFETY: `block` is `page_alloc.ptr()`, a fresh `PageAlloc::new
-    // (plan.alloc_size, ...)` immediately above — valid and exclusively
-    // owned for exactly `plan.alloc_size` bytes, and not yet published
-    // anywhere else.
+    // SAFETY: `block` is the fresh, unpublished `plan.alloc_size`-byte allocation above.
     unsafe {
         core::ptr::write_bytes(block, 0, plan.alloc_size);
     }
 
     for module in modules.iter().filter(|m| m.is_static) {
         if let Some(template) = &module.template {
-            // SAFETY: `template.base()` is valid for `template.size()` bytes
-            // (a `KernelSlice`, bounds-checked when it was built — see
-            // `KernelSlice::as_slice`'s `# Safety` for the same class of
-            // guarantee). The destination stays inside `block`'s
-            // `plan.alloc_size`-byte allocation by `toyos_elf::tls`'s own
-            // contract, chained: `template.size() <= module.memsz` (ELF's
-            // own `filesz <= memsz`), `module.base_offset + module.memsz <=
-            // total_memsz` (`place_module`'s contract, see
-            // `build_tls_layout`'s doc), and `plan.tls_start + total_memsz
-            // <= plan.alloc_size` (`plan`'s own formula: `tls_start =
-            // (alloc_size - block_size) & !(align - 1) <= alloc_size -
-            // block_size`, and `block_size >= total_memsz`). `block` is
-            // freshly zeroed above and not yet published.
+            // SAFETY: `KernelSlice` is bounds-checked and `toyos_elf::tls` bounds the copy inside the unpublished `block`.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     template.base(),
@@ -104,36 +72,24 @@ pub fn setup_combined_tls(
 
     let block_phys = DirectMap::from_ptr(block).phys();
     let tp_user = block_phys + plan.tp_offset as u64;
-    // SAFETY: `plan.tp_offset = tls_start + total_memsz` (the crate's own
-    // field doc: "Where the thread pointer goes") is where the TCB starts,
-    // and `plan()`'s `alloc_size` formula reserves `TCB_SIZE` bytes after it
-    // — so `block.add(plan.tp_offset)` plus the 16 bytes the block below
-    // writes through it stays inside `block`'s allocation.
+    // SAFETY: the plan reserves `TCB_SIZE` bytes at `tp_offset` inside `alloc_size`.
     let tp_kernel = unsafe { block.add(plan.tp_offset) } as *mut u64;
-    // SAFETY: `tp_kernel`'s bound was just established above; two `u64`
-    // writes (16 of the `TCB_SIZE` = 64 bytes reserved there). Same
-    // exclusivity as the zero/copy above — `block` is not yet published.
+    // TP+0 is the psABI self-pointer, TP+8 the DTV pointer.
+    // SAFETY: two words of the `TCB_SIZE` reserved at `tp_kernel`; `block` is still unpublished.
     unsafe {
         *tp_kernel = tp_user;
         *tp_kernel.add(1) = block_phys;
     }
 
     let dtv = block as *mut u64;
-    // SAFETY: `dtv = block`, and every write below lands in `[0,
-    // DTV_BYTES)` (`DTV_HEADER_SIZE` plus `DTV_INITIAL_CAPACITY` eight-byte
-    // slots — exactly the `dtv_bytes` `plan()` was called with above).
-    // `plan()`'s own formula (`alloc_size = align_up(block_size + dtv_bytes
-    // + align, granule)`) guarantees at least that much room at the front of
-    // `block`. The per-module loop checks `idx <= DTV_INITIAL_CAPACITY`
-    // before every write. Same exclusivity as the rest of this function.
+    // SAFETY: every write lands in `[0, DTV_BYTES)`, reserved by the plan at the front of `block`.
     unsafe {
         *dtv = 1;
         *dtv.add(1) = DTV_INITIAL_CAPACITY as u64;
         for i in 0..DTV_INITIAL_CAPACITY {
             *dtv.add(2 + i) = DTV_UNALLOCATED;
         }
-        // Static modules only. A `dlopen`ed module's slot stays unallocated
-        // until `__tls_get_addr` asks for it.
+        // A `dlopen`ed module's slot stays unallocated until `__tls_get_addr` asks for it.
         for module in modules.iter().filter(|m| m.is_static) {
             let idx = module.module_id as usize;
             if idx > 0 && idx <= DTV_INITIAL_CAPACITY {
@@ -145,37 +101,12 @@ pub fn setup_combined_tls(
     Some((page_alloc, tp_user))
 }
 
-/// Rebase a freshly built TLS block's self-referential pointers from physical
-/// to virtual, in place, through the kernel's direct map.
-///
-/// A TLS block is filled with *physical* addresses because it has no virtual
-/// address until it is mapped; this shifts the thread-pointer self-word, the DTV
-/// pointer and every allocated DTV entry by `rebase = vaddr - phys`. `phys` is
-/// the block's physical base, `tp_offset` the byte offset from it to the thread
-/// pointer, and `fs_base` the block's *virtual* thread pointer — what the TP
-/// self-word must end up holding.
-///
-/// Irreducible: there is no Rust type for a DTV whose entries point into itself,
-/// and building one would be modelling the psABI's memory layout rather than
-/// writing it — the same untyped-by-nature work `elf::reloc` does one level
-/// down.
-///
+/// Rebase a fresh TLS block's self-referential pointers from physical to virtual, in place.
+/// No Rust type expresses a DTV whose entries point into itself; this models the psABI layout directly, the same untyped-by-nature work `elf::reloc` does one level down.
 /// # Safety
-///
-/// `phys` must be the physical base of a TLS block `setup_combined_tls`/
-/// `setup_tls` just built, and the caller must exclusively own it for the
-/// duration: no other CPU may read or write the block while this runs. The two
-/// callers satisfy that two ways — [`map_block`] runs before the block's thread
-/// exists (an unscheduled child, not yet handed to the scheduler), and
-/// `process::spawn_thread` runs under the process-data lock that serialises
-/// every thread of the process that could touch it. `tp_offset` and the DTV
-/// length word are the ones those builders wrote, both bounded inside the
-/// block's allocation, so every write below lands in it.
+/// `phys`/`tp_offset` name the block `setup_combined_tls` just built; nothing else touches it until this returns.
 pub(crate) unsafe fn rebase_block(phys: u64, tp_offset: usize, fs_base: u64, rebase: i64) {
-    // SAFETY: the caller's contract above — an exclusively-owned block whose
-    // layout `setup_combined_tls`/`setup_tls` fixed, reached through the
-    // kernel's own direct map. The DTV length at word 1 is a count those
-    // builders wrote, not one read back from userland.
+    // SAFETY: the caller's contract; word 1's DTV length is the builders' own, never userland's.
     unsafe {
         let block = DirectMap::from_phys(phys).as_mut_ptr::<u8>();
         let tp = block.add(tp_offset) as *mut u64;
@@ -192,11 +123,7 @@ pub(crate) unsafe fn rebase_block(phys: u64, tp_offset: usize, fs_base: u64, reb
     }
 }
 
-/// Build one thread's TLS block and map it into the child address space.
-///
-/// The block is built holding physical addresses and [`rebase_block`] shifts
-/// them by one delta once it has a virtual one. `None` when the block cannot be
-/// allocated or the address space has no room for it.
+/// Build one thread's TLS block and map it into the child address space; `None` when either fails.
 pub fn map_block(
     child_pt: &crate::process::PageTables,
     modules: &[TlsModule],
@@ -214,32 +141,14 @@ pub fn map_block(
         crate::mm::paging::Prot::ReadWrite)?;
     let rebase = vaddr.raw() as i64 - phys as i64;
     let fs_base = (fs_base as i64 + rebase) as u64;
-    // SAFETY: `phys`/`alloc` are the block `setup_combined_tls`/`setup_tls` just
-    // built and zeroed; `vma_map` mapped the same pages into the child, but the
-    // child has not been scheduled yet (this runs on the spawning thread, before
-    // `SYS_SPAWN` hands the new process to the scheduler), so nothing else can
-    // read or write the block — the exclusivity `rebase_block` requires. The
-    // thread-pointer offset `fs_base - vaddr.raw()` reduces to the same
-    // `plan.tp_offset` those builders already bounded against `alloc_size`
-    // (algebraically: `fs_base = block_phys + plan.tp_offset + rebase`, `rebase =
-    // vaddr - phys`, `block_phys == phys`).
+    // SAFETY: nothing runs in the unscheduled child yet, and `fs_base - vaddr` is the `tp_offset` the builder bounded.
     unsafe {
         rebase_block(phys, (fs_base - vaddr.raw()) as usize, fs_base, rebase);
     }
     Some((crate::process::MappedPages::new(vaddr, alloc), fs_base))
 }
 
-/// Place every startup module in one combined block: libraries first, then the
-/// executable.
-///
-/// Module id 1 is the executable's by convention — `__tls_get_addr` and the
-/// DTV both depend on it — so the libraries take 2 upwards even though they
-/// are laid out first.
-///
-/// Returns the modules, the block's total size, the strictest alignment any of
-/// them asked for, and the next free module id. `None` when the modules do not
-/// fit one block, which is a refusal rather than a module quietly left out: a
-/// missing module is relocations resolving against a block that is not there.
+/// One combined block for every startup module; `None` when they do not fit, since a missing module would mean relocations resolving against a block that is not there.
 pub fn build_tls_layout(
     loaded_libs: &[crate::elf::LoadedLib],
     layout: &Layout,
@@ -251,6 +160,7 @@ pub fn build_tls_layout(
     let mut modules = alloc::vec::Vec::with_capacity(loaded_libs.len() + 1);
     let mut cursor = 0usize;
     let mut max_align = 1usize;
+    // Module id 1 is the executable's; libraries start at 2.
     let mut next_module_id = 2u64;
 
     for lib in libs {

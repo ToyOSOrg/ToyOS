@@ -58,6 +58,19 @@ jobs:
             "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
           cargo run -- --abi-split-check --base "origin/${{ github.base_ref }}"
 
+      # The writing law: net new prose at most one line per four lines of net
+      # new code, and no CLAUDE.md growth. `src/prosegate.rs` states the law;
+      # the same function answers `cargo run -- --pr`.
+      - name: the writing law
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "not a pull request: this rule is about a branch against its base."
+            exit 0
+          fi
+          git fetch --quiet origin \
+            "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          cargo run -- --writing-law-check --base "origin/${{ github.base_ref }}"
+
   # What protects `main` is configured outside the repository, and this job
   # reads it back into VCS: half of it is readable from an endpoint that needs
   # no token.
