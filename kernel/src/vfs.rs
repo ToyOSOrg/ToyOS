@@ -80,6 +80,21 @@ struct Mount {
     access: UserAccess,
 }
 
+/// A path with every symlink followed, minted only by [`Vfs::resolve_for_open`]:
+/// the mount an `OpenTarget` names is the mount opened, never one a link aimed away from.
+pub struct OpenTarget(String);
+
+impl OpenTarget {
+    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn into_string(self) -> String { self.0 }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ResolveIntent {
+    KernelOrRead,
+    UserModify,
+}
+
 /// Virtual filesystem that dispatches to named mount points.
 pub struct Vfs {
     root: Option<Box<dyn FileSystem>>,
@@ -299,16 +314,15 @@ impl Vfs {
         Ok(result)
     }
 
-    /// Open a file for handle I/O.
-    pub fn open_file(&mut self, path: &str) -> Result<FileId, SyscallError> {
-        let (file_id, backing) = self.open_file_depth(path, 0)?;
-        if let Some(backing) = backing {
-            crate::file_cache::set_backing(file_id, backing);
+    pub fn resolve_for_open(&mut self, path: &str, intent: ResolveIntent) -> Result<OpenTarget, SyscallError> {
+        let target = self.resolve_for_open_depth(path, 0)?;
+        if intent == ResolveIntent::UserModify && !self.user_may_modify(target.as_str()) {
+            return Err(SyscallError::PermissionDenied);
         }
-        Ok(file_id)
+        Ok(target)
     }
 
-    fn open_file_depth(&mut self, path: &str, depth: u32) -> Result<(FileId, Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>), SyscallError> {
+    fn resolve_for_open_depth(&mut self, path: &str, depth: u32) -> Result<OpenTarget, SyscallError> {
         if depth > 10 { return Err(SyscallError::InvalidArgument); }
         let (mount, file) = self.resolve_path("/", path);
         if mount.is_empty() { return Err(SyscallError::NotFound); }
@@ -316,14 +330,36 @@ impl Vfs {
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
         if fs_path.is_empty() { return Err(SyscallError::NotFound); }
         if let Some(target) = fs.read_link(&fs_path)? {
-            let resolved = if is_named {
+            let next = if is_named {
                 format!("/{}/{}", mount, target)
             } else {
                 format!("/{}", target)
             };
-            return self.open_file_depth(&resolved, depth + 1);
+            return self.resolve_for_open_depth(&next, depth + 1);
         }
-        fs.open_file(&fs_path)
+        Ok(OpenTarget(if file.is_empty() { format!("/{mount}") } else { format!("/{mount}/{file}") }))
+    }
+
+    fn fs_for_target(&mut self, target: &OpenTarget) -> Result<(&mut dyn FileSystem, String), SyscallError> {
+        let (mount, file) = self.resolve_path("/", target.as_str());
+        if mount.is_empty() { return Err(SyscallError::NotFound); }
+        let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
+        if fs_path.is_empty() { return Err(SyscallError::NotFound); }
+        Ok((fs, fs_path))
+    }
+
+    pub fn open_target(&mut self, target: &OpenTarget) -> Result<FileId, SyscallError> {
+        let (fs, fs_path) = self.fs_for_target(target)?;
+        let (file_id, backing) = fs.open_file(&fs_path)?;
+        if let Some(backing) = backing {
+            crate::file_cache::set_backing(file_id, backing);
+        }
+        Ok(file_id)
+    }
+
+    pub fn mtime_target(&mut self, target: &OpenTarget) -> Result<u64, SyscallError> {
+        let (fs, fs_path) = self.fs_for_target(target)?;
+        fs.file_mtime(&fs_path)
     }
 
     /// Create a new empty file. Returns FileId.
@@ -401,28 +437,6 @@ impl Vfs {
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
         if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
         fs.delete(&fs_path)
-    }
-
-    pub fn file_mtime(&mut self, path: &str) -> Result<u64, SyscallError> {
-        self.file_mtime_depth(path, 0)
-    }
-
-    fn file_mtime_depth(&mut self, path: &str, depth: u32) -> Result<u64, SyscallError> {
-        if depth > 10 { return Err(SyscallError::InvalidArgument); }
-        let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() { return Err(SyscallError::NotFound); }
-        let is_named = self.mounts.contains_key(&mount);
-        let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if fs_path.is_empty() { return Err(SyscallError::NotFound); }
-        if let Some(target) = fs.read_link(&fs_path)? {
-            let resolved = if is_named {
-                format!("/{}/{}", mount, target)
-            } else {
-                format!("/{}", target)
-            };
-            return self.file_mtime_depth(&resolved, depth + 1);
-        }
-        fs.file_mtime(&fs_path)
     }
 
     pub fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
@@ -522,24 +536,8 @@ impl Vfs {
     /// The write-back queue is drained whole, not filtered by path, because it is keyed by the name a handle was opened under, and a symlink, rename, or relative open names the same file differently.
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
         crate::writeback::drain_held(self);
-        self.open_backing_depth(path, 0)
-    }
-
-    fn open_backing_depth(&mut self, path: &str, depth: u32) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
-        if depth > 10 { return Err(SyscallError::InvalidArgument); }
-        let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() { return Err(SyscallError::NotFound); }
-        let is_named = self.mounts.contains_key(&mount);
-        let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if fs_path.is_empty() { return Err(SyscallError::NotFound); }
-        if let Some(target) = fs.read_link(&fs_path)? {
-            let resolved = if is_named {
-                format!("/{}/{}", mount, target)
-            } else {
-                format!("/{}", target)
-            };
-            return self.open_backing_depth(&resolved, depth + 1);
-        }
+        let target = self.resolve_for_open(path, ResolveIntent::KernelOrRead)?;
+        let (fs, fs_path) = self.fs_for_target(&target)?;
         fs.open_backing(&fs_path)
     }
 }
