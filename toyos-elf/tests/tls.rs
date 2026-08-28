@@ -67,11 +67,45 @@ fn an_alignment_that_is_not_a_power_of_two_has_no_plan() {
 
 #[test]
 fn modules_are_placed_in_order_with_the_first_at_zero() {
-    let (base, cursor) = tls::place_module(0, 0x48).unwrap();
+    // The first module lands at 0 whatever its align; a later one rounds up to
+    // its own align, floored at 16.
+    let (base, cursor) = tls::place_module(0, 0x48, 8).unwrap();
     assert_eq!((base, cursor), (0, 0x48));
-    let (base, cursor) = tls::place_module(cursor, 0x10).unwrap();
+    let (base, cursor) = tls::place_module(cursor, 0x10, 16).unwrap();
     assert_eq!((base, cursor), (0x50, 0x60));
-    let (base, cursor) = tls::place_module(cursor, 0).unwrap();
+    let (base, cursor) = tls::place_module(cursor, 0, 8).unwrap();
     assert_eq!((base, cursor), (0x60, 0x60));
-    assert_eq!(tls::place_module(0x60, usize::MAX), None);
+    assert_eq!(tls::place_module(0x60, usize::MAX, 16), None);
+}
+
+/// psABI variant II oracle (`std_tls`): a 160-byte lib ahead of a 64-aligned exe
+/// places it at `align_up(160, 64) == 192`; the old constant 16 gave 160.
+#[test]
+fn a_module_lands_on_its_own_declared_alignment() {
+    assert_eq!(tls::place_module(160, 152, 64), Some((192, 344)));
+    assert_eq!(tls::place_module(160, 152, 16), Some((160, 312)));
+    for &align in &[0usize, 1, 2, 8, 16, 32, 64, 4096, 65536] {
+        let (base, _) = tls::place_module(0xA5, 8, align).unwrap();
+        assert_eq!(base % align.max(16), 0, "align {align}: base {base}");
+        assert!(base >= 0xA5, "align {align}: base {base} overlaps the cursor");
+    }
+}
+
+/// `TPOFF64`/`TPOFF32` is `S + A - tp`: the addend is in every branch's answer.
+#[test]
+fn tpoff_carries_the_addend() {
+    let total = 0x200usize;
+    for &module_addr in &[0u64, 8, 0x40, 0x1F0] {
+        assert_eq!(tls::tpoff(module_addr, 0, total), module_addr as i64 - total as i64);
+        for &addend in &[0i64, 8, -8, 0x100, -0x100] {
+            assert_eq!(
+                tls::tpoff(module_addr, addend, total),
+                module_addr as i64 + addend - total as i64,
+            );
+            assert_eq!(
+                tls::tpoff(module_addr, addend, total) - tls::tpoff(module_addr, 0, total),
+                addend,
+            );
+        }
+    }
 }
