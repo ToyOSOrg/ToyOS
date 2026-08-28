@@ -59,7 +59,7 @@ kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
 kernel/src/arch/syscall/vm.rs 74 0
 kernel/src/arch/tlb.rs 35 0
-kernel/src/bcachefs_adapter.rs 57 0
+kernel/src/bcachefs_adapter.rs 58 0
 kernel/src/block.rs 33 0
 kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
@@ -94,10 +94,10 @@ kernel/src/elf/cache.rs 24 0
 kernel/src/elf/index.rs 21 0
 kernel/src/elf/mod.rs 104 0
 kernel/src/elf/reloc.rs 37 0
-kernel/src/fat32_adapter.rs 167 0
+kernel/src/fat32_adapter.rs 169 0
 kernel/src/file_backing.rs 21 0
 kernel/src/file_cache.rs 69 0
-kernel/src/fs_rename.rs 16 0
+kernel/src/fs_rename.rs 18 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
 kernel/src/heartbeat.rs 24 0
@@ -173,7 +173,7 @@ kernel/src/sleeplock.rs 28 0
 kernel/src/symbols.rs 39 0
 kernel/src/sync.rs 17 0
 kernel/src/time.rs 47 0
-kernel/src/tmpfs.rs 12 0
+kernel/src/tmpfs.rs 13 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
 kernel/src/user_ptr.rs 58 0
@@ -277,7 +277,7 @@ tests/toyos-rust-tests/src/bin/fault_gates.rs 27 0
 tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_rename_durable.rs 4 0
-tests/toyos-rust-tests/src/bin/fs_transactional.rs 32 0
+tests/toyos-rust-tests/src/bin/fs_transactional.rs 35 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
 tests/toyos-rust-tests/src/bin/futex_wake_counts.rs 167 0
 tests/toyos-rust-tests/src/bin/gsbase_locked.rs 2 0
@@ -438,13 +438,13 @@ toyos-fat32/src/device.rs 42 0
 toyos-fat32/src/dir.rs 72 0
 toyos-fat32/src/error.rs 33 0
 toyos-fat32/src/fat.rs 127 0
-toyos-fat32/src/fs.rs 197 0
+toyos-fat32/src/fs.rs 200 0
 toyos-fat32/src/lib.rs 59 0
 toyos-fat32/src/name.rs 104 0
 toyos-fat32/src/time.rs 40 0
 toyos-fat32/tests/common/mod.rs 103 0
 toyos-fat32/tests/host_read.rs 26 0
-toyos-fat32/tests/host_write.rs 85 1
+toyos-fat32/tests/host_write.rs 86 1
 toyos-fat32/tests/hostile.rs 193 3
 toyos-gpt/src/crc32.rs 13 0
 toyos-gpt/src/guid.rs 19 0

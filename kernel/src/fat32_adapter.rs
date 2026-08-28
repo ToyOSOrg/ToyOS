@@ -595,9 +595,10 @@ impl FatFs {
 }
 
 /// FAT cannot replace an entry in one step, so a replacing rename deletes the
-/// destination and then moves the source. The source is validated present
-/// first, so the delete never runs for a rename that will fail to find its
-/// source.
+/// destination and then moves the source. The source is validated present and
+/// distinct first, so the delete never runs for a rename that would not find its
+/// source or would name its own entry. One residual device-error window is
+/// tracked in `issues/filesystem/fat-overwrite-rename-frees-the-destination-first.md`.
 impl ReplaceRename for FatFs {
     type Displaced = ();
 
@@ -606,10 +607,16 @@ impl ReplaceRename for FatFs {
         self.fs.exists(old).map_err(|e| refused(role, "exists", old, e))
     }
 
+    fn same_object(&mut self, old: &str, new: &str) -> Result<bool, SyscallError> {
+        // Identity is the entry's location: FAT names one entry by two strings.
+        let role = self.role;
+        self.fs.same_entry(old, new).map_err(|e| refused(role, "same_entry", old, e))
+    }
+
     fn commit(&mut self, old: &str, new: &str) -> Result<Committed<()>, SyscallError> {
         let role = self.role;
-        // The destination goes first, but only now the source is known present,
-        // so a rename that will not find its source is already refused.
+        // The destination goes first, but the source is already known present and
+        // distinct, so a rename onto its own entry never reaches this delete.
         if self.fs.exists(new).map_err(|e| refused(role, "exists", new, e))? {
             self.delete(new)?;
         }

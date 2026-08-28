@@ -1,9 +1,9 @@
 //! The one order a replacing rename runs in, shared by every mount adapter: the
-//! source is validated before the destination is disturbed, `old == new` is a
-//! no-op, and the displaced destination is freed only once the move commits.
-//! [`replace_rename`] is the sole sequencer, and [`Committed`] — which only
-//! [`ReplaceRename::commit`] mints — is what [`ReplaceRename::release`] consumes,
-//! so freeing a destination before the move commits fails to compile.
+//! source is validated before the destination is disturbed, a rename onto the
+//! same backend object (by identity, not string equality) is a no-op, and the
+//! displaced destination is freed only once the move commits. [`replace_rename`]
+//! is the sole sequencer, and [`Committed`] — which only `commit` mints — is what
+//! `release` consumes, so freeing before commit fails to compile.
 
 use toyos_abi::syscall::SyscallError;
 
@@ -30,6 +30,10 @@ pub(crate) trait ReplaceRename {
     /// Is the source present? The move fails here, disturbing nothing, when not.
     fn source_present(&mut self, old: &str) -> Result<bool, SyscallError>;
 
+    /// Do `old` and `new` name the same backend object? The move is then a
+    /// no-op, never a delete of the source's own entry.
+    fn same_object(&mut self, old: &str, new: &str) -> Result<bool, SyscallError>;
+
     /// Commit the move on the backend, displacing whatever `new` named; on `Err`
     /// nothing durable moved.
     fn commit(&mut self, old: &str, new: &str)
@@ -39,8 +43,8 @@ pub(crate) trait ReplaceRename {
     fn release(&mut self, old: &str, new: &str, committed: Committed<Self::Displaced>);
 }
 
-/// Validate the source, treat `old == new` as POSIX's no-op success, then commit
-/// and only then release the destination.
+/// Validate the source, treat a rename onto the same object as POSIX's no-op
+/// success, then commit and only then release the destination.
 pub(crate) fn replace_rename<R: ReplaceRename>(
     adapter: &mut R,
     old: &str,
@@ -49,7 +53,7 @@ pub(crate) fn replace_rename<R: ReplaceRename>(
     if !adapter.source_present(old)? {
         return Err(SyscallError::NotFound);
     }
-    if old == new {
+    if adapter.same_object(old, new)? {
         return Ok(());
     }
     let committed = adapter.commit(old, new)?;

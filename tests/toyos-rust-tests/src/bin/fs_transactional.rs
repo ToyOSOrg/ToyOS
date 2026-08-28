@@ -102,6 +102,28 @@ fn rename_self_is_a_noop(dir: &str) {
     fs::remove_file(&path).expect("cleanup");
 }
 
+/// A case-only rename on a case-insensitive mount names one entry by two
+/// strings and must keep the file; a byte-exact self-rename guard destroys it.
+fn rename_case_only_keeps_the_file(dir: &str) {
+    let upper = format!("{dir}/FSTX-Case.BIN");
+    let lower = format!("{dir}/fstx-case.bin");
+    let bytes = pattern(2 * PAGE + 7);
+
+    {
+        let mut f = File::create(&upper).unwrap_or_else(|e| panic!("create {upper}: {e}"));
+        f.write_all(&bytes).expect("write the file");
+        f.sync_all().expect("fsync the file");
+    }
+
+    fs::rename(&upper, &lower).unwrap_or_else(|e| panic!("{dir}: case-only rename failed: {e}"));
+
+    let back = fs::read(&lower)
+        .unwrap_or_else(|e| panic!("{dir}: a case-only rename lost the file: {e}"));
+    assert_eq!(back, bytes, "{dir}: a case-only rename changed the file");
+
+    fs::remove_file(&lower).expect("cleanup");
+}
+
 /// Shrink to a size inside a page while that page is resident, then regrow: the
 /// bytes past the old end must read as zeros. The write, shrink and regrow share
 /// one open so the straddled page is resident when the size is cut; `durable`
@@ -193,6 +215,8 @@ fn main() {
     }
     rename_missing_source_keeps_dirty_destination("/home");
     rename_missing_source_keeps_dirty_destination("/tmp");
+    // /log is FAT, the one case-insensitive mount.
+    rename_case_only_keeps_the_file("/log");
 
     // F7: a shrink zeroes the tail of the page it keeps, so a regrow reads a
     // hole. /tmp is the in-memory control and also drops a whole page; /home

@@ -141,6 +141,11 @@ impl ReplaceRename for BcacheFsAdapter {
         Ok(mapped("exists", old, self.fs.file_mtime(old))?.is_some())
     }
 
+    fn same_object(&mut self, old: &str, new: &str) -> Result<bool, SyscallError> {
+        // bcachefs hashes the exact name; equal strings are the one entry.
+        Ok(old == new)
+    }
+
     fn commit(&mut self, old: &str, new: &str) -> Result<Committed<Option<FileId>>, SyscallError> {
         // Capture the displaced destination's in-memory id but free nothing: the
         // backend move replaces the tree entry atomically, and only its success

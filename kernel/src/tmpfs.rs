@@ -58,6 +58,11 @@ impl ReplaceRename for TmpFs {
         Ok(self.entries.contains_key(old))
     }
 
+    fn same_object(&mut self, old: &str, new: &str) -> Result<bool, SyscallError> {
+        // tmpfs keys each name exactly; equal strings are the one entry.
+        Ok(old == new)
+    }
+
     fn commit(&mut self, old: &str, new: &str) -> Result<Committed<Option<Entry>>, SyscallError> {
         let Some(moved) = self.entries.remove(old) else { return Err(SyscallError::NotFound) };
         let displaced = self.entries.remove(new);
