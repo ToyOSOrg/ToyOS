@@ -253,6 +253,20 @@ pub const RELEGATED: &[Relegated] = &[
                  control.",
     },
     Relegated {
+        test: "gsbase_locked",
+        ci_ms: 13_091,
+        why: Why::Cost,
+        guards: "The GS-base primitive being #UD at Ring 3, on a two-boot control: the \
+                 shipped kernel refuses `RDGSBASE`/`WRGSBASE` and survives, the \
+                 `user-writable-gsbase` kernel leaves it and leaks a kernel-half \
+                 `GS.base`. Over the ceiling because it double-boots. What still runs per \
+                 pull request: the real regression guard is the compile-time \
+                 `arch::control_regs::CR4_FORBIDDEN` assert, which fails the build on any \
+                 shipping kernel that puts `FSGSBASE` back into `CR4`, plus \
+                 `control_regs`'s FSGSBASE-clear row off every boot log — so the nightly \
+                 double-boot only adds the runtime witness that the instruction faults.",
+    },
+    Relegated {
         test: "desktop_audio_client",
         ci_ms: 121_441,
         why: Why::Cost,

@@ -252,21 +252,20 @@ pub fn disable_interrupts() {
     }
 }
 
+/// The kernel's own FS base, not `rd/wrfsbase` (`control_regs::CR4_FORBIDDEN`).
+const IA32_FS_BASE: u32 = 0xC000_0100;
+
 #[inline]
-pub fn rdfsbase() -> u64 {
-    let val: u64;
-    // SAFETY: reads the FS base into the declared output; #UD without CR4.FSGSBASE, required by control_regs on every CPU.
-    unsafe {
-        asm!("rdfsbase {}", out(reg) val, options(nomem, nostack));
-    }
-    val
+pub fn read_fs_base() -> u64 {
+    rdmsr(IA32_FS_BASE)
 }
 
 /// # Safety
 /// `val` becomes this CPU's FS base; #GP if non-canonical, and the caller owns which thread's thread-locals it addresses.
 #[inline]
-pub unsafe fn wrfsbase(val: u64) {
-    asm!("wrfsbase {}", in(reg) val, options(nomem, nostack));
+pub unsafe fn write_fs_base(val: u64) {
+    // SAFETY: `IA32_FS_BASE` takes any canonical value; the caller owns both.
+    unsafe { wrmsr(IA32_FS_BASE, val) };
 }
 
 pub fn halt() -> ! {
