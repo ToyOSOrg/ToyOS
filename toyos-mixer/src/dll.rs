@@ -28,7 +28,7 @@ impl Dll {
         }
     }
 
-    /// Forget the estimate after a pipeline re-prime (§5.9); the next
+    /// Forget the estimate after a pipeline re-prime; the next
     /// completion record re-initializes it.
     pub fn reset(&mut self) {
         self.t_estimated = None;

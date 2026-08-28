@@ -34,7 +34,7 @@
 //! judge these three: a thread parked in `accept` has cloned the `Arc` out of
 //! its table onto its own kernel stack, so killing it strands that `Arc` on
 //! memory that is freed without unwinding and the object stays *alive* — which
-//! this design accepts and says so (`kernel/src/object/`, §1.1). What must not
+//! this design accepts and says so (`kernel/src/object/`). What must not
 //! survive is the **handle count**, because that is what every peer-visible
 //! event rides. So each arm asks a peer, and none of them counts objects.
 //!

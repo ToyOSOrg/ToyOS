@@ -14,6 +14,7 @@ pub use mm::{UserAddr, DirectMap, PHYS_OFFSET};
 
 mod shootdown;
 mod sleeplock;
+mod smp_roster;
 mod sync;
 mod id_map;
 

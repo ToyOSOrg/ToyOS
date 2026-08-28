@@ -57,7 +57,7 @@ struct Contaminated {
     second: u64,
 }
 
-/// §9.1's conservation law, at one width.
+/// The conservation law, at one width.
 ///
 /// **Three registered names and not one, and the reason is the fast tier's
 /// line.** What the law is about is concurrent producers, so a machine with one
@@ -128,17 +128,17 @@ pub fn log_conservation_smp8(
     conservation(test_config, c_bins, rust_bins, 8)
 }
 
-/// §9.2's gate: an interrupt that logs, inside another `emit`, on one CPU.
+/// The nested-`emit` gate: an interrupt that logs, inside another `emit`, on one CPU.
 ///
 /// **The one case loom cannot express and the host cannot stage.** The
 /// stimulus is a self-IPI sent from inside a record's own body copy, on a
-/// kernel thread — where `IF` is set and §2.3a's bracket is the only thing
+/// kernel thread — where `IF` is set and `emit`'s IF-off bracket is the only thing
 /// holding the interrupt off. The handler emits exactly one shard generation of
 /// patterned records; the outer record is then dropped by the ring's own
 /// drop-oldest policy, which is what makes "the burst laps the shard" a
 /// statement with an arithmetic behind it.
 ///
-/// What is asserted is the ledger of §9.1 over a workload of that shape: every
+/// What is asserted is the conservation ledger over a workload of that shape: every
 /// sequence number read or counted lost, every burst record's text regenerated
 /// byte for byte from the two numbers it declares, and the burst's own `done`
 /// read — so a run in which nothing was injected cannot pass quietly.
@@ -165,7 +165,7 @@ pub fn log_nested_emit(
     Ok(())
 }
 
-/// §2.3a's bracket at the window it names first: an interrupt that logs,
+/// The reserve bracket at the window it names first: an interrupt that logs,
 /// landing between a record's shard-pointer read and its unlocked `xadd`.
 ///
 /// **The property is that a shard has one order and not two.** `emit` reads the
@@ -234,7 +234,7 @@ pub fn log_reserve_window(
 const BURST: u64 = 512;
 
 /// The negative control on [`log_reserve_window`], and on `LogCommitGuard`
-/// itself: the same boot with §2.3a's bracket removed.
+/// itself: the same boot with the reserve bracket removed.
 ///
 /// **The one thing that can make the log's correctness claim fail on purpose.**
 /// `log-unbracketed-reserve` leaves the guard constructed and dropped exactly as
@@ -304,10 +304,10 @@ pub fn log_reserve_window_negative(
 /// would notice if the other changed.
 const INVERSION: &str = "within a shard the sequence order is the timestamp order";
 
-/// §3.2: a pending poll on the machine's log is not something a handle closing
+/// A pending poll on the machine's log is not something a handle closing
 /// can cancel.
 ///
-/// **The L4 review's F1, gated.** `object::ops::close` handed every source the
+/// **The close-cancels-a-foreign-poll defect, gated.** `object::ops::close` handed every source the
 /// closing object named to `io_uring::cancel_by_source`, which cancels across every
 /// ring in the machine — right for a pipe whose other end has really gone, and
 /// wrong for a stream that outlives every handle. Every `SysCap` maps to

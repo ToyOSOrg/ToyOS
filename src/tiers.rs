@@ -1149,9 +1149,9 @@ mod tests {
         assert!(validate_ci_profile(&ci).is_ok());
     }
 
-    /// §5: "Nightly measurements refresh the recorded Nightly costs; they are
+    /// Nightly measurements refresh the recorded Nightly costs; they are
     /// validated against the tier rule, never against equality with a past
-    /// measurement." A fresh nightly run never reproduces every `ci_ms` to the
+    /// measurement. A fresh nightly run never reproduces every `ci_ms` to the
     /// millisecond — this drifts every Cost row's numbers, keeping each safely
     /// over the ceiling — and the profile must still validate: `ci_ms` is
     /// last-measured documentation, not a fixture the merge checks against.
