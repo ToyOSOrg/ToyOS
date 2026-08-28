@@ -25,7 +25,7 @@ fn fat_reopen_census() {
 
     let before = crate::file_cache::ref_count(id);
     crate::fat32_adapter::selftest_fail_backing(true);
-    // Each `vfs::lock()` is its own statement: the guard is a re-entrant spinlock.
+    // Each `vfs::lock()` is its own statement: the lock is not reentrant, so re-locking a live guard panics.
     let target = vfs::lock().resolve_for_open(PATH, vfs::ResolveIntent::KernelOrRead);
     let reopened = match target {
         Ok(target) => vfs::lock().open_target(&target),

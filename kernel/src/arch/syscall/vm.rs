@@ -231,15 +231,12 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     // The mapping is committed before the fallible copy-out below; this guard
     // unwinds it — VA region and its shootdown — if the copy-out refuses, so a
     // refused dlopen leaves no library mapped or registered.
-    let mapping = {
-        let pt = pt.clone();
-        crate::rollback::Rollback::new(move || {
-            process::with_process_data(|_data| {
-                pt.lock().free_and_unmap(base);
-            });
-            crate::arch::tlb::shootdown();
-        })
-    };
+    let mapping = crate::rollback::Rollback::new(move || {
+        process::with_process_data(|_data| {
+            pt.lock().free_and_unmap(base);
+        });
+        crate::arch::tlb::shootdown();
+    });
 
     let lib_has_tls = lib.tls_memsz > 0;
     let data_arc = process::process_data();
