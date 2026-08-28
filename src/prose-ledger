@@ -48,7 +48,7 @@ kernel/src/arch/percpu.rs 135 0
 kernel/src/arch/smp.rs 44 0
 kernel/src/arch/syscall/debug.rs 14 0
 kernel/src/arch/syscall/device.rs 12 0
-kernel/src/arch/syscall/dispatch.rs 89 0
+kernel/src/arch/syscall/dispatch.rs 92 0
 kernel/src/arch/syscall/fs.rs 12 0
 kernel/src/arch/syscall/gate.rs 23 0
 kernel/src/arch/syscall/handles.rs 21 0
@@ -310,7 +310,7 @@ tests/toyos-rust-tests/src/bin/panic_recovery.rs 13 0
 tests/toyos-rust-tests/src/bin/poller_capacity.rs 33 0
 tests/toyos-rust-tests/src/bin/port_poll_churn.rs 49 0
 tests/toyos-rust-tests/src/bin/process_lifecycle.rs 94 0
-tests/toyos-rust-tests/src/bin/process_stats.rs 67 0
+tests/toyos-rust-tests/src/bin/process_stats.rs 81 0
 tests/toyos-rust-tests/src/bin/query_modules_size.rs 16 0
 tests/toyos-rust-tests/src/bin/readdir_bound.rs 34 0
 tests/toyos-rust-tests/src/bin/sched_stress.rs 22 0

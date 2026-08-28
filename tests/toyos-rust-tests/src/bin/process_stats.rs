@@ -25,15 +25,66 @@ use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 const SELF_PATH: &str = "/bin/test_rs_process_stats";
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("held") {
-        return held();
+    match std::env::args().nth(1).as_deref() {
+        Some("held") => return held(),
+        Some("refused") => return refused_child(),
+        _ => {}
     }
     exited_child();
     live_process();
     blocked_time_names_what_it_waited_on();
     repeatable();
     refused_without_read();
+    refused_calls_are_timed();
     println!("all process_stats tests passed");
+}
+
+/// Enough that the child spends almost all its CPU inside the refused-call loop,
+/// so `syscall_total_ns` and `cpu_ns` can be compared as a ratio the host speed
+/// cancels out of.
+const REFUSED_CALLS: u64 = 500_000;
+
+/// `SYS_SET_THREAD_NAME` with a name past `THREAD_NAME_LEN` (28) is refused by
+/// the argument check before any pointer is read: a cheap decode refusal, and
+/// the name is a `const` so the loop body is the call and nothing else.
+fn refused_child() {
+    const NAME: [u8; 64] = [0u8; 64];
+    for _ in 0..REFUSED_CALLS {
+        syscall::set_thread_name(&NAME);
+    }
+}
+
+/// A refused syscall is counted *and* timed, not counted past the clock.
+///
+/// The child does almost nothing but issue refused calls, so their dispatch time
+/// is a large fraction of its CPU time — timing each call however it exits keeps
+/// `syscall_total_ns` above a tenth of `cpu_ns` (measured ~0.38 under TCG, higher
+/// on real silicon where the entry/exit costs less). A build that lets a refusal
+/// return past the clock times only its handful of successful calls, a hundredth
+/// of that CPU (measured ~0.01) — a separation the host speed cancels out of.
+fn refused_calls_are_timed() {
+    let mut child =
+        Command::new(SELF_PATH).arg("refused").spawn().expect("spawn the refused child");
+    child.wait().expect("wait the refused child");
+
+    let s = stats_of(&child).expect("the exited child answers");
+    assert!(
+        s.syscall_total >= REFUSED_CALLS,
+        "the child made {REFUSED_CALLS} refused calls but only {} were counted",
+        s.syscall_total,
+    );
+    assert!(
+        s.syscall_total_ns.saturating_mul(10) >= s.cpu_ns,
+        "syscall_total_ns {} is under a tenth of cpu_ns {} — the child did little but issue \
+         refused calls, so their dispatch was a large fraction of its CPU; refused calls \
+         counted but not timed leave syscall_total_ns describing only the few successful calls",
+        s.syscall_total_ns,
+        s.cpu_ns,
+    );
+    println!(
+        "  refused calls timed: ok (total={} total_ns={} cpu_ns={})",
+        s.syscall_total, s.syscall_total_ns, s.cpu_ns,
+    );
 }
 
 /// Says it is running, then blocks until it is killed. The marker is flushed, so

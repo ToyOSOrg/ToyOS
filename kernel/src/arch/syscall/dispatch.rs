@@ -3,9 +3,10 @@
 //! A count userland chose, multiplied by a stride, is refused on overflow —
 //! never trusted as a window — because the refusal word is each site's own.
 //!
-//! An arm's `return` skips the epilogue below the match — the object layer's
-//! zero-handle drain and the call's time accounting — which is why every
-//! decode refusal takes that exit instead of a handler running it.
+//! An arm's `return` leaves the dispatch closure, not the function, so the
+//! epilogue below the match — the zero-handle drain and the time accounting —
+//! runs for a decode refusal exactly as for a handler. `syscall_total` and
+//! `syscall_total_ns` then count and time the same set of calls.
 
 use crate::object::{ops, KObjectRef};
 use crate::user_ptr::SyscallContext;
@@ -106,7 +107,9 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
 
     let bad_addr = SyscallError::BadAddress.to_u64();
 
-    let result = match num {
+    // The match is a closure so an arm's `return` lands here, not past the
+    // epilogue: a refused call is drained and timed like any other.
+    let result = (move || -> u64 { match num {
         SYS_WRITE => {
             let Some(buf) = ctx.user_bytes(UserAddr::new(a2), a3) else { return bad_addr };
             sys_write(RawHandle(a1 as u32), &buf)
@@ -627,7 +630,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             None => SyscallError::InvalidArgument.to_u64(),
         },
-    };
+    } })();
 
     // The first of the object layer's three drain sites. Here, not at the drop that
     // queued it: a hook must not run under whatever guard the syscall held when the
