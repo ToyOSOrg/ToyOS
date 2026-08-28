@@ -1,33 +1,8 @@
-//! The kernel driver for the scheduler core.
+//! The kernel driver for the scheduler core: plumbing only — percpu,
+//! the asm switch, the idle loop, the trampoline. Every scheduling
+//! decision lives in `toyos-sched`.
 //!
-//! This file is plumbing and nothing else: percpu, the asm switch, the idle
-//! loop, the trampoline. It decides nothing. Every scheduling decision, state
-//! transition and ordering-sensitive step happens above it, in `toyos-sched`,
-//! where the simulator drives the same code.
-//!
-//! The shape of a scheduler entry is fixed and total:
-//!
-//! ```text
-//! preempt::disable()
-//! drain device IRQ records into wakes
-//! with_cpu(|cpu| SchedPass::begin(cpu, env, now).dispose_*().finish())
-//! match action { Run(tok) => switch(tok), Resume => {}, Idle(tok) => halt }
-//! preempt::enable_no_resched()
-//! ```
-//!
-//! Everything after the switch belongs to whichever task resumes on this
-//! stack, and there is nothing scheduler-related left to do there — no guard to
-//! release, no outgoing task to park. That is what park-before-switch buys, and
-//! it is sound only because a wake for the just-parked task is a *message to
-//! this same CPU*, which cannot be consumed before the switch completes.
-//!
-//! **What is *not* done by the time the pass ends is the save.** `switch`'s
-//! last instruction writes the outgoing context's `rsp`, and everything above
-//! it — the `with_cpu` return, `charge_cpu_time`, the publish, CR3, `TSS.rsp0`,
-//! the FS base — runs with that context still holding the stack pointer from
-//! the *previous* time it was switched away, or, for a task that never has
-//! been, `alloc_kernel_stack`'s entry frame. Any CPU that restores it inside
-//! that window lands on a stack this one is standing on.
+//! A pass is not complete when it returns: restoring a context before its last `switch` instruction runs puts two CPUs on the same stack.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -55,18 +30,12 @@ use super::payload::{
 use super::MAX_CPUS;
 
 /// Proof that preemption is disabled for as long as the borrow lasts.
-/// Constructible only by the two functions below, both of which bracket it with
-/// the preempt count.
 pub struct PreemptOff(());
 
-// SAFETY: every constructor raises the kernel's preempt count first and lowers
-// it only after the borrow ends, so the executing context cannot be
-// descheduled while a value of this type is alive.
+// SAFETY: every constructor holds the preempt count raised for the value's whole lifetime, so it cannot be descheduled while alive.
 unsafe impl PreemptGuard for PreemptOff {}
 
-/// Run `f` in a preempt-disabled region. Wake paths post mailbox messages from
-/// here; a request raised inside is honoured on the way out, which is how an
-/// RT wake reaches its own preemption.
+/// Run `f` in a preempt-disabled region.
 pub fn preempt_off<R>(f: impl FnOnce(&PreemptOff) -> R) -> R {
     crate::preempt::disable();
     let result = f(&PreemptOff(()));
@@ -74,27 +43,10 @@ pub fn preempt_off<R>(f: impl FnOnce(&PreemptOff) -> R) -> R {
     result
 }
 
-/// The same proof, bought with `cli` instead of the preempt count.
-///
-/// **`log::emit` may pay neither of [`preempt_off`]'s two locked
-/// read-modify-writes.** `preempt::disable` is `lock add` and `enable` is a
-/// `lock sub` plus a `need_resched` poll that can reach `do_preempt`, which is
-/// a scheduling pass — and one locked RMW per log line was measured at 350 ms
-/// of boot. `IrqGuard` is
-/// `pushfq`/`pop`/`cli` with `push`/`popfq` on drop: no locked operation at
-/// all, and on the dominant path `IF` is already clear.
+/// The same proof, bought with `cli`: `log::emit` must pay neither of [`preempt_off`]'s locked read-modify-writes.
 pub struct IrqOff(());
 
-// SAFETY: **preemption in this kernel is delivered at an interrupt.**
-// `do_preempt` has exactly three callers — the LAPIC timer (`arch/idt/timer.rs`),
-// the exit-to-user epilogue (`arch/idt/mod.rs`, which `sti`s before it calls)
-// and `preempt::enable`'s poll. With `IF` masked the first two are unreachable, and the
-// region `irq_off` brackets calls `wake_direct` and nothing else, so it reaches
-// neither `preempt::enable` nor a voluntary pass. A voluntary pass is the one
-// way to be descheduled with `IF` clear, which is why this type has no
-// constructor but the bracket below. The scheduler core grants the same impl to
-// an IRQ context in its own loom model and the trait's SAFETY paragraph names
-// one.
+// SAFETY: `do_preempt` needs `IF` set or a voluntary pass; `irq_off` masks `IF` and calls nothing that yields one.
 unsafe impl PreemptGuard for IrqOff {}
 
 /// Run `f` with interrupts masked, holding [`IrqOff`] for exactly that region.
@@ -112,44 +64,16 @@ static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 struct CpuTime(AtomicU64);
 static CPU_TIME_NS: [CpuTime; MAX_CPUS] = [const { CpuTime(AtomicU64::new(0)) }; MAX_CPUS];
 
-/// Nanoseconds between two pass-cost reports from one CPU.
-///
-/// The counters are cumulative since boot, so the *last* line a capture holds
-/// is the whole run and the ones before it cost only their own record — which
-/// makes this number a resolution rather than a sample size: the last report is
-/// at most this long before the end.
-///
-/// **A wall-clock cadence and not a per-`n`-passes one, because the second is a
-/// feedback loop.** A report is a log record, a record wakes `klogd`, and a
-/// wake is a pass — so "every N passes" makes the report rate drive the pass
-/// rate it is reporting on. This clock is the guest's own and nothing the
-/// reports do moves it.
+/// Nanoseconds between two pass-cost reports — wall-clock, not per-pass, since `klogd`'s own wake is itself a pass.
 #[cfg(feature = "sched-check")]
 const PASS_COST_REPORT_EVERY_NS: u64 = 200_000_000;
 
-/// When each CPU last reported, in nanoseconds since boot. Read and written by
-/// the owning CPU alone.
+/// When each CPU last reported, owned by that CPU alone.
 #[cfg(feature = "sched-check")]
 static PASS_COST_REPORTED: [CpuTime; MAX_CPUS] = [const { CpuTime(AtomicU64::new(0)) }; MAX_CPUS];
 
 /// Publish this CPU's pass-cost distribution, at most once every
-/// [`PASS_COST_REPORT_EVERY_NS`].
-///
-/// **Outside the pass and inside the preempt-off region**, which is the only
-/// window that works: the measurement lands after `finish_inner` has consumed
-/// every borrow of the `CpuSched`, and `log::emit` may take no lock and does
-/// not — it fills a stack record and publishes it under one trap-state bracket
-/// (`log/mod.rs`), which is why it is already called from IRQ handlers and from
-/// inside the scheduler.
-///
-/// `now` is the pass's own sample rather than a fresh clock read: this is a
-/// cadence and not a measurement, and one read per pass is what the check build
-/// already pays.
-///
-/// A check build only. On the pass path between two reports this costs one
-/// relaxed load and one comparison, and everything about it — the histogram,
-/// the clock read that feeds it, the record — exists only where `sched-check`
-/// does.
+/// [`PASS_COST_REPORT_EVERY_NS`], outside the pass: `log::emit` may take no lock and does not.
 #[cfg(feature = "sched-check")]
 fn report_pass_costs(now: Nanos) {
     let cpu = current_cpu();
@@ -161,36 +85,22 @@ fn report_pass_costs(now: Nanos) {
     crate::log!("{}", cpus().get(cpu).pass_costs().report(cpu));
 }
 
-/// How often the heap sweep walks every live band, in guest nanoseconds.
-///
-/// **Guest time and not passes**, because a pass is not a unit of anything: a
-/// loaded CPU takes thousands in the spawn burst this class dies in and an idle
-/// one takes a handful. 25 ms puts roughly a dozen sweeps inside a boot that
-/// reaches `compositor: ready` at ~600 ms, with at least one after the burst —
-/// which is where a band that was written has to be found, since the writer is
-/// long gone by then and the allocation it wrote past is never freed.
+/// How often the heap sweep walks every live band — guest time, not passes, which are not a unit of wall-clock latency.
 #[cfg(feature = "heap-sweep")]
 const SWEEP_EVERY_NS: u64 = 25_000_000;
 
 #[cfg(feature = "heap-sweep")]
 static NEXT_SWEEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Take the sweep if this CPU is the one that claims the slot.
-///
-/// **Outside `with_cpu`, deliberately and not incidentally.** The sweep takes
-/// `dlmalloc`'s lock, and a lock taken inside the driver's exclusive region
-/// wedges the machine, because the log's readiness path re-enters
-/// `driver::pass`. Here there is no pass in progress and no `&mut CpuSched`
-/// alive, so a lock — and the panic a dirty band raises — is an ordinary one.
-///
-/// The claim is a compare-exchange rather than a store, so twelve CPUs coming
-/// through the same nanosecond run one sweep between them and not twelve.
+/// Take the sweep if this CPU is the one that claims the slot, outside `with_cpu`: the sweep takes `dlmalloc`'s lock,
+/// which wedges the machine if taken inside the driver's exclusive region.
 #[cfg(feature = "heap-sweep")]
 fn maybe_sweep(now: Nanos) {
     let due = NEXT_SWEEP.load(Ordering::Relaxed);
     if now.0 < due {
         return;
     }
+    // A compare-exchange claim: concurrent CPUs run one sweep between them, not several.
     if NEXT_SWEEP
         .compare_exchange(due, now.0 + SWEEP_EVERY_NS, Ordering::Relaxed, Ordering::Relaxed)
         .is_err()
@@ -201,14 +111,6 @@ fn maybe_sweep(now: Nanos) {
 }
 
 /// How long a [`maybe_hold`] visit spends on the pass path, and how often.
-///
-/// **The number is a floor on the sweep's own hold and not a match for it.**
-/// `heap-sweep` walks every 2 MiB page the heap owns under `dlmalloc`'s lock on
-/// the same 25 ms cadence, at milliseconds per walk.
-/// 1 ms every 25 ms is 4% of the pass path spent the way the sweep
-/// spends it, chosen so an arm that amplifies says so without a duty cycle that
-/// stops being a boot storm. An arm that does *not* amplify at 1 ms has bounded
-/// the effect rather than refuted it, and the next arm is a longer hold.
 #[cfg(feature = "pass-spin")]
 const HOLD_NS: u64 = 1_000_000;
 #[cfg(feature = "pass-spin")]
@@ -216,24 +118,7 @@ const HOLD_EVERY_NS: u64 = 25_000_000;
 #[cfg(feature = "pass-spin")]
 static NEXT_HOLD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Spend [`HOLD_NS`] on the pass path, and — under `heap-lockspin` — spend it
-/// holding `dlmalloc`'s lock.
-///
-/// **The control the amplifier has never had.** Two instruments now multiply
-/// this class and neither writes anything: `sched-tripwire`'s byte shadow (7.2x)
-/// and `heap-sweep`'s walk (absent to baseline). They share a shape — time spent
-/// on the path every pass takes — and `heap-sweep` adds a second thing, the
-/// allocator's lock. Nothing has separated the two, and the separation is one
-/// cargo feature: `pass-spin` spends the time and takes no lock, `heap-lockspin`
-/// spends the same time under the same lock the sweep takes. Two arms at one
-/// `HOLD_NS` say whether the window this class needs is the *lock* or merely the
-/// *delay*, and the answer decides where a fix can be looked for at all.
-///
-/// It reads nothing and writes nothing but its own claim, so — like the sweep —
-/// it compiles no decision and cannot itself be corrupting anything.
-///
-/// Outside `with_cpu` for [`maybe_sweep`]'s reason: this takes a lock, and the
-/// driver's exclusive region may take none.
+/// Spend [`HOLD_NS`] on the pass path, and — under `heap-lockspin` — holding `dlmalloc`'s lock. Outside `with_cpu`, as [`maybe_sweep`].
 #[cfg(feature = "pass-spin")]
 fn maybe_hold(now: Nanos) {
     let due = NEXT_HOLD.load(Ordering::Relaxed);
@@ -272,9 +157,8 @@ pub fn frontier() -> &'static Frontier {
     &FRONTIER
 }
 
-/// Monotonic and never reused, so a message about a dead task is provably
-/// stale rather than ambiguously about its successor. Deliberately not
-/// `TaskId`: pids and tids are recycled.
+/// Monotonic and never reused, so a message names a dead task unambiguously. Not `TaskId`: pids and tids are
+/// recycled.
 fn next_key() -> TaskKey {
     TaskKey(NEXT_KEY.fetch_add(1, Ordering::Relaxed))
 }
@@ -287,40 +171,28 @@ pub fn total_cpu_ns() -> u64 {
 
 struct SchedSlot(UnsafeCell<Option<CpuSched<KernelPayload>>>);
 
-// SAFETY: the cell is only ever reached through `with_cpu`, which indexes by
-// the *calling* CPU's own id and refuses reentry. `CpuSched` itself is `!Sync`,
-// so nothing it contains can escape into another CPU by any other route.
+// SAFETY: reached only through `with_cpu`, indexed by the calling CPU's own id, so no other CPU can alias this cell.
 unsafe impl Sync for SchedSlot {}
 
 static SCHEDS: [SchedSlot; MAX_CPUS] = [const { SchedSlot(UnsafeCell::new(None)) }; MAX_CPUS];
 static IN_PASS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
-/// Is this CPU inside a pass? A nested pass is a bug, not something to defer —
-/// but the preempt poll can legitimately ask, and the panic path must know
-/// before it tries to rejoin.
+/// Is this CPU inside a pass? A nested pass is a bug, never deferred.
 pub fn in_pass() -> bool {
     IN_PASS[percpu::cpu_id() as usize].load(Ordering::Relaxed)
 }
 
 /// The only accessor. Panics on reentry: a nested pass would alias `&mut`.
 ///
-/// **It is also the whole of the window the tripwire watches.** Nothing else in
-/// the kernel writes `SCHEDS`: `init` fills it before any AP is released and
-/// [`try_with_cpu`] only reads, so between one exit from here and the next entry
-/// the record is a thing no code may change. `sched-tripwire` holds it to that.
-///
-/// **A `cpu N has no CpuSched` is a stray write into `.bss`, not a bring-up
-/// ordering bug** — the fill-before-release held across 17,555 boots on KVM
-/// silicon, over half of them staging the direction-flag defect that produced
-/// every prior sighting, and no arm produced one.
+/// Nothing else in the kernel writes `SCHEDS` between one exit from here and the next entry — the window `sched-tripwire` holds to.
 fn with_cpu<R>(f: impl FnOnce(&mut CpuSched<KernelPayload>) -> R) -> R {
     let cpu = percpu::cpu_id() as usize;
     assert!(
         !IN_PASS[cpu].swap(true, Ordering::Acquire),
         "nested scheduler pass on cpu {cpu}",
     );
-    // SAFETY: exclusive by the flag above, and by CpuId — no other CPU indexes
-    // this slot.
+    // SAFETY: exclusive by the flag above, and by CpuId — no other CPU
+    // indexes this slot.
     let sched = unsafe { (*SCHEDS[cpu].0.get()).as_mut() }
         .unwrap_or_else(|| panic!("cpu {cpu} has no CpuSched"));
     #[cfg(feature = "sched-tripwire")]
@@ -332,20 +204,7 @@ fn with_cpu<R>(f: impl FnOnce(&mut CpuSched<KernelPayload>) -> R) -> R {
     result
 }
 
-/// The stray-write tripwire's storage and its two halves.
-///
-/// **What it is for.** A per-CPU scheduler record reading as a value no
-/// operation on it produces — a `BTreeMap` walked with `root == None` and
-/// `length != 0`, a node whose `len` overran its own key storage, this file's
-/// own `cpu {n} has no CpuSched` on a CPU that had already completed a pass — is
-/// a *word that changed*, and an ordinary report says only that one did. This
-/// says which word, in which field, from what to what, and prints
-/// [`crate::hw::report_contexts`] beside it, which is the other half of the one
-/// mechanism anyone has written down for the class.
-///
-/// **The shadow is per CPU and touched by that CPU alone**, inside `with_cpu`'s
-/// exclusive region, which is why an `UnsafeCell` is enough and no lock is
-/// wanted: this runs on the path a pass takes.
+/// The stray-write tripwire's storage: per CPU, touched by that CPU alone inside `with_cpu`'s exclusive region.
 #[cfg(feature = "sched-tripwire")]
 mod tripwire {
     use super::{CpuSched, KernelPayload, MAX_CPUS};
@@ -375,13 +234,8 @@ mod tripwire {
         }
     }; MAX_CPUS];
 
-    /// The record's bytes as little-endian words, with the words covering the
-    /// one remotely-written field read back as zero.
-    ///
-    /// Byte reads rather than word reads, so a record whose size is not a
-    /// multiple of eight is not read past its own end. Volatile, because what
-    /// this wants is what is in the memory and not what the abstract machine
-    /// says should be.
+    /// The record's bytes as little-endian words, with the remotely-written field's words read back as zero.
+    /// Volatile: a non-volatile read could be folded away instead of catching a stray write.
     fn snapshot(sched: &CpuSched<KernelPayload>, out: &mut [u64; WORDS]) {
         let base = (sched as *const CpuSched<KernelPayload>).cast::<u8>();
         let size = core::mem::size_of::<CpuSched<KernelPayload>>();
@@ -405,14 +259,10 @@ mod tripwire {
         }
     }
 
-    /// Leaving the exclusive region: this is what the record is expected to
-    /// still look like when it is next entered.
+    /// Leaving the exclusive region: what the record must look like at the next entry.
     pub fn record(cpu: usize, sched: &CpuSched<KernelPayload>) {
-        // Walked at *both* ends, which is what makes a red say when. A container
-        // that walks straight here and crookedly at the next entry was broken
-        // while no pass held the record; one that walks straight at entry and
-        // crookedly here was broken by the pass in between. Neither statement is
-        // available from one end alone.
+        // Walked at both ends: which end first disagrees says whether
+        // the pass or something outside it broke the record.
         walk(cpu, sched);
         // SAFETY: this CPU's own slot, inside the exclusive region.
         let slot = unsafe { &mut *SHADOW[cpu].words.get() };
@@ -420,8 +270,7 @@ mod tripwire {
         SHADOW[cpu].taken.store(true, Ordering::Relaxed);
     }
 
-    /// Entering it: anything that differs was written by something with no
-    /// business writing it.
+    /// Entering it: anything that differs was written by something with no business writing it.
     pub fn verify(cpu: usize, sched: &CpuSched<KernelPayload>) {
         if !SHADOW[cpu].taken.load(Ordering::Relaxed) {
             return;
@@ -456,25 +305,13 @@ mod tripwire {
         walk(cpu, sched);
     }
 
-    /// The shadow covers this record's own bytes and says nothing about the heap
-    /// its three containers hang off — and a broken `BTreeMap` **node** is as
-    /// likely as a broken header. So the containers are walked here too.
-    ///
-    /// **What a red here buys is the moment.** A walk that panics or disagrees at
-    /// the *entry* to a pass proves the container was already broken before that
-    /// pass ran a single statement, which is what separates "this pass did it"
-    /// from "something wrote it while no pass held the record" — and combined
-    /// with a clean byte diff one line above, it says the write landed in the
-    /// heap rather than in the record.
-    /// **Every element is touched, and `count()` alone would not have been a
-    /// walk.** `RunQueue::tasks` is a `Chain` of two `ExactSizeIterator`s, so a
-    /// bare `.count()` is free for the optimiser to fold into the two lengths —
-    /// which is precisely the number the assertion would then be comparing it
-    /// against. Reading each task's key forces the traversal and the deref of
-    /// the record behind it, which is where a broken node is met.
+    /// The shadow covers the record's own bytes only; containers are walked here too, since a broken `BTreeMap`
+    /// node is as likely as a broken header.
     fn walk(cpu: usize, sched: &CpuSched<KernelPayload>) {
         let mut walked = 0usize;
         let mut fingerprint = 0u64;
+        // Counted by hand, not `.count()`: a chained `ExactSizeIterator`'s count can fold to
+        // its length without touching a node.
         for task in sched.rq().tasks() {
             walked += 1;
             fingerprint ^= task.key().0;
@@ -485,9 +322,8 @@ mod tripwire {
             "cpu {cpu}: the ready band walks {walked} tasks and calls itself {} long",
             sched.rq().len(),
         );
-        // Walked for the walk's sake: a corrupt node fails inside the iterator,
-        // which is the report wanted, and neither of these publishes a second
-        // length to disagree with.
+        // Walked for the walk's sake: a corrupt node fails inside the
+        // iterator, and neither publishes a second length to disagree with.
         for parked in sched.parked() {
             fingerprint ^= parked.key().0;
         }
@@ -509,15 +345,12 @@ fn try_with_cpu<R>(f: impl FnOnce(&CpuSched<KernelPayload>) -> R) -> Option<R> {
     Some(f(sched))
 }
 
-/// Build every CPU's mailbox and handle, and the BSP's `CpuSched`. Called once,
-/// before any task exists.
+/// Build every CPU's mailbox and handle, and the BSP's `CpuSched`. Called once, before any task exists.
 pub fn init() {
     let count = crate::arch::smp::cpu_count() as usize;
     assert!(count <= MAX_CPUS, "cpu count {count} exceeds MAX_CPUS");
     let mut handles = Vec::with_capacity(count);
-    // A CPU number rather than a walk of `SCHEDS`: it becomes the `CpuId` each
-    // mailbox and handle is built for, and `SCHEDS` is `MAX_CPUS` long whatever
-    // `count` is.
+    // A CPU number, not a walk of `SCHEDS`: `SCHEDS` is `MAX_CPUS` long whatever `count` is.
     #[allow(clippy::needless_range_loop)]
     for cpu in 0..count {
         let (tx, rx) = mailbox::<KMsg>();
@@ -533,9 +366,7 @@ pub fn init() {
     );
 }
 
-/// The context a CPU runs on when it has nothing to do. Having one is what lets
-/// a pass free the previous zombie — an idle CPU never stands on a dead task's
-/// stack.
+/// The context a CPU runs on when idle — never a dead task's stack, so a pass can free the previous zombie.
 fn idle_ctx() -> KernelCtx {
     KernelCtx {
         rsp: 0,
@@ -543,21 +374,14 @@ fn idle_ctx() -> KernelCtx {
         fs_base: 0,
         kernel_stack_top: 0,
         id: None,
-        // Never read: a CPU can only switch *to* its idle context from a task,
-        // and reaching a task means it switched away from idle first, which
-        // wrote the real depth. The idle loop enters by jump, not by switch.
+        // Never read: the idle loop is entered by jump, not switch, and
+        // a switch away from idle always writes the real depth first.
         preempt: 0,
     }
 }
 
-/// Where a spawn goes. The rule is [`CpuHandles::place`]'s, in the core, where
-/// the simulator drives the same code; this supplies the rotating start.
-///
-/// The rotation is load-bearing at boot and only there: `publish_load` runs at
-/// the end of a pass, and the init programs are all spawned before any CPU has
-/// run one, so every published load is still zero and a fixed scan order would
-/// put the whole system on CPU 0. Balance would pull them apart eventually,
-/// but "eventually" is measured in idle passes and boot has none to spare.
+/// Where a spawn goes: the rule is [`CpuHandles::place`]'s; this supplies the rotating start, load-bearing at
+/// boot since every init program is spawned before any CPU has published a load.
 fn placement(now: Nanos) -> CpuId {
     static ROTATE: AtomicU64 = AtomicU64::new(0);
     let count = crate::arch::smp::cpu_count() as u64;
@@ -565,12 +389,9 @@ fn placement(now: Nanos) -> CpuId {
     cpus().place(start, now)
 }
 
-/// Everything a new thread needs. `entry_rsp` points at the trampoline frame
-/// `alloc_kernel_stack` built.
-///
-/// **`address_space` is not an `Option`**: every kernel thread names
-/// `mm::paging::kernel` itself, so one declaration decides a task's `cr3` —
-/// the rule the root `CLAUDE.md` states for control registers, applied here.
+/// Everything a new thread needs. `entry_rsp` points at the trampoline frame `alloc_kernel_stack` built;
+/// `address_space` is not `Option` — every kernel thread uses the kernel address space, so one declaration
+/// decides `cr3`.
 pub struct NewTask {
     pub id: TaskId,
     pub kernel_stack: OwnedAlloc,
@@ -578,20 +399,15 @@ pub struct NewTask {
     pub address_space: PageTables,
     pub fs_base: u64,
     pub share: Arc<KShare>,
-    /// The process's symbol table, cloned from the entry that owns it — see
-    /// [`KernelPayload::symbols`]. A kernel thread names an empty one, which is
-    /// what it has: `SymbolTable::empty` resolves nothing and refuses nothing.
+    /// The process's symbol table; a kernel thread names an empty one.
     pub symbols: Arc<crate::symbols::SymbolTable>,
 }
 
-/// Place a new task by message — never by reaching into the destination's
-/// queue. Returns what the process table keeps, and the CPU it was placed on.
+/// Place a new task by message — never by reaching into the destination's queue.
 pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
-    // A kernel thread's is the kernel address space — the one every CPU is
-    // already in between two user threads, which is why `idle_ctx` above names
-    // the same `cr3`. Nothing is released when the task ends: that `Arc` is a
-    // clone of a leaked one, and the kernel's page tables outlive every task by
-    // construction.
+    // A kernel thread's is the kernel address space, the one every CPU
+    // sits in between user threads — why `idle_ctx` names the same `cr3`.
+    // Nothing is released at teardown: this `Arc` clones a leaked, permanent kernel mapping.
     let cr3 = new.address_space.lock().cr3();
     let kernel_stack_top = new.kernel_stack.ptr() as u64 + KERNEL_STACK_SIZE as u64;
     let ctx = KernelCtx {
@@ -641,8 +457,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
 }
 
 pub enum Dispose {
-    /// An IRQ-exit poll: the pass decides for itself whether the running task
-    /// keeps the CPU.
+    /// An IRQ-exit poll: the pass decides whether the running task keeps the CPU.
     None,
     Yield,
     Exit,
@@ -650,48 +465,11 @@ pub enum Dispose {
 
 /// The environment every pass runs against.
 ///
-/// `balance` is the one policy value in it, and it is
-/// [`Balance::PushOnSurplus`] at [`toyos_sched::cpu::PUSH_THRESHOLD`]: the pull
-/// half — an idle pass probes the busiest CPU, a loaded pass answers probes
-/// from surplus — plus a push
-/// that closes the pull's one hole, a CPU that halted before any sibling
-/// published surplus and was never probed again. The whole mechanism is the
-/// core's ([`toyos_sched::cpu`]); what this kernel supplies is real:
+/// `balance` is [`Balance::PushOnSurplus`]: pull is the core's own, push closes its one hole — a CPU halted
+/// before any sibling published surplus.
 ///
-/// * **The idle mask** is the per-CPU `Doorbell` SLEEPING bit in [`cpus`],
-///   published by the idle disposition before its final mailbox check.
-/// * **The wake** is the ordinary kick IPI ([`crate::hw::KernelHw::kick`] →
-///   `apic::kick_cpu`), sent to **one** sleeping CPU per surplus-publishing
-///   pass, cursor-walked so consecutive pushes reach different sleepers, and
-///   edge-coalesced by the doorbell so a CPU with an IPI already coming is not
-///   kicked twice. The woken CPU posts an ordinary steal probe — the push adds
-///   no second way to move a task.
-/// * **The lost-wakeup race** is closed two-sided: the idler publishes
-///   SLEEPING, then re-reads the surplus behind `cpu::balance_fence` (a
-///   `SeqCst` fence, `mfence`) and stays awake if it sees any; the producer
-///   publishes its surplus, then reads SLEEPING behind the same fence. The
-///   final look runs under `cli` in [`execute`] and [`crate::hw::KernelHw::halt`]
-///   is one `sti; hlt` atom, so a kick between the check and the halt is taken,
-///   not slept through. `toyos-sched/loom/tests/loom_push.rs` is the model, and
-///   its `push-fence-relaxed` feature is the control that reds without the
-///   fence.
-/// * **The backstop** for imbalance with no enqueue behind it is the busy
-///   CPU's own timer tick: a CPU running a task always has its quantum armed,
-///   every tick reaches a pass, and every pass exit re-runs the push — so all
-///   periodic cost lives on already-awake CPUs and an idle CPU sleeps
-///   unbounded.
-///
-/// A machine with no surplus never pushes, which is what keeps the policy off
-/// the idle path's audio budget (`kernel/CLAUDE.md`): the sim prices it at
-/// **zero** added idle wakes on every workload without surplus and full
-/// recovery of the lopsided machine at every width, where plain
-/// [`Balance::Pull`] leaves 0 of 20 seeds reaching every CPU at eight
-/// (`toyos-sched/sim/tests/policy.rs` is the gate). [`Balance::PullWithRearm`]
-/// is declined for the opposite cost — a periodic tick on every idle CPU,
-/// surplus or not.
-///
-/// The guard comes in by reference because its lifetime is the pass's and it
-/// belongs to the caller that raised the count.
+/// `preempt` is borrowed, not owned: its lifetime is the pass's, and it belongs to the caller that raised
+/// the count.
 fn env(preempt: &PreemptOff) -> Env<'_, crate::hw::KernelHw, PreemptOff> {
     Env {
         hw: &HW,
@@ -704,39 +482,24 @@ fn env(preempt: &PreemptOff) -> Env<'_, crate::hw::KernelHw, PreemptOff> {
     }
 }
 
-/// Run one scheduler pass and execute its action.
-///
-/// The preempt count is raised here and lowered by whichever context comes back
-/// on this stack: this one after the switch returns, or a fresh task's
-/// trampoline. It balances per context, not per call — which is why the count
-/// travels *with* the context across the switch (`Hw::switch`) instead of being
-/// inherited by whoever lands on the CPU next.
+/// Run one scheduler pass and execute its action. The preempt count travels with whichever context resumes, not per call.
 pub fn pass(dispose: Dispose) {
-    // The witness's own negative control (`df-witness-mutate`): set the flag one
-    // instruction before the reader that must refuse it. Nothing runs in between,
-    // so the machine never executes a string operation with it set — the panic is
-    // the next statement.
+    // The witness's negative control: sets DF one instruction before the reader that must refuse it.
     #[cfg(feature = "df-witness-mutate")]
     // SAFETY: a build that exists to stage the defect, and the reader below
-    // panics before any `rep movs` can run.
+    // panics before any `rep movs` can run. Nothing runs in between, so no
+    // string op ever executes with it set.
     unsafe {
         core::arch::asm!("std", options(nomem, nostack))
     };
     #[cfg(feature = "df-witness")]
     crate::arch::cpu::df_witness("a scheduler pass");
     crate::preempt::disable();
-    // A pass *is* the reschedule the request asks for, so it owns the clear —
-    // and it must clear before it drains, so a request raised by this pass's
-    // own wakes survives into the next poll. Without this the idle loop never
-    // sleeps: a kick IPI to a halted CPU is taken in Ring 0, which sets
-    // `need_resched` and nothing else, and the pre-halt recheck then finds the
-    // request still standing on every iteration.
+    // Must clear before it drains, so a wake from this pass's own drain survives into the next poll.
     crate::preempt::clear_need_resched();
     drain_irqs();
-    // The object layer's second drain site. After `drain_irqs` and before the
-    // pass picks, so a wake a zero-handle hook posts is in the run queue by the
-    // time this pass chooses — the same placement, and the same reason, as the
-    // irq drain above it.
+    // After `drain_irqs` and before the pass picks, so a wake this
+    // posts is in the run queue by the time the pass chooses.
     crate::object::drain_zero_handles();
     let now = HW.now();
     #[cfg(feature = "heap-sweep")]
@@ -762,95 +525,51 @@ pub fn pass(dispose: Dispose) {
             current.ext().handle.publish(current.acct(), Some(now));
         }
     });
-    // The one report site, and `pass_block` is deliberately not a second one:
-    // every CPU with anything to run takes a timer tick through here, and a CPU
-    // with nothing to run is idling through here too.
+    // The one report site: every CPU reaches here on a timer tick or
+    // while idling, so `pass_block` need not be a second one.
     #[cfg(feature = "sched-check")]
     report_pass_costs(now);
     execute(action);
     crate::preempt::enable_no_resched();
 }
 
-/// A wait registration, holding preemption off for the whole window between
-/// phase 1 and phase 2 of the wait handshake.
+/// A wait registration, holding preemption off for the whole window between phase 1 and phase 2 of the wait handshake.
 ///
-/// The window is not preemptible, and the guard is what makes that true rather
-/// than hoped for. `prepare_wait` publishes `Committing(cpu, gen)` and the
-/// machine has no edge out of it except the commit or the cancel: `preempt`
-/// asserts on `Running`, and *inventing* a `Committing → Ready` edge would be
-/// worse than the assert, because a waker that pops the registration and finds
-/// the word `Ready` reports `Claim::Lost` and moves on to the next waiter —
-/// the registered task is then off the queue, unwoken, and about to park. That
-/// is a lost wake, which is the one thing this protocol exists to remove.
-///
-/// This is *not* the residual commit-to-park window, which has to be tolerated
-/// because a remote CPU can act between two of our own instructions.
-/// Nothing remote is involved here: the only route into a pass mid-window is
-/// this CPU's own `preempt::enable` slow path, reached from the guard drop of
-/// any lock the re-check takes. A window whose only intruder is ourselves can
-/// be closed, so it is.
-///
-/// The guard is owned rather than remembered: the two ways to consume a ticket
-/// both discharge it, so "registered with preemption on" has no expression.
+/// The window must stay closed: a preemption here lets a waker find `Committing` instead of `Ready` and report a lost wake.
 #[must_use = "a wait ticket must be blocked on or cancelled"]
 pub struct Ticket<'q>(RawTicket<'q>);
 
 impl<'q> Ticket<'q> {
-    /// Phase 1: register the running thread on `queue`.
-    ///
-    /// The count goes up before the current task is even read: without it, a
-    /// preemption between reading the task and registering it would leave
-    /// `CurrentTask` naming a CPU the thread no longer runs on, and
-    /// `begin_commit` asserts on exactly that.
+    /// Phase 1: register the running thread on `queue`. The count goes up before the task is read, or a
+    /// preemption in between leaves `CurrentTask` naming a CPU it no longer runs on.
     pub fn register(queue: &'q KWaitQueue, cancel: Cancel, class: WaitClass) -> Self {
         crate::preempt::disable();
         let shared = current_shared().expect("prepare_wait: no running thread");
         let current = CurrentTask::new(&shared, current_cpu());
-        // **The class is the wait's and not the queue's**, because the queue is
-        // this thread's own parking place and has no subject —
-        // `WaitQueue::prepare_wait_as` carries the argument, and the blocked-time
-        // breakdown in `ProcessStats` is what it buys.
+        // The class is the wait's, not the queue's — the queue is this
+        // thread's own parking place and has no subject of its own.
         Self(queue.prepare_wait_as(&current, cancel, class))
     }
 
-    /// The condition became true after registering: withdraw, and take the
-    /// deferred preemption now that the thread is plainly `Running` again.
+    /// The condition became true after registering: withdraw, and take the deferred preemption.
     pub fn cancel(self) -> Cancelled {
         let outcome = self.0.cancel();
         crate::preempt::enable();
         outcome
     }
 
-    /// Hand the registration to the blocking pass. The count stays raised —
-    /// see [`pass_block`].
+    /// Hand the registration to the blocking pass. The count stays raised — see [`pass_block`].
     fn into_raw(self) -> RawTicket<'q> {
         self.0
     }
 }
 
-/// The blocking pass: commit the wait ticket **inside** the pass, after the
-/// mailbox drain, and park on the same pass.
+/// The blocking pass: commit the wait ticket **inside** the pass, after the mailbox drain, and park on the same pass.
 ///
-/// The commit cannot happen at the call site. A remote waker that claims a
-/// task whose word already reads `Blocked` posts `Msg::Wake` to the task's home
-/// CPU — which is this one — and the pass's own drain would consume that
-/// message before the task is in `parked`, where `handle_wake` would find
-/// nothing and drop it. Committing after the drain puts the claim on one side
-/// or the other of it: an earlier claim finds `Committing` and posts nothing, so
-/// the commit itself observes it and refuses to park; a later claim's message
-/// arrives behind the drain and is handled by the next pass, which finds the
-/// task parked.
-///
-/// **Returns on every path.** A retire that catches a thread mid-registration
-/// takes the `Commit::Killed` arm below, which is `dispose_none` — the thread
-/// keeps its stack, unwinds it, and takes the cancel from its next
-/// `completion::wait`. There is no disposition here that does not return.
+/// Committing after the drain puts a remote waker's claim on one side of it or the other, so neither a lost
+/// wake nor a double park.
 pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
-    // No `preempt::disable()` of its own: the ticket has held the count raised
-    // since the registration published `Committing`, and that guard *is* this
-    // pass's bracket. The window and the pass are one continuous preempt-off
-    // region, which is the truth; taking a second level here would leave one
-    // for the resuming context to discharge and one for nobody.
+    // No `preempt::disable()` of its own: the ticket has held the count raised since registration; that guard is this bracket.
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
     drain_irqs();
@@ -866,17 +585,9 @@ pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
                 pass.dispose_block(committed, deadline).finish(),
                 Some(registration),
             ),
-            // A wake landed between registration and commit: do not park, do
-            // not switch. The pass still runs to its disposition, because the
-            // quantum may have expired while we were deciding.
+            // A wake landed between registration and commit: do not park; the quantum may still have expired.
             Commit::AlreadyWoken => (pass.dispose_none().finish(), None),
-            // A retire landed while this thread was deciding to park. **The
-            // thread keeps running and unwinds** — it does not exit here,
-            // because this kernel does not unwind and a switch that never
-            // returns abandons every guard on this stack. The
-            // registration is already withdrawn by `commit`, the word is back
-            // at `Running`, and the caller's next `completion::wait` reports
-            // the cancel that sends it home.
+            // A retire landed while deciding to park: the thread keeps running and unwinds rather than exit through a dead switch.
             Commit::Killed => (pass.dispose_none().finish(), None),
         }
     });
@@ -889,15 +600,13 @@ pub fn pass_block(ticket: Ticket<'_>, deadline: Option<Nanos>) {
     execute(action);
     crate::preempt::enable_no_resched();
     if let Some(registration) = registration {
-        // Whatever ended the park, the node must leave the queue before this
-        // thread can register anywhere else — otherwise a later `wake_one` on
-        // the old queue would be satisfied by a waiter that is not waiting.
+        // The node must leave the queue before this thread registers
+        // anywhere else, or a later `wake_one` finds a waiter not waiting.
         registration.finish();
     }
 }
 
-/// Per-CPU busy time, for `sysinfo`. Derived from the same `now` the pass used,
-/// so it cannot disagree with the task's own charge.
+/// Per-CPU busy time, for `sysinfo`, derived from the pass's own `now`.
 fn charge_cpu_time(now: Nanos) {
     let cpu = percpu::cpu_id() as usize;
     static LAST: [CpuTime; MAX_CPUS] = [const { CpuTime(AtomicU64::new(0)) }; MAX_CPUS];
@@ -911,58 +620,23 @@ fn charge_cpu_time(now: Nanos) {
 
 fn execute(action: Action<KernelPayload>) {
     match action {
-        // SAFETY: the token came from `finish`, which built it from live
-        // Box-backed task records; those records outlive the switch because the
+        // SAFETY: the token's task record outlives the switch — the
         // only way to free one is `Hw::release`, which runs in a later pass.
         Action::Run(token) => unsafe { HW.switch(token) },
         Action::Resume => {}
         Action::Idle(token) => {
-            // The final look, with interrupts off. A message that landed after
-            // the pass's own check raised the doorbell, and its producer saw
-            // SLEEPING and sent the IPI; taking that IPI here as an ordinary
-            // interrupt and then halting is the lost wakeup, so re-check first.
-            //
-            // Not `Machine::irq_guard`: both exits must *set* IF — the halt
-            // because `sti;hlt` is one atom, the stay-awake exit because panic
-            // recovery reaches the idle loop with IF already 0. A guard would
-            // restore, and restoring 0 on the stay-awake exit is a CPU that
-            // leaves the pass deaf.
+            // The final look, with interrupts off, so a message that landed after the pass's own check is not lost to the halt.
+            // Not `Machine::irq_guard`: both exits must set `IF`.
             crate::arch::cpu::disable_interrupts();
             let cpu = CpuId(percpu::cpu_id());
             let awake = cpus().get(cpu).doorbell().kick_pending()
                 || crate::preempt::need_resched()
                 || crate::irq_ring::any_pending_self()
                 || !with_cpu(|c| c.mailbox_is_empty())
-                // A CPU with nothing left to run is the moment the i8042's
-                // "the pin has never asserted" verdict stops being premature:
-                // before it, silence only says the boot is still busy. A
-                // wall-clock deadline cannot serve, because the driver is only
-                // reached from inside a pass and the machine the verdict exists
-                // for reaches `Boot: complete` and then has nothing to do — so
-                // no pass would run to notice the deadline and the line would
-                // never appear at all. Self-clearing on the same argument as the
-                // ring above: the next pass emits the line and moves the state
-                // on, so this costs one trip round the loop and never a spin.
+                // The i8042 verdict needs a pass to notice its deadline; a quiet machine after boot runs none otherwise.
                 || crate::drivers::i8042::verdict_due()
-                // **No log condition belongs on this list, and its absence is
-                // the point.** What writes `/log` is a userland process made
-                // runnable through the mailbox, so a CPU with a log to write is
-                // a CPU with something in its run queue and the three conditions
-                // above already refuse the halt for it.
-                // `idle_loop_is_the_declared_body` is what keeps one from being
-                // quietly added.
-                //
-                // A root-hub port whose connect state the driver has not
-                // finished acting on. The connect edge that started it was the
-                // last interrupt that controller has to give — a device sitting
-                // still in a port produces nothing further — so no wake is
-                // coming and the one-shot timer is armed for parked *tasks*,
-                // which a driver's deferred work is not. Bounded and
-                // self-clearing like the three above, but over a longer
-                // interval: USB 2.0 §7.1.7.3's 100 ms of debounce, or the
-                // transfer deadline behind a port that will not reset. It costs
-                // an idle CPU the halt, never a pass — anything runnable is
-                // still picked, because this decides only whether to sleep.
+                // No log condition here: a log to write means a runnable process, covered above. A pending
+                // root-hub port needs a pass too — no interrupt is coming.
                 || crate::drivers::xhci::port_work_pending();
             if awake {
                 crate::arch::cpu::enable_interrupts();
@@ -974,32 +648,22 @@ fn execute(action: Action<KernelPayload>) {
     }
 }
 
-/// Consume this CPU's `irq_ring` records and turn them into
-/// wakes. Runs at the top of every pass, before the mailbox drain, so a wake
-/// posted here is in the run queue by the time the pass picks.
+/// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
 fn drain_irqs() {
-    // First in the function, so the stamp means "this CPU reached a pass" and
-    // not "this CPU got all the way through one".
+    // First in the function, so the stamp means "this CPU reached a
+    // pass" and not "this CPU got all the way through one".
     #[cfg(feature = "boot-actuators")]
     crate::heartbeat::note_pass();
-    // xHCI (keyboard/mouse): the controller poll dispatches HID reports, which
-    // wake the keyboard/mouse queues from inside the driver.
     crate::drivers::xhci::poll_if_pending();
-    // The i8042's bytes are already in kernel memory when the IRQ returns;
-    // this turns them into events and wakes.
     crate::drivers::i8042::service();
-    // Ctrl+Alt+D. Here rather than at the keystroke, which is decoded under
-    // whichever driver's guard produced it: this walks the scheduler and logs
-    // a line per parked thread, and both drivers are done above.
+    // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
     if crate::keyboard::take_dump_request() {
         super::dump::request();
     }
     // A CPU cannot read a sibling's `CpuSched`, so the dump reaches every CPU
     // by asking, and this is where each one answers.
     super::dump::serve_if_owed();
-    // And this is where the report it painted goes back on the panel if whoever
-    // owns the screen has drawn over it. One clock read per pass while nothing
-    // is held, and nothing at all once the hold expires.
+    // Repaints the panel if whoever owns the screen has drawn over the report.
     crate::drivers::panic_console::hold_report();
 
     if crate::irq_ring::take(crate::irq_ring::IrqSource::Net).is_some() {
@@ -1013,9 +677,8 @@ fn drain_irqs() {
         }
     }
     if crate::irq_ring::take(crate::irq_ring::IrqSource::Audio).is_some() {
-        // One wait queue for both backends: an over-wake costs a recheck, and a
-        // second queue would have to be chosen by whichever driver bound —
-        // which is a fact the parking side does not have.
+        // One wait queue for both backends: a second queue would need
+        // the parking side to know which driver bound, which it doesn't.
         crate::sched::waitqs::wake_device(&crate::sched::waitqs::AUDIO_WATCH);
         for (watchers, source) in [
             (
@@ -1032,49 +695,20 @@ fn drain_irqs() {
 }
 
 /// Leave the current stack for this CPU's idle stack and never come back.
-/// Boot and AP bring-up enter the scheduler here.
 pub fn enter_idle_loop() -> ! {
     percpu::set_current_tid(None);
     percpu::set_current_pid(None);
-    // SAFETY: irreducible — `set_kernel_stack` reaches its `PerCpu` through
-    // `gs:[0]`, so its `# Safety` is that the caller is the CPU that GS base
-    // belongs to. It is: this runs on the CPU it is putting into the idle loop,
-    // after `percpu::init_bsp`/`init_ap` gave that CPU its GS base, and the
-    // argument comes from `idle_stack_top`, which reads the same `PerCpu`. What
-    // it writes is the two words every Ring 3 → Ring 0 entry takes its stack
-    // from, and the value is the stack the `mov rsp` below is about to stand
-    // on — nothing safe can express "this is the stack I am about to be on".
+    // SAFETY: `set_kernel_stack` requires the caller be the CPU its GS base belongs to — true here, on that CPU, after its base was set.
     unsafe { percpu::set_kernel_stack(percpu::idle_stack_top()) };
-    // SAFETY: irreducible — `activate` writes CR3, whose `# Safety` is that the
-    // tables are live. `kernel_cr3` is the one address space this kernel builds
-    // at boot and never frees, and it is the space this function's own code and
-    // stack are mapped in, so the write cannot unmap what executes it. The idle
-    // context carries no user address space, which is the whole reason this is
-    // the space to be in.
+    // SAFETY: `kernel_cr3` is the space this function's own code and stack already run in, so the write cannot unmap what executes it.
     unsafe { crate::mm::paging::kernel_cr3().activate() };
     let sp = percpu::idle_stack_top();
-    // SAFETY: irreducible — a stack pointer cannot be moved from Rust, and this
-    // is the one function that has to. It is sound because nothing on the
-    // outgoing stack is live past it: `enter_idle_loop` returns `!` and its
-    // caller is boot or AP bring-up, whose frames nothing ever unwinds; `sp` is
-    // this CPU's own idle stack top, just installed above; and `options
-    // (noreturn)` is the truth, because `jmp` is the last instruction and
-    // `idle_loop` is `-> !`.
+    // SAFETY: nothing on the outgoing stack is live past this — the function returns `!`, and `sp` is this CPU's own idle stack top.
     unsafe {
         asm!(
             "mov rsp, {sp}",
-            // Terminate the frame chain, and leave the zero return-address
-            // slot a `call` would have left. `idle_loop` is entered by `jmp`,
-            // so its frame is the topmost on this stack and `rbp + 8` — where
-            // `kernel_backtrace` reads the return address — is otherwise the
-            // unmapped page above the idle stack. A fatal panic taken on an idle
-            // CPU then faults inside `crash_report` while printing its own
-            // backtrace, that fault's report faults the same way, and the
-            // machine double-faults with pages of cascade and not one line of
-            // the reason.
-            //
-            // `push` also leaves `rsp` where the ABI expects it at a function
-            // entry, which jumping to the raw top does not.
+            // Zeroes the frame chain, so a panic here can backtrace instead of walking off the top of this stack;
+            // `push` also leaves `rsp` where a function entry expects it.
             "xor ebp, ebp",
             "push rbp",
             "jmp {func}",
@@ -1087,87 +721,62 @@ pub fn enter_idle_loop() -> ! {
 
 extern "C" fn idle_loop() -> ! {
     loop {
-        // The idle loop and not a pass: the state it stages is a CPU that never
-        // reaches one.
+        // The idle loop, not a pass: the state it stages is a CPU that
+        // never reaches one.
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::dump_deaf_cpu() {
             super::dump::deaf_window();
         }
-        // The idle loop for the same reason, from the other side: the CPU that
-        // storms is the one with nothing to run, and the CPU under observation
-        // is whichever one is spinning on `syscall` from Ring 3.
+        // From the other side: the storming CPU has nothing to run,
+        // while the one under observation spins on `syscall` from Ring 3.
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::syscall_window_nmi() {
             crate::nmi_gate::storm();
         }
-        // Here and not from a syscall: the panic handler recovers rather than
-        // paints when a userland thread is current, and this context has none.
+        // Here, not from a syscall: the panic handler recovers, not paints, when a userland
+        // thread is current, and the idle loop has none.
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");
         }
         crate::scheduler::log_health();
         crate::scheduler::reap_poisoned();
-        // `pass` below covers this too; it is here so a CPU that reaches the
-        // loop and then halts has run every hook first, rather than leaving one
-        // queued behind an interrupt that may be 102 s away.
+        // `pass` below covers this too; here as well so a CPU that
+        // halts immediately has still run every hook first.
         crate::object::drain_zero_handles();
-        // A heartbeat is a record like any other: it reaches the wire on the
-        // commit, and the idle loop touches no filesystem, volume or controller
-        // at all.
+        // A heartbeat is a record like any other; the idle loop touches no filesystem itself.
         #[cfg(feature = "boot-actuators")]
         crate::heartbeat::poll();
         pass(Dispose::None);
     }
 }
 
-/// The running task's rendezvous word, cloned so the caller can hold it across
-/// its own block without borrowing the `CpuSched`.
+/// The running task's rendezvous word, cloned so the caller can hold it without borrowing `CpuSched`.
 pub fn current_shared() -> Option<Arc<KShared>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.shared().clone())).flatten()
 }
 
-/// The running task's cross-CPU face, which is where its completion inbox
-/// lives. `None` on a CPU with no task: boot, and the idle loop.
+/// The running task's cross-CPU face, where its completion inbox lives. `None` off-task.
 pub fn current_handle() -> Option<Arc<crate::sched::payload::TaskHandle>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.clone())).flatten()
 }
 
-/// The same face, borrowed rather than cloned, for a reader that does not
-/// outlive the peek. `None` on a CPU with no task, exactly as above.
-///
-/// It exists because [`current_handle`]'s `Arc::clone` is two uncontended
-/// read-modify-writes, and `scheduler::Operation::established` asks this
-/// question on every park token minted in the machine — the hot-path atomic
-/// `tests/CLAUDE.md` names as the one TCG prices unlike hardware.
+/// The same face, borrowed rather than cloned, for a peek that does not outlive it — [`current_handle`]'s clone is a hot-path RMW.
 pub fn with_current_handle<R>(f: impl FnOnce(&crate::sched::payload::TaskHandle) -> R) -> Option<R> {
     try_with_cpu(|cpu| cpu.running().map(|t| f(t.ext().handle.as_ref())))?
 }
 
 /// The symbol table of the task this CPU is running.
 ///
-/// **The crash report's route to a name, and it takes no lock at all.** The
-/// table is immutable for its whole life and the `Arc` is the lifetime: a clone
-/// taken here outlives anything the process's teardown can do, so the report
-/// reads bytes nobody is freeing. The peek is this CPU's own record, and a
-/// report cannot be preempted out of it — `preempt::enable` declines the slow
-/// path while `PerCpu::fault_state` is non-zero — so no pass can start
-/// underneath the read.
+/// Takes no lock: the table is immutable and the `Arc` outlives teardown. `None`: a pass already holds this
+/// record, or none is running.
 ///
-/// `None` has two causes and a caller that prints one must say which
-/// (`process::SymbolLookup`): a pass already held this CPU's record when the
-/// report began, which is what a kernel panic *inside* `driver::pass` looks
-/// like; or the CPU is running nothing, which is the idle context and boot
-/// before the first task.
+/// No pass can start underneath the read: a fault handler runs with preemption declined.
 pub fn current_symbols() -> Option<Arc<crate::symbols::SymbolTable>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().symbols.clone())).flatten()
 }
 
-/// Whether the running task has been killed — one relaxed load, no clone.
-///
-/// Read on every return to Ring 3, which is why it takes no `Arc`: a refcount
-/// on that path is the read-modify-write TCG prices at hundreds of
-/// microseconds.
+/// Whether the running task has been killed — one relaxed load, no clone, since an `Arc` refcount here is too costly on this path.
 pub fn current_kill_pending() -> bool {
     try_with_cpu(|cpu| cpu.running().is_some_and(|t| t.shared().kill_pending())).unwrap_or(false)
 }
@@ -1176,11 +785,7 @@ pub fn current_cpu() -> CpuId {
     CpuId(percpu::cpu_id())
 }
 
-/// The address space the running task runs in.
-///
-/// **`None` means "no task is running", never "this task has no address
-/// space"** — `KernelPayload::address_space` is not optional, so the second
-/// reading has no expression. Boot and an idle CPU are the two answers.
+/// The address space the running task runs in. `None` means "no task is running" — `KernelPayload::address_space` is not `Option`.
 pub fn current_address_space() -> Option<PageTables> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().address_space.clone())).flatten()
 }
@@ -1213,10 +818,7 @@ pub fn parked_len() -> usize {
 
 /// Killed threads on this CPU that are unwinding or waiting to.
 ///
-/// **The dump's fourth container.** A dying task's state word reads `Ready`, so
-/// the process-table census counts it; without this the CPU half cannot see it,
-/// and `unheld = claimed − scheduled` reports a task nothing will ever run — on
-/// a healthy machine, for up to a quantum, on every thread teardown.
+/// The dump's fourth container — without it a dying task is invisible to `unheld = claimed − scheduled`.
 pub fn dying_len() -> usize {
     try_with_cpu(|cpu| cpu.dying_len()).unwrap_or(0)
 }
@@ -1236,11 +838,7 @@ pub fn running_id() -> Option<TaskId> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().id)).flatten()
 }
 
-/// One parked task, flattened for a reader outside the scheduler.
-///
-/// Flattened here because a `ParkedView` borrows the `CpuSched`, and nothing
-/// outside this file may hold that borrow — that a CPU's state is reachable
-/// only from that CPU is the property the whole core is built on.
+/// One parked task, flattened because a `ParkedView` borrows the `CpuSched`, which nothing outside this file may hold.
 pub struct ParkedInfo {
     pub id: TaskId,
     pub class: toyos_sched::task::WaitClass,
@@ -1250,8 +848,7 @@ pub struct ParkedInfo {
     pub rt: bool,
 }
 
-/// Walk this CPU's parked tasks. `false` means a pass owns the state right
-/// now, and a diagnostic does not wait for one.
+/// Walk this CPU's parked tasks. `false` means a pass owns the state right now.
 pub fn for_each_parked(mut f: impl FnMut(ParkedInfo)) -> bool {
     try_with_cpu(|cpu| {
         for parked in cpu.parked() {
@@ -1267,12 +864,8 @@ pub fn for_each_parked(mut f: impl FnMut(ParkedInfo)) -> bool {
     .is_some()
 }
 
-/// Tail of the first switch into a fresh task, called by
-/// `process_start`/`thread_start` before the first `iretq`.
-///
-/// There is no lock to release and no outgoing task to park — the pass that
-/// switched here ended before the switch. All that is owed is the other half of
-/// that pass's preempt-count bracket, which this context now inherits.
+/// Tail of the first switch into a fresh task. No lock to release, no outgoing task to park: only the
+/// preempt-count bracket's other half is owed.
 pub extern "sysv64" fn trampoline_entry() {
     crate::preempt::enable_no_resched();
     crate::arch::idt::kernel_exit_to_user_check();
@@ -1280,12 +873,7 @@ pub extern "sysv64" fn trampoline_entry() {
 
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
-/// What every untouched word of a task's kernel stack holds under
-/// `heap-tripwire`.
-///
-/// The same byte `arch::percpu` fills the idle and IST1 stacks with, for the
-/// same reason: a zero is a value a stack legitimately writes, so a zeroed
-/// stack cannot tell untouched from written and has no depth to report.
+/// What every untouched stack word holds under `heap-tripwire` — not zero, which a stack legitimately writes.
 #[cfg(feature = "heap-tripwire")]
 const STACK_FILL: u8 = 0xA5;
 #[cfg(feature = "heap-tripwire")]
@@ -1299,19 +887,9 @@ fn stack_layout() -> core::alloc::Layout {
         .expect("the kernel stack layout")
 }
 
-/// Rungs of the depth ladder, in bytes above the bottom of the stack.
-///
-/// Descending, so the depths they report *ascend*: a word at `bottom + rung`
-/// that is no longer [`STACK_FILL_WORD`] says the stack reached within `rung`
-/// of its own bottom, which is `KERNEL_STACK_SIZE - rung` bytes used. Touched
-/// is monotone up the stack, so the first rung still holding fill ends the
-/// walk and the one before it is the high water.
-///
-/// **Read rather than walked.** The exact depth is a `partition_point` over
-/// 16,384 words, and this runs on every pass — which `kernel/CLAUDE.md` says is
-/// an audio change. Nine volatile reads bound the high water to a band, which
-/// is what the question needs: a stack that never leaves the top 16 KiB is not
-/// what is writing the heap, and one that reaches the bottom 4 KiB is.
+/// Rungs of the depth ladder, in bytes above the bottom of the stack, descending so the depths they report
+/// ascend. Touched is monotone up the stack, so the first still-filled rung ends the walk. Read rather than
+/// walked: nine bounded reads stand in for an exact `partition_point`.
 #[cfg(feature = "heap-tripwire")]
 const DEPTH_RUNGS: [usize; 9] = [
     124 * 1024, 120 * 1024, 112 * 1024, 96 * 1024, 64 * 1024,
@@ -1320,65 +898,36 @@ const DEPTH_RUNGS: [usize; 9] = [
 
 /// The deepest any task kernel stack has been, in bytes used.
 ///
-/// **An atomic that is never logged from where it is written.** `stack_depth`
-/// runs from `check_stack_canary`, inside `with_cpu`'s exclusive region, and
-/// `crate::log!` is not a leaf there: the log's own readiness path reaches
-/// `driver::pass`, so a log emitted from inside a pass re-enters the pass and
-/// wedges the machine. `sched-tripwire`'s own `log!` gets away with it only
-/// because a `panic!` follows it and it never has to return. The number is read
-/// by [`stack_high_water`] from the crash report instead, which is the channel a
-/// storm reads anyway.
+/// Never logged from where it's written: that runs inside `with_cpu`'s exclusive region, which a log re-enters and wedges.
+/// `sched-tripwire`'s own `log!` is the one exception, since the `panic!` after it never returns.
 #[cfg(feature = "heap-tripwire")]
 static DEEPEST: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// The deepest any task kernel stack has been and the stack it is measured
-/// against, or `None` from a kernel that carries no ladder.
-///
-/// For `hw::report_contexts`, which runs on every kernel crash. A `Some(0)` is
-/// a reading and not an absence: it says no task stack ever reached the
-/// shallowest rung, which is 4 KiB used.
+/// The deepest any task kernel stack has been and the stack it's measured against, or `None` with no ladder.
 #[cfg(feature = "heap-tripwire")]
 pub fn stack_high_water() -> Option<(usize, usize)> {
     Some((DEEPEST.load(Ordering::Relaxed), KERNEL_STACK_SIZE))
 }
 
-/// See the `heap-tripwire` arm above. A kernel without the ladder has no
-/// reading to report, which is not the same as a reading of zero.
+/// See the `heap-tripwire` arm above; no ladder means no reading, not a reading of zero.
 #[cfg(not(feature = "heap-tripwire"))]
 pub fn stack_high_water() -> Option<(usize, usize)> {
     None
 }
 
 pub fn write_stack_canary(stack: &OwnedAlloc) {
-    // Painted before the canary word, so the canary survives the fill rather
-    // than the other way round.
-    //
-    // SAFETY: `stack` is a fresh `OwnedAlloc::new(KERNEL_STACK_SIZE, 4096)`
-    // that nothing else has seen yet, so this writes exactly its own bytes.
+    // Painted before the canary word, so the canary survives the fill.
+    // SAFETY: `stack` is a fresh, exclusively-owned allocation of
+    // exactly this size, so this writes only its own bytes.
     #[cfg(feature = "heap-tripwire")]
     unsafe { core::ptr::write_bytes(stack.ptr(), STACK_FILL, KERNEL_STACK_SIZE) };
-    // SAFETY: the same fresh allocation, whose length is `KERNEL_STACK_SIZE`
-    // and whose alignment is 4096, so eight bytes at offset zero are its own
-    // and aligned. **Irreducible where it is cheap to be reducible**: the
-    // bounded form is `OwnedAlloc::slice(8).write::<u64>(0, …)`, which is an
-    // `unsafe fn` too — `KernelSlice`'s accessors all are — so it would trade
-    // this block for that one and add an assert. What decides it is the
-    // *reader* below rather than this writer: the two have to have the same
-    // shape, and the reader runs inside `with_cpu` on every pass.
+    // SAFETY: the same fresh allocation; eight bytes at offset zero are
+    // its own and 4096-aligned.
     unsafe { *(stack.ptr() as *mut u64) = STACK_CANARY };
 }
 
 fn check_stack_canary(payload: &KernelPayload) {
-    // SAFETY: `payload.kernel_stack` is the `OwnedAlloc` `write_stack_canary`
-    // painted at spawn, alive for as long as the task is — the payload owns it
-    // and `Hw::release` is the only drop — so the word this reads is the one
-    // that was written, or the overflow this exists to name.
-    //
-    // **Irreducible here for a reason that is not about this expression.** It
-    // runs inside `with_cpu`'s exclusive region on *every* pass, which is the
-    // kernel's hottest path and one the idle loop is on; `KernelSlice` would
-    // bound the read and would still be an `unsafe fn` call, so the trade is a
-    // per-pass `assert!` bought for no block removed.
+    // SAFETY: `payload.kernel_stack` is the allocation `write_stack_canary` painted, alive as long as the task is.
     let canary = unsafe { *(payload.kernel_stack.ptr() as *const u64) };
     if canary != STACK_CANARY {
         panic!(
@@ -1392,33 +941,10 @@ fn check_stack_canary(payload: &KernelPayload) {
     stack_depth(payload);
 }
 
-/// Does every Ring 3 → Ring 0 entry this CPU can take land on the stack of the
-/// task this CPU is actually running, and is this CPU standing on it?
+/// Does every Ring 3 → Ring 0 entry land on the stack of the task this CPU is running, and is this CPU standing on it?
 ///
-/// **The question a corrupted word cannot answer and this can.** A mid-function
-/// *kernel text* address found in a kernel data field is a **return address**,
-/// which means something executed with that address as its stack pointer. There
-/// are exactly two words in this
-/// machine that aim an execution at a stack it did not grow: `kernel_rsp`, which
-/// `syscall` loads, and `tss.rsp0`, which every interrupt from Ring 3 loads.
-/// `Hw::switch` writes both from the incoming context's `kernel_stack_top`, so
-/// either a switch left them naming the wrong task or that field is itself a
-/// victim — and both cases are one comparison away, *here*, before the entry
-/// that would use them happens, instead of a boot later at whatever the write
-/// landed on.
-///
-/// The third comparison is the converse: this CPU is executing a pass, so its
-/// own `rsp` must be inside the stack of the task the pass says is running. It
-/// costs a register read and catches the case where the entry stacks are right
-/// and the *execution* is on the wrong one.
-///
-/// Two loads, a register read and three compares per pass. It is a reader and
-/// decides nothing, which is why a kernel carrying it schedules exactly as one
-/// without it — and why the arm it belongs to is still not the arm a rate was
-/// measured on (`heap-sweep`'s note).
-///
-/// **It has never fired.** Kept because it answers a question nothing else can,
-/// and because a negative this wide is worth having.
+/// A stray `kernel_rsp` or `tss.rsp0` aims a future entry at a stack it did not grow; this catches it before
+/// that entry, not after.
 #[cfg(feature = "stack-witness")]
 fn check_stack_ownership(payload: &KernelPayload) {
     let bottom = payload.kernel_stack.ptr() as u64;
@@ -1444,23 +970,13 @@ fn check_stack_ownership(payload: &KernelPayload) {
     );
 }
 
-/// The heap bands around this task's kernel stack, and how deep it has been.
-///
-/// **Both ends, which is what makes a red say when.** The canary above is one
-/// word at the bottom of the usable stack and it is read at every pass already;
-/// what it cannot see is a frame that stepped *over* it — a `memcpy` at a
-/// computed offset, a red zone — and what nothing here could see before is a
-/// stack that ran off its bottom into the neighbouring chunk. Under
-/// `heap-tripwire` there is no neighbouring chunk to reach: 4096 bytes of head
-/// band stand between, and the four words of it that sit immediately below the
-/// lowest usable stack word — the first thing an overflow writes — are read
-/// here, with the tail band's four for company.
+/// The heap bands around this task's kernel stack, and how deep it has been. Both ends: the canary catches
+/// a write at the bottom, this reads the head and tail band words for a frame that stepped over it.
 #[cfg(feature = "heap-tripwire")]
 fn stack_depth(payload: &KernelPayload) {
     let bottom = payload.kernel_stack.ptr();
-    // SAFETY: the running task's own stack, allocated by `alloc_kernel_stack`
-    // with exactly `stack_layout()`. It is running on this CPU, so nothing is
-    // freeing it.
+    // SAFETY: the running task's own stack, allocated with exactly
+    // `stack_layout()`; running on this CPU, so nothing is freeing it.
     unsafe { crate::mm::check_heap_bands(bottom, stack_layout(), "kernel stack") };
     let mut used = 0;
     for rung in DEPTH_RUNGS {
@@ -1476,13 +992,7 @@ fn stack_depth(payload: &KernelPayload) {
     DEEPEST.fetch_max(used, Ordering::Relaxed);
 }
 
-/// The outgoing half of [`context_switch`]: seven words onto the stack this CPU
-/// is leaving, the address of them into the outgoing context, and the incoming
-/// context's saved `rsp` into the register file.
-///
-/// A macro rather than nine lines, because [`context_switch`] exists in two
-/// builds and the instruction sequence must be **one** text: an instrument that
-/// changed the switch it instruments would measure itself.
+/// The outgoing half of [`context_switch`]. A macro, not inlined twice, so both builds share one instruction sequence.
 macro_rules! switch_save {
     () => {
         "pushfq
@@ -1497,8 +1007,7 @@ macro_rules! switch_save {
     };
 }
 
-/// The incoming half: the seven words a resumed context stands on, and the
-/// `ret` that is the last instruction able to say anything at all.
+/// The incoming half: the seven words a resumed context stands on, ending in `ret`.
 macro_rules! switch_restore {
     () => {
         "pop r15
@@ -1519,33 +1028,11 @@ pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) 
     naked_asm!(switch_save!(), switch_restore!());
 }
 
-/// The same switch with [`crate::hw::switch_witness_verify`] between the stack
-/// pointer moving and the first `pop`.
+/// The same switch with [`crate::hw::switch_witness_verify`] between the stack move and the first `pop`; never fired.
 ///
-/// **The window between the check and the pop.** `hw::check_switch_frame` reads
-/// `ctx.rsp`, validates it and the return slot, and returns; the frame is popped
-/// a few hundred instructions later — past the preempt swap, the TSS handover, a
-/// `mov cr3` and a `wrfsbase` — and nothing in between tests it. This does, and
-/// it has never fired.
-///
-/// The call is placed after `mov rsp, rsi` and not before it deliberately: the
-/// subject is the incoming frame read *through the register the machine will
-/// actually use*, so what it reports is where the machine is standing and not
-/// what a field says. That is what lets it tell the two apart now that
-/// `hw::check_switch_frame` returns the word it validated — the stack pointer
-/// is that word, and a `ctx.rsp` written after the check moves the field and
-/// nothing else.
-///
-/// It is sound to `call` here. The return address lands eight bytes below the
-/// frame, which is inside the incoming task's own kernel stack — `switch-witness`
-/// turns on `stack-witness` for exactly that reason, whose third test refuses a
-/// `ctx.rsp` that is not inside the stack its own `kernel_stack_top` names. The
-/// callee is an ordinary `extern "C"` function, so the six registers about to be
-/// popped are preserved by the ABI and every register it may clobber is dead
-/// here: `rdi` was consumed by `mov [rdi], rsp`, `rsi` by `mov rsp, rsi`, and a
-/// resumed context's caller-saved registers are dead across the `call
-/// context_switch` it returns to (`loader::start`'s three trampolines take their
-/// arguments in `r12`/`r13`/`r14`, which are callee-saved).
+/// Placed after `mov rsp, rsi`, reading the incoming frame through the register the machine will use. Sound
+/// to `call`: the return lands inside the incoming task's own stack, and every register `verify` may clobber
+/// is caller-saved and already dead here.
 #[cfg(feature = "switch-witness")]
 #[unsafe(naked)]
 pub(crate) unsafe extern "C" fn context_switch(old_rsp: *mut u64, new_rsp: u64) {

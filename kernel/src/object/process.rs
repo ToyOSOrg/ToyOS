@@ -1,16 +1,8 @@
 //! A process, as something a handle can name.
 //!
-//! **The exit code belongs to the object, not to a table entry.** A pid-keyed
-//! wait needed the process table to keep a corpse around until somebody claimed
-//! it, which is what a zombie was, and it needed rules for who was allowed to
-//! claim one and what happened when nobody did. None of that exists here: the
-//! spawn that made the process answered with a handle, the teardown publishes
-//! the code into the object that handle names, and the table entry is freed as
-//! soon as its threads are gone. A wait after the fact reads a value; a wait
-//! before it parks and is woken by the publish.
-//!
-//! So there is no reap, no orphan adoption, no "exactly once" and no window in
-//! which an exit is missed — and a process nobody holds a handle to simply
+//! The exit code lives on the object, not a table entry: no zombie, no reap,
+//! no orphan adoption. A wait after the fact reads a value; a wait before it
+//! parks and is woken by the publish. A process nobody holds a handle to
 //! disappears.
 
 use alloc::sync::Arc;
@@ -33,19 +25,11 @@ pub struct Exit {
 pub struct ProcessObject {
     pub(super) core: ObjectCore,
     pid: Pid,
-    /// Written exactly once, by whichever of exit, kill or panic recovery owns
-    /// this process's teardown.
+    /// Written exactly once, by whichever teardown path owns this process.
     exit: Lock<Option<Exit>>,
-    /// The same fact, readable without taking the lock: a parked waiter's
-    /// predicate runs on every wake, and a `Lock` there is a `fetch_add` on a
-    /// path that already has one.
+    /// The same fact, without the lock, for a waiter's per-wake predicate.
     finished: AtomicBool,
-    /// What a `SYS_PROCESS_WAIT` arms on. The object is what the waiter holds
-    /// across its park, so the watch it names cannot outlive its subject.
-    ///
-    /// **One waiter set where there were two.** The `KWaitQueue` beside this
-    /// went with the park it served: a thread arms here and parks on its own
-    /// queue, so a second list on the object had nothing left in it.
+    /// What `SYS_PROCESS_WAIT` arms on; holding the `Arc` across the park keeps the watch from outliving its subject.
     watch: Watch,
 }
 
@@ -72,9 +56,7 @@ impl ProcessObject {
         self.exit.lock().as_ref().map(|e| e.code)
     }
 
-    /// The last accounting the process had. `None` while it is still running —
-    /// a live process is sampled from its own `ProcessData` instead, which is
-    /// where the numbers are still moving.
+    /// The last accounting the process had; `None` while running — sample `ProcessData` instead.
     pub fn final_stats(&self) -> Option<ProcessStats> {
         self.exit.lock().as_ref().map(|e| e.stats)
     }
@@ -83,17 +65,7 @@ impl ProcessObject {
         &self.watch
     }
 
-    /// Publish the exit and release every waiter.
-    ///
-    /// Idempotent by assertion rather than by tolerance: two publishes mean two
-    /// teardowns claimed one process, which `claim_teardown` exists to prevent.
-    ///
-    /// This is also the moment the process's table entry becomes collectable —
-    /// `process::reap_finished` takes exactly the entries whose object answers
-    /// `finished` — so the idle loop is told, after the store it has to see.
-    /// That signal is the only one it gets: without it the loop would have to
-    /// take the process table to find out, which is what it did on every trip
-    /// until `sched::reap_gate`.
+    /// Publish the exit and release every waiter; panics on a second call, since that would mean two teardowns claimed one process, which `claim_teardown` prevents.
     pub fn publish_exit(&self, exit: Exit) {
         {
             let mut slot = self.exit.lock();
@@ -107,6 +79,7 @@ impl ProcessObject {
             *slot = Some(exit);
         }
         self.finished.store(true, Ordering::Release);
+        // Must come after the store: reap_finished polls this flag, not the lock.
         crate::scheduler::note_reapable();
         completion::post(Subject::of(&self.watch), Outcome::Ready);
     }

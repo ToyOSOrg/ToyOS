@@ -1,42 +1,27 @@
-//! The user machine state: what a transition out of Ring 3 has to preserve.
-//!
-//! **The invariant**: a transition out of Ring 3 that can reach another task
-//! saves and restores the whole of it, and a task that has never run in Ring 3
-//! starts from a *declared* state rather than from whatever the hardware's init
-//! instruction leaves. This file owns the x86-64 half of that.
+//! What a transition out of Ring 3 must save and restore in full; a task
+//! that has never run in Ring 3 starts from the declared state below.
 
 use crate::log;
 
-/// The whole of the user machine state this kernel permits to exist, in the
-/// layout `FXSAVE64` writes and `FXRSTOR64` reads.
-///
-/// `XCR0` is 1 on every machine this kernel boots — `CR4.OSXSAVE` is set
-/// nowhere, so nothing can widen it — which is what makes 512 bytes *complete*
-/// rather than a cheap approximation. The day any further component is enabled,
-/// `FXSAVE64` becomes a silent partial save and this type has to grow with the
-/// move to `XSAVE`; every reservation in `arch::entry` is sized from
-/// `size_of::<Self>()` so that growth cannot be forgotten in one of them.
+/// The whole user machine state this kernel permits, in `FXSAVE64`/
+/// `FXRSTOR64` layout. Complete only while `CR4.OSXSAVE` stays clear.
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 pub struct UserFpState([u8; 512]);
 
-/// The x87 control word every exception masked, extended precision, round to
-/// nearest — the value `FNINIT` leaves.
+/// The x87 control word `FNINIT` leaves.
 const FCW_INITIAL: u16 = 0x037F;
 
-/// `MXCSR` every exception masked, round to nearest, no flush-to-zero — the
-/// value the SDM gives as the power-on default.
+/// `MXCSR`'s SDM-defined power-on default.
 const MXCSR_INITIAL: u32 = 0x1F80;
 
 // Field offsets in the FXSAVE64 image (SDM Vol. 1 Table 10-2).
 const OFF_FCW: usize = 0;
 const OFF_MXCSR: usize = 24;
-/// The CPU writes its own mask here, so it is a property of the silicon rather
-/// than of the state, and the self-check cannot compare it against anything.
+/// The CPU's own mask; not part of the state the self-check compares.
 const OFF_MXCSR_MASK: usize = 28;
 const OFF_ST0: usize = 32;
-/// Past the last XMM register. Bytes above this are reserved or available for
-/// software, and `FXSAVE` is not obliged to write them.
+/// Past the last XMM register; `FXSAVE` need not write bytes above this.
 const END_XMM: usize = 416;
 
 impl UserFpState {
@@ -54,20 +39,12 @@ impl UserFpState {
         Self(b)
     };
 
-    /// This CPU's state, now.
-    ///
-    /// The Rust form of what `arch::entry`'s `save_user_state!` does in naked
-    /// assembly; both write this type's layout and neither can drift from it,
-    /// because the macro sizes its reservation from `size_of::<Self>()`.
+    /// This CPU's state, now — the Rust mirror of `arch::entry`'s naked
+    /// `save_user_state!`, which sizes its reservation from `size_of::<Self>()`.
     pub fn saved_from_cpu() -> Self {
         let mut state = Self([0u8; 512]);
-        // SAFETY: `fxsave64` writes 512 bytes to its operand and requires
-        // 16-byte alignment. `state` is a live local `UserFpState`, which is
-        // `repr(C, align(16))` over exactly `[u8; 512]` — the type is the whole
-        // guarantee, and it is the same type `arch::entry`'s naked bracket sizes
-        // its reservation from. Irreducible: this is the instruction, and the
-        // file's own header says these are the only lines in the kernel naming
-        // one.
+        // SAFETY: `fxsave64` needs 16-byte alignment; `state` is
+        // `repr(C, align(16))` over `[u8; 512]`.
         unsafe {
             core::arch::asm!(
                 "fxsave64 [{}]",
@@ -78,12 +55,7 @@ impl UserFpState {
         state
     }
 
-    /// The bytes `FXSAVE64` defines and two states may be compared on: the
-    /// header up to `MXCSR_MASK`, then the x87 and XMM register files.
-    ///
-    /// `MXCSR_MASK` is the CPU's answer and not part of the state. Everything
-    /// above the XMM area is reserved or software-available, and `FXSAVE` may
-    /// leave it as it found it.
+    /// The bytes two `UserFpState`s are compared on.
     fn defined(&self) -> (&[u8], &[u8]) {
         (&self.0[..OFF_MXCSR_MASK], &self.0[OFF_ST0..END_XMM])
     }
@@ -94,32 +66,22 @@ impl UserFpState {
 
 }
 
-/// [`UserFpState::INITIAL`] in memory, so the loader's trampolines can put a
-/// new thread into it with one instruction and no stack of their own.
-///
-/// A trampoline cannot use `FNINIT` instead: it marks the x87 registers empty
-/// without clearing them, so an `FXSAVE` reads the previous tenant's data back
-/// out, and it does not touch XMM at all.
+/// [`UserFpState::INITIAL`] in memory, for stackless trampolines to load in
+/// one instruction; not `FNINIT`, which leaves x87 empty without clearing it.
 pub static INITIAL_IMAGE: UserFpState = UserFpState::INITIAL;
 
-/// Put this CPU's FPU into the declared state and check that it is the state we
-/// think it is.
-///
-/// Called once per CPU, after `CR4.OSFXSR` is set — `LDMXCSR` is `#UD`
-/// otherwise.
+/// Puts this CPU's FPU into the declared state and asserts it matches.
+/// Call once per CPU after `CR4.OSFXSR` is set; `LDMXCSR` is `#UD` otherwise.
 pub fn init() {
     load_initial();
     self_check();
 }
 
-/// `FNINIT` for the x87 half, `LDMXCSR` for the SSE half. Neither waits, so
-/// this is safe to run over an FPU left holding a pending unmasked exception.
+/// `FNINIT` then `LDMXCSR`; neither waits, so this is safe over a pending
+/// unmasked exception.
 fn load_initial() {
-    // SAFETY: `fninit` takes no operand. `ldmxcsr` reads four bytes from its
-    // operand — `&MXCSR_INITIAL`, a live `const`-initialised `u32` — and is
-    // `#GP` if the value sets a reserved bit, which `0x1F80` does not; it is
-    // `#UD` without `CR4.OSFXSR`, which `init`'s doc comment is the ordering
-    // constraint for. `readonly` is honest: nothing is written.
+    // SAFETY: `&MXCSR_INITIAL` is valid for a 4-byte read; `CR4.OSFXSR` is the
+    // caller's job (see `init`).
     unsafe {
         core::arch::asm!(
             "fninit",
@@ -130,12 +92,8 @@ fn load_initial() {
     }
 }
 
-/// Assert that what the CPU calls the architectural default is what
-/// [`UserFpState::INITIAL`] says it is.
-///
-/// A kernel bug if it is not: the value would be restored onto every new thread
-/// and would be wrong on every one of them, silently. The caller has just run
-/// [`load_initial`], so this compares like with like.
+/// Asserts the CPU's architectural default matches [`UserFpState::INITIAL`];
+/// a mismatch would be silently restored onto every new thread.
 fn self_check() {
     assert_eq!(
         (&raw const INITIAL_IMAGE) as usize % core::mem::align_of::<UserFpState>(),
@@ -160,7 +118,7 @@ fn self_check() {
     );
 }
 
-/// XCR0, which says which state components `XSAVE` would move.
+/// XCR0: which state components `XSAVE` would move.
 ///
 /// # Safety
 /// `CR4.OSXSAVE` must be set; `xgetbv` is `#UD` otherwise.
@@ -177,21 +135,14 @@ unsafe fn xgetbv0() -> u64 {
     ((hi as u64) << 32) | lo as u64
 }
 
-/// One line per CPU naming the enumeration leaves that decide what state exists
-/// on this machine.
-///
-/// Per CPU rather than once for the machine: a thread that migrates between two
-/// CPUs disagreeing about `XCR0` faults on an instruction that worked a moment
-/// ago. `CR0` and `CR4` are [`control_regs`](super::control_regs)' line, which
-/// prints them beside this one and asserts on them.
+/// Logs one line per CPU naming what state exists; per CPU because two CPUs
+/// disagreeing about `XCR0` would fault on migration, invisibly if summarized.
 pub fn log_state() {
     let (max_leaf, _, _, _) = super::cpu::cpuid(0, 0);
     let (_, _, ecx1, _) = super::cpu::cpuid(1, 0);
     let xsave = ecx1 & (1 << 26) != 0;
     let osxsave = ecx1 & (1 << 27) != 0;
-    // SAFETY: `xgetbv0` asks for `CR4.OSXSAVE`, and the branch this is in is
-    // exactly CPUID leaf 1's `OSXSAVE` bit — the CPU's own report of that same
-    // register bit.
+    // SAFETY: gated on `osxsave`, CPUID leaf 1's report that `CR4.OSXSAVE` is set.
     let xcr0 = if osxsave { unsafe { xgetbv0() } } else { 0 };
     let (d0a, d0b, d0c, _) = if max_leaf >= 0xD { super::cpu::cpuid(0xD, 0) } else { (0, 0, 0, 0) };
     let (d1a, _, _, _) = if max_leaf >= 0xD { super::cpu::cpuid(0xD, 1) } else { (0, 0, 0, 0) };
