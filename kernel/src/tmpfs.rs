@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use crate::file_backing::FileBacking;
 use crate::file_cache::{self, FileId};
+use crate::fs_rename::{self, Committed, ReplaceRename};
 use toyos_abi::syscall::SyscallError;
 
 use crate::vfs::FileSystem;
@@ -31,51 +32,93 @@ impl FileBacking for TmpfsBacking {
     }
 }
 
+/// One name's one entry — a file or a symlink, never both. A single map keys
+/// every name once, so `create`, `create_symlink`, `rename` and `delete` cannot
+/// each see a different namespace.
+pub(crate) enum Entry {
+    File { id: FileId, mtime: u64 },
+    Symlink { target: String },
+}
+
 /// In-memory filesystem: file data lives in the file cache.
 pub struct TmpFs {
-    /// name → (FileId, mtime)
-    files: BTreeMap<String, (FileId, u64)>,
-    symlinks: BTreeMap<String, String>,
+    entries: BTreeMap<String, Entry>,
 }
 
 impl TmpFs {
     pub fn new() -> Self {
-        Self { files: BTreeMap::new(), symlinks: BTreeMap::new() }
+        Self { entries: BTreeMap::new() }
+    }
+}
+
+impl ReplaceRename for TmpFs {
+    type Displaced = Option<Entry>;
+
+    fn source_present(&mut self, old: &str) -> Result<bool, SyscallError> {
+        Ok(self.entries.contains_key(old))
+    }
+
+    fn commit(&mut self, old: &str, new: &str) -> Result<Committed<Option<Entry>>, SyscallError> {
+        let Some(moved) = self.entries.remove(old) else { return Err(SyscallError::NotFound) };
+        let displaced = self.entries.remove(new);
+        self.entries.insert(String::from(new), moved);
+        Ok(Committed::new(displaced))
+    }
+
+    fn release(&mut self, _old: &str, _new: &str, committed: Committed<Option<Entry>>) {
+        if let Some(Entry::File { id, .. }) = committed.into_displaced() {
+            let _ = file_cache::mark_deleted(id);
+        }
     }
 }
 
 impl FileSystem for TmpFs {
     // Nothing else caps file count here.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
-        if self.files.len() > limit {
-            return Err(SyscallError::ResourceExhausted);
+        let mut out = Vec::new();
+        for (name, entry) in &self.entries {
+            if let Entry::File { id, .. } = entry {
+                if out.len() == limit {
+                    return Err(SyscallError::ResourceExhausted);
+                }
+                out.push((name.clone(), file_cache::size(*id)));
+            }
         }
-        Ok(self.files.iter().map(|(name, (file_id, _))| {
-            (name.clone(), file_cache::size(*file_id))
-        }).collect())
+        Ok(out)
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
-        self.files.get(name).map(|(_, mtime)| *mtime).ok_or(SyscallError::NotFound)
+        match self.entries.get(name) {
+            Some(Entry::File { mtime, .. }) => Ok(*mtime),
+            _ => Err(SyscallError::NotFound),
+        }
     }
 
     fn read_link(&mut self, name: &str) -> Result<Option<String>, SyscallError> {
-        Ok(self.symlinks.get(name).cloned())
+        Ok(match self.entries.get(name) {
+            Some(Entry::Symlink { target }) => Some(target.clone()),
+            _ => None,
+        })
     }
 
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
-        let (file_id, _) = self.files.get(name).ok_or(SyscallError::NotFound)?;
-        file_cache::open(*file_id);
-        Ok((*file_id, None)) // tmpfs: no backing, data is in the file cache
+        match self.entries.get(name) {
+            Some(Entry::File { id, .. }) => {
+                file_cache::open(*id);
+                Ok((*id, None)) // tmpfs: no backing, data is in the file cache
+            }
+            _ => Err(SyscallError::NotFound),
+        }
     }
 
     fn create(&mut self, name: &str, mtime: u64) -> Result<FileId, SyscallError> {
-        if let Some((file_id, _)) = self.files.get(name) {
-            return Ok(*file_id);
+        if let Some(Entry::File { id, .. }) = self.entries.get(name) {
+            return Ok(*id);
         }
-        let file_id = file_cache::create_file(false); // non-evictable
-        self.files.insert(String::from(name), (file_id, mtime));
-        Ok(file_id)
+        // A dangling symlink of this name is displaced: one name, one entry.
+        let id = file_cache::create_file(false); // non-evictable
+        self.entries.insert(String::from(name), Entry::File { id, mtime });
+        Ok(id)
     }
 
     fn close_file(&mut self, _file_id: FileId) {
@@ -83,29 +126,18 @@ impl FileSystem for TmpFs {
     }
 
     fn delete(&mut self, name: &str) -> Result<(), SyscallError> {
-        if let Some((file_id, _)) = self.files.remove(name) {
-            let _ = file_cache::mark_deleted(file_id);
-            return Ok(());
+        match self.entries.remove(name) {
+            Some(Entry::File { id, .. }) => {
+                let _ = file_cache::mark_deleted(id);
+                Ok(())
+            }
+            Some(Entry::Symlink { .. }) => Ok(()),
+            None => Err(SyscallError::NotFound),
         }
-        if self.symlinks.remove(name).is_some() {
-            return Ok(());
-        }
-        Err(SyscallError::NotFound)
     }
 
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError> {
-        if let Some((target_id, _)) = self.files.remove(new) {
-            let _ = file_cache::mark_deleted(target_id);
-        }
-        if let Some(entry) = self.files.remove(old) {
-            self.files.insert(String::from(new), entry);
-            Ok(())
-        } else if let Some(target) = self.symlinks.remove(old) {
-            self.symlinks.insert(String::from(new), target);
-            Ok(())
-        } else {
-            Err(SyscallError::NotFound)
-        }
+        fs_rename::replace_rename(self, old, new)
     }
 
     fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; 4096]) -> Result<(), SyscallError> {
@@ -113,17 +145,24 @@ impl FileSystem for TmpFs {
     }
 
     fn update_metadata(&mut self, file_id: FileId, _size: u64, mtime: u64) -> Result<(), SyscallError> {
-        for (fid, mt) in self.files.values_mut() {
-            if *fid == file_id {
-                *mt = mtime;
-                return Ok(());
+        for entry in self.entries.values_mut() {
+            if let Entry::File { id, mtime: mt } = entry {
+                if *id == file_id {
+                    *mt = mtime;
+                    break;
+                }
             }
         }
         Ok(())
     }
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
-        self.symlinks.insert(String::from(name), String::from(target));
+        // Displaces whatever answered to this name: one name, one entry.
+        if let Some(Entry::File { id, .. }) =
+            self.entries.insert(String::from(name), Entry::Symlink { target: String::from(target) })
+        {
+            let _ = file_cache::mark_deleted(id);
+        }
         Ok(())
     }
 
@@ -132,7 +171,9 @@ impl FileSystem for TmpFs {
     }
 
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
-        let (file_id, _) = self.files.get(name).ok_or(SyscallError::NotFound)?;
-        Ok(Arc::new(TmpfsBacking { file_id: *file_id }))
+        match self.entries.get(name) {
+            Some(Entry::File { id, .. }) => Ok(Arc::new(TmpfsBacking { file_id: *id })),
+            _ => Err(SyscallError::NotFound),
+        }
     }
 }

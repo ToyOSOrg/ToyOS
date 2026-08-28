@@ -6,6 +6,7 @@ use hashbrown::HashMap;
 use bcachefs::{BlockIO, BlockBuf, BlockNum, DeviceError, FsError, Mounted, ReadWrite, ReadOnly, Formatted, SliceBlockIO, Extent};
 use crate::file_backing::{FileBacking, FileBlocks, NvmeBacking, InitrdBacking};
 use crate::file_cache::{self, FileId, Residency};
+use crate::fs_rename::{self, Committed, ReplaceRename};
 use crate::page_cache;
 use toyos_abi::syscall::SyscallError;
 
@@ -126,6 +127,50 @@ impl BcacheFsAdapter {
     }
 }
 
+/// `bcachefs::Mounted::rename` replaces atomically and resolves the source
+/// before it touches the tree, so the move commits before the displaced
+/// destination's in-memory state is freed: a rename that fails to find its
+/// source frees nothing.
+impl ReplaceRename for BcacheFsAdapter {
+    type Displaced = Option<FileId>;
+
+    fn source_present(&mut self, old: &str) -> Result<bool, SyscallError> {
+        if self.name_to_id.contains_key(old) {
+            return Ok(true);
+        }
+        Ok(mapped("exists", old, self.fs.file_mtime(old))?.is_some())
+    }
+
+    fn commit(&mut self, old: &str, new: &str) -> Result<Committed<Option<FileId>>, SyscallError> {
+        // Capture the displaced destination's in-memory id but free nothing: the
+        // backend move replaces the tree entry atomically, and only its success
+        // licenses freeing what the old destination held.
+        let displaced = self.name_to_id.get(new).copied();
+        mapped("rename", old, self.fs.rename(old, new))?;
+        Ok(Committed::new(displaced))
+    }
+
+    fn release(&mut self, old: &str, new: &str, committed: Committed<Option<FileId>>) {
+        if let Some(target_id) = committed.into_displaced() {
+            if file_cache::mark_deleted(target_id) == Residency::Gone {
+                self.open_files.remove(&target_id);
+            }
+            self.name_to_id.remove(new);
+        }
+        // The old destination's backings read blocks the move has reassigned.
+        self.revoke(new);
+        if let Some(file_id) = self.name_to_id.remove(old) {
+            self.name_to_id.insert(String::from(new), file_id);
+            if let Some(info) = self.open_files.get_mut(&file_id) {
+                info.name = String::from(new);
+            }
+        }
+        if let Some(blocks) = self.blocks.remove(old) {
+            self.blocks.insert(String::from(new), blocks);
+        }
+    }
+}
+
 impl FileSystem for BcacheFsAdapter {
     /// Checked after the work, not before: `bcachefs::Mounted::list` exposes no count to check first.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
@@ -211,28 +256,7 @@ impl FileSystem for BcacheFsAdapter {
     }
 
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError> {
-        if let Some(&target_id) = self.name_to_id.get(new) {
-            if file_cache::mark_deleted(target_id) == Residency::Gone {
-                self.open_files.remove(&target_id);
-            }
-            self.name_to_id.remove(new);
-        }
-        // Only the destination is revoked; the source's blocks carry to the new name.
-        self.revoke(new);
-
-        mapped("rename", old, self.fs.rename(old, new))?;
-
-        if let Some(file_id) = self.name_to_id.remove(old) {
-            self.name_to_id.insert(String::from(new), file_id);
-            if let Some(info) = self.open_files.get_mut(&file_id) {
-                info.name = String::from(new);
-            }
-        }
-        if let Some(blocks) = self.blocks.remove(old) {
-            self.blocks.insert(String::from(new), blocks);
-        }
-
-        Ok(())
+        fs_rename::replace_rename(self, old, new)
     }
 
     fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; 4096]) -> Result<(), SyscallError> {
