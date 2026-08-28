@@ -1,23 +1,11 @@
-//! The kernel's console sink, the two drain modes, and `klogd`.
-//!
-//! **One thread drains the console**, and three things bound that: boot does
-//! not need a thread at all, the panic and shutdown paths drain inline and
-//! never depend on `klogd` being schedulable, and **`klogd`'s own death is not
-//! survivable quietly** — its row in `sched::kthread` is [`OnPanic::Halt`],
-//! because a machine whose only console drainer has been killed goes silent
-//! with nothing left able to say so.
-//!
-//! **Its death is survivable by design, which is why its panic may not be.**
-//! Records keep committing into the shards whatever happens here: the oldest
-//! are dropped and counted, `lost` derives from `head` and `next` rather than
-//! from a counter, and `snapshot_committed` reads the shards directly — so the
-//! panic path is unaffected by `klogd` being gone. What is lost is the live
-//! console, which is exactly the thing nothing else can report.
-//!
-//! **[`Drain::Inline`] and [`Drain::Thread`] are phases and not fallbacks.**
-//! Exactly one is active, the transition is a single statement — [`start`] —
-//! and there is no second flag to disagree with the first about which one the
-//! machine is in: `Drain::Inline` *is* [`KLOGD`] being null.
+//! The kernel's console sink: two drain phases (inline boot, then `klogd`'s
+//! thread) and the `klogd` thread itself.
+//! `klogd`'s row in `sched::kthread` is [`OnPanic::Halt`]: it is the only
+//! console drainer, and its death must not go silent.
+//! Records keep committing to their shards regardless of `klogd`; only the
+//! live console is lost while it is down.
+//! [`Drain::Inline`] and [`Drain::Thread`] are phases, not fallbacks: exactly
+//! one is active, and `Drain::Inline` *is* [`KLOGD`] being null.
 
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, Ordering};
 
@@ -38,63 +26,27 @@ use crate::scheduler;
 use super::read::{drain_ordered, Published, RecordSink};
 use super::shard;
 
-/// The name `sched::dump`, `ps` and a crash report use.
-///
-/// **`klogd` and not `logd`**: `/bin/logd` is a userland program in the same
-/// machine, and two things with one name is a collision a dump report cannot
-/// survive.
+// klogd, not logd: `/bin/logd` is a separate userland process; one name for both would collide in a dump report.
 const NAME: &str = "klogd";
 
-/// `klogd`'s rendezvous word, or null before it is spawned.
-///
-/// **`emit` finds `klogd` through this and never through the process table**:
-/// `wake_task`'s `process::thread_sched` lookup takes a lock, and `log!` runs
-/// inside `sync.rs`, inside IRQ handlers, inside the scheduler and inside every
-/// syscall's locked region. The `Arc` is leaked once at spawn and read
-/// `Acquire`, which is the shape `driver::CPUS` already has in the same tree.
-///
-/// **Null is `Drain::Inline`'s whole state and needs no branch of its own.**
-/// There is no second flag to disagree with this one about which mode the
-/// machine is in.
+// `emit` finds `klogd` through this, not the process table: the lookup takes a lock, and `emit` runs inside IRQ handlers and every syscall's locked region.
 static KLOGD: AtomicPtr<Arc<KShared>> = AtomicPtr::new(core::ptr::null_mut());
 
-/// `klogd`'s inbox, published by `klogd` itself before its first park.
-///
-/// Separate from [`KLOGD`] because the two are read by the same producer at the
-/// same instant and are written by different threads at different ones: the
-/// spawner publishes the rendezvous word, and the thread publishes its own
-/// handle once it is running. A null here is a producer that has nothing to
-/// record — which is exactly the window between the spawn and `klogd`'s first
-/// loop, where `Drain::Thread` is already set and the claim alone is the wake.
+// Separate from `KLOGD`: the spawner publishes `KLOGD`, `klogd` itself publishes this before its first park.
+// Null between that spawn and `klogd`'s first loop: `Drain::Thread` is already set, and the wake alone covers the gap.
 static KLOGD_INBOX: AtomicPtr<Arc<TaskHandle>> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Who puts a committed record on the wire.
-///
-/// A fallback is a path taken when another one fails; these are phases. Exactly
-/// one is active, the transition is [`start`], it happens once, and it is
-/// logged.
 pub enum Drain {
-    /// The producer itself, on its own stack, immediately after committing.
-    /// Nothing else can run yet: there is no thread until `klogd`'s spawn, and
-    /// no CPU reaches a scheduler pass before the two statements after it.
+    /// The producer itself, inline immediately after committing.
+    /// Nothing else runs yet: no thread exists before `klogd`'s spawn, and no CPU takes a scheduler pass this early.
     Inline,
-    /// `klogd`, made runnable at the commit of the record it will drain, by the
-    /// producer's own `wake_direct`.
-    ///
-    /// **So the last line before a quiet period is evidence.** What puts a
-    /// record on the wire is its own commit and nothing else — not the idle
-    /// loop, not the timer, not the next piece of work happening to wake a
-    /// CPU — which is what makes "the log stops here" mean the machine stopped
-    /// there. `i8042_no_spurious_wake` rests on it: the host sends each key
-    /// group only once the *previous* group's drain line has arrived on serial,
-    /// with the guest parked on its keyboard handle in between, so a drain that
-    /// needed the machine to be busy would deadlock that test rather than pass
-    /// it.
+    /// `klogd`, woken at the commit of the record it will drain.
+    /// Only a commit wakes it — no idle loop, no timer — and `i8042_no_spurious_wake` depends on that.
     Thread,
 }
 
-/// Which phase this machine is in. One load, of the same word the wake post
-/// reads.
+/// Which phase this machine is in.
 pub fn mode() -> Drain {
     if KLOGD.load(Ordering::Acquire).is_null() {
         Drain::Inline
@@ -103,63 +55,31 @@ pub fn mode() -> Drain {
     }
 }
 
-/// Where the console's drain has got to.
-///
-/// One position for every context that drains, which is what stops a record
-/// reaching the wire twice however the machine happens to be running when it is
-/// committed. `read::Published` carries the argument for the shape.
+/// One position for every drain context, so a record never reaches the wire twice.
 static DRAINED: Published = Published::new();
 
-/// Start the thread. Called once, from `kernel_main`, immediately before the
-/// machine hands itself to the scheduler.
-///
-/// **That placement is the whole of the `Drain::Inline` → `Drain::Thread`
-/// transition.** The APs spin on `SMP_READY` until the second-to-last statement
-/// of `kernel_main` and the BSP reaches no pass before `enter_idle_loop`, so a
-/// `klogd` spawned at `scheduler::init` cannot run for the whole of phases 5, 6
-/// and 7 — which is the window a machine with no console wedges in, and that
-/// window may not get quieter.
+/// Start the thread. Called once, from `kernel_main`, before the scheduler starts.
+/// Placement matters: APs spin on `SMP_READY` until then, so an earlier spawn could not run while the machine has no console.
 pub fn start() {
     let sched = kthread::spawn(NAME, body, 0, OnPanic::Halt);
-    // Leaked deliberately: `klogd` never exits, and a producer reading this
-    // pointer from inside a locked region may not touch a refcount that could
-    // reach zero under it.
+    // Leaked: `klogd` never exits, and a producer reading this pointer under lock may not touch a refcount.
     let shared: &'static Arc<KShared> = alloc::boxed::Box::leak(alloc::boxed::Box::new(sched.shared));
     KLOGD.store(shared as *const _ as *mut _, Ordering::Release);
 }
 
-/// Post the wake `shard::signal_after_commit` said this producer owns.
-///
-/// Called from `emit`, after the publication bracket has closed and the
-/// caller's RFLAGS are back — so this is a *second* bracket of the same kind
-/// and not the reservation-and-publication bracket itself.
+/// Post the wake this producer owns; called from `emit` after its publication bracket has closed.
 pub fn post_wake() {
     let ptr = KLOGD.load(Ordering::Acquire);
     if ptr.is_null() {
         return;
     }
-    // SAFETY: written once from a leaked `Box`, never cleared, so the pointer
-    // is live for the rest of the machine's life.
+    // SAFETY: leaked once from a `Box`, never cleared; live for the machine's life.
     let shared = unsafe { &*ptr };
-    // **The record first, then the claim** — invariant W, in the one shape
-    // that may take no lock. `emit` runs inside `sync.rs`, inside IRQ handlers,
-    // inside the scheduler and inside every syscall's locked region, so the
-    // ordinary `completion::post` — which walks a watch list under the
-    // subject's leaf lock — is not available here.
-    //
-    // **`signal` and not `post`, because there is no one-poster argument to be
-    // had on this path.** `shard::signal_after_commit`'s swap admits one poster
-    // per *park*, which is not one per *post*: `klogd`'s loop re-arms the waiter
-    // flag and goes round without parking whenever `arm_waiter` finds work, so a
-    // second producer can win a fresh epoch's swap while the first is still
-    // inside `Inbox::post` — two CPUs writing one `UnsafeCell<Record>`, which is
-    // undefined behaviour and not a lost record. `Inbox::signal` is one atomic
-    // store and has no such precondition; what it gives up is the record's
-    // content, which this subject is edge-classed and never had to say.
+    // Preserves invariant W's store-before-claim order (`completion::post_n`), in the one shape that may take no lock.
+    // signal, not post: two producers can win the same wake epoch, and post's write would race on one `UnsafeCell<Record>`.
     let inbox = KLOGD_INBOX.load(Ordering::Acquire);
     if !inbox.is_null() {
-        // SAFETY: as above — leaked once by `klogd` itself before its first
-        // park, never cleared.
+        // SAFETY: leaked once by `klogd` before its first park, never cleared.
         let handle = unsafe { &*inbox };
         handle.inbox().signal();
     }
@@ -169,29 +89,13 @@ pub fn post_wake() {
 }
 
 /// Put every committed record this machine has not yet spoken on the wire.
-///
-/// **Three callers — `emit` in `Drain::Inline`, `klogd`, and a console arriving
-/// — and one function rather than a mode of anything.** What differs between
-/// the phases is who calls it, never what it does.
-///
-/// **One acquisition per chunk, not one per drain**, so the interrupts-off
-/// window is bounded by [`CHUNK_RECORDS`] however long the backlog is.
-///
-/// **`try_lock` and not `lock`, and the reason is a deadlock rather than
-/// latency.** `BackendGuard::lock` clears IF and then spins, so it is not
-/// re-entrant on its own CPU — and in `Drain::Inline` the caller is an
-/// arbitrary producer. A Ring 0 exception taken inside the backend write whose
-/// handler logs would spin there forever with interrupts off, on the one path
-/// that exists to report it. Declining costs nothing: the record stays
-/// committed in its shard, the position is shared, and whoever holds the
-/// backend re-scans every shard before it releases — so the holder drains the
-/// decliner's record too, in `at_ns` order, and the next `emit` or `klogd` wake
-/// catches whatever was committed after that last scan.
 pub fn drain_inline() {
     if !serial::has_console() {
         return;
     }
     loop {
+        // try_lock, not lock: `BackendGuard::lock` is not reentrant on this CPU, and a Ring 0 exception inside the backend write would spin forever with interrupts off.
+        // Declining loses nothing: the record stays committed, and whichever holder scans next drains it too.
         let Some(mut guard) = BackendGuard::try_lock() else { return };
         let records = drain_bounded(&mut guard, CHUNK_RECORDS);
         drop(guard);
@@ -201,49 +105,18 @@ pub fn drain_inline() {
     }
 }
 
-/// Records per backend acquisition on the live paths.
-///
-/// **`BackendGuard` holds interrupts off for its whole life, so this number is
-/// an interrupt latency and not a batch size** — draining a whole backlog under
-/// one guard masks interrupts for as long as the backlog takes, which an i8042
-/// byte and a daemon's own `write` both lose against.
-///
-/// Eight lines, against a mean rendered line of 89.4 bytes. The outer loop
-/// re-acquires, so a backlog still drains in one visit — it just lets an
-/// interrupt in between chunks, which is the whole point.
+/// Interrupt-off latency bound, not a batch size: `BackendGuard` holds IF off for its whole life.
 const CHUNK_RECORDS: u64 = 8;
 
-/// The whole backlog under one guard, for a caller that already holds it: the
-/// panic flush and the shutdown flush. **Interrupt latency is not a
-/// consideration on either** — one is halting the machine and the other is
-/// cutting the power — and both would rather have the report whole than let
-/// anything in between its lines.
+/// The whole backlog under one guard, for a caller that already holds it (panic and shutdown flush).
+/// Unbounded because interrupt latency doesn't matter while halting or cutting power, and the report should be whole.
 pub fn drain_locked(guard: &mut BackendGuard) {
     drain_bounded(guard, u64::MAX);
 }
 
-/// Advance the console's position over records nothing can carry.
-///
-/// **`klogd`'s, and nobody else's.** A machine with no backend has nowhere to
-/// put a record and the position must move anyway: standing still, an armed
-/// waiter finds a committed record on every rescan and spins for the life of the
-/// machine — and parking *unarmed* instead means `klogd` never wakes, so it
-/// never reaches `user::post_readiness`, so **the one machine shape this whole
-/// design exists for posts no log readiness at all** and `/bin/logd` parks for
-/// ever with `/log` unwritten.
-///
-/// Advancing costs nothing that machine had: the records stay in their shards
-/// for the panel, which reads them through `snapshot_committed` and not through
-/// this position; `panic_flush` refuses on `has_console()` before it looks at
-/// it; and a backend arriving later rewinds it whole ([`backend_changed`]).
-/// What it buys is a `klogd` that can park armed, so a commit wakes it, so a
-/// reader watching `Source::Log` hears about records on a machine with no
-/// console — which is every laptop and every `--diag-boot` image.
-///
-/// It is deliberately **not** in [`drain_inline`], whose other two callers are a
-/// producer mid-`emit` and a panicking machine: a `Drain::Inline` boot with no
-/// console would then walk every shard per record, which is exactly the cost
-/// gating that mode on `has_console()` avoids.
+/// Advances the position with no backend: standing still, an armed waiter would find the same record on every rescan and spin.
+/// Not in `drain_inline`: that function's other callers (a producer mid-`emit`, the panic path) would pay a per-record shard walk with no backend to justify it.
+/// Safe to advance: shards keep every record for the panel regardless, and a backend arriving later rewinds this position whole.
 fn discard_pending() {
     let mut cursor = DRAINED.take();
     let mut sink = Discard;
@@ -267,12 +140,7 @@ fn drain_bounded(guard: &mut BackendGuard, budget: u64) -> u64 {
 /// Drain with no lock at all, straight to the 16550.
 ///
 /// # Safety
-/// Panic path only, and only once a bounded wait for a clean `BackendGuard`
-/// handoff has failed (`serial::panic_flush`). What is unsynchronised is the
-/// *position*: a wedged holder may be between its walk and its publication, so
-/// a record can reach the wire twice. Twice is the right side of that trade on
-/// a machine that is halting — the alternative is a report that never arrives
-/// because the CPU holding the backend died holding it.
+/// Panic path only, after `serial::panic_flush`'s bounded wait for a clean handoff fails; the position is unsynchronised and a record may reach the wire twice.
 pub unsafe fn drain_bypassed() {
     let mut cursor = DRAINED.take();
     let mut sink = Raw;
@@ -280,55 +148,32 @@ pub unsafe fn drain_bypassed() {
     DRAINED.put(&cursor);
 }
 
-/// Which backend the drain has already spoken to, as [`serial::Backend`]'s
-/// discriminant.
+/// Which backend the drain has already spoken to, as `serial::Backend`'s discriminant.
 static SPOKEN_TO: AtomicU8 = AtomicU8::new(serial::Backend::None as u8);
 
-/// A backend has appeared, or the machine has switched to a better one. Say the
-/// whole boot again, into the one that is current now.
-///
-/// A record written while the only backend was a 16550 went to the 16550; when
-/// virtio-console comes up in phase 6 the machine has a *different* channel that
-/// has heard none of it, and on the harness's shape that channel is the only one
-/// anybody reads. Rewinding to the oldest record each shard still holds and
-/// draining again is what puts the boot on it.
-///
-/// **Both channels then carry the early boot and neither carries it twice**,
-/// because `BackendGuard::write_raw` writes to exactly one backend and this
-/// only fires when that choice changes. A machine whose backend never changes —
-/// metal-sim, or a laptop with no console at all — replays nothing.
+/// A backend has appeared or changed. Rewind and drain the boot again into the current one.
+/// Fires only on an actual change, and `write_raw` targets one backend at a time, so the replay never duplicates onto the backend already spoken to.
 pub fn backend_changed() {
     let now = serial::backend() as u8;
     if SPOKEN_TO.swap(now, Ordering::Relaxed) != now {
         DRAINED.rewind();
     }
     drain_inline();
-    // The rewind above moved the position backwards under a parked `klogd`,
-    // and nothing commits a record to wake it: the whole boot is now pending
-    // and the producer that would have posted has long since returned.
+    // post_wake: the rewind above moved the position backwards under a parked `klogd`, with no new commit to wake it.
     post_wake();
 }
 
-/// The longest line a record renders to: the tag, the ABI's bracket at its
-/// widest, the message, and the elision note.
-///
-/// It is a buffer and not a bound. A line that somehow ran past it spills to
-/// the backend and carries on under the one guard, so it is still whole on the
-/// wire — where a bound would have to choose between truncating and lying.
+/// Sized for the tag, the ABI's widest bracket, the message, and the elision note.
+/// A buffer, not a bound: an overlong line spills to the backend under the same guard instead of truncating.
 const LINE_BYTES: usize = toyos_abi::log::MAX_RECORD_MESSAGE + 160;
 
 /// One rendered line on its way to the backend.
-///
-/// **Buffered, and that is a device fact rather than tidiness.**
-/// `virtio_console::write_bytes_locked` is one host round trip per call and a
-/// record's `Display` is eight or nine fragments, so writing them straight
-/// through would pay eight vmexits a line for the whole boot.
+/// Buffered: writing each `Display` fragment straight through would cost one host round trip per fragment.
 struct Line<F: FnMut(&[u8])> {
     emit: F,
     buf: [u8; LINE_BYTES],
     len: usize,
-    /// The ABI's line opens with the bracket the tag has to sit inside, and
-    /// this says that first fragment has been dealt with.
+    /// Set once the ABI's leading bracket has been consumed by the tag.
     tagged: bool,
 }
 
@@ -364,19 +209,7 @@ impl<F: FnMut(&[u8])> core::fmt::Write for Line<F> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         if !self.tagged {
             self.tagged = true;
-            // **The tag is composed with the ABI's line rather than derived
-            // from a second copy of its fields.** `LogRecord`'s `Display` opens
-            // with the bracket the tag belongs inside, so the tag replaces that
-            // one byte and everything that varies — the timestamp, the origin,
-            // the `boot` label, the tid, the elision note — is rendered once,
-            // in `toyos-abi`, for this sink and the panel and `logd` alike. A
-            // `LogRecord::tagged(&str)` beside `Display` would be tidier and is
-            // a *sysroot* change:
-            // `issues/diagnostics/a-console-tag-is-composed-by-replacing-a-bracket.md`.
-            //
-            // If that leading bracket ever goes, the fragment passes through
-            // whole: a visible `[kernel [0.1 …` beats a line silently missing
-            // its first character.
+            // The tag replaces `LogRecord`'s leading bracket instead of duplicating its fields; if the bracket goes, the raw fragment passes through whole.
             let rest = s.strip_prefix('[').unwrap_or(s);
             self.push(rest.as_bytes());
             return Ok(());
@@ -386,14 +219,7 @@ impl<F: FnMut(&[u8])> core::fmt::Write for Line<F> {
     }
 }
 
-/// Render one record as the console line — byte for byte what the byte ring
-/// carried, `[kernel ` and all.
-///
-/// **Public because `/log`'s sink renders the same line**, and a second
-/// implementation of it there would be a second thing to keep agreeing with the
-/// panel: `logd` renders the same record through the same `Display` and writes a
-/// *wall-clock* prefix in front of it. One implementation of everything that
-/// varies, two prefixes over it.
+/// Render one record as the console line; `logd`'s `/log` sink renders the same line with a different prefix.
 pub fn write_line(record: &LogRecord, emit: impl FnMut(&[u8])) {
     use core::fmt::Write;
     let mut line = Line::new(emit);
@@ -402,12 +228,7 @@ pub fn write_line(record: &LogRecord, emit: impl FnMut(&[u8])) {
     line.finish();
 }
 
-/// Records through a backend the caller holds, up to a budget.
-///
-/// **`false` before the record rather than after it**, which is what
-/// `RecordSink` means by it: `drain_ordered` leaves the cursor *at* the record
-/// it was refused, so the next acquisition starts exactly there and the budget
-/// costs nothing but a re-scan.
+/// Records through a backend the caller holds, up to a budget; `put` returns false before the refused record, so the next acquisition starts there.
 struct Wire<'a> {
     out: &'a mut BackendGuard,
     records: u64,
@@ -425,8 +246,7 @@ impl RecordSink for Wire<'_> {
     }
 }
 
-/// Records nothing can carry, on a machine with no backend. The position moves
-/// and the bytes are never built.
+/// Advances the position with no backend; no bytes are built.
 struct Discard;
 
 impl RecordSink for Discard {
@@ -446,9 +266,7 @@ impl RecordSink for Raw {
 }
 
 extern "C" fn body(_arg: u64) -> ! {
-    // Deliberately the first thing, before any drain: what this stages is a
-    // panic *inside a kernel thread*, and the whole question is which branch
-    // the panic handler takes.
+    // First, before any drain: stages a panic inside a kernel thread to test the panic handler's branch.
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::klogd_panic() {
         panic!("klogd-panic: the console drainer died");
@@ -456,40 +274,25 @@ extern "C" fn body(_arg: u64) -> ! {
 
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("klogd runs as a task");
-    // The producer signals here, without a lock and without a watch list —
-    // `post_wake` says why it may not write a record instead.
+    // Signals without a lock or watch list; `post_wake` explains why a record can't be written here instead.
     KLOGD_INBOX.store(
         alloc::boxed::Box::leak(alloc::boxed::Box::new(handle.clone())) as *const Arc<TaskHandle>
             as *mut _,
         Ordering::Release,
     );
     loop {
-        // One bounded chunk per backend acquisition, so an interrupts-off
-        // window is never longer than `CHUNK_RECORDS` lines. With no backend the
-        // position moves and nothing is rendered — `discard_pending` says why
-        // that is this thread's job and not `drain_inline`'s.
+        // Bounded per chunk so interrupts stay off for at most `CHUNK_RECORDS` lines; `discard_pending` covers machines with no backend.
         if serial::has_console() {
             drain_inline();
         } else {
             discard_pending();
         }
 
-        // **The one context in the machine that has just observed committed
-        // records and may take a lock**, which is why the readiness post is
-        // here and not in `emit`: each per-source watcher list is a
-        // `Lock<Vec<_>>` the post clones under the lock, and taking a lock is
-        // the one thing `emit` may not do. One post per batch rather than one
-        // per record, and none at all while nothing is watching.
-        //
-        // It is outside `drain_inline` deliberately: that function's other two
-        // callers are a producer mid-`emit` and a panicking machine, and
-        // neither may touch `INBOXES`.
+        // The one point with committed records just observed that may take a lock; `emit` may not.
+        // Outside `drain_inline`: that function's other callers (a producer mid-`emit`, the panic path) may not touch `INBOXES`.
         super::user::post_readiness();
 
-        // **A completion post cannot drop a wake**: it stores the record before
-        // it claims, so a claim that finds nobody parked leaves a record
-        // `wait`'s own recheck finds. That is what makes the order of this arm
-        // and the waiter flag below a choice rather than a proof obligation.
+        // A completion post cannot drop a wake: it stores the record before claiming, so a miss here is caught by `wait`'s own recheck.
         let Some(armed) = completion::arm(
             completion::Subject::of(handle.watch()),
             completion::Token::new(0),
@@ -497,39 +300,23 @@ extern "C" fn body(_arg: u64) -> ! {
         ) else {
             continue;
         };
-        // **A machine with no console arms exactly like one that has a
-        // console**, which `discard_pending` above is what makes safe: with the
-        // position standing still an armed waiter would find a committed record
-        // on every rescan and spin.
+        // Safe with no backend because `discard_pending` still advances the position each pass.
         if shard::arm_waiter(shard::log_waiter(), || DRAINED.any_pending()) {
             continue;
         }
-        // No deadline. A spurious wake is legal and costs one re-drain; a
-        // missing one is what W3's two fences exist to make impossible, and a
-        // timeout here would hide exactly that.
+        // No deadline: a spurious wake costs a re-drain; a missing one is what W3's fences prevent.
         PARKS.fetch_add(1, Ordering::Relaxed);
-        // `klogd` is never killed — its row in the panic predicate is
-        // deliberately not recoverable — so the cancel arm is unreachable and
-        // says so rather than being handled.
+        // `klogd` is never killed, so this cancel arm is unreachable.
         let _ = completion::wait(&parkable, &armed, crate::time::Deadline::never());
     }
 }
 
-/// What the console drain has done, for a machine that has gone quiet and is
-/// being asked why.
-///
-/// **Three numbers rather than a heartbeat**, and each answers a different
-/// question the console alone cannot: `records` says the drain is running at
-/// all, `parks` says `klogd` is parking rather than spinning, and `lost` says
-/// whether a producer outran it — which is the one number a reader of the
-/// console can never derive, because what it names is the lines that are not
-/// there. Read only by `sched::dump`.
+/// Three counters read by `sched::dump`: records drained, records lost, and parks.
 static RECORDS: AtomicU64 = AtomicU64::new(0);
 static LOST: AtomicU64 = AtomicU64::new(0);
 static PARKS: AtomicU64 = AtomicU64::new(0);
 
-/// `(records drained, records lost, parks)`. Three relaxed loads: the dump may
-/// take no lock.
+/// `(records drained, records lost, parks)`, via three relaxed loads.
 pub fn stats() -> (u64, u64, u64) {
     (
         RECORDS.load(Ordering::Relaxed),

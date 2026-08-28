@@ -1,42 +1,25 @@
-//! Vector 0xFF, which this kernel names by writing it into the SVR.
+//! Vector 0xFF, the spurious vector `apic::enable_x2apic` writes into the SVR
+//! on every CPU.
 //!
-//! `apic::enable_x2apic` puts `0xFF` in the spurious-interrupt vector field on
-//! the BSP and on every AP, so the local APIC will deliver that vector whenever
-//! it takes back an interrupt it had already signalled. A vector the CPU can
-//! deliver and the IDT leaves `P = 0` is not a fault: the missing gate is a
-//! second, contributory fault and the CPU escalates to `#DF`, which
-//! `double_fault_handler` answers by halting the machine. That is the rule
-//! `idt_vectors!`' own comment states for the exception range, and this is the
-//! one vector the platform — rather than Intel — names.
-//!
-//! **The EOI is conditional, and that is the whole of the handler's
-//! difficulty.** A genuine spurious interrupt sets no ISR bit (SDM Vol. 3A
-//! §11.9), so an unconditional `eoi()` here would clear some *other*
-//! interrupt's in-service bit and lose it. The same vector reached by a
-//! deliberate IPI does go through the IRR and does need one — and without it
-//! the ISR bit at priority 0xF blocks every lower-priority vector on this CPU
-//! for the rest of the boot, the timer included. So the handler asks the ISR
-//! which of the two it is.
-//!
-//! **It does not log**, for `idt::nmi`'s reason: it can arrive inside the log's
-//! own commit bracket. It records one delivery in the interrupt census, which
-//! is a single `add` to this CPU's own counter block and reaches no lock.
+//! The EOI is conditional: sent only when the ISR bit is set (SDM Vol. 3A
+//! §11.9), since a genuine spurious interrupt sets none and an unconditional
+//! EOI would strand some other in-service interrupt. Does not log — this
+//! handler can run inside the log's own commit bracket.
 
 use core::arch::naked_asm;
 
 use crate::arch::apic;
 
-/// The vector `apic::enable_x2apic` writes into the SVR. Public because the
-/// gate's row and the register write are two places, and only one may decide.
+/// The vector `apic::enable_x2apic` writes into the SVR; pub because the IDT
+/// gate row hardcodes `0xFF` on its own and must be kept in sync by hand.
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn spurious_entry() {
     naked_asm!(
-        // The `cld` every Ring 0 entry owes itself (`arch::entry`), at a gate
-        // that is not routed through `ring3_naked_asm!`: this vector can arrive
-        // between any two instructions, `memmove`'s `std` … `cld` window
-        // included, and `took` is a `sysv64` call.
+        // Not routed through `ring3_naked_asm!`: this vector can interrupt any
+        // instruction, `memmove`'s `std` … `cld` window included, so it owes
+        // itself the `cld` every Ring 0 entry needs.
         "cld",
         "push rax",
         "push rcx",
@@ -67,8 +50,7 @@ pub(super) extern "sysv64" fn spurious_entry() {
     );
 }
 
-/// One delivery of the spurious vector, counted and acknowledged if it is one
-/// of the deliveries that can be.
+/// Counts one delivery and acknowledges it if the ISR bit shows it needed one.
 extern "sysv64" fn took() {
     crate::irq_census::irq_took!(Spurious);
     if apic::in_service(SPURIOUS_VECTOR) {
@@ -76,17 +58,8 @@ extern "sysv64" fn took() {
     }
 }
 
-/// Raise the spurious vector on this CPU on purpose, and check the three things
-/// a boot cannot otherwise certify: that the machine survives the delivery,
-/// that the handler ran, and that the interrupt after it is not lost.
-///
-/// **Nothing on this host produces a genuine spurious interrupt.** The SDM's
-/// classic condition is an interrupt masked by a task-priority register raised
-/// between assertion and `INTA`, and this kernel never writes `TPR`; every
-/// device on the machine is MSI or MSI-X. So without this the gate would ship
-/// never having been entered — and the third assertion is the one that matters,
-/// because a handler that acknowledged nothing would leave an ISR bit set at
-/// priority 0xF and starve every vector below it, the timer included.
+/// Raises the spurious vector on this CPU and verifies the handler ran and
+/// left the ISR clear.
 #[cfg(feature = "boot-actuators")]
 pub fn selftest() {
     use crate::irq_census::Source;
@@ -98,10 +71,11 @@ pub fn selftest() {
     };
     let taken_before = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
 
+    // This platform's devices are all MSI/MSI-X and `TPR` is never written, so
+    // nothing here raises a spurious interrupt without this call.
     apic::send_self(SPURIOUS_VECTOR);
 
-    // A self-IPI is delivered as soon as `IF` allows, which is now; the budget
-    // is what turns "it never arrived" into a verdict instead of a hang.
+    // A self-IPI arrives as soon as `IF` allows; the budget turns "never arrived" into a verdict.
     const ARRIVES: crate::time::Budget = crate::time::Budget::of(
         crate::time::Duration::from_millis(50),
         "the delivery is reported as never having arrived",
@@ -114,9 +88,7 @@ pub fn selftest() {
         return;
     }
 
-    // Acknowledged. A missing EOI does not fault: it leaves the bit set, this
-    // CPU's in-service priority at 0xF, and every lower vector — the timer
-    // included — undeliverable for the rest of the boot (SDM Vol. 3A §11.8.4).
+    // A missing EOI leaves the ISR bit set, starving every vector below priority 0xF (SDM Vol. 3A §11.8.4).
     if apic::in_service(SPURIOUS_VECTOR) {
         crate::log!(
             "LAPIC: spurious selftest FAILED — vector {SPURIOUS_VECTOR:#x} is still in service, so \
@@ -125,9 +97,7 @@ pub fn selftest() {
         return;
     }
 
-    // …and the machine takes interrupts after it, which is that argument's
-    // observable half. Any source will do: what is being ruled out is a CPU
-    // that has gone deaf, not a particular device.
+    // Confirms the CPU still takes interrupts afterward; any source works, since only a deaf CPU is ruled out.
     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
         crate::irq_census::deliveries_total(cpu).unwrap_or(taken_before) > taken_before
     });
