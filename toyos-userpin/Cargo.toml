@@ -1,0 +1,15 @@
+# A member of the host workspace (root `Cargo.toml`), like `toyos-userbound`
+# and `toyos-proclife`: a pure decision model whose tests run on the host. It is
+# the oracle for the user-copy window's pin invariant — that a window's frame is
+# never reissued while the window is live — and it enumerates every
+# park/munmap/copy interleaving to prove the pinning design upholds it. Nothing
+# depends on it: like `kernel-loom`, it is a checker the kernel is tied to by a
+# test, not a library the kernel links.
+[package]
+name = "toyos-userpin"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lints.rust]
+warnings = "deny"
