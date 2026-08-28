@@ -4,33 +4,10 @@ use crate::file_backing::FileBacking;
 use crate::mm::paging::Prot;
 use crate::mm::PAGE_2M;
 
-/// Dynamic allocations (mmap, shared memory) grow top-down from this ceiling.
-/// The stack at STACK_BASE is tracked in the regions BTreeMap, so find_gap
-/// avoids it. ALLOC_CEILING equals STACK_BASE because the stack extends upward
-/// to the PIE base — no usable VA space exists above it.
+/// The stack extends upward to the PIE base, so no usable VA space exists above it.
 pub const ALLOC_CEILING: u64 = STACK_BASE;
 
-/// Nothing allocated below this floor (guard against NULL-ish addresses), and
-/// what `test-tiny-va` raises to leave a 256 MiB arena.
-///
-/// Why an actuator rather than a program. The shipped arena is
-/// `ALLOC_CEILING - alloc_floor()`, about 1015 GB. Every region in it costs
-/// `align_up_2m(size) + GUARD_SIZE` of address space against at least
-/// `align_up_2m(size)` of *physical* memory — mmap, shared memory, an inbox
-/// and TLS all allocate through the PMM, and `dlopen`'s shared-image arm still
-/// allocates its own writable window. The worst ratio is therefore 2:1, at a
-/// 4 KiB request: 4 MiB of address space for 2 MiB of RAM. Exhausting 1015 GB
-/// of address space needs upwards of 500 GB of RAM, 126 times what the harness
-/// gives a guest — so the PMM refuses first, down a path that already returns
-/// an error, and `find_gap` never fails. No workload this harness can express
-/// reaches it.
-///
-/// 256 MiB is ~64 mappings, so a test exhausts it in a fraction of a second,
-/// and it is wide enough that every process in the boot still maps its TLS and
-/// its heap (measured: the boot completes and the guest reaches its ready
-/// marker). The code under test is the shipped code; only this number moves —
-/// and in a kernel without `boot-actuators` the branch is `if false` and this
-/// is the constant it always was.
+/// Guards against NULL-ish addresses below this floor.
 pub fn alloc_floor() -> u64 {
     if crate::actuator::test_tiny_va() {
         ALLOC_CEILING - 256 * 1024 * 1024
@@ -39,45 +16,32 @@ pub fn alloc_floor() -> u64 {
     }
 }
 
-/// Main thread stack base. RSP starts at STACK_BASE + USER_STACK_SIZE.
+/// RSP starts at this address plus `USER_STACK_SIZE`.
 pub const STACK_BASE: u64 = 0x00FF_FF80_0000;
 
-/// 2MB guard page between allocations.
+/// Guard page between allocations.
 pub const GUARD_SIZE: u64 = PAGE_2M;
 
-// Region — what a virtual memory area is backed by
 
-/// What backs a virtual memory region.
-///
-/// **The two demand-paged kinds carry a [`Prot`] and the eager one does not.**
-/// Only they are ever asked what to install; a `Mapped` region's pages were
-/// mapped when the region was created, and the page tables are the whole record
-/// of what they carry — a library image's are not even uniform across it. A
-/// `prot` on that kind would be a second answer nothing reads and nothing keeps
-/// true.
+/// `Mapped` has no `prot`: its pages are already installed, so nothing reads one.
 pub enum RegionKind {
-    /// File-backed region. On fault: read the page from the backing store and
-    /// map it `prot`.
+    /// On fault, reads the backing store and maps `prot`.
     FileBacked {
         backing: Arc<dyn FileBacking>,
         file_offset: u64,
         file_size: u64,
         prot: Prot,
     },
-    /// Anonymous memory (stack, BSS, heap). On fault: a zeroed page, mapped
-    /// `prot`.
+    /// On fault, maps a zeroed page as `prot`.
     Anonymous { prot: Prot },
-    /// Eagerly mapped: `mmap` with physical backing already assigned, a library
-    /// image, a shared-memory window. A fault inside one is refused rather than
-    /// filled.
+    /// A fault here is refused — physical backing is already assigned.
     Mapped,
 }
 
 /// A contiguous region of virtual address space.
 pub struct Region {
-    /// Size in bytes (2MB-aligned for allocated regions, 4KB-aligned for VMAs).
+    /// 2 MiB-aligned for allocated regions, 4 KiB-aligned for VMAs.
     pub size: u64,
-    /// What backs this region, and — for the demand-paged kinds — what a fault
-    /// in it installs.
+    /// For the demand-paged kinds, what a fault in this region installs.
     pub kind: RegionKind,
 }
