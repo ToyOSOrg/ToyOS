@@ -101,11 +101,9 @@ fn merge_rlibs(rlib_paths: &[std::path::PathBuf]) -> Vec<u8> {
     for path in rlib_paths {
         let data = fs::read(path)
             .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
-        // Refuse with the evidence: the one firing of the bare assert below
-        // (macos-latest, 2026-08-25) left no way to tell which file was wrong
-        // or what it was instead — issues/build/
-        // macos-libc-merge-reads-a-file-that-is-not-an-ar.md is the open
-        // question this line exists to answer on its next firing.
+        // Refuse with the evidence. The bare assert this replaced named
+        // neither the file nor what it held instead, so its one firing on a
+        // hosted macOS runner left nothing to diagnose.
         assert!(
             data.starts_with(b"!<arch>\n"),
             "{}: not an ar archive ({} bytes, starts {:02x?})",

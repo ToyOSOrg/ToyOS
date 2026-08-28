@@ -301,6 +301,19 @@ pub const KNOWN_RED: &[Red] = &[
     // the exact twelve-shard configuration `ci.yml` runs, sixty jobs, 292 tests
     // each, 1460 outcomes. 281 of the 292 names were green in all five.
     // ---------------------------------------------------------------------
+    // The budget is soft where the harness asserts it hard: eviction never takes
+    // a dirty page, so an all-dirty resident set truthfully prints over-budget.
+    Red {
+        test: "cache_eviction",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "file cache: 65 entries resident against a 64 bound after 1280 evictions — \
+               the bound does not hold",
+        evidence: "ci.yml run 33159606357 guest (3); green ALONE in the same session",
+        source: "issues/kernel/file-cache-budget-is-soft-where-the-harness-asserts-it-hard.md",
+        measured: "2026-08-28",
+    },
     Red {
         test: "usb_transport_break",
         instrument: Instrument::Ci,
@@ -1445,7 +1458,7 @@ pub const KNOWN_RED: &[Red] = &[
         what: "`ALONE: GREEN` twice and `ALONE: red again` once across four full suites in one \
                session",
         evidence: "four full suites on `wt/toyos-tlbfix`, 2026-08-07",
-        source: "issues/build/desktop-window-child-holds-a-lane.md",
+        source: "issues/diagnostics/blocked-dump-cannot-fire-on-a-total-freeze.md",
         measured: "2026-08-07",
     },
     Red {
@@ -1505,7 +1518,7 @@ pub const KNOWN_RED: &[Red] = &[
                ~250 s of every run and whichever desktop the duration profile ranked next went in \
                beside it",
         evidence: "seven full runs in one worktree, one session",
-        source: "issues/build/desktop-window-child-holds-a-lane.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-06",
     },
     Red {
@@ -1518,7 +1531,7 @@ pub const KNOWN_RED: &[Red] = &[
                alone, with its own verdict line rather than the typing one, so the message is not \
                the tell and the pair of durations is",
         evidence: "seven full runs in one worktree, one session",
-        source: "issues/build/desktop-window-child-holds-a-lane.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-06",
     },
     Red {
