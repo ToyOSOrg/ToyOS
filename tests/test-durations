@@ -179,8 +179,8 @@ fault_gates 31
 foreign_disk_untouched 4688
 fpu_isolation 14662
 fs_large_file 94
-fs_rename_durable 18446744073709551615
-fs_transactional 18446744073709551615
+fs_rename_durable 9346
+fs_transactional 85
 fs_truncate_persist 17
 futex_wake_counts 1007
 gsbase_locked 13091

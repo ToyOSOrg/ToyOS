@@ -902,7 +902,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // both questions the guest that staged them cannot answer about itself.
     ("fat_backing_revoked", Sched::Parallel, Tier::Fast),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
-    ("fs_rename_durable", Sched::Parallel, Tier::Fast),
+    ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
