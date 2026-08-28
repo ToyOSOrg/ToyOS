@@ -51,6 +51,7 @@ const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
 
+const DT_NEEDED: i64 = 1;
 const DT_STRTAB: i64 = 5;
 const DT_SYMTAB: i64 = 6;
 const DT_RELA: i64 = 7;
@@ -327,6 +328,17 @@ fn main() {
             .build(),
     );
 
+    // 4b. The whole image above USER_VM_BASE: vaddr_min itself exceeds the base,
+    //     so `USER_VM_BASE - vaddr_min` underflows — a whole-machine trap where
+    //     cases 3 and 4's low vaddr_min and stretched span are caught by the span test.
+    spawn_refused(
+        "load_only_above_vm_base",
+        &Elf::new(0x1000)
+            .ph(Phdr::load(0, USER_VM_BASE * 2, 0, 0x1000, PF_R | PF_W))
+            .entry(USER_VM_BASE * 2)
+            .build(),
+    );
+
     // 5. PT_TLS p_align is a file-chosen addend to the TLS block's size.
     //    u64::MAX wrapped the size computation, and the layout that fell out
     //    of it tripped the block's own "DTV overlaps TLS data" assert.
@@ -450,6 +462,26 @@ fn main() {
             "rela_index_past_heap",
             spawn_path(&write_file_in(BIG_DIR, "rela_index_past_heap", &bytes)),
         );
+    }
+
+    // 12b. More distinct DT_NEEDED names than the loader will load: each is one
+    //      private window, so above the cap it is refused before any open — where
+    //      the unbounded loader reached an open of a missing name and got NotFound.
+    {
+        const N: usize = 65; // MAX_NEEDED_LIBS (64) + 1, all distinct
+        const STRTAB: usize = 0x2000;
+        let mut tags: Vec<(i64, u64)> =
+            vec![(DT_STRTAB, STRTAB as u64), (DT_STRSZ, (N * 4) as u64)];
+        let mut elf = Elf::new(0x4000)
+            .ph(Phdr::load(0, 0, 0x4000, 0x4000, PF_R | PF_W))
+            .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x800, memsz: 0x800, align: 8 })
+            .entry(0);
+        for i in 0..N {
+            let off = i * 4;
+            elf = elf.poke(STRTAB + off, &[b'a' + (i % 26) as u8, b'A' + (i / 26) as u8]);
+            tags.push((DT_NEEDED, off as u64));
+        }
+        spawn_refused("too_many_needed_libs", &elf.dynamic(0x1000, &tags).build());
     }
 
     // 11. A DTPMOD64 relocation naming a TLS symbol no loaded module defines.

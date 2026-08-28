@@ -191,6 +191,8 @@ const RUST_SKIP: &[&str] = &[
     "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
+    // `gsbase_locked`'s probe child; its #UD must kill the child, not the run.
+    "gsbase_probe",
     "test_panic_child",
     "i8042_keyboard",
     "i8042_mouse",
@@ -204,6 +206,8 @@ const RUST_SKIP: &[&str] = &[
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
     "readdir_bound",
+    // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
+    "mkdir_cap",
     // Needs a live compositor, which `tests/testcases` does not boot.
     // `metal_sim_window_caps` runs it on the config that does.
     "window_caps",
@@ -225,6 +229,8 @@ const RUST_SKIP: &[&str] = &[
     // one — and a second boot on the kernel that saves nothing, which is the
     // only thing that proves the arms have teeth.
     "fpu_isolation",
+    // Its host driver boots two kernels to compare, so a bare run says nothing.
+    "gsbase_locked",
     // Needs netd with a NIC. `netd_connection_caps` runs it on tests/netcase.
     "netd_caps",
     // Same reason, same config: `netd_hostile_peer` runs it there.
@@ -544,6 +550,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
+    // A kernel log line from PCI enumeration; no clock and no real device in it.
+    ("pci_capability_walk", Sched::Parallel, Tier::Fast),
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
@@ -568,12 +576,17 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("nvme_wide_sector", Sched::Parallel, Tier::Fast),
     ("iommu_discovery", Sched::Parallel, Tier::Nightly),
     ("readdir_bound", Sched::Parallel, Tier::Fast),
+    // Its own boot: it fills the VFS `created_dirs` cap and leaves it there.
+    ("mkdir_cap", Sched::Parallel, Tier::Fast),
     // Two boots, and the verdict is that they answer differently. Nothing in it
     // is timed: every arm is a process exit code or a byte comparison — still
     // compute-bound, still Nightly: 11,075 ms in the sweep's final shard
     // packing (run 31705986758) is a Cost row, the same shape
     // `desktop_window_child` carries, not a reclassification.
     ("fpu_isolation", Sched::Parallel, Tier::Nightly),
+    // Two boots, exit codes only (no clock, Parallel). Nightly for `Cost`: its
+    // second (`user-writable-gsbase`) kernel double-boots it over the ceiling.
+    ("gsbase_locked", Sched::Parallel, Tier::Nightly),
     // The fourth declared kernel build, booted so that the scheduler core's
     // `feature = "check"` instruments are compiled and executed by a CI run at
     // all. One of its verdicts is a *quantile* of the guest's published
@@ -9275,6 +9288,33 @@ fn run_machine_test(
             }
             Ok(())
         }
+        "mkdir_cap" => {
+            // `Vfs::create_dir` grew a kernel `HashSet` without a ceiling, so a
+            // `mkdir` loop ran the heap out. Its own boot: it fills the cap and
+            // leaves it there, which a shared boot's later `mkdir`s would trip.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions::default(),
+            );
+            serial::Serial::boot(&qemu).must_be_clean()?;
+
+            let result = qemu.run_test("test_rs_mkdir_cap", Duration::from_secs(60));
+            if let Some(err) = &result.error {
+                return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+            }
+            if !check_rust_result(&result) {
+                return Err(format!("mkdir_cap failed:\n{}", result.stdout));
+            }
+            // The refusal is an error return and nothing else: a panic in the VFS
+            // would strand its lock, which the guest exiting 0 does not rule out.
+            serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
+            for line in result.stdout.lines().filter(|l| l.contains("PASS")) {
+                eprintln!("  [mkdir]{}", line.trim_start_matches("  PASS"));
+            }
+            Ok(())
+        }
         "fpu_isolation" => {
             // Two boots that must answer
             // differently: the shipped kernel preserves the whole user machine
@@ -9337,6 +9377,74 @@ fn run_machine_test(
             }
             eprintln!(
                 "  [fpu] fpu-save-nothing: exit {:?}, which is the gate having teeth",
+                negative.exit_code
+            );
+            Ok(())
+        }
+        "gsbase_locked" => {
+            // Two boots that must differ: the shipped kernel #UDs the GS-base
+            // primitive; `user-writable-gsbase` (the fix reverted) leaves it.
+            let one_cpu = || BootOptions { smp: 1, ..BootOptions::default() };
+
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, one_cpu());
+            serial::Serial::boot(&qemu).must_be_clean()?;
+            let result = qemu.run_test("test_rs_gsbase_locked", Duration::from_secs(120));
+            if let Some(err) = &result.error {
+                return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+            }
+            if !check_rust_result(&result) {
+                return Err(format!("gsbase_locked failed on the shipped kernel:\n{}", result.stdout));
+            }
+            // Reached and refused, not skipped: the #UD is the kernel's `SIGILL`.
+            if !result.serial.contains("SIGILL") {
+                return Err(format!(
+                    "gsbase_locked passed but no SIGILL: the probe never reached the instruction\n{}",
+                    result.serial
+                ));
+            }
+            for line in result.stdout.lines() {
+                eprintln!("  [gsbase] {}", line.trim());
+            }
+            drop(qemu);
+
+            let mut blind = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { kernel_features: &["user-writable-gsbase"], ..one_cpu() },
+            );
+            serial::Serial::boot(&blind).must_be_clean()?;
+            let negative = blind.run_test("test_rs_gsbase_locked", Duration::from_secs(120));
+            if let Some(err) = &negative.error {
+                return Err(format!(
+                    "the negative-control guest stopped answering: {err}\nserial:\n{}",
+                    negative.serial
+                ));
+            }
+            if negative.exit_code == Some(0) {
+                return Err(format!(
+                    "the `user-writable-gsbase` kernel passed `gsbase_locked`, so the gate \
+                     asserts nothing:\n{}",
+                    negative.stdout
+                ));
+            }
+            // Present, not merely a different exit: a kernel-half GS base leaked.
+            let leaked = negative
+                .stdout
+                .lines()
+                .chain(negative.serial.lines())
+                .filter_map(|l| l.split("base=0x").nth(1))
+                .filter_map(|h| u64::from_str_radix(h.split_whitespace().next().unwrap_or(""), 16).ok())
+                .find(|&b| b >= 0xffff_8000_0000_0000);
+            if leaked.is_none() {
+                return Err(format!(
+                    "the control exited nonzero but leaked no kernel GS base:\n{}",
+                    negative.stdout
+                ));
+            }
+            eprintln!(
+                "  [gsbase] user-writable-gsbase: exit {:?}, which is the gate having teeth",
                 negative.exit_code
             );
             Ok(())
@@ -10834,6 +10942,43 @@ fn run_machine_test(
             eprintln!("  [virtio] {}", verdict.trim());
             Ok(())
         }
+        "pci_capability_walk" => {
+            // A capability list is the device's, and QEMU publishes only
+            // well-formed ones, so the kernel drives eleven malformed layouts —
+            // a cycle, a spec-forbidden link, a BAR/offset/length past the window
+            // — over a crafted config space at init under this parameter.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["pci-cap-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            if let Some(bad) = log.lines().find(|l| l.contains("pci cap selftest FAILED")) {
+                return Err(format!("{bad}\n{log}"));
+            }
+            let Some(verdict) = log.lines().find(|l| l.contains("pci cap selftest")) else {
+                return Err(format!("the walk's self-test never ran:\n{log}"));
+            };
+            // `11/11`, not the absence of a FAILED line, which zero cases satisfy too.
+            if !verdict.contains("11/11") {
+                return Err(format!("not every malformed capability list was refused: {verdict}"));
+            }
+            // Once for the machine: it reads no real device.
+            let ran = log.matches("pci cap selftest").count();
+            if ran != 1 {
+                return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
+            }
+            // And the ordinary walk beside it: QEMU's real functions were enumerated.
+            if !log.contains("PCI: Enumeration complete") {
+                return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
+            }
+            eprintln!("  [pci] {}", verdict.trim());
+            Ok(())
+        }
         "xhci_descriptor_walk" => {
             // A configuration descriptor is the device's, and a device is not
             // kernel code. Every device QEMU can attach describes itself
@@ -12069,7 +12214,9 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         (9, "OSFXSR", true),
         (10, "OSXMMEXCPT", true),
         (12, "LA57", false),
-        (16, "FSGSBASE", true),
+        // Clear: `CR4.FSGSBASE` gates RD/WR FS/GS BASE at every CPL (Intel SDM
+        // Vol. 3A §2.5, Vol. 2 `WRGSBASE`), so no Ring 3 thread aims `GS.base`.
+        (16, "FSGSBASE", false),
         (18, "OSXSAVE", false),
         // Not a bit the machine may withhold: `toyos_build::qemu::CPU_KVM` and
         // `CPU_TCG` are the only two CPUs this repository launches and both name
@@ -12165,7 +12312,7 @@ fn control_regs_verdict() -> Result<(), String> {
     /// The pre-fix machine, `smp=4`, TCG, read off this tree on 2026-08-08:
     /// firmware's registers on the BSP and INIT's on every AP.
     const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);
-    const DECLARED: (u64, u64) = (0x8001_0033, 0x0031_0668);
+    const DECLARED: (u64, u64) = (0x8001_0033, 0x0030_0668);
 
     fn log(cpus: &[(u64, u64)]) -> String {
         cpus.iter()

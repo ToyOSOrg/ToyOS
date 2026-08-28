@@ -103,16 +103,6 @@ fn read_elf_table(
     Some(read_file_range(backing, offset, len))
 }
 
-/// Whether the whole ELF image fits in the user half once it is rebased.
-///
-/// A large enough `p_vaddr` wraps `base + p_vaddr` into the kernel half —
-/// where a user fault would OR `PAGE_USER` onto page tables every process
-/// shares — or past `ALLOC_CEILING`; the check is one range test against
-/// `[vaddr_min, vaddr_max)`, the hardware's user/kernel split.
-fn image_fits_user_half(layout: &Layout) -> bool {
-    toyos_userbound::in_user_half(USER_VM_BASE, layout.span())
-}
-
 /// Insert one demand-paged region per `PT_LOAD` segment.
 ///
 /// `Err` when two segments would share a page: page-rounded regions at one
@@ -396,12 +386,14 @@ pub fn spawn(
         }
     };
 
-    if !image_fits_user_half(&layout) {
-        log!("spawn: {}: image spans {:#x} bytes, past the user half from {:#x}",
-            path, layout.span(), USER_VM_BASE);
+    // The rebase base is the file's numbers, so `rebase_base` refuses a vaddr_min
+    // that underflows the subtraction or a span that leaves the user half.
+    let Some(base) = toyos_userbound::rebase_base(USER_VM_BASE, layout.vaddr_min, layout.span())
+    else {
+        log!("spawn: {}: image at vaddr_min {:#x} spanning {:#x} cannot rebase to {:#x}",
+            path, layout.vaddr_min, layout.span(), USER_VM_BASE);
         return Err(SyscallError::InvalidArgument.into());
-    }
-    let base = USER_VM_BASE - layout.vaddr_min;
+    };
 
     let exe = read_exe_tables(backing.as_ref(), &layout, path)?;
     let t1 = crate::clock::nanos_since_boot();
@@ -441,7 +433,11 @@ pub fn spawn(
     let t_deps = crate::clock::nanos_since_boot();
 
     // ELF segments are demand-faulted; the address space starts empty.
-    let child_pt: PageTables = Arc::new(Lock::new(crate::mm::paging::AddressSpace::new_user()));
+    let Some(space) = crate::mm::paging::AddressSpace::new_user() else {
+        log!("spawn: {}: no user PCID free — too many live address spaces", path);
+        return Err(SyscallError::ResourceExhausted.into());
+    };
+    let child_pt: PageTables = Arc::new(Lock::new(space));
     insert_elf_regions(&mut child_pt.lock(), &layout, base, &backing)?;
 
     // Libraries get user addresses before any relocation is written: RELATIVE
@@ -675,7 +671,11 @@ struct NeededLibs {
     paths: Vec<String>,
 }
 
-/// Load every `DT_NEEDED` library, from the executable's own directory first and `/lib` second.
+/// The most distinct libraries one executable may pull in; each is a private
+/// 2 MiB window, so a `DT_NEEDED` list naming more is refused rather than loaded.
+const MAX_NEEDED_LIBS: usize = 64;
+
+/// Load each distinct `DT_NEEDED` library, from the executable's own directory first and `/lib` second.
 fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallError> {
     let mut out = NeededLibs { libs: Vec::new(), paths: Vec::new() };
     if exe.needed.is_empty() {
@@ -683,12 +683,25 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
     }
     let exe_dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
 
+    // Collapse duplicates to the distinct set and bound it: a repeat resolves to
+    // one library `elf/cache.rs` holds one window for, so it buys no second one.
+    let mut distinct: Vec<&str> = Vec::new();
     for &name_offset in &exe.needed {
         // An offset outside the string table yields an empty name, not a bounds failure.
         let lib_name = toyos_elf::cstr(&exe.dynstr, name_offset);
-        if lib_name.is_empty() {
+        if lib_name.is_empty() || distinct.contains(&lib_name) {
             continue;
         }
+        if distinct.len() == MAX_NEEDED_LIBS {
+            log!("spawn: {}: more than {} distinct DT_NEEDED libraries", path, MAX_NEEDED_LIBS);
+            return Err(SyscallError::ResourceExhausted);
+        }
+        distinct.push(lib_name);
+    }
+    out.libs.reserve_exact(distinct.len());
+    out.paths.reserve_exact(distinct.len());
+
+    for lib_name in distinct {
         let lib_path = alloc::format!("{}/{}", exe_dir, lib_name);
         let t_load0 = crate::clock::nanos_since_boot();
 
