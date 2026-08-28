@@ -10,24 +10,15 @@ use crate::{log, process, vfs};
 
 use toyos_abi::syscall::*;
 
-// `WRITE` alone is not the question: `CREATE`, `TRUNCATE` and `APPEND` also modify.
-fn open_modifies(flags: OpenFlags) -> bool {
-    flags.contains(OpenFlags::WRITE)
-        || flags.contains(OpenFlags::CREATE)
-        || flags.contains(OpenFlags::TRUNCATE)
-        || flags.contains(OpenFlags::APPEND)
-}
-
-// The check rides the same `vfs` guard the mutation will run on, so a moved
-// mount can't separate what was checked from what acts.
+// Entry ops act on the name without following it; the check rides the same `vfs`
+// guard the mutation will run on, so a moved mount can't separate check from act.
 fn resolve_and_check(
     vfs: &vfs::Vfs,
     cwd: &str,
     path: &str,
-    demand: bool,
 ) -> Result<alloc::string::String, u64> {
     let resolved = vfs.resolve_absolute(cwd, path);
-    if demand && !vfs.user_may_modify(&resolved) {
+    if !vfs.user_may_modify(&resolved) {
         return Err(SyscallError::PermissionDenied.to_u64());
     }
     Ok(resolved)
@@ -37,19 +28,13 @@ fn resolve_and_check(
 fn resolve_for_modify(path: &str) -> Result<(vfs::VfsGuard, alloc::string::String), u64> {
     let cwd = process::with_process_data(|d| d.cwd.clone());
     let vfs = vfs::lock();
-    let resolved = resolve_and_check(&vfs, &cwd, path, true)?;
+    let resolved = resolve_and_check(&vfs, &cwd, path)?;
     Ok((vfs, resolved))
 }
 
 pub(super) fn sys_open(path: &str, flags: OpenFlags) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
-    let resolved = {
-        let vfs = vfs::lock();
-        match resolve_and_check(&vfs, &cwd, path, open_modifies(flags)) {
-            Ok(resolved) => resolved,
-            Err(refusal) => return refusal,
-        }
-    };
+    let resolved = vfs::lock().resolve_absolute(&cwd, path);
     process::with_process_data(|data| ops::open(&mut data.handles, &resolved, flags))
 }
 
@@ -121,11 +106,11 @@ pub(super) fn sys_getcwd(out: &mut UserBytesMut) -> u64 {
 pub(super) fn sys_rename(old: &str, new: &str) -> u64 {
     let cwd = process::with_process_data(|d| d.cwd.clone());
     let mut vfs = vfs::lock();
-    let old_abs = match resolve_and_check(&vfs, &cwd, old, true) {
+    let old_abs = match resolve_and_check(&vfs, &cwd, old) {
         Ok(resolved) => resolved,
         Err(refusal) => return refusal,
     };
-    let new_abs = match resolve_and_check(&vfs, &cwd, new, true) {
+    let new_abs = match resolve_and_check(&vfs, &cwd, new) {
         Ok(resolved) => resolved,
         Err(refusal) => return refusal,
     };
