@@ -403,7 +403,8 @@ pub fn load_shared_lib(
     // when `vaddr_min == 0`, true for every module a linker produces.
     let window = (rw_offset as u64, (rw_offset + rw_size) as u64);
     let entries = table_entries(&rela).chain(table_entries(&jmprel));
-    rela::validate(entries, window, sym_count).map_err(|e| e.as_str())?;
+    // `None`: a library's image is written contiguously, with no fill-page edge.
+    rela::validate(entries, window, sym_count, None).map_err(|e| e.as_str())?;
 
     let base_phys = image.phys();
     let mut reloc_count = 0u64;

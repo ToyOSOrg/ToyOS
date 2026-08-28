@@ -106,25 +106,63 @@ fn validation_refuses_a_write_outside_the_window_by_name() {
 
     let overflowing = [rela(u64::MAX - 3, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&overflowing).iter(), window, 4),
+        rela::validate(RelaTable::new(&overflowing).iter(), window, 4, None),
         Err(RelocError::OffsetOverflows),
     );
 
     let below = [rela(0xFF8, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&below).iter(), window, 4),
+        rela::validate(RelaTable::new(&below).iter(), window, 4, None),
         Err(RelocError::OutsideWindow),
     );
 
     // One byte of an eight-byte write past the end.
     let straddling = [rela(0x1FF9, 0, 8, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&straddling).iter(), window, 4),
+        rela::validate(RelaTable::new(&straddling).iter(), window, 4, None),
         Err(RelocError::OutsideWindow),
     );
 
     let fits = [rela(0x1FF8, 0, 8, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&fits).iter(), window, 4), Ok(()));
+    assert_eq!(rela::validate(RelaTable::new(&fits).iter(), window, 4, None), Ok(()));
+}
+
+/// psABI oracle: every entry is applied or the object rejected. An 8-byte write
+/// in a page's last 7 bytes is refused for a chunked writer, accepted for `None`.
+#[test]
+fn a_relocation_crossing_a_fill_page_is_refused_only_for_a_chunked_writer() {
+    let window = (0u64, 0x1_0000u64);
+    let lattice = rela::FillLattice { base: 0, granule: 4096 };
+
+    for off in 0xFF9u64..=0xFFF {
+        let straddles = [rela(off, 0, 8, 0)].concat();
+        assert_eq!(
+            rela::validate(RelaTable::new(&straddles).iter(), window, 4, Some(lattice)),
+            Err(RelocError::StraddlesFillPage),
+            "offset {off:#x} straddles the page but was accepted",
+        );
+        assert_eq!(
+            rela::validate(RelaTable::new(&straddles).iter(), window, 4, None),
+            Ok(()),
+            "offset {off:#x} refused for a contiguous writer",
+        );
+    }
+
+    // A write ending at the boundary fits; a 4-byte TPOFF32 fits in the last 4.
+    assert_eq!(
+        rela::validate(RelaTable::new(&[rela(0xFF8, 0, 8, 0)].concat()).iter(), window, 4, Some(lattice)),
+        Ok(()),
+    );
+    assert_eq!(
+        rela::validate(RelaTable::new(&[rela(0xFFC, 0, 23, 0)].concat()).iter(), window, 4, Some(lattice)),
+        Ok(()),
+    );
+
+    let shifted = rela::FillLattice { base: 3, granule: 4096 };
+    assert_eq!(
+        rela::validate(RelaTable::new(&[rela(0x1000, 0, 8, 0)].concat()).iter(), window, 4, Some(shifted)),
+        Err(RelocError::StraddlesFillPage),
+    );
 }
 
 /// A `DTPOFF64` with `r_sym == 0` writes its addend verbatim, so validation has
@@ -136,14 +174,14 @@ fn every_written_type_is_validated_and_no_other_is() {
     for raw in [6u32, 7, 8, 16, 17, 18, 23] {
         let bytes = [rela(0x1000, 0, raw, 0)].concat();
         assert_eq!(
-            rela::validate(RelaTable::new(&bytes).iter(), window, 4),
+            rela::validate(RelaTable::new(&bytes).iter(), window, 4, None),
             Err(RelocError::OutsideWindow),
             "type {raw} was not validated",
         );
     }
     // A type nobody patches may name any offset at all.
     let ignored = [rela(u64::MAX, 0, 42, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&ignored).iter(), window, 0), Ok(()));
+    assert_eq!(rela::validate(RelaTable::new(&ignored).iter(), window, 0, None), Ok(()));
 }
 
 #[test]
@@ -152,13 +190,13 @@ fn a_symbol_index_past_the_table_is_refused_except_for_relative() {
 
     let bind = [rela(0x10, 4, 6, 0)].concat();
     assert_eq!(
-        rela::validate(RelaTable::new(&bind).iter(), window, 4),
+        rela::validate(RelaTable::new(&bind).iter(), window, 4, None),
         Err(RelocError::SymbolPastTable),
     );
-    assert_eq!(rela::validate(RelaTable::new(&bind).iter(), window, 5), Ok(()));
+    assert_eq!(rela::validate(RelaTable::new(&bind).iter(), window, 5, None), Ok(()));
 
     let relative = [rela(0x10, u32::MAX, 8, 0)].concat();
-    assert_eq!(rela::validate(RelaTable::new(&relative).iter(), window, 0), Ok(()));
+    assert_eq!(rela::validate(RelaTable::new(&relative).iter(), window, 0, None), Ok(()));
 }
 
 #[test]
