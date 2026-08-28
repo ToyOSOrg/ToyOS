@@ -1,72 +1,11 @@
-//! The two partitions this kernel was given, as mounted filesystems.
+//! The two FAT32 partitions this kernel mounts: the boot volume the firmware
+//! loaded from, and the log volume beside it.
 //!
-//! UEFI mandates FAT32 on the partition firmware loads a bootloader from, so
-//! this is the one filesystem a ToyOS machine is guaranteed to have before it
-//! has any other. The log partition beside it is FAT32 for a different reason —
-//! it is the format every desktop OS mounts off a stick without being asked.
-//! `toyos-fat32` reads and writes both; this file is the two things that crate
-//! deliberately does not know about — the kernel's 4 KiB [`BlockDevice`], and
-//! [`vfs::FileSystem`].
-//!
-//! # Why neither can become "some disk we found"
-//!
-//! Three independent gates, and a volume is untouched unless all three pass:
-//!
-//! 1. **Which partition.** [`gpt::boot_volume`] and [`gpt::log_volume`] answer,
-//!    and they answer only for unique partition GUIDs the kernel was handed
-//!    through `KernelArgs` — the boot partition's from firmware, cross-checked
-//!    against the table's own extent and accepted only when exactly one device
-//!    carries it, and the log partition's from a file on that volume, looked
-//!    for only on the device the boot partition was found on. Nothing here
-//!    scans for a FAT signature and nothing here looks at a partition *type*.
-//!    In particular the log partition is not "the other FAT32 on the stick",
-//!    which would have needed no handoff at all and is the defect the handoff
-//!    exists to make unrepresentable.
-//! 2. **Which bytes.** [`FatDevice`] clamps every read and every write to the
-//!    volume before it reaches the device, so a filesystem that computed a wild
-//!    offset gets [`IoError`] rather than a neighbour's blocks. This is the
-//!    adapter's invariant and not the filesystem's to be trusted about:
-//!    `BlockAccess`'s own documentation claims the crate "never asks for bytes
-//!    it has not already bounded against the volume", and a crafted directory
-//!    entry drives a write 256 GiB past the end of one. A driver escaping its
-//!    partition is how a boot stick's
-//!    other partitions get destroyed — and with two mounted at once, the
-//!    neighbour it would escape into is the other one.
-//!
-//!    The bound is the *volume*, tighter than the partition: [`Fat32::probe`]
-//!    reads the boot sector without mounting, and the sector count in it is
-//!    what the filesystem may legitimately address. Slack between the volume
-//!    and the end of the partition is then unreachable too. A partition's first
-//!    byte need not be 4 KiB-aligned in general, so a write to it is a
-//!    read-modify-write of a device block it shares with whatever is next to
-//!    it — which preserves those bytes rather than authoring them.
-//!
-//!    **What this does not do is re-check the partition table.** Whether an
-//!    extent is *right* is [`gpt`]'s question and this cannot answer it; whether
-//!    an extent is being *respected* is this one's and nothing else answers it.
-//!    A second copy of a table rule here would be two rules that can disagree,
-//!    which is worse than one — so a residual found in the parser is fixed in
-//!    the parser.
-//! 3. **Whether it is already ours.** `toyos-fat32` contains no code that can
-//!    write a BPB. A volume that does not parse as FAT32 makes [`mount`] return
-//!    `None` after nothing but reads, and there is no path from there to a
-//!    format, because no such path exists to take.
-//!
-//! # What these mounts are not
-//!
-//! Not a general FAT32 mount service. Two volumes, both named by the handoff,
-//! mounted once at boot. A third FAT32 partition on the same disk is not
-//! reachable from here and should not become reachable without the same three
-//! gates.
-//!
-//! # Freeing a cluster gives up the extent lists naming it first
-//!
-//! A [`FatBacking`] reads the volume directly, holds no lock the filesystem
-//! takes, and outlives the call that made it — so between a freed cluster and a
-//! stale list still naming it there is nothing but the next allocation, and the
-//! next allocation is where another file's bytes come from. Every path that
-//! frees ([`FatFs::revoke`]) or shortens ([`FatExtents::truncate_to`]) does it
-//! before the FAT is written, not after.
+//! A volume is mounted only when three checks pass: [`gpt::boot_volume`] and
+//! [`gpt::log_volume`] name it from the handoff, never by scanning for a FAT
+//! signature or a partition type; [`FatDevice`] clamps every read and write to
+//! the volume and never the wider partition; and `toyos-fat32` never writes a
+//! BPB, so a volume that fails to parse is left untouched.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -91,18 +30,11 @@ use crate::vfs::FileSystem;
 const BLOCK: u64 = crate::mm::PAGE_SIZE;
 
 /// Which of the two partitions a mount is.
-///
-/// A mount is named for its role and never for its format: `/esp` would say
-/// what the filesystem is, and selecting a volume by what it looks like is the
-/// mistake [`gpt`] exists to make unrepresentable. Both of these are FAT32 and
-/// neither is mounted for being FAT32.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
     /// The partition firmware loaded the bootloader from.
     Boot,
-    /// The partition that volume names, which the kernel's log goes on. Its own
-    /// partition because macOS never auto-mounts an EFI-typed one, so a log on
-    /// the ESP is unreadable on the machine the owner would read it from.
+    /// The log partition, kept off the ESP so macOS mounts it.
     Log,
 }
 
@@ -136,92 +68,36 @@ impl core::fmt::Display for Role {
     }
 }
 
-/// Extents one file's data may be split into before [`Fat32::extents`] refuses.
-///
-/// Derived, not picked. An [`Extent`] is two `u64`s, and the `Vec` holding them
-/// must stay under `mm::MAX_HEAP_ALLOC` (2_093_056) including the transient
-/// request `Vec`'s growth-by-doubling makes: 65_536 is a power of two, so the
-/// last allocation is exactly `65_536 * 16 = 1_048_576` and the one before it
-/// half that. A file needing more than this is one whose every cluster is
-/// discontiguous from the last — at the 4 KiB clusters an ESP of a few hundred
-/// megabytes gets, that is a 256 MiB file, and refusing to open it is better
-/// than a `Vec` the allocator would refuse anyway.
+/// Bounded so the extent-list `Vec` stays under `mm::MAX_HEAP_ALLOC`.
 const MAX_EXTENTS: usize = 65_536;
 
 const _: () = assert!(core::mem::size_of::<Extent>() == 16);
 
-/// One partition, seen as a byte range, over a device that only does whole
-/// 4 KiB blocks.
-///
-/// Offsets are relative to the partition. Nothing above this struct can name a
-/// byte outside it, which is the property that makes a filesystem bug on this
-/// volume a filesystem bug rather than damage to the disk it sits on.
-///
-/// # Why blocks stay resident
-///
-/// This boundary is where read amplification is *created*, so it is where it
-/// has to be paid off. `toyos-fat32` reasons in the volume's own units — a FAT
-/// entry is four bytes — while the device's only transfer unit is 4096, so a
-/// chain walk cost one USB transfer per cluster and the volumes this project
-/// builds have 512-byte clusters. One device block covers 1024 FAT entries;
-/// re-reading it per entry is the whole cost.
-///
-/// # Why keeping copies is sound here
-///
-/// Nothing is ever held back: a write reaches the device before this returns,
-/// and the copy is updated (partial block) or dropped (whole blocks) as part
-/// of issuing it. So the resident set can be stale only if something else
-/// writes these blocks, and after [`mount`] nothing can. There is one of these
-/// per [`Role`] and no other handle to either partition: `probe_boot_disks`
-/// opens its own and only reads, before the mounts; `usb_gate` writes only a
-/// disk whose block 0 carries the designation stamp, which this one does not.
-///
-/// The two roles' resident sets cannot alias each other either, and that is a
-/// property of the *image* rather than of this code: `create_gpt_disk` aligns
-/// both partitions to 1 MiB and asserts that no 4 KiB device block belongs to
-/// both. Unaligned, the ESP ended a quarter of the way into a block the log
-/// partition began in, and each mount's copy of it would have gone stale on the
-/// other's write with nothing here able to see it.
+/// One partition, as a byte range over a device that only does whole 4 KiB
+/// blocks; offsets are relative to the partition.
 struct FatDevice {
     dev: Box<dyn BlockDevice>,
     /// Where the partition starts, in bytes from the start of the device.
     start: u64,
     /// How many bytes it has.
     len: u64,
-    /// One device block, for the partial-block ends of a request. On the heap
-    /// because the deepest caller of this is the idle loop, whose stack is
-    /// 16 KiB and has no guard page.
+    /// On the heap: the deepest caller is the idle loop, whose 16 KiB stack
+    /// has no guard page.
     scratch: Vec<u8>,
     /// [`RESIDENT_BLOCKS`] blocks, each tagged with the block it holds.
     resident: Vec<u8>,
     tags: [Option<u64>; RESIDENT_BLOCKS],
-    /// Round-robin, because the access pattern this exists for touches every
-    /// resident block on every append. Recency cannot rank blocks that are all
-    /// used once per operation, so anything cleverer would cost a counter to
-    /// arrive at the same eviction.
+    /// Round-robin: the access pattern touches every resident block per
+    /// operation, so recency ranks nothing.
     next_victim: usize,
 }
 
-/// Device blocks [`FatDevice`] keeps a copy of.
-///
-/// Sized to hold what one append touches at once, which is what makes the
-/// difference between one device read per FAT entry and one per operation:
-/// the active FAT's block for the file's clusters, the mirror FAT's block at
-/// the same index (`set_fat_entry` writes every FAT and a 4-byte write is a
-/// read-modify-write), the directory block carrying the entry, the FSInfo
-/// block, and the data block being appended to. That is five, or seven when
-/// the file's chain straddles a FAT block boundary.
+/// Blocks [`FatDevice`] keeps resident: enough for one append's FAT, mirror
+/// FAT, directory, FSInfo and data blocks.
 const RESIDENT_BLOCKS: usize = 8;
 
-/// The block layer's answer, in the word `toyos_fat32` speaks.
-///
-/// **One function and not `From`, because it crosses a crate boundary in the
-/// direction that has no orphan.** It is the whole of what carries
-/// `block::OPERATION`'s refusal past this adapter: `toyos-fat32` is a pure
-/// crate with no kernel in it, so the *fact* that a bound expired has to arrive
-/// as a variant rather than as a log line, and this is where the two
-/// vocabularies meet. `Device` on both sides is every fact about the hardware;
-/// `BudgetExpired` on both sides is the caller's own clock.
+/// One function and not `From`: this crosses the crate boundary in the
+/// direction that has no orphan.
 fn as_io_error(e: crate::block::BlockError) -> IoError {
     match e {
         crate::block::BlockError::Device => IoError::Device,
@@ -230,10 +106,8 @@ fn as_io_error(e: crate::block::BlockError) -> IoError {
 }
 
 impl FatDevice {
-    /// The device byte offset `offset` names, or [`IoError::Device`] if the
-    /// request leaves the partition — this adapter's own bound, and a fact
-    /// about the request rather than about the caller's clock. Every read and
-    /// write goes through here.
+    /// The device byte offset `offset` names, or [`IoError::Device`] past the
+    /// partition.
     fn locate(&self, offset: u64, len: usize) -> Result<u64, IoError> {
         let end = offset.checked_add(len as u64).ok_or(IoError::Device)?;
         if end > self.len {
@@ -259,9 +133,8 @@ impl FatDevice {
         Ok(())
     }
 
-    /// Record `scratch` as this device's `block`. Only ever called where the
-    /// device holds those bytes already — after reading them, or after writing
-    /// them — so nothing here is a copy the disk is waiting for.
+    /// Record `scratch` as this device's `block`; only called where the
+    /// device already holds those bytes.
     fn retain(&mut self, block: u64) {
         let slot = self.slot_of(block).unwrap_or_else(|| {
             let s = self.next_victim;
@@ -323,9 +196,8 @@ impl FatDevice {
                     .map_err(as_io_error)?;
                 done = end;
             } else {
-                // The bytes this request does not cover belong to whoever wrote
-                // them — another file, or the partition table itself when the
-                // partition does not start on a 4 KiB boundary.
+                // Bytes this request doesn't cover belong to another file or
+                // the partition table; preserved by the read-modify-write.
                 let n = (BLOCK as usize - within).min(left);
                 self.load(block)?;
                 self.scratch[within..within + n].copy_from_slice(&buf[done..done + n]);
@@ -339,14 +211,8 @@ impl FatDevice {
     }
 }
 
-/// Each mounted partition's device, reachable without the VFS lock.
-///
-/// Statics for the same reason `page_cache`'s device is one: a [`FileBacking`]
-/// serves a page-fault miss with `&self` and no filesystem in hand, so the
-/// device cannot live inside the `Box<dyn FileSystem>` the VFS owns. Lock
-/// order is VFS → here → `XHCI`; nothing takes them the other way, and no path
-/// holds two of these at once — [`Role`] indexes one of them and every caller
-/// has exactly one role in hand.
+/// Lock order: VFS → here → `XHCI`; never the other way, and never two of
+/// these at once.
 static VOLUMES: [Lock<Option<FatDevice>>; 2] = [Lock::new(None), Lock::new(None)];
 
 fn device(role: Role) -> &'static Lock<Option<FatDevice>> {
@@ -354,9 +220,6 @@ fn device(role: Role) -> &'static Lock<Option<FatDevice>> {
 }
 
 /// One [`VOLUMES`] entry in the shape `toyos-fat32` asks for.
-///
-/// Zero state beyond the role and the capacity, so the filesystem holding one
-/// of these can be moved into the VFS while the device stays put.
 pub struct FatVolume {
     role: Role,
     bytes: u64,
@@ -371,10 +234,7 @@ impl BlockAccess for FatVolume {
         let mut guard = device(self.role).lock();
         let served = guard.as_mut().ok_or(IoError::Device)?.read_at(offset, buf);
         if injected_read_failure(self.role) {
-            // Both halves of what a real failure leaves behind, not just the
-            // verdict: `FatDevice::read_at` gives the caller back a buffer it
-            // must not believe, so a caller that got the volume's real bytes
-            // here would make every assertion downstream vacuous.
+            // Zeroed to match what a real failed read leaves behind.
             buf.fill(0);
             log!("{}-volume: read of {} B at volume offset {offset} failed",
                 self.role, buf.len());
@@ -384,11 +244,8 @@ impl BlockAccess for FatVolume {
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        // The `fat-mirror-write-refuse` actuator: a budget expiry on the mirror
-        // write of a drain flush's cluster allocation, which no host option can
-        // stage. Refused before the write is issued, exactly as a spent
-        // `block::OPERATION` refuses one with nothing in flight — the volume is
-        // untouched and the caller may ask again.
+        // `fat-mirror-write-refuse` actuator: refused before the write is
+        // issued, like a spent `block::OPERATION` — the volume stays untouched.
         #[cfg(feature = "boot-actuators")]
         if self.role == Role::Log && mirror_refuse::should_refuse(offset, buf.len()) {
             log!(
@@ -407,79 +264,31 @@ impl BlockAccess for FatVolume {
     }
 }
 
-/// Whether a page re-read of a file on either of these volumes is allowed to
-/// succeed.
-///
-/// A kernel feature because nothing on the host side can stage it: both
-/// partitions are on the disk the guest is running from, so every QEMU-side way
-/// to make its reads fail — `readonly=on` is writes only, detaching the device,
-/// a smaller image — takes away the mount the failure has to be observed
-/// through, or the kernel the machine is running. `werror`/`rerror` act on the
-/// whole drive and would break the boot before there is a log to write.
-///
-/// The read is still *issued*, and only its verdict is replaced. Overriding it
-/// before the call would make this the mistake `FLUSH_SENSE` makes — an
-/// injection that also hides a broken transport, so the gate goes green on a
-/// boot where the device was never asked. Same reason `xhci-one-slot` and
-/// `i8042-fault` exist.
+/// Whether a page re-read succeeds; the read is still issued and only its
+/// verdict replaced, so a broken transport cannot hide behind it.
 fn fat_backing_reads() -> bool {
     !crate::actuator::fat_backing_read_fails()
 }
 
-/// Whether the boot volume may still answer a *filesystem* read once it is
-/// mounted.
-///
-/// The negative control for the metadata half of the error channel, and the
-/// sibling of [`fat_backing_reads`] rather than a duplicate of it: that one
-/// fails [`FatBacking::read_page`], which is the page-fault path and touches no
-/// directory entry at all, so with it armed `open_file`, `list` and
-/// `file_mtime` still succeed and there is nothing in the tree that can make
-/// them fail. This one is under [`Fat32`] itself, which is where a directory
-/// entry, a FAT chain and an extent list are read.
-///
-/// A kernel feature for the same reason as its sibling: both partitions are on
-/// the disk the guest is running from, so `readonly=on` (writes only), a
-/// detached device and `rerror` each take away either the mount the failure has
-/// to be observed through or the kernel the machine is running.
-///
-/// [`Role::Boot`] and not [`Role::Log`], because nothing in the kernel reads the
-/// boot volume after it is mounted: the machine keeps its log, its shell and
-/// its serial console, and the refusal is something a process can be sent to go
-/// and ask about. The log volume is where the kernel's own log goes, so failing
-/// its reads would take the channel the evidence arrives on.
+/// Whether the boot volume may still answer a filesystem read once mounted;
+/// the metadata-path sibling of [`fat_backing_reads`], which is the
+/// page-fault path.
 fn boot_volume_reads() -> bool {
     !crate::actuator::fat_boot_reads_fail()
 }
 
-/// Set once [`mount`] has installed the boot volume.
-///
-/// [`Fat32::probe`] and [`Fat32::mount`] read through the same [`BlockAccess`]
-/// this injects at, so arming it from the start would refuse the mount instead
-/// of the mounted volume — and a machine with no `/boot` proves nothing about
-/// what a `/boot` says when its device stops answering.
+/// Set once [`mount`] has installed the boot volume, so the injection cannot
+/// fire during mount itself.
 static BOOT_MOUNTED: AtomicBool = AtomicBool::new(false);
 
+// Boot only: the log volume carries the kernel's own log, and failing its
+// reads would take the channel the evidence arrives on.
 fn injected_read_failure(role: Role) -> bool {
     !boot_volume_reads() && role == Role::Boot && BOOT_MOUNTED.load(Ordering::Relaxed)
 }
 
-/// Which byte ranges of the volume one file's data lives in, and whether they
-/// are still that file's.
-///
-/// Every [`FatBacking`] for one name reads through the same one of these rather
-/// than a copy taken when it was handed out, so unlinking the file is a single
-/// store that every outstanding backing sees — the one the file cache re-fetches
-/// evicted pages through, the one a spawned program's text is demand-paged from,
-/// and any handed out since. It is `/home`'s [`crate::file_backing::FileBlocks`]
-/// in this volume's units: a FAT extent is a device byte range and a bcachefs
-/// one is a block number, and nothing else about the two differs.
-///
-/// It keeps nothing alive. `Fat32::remove` puts the clusters back in the FAT the
-/// moment the entry is erased and the next file takes them — `free_chain` even
-/// walks FSInfo's `next_free` *down* to the lowest cluster it frees, so the very
-/// next allocation on the volume is the one that reissues them — which is
-/// exactly why a read after that has to *fail*: the clusters are still readable
-/// and what is in them belongs to somebody else.
+/// Which byte ranges hold one file's data, shared by every [`FatBacking`] for
+/// that name so an unlink revokes all of them at once.
 struct FatExtents {
     /// `None` once the volume has the clusters back.
     runs: Lock<Option<Vec<Extent>>>,
@@ -487,11 +296,9 @@ struct FatExtents {
 
 /// Where one file offset is, once [`FatExtents`] has been asked.
 enum Located {
-    /// The volume byte offset, and how many bytes of that contiguous run follow
-    /// it.
+    /// Volume byte offset, and how many contiguous bytes follow.
     Run(u64, u64),
-    /// Past the end of the extent list: the file has no data there, and zeros
-    /// are its own bytes.
+    /// Past the extent list: the file has no data there; zeros are its own bytes.
     Hole,
 }
 
@@ -500,27 +307,20 @@ impl FatExtents {
         Arc::new(Self { runs: Lock::new(Some(runs)) })
     }
 
-    /// Give the ranges up. Every read through every backing that shares this
-    /// fails from here on.
+    /// Give the ranges up; every read through a sharing backing fails from
+    /// here on.
     fn revoke(&self) {
         *self.runs.lock() = None;
     }
 
-    /// Take the list a fresh [`Fat32::extents`] just produced.
-    ///
-    /// Write-through and not a new cell: a backing handed out at an earlier open
-    /// must not keep the ranges the file had before somebody else appended to
-    /// it, and it is the *cell* the sharers hold.
+    /// Take a fresh [`Fat32::extents`] list; write-through so every sharer's
+    /// cell sees it.
     fn refresh(&self, runs: Vec<Extent>) {
         *self.runs.lock() = Some(runs);
     }
 
-    /// Give up everything past `len` bytes, keeping the prefix.
-    ///
-    /// Pure arithmetic on the list already here, so it can run *before*
-    /// `Fat32::set_len` hands the tail clusters back to the allocator rather
-    /// than after: there is no window in which a sharer's backing names a
-    /// cluster the next file has taken. A revoked file has no tail to give up.
+    /// Give up bytes past `len`; runs before `Fat32::set_len` frees the tail
+    /// so no backing ever names a reissued cluster.
     fn truncate_to(&self, len: u64) {
         let mut guard = self.runs.lock();
         let Some(runs) = guard.as_mut() else { return };
@@ -533,15 +333,11 @@ impl FatExtents {
         });
     }
 
-    /// Where `file_offset` is on the volume, or `None` once the file is gone.
-    ///
-    /// One acquisition per run and never one held across the device read below:
-    /// this lock is a leaf above the volume's, and a page on a volume with
-    /// 512-byte clusters is up to eight runs and eight transfers.
+    /// Where `file_offset` is on the volume, or `None` once the file is gone;
+    /// the lock is a leaf, never held across a device read.
     fn locate(&self, file_offset: u64) -> Option<Located> {
         let guard = self.runs.lock();
         let runs = guard.as_ref()?;
-        // Where the run under consideration starts, in file bytes.
         let mut base = 0u64;
         for run in runs {
             if file_offset < base + run.len {
@@ -554,15 +350,8 @@ impl FatExtents {
     }
 }
 
-/// The `fat-mirror-write-refuse` actuator: refuse the first two FAT-1 (mirror)
-/// writes of a write-back drain flush on the log volume, as a budget expiry.
-///
-/// Scoped to the drain flush (`writeback::drain_one` brackets its `flush_file`
-/// with [`enter_drain_flush`]/[`leave_drain_flush`]) so it lands on the path the
-/// fix is about and not on `SYS_FSYNC`, which already retries. The mirror region
-/// is captured at mount; a write overlapping it while a drain flush is in
-/// progress is refused, twice, so the drain's retry ladder reaches the attempt
-/// that parks. Everything folds to nothing without `boot-actuators`.
+/// The `fat-mirror-write-refuse` actuator: refuses the first two FAT-1 mirror
+/// writes of a drain flush, as a budget expiry.
 #[cfg(feature = "boot-actuators")]
 mod mirror_refuse {
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -570,18 +359,14 @@ mod mirror_refuse {
     /// The log volume's FAT-1 byte range, volume-relative, captured at mount.
     static LO: AtomicU64 = AtomicU64::new(0);
     static HI: AtomicU64 = AtomicU64::new(0);
-    /// Set while `writeback`'s drain holds a `flush_file` open, so the refusal
-    /// falls on the drain path and not on a `SYS_FSYNC` flush.
+    /// Set while `writeback`'s drain holds a `flush_file` open, so refusal
+    /// targets only the drain path.
     static IN_DRAIN: AtomicBool = AtomicBool::new(false);
     /// How many drain-flush mirror writes have been refused so far.
     static REFUSED: AtomicU32 = AtomicU32::new(0);
 
-    /// Refuse the first **two**, not one. One refusal makes the drain's retry
-    /// ladder reach only attempt 1, which merely yields; attempt 2 is the first
-    /// that parks, and the park is where the `iod` one-arm-per-task panic
-    /// strikes (`writeback::drain_all_iod`). So a single-refusal control passes
-    /// a broken kernel. Two refusals force attempt 2; the third flush (spent)
-    /// heals the mirror.
+    /// Two, not one: a single refusal only reaches the retry ladder's attempt
+    /// 1, which merely yields — attempt 2 is the one that parks.
     const REFUSALS: u32 = 2;
 
     pub fn capture(lo: u64, hi: u64) {
@@ -593,9 +378,8 @@ mod mirror_refuse {
         IN_DRAIN.store(on, Ordering::Relaxed);
     }
 
-    /// Whether this log-volume write is one to refuse: the actuator is armed, a
-    /// drain flush is in progress, fewer than [`REFUSALS`] have been refused, and
-    /// the bytes overlap the mirror FAT. Counts the refusal.
+    /// Whether this log-volume write should be refused: actuator armed,
+    /// mid-drain, under [`REFUSALS`], and overlapping the mirror FAT.
     pub fn should_refuse(offset: u64, len: usize) -> bool {
         if !crate::actuator::fat_mirror_write_refuse()
             || !IN_DRAIN.load(Ordering::Relaxed)
@@ -613,9 +397,8 @@ mod mirror_refuse {
     }
 }
 
-/// Mark whether a write-back drain flush is in progress, so the
-/// `fat-mirror-write-refuse` actuator refuses a mirror write on the drain path
-/// and not on `SYS_FSYNC`. Folds to nothing without `boot-actuators`.
+/// Mark that a write-back drain flush is in progress, so the mirror-refuse
+/// actuator targets the drain path and not `SYS_FSYNC`.
 #[cfg(feature = "boot-actuators")]
 pub(crate) fn enter_drain_flush() {
     mirror_refuse::set_in_drain(true);
@@ -626,13 +409,8 @@ pub(crate) fn leave_drain_flush() {
     mirror_refuse::set_in_drain(false);
 }
 
-/// A file on one of these volumes, as byte ranges the page-fault path can read
-/// without going back through the filesystem.
-///
-/// `size` is the file's length when this backing was made and not a view of the
-/// shared cell, exactly as [`crate::file_backing::NvmeBacking`]'s is: it bounds
-/// how many bytes are copied out, and a caller that wants the current length
-/// asks the file cache.
+/// A file's byte ranges, read without going back through the filesystem;
+/// `size` is a snapshot, not a view of the live length.
 struct FatBacking {
     role: Role,
     extents: Arc<FatExtents>,
@@ -647,41 +425,32 @@ impl FileBacking for FatBacking {
         }
         let valid = (4096u64).min(self.size - file_offset) as usize;
         let mut done = 0usize;
-        // A page can span two runs whenever the volume's cluster is smaller
-        // than 4096, which a volume a few tens of megabytes across usually is.
+        // A page can span multiple runs when the cluster size is under 4096.
         while done < valid {
-            // Asked again for every run, so a revocation that lands halfway
-            // through a page stops the rest of it: the file is gone either way.
+            // Re-asked every run, so a mid-page revocation stops the rest of
+            // it here.
             let Some(found) = self.extents.locate(file_offset + done as u64) else {
-                // The clusters went back to the allocator when the file was
-                // unlinked, and the next file has them. Reading them would
-                // serve its contents to whoever still holds this backing.
+                // Clusters already back in the allocator; reading them would
+                // serve another file's data.
                 log!("{}-volume: read through a backing whose file was deleted", self.role);
                 return Err(crate::block::BlockError::Device);
             };
             let Located::Run(at, run) = found else {
-                // Past the extent list: a hole, and the zeros already in `buf`
-                // are the file's own bytes.
+                // Past the extent list: a hole; the zeros already in `buf`
+                // are correct.
                 return Ok(());
             };
             let n = (run as usize).min(valid - done);
             let mut guard = device(self.role).lock();
             let Some(dev) = guard.as_mut() else {
-                // Only reachable if a mount failed after installing the device
-                // — but silence here is what the other two backings do not do,
-                // and `serving zeros` is the string a triage greps for.
+                // Not silent, unlike elsewhere: `serving zeros` is the string
+                // a triage greps for.
                 log!("{}-volume: not mounted; serving zeros", self.role);
                 return Err(crate::block::BlockError::Device);
             };
             let served = dev.read_at(at, &mut buf[done..done + n]);
             if !fat_backing_reads() {
-                // The read above was issued and is the shipped one, so a
-                // transport that really broke is still what `served` says —
-                // the injection cannot hide it. What it does replace is the
-                // whole outcome of a failed read, verdict *and* buffer: a real
-                // failure returns here with these bytes still holding the zeros
-                // from `buf.fill(0)`, and a caller that got the data anyway
-                // would make every assertion about the consequences vacuous.
+                // Zeroed to match what a real failed read leaves behind.
                 buf[done..done + n].fill(0);
             }
             if served.is_err() || !fat_backing_reads() {
@@ -700,120 +469,62 @@ impl FileBacking for FatBacking {
     }
 }
 
-/// Per-open-file state: the path it was opened by, and the crate's own handle,
-/// which caches the directory-entry location and a chain position.
-///
-/// Keeping the handle is what makes an append cost one FAT read instead of a
-/// walk from cluster zero — `write_page` is called once per dirty page and
-/// re-resolving the path each time would be quadratic in the file's length.
+/// Per-open-file state: the path, and the crate's handle caching directory
+/// location and chain position.
 struct OpenFile {
     name: String,
     file: toyos_fat32::File,
 }
 
-/// VFS adapter for one of the two partitions.
-///
-/// A file's identity here is its **path**, which is what [`by_name`] keys on.
-/// The trait requires the same [`FileId`] for the same file across opens, and
-/// the two other candidates cannot give that: the directory entry's location
-/// is reused the moment an entry is erased, so a location-keyed id would let a
-/// new file inherit a deleted one's cached pages, and the crate's stale-handle
-/// fingerprint (8.3 name plus creation timestamp) cannot tell a
-/// delete-and-recreate under the same name from the original once both stamps
-/// land in the same second — [`now`] reads `clock::local_secs`, so the tenths
-/// byte FAT resolves to 10 ms carries nothing finer than a whole second here.
-/// It is not a generation counter, FAT has nowhere to put one, and it is not
-/// used as one.
-///
-/// Path identity makes delete-and-recreate produce a *new* `FileId`, because
-/// `delete` drops the name; and it survives a rename, because `rename`
-/// re-keys. A handle held across an unlink keeps its `FileId` and its cached
-/// pages, and reads nothing new: [`FatFs::revoke`] takes the byte ranges away
-/// from every backing that named them.
-///
-/// [`by_name`]: FatFs::by_name
+/// VFS adapter for one of the two partitions; a file's identity is its path,
+/// which `by_name` keys on.
 pub struct FatFs {
     role: Role,
     fs: Fat32<FatVolume>,
     open: HashMap<FileId, OpenFile>,
     by_name: HashMap<String, FileId>,
-    /// The one [`FatExtents`] every backing for a name shares.
-    ///
-    /// Keyed by name and not by `FileId` because `open_backing` hands out a
-    /// backing without opening a file at all — that is the one a spawned
-    /// program's text lives behind, and it outlives every handle. `Weak` so the
-    /// entry costs nothing once the last backing is dropped.
+    /// The one [`FatExtents`] every backing for a name shares; keyed by name
+    /// because `open_backing` hands one out without opening a file.
     extents: HashMap<String, Weak<FatExtents>>,
 }
 
-/// What to stamp on an entry this adapter is writing.
-///
-/// FAT stores wall-clock time and the VFS's `mtime` is nanoseconds since boot,
-/// so the number the trait hands this adapter is not a time of day and cannot
-/// go on an entry. It comes from `clock` instead, which reads the RTC once for
-/// the whole machine; a per-volume reading would give a machine with both
-/// volumes mounted two answers to what time it booted.
-///
-/// Local and not UTC: FAT stores local time by specification. A machine with no
-/// wall clock stamps [`FatTime::EPOCH`], which is what the format itself uses
-/// for an entry nobody dated.
+/// What to stamp on an entry: reads `clock` directly, in local time as FAT
+/// requires — the VFS's `mtime` is nanoseconds since boot, not a time of day.
 fn now() -> FatTime {
     crate::clock::local_secs().map_or(FatTime::EPOCH, FatTime::from_unix_secs)
 }
 
-/// What one of `toyos-fat32`'s errors means to the [`FileSystem`] trait's
-/// caller.
-///
-/// Exhaustive because [`Error`] is documented as being exhaustive for exactly
-/// this: an adapter mapping it should stop compiling when a variant appears
-/// rather than sweeping it into a catch-all.
-///
-/// Every structural variant answers [`SyscallError::Io`] and not `NotFound`. A
-/// cyclic cluster chain is a volume that cannot say what is in the file, which
-/// to a caller is the same thing as a device that refused the transfer and the
-/// opposite of a name that is not there — and the FAT32 the machine boots from
-/// is the one filesystem where "the file is gone" and "the stick is unhappy"
-/// have very different answers.
+/// What one of `toyos-fat32`'s errors means to the [`FileSystem`] caller;
+/// exhaustive so a new variant fails to compile here.
 fn as_syscall_error(e: Error) -> SyscallError {
     match e {
         Error::NotFound => SyscallError::NotFound,
         Error::AlreadyExists => SyscallError::AlreadyExists,
+        // Structural corruption reads as `Io`, not `NotFound`: the volume
+        // can't say what's there, not that nothing is.
         Error::Io
         | Error::NotFat32
         | Error::Truncated
         | Error::CorruptChain
         | Error::CorruptDirectory => SyscallError::Io,
-        // **Not `Io`, and the difference is the whole of this arm's job.** The
-        // volume was not touched and the device said nothing wrong; what
-        // expired is `block::OPERATION`, which is the *caller's* bound. It
-        // reaches userland as `io::ErrorKind::WouldBlock`
-        // (`rust/library/std/src/sys/fs/toyos.rs`), which is what lets
-        // `/bin/logd` keep a volume across a slow flush and still give it up
-        // on a failing one.
+        // Not `Io`: the volume wasn't touched; `block::OPERATION` (the
+        // caller's bound) expired. Reaches userland as `WouldBlock`.
         Error::BudgetExpired => SyscallError::WouldBlock,
-        // The last component of the path is not the thing the operation is
-        // defined for. Not `NotFound`: the name does resolve.
+        // Not `NotFound`: the name resolves; the operation just isn't defined
+        // for what it names.
         Error::NotADirectory | Error::IsADirectory | Error::DirectoryNotEmpty => {
             SyscallError::InvalidArgument
         }
         Error::InvalidName => SyscallError::InvalidArgument,
-        // `TooLarge` is FAT32's 4 GiB size field rather than a full volume, but
-        // both are the volume having no room for what was asked.
+        // `TooLarge` is FAT32's 4 GiB field limit, not a full volume, but both
+        // mean no room.
         Error::NoSpace | Error::TooLarge => SyscallError::ResourceExhausted,
         Error::LimitExceeded => SyscallError::ResourceExhausted,
     }
 }
 
-/// Log what the volume said, and hand the caller the code for it.
-///
-/// The variant is in the line and not in the return: `SyscallError` has no room
-/// for one, and a triage that wants to know whether the chain was cyclic or the
-/// stick unplugged reads the log.
-///
-/// A name that is not there is the one answer with nothing to say. Logging it
-/// would put a line in the kernel's log for every `open` of a path that does
-/// not exist — on the volume that log lives on, which is work made for the
-/// thing that failed.
+/// Log what the volume said and return its code; `NotFound` is skipped so
+/// opening a missing path doesn't write the log it lives on.
 fn refused(role: Role, op: &str, name: &str, e: Error) -> SyscallError {
     if e != Error::NotFound {
         log!("{role}-volume: {op} of {name}: {e}");
@@ -843,12 +554,11 @@ impl FatFs {
         Ok(Arc::new(FatBacking { role, extents, size }))
     }
 
-    /// The cell every backing for `name` reads through, carrying the extent
-    /// list just read off the volume.
+    /// The cell every backing for `name` reads through, carrying the
+    /// just-read extent list.
     fn extents_for(&mut self, name: &str, runs: Vec<Extent>) -> Arc<FatExtents> {
-        // Names whose last backing has gone are swept here rather than on a
-        // timer: the map is only ever grown by this call, so this is the one
-        // place where dropping them costs nothing extra.
+        // Swept here, not on a timer: this call is the only place the map
+        // grows.
         self.extents.retain(|_, weak| weak.strong_count() > 0);
 
         if let Some(live) = self.extents.get(name).and_then(Weak::upgrade) {
@@ -865,36 +575,17 @@ impl FatFs {
         self.extents.get(name).and_then(Weak::upgrade)
     }
 
-    /// Give up every backing that reads `name`'s clusters.
-    ///
-    /// Called wherever the volume hands those clusters back to the FAT — an
-    /// unlink, and a rename over an existing name. The next file takes them, so
-    /// a backing that still names them reads that file's data: an information
-    /// disclosure through ordinary filesystem operations, with nothing crafted
-    /// about it.
-    ///
-    /// **Before the clusters are freed and not after**, because
-    /// [`FatBacking::read_page`] takes no VFS lock: a read on another CPU
-    /// between the free and the revocation would name clusters the allocator
-    /// has already reissued. The cost of that order is that a `remove` which
-    /// then fails leaves a live file's outstanding backings dead — the name
-    /// re-opens and gets a fresh cell, and refusing to read a file the volume
-    /// would not delete is the safe half of the trade.
-    ///
-    /// The map entry goes too, so a name created again after this gets a new
-    /// cell rather than re-arming the one a stale backing still holds.
+    /// Give up every backing reading `name`'s clusters; must be called before
+    /// the clusters are freed, since [`FatBacking::read_page`] takes no VFS
+    /// lock.
     fn revoke(&mut self, name: &str) {
         if let Some(cell) = self.extents.remove(name).as_ref().and_then(Weak::upgrade) {
             cell.revoke();
         }
     }
 
-    /// Make sure every directory on the way to `name` exists.
-    ///
-    /// The VFS has no per-mount `mkdir` — `Vfs::create_dir` records a name in
-    /// its own set and tells no filesystem — so a `create` of `a/b/c.txt` is
-    /// the only notice this mount ever gets that `a/b` was wanted. Every other
-    /// mount is a flat namespace where the question does not arise.
+    /// Make sure every directory on the way to `name` exists; the VFS has no
+    /// per-mount `mkdir`, so `create` is the only notice this mount gets.
     fn ensure_parent(&mut self, name: &str, time: FatTime) -> Result<(), SyscallError> {
         let Some((parent, _)) = name.rsplit_once('/') else { return Ok(()) };
         let role = self.role;
@@ -903,12 +594,8 @@ impl FatFs {
 }
 
 impl FileSystem for FatFs {
-    /// The bound is honoured before the allocation, not after it.
-    ///
-    /// `Fat32::walk` checks `limit` against the count it has *before* each
-    /// push, for files and for directories alike, and abandons the listing
-    /// rather than truncating it. So this implementation meets the trait's
-    /// stated contract; the bcachefs adapters do not.
+    /// The `limit` bound is honoured before each push, not after — unlike the
+    /// bcachefs adapters.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         let role = self.role;
         self.fs.walk(limit).map_err(|e| refused(role, "list", "/", e))
@@ -922,9 +609,7 @@ impl FileSystem for FatFs {
             .map_err(|e| refused(role, "metadata", name, e))
     }
 
-    /// Always `Ok(None)`. FAT32 has no representation for a symbolic link, and
-    /// answering anything else would hand the caller a regular file it
-    /// believes is a link. Infallible because nothing is asked of the volume.
+    /// Always `Ok(None)`: FAT32 has no symlink representation.
     fn read_link(&mut self, _name: &str) -> Result<Option<String>, SyscallError> {
         Ok(None)
     }
@@ -955,11 +640,10 @@ impl FileSystem for FatFs {
         self.ensure_parent(name, time)?;
         let file = match self.fs.create(name, time) {
             Ok(file) => file,
-            // `vfs::create_file` is also how an existing file is reopened for
-            // writing, so an existing name is not an error here — but it is in
-            // the crate, deliberately, because a create that silently opened
-            // somebody else's file is how a caller comes to believe it owns
-            // bytes it does not.
+            // Not an error here: `create` also reopens an existing file for
+            // writing, deliberately — a create that silently opened somebody
+            // else's file is how a caller comes to believe it owns bytes it
+            // does not.
             Err(Error::AlreadyExists) => {
                 self.fs.open(name).map_err(|e| refused(role, "open", name, e))?
             }
@@ -978,24 +662,9 @@ impl FileSystem for FatFs {
         }
     }
 
-    /// Unlink, and give up both sides of the file whether or not a process
-    /// still holds it open.
-    ///
-    /// Unconditionally, unlike the bcachefs adapters, and that is the point.
-    /// `remove` below frees the chain and erases the entry, so everything that
-    /// still names those clusters names the next file's data:
-    ///
-    /// - the **write** side is the cached `toyos_fat32::File`, and a later
-    ///   `write_page` through it would put one process's bytes inside
-    ///   another's. Dropping it turns that into `NotFound` from `write_page`,
-    ///   so a handle held across an unlink can no longer write the file back.
-    ///   That is the right answer: the file it would write back does not exist.
-    /// - the **read** side is every [`FatBacking`] already handed out, and
-    ///   [`FatFs::revoke`] is what takes the byte ranges away from all of them
-    ///   at once. Without it, a process holding a descriptor across somebody
-    ///   else's `rm` demand-paged whatever the volume put in those clusters
-    ///   next — a cross-process disclosure through `open`, `rm` and a write,
-    ///   with no privilege and nothing crafted about it.
+    /// Unlink, giving up both the write handle and every read backing
+    /// unconditionally — a held-open handle must not read or write the next
+    /// file's data.
     fn delete(&mut self, name: &str) -> Result<(), SyscallError> {
         if let Some(file_id) = self.by_name.remove(name) {
             let _ = file_cache::mark_deleted(file_id);
@@ -1006,18 +675,12 @@ impl FileSystem for FatFs {
         self.fs.remove(name).map_err(|e| refused(role, "delete", name, e))
     }
 
-    /// Rename, deleting the destination first when one exists.
-    ///
-    /// FAT has no atomic replacement, so `Fat32::rename` refuses a destination
-    /// that exists rather than opening a window in which neither name
-    /// resolves. The VFS's callers want POSIX overwrite, so the window is
-    /// opened here, where it is visible: between the delete and the rename
-    /// below, neither name names the old file's data.
+    /// Rename, deleting the destination first when one exists: FAT has no
+    /// atomic replacement, so POSIX overwrite is emulated here.
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError> {
         let role = self.role;
-        // The destination's clusters are freed by this; the source's are
-        // carried over to the new name, so only the destination is revoked —
-        // and `delete` is what does it.
+        // Only the destination is revoked; the source's data moved with it,
+        // via `delete` above.
         if self.fs.exists(new).map_err(|e| refused(role, "exists", new, e))? {
             self.delete(new)?;
         }
@@ -1028,9 +691,8 @@ impl FileSystem for FatFs {
                 info.name = String::from(new);
             }
         }
-        // Re-keyed rather than revoked: the file's data did not move, so a
-        // backing handed out under the old name still names this file's own
-        // clusters and must keep reading them.
+        // Re-keyed, not revoked: the file's data didn't move, so backings
+        // under the old name still read it.
         if let Some(cell) = self.extents.remove(old) {
             self.extents.insert(String::from(new), cell);
         }
@@ -1052,23 +714,9 @@ impl FileSystem for FatFs {
         }
     }
 
-    /// Record the file's real length and stamp it, then re-derive its backing.
-    ///
-    /// The length matters because `write_page` writes whole pages: the last
-    /// one carries the cache's zero padding, so without this the entry would
-    /// claim a page-rounded size. The backing matters because the pages the
-    /// flush just wrote are now evictable, and the extents captured when the
-    /// file was opened do not cover the clusters this write allocated —
-    /// evicting one of those pages against a stale extent list reads back
-    /// zeroes. `backing` writes the fresh list *through* the cell every sharer
-    /// holds, so an earlier opener's backing is re-pointed rather than left
-    /// behind.
-    ///
-    /// A shrink gives the tail up first. `set_len` releases those clusters to
-    /// the FAT, so between it and the re-derivation below a sharer's backing
-    /// would name clusters the next file can already have —
-    /// [`FatExtents::truncate_to`] closes that window with arithmetic on the
-    /// list that is already here, before a single FAT entry is written.
+    /// Record the real length and re-derive the backing; a shrink truncates
+    /// the extent list before `set_len` frees the tail, so no backing ever
+    /// names a reissued cluster.
     fn update_metadata(
         &mut self,
         file_id: FileId,
@@ -1095,10 +743,8 @@ impl FileSystem for FatFs {
                 .map_err(|e| refused(role, "flush_meta", &info.name, e))?;
             name
         };
-        // The bytes and the entry are both on the volume by here, so a volume
-        // that will not re-derive the extent list has not lost the write. What
-        // it costs is this file's evictability, which is reported and not
-        // returned — the caller has nothing to do about it.
+        // A failure here only costs evictability; the write itself is
+        // already on the volume.
         match self.backing(&name) {
             Ok(backing) => file_cache::set_backing(file_id, backing),
             Err(_) => log!("{role}-volume: {name} was written but has no re-readable extent list"),
@@ -1106,19 +752,13 @@ impl FileSystem for FatFs {
         Ok(())
     }
 
-    /// Always an error. See [`FileSystem::read_link`] above and the crate's
-    /// own documentation: there is deliberately nothing here to call.
+    /// Always an error: FAT32 has no symlink representation to write.
     fn create_symlink(&mut self, _name: &str, _target: &str) -> Result<(), SyscallError> {
         Err(SyscallError::NotSupported)
     }
 
-    /// The error is returned rather than logged, and that is the whole point of
-    /// the signature: the log mount is where the kernel's own log lives, so a
-    /// line written here is pending ring content, which is the next flush,
-    /// which is the next sync. Swallowing it turns a device that declines to
-    /// flush into a permanent write loop from the idle loop.
-    ///
-    /// [`refused`] is not used, for that same reason — it logs.
+    /// Error returned, not logged via [`refused`]: a log write here would be
+    /// more pending content for the next sync.
     fn sync(&mut self) -> Result<(), SyscallError> {
         self.fs.sync().map_err(as_syscall_error)
     }
@@ -1128,49 +768,15 @@ impl FileSystem for FatFs {
     }
 }
 
-/// Ask every USB disk whether it carries the partitions this kernel was given,
-/// and do not stop asking while the machine is still missing the one it was
-/// booted from.
-///
-/// Read-only. `gpt::probe` over NVMe alone leaves a machine that boots off a
-/// stick — which is every machine this project boots — with
-/// `gpt::boot_volume()` answering `None` and no mount able to ask it anything.
-///
-/// # Why this is a loop and not a pass
-///
-/// One pass at a fixed point in the peripheral phase runs against a disk set
-/// that is **not final at that point**. `xhci::await_connect_settle` returns as
-/// soon as the root hub's connect set has held still for the USB debounce and is
-/// non-empty, so a machine whose *other* devices are up scans without whatever
-/// is still arriving — and the laptop has four internal USB devices beside the
-/// stick it boots from. The same stick and the same image then mount both
-/// volumes on one boot and neither on the next: a race, and not a defect in
-/// anything downstream of here.
-///
-/// The asymmetry is the same one `xhci::EMPTY_BUS` is written around, and it
-/// is what keeps this free: a machine whose boot volume has already been
-/// resolved — every QEMU boot, every machine that boots off NVMe, and the laptop on
-/// a good boot — leaves after one pass, because `gpt::boot_volume()` answers.
-/// Only a machine that would otherwise report no boot volume at all pays
-/// anything, and that is the outcome this exists to prevent.
-///
-/// # Why every refusal here has a line
-///
-/// The end of this function is a machine with no `/boot` and no `/log`, on
-/// hardware whose only other diagnostic channel *is* `/log`. Skipping a disk
-/// silently — which is what a bare `continue` does — spends the one chance
-/// anybody has to find out why.
+/// Ask every USB disk for the partitions this kernel was given, retrying
+/// while the boot volume is still not found.
 pub fn probe_boot_disks() {
     let deadline = crate::clock::nanos_since_boot() + xhci::PORT_SETTLE_CEILING.nanos();
     let mut probed = 0;
     loop {
         probed = probe_announced(probed);
-        // Nothing to wait for. Three ways, and the third is the one worth
-        // stating: firmware named no partition, so there is no question; or a
-        // device carries it; or two devices do, which no further device can
-        // repair — `gpt:` has already named that machine as having no boot
-        // volume, and waiting the ceiling out would be waiting for an event
-        // that cannot occur.
+        // Nothing further can change: no partition named, resolved, or
+        // ambiguity no device can repair.
         if gpt::boot_partition().is_none() || !gpt::boot_volume_still_possible() {
             return;
         }
@@ -1182,9 +788,8 @@ pub fn probe_boot_disks() {
             );
             return;
         }
-        // Paced rather than spun, at the cadence the connect settle already
-        // reads port registers on: each pass is one MMIO read per port under
-        // the controller lock, and the thing being waited for is physical.
+        // Paced, not spun: one MMIO read per port under the controller lock,
+        // on physical hardware.
         let next = crate::clock::nanos_since_boot() + xhci::PORT_POLL.nanos();
         while crate::clock::nanos_since_boot() < next {
             core::hint::spin_loop();
@@ -1193,18 +798,15 @@ pub fn probe_boot_disks() {
     }
 }
 
-/// Probe every disk announced since the last call, and return the new count.
-///
-/// Indices are stable and dense — a disk keeps the index it was bound under —
-/// so "since" is a count, and a disk is never probed twice.
+/// Probe every disk announced since the last call; indices are stable and
+/// dense, so a disk is never probed twice.
 fn probe_announced(mut probed: usize) -> usize {
     let count = usb_storage::count();
     while probed < count {
         let index = probed;
         probed += 1;
-        // One question with one answer: asking twice — `open` for the handle and
-        // `storage_geometry` for the block size — is two `None` branches for one
-        // fact, and the disk carries the block size itself.
+        // One `open` call for both the handle and the block size; the disk
+        // carries its own geometry.
         let Some(mut disk) = usb_storage::open(index) else {
             log!(
                 "usb-storage: disk {index} was announced and was gone again before its partition \
@@ -1218,13 +820,8 @@ fn probe_announced(mut probed: usize) -> usize {
     probed
 }
 
-/// The bound disk carrying `id`, or `None` when no driver here serves it.
-///
-/// Only USB today. A machine that boots off an internal disk lands in the
-/// `None` arm and gets neither mount, because the NVMe device is owned by the
-/// page cache from the moment storage comes up and there is no second handle
-/// to it — see the report in `issues/build/page-cache-owns-one-device.md`
-/// rather than a workaround here.
+/// The bound disk carrying `id`, or `None` when no driver here serves it
+/// (only USB today; see `issues/build/page-cache-owns-one-device.md`).
 fn device_carrying(id: crate::block::DeviceId) -> Option<Box<dyn BlockDevice>> {
     (0..usb_storage::count())
         .filter_map(usb_storage::open)
@@ -1232,13 +829,8 @@ fn device_carrying(id: crate::block::DeviceId) -> Option<Box<dyn BlockDevice>> {
         .map(|disk| Box::new(disk) as Box<dyn BlockDevice>)
 }
 
-/// Open the partition `role` names, if it can be found and if it carries a
-/// filesystem we recognise.
-///
-/// `None` is an ordinary outcome and never a reason to write anything: no
-/// handoff, no device carrying that GUID, two devices carrying it, a device
-/// this kernel has no driver for, or a volume that is not FAT32. The caller
-/// simply has no mount for that role.
+/// Open the partition `role` names, or `None` for any of several ordinary
+/// non-matches — never a reason to log.
 pub fn mount(role: Role) -> Option<FatFs> {
     let volume = role.volume()?;
 
@@ -1272,10 +864,8 @@ pub fn mount(role: Role) -> Option<FatFs> {
         next_victim: 0,
     });
 
-    // `probe` is a total read and takes no ownership, which is what lets the
-    // bound be tightened from the partition to the volume before anything can
-    // write. A boot sector describing more than the partition holds is already
-    // `Error::Truncated`, so this only ever shrinks.
+    // `probe` only reads, so the bound can tighten from partition to volume
+    // before any write; this only ever shrinks.
     let mut volume = FatVolume { role, bytes: len };
     let geom = match Fat32::probe(&mut volume) {
         Ok(geom) => geom,
@@ -1291,9 +881,8 @@ pub fn mount(role: Role) -> Option<FatFs> {
         mounted.len = volume_bytes;
     }
 
-    // The log volume's FAT-1 (mirror) byte range, for the
-    // `fat-mirror-write-refuse` actuator. A one-FAT volume has no mirror, so the
-    // range stays empty and the actuator can never fire.
+    // FAT-1 mirror range for the `fat-mirror-write-refuse` actuator; empty
+    // and inert on a one-FAT volume.
     #[cfg(feature = "boot-actuators")]
     if role == Role::Log && geom.num_fats >= 2 {
         let one_fat = geom.fat_sectors as u64 * geom.bytes_per_sector as u64;

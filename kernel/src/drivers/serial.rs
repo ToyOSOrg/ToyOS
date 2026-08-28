@@ -1,22 +1,9 @@
 //! The 16550 and the virtio-console, and the one lock that serialises them.
-//!
-//! **What reaches this file is whole units** — a rendered record from
-//! `log::console`, a userland `write`, a panic report — each of which takes
-//! [`BackendGuard`] once and holds it for its own whole unit. That is where
-//! line atomicity comes from, and it is the only place it could come from: two
-//! producers of half-lines cannot be made atomic by anything downstream of
-//! them.
-//!
-//! [`BackendGuard`] is CLI plus a global spinlock, so an interrupts-off window
-//! is one unit long. The slow I/O happens inside it, which is why **every unit
-//! is bounded and no holder may take its length from userland** — a rendered
-//! record is one 1 KiB `LogRecord`, the live drain takes eight of them, the
-//! panic report is a fixed buffer, and a `write` of arbitrary length is cut
-//! into [`MAX_CONSOLE_LINE`] pieces by [`ConsoleLine`]. The one deliberate
-//! exception is the panic path's `drain_locked`, which takes the whole backlog
-//! under one hold — a machine that is dying pays latency to say why, and
-//! `log/console.rs` argues it at the site. Nothing that holds a kernel lock
-//! formats here.
+//! Every writer takes [`BackendGuard`] once per whole unit (a record, a
+//! userland `write`, a panic report) and holds it for that whole unit; that
+//! is the only source of line atomicity. Every unit taken under the guard is
+//! bounded, except the panic path's `drain_locked`. Nothing that holds a
+//! kernel lock formats here.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::cpu::{inb, outb};
@@ -24,33 +11,19 @@ use crate::log;
 
 const PORT: u16 = 0x3f8; // COM1
 
-/// Whether a 16550 answered the loopback probe in `init`.
-///
-/// Modern laptops have no SuperIO, so every port read returns `0xFF`. That
-/// is indistinguishable from a UART reporting "receiver ready, data = 0xFF",
-/// which would feed the console an endless stream of 0xFF input bytes. The
-/// probe is the only place the difference is observable, so it is latched
-/// here and every UART access is gated on it.
+// Latched once from `init`'s loopback probe: hardware with no SuperIO
+// reads 0xFF on every access, indistinguishable from a ready UART.
 static UART_PRESENT: AtomicBool = AtomicBool::new(false);
 
-// Every line is `PORT + <register number>`, which is how a 16550's registers
-// are named; writing the data register as bare `PORT` would make three of these
-// lines a different kind of statement from the other eight.
+// Every register is `PORT + n`; the identity op keeps that pattern uniform
+// across all eight lines instead of special-casing the data register.
 #[allow(clippy::identity_op)]
 pub fn init() {
-    // SAFETY: `outb` asks its caller to own the port and the byte. Every port
-    // here is `PORT + n` with `n` a literal in 0..=4, so all of them are inside
-    // COM1's own eight-register block at 0x3f8 — a UART, which decodes nothing
-    // outside itself and has no way to reach memory. The bytes are the 16550's
-    // documented programming: the divisor latch, the line and FIFO control
-    // words, and the loopback probe.
-    //
-    // **One block, because the sequence is the safety argument.** The DLAB bit
-    // set on line three is what makes the next two writes the divisor latch
-    // rather than the data and interrupt-enable registers, and the loopback bit
-    // set before the probe is what makes the byte read back the chip's own
-    // rather than something on the wire. Either half left standing is a UART
-    // that is not a console.
+    // SAFETY: `outb`/`inb` require the caller to own the port and the byte;
+    // every port here is `PORT + n` for `n` in 0..=4, inside COM1's own
+    // register block, and the writes are the 16550's documented init sequence.
+    // Order matters: DLAB must precede the divisor writes and loopback mode
+    // must precede the probe, or the sequence misprograms the chip.
     let loopback = unsafe {
         outb(PORT + 1, 0x00); // Disable all interrupts
         outb(PORT + 3, 0x80); // Enable DLAB (set baud rate divisor)
@@ -66,11 +39,8 @@ pub fn init() {
         outb(PORT + 4, 0x0F); // Normal operation mode
         seen
     };
-    // The byte, not just the verdict: a bare `false` collapses three different
-    // situations — no SuperIO at all (0xFF), a chip that answered wrongly, and
-    // the right chip at the wrong port — and they want different next steps. On
-    // a machine with no serial output this line still reaches the virtio-console
-    // and the on-screen console.
+    // Logs the raw byte, not just the verdict: distinguishes "no SuperIO"
+    // (0xFF) from a wrong response and a right chip at the wrong port.
     log!(
         "serial: 16550 loopback read {:#04x} ({})",
         loopback,
@@ -79,12 +49,7 @@ pub fn init() {
     console_changed();
 }
 
-/// A backend has arrived, or the machine has switched to a better one.
-///
-/// Called from the two places [`backend`] can change its answer — this module's
-/// probe, and virtio-console coming up. What it does is
-/// `log::console`'s and the argument lives there: everything said so far went
-/// to whichever backend existed then, and the new one has heard none of it.
+/// A backend arrived or improved. Forwards to `log::console`, which owns the replay argument.
 pub fn console_changed() {
     crate::log::console::backend_changed();
 }
@@ -93,29 +58,16 @@ pub fn uart_present() -> bool {
     UART_PRESENT.load(Ordering::Relaxed)
 }
 
-/// Whether anything can carry a byte off this machine. False is the laptop's
-/// shape: the shards still fill and still hold their tails, but nothing drains
-/// them off the machine, so the framebuffer is the only surface a diagnostic
-/// can reach.
-///
-/// The predicate a caller wants before falling back to the screen, and the same
-/// one [`panic_flush`] refuses on.
+/// Whether anything can carry a byte off this machine; the same check `panic_flush` refuses on.
 pub fn has_console() -> bool {
     !matches!(backend(), Backend::None)
 }
 
-/// Where a write goes right now.
-///
-/// **One answer, and [`BackendGuard::write_raw`] is written in terms of it**, so
-/// the drain's "which backend has already heard this" question cannot disagree
-/// with where the bytes actually went. The order is the preference: a
-/// virtio-console is the host's own channel and a 16550 is what is left when
-/// there is none.
+/// Which channel a write goes to right now; virtio-console is preferred over a 16550.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Backend {
-    /// Nothing can carry a byte off this machine. The laptop's shape: records
-    /// stay in their shards, where the panel can still read them.
+    /// Nothing can carry a byte off this machine.
     None = 0,
     Uart = 1,
     Virtio = 2,
@@ -131,44 +83,25 @@ pub fn backend() -> Backend {
     }
 }
 
-// Backend access — slow path, used by drain / input / panic.
 
 static BACKEND_LOCKED: AtomicBool = AtomicBool::new(false);
 
-/// RAII handle for exclusive access to the serial backend (virtio-console
-/// or UART). Disables interrupts because reads and writes touch device
-/// state shared with poll callers; same-CPU re-entry from an IRQ handler
-/// would otherwise deadlock the spin.
+/// Exclusive access to the serial backend; interrupts are off for as long as the guard lives.
+/// Same-CPU re-entry from an IRQ handler deadlocks the spin.
 pub struct BackendGuard {
     rflags: SavedFlags,
 }
 
-/// An `RFLAGS` word this CPU itself pushed, and the only thing `popfq` may be
-/// given.
-///
-/// **The type is what makes [`SavedFlags::restore`] safe.** Restoring flags is
-/// a memory-safety operation only because of what a *forged* word can carry —
-/// `DF` set makes every `rep` in the machine run backwards, `IF` set re-enables
-/// interrupts inside a critical section, `TF` single-steps. None of that is
-/// reachable from a value that came out of `pushfq` on this CPU, and
-/// [`save_and_cli`] is the only constructor, so restoring is ordinary safe code.
-/// Not `Copy` and not `Clone`:
-/// a saved word is one CPU's state at one instant, and duplicating it is how it
-/// would end up restored somewhere it did not come from.
+/// This CPU's own `RFLAGS`, captured by `pushfq`; the only value `popfq` may be given.
+/// Not `Copy`/`Clone`: one CPU's state at one instant, not to be duplicated.
 pub struct SavedFlags(u64);
 
 impl SavedFlags {
-    /// Put the word back. `&self` rather than `self` because [`BackendGuard`]
-    /// restores from `Drop`, which cannot move a field out; restoring twice
-    /// writes the same bits twice and is inert.
+    /// Restores the flags; `&self` because `Drop` cannot move a field out, and restoring twice is idempotent.
     #[inline]
     fn restore(&self) {
-        // SAFETY: irreducible — `popfq` has no safe spelling; this is the
-        // instruction, not a wrapper around one. Sound because `self.0` can
-        // only have come from `save_and_cli`'s `pushfq` on this CPU: no bit
-        // reaches `RFLAGS` that the CPU did not have set moments earlier, so
-        // there is no `DF`/`IF`/`TF` transition here that the caller did not
-        // already make. `nomem` because the asm touches no memory.
+        // SAFETY: `popfq` has no safe spelling; `self.0` came only from this
+        // CPU's own `pushfq` in `save_and_cli`, so no unintended bit reaches RFLAGS.
         unsafe {
             core::arch::asm!(
                 "push {}",
@@ -194,9 +127,7 @@ impl BackendGuard {
         Self { rflags }
     }
 
-    /// Non-blocking acquire. Returns `None` if another CPU already holds
-    /// the backend. For use in IRQ contexts that must not stall — caller
-    /// can retry on the next tick.
+    /// Non-blocking acquire: `None` if another CPU already holds the backend.
     pub fn try_lock() -> Option<Self> {
         let rflags = save_and_cli();
         if BACKEND_LOCKED
@@ -210,9 +141,7 @@ impl BackendGuard {
         }
     }
 
-    /// Write raw bytes straight to the backend, no escape stripping — the
-    /// record drain's lines carry none, and a userland write is stripped by
-    /// [`write_console`] before it gets here.
+    /// Writes raw bytes with no escape stripping; callers must pre-strip via [`write_console`].
     pub fn write_raw(&mut self, bytes: &[u8]) {
         match backend() {
             Backend::Virtio => super::virtio_console::write_bytes_locked(bytes),
@@ -247,17 +176,13 @@ impl Drop for BackendGuard {
     }
 }
 
-/// This CPU's `RFLAGS`, and interrupts off — one instruction sequence, because
-/// the value is only worth anything if nothing ran between the read and the
-/// `cli`.
+/// This CPU's `RFLAGS`, captured with interrupts off in one instruction sequence:
+/// the value is stale if anything runs between the read and `cli`.
 #[inline]
 fn save_and_cli() -> SavedFlags {
     let rflags: u64;
-    // SAFETY: irreducible — `pushfq`/`cli` have no safe spelling. Sound because
-    // the sequence only reads `RFLAGS` and clears `IF`: it writes no memory
-    // (`nomem`), touches no other register than the `out`, and masking
-    // interrupts is what every caller is asking for. The value goes straight
-    // into `SavedFlags`, which is what lets `restore` be safe.
+    // SAFETY: irreducible — `pushfq`/`cli` have no safe spelling; the asm reads
+    // RFLAGS and clears IF only, writes no memory, and touches no other register.
     unsafe {
         core::arch::asm!(
             "pushfq",
@@ -280,33 +205,20 @@ pub fn try_read_byte() -> Option<u8> {
     g.try_read_byte()
 }
 
-/// ~1s of pause-loop spins. Long enough for any live `BackendGuard` holder
-/// to finish its drain and release; short enough that a wedged holder does
-/// not hang the panic path.
+/// ~1s of spin, long enough for a live guard holder to release and short enough not to hang panic.
 const PANIC_LOCK_SPIN_LIMIT: u64 = 100_000_000;
 
-/// Flush pending logs on the panic path.
+/// Flushes pending logs on the panic path.
 ///
-/// The halt IPI is an ordinary maskable vector: a sibling holding the
-/// backend (IF=0, e.g. mid idle-loop drain) keeps running until its guard
-/// drops and only then halts — bypassing immediately would race its live
-/// ring/virtqueue mutation and lose the panic message. So first wait
-/// (bounded) for a clean handoff and drain through the normal locked path.
-/// Only when the holder never releases (wedged in a virtio submit, or died
-/// holding the lock) bypass — with virtio-console disabled, because its TX
-/// queue may be left half-submitted (`tx_slot` taken) and a bypassing
-/// writer would panic recursively on it; the UART is pure port-IO and
-/// cannot wedge.
+/// Waits for a live guard holder to release before bypassing it — bypassing
+/// immediately would race its live ring/virtqueue mutation — and only
+/// bypasses a holder that never releases.
 ///
 /// # Safety
-/// Panic context only — on the bypass path the drain's position is read with no
-/// lock held (see `log::console::drain_bypassed`).
+/// Panic context only: the bypass reads the drain position with no lock held.
 pub unsafe fn panic_flush() {
-    // No backend at all means every path below hands the report to a writer
-    // that discards it, and the record drain would move its position over it.
-    // The report is then gone from the one place still holding it, the
-    // on-screen console included. This has to be checked before the locked
-    // path, not after: that path is the common one.
+    // Checked before the locked path: with no backend, that path would just
+    // discard the report while still advancing the drain past it.
     if !has_console() {
         return;
     }
@@ -317,30 +229,23 @@ pub unsafe fn panic_flush() {
         }
         core::hint::spin_loop();
     }
-    // The bypass disables virtio-console, so it can only write to the UART.
+    // Disables virtio-console first: a half-submitted TX queue would panic
+    // recursively if a bypassing write reached it.
     if !uart_present() {
         return;
     }
     super::virtio_console::disable();
-    // SAFETY: this is the bypass the function's own clause describes — a
-    // bounded wait for a clean handoff has already failed, so the holder is
-    // wedged and will not publish.
+    // SAFETY: the bounded wait above found no clean handoff; the holder is
+    // wedged and will not publish, so reading its position unlocked is safe.
     unsafe { crate::log::console::drain_bypassed() };
 }
 
-/// Drain the ring before the machine stops.
+/// Drains the ring before the machine powers off, so the tail of a shutdown
+/// is not lost to `acpi::shutdown()` cutting power with logs still queued.
 ///
-/// `acpi::shutdown()` cuts power with whatever is still queued, so without this
-/// the tail of every clean shutdown is unobservable — including the line that
-/// says how far a filesystem sync got before it died, which is the one
-/// diagnostic a shutdown failure has. On a machine with no serial there is no
-/// other channel at all.
-///
-/// Bounded on the lock rather than blocking, for the same reason `panic_flush`
-/// is: a shutdown must not hang because another CPU is wedged holding the
-/// backend. It does *not* take that function's bypass — every CPU is still live
-/// here, and reading the ring unsynchronized is only defensible when nothing
-/// else will ever run. Losing the tail is better than not powering off.
+/// Bounded on the lock like `panic_flush`, but never bypasses: every CPU is
+/// still live here, and reading the ring unsynchronized is only safe once
+/// nothing else runs. Losing the tail is better than not powering off.
 pub fn flush_final() {
     for _ in 0..PANIC_LOCK_SPIN_LIMIT {
         if let Some(mut g) = BackendGuard::try_lock() {
@@ -351,77 +256,17 @@ pub fn flush_final() {
     }
 }
 
-/// A userland `write` to a console object, **unbuffered**.
-///
-/// **One backend acquisition per [`MAX_CONSOLE_LINE`] of output, ANSI stripped,
-/// no buffering.** Taking the guard here is what makes this write whole against
-/// a kernel record and against another process; what it does *not* fix is
-/// `println!` handing the kernel half a line at a time.
-///
-/// **That is what [`ConsoleLine`] fixes, and this function is what it is
-/// measured against.** Every ordinary write goes through the line buffer; this
-/// path is the `console-unbuffered` actuator's behaviour.
-///
-/// **The guard is taken and released per chunk, and the bound is the reason
-/// this function may be called with a userland length at all.** `BackendGuard`
-/// is `cli` plus a global spinlock and the device write happens inside it, so a
-/// single acquisition around the whole call would mask interrupts for a window
-/// userland chooses: `SYS_WRITE` puts no cap on its buffer, and a UART pays a
-/// [`THRE_SPIN_LIMIT`]-bounded spin *per byte* of it. That is the shape
-/// `kernel/CLAUDE.md`'s `BackendGuard` caveat refuses.
-///
-/// **[`MAX_CONSOLE_LINE`] rather than a number invented here.** The console
-/// object bounds a *line* by it and emits a longer one in pieces of it, so the
-/// interleaving unit this chunking creates is the same one [`ConsoleLine`]
-/// already has: anything whole through the line buffer is whole here too, and
-/// nothing that is atomic through the line buffer stops being so.
-/// The tradeoff is re-acquisition against latency — a write of `n` bytes pays
-/// `ceil(n/1024)` `cli`/`compare_exchange_weak`/`popfq` triples rather than
-/// one, a handful of uncontended atomics against an otherwise unbounded
-/// interrupts-off window. Latency wins; the acquisitions are
-/// paid once per kilobyte of output and a kilobyte of output is already a
-/// device write two orders of magnitude more expensive.
-///
-/// The bytes live in user memory, so they arrive a chunk at a time with the
-/// filter's state carried across: a CSI sequence straddling a chunk boundary
-/// must come out the same as one that does not, and a fresh filter per chunk
-/// would emit its head. That is true of the *output* chunking too — [`Csi`] and
-/// [`Stripped`] both outlive every guard this function takes, so a sequence
-/// split by a flush is stripped exactly as one that is not.
+/// A userland `write` to the console, unbuffered and ANSI-stripped.
 pub fn write_console(src: &crate::user_ptr::UserBytes) {
     let mut line = ConsoleLine::new();
     line.out.on_newline = false;
     line.write(src);
-    // Nothing is held back: a lone trailing ESC is the caller's byte and the
-    // buffer is not carried anywhere, so both are emitted here.
+    // Nothing held back: a trailing ESC is the caller's own byte, emitted here too.
     line.finish();
 }
 
-/// One console holder's partly-written line.
-///
-/// **This is where line atomicity comes from, and it is per holder.** The unit
-/// that reaches the backend under one [`BackendGuard`] is what other producers
-/// cannot get inside, and `println!` does not hand the kernel one:
-/// `LineWriter` issues `flush_buf()` and then `inner.write(rest)`, two syscalls
-/// per line. So the whole of a line is accumulated here and leaves on the
-/// newline that ends it, whatever number of `write`s built it.
-///
-/// **Per holder is the whole of it.** One buffer shared by two processes is two
-/// half-lines spliced inside the very mechanism that exists to stop splicing,
-/// so this lives on a `ConsoleObject` and every process that has a console has
-/// its own — `loader::start::build_child_handles` mints one per spawn rather
-/// than duplicating its parent's. The *backend* is still one, and
-/// [`BackendGuard`] is still its only serialiser.
-///
-/// **A line longer than [`MAX_CONSOLE_LINE`] is emitted in pieces of it**, and
-/// that bound is an interrupt latency before it is a line bound: the guard
-/// masks interrupts for whatever is written under it and a userland `write` has
-/// no length. So the claim is "whole up to `MAX_CONSOLE_LINE`", the same claim
-/// [`write_console`] makes for its chunking.
-///
-/// The CSI filter's state lives here for the same reason the buffer does: a
-/// sequence split across two `write`s must come out the same as one that is
-/// not.
+/// One console holder's partly-written line. Must live per holder, never
+/// shared: one buffer used by two processes splices their output.
 pub struct ConsoleLine {
     out: Stripped,
     csi: Csi,
@@ -447,12 +292,8 @@ impl ConsoleLine {
         }
     }
 
-    /// Emit whatever is held back, whether or not a newline ever came.
-    ///
-    /// The last handle to a console going away is the one moment a partial line
-    /// stops being "not finished yet" and becomes "all there will ever be", and
-    /// a process that exits mid-line said those bytes: dropping them would make
-    /// the buffer a way to lose output rather than a way to keep it whole.
+    /// Emits whatever is held back, whether or not a newline came; dropping
+    /// it here would lose output the process already wrote.
     pub fn finish(&mut self) {
         let csi = core::mem::replace(&mut self.csi, Csi::Text);
         csi.finish(&mut self.out);
@@ -466,34 +307,18 @@ impl Default for ConsoleLine {
     }
 }
 
-/// How much of a user write is copied out of user memory at a time.
-///
-/// A user window cannot be a slice, so it is copied in pieces, and this is one
-/// piece. It is **not** the backend's unit — [`MAX_CONSOLE_LINE`] is — because
-/// the filter can consume a whole piece and emit nothing.
+/// Size of one copy out of user memory; not the backend's unit — see [`MAX_CONSOLE_LINE`].
 const STRIP_CHUNK: usize = 256;
 
-/// The most that reaches the backend under one [`BackendGuard`], and therefore
-/// the longest interrupts-off window a userland `write` can buy.
-///
-/// 1024, the console-line bound. [`ConsoleLine`] emits a longer line in pieces
-/// of the same size, so a whole line is one acquisition either side of the
-/// buffer arriving.
+/// The most written to the backend under one [`BackendGuard`], bounding a write's interrupts-off window.
 const MAX_CONSOLE_LINE: usize = 1024;
 
-/// Bytes on their way to the backend, buffered so that a per-byte filter does
-/// not become a per-byte device write — and so that the guard is taken once per
-/// buffer rather than once per call.
-///
-/// It holds no guard of its own: [`Stripped::flush`] takes one, writes, and
-/// drops it, so between two chunks of one write interrupts are on.
+/// Buffers bytes for the backend: a per-byte filter must not become a per-byte device write or lock acquisition.
+/// Holds no guard of its own; interrupts are on between two chunks of one write.
 struct Stripped {
     buf: [u8; MAX_CONSOLE_LINE],
     len: usize,
-    /// Whether a newline ends a unit. True is [`ConsoleLine`]'s line buffer —
-    /// the buffer is the line and it leaves when the line does; false is
-    /// [`write_console`]'s unbuffered chunking, where the only reason to stop
-    /// is a full buffer.
+    /// Whether a newline ends a unit; true for a line buffer, false for [`write_console`]'s unbuffered chunking.
     on_newline: bool,
 }
 
@@ -517,16 +342,10 @@ impl Stripped {
     }
 }
 
-/// Strips ANSI CSI sequences, so the backend never carries bytes it would drop.
-///
-/// A state machine rather than an index walk because the bytes arrive 256 at a
-/// time out of a user window and leave 1024 at a time under a guard taken for
-/// each, and only a machine that survives the gap between two chunks — either
-/// gap — gives the same answer as one that saw the write whole.
+/// Strips ANSI CSI sequences; a state machine because writes and flushes arrive in different-sized chunks.
 enum Csi {
     Text,
-    /// An ESC held back: it is only the start of a sequence if `[` follows, and
-    /// it is emitted as itself if anything else does.
+    /// An ESC held back: only the start of a sequence if `[` follows.
     Esc,
     Body,
 }
@@ -549,9 +368,7 @@ impl Csi {
         }
     }
 
-    /// A sequence the input ended in the middle of. The lone ESC is the caller's
-    /// byte and is emitted; a started CSI body is not, and its terminator was
-    /// never going to arrive.
+    /// A sequence the input ended mid-way: a lone ESC is emitted, a started CSI body is not.
     fn finish(self, out: &mut Stripped) {
         if matches!(self, Self::Esc) {
             out.push_byte(0x1B);
@@ -559,14 +376,8 @@ impl Csi {
     }
 }
 
-/// Spins per byte for the transmit-holding-register-empty bit, bounded.
-///
-/// The bound is not belt-and-braces. `uart_present()` says a 16550 answered a
-/// loopback probe at boot, not that it is still draining: a UART wedged with
-/// THRE clear — flow-controlled by a host that went away, or simply broken —
-/// makes an unbounded loop here infinite, and this is on `panic_flush`'s bypass
-/// path, the last thing standing when the backend lock holder is already
-/// wedged. Losing a byte to a dead UART beats losing the machine to it.
+/// Bounded, not belt-and-braces: a UART wedged with THRE clear would spin
+/// forever here, on `panic_flush`'s bypass path where nothing else can help.
 const THRE_SPIN_LIMIT: u32 = 100_000;
 
 fn uart_write_bytes(bytes: &[u8]) {
@@ -580,30 +391,18 @@ fn uart_write_bytes(bytes: &[u8]) {
             }
             core::hint::spin_loop();
         }
-        // SAFETY: `outb` asks its caller to own the port and the byte. `PORT` is
-        // COM1's data register — a UART, which decodes nothing outside its own
-        // eight registers and cannot reach memory — and the byte is console
-        // output, so there is no value of it that means anything to the device
-        // other than "transmit this". `uart_present()` above is why the chip is
-        // there at all; the THRE spin is why it is ready.
+        // SAFETY: `outb` requires ownership of the port and the byte; `PORT`
+        // is COM1's own data register, and the byte is console output only.
         unsafe { outb(PORT, b) };
     }
 }
 
-/// Write straight to the 16550, bypassing the ring, the backend lock and the
-/// virtio console.
-///
-/// For the callers that have to report something *about* the machinery they
-/// would otherwise report through: `panic::last_words`, which is what a machine
-/// two crashes deep has left, and the IST1 stack verdict, which is meaningless
-/// if it travels through a ring that may be what the overflow corrupted. No
-/// lock, no allocation, bounded per byte.
+/// Writes straight to the 16550, bypassing the ring, the lock and virtio-console: no allocation, bounded per byte.
 pub fn panic_raw(bytes: &[u8]) {
     uart_write_bytes(bytes);
 }
 
-/// `panic_raw` for an address or an error code, in the `{:#018x}` the rest of
-/// the crash report writes them in.
+/// `panic_raw` for an address, formatted as `{:#018x}` to match the rest of the crash report.
 pub fn panic_raw_hex(v: u64) {
     let mut out = [b'0'; 18];
     out[1] = b'x';

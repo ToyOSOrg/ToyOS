@@ -1,8 +1,6 @@
 use super::device_irq::device_irq_entry;
 
-/// Rust half of the HDA stream-completion handler. Lock-free and heap-free: it
-/// may interrupt a CPU that holds the controller lock, which disables
-/// preemption and not interrupts.
+// Lock-free, heap-free: may interrupt a CPU holding the controller lock (preemption disabled, not interrupts).
 extern "sysv64" fn hda_handler() {
     crate::irq_census::irq_took!(Hda);
     crate::drivers::hda::isr_complete();

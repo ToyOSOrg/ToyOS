@@ -11,7 +11,6 @@ pub struct Region {
     pub end: u64,
 }
 
-// Allocation categories — every PMM allocation is tagged
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -101,17 +100,14 @@ pub fn dump_stats() {
     }
 }
 
-/// Proof of ownership of one 2MB physical page. Non-Copy, non-Clone.
-/// Drop returns the page to the free list and decrements category counters.
+/// Owns one 2MB physical page; dropping it returns the page to the free list.
 pub struct PhysPage {
     phys: u64,       // raw physical address, 2MB-aligned
     category: u8,    // Category as u8
 }
 
 impl PhysPage {
-    /// Reconstruct from a raw physical address. Caller must ensure this
-    /// is a valid 2MB-aligned page that was previously allocated.
-    /// Assigned to KernelHeap category (used by dlmalloc lifetime management).
+    /// Caller must ensure `phys` is a previously allocated, 2MB-aligned page; assigned to `KernelHeap`.
     pub(super) fn from_raw(phys: u64) -> Self {
         Self { phys, category: Category::KernelHeap as u8 }
     }
@@ -233,12 +229,7 @@ pub fn alloc_page(cat: Category) -> Option<PhysPage> {
             bm.next_hint = if idx + 1 < bm.page_count { idx + 1 } else { 0 };
             let phys = bm.idx_to_phys(idx);
             drop(bm);
-            // SAFETY: `set_used(idx)` just claimed this page under
-            // `BITMAP`'s lock, so no other caller can be handed the same
-            // `idx` concurrently and nothing yet holds a `PhysPage` for it —
-            // this write has no alias. The direct map covers every physical
-            // address the bitmap can name, so `PAGE_2M` bytes from
-            // `DirectMap::from_phys(phys)` stays inside mapped memory.
+            // SAFETY: `idx` was just claimed under `BITMAP`'s lock, so it is unaliased, and the direct map covers every address the bitmap can name.
             unsafe {
                 core::ptr::write_bytes(
                     DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_2M as usize,
@@ -253,15 +244,11 @@ pub fn alloc_page(cat: Category) -> Option<PhysPage> {
 
 /// Allocate `count` physically contiguous 2MB pages.
 pub fn alloc_contiguous(count: usize, cat: Category) -> Option<alloc::vec::Vec<PhysPage>> {
-    // `count` is derived from a userland size at two call sites (`PageAlloc::new`
-    // and `shared_memory::alloc`), so an assert here cannot tell a kernel bug
-    // from a `mmap(0)`. The four driver callers all `.expect()` or `?` the
-    // Option, so a genuine driver bug asking for nothing still screams.
+    // `count` comes from userland, so a bogus 0 and a legitimate `mmap(0)` can't be told apart here — refuse, don't assert.
     if count == 0 { return None; }
     let mut bm = BITMAP.lock();
     if bm.free_count < count { return None; }
 
-    // Scan for a run of `count` consecutive free bits.
     let mut run = 0usize;
     let mut run_start = 0usize;
     for idx in 0..bm.page_count {
@@ -280,11 +267,7 @@ pub fn alloc_contiguous(count: usize, cat: Category) -> Option<alloc::vec::Vec<P
                 let mut pages = alloc::vec::Vec::with_capacity(count);
                 for i in 0..count {
                     let phys = base_phys + i as u64 * PAGE_2M;
-                    // SAFETY: same argument as `alloc_page` above — every
-                    // index in `run_start..run_start + count` was just
-                    // `set_used` under `BITMAP`'s lock, so this run is
-                    // exclusively ours and unaliased, and the direct map
-                    // covers whatever the bitmap can name.
+                    // SAFETY: every index in this run was just `set_used` under `BITMAP`'s lock, so it is unaliased and within the direct map.
                     unsafe {
                         core::ptr::write_bytes(
                             DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_2M as usize,
@@ -301,7 +284,7 @@ pub fn alloc_contiguous(count: usize, cat: Category) -> Option<alloc::vec::Vec<P
     None
 }
 
-/// Return a page to the bitmap (called by PhysPage::drop).
+/// Returns a page to the free bitmap.
 fn free_page(phys: u64) {
     let mut bm = BITMAP.lock();
     let idx = bm.phys_to_idx(phys);
@@ -311,13 +294,8 @@ fn free_page(phys: u64) {
     bm.next_hint = bm.next_hint.min(idx);
 }
 
-/// One past the highest physical frame this kernel manages.
-///
-/// The extent the IOMMU's identity domain covers:
-/// every address a driver can hand a device comes out of here, so `[0, top)`
-/// is exactly what a device could reach on a machine with no unit at all.
-/// Taken from the bitmap rather than from the firmware memory map, whose own
-/// buffer is ordinary free RAM by the time anything asks.
+/// One past the highest physical frame this kernel manages; the IOMMU identity domain's exclusive upper bound.
+/// Taken from the bitmap, not the firmware memory map, whose backing buffer is ordinary free RAM by the time anything asks.
 pub fn top() -> u64 {
     let bm = BITMAP.lock();
     bm.base + bm.page_count as u64 * PAGE_2M
