@@ -176,7 +176,7 @@ kernel/src/tmpfs.rs 8 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
 kernel/src/user_ptr.rs 53 0
-kernel/src/vfs.rs 44 0
+kernel/src/vfs.rs 45 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/assets.rs 123 0
@@ -268,7 +268,7 @@ tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 32 0
 tests/toyos-rust-tests/src/bin/endowment_denied.rs 148 2
-tests/toyos-rust-tests/src/bin/esp_files.rs 48 0
+tests/toyos-rust-tests/src/bin/esp_files.rs 50 0
 tests/toyos-rust-tests/src/bin/exit_wait_storm.rs 36 0
 tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs 49 0
 tests/toyos-rust-tests/src/bin/fault_gate_child.rs 32 0
