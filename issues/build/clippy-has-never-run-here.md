@@ -75,7 +75,7 @@ the two filed below as their own issues.
 | `cast_sign_loss` / `cast_precision_loss` | 217 / 114 | same cast-lint character |
 | `redundant_closure_for_method_calls` | 177 | style |
 | `too_long_first_doc_paragraph` | 130 | doc style |
-| `too_many_lines` | 117 | this tree writes long functions on purpose (see `the-density-sweep-has-never-run.md`) |
+| `too_many_lines` | 117 | this tree writes long functions on purpose |
 | `option_if_let_else` / `map_unwrap_or` | 115 / 101 | style |
 | `uninlined_format_args` | 105 | style |
 | `match_same_arms` | 101 | style, sometimes clearer split |
