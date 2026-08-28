@@ -18,7 +18,7 @@ for the guest to do something and, when the number expires, reports the
 *content* it was going to assert — so the red's name is the workload and never
 the cause. Every entry below that says `nothing typed at the terminal window reached a
 shell` — `desktop_typing_damage`, `desktop_locale_detect`, `blocked_dump`, and
-`desktop_audio_client` in `desktop-window-child-holds-a-lane` — is now known to be the
+`desktop_audio_client` — is now known to be the
 `/bin/terminal` boot race (`kernel/terminal-races-compositor-at-boot`, since
 closed by the capability endowment branch: a port exists before either end's
 process does) reported through a wall-clock guard that could
@@ -67,9 +67,12 @@ changes.
 - **`desktop_typing_damage`** — `nothing typed at the terminal window reached a
   shell`. `shell_answers` typed ten times with a flat two seconds between, which
   is a twenty-second ceiling on a desktop coming up; the retry window is now
-  `qemu::budget(20 s)`, the phase's. Still `Sched::Parallel`. **See
-  `desktop-window-child-holds-a-lane`: as of 2026-08-06 this is no longer
-  occasional but reproducible, and the mechanism is the duration profile.**
+  `qemu::budget(20 s)`, the phase's. Still `Sched::Parallel`. **The duration
+  profile's share of this is closed**: nothing is retyped against a clock any
+  more — `/bin/terminal` prints `terminal: ready` and `shell_echoes` waits on
+  that (`tests/toyos.rs`'s `SURFACE_UP`) — and the four-minute lane holder that
+  the profile used to seat a second desktop beside, `desktop_window_child`, is
+  `Tier::Nightly` and so never in a pull request's parallel phase.
 - **`desktop_locale_detect`** — added 2026-08-05. Same `nothing typed at the
   terminal window reached a shell`, same `ALONE … GREEN`, in the same run as the
   entry above and on a branch that touches neither the compositor nor the

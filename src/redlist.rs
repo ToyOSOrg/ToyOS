@@ -1445,7 +1445,7 @@ pub const KNOWN_RED: &[Red] = &[
         what: "`ALONE: GREEN` twice and `ALONE: red again` once across four full suites in one \
                session",
         evidence: "four full suites on `wt/toyos-tlbfix`, 2026-08-07",
-        source: "issues/build/desktop-window-child-holds-a-lane.md",
+        source: "issues/diagnostics/blocked-dump-cannot-fire-on-a-total-freeze.md",
         measured: "2026-08-07",
     },
     Red {
@@ -1505,7 +1505,7 @@ pub const KNOWN_RED: &[Red] = &[
                ~250 s of every run and whichever desktop the duration profile ranked next went in \
                beside it",
         evidence: "seven full runs in one worktree, one session",
-        source: "issues/build/desktop-window-child-holds-a-lane.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-06",
     },
     Red {
@@ -1518,7 +1518,7 @@ pub const KNOWN_RED: &[Red] = &[
                alone, with its own verdict line rather than the typing one, so the message is not \
                the tell and the pair of durations is",
         evidence: "seven full runs in one worktree, one session",
-        source: "issues/build/desktop-window-child-holds-a-lane.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-06",
     },
     Red {

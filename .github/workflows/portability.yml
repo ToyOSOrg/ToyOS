@@ -57,12 +57,11 @@ jobs:
   # "cargo run builds everything" (root CLAUDE.md) — without ever launching a
   # window.
   #
-  # issues/build/the-portability-premise-has-no-instrument.md named the move
-  # this replaces as the open gap in the previous version of this job: a
-  # green run on `ubuntu-latest` could not distinguish "the three packages
-  # this job installed were enough" from "the image's own contents quietly
-  # covered the rest". `debian:sid` is the same image `ci.yml`'s guest shards
-  # already run in for the identical reason.
+  # The move this replaces was the open gap in the previous version of this
+  # job: a green run on `ubuntu-latest` could not distinguish "the three
+  # packages this job installed were enough" from "the image's own contents
+  # quietly covered the rest". `debian:sid` is the same image `ci.yml`'s guest
+  # shards already run in for the identical reason.
   #
   # **Measured, finally**: dispatch 32749539353, 2026-08-24 — the first run of
   # this workflow that ever got past its own setup — went green in 4247 s
