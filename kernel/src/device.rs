@@ -7,20 +7,16 @@ use toyos_abi::FramebufferInfo;
 use crate::sync::Lock;
 pub use toyos_abi::syscall::DeviceType;
 
-/// Whether each class is claimed — and deliberately not by whom.
-///
-/// A pid beside the bit would be designation by ambient property: every device
-/// syscall takes the claim handle, so the only question left here is the one
-/// exclusivity actually needs.
+// Tracks occupancy only, not an owner — every device syscall already carries the claim handle.
 static TAKEN: [Lock<bool>; DeviceType::ALL.len()] =
     [const { Lock::new(false) }; DeviceType::ALL.len()];
 static FB_INFO: Lock<Option<Screen>> = Lock::new(None);
 
 /// What the display driver published, as a claim needs it.
 ///
-/// The regions rather than objects: a claim mints its own, because a
-/// `SharedMemObject` whose handle count has reached zero is retired and the
-/// screen outlives whichever process was holding it.
+/// Screen stores `Region`s rather than `SharedMemObject`s because each claim
+/// mints its own object, and a `SharedMemObject` is retired once its handle
+/// count reaches zero while the screen itself outlives any single claim.
 #[derive(Clone)]
 pub struct Screen {
     pub info: FramebufferInfo,
@@ -35,22 +31,15 @@ fn taken(class: DeviceType) -> &'static Lock<bool> {
         .expect("`DeviceType::ALL` names every class")]
 }
 
-/// The claim itself, as a value.
+/// A move-only proof that a device class is claimed; at most one exists per class.
 ///
-/// Not `Clone` and not `Copy`, and the field is private, so the only ways to
-/// obtain one are [`Claim::acquire`] and moving an existing one. That is the
-/// exclusivity: at most one `Claim` per class can exist at a time, and the
-/// compiler — not a check in `dup` — is what says so.
-///
-/// The rule reaches userland through the object that holds one: a
-/// [`DeviceClaim`] is created without `Rights::DUP`, so at most one handle to
-/// it can exist and a transfer moves it whole.
+/// The exclusivity reaches userland because `DeviceClaim` is created without
+/// `Rights::DUP`, so at most one handle to it can ever exist.
 pub struct Claim {
     class: DeviceType,
 }
 
 impl Claim {
-    /// Take the class, or say it is already held.
     fn acquire(class: DeviceType) -> Result<Self, ClaimError> {
         let mut held = taken(class).lock();
         if *held {
@@ -68,21 +57,12 @@ impl Drop for Claim {
 }
 
 pub fn set_framebuffer_info(screen: Screen) {
-    // A relative pointer accumulates into a square 0..32767 space that this
-    // geometry is what gets mapped onto, so its per-axis scale is a function of
-    // the screen and has to follow a mode change.
+    // Mouse motion maps into a fixed 0..32767 space scaled by this geometry, so it must track every mode change.
     crate::mouse::set_screen(screen.info.width, screen.info.height);
     *FB_INFO.lock() = Some(screen);
 }
 
-/// Why a claim did not succeed.
-///
-/// A daemon's whole degradation decision turns on this: "this machine has no
-/// sound card" is a machine, and exiting is right; "another process holds the
-/// sound card" is a conflict, and exiting silently turns it into a session
-/// with no audio and no record of why. One `None` cannot tell them apart, which
-/// makes soundd's and netd's "no device on this machine" line an assertion
-/// rather than a check.
+/// Why a claim did not succeed — distinguishes "no such device" from "already held" so callers can degrade correctly.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClaimError {
     /// Another process holds the claim.
@@ -93,20 +73,14 @@ pub enum ClaimError {
 
 /// Try to claim exclusive access to a device.
 ///
-/// The `Claim` is on this stack frame until the object takes it, so a failure
-/// past the `acquire` cannot leave a class held by nobody.
+/// `Claim` lives on this stack frame until the returned object takes it, so a
+/// failure after `acquire` cannot leave a class held by nobody.
 pub fn try_claim(class: DeviceType) -> Result<Arc<DeviceClaim>, ClaimError> {
-    // Availability is decided before the claim, so a second claimant of an
-    // absent device is told `Absent` and not `Owned` — the distinction soundd
-    // and netd degrade on.
+    // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
         DeviceType::Keyboard => {
             let claim = Claim::acquire(class)?;
-            // Whatever was typed while nobody held the device belongs to
-            // nobody. Delivering it to whoever claims next hands one program
-            // another's keystrokes, and a compositor restarted mid-sentence
-            // would open with the tail of what was being typed into the one
-            // that died.
+            // Keystrokes queued before this claim belong to no one; delivering them would leak them to the new owner.
             keyboard::discard_queued();
             Ok(DeviceClaim::new(class, DeviceInfo::Events, claim))
         }
@@ -143,8 +117,7 @@ fn shm(region: Region) -> Arc<crate::object::shm::SharedMemObject> {
     crate::object::shm::SharedMemObject::over(region)
 }
 
-/// The description a framebuffer claim answers with, over freshly minted
-/// buffer objects.
+/// The description a framebuffer claim answers with, over freshly minted buffer objects.
 pub fn framebuffer_info(screen: Screen) -> DeviceInfo {
     let Screen { info, scanout: [front, back], cursor } = screen;
     DeviceInfo::Framebuffer(

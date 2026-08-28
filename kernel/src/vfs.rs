@@ -30,115 +30,48 @@ pub fn lock() -> VfsGuard {
     VfsGuard(VFS.lock())
 }
 
-/// Trait abstracting filesystem operations so the VFS can hold
-/// heterogeneous mount points (initrd on SliceDisk, nvme on NvmeDisk).
-///
-/// # Every answer is a `Result`, and the error is the ABI's
-///
-/// The device error channel runs from [`crate::block::BlockDevice`] up through
-/// [`crate::file_backing::FileBacking`] and `bcachefs::BlockIO`, each fallible
-/// so that nothing in the middle invents a value, and this trait is no
-/// exception: an `Option` or a bare `u64` here reads a device that would not
-/// answer as *no such file*, which is not a degradation a caller can act on —
-/// `ops::open` would create an empty file over one that exists, because
-/// `CREATE` acts on the same `None` a refused transfer produces.
-///
-/// [`SyscallError`] and not a filesystem error type of its own, because there
-/// is no second consumer: the only thing above this trait is the syscall layer,
-/// and a vocabulary translated once more on the way out is a vocabulary two
-/// layers can come to disagree about. [`SyscallError::Io`] is the variant this
-/// channel exists for; `NotFound` means the name is not there, and nothing
-/// else may.
-///
-/// The detail belongs in the log rather than in the error. `BlockError` carries
-/// nothing on purpose — which endpoint stalled and what the sense key was is in
-/// the driver's own line — so an implementation here logs what it knows and
-/// returns the code.
+/// A device that would not answer is `Io`; `NotFound` means only that the name is absent.
 pub trait FileSystem: Send {
-    /// Every name in this mount, or `ResourceExhausted` if there are more than
-    /// `limit` of them.
-    ///
-    /// The limit is on the mount and not on the directory being listed, because
-    /// that is what this call materialises: there is no per-directory index
-    /// anywhere in the VFS, so every `readdir` builds the whole mount's listing
-    /// and filters it. `limit` is [`MAX_LIST_ENTRIES`] at the only call sites.
-    ///
-    /// **An implementation must refuse before it allocates**, which is the only
-    /// reason this takes a limit rather than the caller checking the length it
-    /// gets back. `TmpFs` does; the two bcachefs adapters cannot, because
-    /// `bcachefs::Mounted::list` has no count primitive and `btree::collect_all`
-    /// under it builds the whole entry set first. Their check is on the result,
-    /// so it makes the refusal uniform without making the allocation bounded —
-    /// see `issues/isolation/untrusted-input-panics.md`.
+    /// Every name in the whole mount — not one directory — or `ResourceExhausted` above `limit`.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError>;
 
     /// When `name` was last written, in whatever epoch the mount keeps.
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError>;
 
-    /// What `name` points at, or `Ok(None)` if it is not a symbolic link.
-    ///
-    /// `Ok(None)` covers a name that is not there at all, and that is not a
-    /// sentinel this signature could remove: both callers follow it with an
-    /// `open_file` or an `open_backing` of the same name, which answers
-    /// `NotFound` for the one and opens the other. What it must never fold in
-    /// is a device that would not say, which is what the `Err` is for.
+    /// What `name` points at; `Ok(None)` for a non-link or an absent name, never for a device that would not answer.
     fn read_link(&mut self, name: &str) -> Result<Option<String>, SyscallError>;
 
-    /// Open a file. Returns (FileId, optional backing for cache misses).
-    /// Must return the SAME FileId for the same file across multiple opens.
+    /// Open `name`: the same `FileId` on every open of the same file, plus a backing for cache misses.
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>), SyscallError>;
-    /// Create an empty file. Returns FileId. Registers in name→FileId map.
+    /// Create an empty file, registered under `name`.
     fn create(&mut self, name: &str, mtime: u64) -> Result<FileId, SyscallError>;
-    /// Release filesystem-side state for a `FileId`.
-    ///
-    /// Reached only from a caller whose own `file_cache::release` returned the
-    /// last reference, under the VFS lock that a reopen would need — so the
-    /// answer arrives established, and an implementation asking the cache again
-    /// would be asking a second question at a second moment.
+    /// Release filesystem state for `file_id`, after the file cache dropped its last reference under the VFS lock.
     fn close_file(&mut self, file_id: FileId);
 
     /// Unlink `name`, or `NotFound` if there was nothing by that name.
     fn delete(&mut self, name: &str) -> Result<(), SyscallError>;
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError>;
 
-    /// Write a single dirty page to persistent storage. The filesystem resolves
-    /// page_idx to a disk block (allocating if needed).
+    /// Write one dirty page to the device, allocating its block if needed.
     fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; 4096]) -> Result<(), SyscallError>;
     /// Update file metadata (size, mtime) after flushing dirty pages.
     fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError>;
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError>;
 
-    /// Push everything this filesystem has buffered all the way to the device,
-    /// the device's own write cache included.
-    ///
-    /// Fallible for the same reason [`crate::block::BlockDevice::read_blocks`]
-    /// is: a sync whose failure the caller cannot see is indistinguishable from
-    /// one that worked, and the caller here is a log that writes a line when it
-    /// is told something went wrong — so swallowing the error made every failed
-    /// sync produce the pending bytes that ask for the next one.
+    /// An implementation of `sync` must not swallow a lower-level failure and report success: the log depends on this call telling the truth about durability.
     fn sync(&mut self) -> Result<(), SyscallError>;
 
-    /// Open a file backing for demand-paged ELF loading (separate from handle
-    /// I/O).
-    ///
-    /// No default body. One answering "nothing here" would be the sentinel this
-    /// trait exists to have removed, wearing a mount's own signature: a
-    /// filesystem that forgot to implement it would report every program on it
-    /// as missing.
+    /// `open_backing` has no default body: an unimplemented one would silently report every file on that mount as missing (the sentinel this trait exists to remove).
     fn open_backing(&mut self, name: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError>;
 }
 
 
-/// Whether userland may modify a mount.
-///
-/// Stated at every `mount` call and defaulted nowhere, so a volume added later
-/// cannot inherit the wrong answer by omission.
+/// Whether userland may modify a mount; stated at every `mount`, defaulted nowhere.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum UserAccess {
     ReadWrite,
-    /// The kernel's own volume. Reachable and readable, and every syscall that
-    /// would change it is refused — see [`Vfs::user_may_modify`].
+    /// Readable, and every userland syscall that would change it is refused.
     KernelOnly,
 }
 
@@ -154,75 +87,15 @@ pub struct Vfs {
     created_dirs: hashbrown::HashSet<String>,
 }
 
-/// Longest absolute path the VFS will hand back, and so the longest a process's
-/// `cwd` can ever be.
-///
-/// This exists because a bound can be defeated by composition. `MAX_USER_STR`
-/// (64 KiB) really does bound every path *argument*, and its own derivation
-/// says the number is set by the largest allocation derived from it. But
-/// `resolve_absolute` prepends `cwd` before handing the result to `normalize`,
-/// so unless `cwd` is bounded too the input `MAX_USER_STR` was sized against is
-/// not the input `normalize` sees.
-///
-/// The number is derived, not picked. Let `L = MAX_PATH + 1 + MAX_USER_STR` be
-/// the longest string reaching `normalize`. Its largest derived allocation is
-/// the `Vec<&str>` of components: 16 bytes each, and a path of `"a/a/a/…"`
-/// yields one component per two input bytes, so the vector holds up to
-/// `ceil(L/2)` of them. `Vec` grows by doubling, so the buffer is
-/// `next_pow2(ceil(L/2)) * 16` — and that single allocation must stay under
-/// `mm::MAX_HEAP_ALLOC` (2_093_056), above which `KernelAllocator::alloc`
-/// asserts.
-///
-/// At 4096: `L = 69_633`, `ceil(L/2) = 34_817`, `next_pow2 = 65_536`, so the
-/// vector is 1 MiB — a factor of two under the ceiling. The joined `String` is
-/// at most `L` bytes and never competes.
-///
-/// `MAX_USER_STR` dominates that sum, so this bound is a function of it: if
-/// `MAX_USER_STR` ever rises, re-run the arithmetic above rather than assuming
-/// this constant still holds. 64 KiB is already close to the cliff on its own —
-/// `MAX_PATH = 65_535` would put `ceil(L/2)` at 65_537, one element past the
-/// doubling step that lands on 2 MiB.
+/// `MAX_PATH` exists because `resolve_absolute` prepends `cwd` before `normalize`, defeating `MAX_USER_STR`'s per-argument bound unless `cwd` is separately bounded.
 pub const MAX_PATH: usize = 4096;
 
-/// The most entries one `FileSystem::list` may materialise.
-///
-/// The listing is a *derived* collection and `MAX_PATH` does not constrain it:
-/// every name in it is individually short, and it is the count that grows. A
-/// `read_dir` over 32,769 files in one tmpfs directory panics the kernel, which
-/// is the same shape as the `cwd` accumulation `MAX_PATH` closed, one
-/// collection further out.
-///
-/// Derived, not picked. Three allocations scale with the entry count `N`, and
-/// each must stay under `mm::MAX_HEAP_ALLOC` (2_093_056):
-///
-/// - the `Vec<(String, u64)>` `FileSystem::list` returns: `N * 32`, and the
-///   32 is const-asserted below rather than believed.
-/// - `Vfs::list`'s own `result`, same element: reserved *exactly* from a
-///   counting pass, so it is `<= N * 32` with no growth-by-doubling overshoot.
-///   That overshoot is what actually fired — `RawVec::grow_one` asking for the
-///   *doubled* capacity, at half the entry count the element size suggests.
-/// - `seen_dirs`, a `hashbrown::HashSet<String>` holding one entry per distinct
-///   subdirectory name — worst case `N`, when every entry is `d<i>/f`.
-///   hashbrown rounds to a power-of-two bucket count above `N * 8/7` and pays
-///   24 bytes plus one control byte per bucket.
-///
-/// At 16_384 those are 524_288, at most 524_288, and `32_768 * 25 = 819_216`:
-/// the worst is a factor of 2.5 under the ceiling, which is margin for a
-/// hashbrown whose per-bucket cost changes rather than a number that has to be
-/// re-derived when it does. Both worst cases are exercised at exactly this
-/// count by `readdir_bound`, so the derivation is checked and not just written
-/// down.
-///
-/// This bounds the *mount*, not the directory — see `FileSystem::list`.
+/// The most entries one `FileSystem::list` may materialise — per mount, not per directory.
 pub const MAX_LIST_ENTRIES: usize = 16_384;
 
 const _: () = assert!(core::mem::size_of::<(String, u64)>() == 32);
 
-/// The absolute path of a directory, from [`Vfs::resolve_path`]'s two halves.
-///
-/// The form `created_dirs` is keyed on, which is [`Vfs::resolve_absolute`]'s.
-/// One construction shared by the writer of that set and both its readers, so
-/// they cannot drift into disagreeing about what a directory is called.
+/// The `created_dirs` key for a directory — the one construction its writer and readers share.
 fn directory(mount: &str, subdir: &str) -> String {
     if subdir.is_empty() {
         format!("/{mount}")
@@ -232,8 +105,7 @@ fn directory(mount: &str, subdir: &str) -> String {
 }
 
 fn normalize(path: &str) -> String {
-    // `parts` is the allocation MAX_PATH is derived against — see its comment.
-    // Callers guarantee `path` is at most `MAX_PATH + 1 + MAX_USER_STR` bytes.
+    // `parts` is the allocation `MAX_PATH` is sized against.
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split('/') {
         match part {
@@ -267,21 +139,6 @@ impl Vfs {
     }
 
     /// May a syscall acting for userland change what is at `path`?
-    ///
-    /// The kernel's own answer is yes everywhere — it does not ask. This is
-    /// the syscall layer's question, and it is asked by every syscall that can
-    /// create, truncate, rename, delete or link, plus `open` for write.
-    ///
-    /// `/boot` is what it exists for. It is the volume firmware and the
-    /// bootloader read the machine out of, so without this an ordinary
-    /// process's `fs::write("/boot/toyos/kernel.elf", "TEETH")` truncates the
-    /// kernel image to five bytes and the machine does not boot again. That is
-    /// not a filesystem bug to fix in FAT32 — it is a mount that userland was
-    /// never meant to be able to change.
-    ///
-    /// The root mount answers yes here and refuses in the adapter instead:
-    /// the initrd is `ReadOnlyBcacheFsAdapter`, which has no write path to
-    /// gate.
     pub fn user_may_modify(&self, path: &str) -> bool {
         let (mount, _) = self.resolve_path("/", path);
         self.mounts.get(&mount).is_none_or(|m| m.access == UserAccess::ReadWrite)
@@ -344,12 +201,7 @@ impl Vfs {
 
         let abs = directory(&mount, &subdir);
 
-        // The one place a process's `cwd` is grown: `sys_chdir` stores whatever
-        // this returns. Refused rather than truncated — a shortened path names a
-        // *different* directory, and every later `resolve_absolute` against it
-        // would silently resolve to the wrong file. Checked before the three
-        // `Ok(abs)` returns below so none of them can hand back an over-long
-        // path, and after `mount.is_empty()`, whose "/" is a byte long.
+        // Refused rather than truncated: a shortened path names a different directory.
         if abs.len() > MAX_PATH {
             return Err(SyscallError::InvalidArgument);
         }
@@ -365,9 +217,7 @@ impl Vfs {
 
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
         let prefix = format!("{}/", fs_path);
-        // A mount too large to list is not a mount you can `cd` into either —
-        // the answer would need the same allocation — and a mount that would
-        // not answer is not one you can be told is absent.
+        // A mount too large to list cannot be entered either: the answer needs the same allocation.
         let names = fs.list(MAX_LIST_ENTRIES)?;
         if names.iter().any(|(name, _)| name.starts_with(&prefix) || *name == fs_path) {
             return Ok(abs);
@@ -376,13 +226,7 @@ impl Vfs {
         Err(SyscallError::NotFound)
     }
 
-    /// Every entry of one directory.
-    ///
-    /// Refuses above [`MAX_LIST_ENTRIES`] rather than truncating: a listing
-    /// short of the truth is worse than no listing, because a caller
-    /// enumerating a directory to delete it, or to check a name is absent,
-    /// gets a confident wrong answer. The refusal reaches userland as
-    /// `ResourceExhausted`.
+    /// `list` refuses above [`MAX_LIST_ENTRIES`] rather than truncating because a short listing is a confidently wrong answer to a caller checking existence or deleting a tree.
     pub fn list(&mut self, cwd: &str, path: &str) -> Result<Vec<(String, u64)>, SyscallError> {
         let (mount, subdir) = if path.is_empty() {
             self.resolve_path(cwd, "")
@@ -429,11 +273,7 @@ impl Vfs {
             if prefix.is_empty() { Some(name) } else { name.strip_prefix(prefix) }
         }
 
-        // Counted first, then reserved exactly — the `elf.rs` shape. Growth by
-        // doubling asks for the capacity it is moving *to*, so a `Vec` that
-        // ends up holding N entries transiently requests up to `2N`, and it
-        // was that overshoot rather than the final size that crossed the heap
-        // ceiling. Dedup only removes entries, so this is an upper bound.
+        // Dedup only removes entries, so `matching` is a true upper bound on the final result count.
         let matching = all_files.iter().filter(|(n, _)| under_prefix(n, &prefix).is_some()).count();
         let mut result = Vec::with_capacity(matching);
         let mut seen_dirs = hashbrown::HashSet::new();
@@ -451,26 +291,15 @@ impl Vfs {
             }
         }
 
-        // An empty directory and a path no directory could be are different
-        // answers, and this is the only place that can tell them apart. A
-        // directory here exists for one of three reasons — it is a mount, some
-        // file lives under it, or something called `mkdir` — and only the first
-        // two are visible in `result`. Without the third, `mkdir("/tmp/d")`
-        // followed by `read_dir("/tmp/d")` is `NotFound`, and `is_dir` reads the
-        // same refusal for an empty `d` as for a `d` that was never there —
-        // which is how `cp x d/` comes to write a *file* named `d`.
+        // `created_dirs` is the only witness to an empty `mkdir`ed directory;
+        // without it an empty directory reads as one that was never there.
         if result.is_empty() && !prefix.is_empty() && !self.created_dirs.contains(&directory(&mount, &subdir)) {
             return Err(SyscallError::NotFound);
         }
         Ok(result)
     }
 
-    /// Open a file for handle-based I/O.
-    ///
-    /// The backing the filesystem hands back is registered with the file
-    /// cache rather than returned: it belongs to the file, not to the handle
-    /// that happened to open it, and eviction is only sound for pages the cache
-    /// itself knows how to fetch again.
+    /// Open a file for handle I/O.
     pub fn open_file(&mut self, path: &str) -> Result<FileId, SyscallError> {
         let (file_id, backing) = self.open_file_depth(path, 0)?;
         if let Some(backing) = backing {
@@ -506,20 +335,10 @@ impl Vfs {
         fs.create(&fs_path, mtime)
     }
 
-    /// Flush dirty pages for a file, then update metadata.
-    ///
-    /// No early return on an empty dirty set. A `ftruncate` changes the file's
-    /// size without dirtying a page, so returning here leaves the new size in
-    /// the file cache and never tells the filesystem — correct until the last
-    /// handle closes and the cached size goes with it. Callers reach this only
-    /// when the handle is marked modified, so there is always something to
-    /// record.
+    /// No early return on an empty dirty set: `ftruncate` changes the size without dirtying a page.
     pub fn flush_file(&mut self, path: &str, file_id: FileId, mtime: u64) -> Result<(), SyscallError> {
-        // Take the dirty page set and clear the file's `dirty_meta` flag
-        // together (`take_dirty`), so a write that lands mid-flush re-sets the
-        // flag and is caught by the next flush rather than cleared by this one.
-        // A failed flush puts the flag back: the pages are still dirty and the
-        // file still owes a write-back, so `iod`/`fsync` will try again.
+        // `take_dirty` takes the dirty set and clears `dirty_meta` together, so a write landing
+        // mid-flush re-sets the flag and is caught by the next flush rather than cleared by this one.
         let dirty = crate::file_cache::take_dirty(file_id);
         match self.flush_taken(path, file_id, mtime, &dirty) {
             Ok(()) => Ok(()),
@@ -542,30 +361,11 @@ impl Vfs {
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
         if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
 
-        // On the heap and not the stack. A kernel-side caller can reach this
-        // from the idle loop, whose per-CPU stack is 16 KiB of ordinary heap
-        // with no guard page — so a 4 KiB frame there is a quarter of the stack
-        // and an overflow corrupts whatever the allocator put underneath it,
-        // silently: 11,505 bytes of the 16,384 were in use at the block layer,
-        // with the USB command path still below. `Vec` rather than
-        // `Box::new([0u8; 4096])`, because the latter is only elided from the
-        // stack if the optimiser feels like it.
+        // On the heap: the idle loop's 16 KiB stack has no guard page.
         let mut heap = alloc::vec![0u8; 4096].into_boxed_slice();
         let buf: &mut [u8; 4096] = (&mut heap[..]).try_into().expect("4096 bytes");
         for &page_idx in dirty {
-            // A truncate on another CPU can take a page out of the cache
-            // between `take_dirty` and here. Writing whatever the buffer
-            // happens to hold would put bytes in the file no writer produced.
-            //
-            // **The `?` before `clear_dirty` is the fsyncgate invariant**: a
-            // refused write-back returns with every page of the set still
-            // dirty and the handle still modified, so a retried flush has the
-            // same pages to deliver — a kernel that marked them clean here
-            // would hand the retry nothing and call the result durable, which
-            // is the exact failure PostgreSQL shipped for twenty years.
-            // `log_flush_retry`'s first boot is the gate, and the mutation
-            // that clears the set on this error path reds it at the blob's
-            // byte comparison.
+            // The `?` runs before `clear_dirty`: a refused write-back leaves every page dirty for the retry.
             if crate::file_cache::copy_page_out(file_id, page_idx, buf) {
                 fs.write_page(file_id, page_idx, buf)?;
             }
@@ -575,12 +375,7 @@ impl Vfs {
         let size = crate::file_cache::size(file_id);
         fs.update_metadata(file_id, size, mtime)?;
 
-        // A file created in this boot had no blocks to point a backing at,
-        // so its pages were unevictable up to here. They are on disk now.
-        //
-        // A refusal here is not the flush's: the bytes reached the device two
-        // statements ago. It costs this file its evictability for the rest of
-        // the boot, which is a cost the caller has nothing to do about.
+        // A refusal is logged, not returned: the bytes are on the device; only evictability is lost.
         if !crate::file_cache::has_backing(file_id) {
             match fs.open_backing(&fs_path) {
                 Ok(backing) => crate::file_cache::set_backing(file_id, backing),
@@ -599,7 +394,7 @@ impl Vfs {
         }
     }
 
-    /// Delete a file. Handles file cache mark_deleted for the FileId.
+    /// Unlink `path` on its mount.
     pub fn delete_file(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
         if mount.is_empty() { return Err(SyscallError::InvalidArgument); }
@@ -648,18 +443,7 @@ impl Vfs {
         fs.rename(&old_fs_path, &new_fs_path)
     }
 
-    /// Record a directory, or refuse a path no directory could have.
-    ///
-    /// `cd` bounds what it returns by `MAX_PATH`, so a longer path names a
-    /// directory nothing could ever chdir into. Storing one would grow
-    /// `created_dirs` for a name that is unreachable by construction, and would
-    /// make `cd`'s `None` a lie — it would be reporting "no such directory" for
-    /// something this function had just accepted.
-    ///
-    /// The `Result` is the point as much as the bound is: a `sys_mkdir` that
-    /// discarded this outcome and reported success unconditionally would make
-    /// the bound a *silent* failure — the caller told nothing, the directory
-    /// simply absent.
+    /// The `Result` is as much the point as the bound: a caller that discards it and reports success anyway turns the bound into a silent failure.
     pub fn create_dir(&mut self, path: &str) -> Result<(), SyscallError> {
         if path.len() > MAX_PATH {
             return Err(SyscallError::InvalidArgument);
@@ -698,58 +482,30 @@ impl Vfs {
         self.delete_file(path)
     }
 
-    /// Make one mount's writes durable.
-    ///
-    /// [`Vfs::sync_all`] is the wrong tool for a caller that knows which
-    /// filesystem it wrote to: on a machine with a `/home` on NVMe it is a
-    /// btree write-back and a device flush for a byte that went to the boot
-    /// stick.
+    /// Make one named mount's writes durable.
     pub fn sync_mount(&mut self, name: &str) -> Result<(), SyscallError> {
         self.mounts.get_mut(name).ok_or(SyscallError::NotFound)?.fs.sync()
     }
 
-    /// Is there a filesystem mounted under this name?
-    ///
-    /// The one thing the kernel knows about `/log`: it mounts the volume and
-    /// hands it to userland, and `/bin/logd` is what knows whether a file was
-    /// opened on it. `report_log_destination` is the caller and the panel is why
-    /// it exists — logd's own line reaches a console and never the screen.
+    /// Is there a filesystem mounted under `name`?
     pub fn has_mount(&self, name: &str) -> bool {
         self.mounts.contains_key(name)
     }
 
-    /// Sync whichever filesystem `path` lives on, the root included.
-    ///
-    /// **What `SYS_FSYNC` means.** `flush_file` puts the data, the FAT and the
-    /// directory entry on the device; it does not reach the device's own write
-    /// cache, and [`Vfs::sync_mount`] is what does — `Fat32::sync` writes FSInfo
-    /// and then calls `dev.flush()`, which is SCSI SYNCHRONIZE CACHE on a stick.
-    /// `/bin/logd` publishes `LOG_DURABLE_NS` off the result of an ordinary
-    /// `fsync`, and a panicking kernel waits on that word — so a syscall that
-    /// stopped at the page cache would make the word a claim about nothing.
-    ///
-    /// It is the whole mount and not the one file because that is the only
-    /// granularity a block device offers: a cache flush is per device. Every
-    /// `fsync` in the machine is slower for it, and more honest.
+    /// `/bin/logd` publishes `LOG_DURABLE_NS` off this call's result and a panicking kernel waits on that word, so `sync_for_path` must reach the device's write cache, not stop at the page cache.
     pub fn sync_for_path(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, _) = self.resolve_path("/", path);
         if self.mounts.contains_key(&mount) {
             return self.sync_mount(&mount);
         }
-        // Not a named mount, so the file is on the root filesystem. A machine
-        // with no root at all has nothing to flush, and that is not an error
-        // here: the write this is being asked to make durable cannot have
-        // happened.
+        // No root is not an error: the write being made durable cannot have happened.
         match &mut self.root {
             Some(root) => root.sync(),
             None => Ok(()),
         }
     }
 
-    /// Every mount, on the way down. Failures are logged here and not returned:
-    /// the caller is `SYS_SHUTDOWN`, which has nowhere to put a `Result` and
-    /// nothing left to try, and one mount refusing must not stop the rest from
-    /// being written out.
+    /// A refusal is logged, not returned, so one mount failing does not stop the rest.
     pub fn sync_all(&mut self) {
         if let Some(root) = &mut self.root {
             if let Err(e) = root.sync() {
@@ -763,27 +519,7 @@ impl Vfs {
         }
     }
 
-    /// Open a file backing for demand-paged ELF loading.
-    ///
-    /// This is separate from handle-based I/O and does not use the file cache:
-    /// what it hands back is a *device* view — the extent list and the length a
-    /// filesystem has recorded — so it is only true while the device is current.
-    ///
-    /// **The write-back queue is the standing statement that it is not**, and
-    /// settling it is this call's own job. A file's last close hands its dirty
-    /// pages to `iod` and returns (`crate::writeback`), so without the drain
-    /// below a `fs::write` followed by a spawn of the same path reads a btree
-    /// inode that still says length 0 and the loader answers `ELF: fewer bytes
-    /// than a file header` — a read-your-writes hole in exactly the sequence a
-    /// compiler performs. The
-    /// queue is drained here rather than waited on, so no writer pays for it and
-    /// the deferred close stays deferred; the reader that needs the device to be
-    /// current is the one that makes it so. Whole and not by path: the queue is
-    /// keyed by the name a handle was opened under, and a symlink, a rename or a
-    /// relative open name the same file differently.
-    ///
-    /// `flush_taken` re-derives a backing through [`FileSystem::open_backing`]
-    /// directly, so the drain below cannot re-enter this.
+    /// The write-back queue is drained whole, not filtered by path, because it is keyed by the name a handle was opened under, and a symlink, rename, or relative open names the same file differently.
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
         crate::writeback::drain_held(self);
         self.open_backing_depth(path, 0)

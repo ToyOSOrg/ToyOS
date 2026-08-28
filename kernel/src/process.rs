@@ -1,60 +1,11 @@
 //! The process table, and what a process is made of.
 //!
-//! ## What a crash report may take here, and what it may not
+//! [`dump_crash_diagnostics`] and [`try_for_each_thread`] never wait on
+//! [`PROCESS_TABLE`]: the faulting thread may hold it. A crash report resolves
+//! symbols off the task's own record ([`resolve_user_symbol`]), never off
+//! this table.
 //!
-//! Every reader in this file but two takes [`PROCESS_TABLE`] with `lock()`. The
-//! two that may not — [`dump_crash_diagnostics`] and [`try_for_each_thread`] —
-//! are the ones a machine in trouble reaches, and their rule is a rule about the
-//! whole path rather than about this file: **a crash report may not wait for any
-//! lock, because the faulting thread may be holding it.**
-//! `try_recover_from_panic` exists for exactly that thread, so a wait there is a
-//! deadlock on the one path in the kernel that must always produce output; and
-//! whatever holds this lock while the machine is stuck is a candidate for what
-//! is stuck, which is the census's version of the same argument.
-//!
-//! `try_lock` is what that leaves, and a `try_lock` is a coin toss: the answer
-//! it loses is not printed, and the answer worth losing least is the faulting
-//! function's *name*. So the rule has a second half, and it is the one worth
-//! stating:
-//!
-//! > **A crash report does not ask this table for a symbol.** It reads the
-//! > symbol table of the task it is reporting on, off that task's own record,
-//! > with no lock in the path — [`resolve_user_symbol`], over
-//! > `sched::driver::current_symbols`. A name is the part of a report a reader
-//! > cannot reconstruct from anything else in it, so it may not be the part that
-//! > depends on what some other CPU happened to be doing.
-//!
-//! What a report still takes from the table is [`dump_crash_diagnostics`]'s
-//! page-fault trace — and it still `try_lock`s, still loses sometimes, and says
-//! so in the report when it does. That is allowed because the trace is a
-//! supplement: the report above it is complete without it. Anything that stops
-//! being true of that — anything a reader could not reconstruct — has to leave
-//! this table the way the names did.
-//!
-//! ## Where the lifecycle's decisions live, and why they are not here
-//!
-//! **`toyos-proclife` decides and this file performs.** Who wins a teardown
-//! claim, which threads a claimant must retire, what code each thread is marked
-//! with, whose watch a thread's exit posts on, which entries an idle pass may
-//! take — every one of those is a pure function of two words per process and
-//! one per thread, and every one of them used to be a few lines in the middle
-//! of a function that also took locks, freed pages and retired tasks.
-//!
-//! The reason for the split is that this file's defects are **interleavings**.
-//! The table lock is given up between every phase of a teardown and between
-//! both halves of a spawn, and what goes wrong goes wrong in those windows:
-//! a thread inserted behind a retire sweep, two paths publishing one exit, a
-//! join armed on a subject nothing will post to. Nothing but a booted guest can
-//! reach one, and `issues/kernel/spawned-process-never-starts.md` stands open
-//! with no QEMU reproduction. `toyos-proclife`'s `interleave` module
-//! enumerates every ordering of a scripted pair of these paths and checks the
-//! laws at each state, in milliseconds.
-//!
-//! What that costs this file is two trait impls — [`Lifecycle`] over a
-//! [`ProcessEntry`] and [`Processes`] over the table — and the rule that comes
-//! with them: **a lifecycle decision is made there and never restated here.**
-//! A second copy of "the main thread gets the code and every sibling gets -1"
-//! is a second thing to get wrong, and the host model would not be holding it.
+//! `toyos-proclife` decides lifecycle transitions; this file only performs them.
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::string::String;
@@ -79,28 +30,19 @@ pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
 use toyos_abi::syscall::EndowEntry;
 
-/// The lifecycle's decisions. This file is their effects shell — see the module
-/// header for the split and what it is worth.
+/// The lifecycle's decisions; this file only performs them.
 pub use toyos_proclife::{ThreadLocation, Watch};
 use toyos_proclife::{join, poison, reap, spawn as proclife_spawn, teardown as proclife, Lifecycle, Processes};
 
-/// One `EndowEntry` on the wire. Named once, because both the reader in
-/// `loader::start` and the writer in [`Endowments::encode`] index by it.
+/// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
 
-// Re-export loader functions so existing callers (via `process::`) keep working.
 pub use crate::loader::{build_child_handles, spawn, spawn_init, INIT_PATH};
 
 /// Page tables shared between a process and all its threads.
 pub type PageTables = Arc<Lock<crate::mm::paging::AddressSpace>>;
 
-/// Allocate a virtual region and map physical memory into it.
-/// Returns the allocated virtual address, or None if out of address space.
-///
-/// Every caller states which [`Prot`] it means, so a TLS block, a pipe's ring
-/// and an `io_uring`'s rings cannot come back as pages a program could jump
-/// into. A library image — the one whose pages do not agree — does not come
-/// through here at all.
+/// Allocate a virtual region and map physical memory into it, or `None` if out of address space.
 pub fn vma_map(
     pt: &Lock<crate::mm::paging::AddressSpace>,
     phys: u64,
@@ -110,41 +52,19 @@ pub fn vma_map(
     pt.lock().alloc_and_map(phys, size, prot, CachePolicy::DeferToMtrr)
 }
 
-// OwnedAlloc — RAII heap allocation (for kernel-only buffers < 2MB)
 
-/// Move-only wrapper around a heap allocation. Drop calls dealloc.
-/// For kernel-only buffers (kernel stacks, TLS templates). NOT for user-mapped pages.
+/// Move-only wrapper around a heap allocation, freed on drop; not for user-mapped pages.
 pub struct OwnedAlloc {
     ptr: NonNull<u8>,
     layout: Layout,
 }
 
 impl OwnedAlloc {
-    /// `None` for any size the kernel heap cannot serve, so a caller sizing a
-    /// buffer from untrusted input gets a value to handle rather than a panic.
-    /// The heap's page source asserts above its ceiling (`mm::alloc`) instead
-    /// of returning null, so that ceiling is checked before the request, not
-    /// after.
-    ///
-    /// The ceiling is `mm::MAX_HEAP_ALLOC`, not `PAGE_2M`: testing against
-    /// `PAGE_2M` is short by dlmalloc's own bookkeeping, so a request in
-    /// `[PAGE_2M - overhead, PAGE_2M)` passes here and then makes dlmalloc ask
-    /// the page source for a 4 MiB granule — the assert this guard exists to
-    /// keep unreachable, and reachable from a `PT_TLS` `p_memsz` of `0x1F_FFF0`.
+    /// `None` above `mm::MAX_HEAP_ALLOC` — not `PAGE_2M`, which dlmalloc's own overhead can still overrun for a `PT_TLS` block near that size.
     pub fn new(size: usize, align: usize) -> Option<Self> {
         if size > crate::mm::MAX_HEAP_ALLOC { return None; }
         let layout = Layout::from_size_align(size, align).ok()?;
-        // SAFETY: `alloc_zeroed` requires a non-zero-size layout, and
-        // `Layout::from_size_align` has just produced this one from a size the
-        // guard above bounded — a zero size is refused by the allocator by
-        // returning null, which `NonNull::new` turns into `None` rather than a
-        // dangling `OwnedAlloc`.
-        //
-        // Irreducible: this is the raw allocator, and the safe wrapper over it
-        // is `Box`/`Vec`, neither of which can express "give me `size` bytes
-        // at `align`, decided at run time, or tell me you cannot" — `Box`
-        // needs a type and aborts instead of answering. Answering is the whole
-        // reason this type exists (`PT_TLS` sizes come out of an ELF).
+        // SAFETY: `layout` has non-zero size (checked above); a null return becomes `None` via `NonNull::new` rather than a dangling `OwnedAlloc`.
         let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })?;
         Some(Self { ptr, layout })
     }
@@ -152,22 +72,13 @@ impl OwnedAlloc {
     pub fn ptr(&self) -> *mut u8 { self.ptr.as_ptr() }
     pub fn size(&self) -> usize { self.layout.size() }
 
-    /// A bounds-checked view of the first `len` bytes.
-    ///
-    /// `len` is checked against the allocation rather than trusted: the whole
-    /// window comes from [`crate::mm::Allocation`] and `subslice` bounds the
-    /// prefix against it, so a view longer than the buffer is a panic here and
-    /// not an out-of-bounds write somewhere later.
+    /// A bounds-checked view of the first `len` bytes; `len` is checked against the allocation, not trusted.
     pub fn slice(&self, len: usize) -> crate::mm::KernelSlice {
         crate::mm::KernelSlice::whole(self).subslice(0, len)
     }
 }
 
-// SAFETY: `ptr()` is the address `alloc_zeroed` returned for `layout` and
-// `size()` is `layout.size()` — the same `Layout`, read off the allocation
-// rather than supplied beside it. `OwnedAlloc` is move-only, frees in its own
-// `Drop` and hands out no copy of the pointer that outlives `&self`, so the
-// bytes stay valid for as long as `self` does.
+// SAFETY: `ptr()`/`size()` read the same `Layout` `alloc_zeroed` used; the type is move-only and frees once in `Drop`.
 unsafe impl crate::mm::Allocation for OwnedAlloc {
     fn ptr(&self) -> *mut u8 { OwnedAlloc::ptr(self) }
     fn size(&self) -> usize { OwnedAlloc::size(self) }
@@ -175,34 +86,16 @@ unsafe impl crate::mm::Allocation for OwnedAlloc {
 
 impl Drop for OwnedAlloc {
     fn drop(&mut self) {
-        // SAFETY: `ptr`/`layout` are the pair `new` got back from
-        // `alloc_zeroed` and neither field is reachable from outside this
-        // module, so this is the same layout at the same address, freed once —
-        // `OwnedAlloc` is move-only and has no `Clone`.
-        //
-        // Irreducible: `Drop` is where a raw allocation is returned, and the
-        // safe alternative (`Box<[u8]>`) cannot carry a run-time alignment.
+        // SAFETY: same `ptr`/`layout` pair `new` produced; freed exactly once (move-only, no `Clone`).
         unsafe { dealloc(self.ptr.as_ptr(), self.layout); }
     }
 }
 
-// SAFETY: `OwnedAlloc` is `NonNull<u8>` plus its `Layout`, and it is `!Send`
-// only because `NonNull` is. The bytes behind it are an ordinary kernel heap
-// allocation with exactly one owner — the type is move-only, hands out no
-// copy of the pointer that outlives `&self`, and frees in its own `Drop` — so
-// moving that owner to another CPU carries the whole allocation with it and
-// leaves nothing behind to race with.
-//
-// Irreducible: `NonNull`'s `!Send` is deliberate and this is the only way to
-// say "this particular raw pointer is owned". Replacing it with a `Box<[u8]>`
-// (which is `Send`) is what would make the impl unnecessary, and that is the
-// run-time-alignment problem `new` above explains.
+// SAFETY: sole owner of the allocation moves with `self`; nothing else can reach `ptr`.
 unsafe impl Send for OwnedAlloc {}
 
-// PageAlloc — contiguous 2MB physical pages from PMM
 
-/// Contiguous 2MB-aligned physical pages from PMM. Provides a kernel-accessible
-/// pointer via the direct map. Pages are zeroed on allocation, freed on drop.
+/// Contiguous 2MB-aligned physical pages from PMM, zeroed on allocation, freed on drop.
 pub struct PageAlloc(Vec<crate::mm::pmm::PhysPage>);
 
 impl PageAlloc {
@@ -217,22 +110,7 @@ impl PageAlloc {
         self.0[0].direct_map().as_mut_ptr()
     }
 
-    /// This allocation as a bounds-checked window, sized from the pages it
-    /// owns.
-    ///
-    /// **A window and not a `&mut [u8]`, and these pages are why.** A frame
-    /// filled through this becomes a *user* mapping a few statements later, and
-    /// a `&mut [u8]` over bytes a process maps writable carries `noalias` and
-    /// `dereferenceable` into LLVM — the borrow [`UserBytes`]'s header exists to
-    /// refuse. A [`KernelSlice`] hands out no reference: `copy_from` and
-    /// `subslice` are a bounds-checked address and a raw copy, which is the
-    /// shape [`UserBytesMut::write_at`] already uses on the other side of the
-    /// same boundary. There is one such window type in this kernel and this is
-    /// it; a fourth private one would be a fourth thing to get right.
-    ///
-    /// [`KernelSlice`]: crate::mm::KernelSlice
-    /// [`UserBytes`]: crate::user_ptr::UserBytes
-    /// [`UserBytesMut::write_at`]: crate::user_ptr::UserBytesMut::write_at
+    /// This allocation as a bounds-checked window; a `&mut [u8]` here would carry `noalias`/`dereferenceable` into LLVM over pages that become a user mapping.
     pub fn window(&self) -> crate::mm::KernelSlice {
         crate::mm::KernelSlice::whole(self)
     }
@@ -248,29 +126,14 @@ impl PageAlloc {
     }
 }
 
-// SAFETY: both halves come from the same `Vec<PhysPage>` this type owns and
-// frees — `ptr()` is the direct-map address of the first page and `size()` is
-// `len() * PAGE_2M` over a run `alloc_contiguous` returned, so the pages really
-// are adjacent and the length really is the allocation's. The pages go back to
-// the PMM when the `Vec` drops each `PhysPage`, which is when `self` dies, so
-// they stay valid for exactly as long as `self` does.
+// SAFETY: `ptr()`/`size()` come from the same `Vec<PhysPage>` this type owns; pages return to the PMM when that `Vec` drops, which is when `self` does.
 unsafe impl crate::mm::Allocation for PageAlloc {
     fn ptr(&self) -> *mut u8 { PageAlloc::ptr(self) }
     fn size(&self) -> usize { PageAlloc::size(self) }
 }
 
-// MappedPages — physical pages plus the user address they were mapped at
 
-/// Pages handed to userland through [`vma_map`], carried with the virtual
-/// address that maps them.
-///
-/// `PageAlloc`'s Drop returns the pages to the PMM and reaches no address
-/// space, so pages and mapping cannot be dropped as one. Holding the two
-/// together is what makes the unmap expressible at all, and nothing but this
-/// type enforces that they stay together.
-///
-/// Dropping without unmapping is only sound when the address space itself is
-/// being destroyed (process teardown).
+/// Pages handed to userland through [`vma_map`], paired with the mapping address so the two are unmapped together; dropping without unmapping is sound only when the address space itself is being destroyed.
 pub struct MappedPages {
     vaddr: UserAddr,
     pages: PageAlloc,
@@ -288,13 +151,7 @@ impl MappedPages {
 
     pub fn size(&self) -> usize { self.pages.size() }
 
-    /// Take the mapping out of `addr_space` and hand back the pages, still
-    /// reachable from every other CPU until the wrapper is dropped.
-    ///
-    /// The obligation is the return type rather than a sentence: `unmap`'s
-    /// `invlpg` reaches this CPU only, and a sibling running another thread of
-    /// the same process can still hold an entry for a page the PMM is about to
-    /// reissue.
+    /// Take the mapping out of `addr_space`; the pages stay reachable from other CPUs until the returned wrapper drops (`invlpg` reaches only this CPU).
     fn unmap_from(
         self,
         addr_space: &mut crate::mm::paging::AddressSpace,
@@ -304,27 +161,13 @@ impl MappedPages {
     }
 
     pub fn release(self, pt: &PageTables) {
-        // Two statements, because the shootdown inside the drop may not run
-        // while the address-space lock is held: a sibling taking a page fault
-        // spins on that lock with `IF` clear and could never acknowledge.
+        // Two statements: the shootdown in drop must not run under the address-space lock, which a sibling's page fault spins on with IF clear.
         let pages = self.unmap_from(&mut pt.lock());
         drop(pages);
     }
 }
 
-/// Release every user mapping an exiting thread owns — its own TLS block and
-/// one per dlopen'd module it touched.
-///
-/// Sibling threads keep the address space alive past a thread exit, so a
-/// mapping left behind here is a live user-writable window onto memory the PMM
-/// has already reissued. Process teardown does not call this: there is no
-/// address space left to unmap from.
-///
-/// `tls` arrives by value because the caller holds the `ProcessData` lock and
-/// the `ThreadData` lock is never held at the same time. The pages go back out
-/// for the same reason: freeing one waits for every other CPU to flush, and one
-/// shootdown per block is what the caller pays — a thread owns its TLS and at
-/// most one block per module it touched, and thread exit is not a hot path.
+/// Release every user mapping an exiting thread owns (its TLS block, and any dlopen'd modules it touched), so none is left as a live writable window onto memory the PMM has already reissued; not called by process teardown, which has no address space left to unmap from.
 #[must_use]
 fn release_thread_mappings(
     data: &mut ProcessData,
@@ -351,11 +194,7 @@ fn release_thread_mappings(
 
 pub const KERNEL_STACK_SIZE: usize = 128 * 1024;
 
-/// Type-safe user stack. Knows its virtual address (what userland sees) and the
-/// kernel window onto the same pages. Impossible to confuse the two.
-///
-/// The window is the stack's [`PageAlloc`]'s own, so the size the writes are
-/// bounded against is the allocation's and not a constant repeated beside it.
+/// Type-safe user stack: couples the user-visible virtual address with the kernel window onto the same pages.
 pub struct UserStack {
     vaddr: UserAddr,
     window: crate::mm::KernelSlice,
@@ -374,42 +213,16 @@ impl UserStack {
 
     pub fn size(&self) -> u64 { self.window.size() as u64 }
 
-    /// Copy `src` onto this stack, at the *user* address `user_addr`.
-    ///
-    /// **The whole write is bounds-checked, and not just its address.** An
-    /// accessor that checked only the address it handed back would leave `n`
-    /// unchecked at every caller: the argv strings run one byte past the
-    /// checked address and the metadata block `args.len() + 2` words past it,
-    /// both inside the stack by `write_argv`'s arithmetic — which is an
-    /// argument and not a check.
-    ///
-    /// The check is [`crate::mm::KernelSlice`]'s rather than one of this type's
-    /// own: a bounded window over kernel pages that become a user mapping is
-    /// one problem, not four, and a stack is that problem exactly as a
-    /// demand-paged frame is.
-    ///
-    /// Panics rather than refuses because `user_addr` and `src.len()` are the
-    /// kernel's own arithmetic over its own freshly allocated pages, never a
-    /// number that crossed the boundary.
+    /// Copy `src` onto this stack at user address `user_addr`; bounds-checked against the whole write, not just `user_addr`.
+    /// Panics rather than refuses — both arguments are the kernel's own arithmetic, never boundary-crossed input.
     fn write_at(&self, user_addr: u64, src: &[u8]) {
         let offset = user_addr.checked_sub(self.vaddr.raw())
             .expect("UserStack: address below stack base");
-        // SAFETY: `copy_from` asserts `offset + src.len() <= size` against the
-        // stack's own allocation, so the write lands inside the pages
-        // `PageAlloc::window` was built from. `src` is a slice the caller owns
-        // and the destination is kernel-only until `loader::start` hands the
-        // address space to Ring 3, so the ranges cannot overlap and nothing
-        // else is looking.
-        //
-        // Irreducible: the destination becomes a user mapping, so the safe
-        // spelling — a `&mut [u8]` — is the borrow `user_ptr.rs`'s header
-        // refuses. One raw copy behind one bounds check is the shape
-        // [`crate::user_ptr::UserBytesMut`] uses for the same problem.
+        // SAFETY: `copy_from` bounds `offset + src.len()` against the stack's own allocation; the destination is kernel-only until `loader::start` hands the address space to Ring 3, so nothing else can be reading it.
         unsafe { self.window.copy_from(offset as usize, src) };
     }
 
-    /// Write argc, argv pointers, and string data onto this stack.
-    /// Returns the new user-visible stack pointer.
+    /// Write argc, argv pointers, and string data onto this stack; returns the new user-visible stack pointer.
     pub fn write_argv(&self, args: &[&str]) -> u64 {
         let mut sp = self.top();
         let mut argv_ptrs: Vec<u64> = Vec::with_capacity(args.len());
@@ -431,12 +244,8 @@ impl UserStack {
     }
 }
 
-// ProcessEntry + ThreadEntry — hierarchical process/thread table
 
-/// How much of a process or thread name the table keeps.
-///
-/// Fixed by the `SYS_SYSINFO` record's name field, which is the syscall that
-/// exists to report it: anything longer would not survive being asked for.
+/// How much of a process or thread name the table keeps, fixed by the `SYS_SYSINFO` record's name field.
 pub const THREAD_NAME_LEN: usize = 28;
 
 /// Per-thread metadata. Tid is the HashMap key in ProcessEntry.threads.
@@ -444,9 +253,7 @@ pub struct ThreadEntry {
     state: ThreadLocation,
     name: [u8; THREAD_NAME_LEN],
     thread_data: Arc<Lock<ThreadData>>,
-    /// The thread's scheduler faces (rendezvous word + published counters).
-    /// `None` only between the table insert that allocates the tid and the
-    /// `sched::spawn` that needs it — the task cannot exist before its own id.
+    /// `None` only between the table insert allocating the tid and the `sched::spawn` that creates the task.
     sched: Option<ThreadSched>,
 }
 
@@ -475,35 +282,20 @@ impl ThreadEntry {
 /// A process and all its threads. Removing a ProcessEntry removes all threads.
 pub struct ProcessEntry {
     pid: Pid,
-    /// The thing a handle to this process names, and where its exit code goes.
-    ///
-    /// The entry holds it, not the other way round: an object outlives the
-    /// entry for exactly as long as somebody still holds a handle, and a
-    /// process nobody kept a handle to leaves nothing behind at all.
+    /// The thing a handle to this process names; outlives the entry for as long as somebody still holds a handle.
     object: Arc<crate::object::process::ProcessObject>,
     name: [u8; THREAD_NAME_LEN],
     process_data: Arc<Lock<ProcessData>>,
-    /// This process's backtrace symbols, and **no `Lock` around them**.
-    ///
-    /// A `SymbolTable` is written once, by the loader, and read-only for the
-    /// rest of its life, so the only thing a lock would guard is the eager
-    /// release at teardown, which `teardown_bookkeeping` performs by dropping
-    /// this reference instead. What that buys is the whole point: every
-    /// thread of this process carries a clone of this `Arc` on its own task
-    /// record, so a crash report reaches the names through the task it is
-    /// reporting on and never through the table (see this module's header).
+    /// No `Lock`: written once by the loader, then read-only, so teardown releases it by dropping this `Arc` — a crash report then reaches names through the task it is reporting on, never through this table.
     symbols: Arc<SymbolTable>,
     main_tid: Tid,
     threads: crate::id_map::IdMap<Tid, ThreadEntry>,
-    /// Set once by the single exit/kill path that owns this process's
-    /// teardown. Guarded by the table lock. Checked by spawn_thread so no
-    /// new thread can appear after the teardown's retire sweep.
+    /// Set once by the exit/kill path that owns teardown; checked by `spawn_thread` so no thread appears after the retire sweep.
     tearing_down: bool,
 }
 
 impl ProcessEntry {
-    /// Create a new process with its main thread. Returns the entry and the
-    /// allocated main tid (always Tid(0) for the first thread).
+    /// Create a new process with its main thread (always `Tid(0)`).
     pub fn new(
         pid: Pid,
         name: [u8; THREAD_NAME_LEN],
@@ -537,19 +329,11 @@ impl ProcessEntry {
 }
 
 impl ProcessEntry {
-    /// The same field [`Lifecycle::tearing_down`] answers, spelled inherently
-    /// so a reader outside the lifecycle — the crash report's process line —
-    /// needs no trait in scope for one bool.
+    /// Mirrors [`Lifecycle::tearing_down`], usable without the trait in scope.
     pub fn tearing_down(&self) -> bool { self.tearing_down }
 }
 
-/// The lifecycle face of an entry: the four fields `toyos-proclife` decides
-/// against, and nothing else this type carries.
-///
-/// Deliberately the whole of what a decision may reach. An address space, a
-/// handle table, a symbol table and a scheduler record are all in
-/// [`ProcessEntry`] and none of them is nameable from a decision, which is why
-/// the host model of this is a `BTreeMap` and not a simulated kernel.
+/// The lifecycle face of an entry: only the fields `toyos-proclife` decides against, and nothing else this type carries.
 impl Lifecycle for ProcessEntry {
     fn main_tid(&self) -> Tid { self.main_tid }
     fn tearing_down(&self) -> bool { self.tearing_down }
@@ -572,21 +356,11 @@ impl Lifecycle for ProcessEntry {
     }
 }
 
-/// The lifecycle face of the table.
-///
-/// `published_exit` is the one answer that is not in the table at all: it comes
-/// off the [`ProcessObject`], which outlives its entry for as long as somebody
-/// holds a handle. That is the whole reason the trait has it rather than
-/// [`Lifecycle`].
-///
-/// [`ProcessObject`]: crate::object::process::ProcessObject
+/// The lifecycle face of the table; `published_exit` comes off the [`ProcessObject`](crate::object::process::ProcessObject) rather than the table, since it outlives the entry.
 impl Processes for ProcessTable {
     type Proc = ProcessEntry;
 
-    // Spelled through `IdMap` rather than as `self.get(pid)`: an inherent
-    // method and a trait method of the same name resolve to the inherent one,
-    // so the short spelling is correct here and one rename away from being
-    // infinite recursion.
+    // Via `IdMap::get`, not `self.get(pid)`: the inherent method and a trait method of the same name resolve to the inherent one, so renaming this would turn it into infinite recursion.
     fn get(&self, pid: Pid) -> Option<&ProcessEntry> {
         crate::id_map::IdMap::get(self, pid)
     }
@@ -605,14 +379,11 @@ impl Processes for ProcessTable {
 
 impl Drop for ProcessEntry {
     fn drop(&mut self) {
-        // The scheduler's per-process vruntime entry must live exactly as long
-        // as the table entry: threads of a zombified process still yield inside
-        // their own exit path, and the Yield re-insert reads the entry.
+        // vruntime must live as long as the table entry: a zombified process's threads still yield inside their own exit path and read it.
         scheduler::remove_vruntime(self.pid);
     }
 }
 
-// ProcessData — per-process data behind Arc<Lock<ProcessData>>
 
 /// Record of a single demand-paged fault, stored in a ring buffer for crash diagnostics.
 #[derive(Clone, Copy)]
@@ -621,9 +392,7 @@ pub struct PageFaultRecord {
     pub page_elf_offset: u64,
     pub block_idx: u32,
     pub reloc_count: u16,
-    // bit 0: writable, bit 1: has_relocs, bit 2: anonymous, bit 3: beyond_extent,
-    // bit 4: executable. Bits 0 and 4 come from one `Prot` and are never both
-    // set — a line carrying both is a kernel that has lost W^X.
+    // bit 0 writable, 1 has_relocs, 2 anonymous, 3 beyond_extent, 4 executable; 0 and 4 come from one `Prot` and are never both set (W^X).
     pub flags: u16,
     pub duration_us: u16, // microseconds spent handling this fault
 }
@@ -647,7 +416,6 @@ impl PageFaultTrace {
         }
     }
 
-    /// Record a page fault event.
     pub fn record(&mut self, rec: PageFaultRecord) {
         self.entries[self.write_pos] = rec;
         self.write_pos = (self.write_pos + 1) % 32;
@@ -667,26 +435,20 @@ impl PageFaultTrace {
 /// ELF loading artifacts and TLS state.
 pub struct ElfInfo {
     pub elf_alloc: Option<OwnedAlloc>,
-    /// Multi-module TLS layout per loaded library.
     pub tls_modules: Vec<crate::elf::TlsModule>,
-    /// Total combined TLS size across all modules.
     pub tls_total_memsz: usize,
-    /// Maximum TLS alignment across all modules.
     pub tls_max_align: usize,
     /// Next module ID to assign on dlopen (1-based, exe=1).
     pub next_tls_module_id: u64,
-    /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by (thread Tid, module_id).
-    /// Stored in process-level data so the VMA and backing memory have the same lifetime.
+    /// Dynamically allocated TLS blocks for dlopen'd modules, keyed by (Tid, module_id).
     pub dynamic_tls_blocks: alloc::collections::BTreeMap<(Tid, u64), MappedPages>,
     /// Dynamically loaded shared libraries (indexed by dlopen handle).
     pub loaded_libs: Vec<elf::LoadedLib>,
     /// RELATIVE relocation index for demand-paged ELF (applied per-page on fault).
     pub reloc_index: Option<Arc<elf::RelocationIndex>>,
-    /// Runtime base address for the demand-paged ELF (for relocation computation).
     pub elf_base: UserAddr,
     /// Executable .eh_frame_hdr vaddr (stated ELF vaddr, before base offset).
     pub exe_eh_frame_hdr_vaddr: u64,
-    /// Executable .eh_frame_hdr size.
     pub exe_eh_frame_hdr_size: u64,
     /// Executable virtual address extent (elf_base + vaddr_max - vaddr_min).
     pub exe_vaddr_max: u64,
@@ -695,13 +457,7 @@ pub struct ElfInfo {
 }
 
 impl ElfInfo {
-    /// The state of a process that has no ELF at all — a kernel thread
-    /// (`sched::kthread`).
-    ///
-    /// Not `Default`, because the only honest default of `next_tls_module_id`
-    /// is 1 rather than 0 and a derive would silently pick the other. Written
-    /// here rather than at the one call site so that a field added to
-    /// [`ElfInfo`] stops *this* build too.
+    /// The state of a process with no ELF at all (a kernel thread). Not `Default`: `next_tls_module_id`'s only honest default is 1, not 0; written here, not at the one call site, so a field added to [`ElfInfo`] stops this build too.
     pub fn none() -> Self {
         Self {
             elf_alloc: None,
@@ -722,17 +478,13 @@ impl ElfInfo {
 }
 
 /// Process-level data shared across all threads via `Arc<Lock<ProcessData>>`.
-/// Contains handles, memory mappings, ELF state, accounting — everything that belongs to the process.
-/// Accessed via `with_process_data`. All threads of a process share the same Arc.
 pub struct ProcessData {
-    /// Every kernel object this process can name. Stdio is slots 0, 1 and 2 at
-    /// generation 0, which is what makes those handles literally `0`, `1`, `2`.
+    /// Every kernel object this process can name; stdio is handles `0`, `1`, `2`.
     pub handles: HandleTable,
     pub cwd: String,
     /// Inherited environment variables (KEY=VALUE\0KEY2=VALUE2\0...)
     pub env: Vec<u8>,
 
-    /// ELF loading artifacts and TLS state.
     pub elf: ElfInfo,
 
     pub mmap_regions: Vec<MmapRegion>,
@@ -757,13 +509,7 @@ pub struct ProcessData {
     pub endowments: Endowments,
 }
 
-/// The labels a parent put on the handles it endowed, and nothing else.
-///
-/// **Names, not authority.** The handles are in the table whether or not the
-/// child ever asks; this is only how it learns which of its slots its parent
-/// meant by `serve:compositor`. Written once by spawn and freed with the
-/// process, which is the whole of the per-process state the endowment design
-/// adds.
+/// The labels a parent put on the handles it endowed — names, not authority: the handle is in the table whether or not the child ever asks.
 pub struct Endowments {
     entries: alloc::boxed::Box<[EndowEntry]>,
     labels: alloc::boxed::Box<[u8]>,
@@ -778,19 +524,12 @@ impl Endowments {
         Self { entries: entries.into_boxed_slice(), labels: labels.into_boxed_slice() }
     }
 
-    /// Bytes [`SYS_ENDOWMENTS`] answers with: a `u64` count, the entries, then
-    /// the blob their offsets index.
-    ///
-    /// [`SYS_ENDOWMENTS`]: toyos_abi::syscall::SYS_ENDOWMENTS
+    /// Bytes `SYS_ENDOWMENTS` answers with: a `u64` count, the entries, then the blob their offsets index.
     pub fn encoded_len(&self) -> usize {
         8 + self.entries.len() * ENDOW_ENTRY_LEN + self.labels.len()
     }
 
-    /// Render into `out`, which the caller has sized at [`Self::encoded_len`].
-    ///
-    /// Field by field rather than a transmute of the slice: `EndowEntry`'s
-    /// padding word is written as a zero here, so nothing of the kernel's
-    /// reaches a child in it.
+    /// Render into `out`, sized at [`Self::encoded_len`]. Field by field, not a slice transmute: `EndowEntry`'s padding word is written as zero here, so nothing of the kernel's reaches a child in it.
     pub fn encode(&self, out: &mut [u8]) {
         out[..8].copy_from_slice(&(self.entries.len() as u64).to_ne_bytes());
         for (i, entry) in self.entries.iter().enumerate() {
@@ -823,14 +562,10 @@ pub struct ProcessAccounting {
 }
 
 /// Per-thread data, unique to each thread via `Arc<Lock<ThreadData>>`.
-/// Contains thread-local storage pages, stack info, syscall profiling.
-/// Accessed via `with_current_data`. Each thread has its own Arc.
 pub struct ThreadData {
     pub tls_pages: Option<MappedPages>,
-    /// Main thread's user stack, at the fixed `vma::STACK_BASE`. Only ever
-    /// freed with the address space it lives in, so it needs no address here.
+    /// Main thread's user stack; freed only with its address space, so it needs no address here.
     pub stack_pages: Option<PageAlloc>,
-    // User stack location (for SYS_STACK_INFO)
     pub user_stack_base: UserAddr,
     pub user_stack_size: u64,
     /// Syscall counts per syscall number (for profiling)
@@ -840,27 +575,13 @@ pub struct ThreadData {
     pub syscall_total_ns: u64,
 }
 
-/// One process's window onto a pipe's ring page, from `SYS_PIPE_MAP`.
-///
-/// Recorded so it can be taken away. The page belongs to the pipe, and the
-/// pipe is freed the moment its last reader and writer reference drop — so a
-/// mapping that outlives the process's handles is a writable window onto
-/// memory the PMM has already handed to something else.
-///
-/// One entry per *pipe*, not per call: `sys_pipe_map` returns the window it
-/// already made. That is what bounds this vector — every entry needs a live
-/// handle naming its pipe, and distinct pipes need distinct handles, so it can
-/// never hold more than `object::handle::MAX_HANDLES` entries.
+/// One process's window onto a pipe's ring page (`SYS_PIPE_MAP`); recorded so it can be revoked before the page outlives the process's handle to it.
 pub struct PipeMap {
     pub pipe: pipe::PipeId,
     pub addr: UserAddr,
 }
 
-/// Take back every window onto `pipe` that `maps` holds.
-///
-/// Called when the process's last handle for the pipe goes: from there on
-/// nothing keeps the ring page alive, so the mapping has to stop before the
-/// page can be reissued.
+/// Take back every window onto `pipe`; called when the process's last handle to it goes.
 pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::PipeId) {
     if !maps.iter().any(|m| m.pipe == pipe) {
         return;
@@ -875,44 +596,29 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
             false
         });
     }
-    // Outside the block, because it waits: the lock this CPU would still be
-    // holding is one a sibling can be spinning on with `IF` clear.
+    // Outside the block: it waits, and a sibling can be spinning on this lock with IF clear.
     crate::arch::tlb::shootdown();
 }
 
-/// One live `mmap`, and the physical pages behind it.
-///
-/// The range itself is registered in the address space's `regions`, which is
-/// what the placement search reads and what `munmap` frees; this is the
-/// ownership of the memory and the accounting, and every entry here has a
-/// region of exactly its extent.
+/// One live `mmap` and its physical pages; the range's registration in the address space's `regions` is separate (placement search, `munmap`).
 pub struct MmapRegion {
     pub addr: UserAddr,
     pub size: usize,
-    /// `None` for a `MmapProt::NONE` mapping: the range is reserved so nothing
-    /// else is placed in it, and no physical memory backs a page whose whole
-    /// purpose is to fault.
+    /// `None` for a `MmapProt::NONE` mapping: the range is reserved, but no physical page backs an access whose whole purpose is to fault.
     pub _pages: Option<PageAlloc>,
 }
 
-// IdleProof — zero-cost proof that code runs on the per-CPU idle stack
 
-/// Zero-sized proof that we are on the per-CPU idle stack.
-/// Required by `ProcessTable::collect_orphan_zombies` to prevent calling it
-/// from a process's kernel stack (which would be use-after-free if we drop
-/// the thread entry we're running on).
+/// Zero-sized proof of running on the per-CPU idle stack; required by `collect_orphan_zombies` so it never drops the thread entry it runs on.
 #[derive(Clone, Copy)]
 pub struct IdleProof(());
 
 impl IdleProof {
-    /// Only call from `cpu_idle_loop` (which runs on the per-CPU idle stack).
-    ///
     /// # Safety
-    /// Caller must actually be running on the idle stack.
+    /// Caller must be running on the idle stack.
     pub(crate) unsafe fn new_unchecked() -> Self { Self(()) }
 }
 
-// Process table — IdMap<Pid, ProcessEntry> with lifecycle operations
 
 pub type ProcessTable = crate::id_map::IdMap<Pid, ProcessEntry>;
 
@@ -922,28 +628,20 @@ pub fn init() {
     *PROCESS_TABLE.lock() = Some(ProcessTable::new());
 }
 
-/// One thread as a diagnostic sees it: who it is, and what the scheduler's
-/// cross-CPU-readable face says about it.
+/// One thread as a diagnostic sees it: who it is, and what the scheduler's cross-CPU-readable face says about it.
 pub struct ThreadCensus<'a> {
     pub pid: Pid,
     pub tid: Tid,
     pub process: &'a str,
     pub thread: &'a str,
     pub zombie: Option<i32>,
-    /// One of `sched::payload`'s `SCHED_*`. `None` is the window between the
-    /// table insert that allocates the tid and the `sched::spawn` that mints
-    /// the task — a thread that has no scheduler record cannot be scheduled,
-    /// which is a state worth naming rather than eliding.
+    /// One of `sched::payload`'s `SCHED_*`; `None` between the table insert (tid allocated) and `sched::spawn` (task minted).
     pub sched: Option<u8>,
     /// Zero means the thread has never executed a user instruction.
     pub cpu_ns: u64,
 }
 
-/// Walk every thread in the table, or answer `false` because the table is
-/// held.
-///
-/// `try_lock` and not `lock`: the one time anybody asks is when the machine is
-/// stuck, and whatever holds this lock is a candidate for what is stuck.
+/// Walk every thread in the table, or answer `false` because the table is held; `try_lock`, not `lock`, since the one time anybody asks is when the machine is stuck and whatever holds this lock is a candidate for what is stuck.
 pub fn try_for_each_thread(mut f: impl FnMut(ThreadCensus<'_>)) -> bool {
     let Some(guard) = PROCESS_TABLE.try_lock() else {
         return false;
@@ -978,11 +676,7 @@ pub fn process_object(pid: Pid) -> Option<Arc<crate::object::process::ProcessObj
     table.get(pid).map(|proc| Arc::clone(proc.object()))
 }
 
-/// Accounting for a process, from wherever the numbers are.
-///
-/// A live one is sampled from its own `ProcessData` and its threads' published
-/// counters; an exited one answers with what its teardown took. `None` is the
-/// window between the two, which is the process being torn down right now.
+/// Accounting for a process. `None` only in the window between a live process and its published exit (the process being torn down right now).
 pub fn stats_of(
     object: &crate::object::process::ProcessObject,
 ) -> Option<toyos_abi::syscall::ProcessStats> {
@@ -990,8 +684,7 @@ pub fn stats_of(
         return Some(stats);
     }
     let pid = object.pid();
-    // Nothing is locked under the table lock: the two other locks are taken
-    // after it is given up, so this adds no ordering edge.
+    // The other two locks are taken after this one is dropped, so no ordering edge.
     let (data_arc, cpu_ns, threads) = {
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref()?.get(pid)?;
@@ -1013,41 +706,22 @@ pub fn stats_of(
     Some(stats_from(&data, pid, cpu_ns, syscall_total, syscall_total_ns))
 }
 
-/// Mark one thread dead — `toyos_proclife::teardown::mark_zombie`, which
-/// carries what it is idempotent about and why it is silent.
+/// Mark one thread dead; see `toyos_proclife::teardown::mark_zombie` for idempotency and silence.
 pub fn mark_thread_zombie(table: &mut ProcessTable, pid: Pid, tid: Tid, code: i32) {
     proclife::mark_zombie(table, pid, tid, code);
 }
 
-/// What a thread that died in panic recovery leaves to be cleaned up.
-///
-/// The panic path itself cannot do any of it — it may hold any lock the faulted
-/// thread was holding — so it only records the thread in the poison set and
-/// this runs later, from the idle loop. Both wakes are carried out rather than
-/// performed here, because both must happen with the table lock given up.
+/// What a thread that died in panic recovery leaves to be cleaned up; the panic path itself may hold any lock the faulted thread held, so this only records the thread, and the idle loop runs it later.
 #[must_use = "a poisoned thread's waiter must be woken"]
 pub enum PoisonWake {
-    /// A child thread died. **The pair names the thread that died**, which is
-    /// the subject a `thread_join` arms on — not the process's main thread.
+    /// A child thread died; the pair is the subject `thread_join` arms on (not the process's main thread).
     Joiner(Pid, Tid),
-    /// The main thread died, so the process is over. The exit is published on
-    /// the object — outside the table lock, like every other publish — and
-    /// whoever holds a handle reads it there.
+    /// The main thread died, so the process is over; publish outside the table lock.
     Process(Arc<crate::object::process::ProcessObject>),
 }
 
-/// Mark a poisoned thread dead and name what must be woken for it —
-/// `toyos_proclife::poison::zombify_poisoned` decides, this turns its answer
-/// into the two things the idle loop can perform.
-///
-/// `None` means there is nothing to do: the entry is gone, or another path
-/// already owns this process's teardown and will publish its exit.
-///
-/// No `teardown_resources` runs on this path, so the process's mappings and
-/// handles go with the table entry rather than before it. That is the standing
-/// cost of a panic recovery: this is reached from the idle loop
-/// and every release below it wants a lock the faulted thread may still be
-/// recorded as holding.
+/// Mark a poisoned thread dead and say what the idle loop must wake for it. `None`: nothing to do — the entry is gone, or another path already owns teardown.
+/// Resources are freed with the table entry rather than before it: every release below wants a lock the faulted thread may still hold.
 #[must_use = "a poisoned thread's waiter must be woken"]
 pub fn zombify_poisoned(table: &mut ProcessTable, pid: Pid, tid: Tid) -> Option<PoisonWake> {
     match poison::zombify_poisoned(table, pid, tid) {
@@ -1064,18 +738,8 @@ pub fn zombify_poisoned(table: &mut ProcessTable, pid: Pid, tid: Tid) -> Option<
     }
 }
 
-/// Take every entry whose process has published its exit —
-/// `toyos_proclife::reap::finished_pids` is which ones.
-///
-/// **There is no reaping ceremony.** Nobody has to be entitled to this, there
-/// is no orphan to adopt and nothing is kept for anyone to read later: the exit
-/// code and the final accounting are on the `ProcessObject`, which outlives the
-/// entry for as long as a handle to it does. The [`IdleProof`] is there because
-/// an entry owns its threads, so this may not run on one of them.
-///
-/// The entries come back rather than being dropped here, because the caller
-/// holds the table lock and an entry's drop reaches `remove_vruntime` and — for
-/// a process whose teardown never ran — the whole of its `ProcessData`.
+/// Take every entry whose process has published its exit.
+/// Entries come back rather than being dropped here: the caller holds the table lock, and an entry's drop reaches `remove_vruntime` and, for a process whose teardown never ran, the whole of its `ProcessData`.
 #[must_use = "the reaped entries must be dropped outside the table lock"]
 pub fn reap_finished(table: &mut ProcessTable, _proof: IdleProof) -> Vec<ProcessEntry> {
     reap::finished_pids(table).into_iter().filter_map(|pid| table.remove(pid)).collect()
@@ -1093,10 +757,8 @@ pub fn current_address_space() -> PageTables {
     scheduler::current_address_space().expect("current_address_space: no address space")
 }
 
-// Access patterns — ProcessData (clone Arc, drop table lock, lock ProcessData)
 
-/// Get the current thread's ThreadData Arc (brief table lock).
-/// If the entry is gone (process killed while thread was running), exits silently.
+/// Get the current thread's ThreadData Arc (brief table lock); exits silently if the entry is gone.
 pub fn current_data() -> Arc<Lock<ThreadData>> {
     let guard = PROCESS_TABLE.lock();
     let table = guard.as_ref().unwrap();
@@ -1120,8 +782,7 @@ pub fn set_current_thread_name(name: &[u8]) {
     }
 }
 
-/// Get the process-level ProcessData Arc (brief table lock).
-/// All threads of a process share the same Arc — no table walk needed.
+/// Get the process-level ProcessData Arc (brief table lock); shared by every thread of the process.
 pub fn process_data() -> Arc<Lock<ProcessData>> {
     let guard = PROCESS_TABLE.lock();
     let table = guard.as_ref().unwrap();
@@ -1134,16 +795,14 @@ pub fn process_data() -> Arc<Lock<ProcessData>> {
     }
 }
 
-/// Access the current thread's ThreadData mutably.
-/// Table lock is NOT held during the closure — only the per-thread lock.
+/// Access the current thread's ThreadData mutably; the table lock is not held during the closure.
 pub fn with_current_data<R>(f: impl FnOnce(&mut ThreadData) -> R) -> R {
     let arc = current_data();
     let mut guard = arc.lock();
     f(&mut guard)
 }
 
-/// Access the process-level ProcessData mutably.
-/// Table lock is NOT held during the closure — only the per-process lock.
+/// Access the process-level ProcessData mutably; the table lock is not held during the closure.
 pub fn with_process_data<R>(f: impl FnOnce(&mut ProcessData) -> R) -> R {
     let arc = process_data();
     let mut guard = arc.lock();
@@ -1152,17 +811,12 @@ pub fn with_process_data<R>(f: impl FnOnce(&mut ProcessData) -> R) -> R {
 
 /// Spawn a thread within the current process.
 pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Option<Tid> {
-    // Phase 1: Get parent's data + address space (never held simultaneously)
+    // Phase 1: parent's data + address space (table lock dropped after).
     let parent_process = current_process();
     let (parent_addr_space, process_data_arc) = {
         let guard = PROCESS_TABLE.lock();
         let table = guard.as_ref().unwrap();
-        // Not `is_yes()`, because the three answers are three different things
-        // here: a claimed teardown refuses the spawn, and a *missing* entry is
-        // the spawning thread's own process reaped out from under it, which
-        // panics. Phase 3 below answers `None` to that same state, and the two
-        // disagree
-        // (`issues/kernel/spawn-thread-disagrees-about-a-reaped-parent.md`).
+        // Not `is_yes()`: a missing entry here means this thread's own process was reaped out from under it, which panics rather than refuses.
         match proclife_spawn::admit_thread_start(table, parent_process) {
             proclife_spawn::Admit::Yes => {}
             proclife_spawn::Admit::TearingDown => return None,
@@ -1172,8 +826,6 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         }
         let proc = table.get(parent_process)
             .expect("spawn_thread: the entry the admission just answered for");
-        // A thread is spawned by a running thread, which by construction has an
-        // address space: `None` here is "no task is running", and this is one.
         let addr_space = scheduler::current_address_space()
             .expect("spawn_thread: the spawning thread runs in an address space");
         (addr_space, Arc::clone(&proc.process_data))
@@ -1183,10 +835,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         (data.elf.tls_modules.clone(), data.elf.tls_total_memsz, data.elf.tls_max_align)
     };
 
-    // Phase 2: Allocate TLS (outside any lock). An empty module set is a process
-    // with no TLS at all — its threads still get a DTV+TCB block, which
-    // `setup_tls(None, 0, ..)` builds. (The exe's own template rides in
-    // `tls_modules` as module 1, never here.)
+    // Phase 2: allocate TLS outside any lock. An empty module set still gets a DTV+TCB block via `setup_tls(None, 0, ..)`.
     let (tls_alloc, fs_base) = if !tls_modules.is_empty() {
         setup_combined_tls(&tls_modules, tls_total_memsz, tls_max_align)?
     } else {
@@ -1196,20 +845,11 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         let addr_space = &parent_addr_space;
         let parent_data = process_data_arc.lock();
         let tls_phys = tls_alloc.phys();
-        // VA exhaustion is a resource failure a process can reach by spawning
-        // threads until its range is gone, not a kernel bug. `tls_alloc`
-        // drops on the way out, returning its pages.
+        // VA exhaustion is a resource failure the process caused, not a kernel bug; `tls_alloc` drops on the way out, returning its pages.
         let (tls_vaddr, _) = vma_map(addr_space, tls_phys, tls_alloc.size() as u64, Prot::ReadWrite)?;
-        // Rebase fs_base and internal TLS pointers from physical to virtual
         let tls_rebase = tls_vaddr.raw() as i64 - tls_phys as i64;
         let fs_base = (fs_base as i64 + tls_rebase) as u64;
-        // SAFETY: `tls_alloc` is the block `setup_tls`/`setup_combined_tls` just
-        // built and this scope still owns it — freshly allocated pages no other
-        // path knows, reached through the direct map; `vma_map` has published
-        // only their *virtual* address, which the not-yet-created thread that
-        // will read it does not yet name. This runs under the process-data lock
-        // taken above, `spawn_thread`'s own exclusivity. `fs_base - tls_vaddr` is
-        // the thread-pointer offset those builders placed.
+        // SAFETY: `tls_alloc` is freshly built and solely owned by this scope; `vma_map` has published only its virtual address, which no not-yet-created thread names yet. Runs under the process-data lock.
         unsafe {
             rebase_block(tls_phys, (fs_base - tls_vaddr.raw()) as usize, fs_base, tls_rebase);
         }
@@ -1225,8 +865,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         }
     };
 
-    // Phase 3: Insert into table (brief table lock)
-    // Threads share the parent's ProcessData Arc — no empty handle table or zeroed process fields.
+    // Phase 3: insert into table (brief table lock); threads share the parent's ProcessData Arc.
     let thread_data = Arc::new(Lock::new(ThreadData {
         tls_pages: Some(tls_alloc),
         stack_pages: None,
@@ -1239,23 +878,17 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
 
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
-    // The same question, under the lock that inserts. Teardown claims the
-    // process under this lock, so a thread refused here is one that would have
-    // been invisible to a retire sweep already under way — and
-    // `toyos_proclife::interleave` enumerates the orderings that reach it.
+    // Re-checked under the insert lock: a thread refused here would otherwise be invisible to a retire sweep already under way.
     if !proclife_spawn::admit_thread_insert(table, parent_process).is_yes() {
         return None;
     }
     let proc = table.get_mut(parent_process)
         .expect("spawn_thread: the entry the insert admission just answered for");
-    // Every thread of a process names the same symbols, so a crash report on any
-    // of them reads its own process's names without asking this table.
+    // Every thread names the same symbols, so a crash report never asks this table.
     let symbols = Arc::clone(&proc.symbols);
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
 
-    // Placed while still holding the table lock: teardown claims the process
-    // under this lock, so a thread that passed the check above is fully visible
-    // to the scheduler before any retire sweep can start.
+    // Enqueue while still holding the table lock: this thread is fully visible to the scheduler before any retire sweep can start.
     let (sched, _dst) = scheduler::enqueue_new(
         TaskId(parent_process, tid),
         ks_alloc,
@@ -1270,18 +903,13 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
 }
 
 
-/// Tear down a process: zombie all its threads, free all resources, wake parent.
-/// Called in two phases:
-/// - Phase 1 (resource cleanup): ProcessData lock held, table lock NOT held.
-/// - Phase 2 (scheduling): table lock held through context switch.
-///
-/// Returns (syscall_total, syscall_total_ns) for the main thread, needed by the accounting snapshot.
+/// Frees an exiting process's resources (mappings, handles, ELF state). Returns (syscall_total, syscall_total_ns) for the main thread, for the accounting snapshot.
 fn teardown_resources(
     process_data_arc: &Arc<Lock<ProcessData>>,
     thread_data_arc: &Arc<Lock<ThreadData>>,
     pid: Pid,
 ) -> (u64, u64) {
-    // Phase 1: Thread-level cleanup (never hold ThreadData + ProcessData simultaneously)
+    // Never hold ThreadData + ProcessData at once.
     let (syscall_total, syscall_total_ns, syscall_counts) = {
         let mut tdata = thread_data_arc.lock();
         let stats = (tdata.syscall_total, tdata.syscall_total_ns, tdata.syscall_counts);
@@ -1290,10 +918,8 @@ fn teardown_resources(
         stats
     };
 
-    // Phase 2: Process-level cleanup (single lock acquisition)
     let mut data = process_data_arc.lock();
 
-    // Flush current thread's blocked/runqueue stats into process accounting
     if percpu::current_pid() == Some(pid) {
         scheduler::flush_current_stats(&mut data.accounting);
     }
@@ -1309,11 +935,7 @@ fn teardown_resources(
         }
         let wall_ms = syscall_total_ns / 1_000_000;
         log!("syscalls: pid={pid} total={} syscall_wall={wall_ms}ms{profile}", syscall_total);
-        // The flush census speaks here because a process exit is the one
-        // recurring moment a running guest reaches (the harness kills QEMU, so
-        // a shutdown-only instrument reaches no capture), and only behind an
-        // exit that called `SYS_FSYNC`, so the machine's flush story is told
-        // beside a process that just depended on it.
+        // Printed here, not at shutdown: process exit is the one recurring moment a running guest reaches (the harness kills QEMU).
         if syscall_counts[toyos_abi::syscall::SYS_FSYNC as usize] > 0 {
             crate::block::census::print_if_moved();
         }
@@ -1324,13 +946,7 @@ fn teardown_resources(
             data.peak_memory / (1024 * 1024), data.alloc_count, data.free_count);
     }
 
-    // **The machine's interrupt census, at the one recurring moment every boot
-    // reaches and every capture carries.** It is not this process's — the
-    // counters are cumulative and machine-wide — but they are monotonic, so the
-    // last such line in a capture is that boot's whole census and the difference
-    // between two of them is what the interval cost. `SYS_SHUTDOWN` is not a
-    // substitute: the QEMU harness ends a guest by killing it, so nothing after
-    // the last process exit ever reaches a capture.
+    // Machine-wide, cumulative counters, printed here (not at shutdown) because process exit is the one recurring moment every boot reaches.
     crate::irq_census::log_census();
 
     ops::close_all(&mut data.handles);
@@ -1344,17 +960,8 @@ fn teardown_resources(
     (syscall_total, syscall_total_ns)
 }
 
-/// Table-side teardown bookkeeping: mark remaining thread entries zombie and
-/// drop the symbol table.
-///
-/// Caller must hold the PROCESS_TABLE lock, have claimed teardown, retired
-/// every other thread of the process (so none can run), and freed resources.
-/// Returns the process's object, whose exit the caller publishes once the table
-/// lock is given up.
-///
-/// No shared regions come back to be freed outside the lock, and there is no
-/// pid sweep to do: a region is an object, its mappings go with the last
-/// handle, and `close_all` in phase 3 is what releases them.
+/// Table-side teardown bookkeeping: mark remaining threads zombie, drop the symbol table.
+/// Caller must hold `PROCESS_TABLE`, have claimed teardown, retired every other thread and freed resources. Returns the object whose exit the caller publishes once the table lock is given up.
 #[must_use = "the exit must be published on the object returned"]
 fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
                         main_cpu_ns: u64, child_threads_cpu_ns: u64)
@@ -1364,23 +971,10 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
 
     proclife::mark_all_zombie(proc, code);
 
-    // The symbol table is megabytes of the process's own pages, read off its
-    // binary, and a dead process has no backtrace left for anyone to take —
-    // every caller of `resolve_user_symbol` is a crash report, which runs on the
-    // live process before this.
-    //
-    // Dropping this reference is the release, and the pages go with the *last*
-    // one: phase 2 has already retired every other thread of this process, so
-    // what is left holding a clone is the thread running this line, whose
-    // payload `Hw::release` drops as it leaves the CPU. That is one exit pass
-    // later than an in-place empty, and it is the property that makes the
-    // lock-free read sound — a report cannot be reading a table whose owner is
-    // off every CPU.
+    // Dropping this `Arc` is the release; every other thread is already retired, so the thread running this line holds the last clone — which is why a lock-free crash-report read can never see a table whose owner is off every CPU.
     proc.symbols = Arc::new(SymbolTable::empty());
 
-    // The whole process, not the main thread alone — retire_threads already
-    // folded every other thread's time into child_threads_cpu_ns, and this
-    // is the same total final_stats hands SYS_PROCESS_STATS.
+    // Whole-process total: retire_threads already folded sibling time into child_threads_cpu_ns.
     let cpu_ms = (main_cpu_ns + child_threads_cpu_ns) / 1_000_000;
     let name = proc.name_str();
     log!("exit: {name} pid={process_pid} code={code} cpu={cpu_ms}ms");
@@ -1388,14 +982,7 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32,
     Arc::clone(&proc.object)
 }
 
-/// The accounting a process leaves behind, for `SYS_PROCESS_STATS` to answer
-/// after it is gone.
-///
-/// Must run after [`retire_threads`], which is what folds each retired
-/// thread's scheduler accounting into `ProcessData` — `merge_into` for the
-/// counters and `child_threads_cpu_ns` for the CPU time. Both teardowns do:
-/// `exit`'s phase 2 and `kill_process`'s, each immediately before
-/// [`teardown_tail`], which is this function's only caller.
+/// The accounting a process leaves behind, for `SYS_PROCESS_STATS`. Must run after [`retire_threads`], which folds retired threads' accounting into `ProcessData`.
 fn final_stats(
     process_data_arc: &Arc<Lock<ProcessData>>,
     pid: Pid,
@@ -1407,11 +994,7 @@ fn final_stats(
     stats_from(&data, pid, main_cpu_ns, syscall_total, syscall_total_ns)
 }
 
-/// One `ProcessStats`, from a process's own data.
-///
-/// Written once because `SYS_PROCESS_STATS` samples a live process through the
-/// same fields the teardown snapshots, and two spellings of one record is two
-/// records that can disagree.
+/// One `ProcessStats`, from a process's own data; written once, since `SYS_PROCESS_STATS` samples a live process through the same fields the teardown snapshots.
 pub fn stats_from(
     data: &ProcessData,
     pid: Pid,
@@ -1443,15 +1026,8 @@ pub fn stats_from(
     }
 }
 
-/// Retire a set of threads and fold their scheduler accounting into the
-/// process's, returning the main thread's CPU time if `main_tid` was among them
-/// (else 0).
-///
-/// Each thread is provably out of the scheduler when `retire_task` returns — not
-/// queued, not parked, not mid-steal, not running — which is the ordering the
-/// whole teardown rests on: only a thread no CPU can still run may have the
-/// memory its page tables map freed, or a thread still running writes through
-/// those stale mappings into 2 MiB frames the PMM has already re-issued.
+/// Retire a set of threads, folding their scheduler accounting into the process's; returns the main thread's CPU time if it was among them (else 0).
+/// `retire_task` proves each thread fully off the scheduler before returning — the ordering the whole teardown's memory-freeing safety rests on.
 fn retire_threads(
     pid: Pid,
     tids: impl IntoIterator<Item = Tid>,
@@ -1475,15 +1051,8 @@ fn retire_threads(
     main_cpu_ns
 }
 
-/// Phases 3-5 of a process teardown, shared by exit and kill: free resources, do
-/// the table-locked bookkeeping, then publish the exit once the table lock is
-/// given up.
-///
-/// The ordering is load-bearing, and the caller has already met its
-/// precondition — every other thread retired, so none of this process can run.
-/// Publish comes *after* the table lock is released, which is what the wake
-/// inside `teardown_bookkeeping` needs; and once published the entry is
-/// reapable, so nothing may read the table for this pid afterward.
+/// Phases 3-5 of a process teardown, shared by exit and kill: free resources, do the table-locked bookkeeping, then publish the exit. The ordering is load-bearing: the caller has already retired every other thread, so none of this process can run.
+/// Publish happens after the table lock is released — `teardown_bookkeeping`'s wake needs that — and once published the entry is reapable, so nothing may read the table for this pid after.
 fn teardown_tail(
     process_data_arc: &Arc<Lock<ProcessData>>,
     thread_data_arc: &Arc<Lock<ThreadData>>,
@@ -1504,9 +1073,7 @@ fn teardown_tail(
         teardown_bookkeeping(table, pid, code, main_cpu_ns, child_threads_cpu_ns)
     };
 
-    // Phase 5: publish the exit. The table lock is given up, which is what the
-    // wake inside it needs — and once it is published the entry is reapable, so
-    // nothing may read the table for this pid after this point.
+    // Phase 5: publish; once published the entry is reapable, so nothing may read the table for this pid after.
     let stats = final_stats(process_data_arc, pid, syscall_total, syscall_total_ns, main_cpu_ns);
     object.publish_exit(crate::object::process::Exit { code, stats });
 }
@@ -1516,33 +1083,16 @@ pub fn exit(code: i32) -> ! {
     scheduler::exit_current(code);
 }
 
-/// Everything a process's own teardown gives back — and it **returns**, which
-/// is the whole reason it is a function.
-///
-/// `exit_current` never comes back and nothing here unwinds, so a value still
-/// live at that call is a value nothing will ever drop: the kernel stack it
-/// sits on is freed by the exit pass without running a destructor. Three `Arc`s
-/// are live here — the [`ProcessObject`], the process's `ProcessData` and the
-/// exiting thread's `ThreadData` — so diverging leaks one live kernel object
-/// per process the machine has ever run, which the per-variant census sees. A
-/// scope that ends is the only thing that releases them, and a caller that
-/// diverges has none.
-///
-/// [`ProcessObject`]: crate::object::process::ProcessObject
+/// Everything a process's own teardown gives back; returns rather than diverging because `exit_current` never comes back, and three live `Arc`s (`ProcessObject`, `ProcessData`, `ThreadData`) would leak with no scope left to drop them.
 fn release_process(code: i32) {
     let process_pid = current_process();
     let tid = current_tid();
 
-    // Phase 1: claim teardown. Exactly one exit/kill path tears a process
-    // down; later arrivals just exit their own thread — the claimant's
-    // retire sweep accounts for them like any other thread.
+    // Phase 1: claim teardown. Exactly one exit/kill path wins; later arrivals just exit their own thread, and the claimant's retire sweep accounts for them like any other thread.
     let (process_data_arc, thread_data_arc, main_tid, set) = {
         let mut guard = PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
-        // The thread is checked before the claim and the claim is not taken
-        // when it is missing, which is the short circuit this expression is:
-        // a thread that is not in its own process's entry has nothing to tear
-        // down.
+        // Checked before the claim: a thread not in its own process's entry has nothing to tear down.
         let present = Processes::get(table, process_pid)
             .is_some_and(|proc| Lifecycle::location(proc, tid).is_some());
         if !present || !proclife::claim_teardown(table, process_pid) {
@@ -1560,11 +1110,9 @@ fn release_process(code: i32) {
 
     crate::mm::paging::activate_kernel();
 
-    // Phase 2: retire every *other* thread — the current thread is running this
-    // and cannot retire itself.
+    // Phase 2: retire every *other* thread — the current thread can't retire itself.
     let mut main_cpu_ns = retire_threads(process_pid, set.others, main_tid, &process_data_arc);
-    // The current thread was filtered out of the retire set above, so if it is
-    // the main thread its CPU time is picked up here rather than by the sweep.
+    // Filtered out of the retire set above, so its time is picked up here if it's the main thread.
     if set.current_is_main {
         main_cpu_ns = thread_sched(process_pid, tid)
             .map_or(0, |s| scheduler::task_cpu_ns(&s));
@@ -1574,8 +1122,7 @@ fn release_process(code: i32) {
     teardown_tail(&process_data_arc, &thread_data_arc, process_pid, code, main_cpu_ns);
 }
 
-/// Exit the current thread. If this is the main thread, tears down the entire
-/// process via `exit()`. For child threads, frees thread resources and zombifies.
+/// Exit the current thread. If this is the main thread, tears down the entire process via `exit()`. For child threads, frees thread resources and zombifies.
 pub fn thread_exit(code: i32) -> ! {
     let process_pid = current_process();
     let tid = current_tid();
@@ -1588,10 +1135,7 @@ pub fn thread_exit(code: i32) -> ! {
     let post = match route {
         proclife::ThreadExit::Process => exit(code),
         proclife::ThreadExit::Sibling { post } => post,
-        // The entry went under this thread while it was on its way here, which
-        // is the race `mark_thread_zombie` one function along already tolerates.
-        // It leaves by the sibling door and every table write below finds
-        // nothing to do.
+        // The entry went under this thread on the way here (the race `mark_thread_zombie` already tolerates); it leaves by the sibling door.
         proclife::ThreadExit::Gone { post } => {
             log!("exit: pid={process_pid} tid={tid} outlived its process-table entry");
             post
@@ -1599,12 +1143,9 @@ pub fn thread_exit(code: i32) -> ! {
     };
 
     release_thread(process_pid, tid, code);
-    // Whoever joined this thread armed on it. Posted before the exit pass,
-    // because after it this thread does not run again.
+    // Whoever joined this thread armed on it; post before the exit pass — after it this thread never runs again.
     if let Some(handle) = crate::sched::driver::current_handle() {
-        // The decision names a subject and this performs it through the
-        // handle this CPU already has, which costs no lock — so the two are
-        // held together by an assertion rather than by a reader's memory.
+        // Held together by assertion, not shared state: the decision names the subject, this performs it via the CPU's own handle.
         debug_assert_eq!(
             post,
             Watch::Thread(process_pid, tid),
@@ -1619,17 +1160,9 @@ pub fn thread_exit(code: i32) -> ! {
     scheduler::exit_current(code);
 }
 
-/// A child thread's own teardown.
-///
-/// It **returns** rather than diverging, for [`release_process`]'s reason: the
-/// address space it clones out is an `Arc`, and one left live where
-/// `exit_current` is called is one nothing ever drops.
-///
-/// Every table write here is silent about an entry that has gone, which is
-/// [`mark_thread_zombie`]'s rule: a thread can arrive with its process already
-/// reaped by another CPU's kill, and it still has to finish leaving.
+/// A child thread's own teardown; returns rather than diverging for [`release_process`]'s reason (a live `Arc` nothing would drop).
+/// Every table write here is silent about a gone entry: the process may already have been reaped by another CPU's kill.
 fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
-    // Thread-only exit path: release this thread's mappings, zombify, wake parent.
     let addr_space = current_address_space();
     crate::mm::paging::activate_kernel();
 
@@ -1643,9 +1176,7 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
         let mut owner_data = owner_arc.lock();
         release_thread_mappings(&mut owner_data, tls, &addr_space, tid)
     };
-    // After the block: dropping these waits for every other CPU, and the
-    // process-data lock they were taken under is one the page-fault handler
-    // takes with `IF` clear.
+    // After the block: dropping waits for every other CPU, and the page-fault handler takes this same lock with IF clear.
     drop(released);
 
     let mut guard = PROCESS_TABLE.lock();
@@ -1662,31 +1193,15 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
     }
 }
 
-/// A thread's scheduler record, cloned out of the table.
-///
-/// Cloning rather than borrowing is what keeps the wake and retire paths off
-/// the table lock: both need the rendezvous word, and neither may hold a lock
-/// while it posts.
+/// A thread's scheduler record, cloned out of the table so wake/retire never hold the table lock while they post.
 pub fn thread_sched(pid: Pid, tid: Tid) -> Option<ThreadSched> {
     let guard = PROCESS_TABLE.lock();
     let table = guard.as_ref()?;
     table.get(pid)?.threads.get(tid)?.sched().cloned()
 }
 
-/// The physical address of a futex word, demand-paged in like any other user
-/// access.
-///
-/// The scheduler dereferences this long after the syscall returns
-/// (`scheduler::futex_wait` reads `*phys as u32` on every wake check), so the
-/// alignment is not the caller's manners: a word four bytes below a 2 MiB
-/// boundary would have its tail read out of the next *physical* page, which
-/// belongs to somebody else.
-///
-/// For the same reason the answer is not a *lease*: nothing here pins the
-/// frame, and a sibling's `munmap` can hand it back to the PMM while the wait
-/// is still parked on it. What makes that safe is at the two ends —
-/// `AddressSpace::unmap` ends the waits it orphans, and `scheduler::futex_wait`
-/// re-derives this translation on every check rather than trusting it.
+/// The physical address of a futex word, demand-paged in like any other user access. Alignment matters: the scheduler dereferences this directly on every wake check, so an unaligned word could straddle into the next physical page.
+/// Not a lease: nothing pins the frame, and a sibling's `munmap` can free it under a parked wait. Made safe by `AddressSpace::unmap` ending orphaned waits, and `scheduler::futex_wait` re-deriving the translation on every check.
 fn futex_word(addr: UserAddr) -> Option<crate::mm::DirectMap> {
     if !addr.raw().is_multiple_of(4) {
         return None;
@@ -1694,19 +1209,10 @@ fn futex_word(addr: UserAddr) -> Option<crate::mm::DirectMap> {
     crate::user_ptr::translate_user(addr)
 }
 
-/// Atomically check a user futex word and block if it matches the expected value.
-/// Returns 0 if woken normally, 1 if timed out, an error if `addr` names no
-/// word this process may have.
-///
-/// It takes a [`UserAddr`] rather than a `u64` because the bound is the whole
-/// safety of the call: at the syscall arms it is an expression whose value gets
-/// discarded — dead-looking code protecting a `pub fn` in another file, which a
-/// third caller would not know to repeat.
+/// Atomically check a user futex word and block if it matches `expected`. Returns 0 if woken/never blocked, 1 if timed out, an error if `addr` names no word this process may have.
+/// Takes [`UserAddr`], not `u64`: the bound check is the whole safety of the call, done once here rather than repeated by every caller.
 pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
-    // The ABI's relative `u64::MAX` means "no timeout" and every other value is
-    // a relative span, turned absolute exactly once, here. C11 makes the ABI
-    // itself absolute; until then this is where the two meanings meet, and the
-    // [`Deadline`] is what stops the sentinel travelling any further in.
+    // The ABI's relative `u64::MAX` means no timeout; every other value is a relative span, turned absolute exactly once, here.
     let deadline = if timeout_ns != u64::MAX {
         Deadline::at(crate::clock::now() + Duration::from_nanos(timeout_ns))
     } else {
@@ -1718,11 +1224,7 @@ pub fn futex_wait(addr: UserAddr, expected: u32, timeout_ns: u64) -> u64 {
         return toyos_abi::syscall::SyscallError::BadAddress.to_u64();
     };
 
-    // The ABI's two answers, and the kernel can produce both now: 0 wherever
-    // the word no longer holds `expected` — woken, or never blocked at all,
-    // which are one answer to a caller that re-checks the word either way —
-    // and 1 where it still does, which nothing but the caller's own deadline
-    // can have ended.
+    // 0 covers both woken and never-blocked (the caller re-checks the word either way); 1 means only the caller's own deadline ended it.
     match scheduler::futex_wait(addr, phys_addr, expected, deadline) {
         scheduler::FutexEnd::Changed => 0,
         scheduler::FutexEnd::Timeout => 1,
@@ -1761,48 +1263,23 @@ pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
     }
 }
 
-/// Atomically validate parent-thread relationship and collect a zombie thread.
-///
-/// The table lock is the atomicity: the state read and the entry removal are one
-/// critical section, so a joiner cannot observe the zombie and then race another
-/// path to remove it. `Err(())` is a `tid`/`pid` this caller may not join.
+/// Atomically validate the parent-thread relationship and collect a zombie thread; the table lock is the atomicity. `Err(())`: this caller may not join `tid`/`pid`.
 pub fn wait_thread_zombie(tid: Tid, parent_pid: Pid) -> Result<Option<i32>, ()> {
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
-    // The two refusals are one answer to this caller — `SyscallError::NotFound`
-    // either way — and `toyos_proclife::join::JoinRefused` keeps them apart
-    // because they are not the same fact about the machine.
+    // Both refusals are one answer here (`SyscallError::NotFound`); `JoinRefused` keeps them apart because they aren't the same fact.
     join::collect_zombie(table, parent_pid, tid).map_err(|_| ())
 }
 
-/// Handle a page fault at `fault_addr` by looking up the current process's VMAs.
-/// Returns true if the fault was resolved (a page was mapped), false if fatal.
-///
-/// **One 2 MiB window is filled by however many threads fault on it and
-/// installed exactly once.** Nothing here holds the address space across the
-/// fill — it is the longest operation in the kernel's hottest paging path, up
-/// to 512 device reads — so the mapped/not-mapped question is asked twice: once
-/// cheaply, to decide whether to fill at all, and once inside the critical
-/// section that writes the entry ([`AddressSpace::map_window_if_absent`]). A
-/// thread that loses the second question drops the frame it just filled. It is
-/// still charged for it, so `fault_demand_count + fault_zero_count` exceeds
-/// `alloc_count` by exactly the number of fills this process threw away.
-///
-/// The `ProcessData` lock below serialises the fills but decides nothing about
-/// them: two threads queue on it having both already passed the first question.
+/// Handle a page fault at `fault_addr` by looking up the current process's VMAs. Returns whether the fault was resolved.
+/// A 2 MiB window may be filled by several racing threads; only the one that wins [`AddressSpace::map_window_if_absent`]'s critical section installs it, and a loser drops its frame but is still charged for it — `fault_demand_count + fault_zero_count` exceeds `alloc_count` by exactly the fills thrown away.
 pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
     let t0 = crate::clock::nanos_since_boot();
     let tid = current_tid();
     if tid == Tid::MAX {
         return false;
     }
-    // **A kernel thread's fault is fatal, said out loud rather than fallen
-    // into.** A kernel thread names the kernel address space, so
-    // `current_address_space()` two lines below answers `Some` and the walk
-    // beneath would look for a user region in a `ProcessData` that has none —
-    // reaching the same `false` by accident. Nothing here can resolve a kernel
-    // fault: demand paging is a user mapping's mechanism, and the kernel's
-    // direct map is complete from `paging::init`.
+    // A kernel thread's fault is fatal, said explicitly rather than fallen into by accident: demand paging is a user-mapping mechanism only, and the kernel's direct map is complete.
     if crate::sched::kthread::current_is_kernel_thread() {
         return false;
     }
@@ -1821,8 +1298,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
     let region_start = fault_addr & !(page_2m - 1);
     let region_end_full = region_start.saturating_add(page_2m);
 
-    // Collect region info from the address space (lock addr_space briefly).
-    // We gather everything we need so we can drop the lock before doing I/O.
+    // Snapshot region info (brief address-space lock) so the fill below can run without holding it.
     struct RegionSnap {
         start: u64,
         end: u64,
@@ -1839,43 +1315,21 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
 
         match as_guard.find_region(UserAddr::new(fault_addr)) {
             None => return false,
-            // A `Mapped` region carries its pages from the moment it is
-            // created, so a fault *inside* one is an access the mapping was
-            // created to refuse — a `MmapProt::NONE` reservation, which is
-            // mapped nowhere on purpose. Filling it here would hand back the
-            // writable page the caller asked not to have.
-            //
-            // The test is on the faulting address and not on the overlap set
-            // below, because a `Mapped` region that merely shares a 2 MiB
-            // window with a demand-paged one still contributes zeros to it.
+            // A `Mapped` region's pages exist from creation, so a fault inside one (a `MmapProt::NONE` reservation) must refuse, not fill.
+            // Tested on the faulting address, not the overlap set below: a shared window still contributes zeros to a demand-paged one.
             Some((_, region)) if matches!(region.kind, crate::vma::RegionKind::Mapped) => {
                 return false;
             }
             Some(_) => {}
         }
 
-        // If a 2MB page is already mapped at this region (from a previous fault
-        // in a different VMA that shares the same 2MB range), just return success.
-        //
-        // **This is the fast answer and not the decision.** The lock goes away
-        // three statements below and the fill takes 2 MiB of work, so a sibling
-        // thread faulting on this window in the meantime reads the same "not
-        // mapped" from the same table. What decides is `map_window_if_absent`,
-        // which asks again in the same critical section as the install; this
-        // one is here so that the overwhelmingly common case — a window a
-        // previous fault already filled — costs a walk instead of a fill.
+        // Fast answer, not the decision: the lock drops before the fill, so a racing sibling can see the same "not mapped".
+        // `map_window_if_absent` re-checks inside the install's critical section; this just skips a fill for the common already-filled case.
         if as_guard.translate(UserAddr::new(region_start)).is_some() {
             return true;
         }
 
-        // **The window's protection is per 4 KiB page and not one verdict for
-        // all 512.** These regions came from `PT_LOAD` segments at 4 KiB
-        // alignment, so the window where `.text` ends and `.data` begins holds
-        // both — and OR-ing the two, which is what a single `writable` flag
-        // would do, is a window that is writable *and* executable. A page no region
-        // covers is the padding past the image and gets the least of the
-        // three: `map_window` still maps the whole frame, and nothing may
-        // execute or write what nothing asked for.
+        // Per-4-KiB protection, not one verdict for all 512: `PT_LOAD` segments align to 4 KiB, so a window can hold both `.text` and `.data`, and OR-ing their flags would make it writable and executable at once; padding past the image gets the least of the three.
         let mut window_prot = WindowProt::uniform(Prot::Read);
         let mut snaps = Vec::new();
         for (&start_addr, region) in as_guard.overlapping_regions(UserAddr::new(region_start), UserAddr::new(region_end_full)) {
@@ -1889,9 +1343,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
                     },
                     *prot,
                 ),
-                // Already mapped eagerly, and its pages keep what was installed
-                // — this fault is not about them. It contributes zeros to the
-                // frame and the least protection to the pages it covers.
+                // Already mapped eagerly; contributes zeros and the least protection.
                 crate::vma::RegionKind::Mapped => (RegionSnapKind::Anonymous, Prot::Read),
             };
             let start = start_addr.raw();
@@ -1915,13 +1367,10 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
         Some(a) => a,
         None => return false,
     };
-    // The frame as a bounds-checked window rather than a bare `*mut u8`: both
-    // fills below are the kernel's own arithmetic over ELF fields, and an
-    // arithmetic bound is an argument until something checks it.
+    // A bounds-checked window, not a bare `*mut u8`: both fills below are the kernel's own arithmetic, unchecked until something bounds it.
     let page = page_alloc.window();
 
-    // Fill the 2MB page from ALL regions that overlap this range.
-    // Multiple segments (e.g. .text and .rodata) can share a 2MB range.
+    // Multiple segments (e.g. .text/.rodata) can share a 2MB range.
     let mut io_reads: u32 = 0;
     for region in &regions {
         match &region.kind {
@@ -1940,12 +1389,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
                     if vma_offset < *file_size {
                         let byte_offset = vma_offset + file_offset;
                         let mut page_buf = [0u8; 4096];
-                        // Unhandled, not filled with zeros. The fault is on a
-                        // file-backed mapping, so zeros here are instructions
-                        // or constants the program never had, and the fault it
-                        // takes later names an address rather than the disk.
-                        // `page_alloc` is a local, so this return gives the
-                        // 2 MiB page back.
+                        // Unhandled, not zero-filled: zeros here would be instructions/constants the program never had; `page_alloc` is a local, so returning drops it.
                         if backing.read_page(byte_offset, &mut page_buf).is_err() {
                             log!("fault: {:#x} is backed by a file byte {byte_offset} that the \
                                  device would not read; leaving the fault unhandled",
@@ -1954,24 +1398,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
                         }
                         io_reads += 1;
                         let valid = if vma_offset + 4096 <= *file_size { 4096 } else { (*file_size - vma_offset) as usize };
-                        // SAFETY: `copy_from` asserts
-                        // `page_offset + valid <= page_2m` against
-                        // `page_alloc`'s own size, so the write lands inside
-                        // the frame — checked, rather than derived from this
-                        // loop's conditions. `page_alloc`
-                        // is a local of this function that nothing else can
-                        // see: the frame is not mapped into any address space
-                        // until `map_window` below, so nothing is reading it
-                        // and the `noalias` question the borrow would have
-                        // raised does not arise. `page_buf` is a stack array
-                        // this loop owns, so the ranges cannot overlap.
-                        //
-                        // Irreducible: the safe spelling is a `&mut [u8]`, and
-                        // these pages become a user mapping four statements
-                        // later — the borrow `user_ptr.rs`'s header refuses.
-                        // A bounds-checked window that hands out no reference is
-                        // the reduction, and `PageAlloc::window` is where it is
-                        // taken.
+                        // SAFETY: `copy_from` bounds `page_offset + valid` against `page_alloc`'s own size; the frame is unmapped in any address space until `map_window` below, so nothing else can read it, and `page_buf` is this loop's own stack array.
                         unsafe { page.copy_from(page_offset, &page_buf[..valid]) };
                     }
                     vaddr += 4096;
@@ -1987,12 +1414,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
         while offset < page_2m {
             let page_elf_offset = (region_start + offset).wrapping_sub(elf_base);
             if ri.has_relocs_in_page(page_elf_offset) {
-                // `subslice` asserts `offset + 4096 <= page_2m` against the
-                // frame's own size, and `apply_to_page` then bounds every write
-                // against the window it was handed rather than against a 4096
-                // of its own. This loop's own `offset < page_2m` is an argument
-                // rather than a check, and says nothing about the 4096 bytes
-                // past `offset`.
+                // `subslice` bounds `offset + 4096` against the frame's own size; `apply_to_page` bounds every write against the window it's handed.
                 total_relocs = total_relocs.saturating_add(
                     ri.apply_to_page(page_elf_offset, page.subslice(offset as usize, 4096)) as u16,
                 );
@@ -2002,22 +1424,8 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
     }
 
 
-    // No invalidation here, and none inside on the ordinary path: the fault got
-    // here because the PDE was not present, and nothing is cached from one.
-    // `map_window` derives that from the entry it replaced.
-    //
-    // One 2 MiB frame either way: a window whose pages agree is one PDE, and
-    // the one window per binary whose pages do not is a page table over the
-    // same frame.
-    //
-    // **The window is claimed under the lock that installs it, not under the
-    // one that decided to fill.** The `translate` far above answered before
-    // this address space was unlocked for the fill, and the fill is the longest
-    // thing on this path — so a sibling thread faulting on the same window gets
-    // the same "not mapped" and arrives here too. Whoever gets this lock first
-    // installs; the other's fill is thrown away. Installing both would leave
-    // one thread's CPU on a frame nothing else can see: what the PDE write owes
-    // is discharged on *this* CPU, and no shootdown is issued from a fault.
+    // No invalidation: the fault means the PDE was absent, so nothing is cached from it (`map_window` derives that from the entry it replaces).
+    // Claimed under the install lock, not the decide-to-fill one: a racing sibling can reach here too and lose the install race; the loser's fill is thrown away rather than both being installed, since no shootdown is issued from a fault.
     let installed = addr_space.lock().map_window_if_absent(
         UserAddr::new(region_start),
         page_alloc.phys(),
@@ -2033,17 +1441,11 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
             data.peak_memory = current_mem;
         }
     } else {
-        // A wasted fill, and the frame goes back now rather than at the end of
-        // this function: nothing is mapped to it, so nothing but this local
-        // knows it exists.
+        // Wasted fill: dropped now, since nothing but this local knows it exists.
         drop(page_alloc);
     }
 
-    // Charged whether or not the fill was kept. The fault happened, the CPU
-    // time was spent and the device reads were issued, so a loser that
-    // vanished from the accounting would make a contended window look free —
-    // and the difference between the fault counts and `alloc_count` is the
-    // only reading anything has of how often this races.
+    // Charged whether or not the fill was kept, so a losing race doesn't vanish from accounting — the gap vs `alloc_count` is the only reading of how often this races.
     let fault_elapsed = crate::clock::nanos_since_boot() - t0;
     data.accounting.fault_ns += fault_elapsed;
     if io_reads > 0 {
@@ -2054,9 +1456,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
         data.accounting.fault_zero_count += 1;
     }
 
-    // The faulting page's own protection and not the window's: a window may
-    // hold a code page and a data page at once, and the trace is about the
-    // access that faulted.
+    // The faulting page's own protection, not the window's: a window can hold code and data pages together.
     let fault_prot = regions
         .iter()
         .find(|r| fault_addr >= r.start && fault_addr < r.end)
@@ -2078,8 +1478,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
     true
 }
 
-/// Dump the page fault trace and memory around `fault_addr` for the current process.
-/// Called from the exception handler on user-mode crashes.
+/// Dump the page fault trace and memory around `fault_addr` for the current process; called from the exception handler on user-mode crashes.
 pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     let Some(pid) = percpu::current_pid() else { return };
 
@@ -2110,8 +1509,7 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
             if rec.flags & 2 != 0 { flag_str[1] = b'R'; } // has_relocs
             if rec.flags & 4 != 0 { flag_str[2] = b'A'; } // anonymous
             if rec.flags & 8 != 0 { flag_str[3] = b'Z'; } // beyond extent (zero)
-            // Never beside `W`: the two are the variants of one `Prot`, and a
-            // trace line carrying both would be a kernel that lost W^X.
+            // Never beside `W` (one `Prot`'s variants); both set means lost W^X.
             if rec.flags & 16 != 0 { flag_str[4] = b'X'; } // executable
             let flags = core::str::from_utf8(&flag_str).unwrap_or("????");
             log!("    fault={:#x} elf_off={:#x} blk={} relocs={} {}us [{}]",
@@ -2120,33 +1518,13 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
         }
     }
 
-    // Dump memory around given addresses (if mapped in the process page tables)
     let Some(addr_space) = scheduler::current_address_space() else { return };
 
-    // Read a u64 from a user virtual address via page table translation.
-    // Reads via the kernel direct map (no USER bit) to avoid SMAP faults.
+    // Reads via the direct map (no USER bit) to avoid SMAP faults.
     let read_user = |virt: u64| -> Option<u64> {
         if !virt.is_multiple_of(8) { return None; }
         let phys = addr_space.lock().translate(UserAddr::new(virt))?;
-        // SAFETY: `translate` answered `Some`, so `virt` is mapped in this
-        // process right now and `phys` is its direct-map address; the `virt %
-        // 8` guard above makes the `u64` naturally aligned, and one aligned
-        // `u64` cannot straddle the 2 MiB page the single translation answered
-        // for. Reading through the direct map rather than `virt` is what keeps
-        // SMAP on.
-        //
-        // Irreducible, and it is a *crash report* — the value is printed and
-        // decides nothing, so a word another thread of the dying process
-        // substitutes between two lines of the dump is the report's subject
-        // rather than a hazard.
-        //
-        // `read_volatile` all the same, because the rule is the kernel's and
-        // not this call site's: every read of user memory in this kernel is one
-        // read, not one the compiler may split, fold or repeat. `dump_region`
-        // is where that would show — it reads the same address twice, once to
-        // decide the region is mapped and once inside the loop that prints it —
-        // and a report whose two reads were folded into one would be printing a
-        // value it did not fetch.
+        // SAFETY: `translate` answered `Some`, so `phys` is `virt`'s current direct-map address; the `virt % 8` guard keeps the `u64` within the one 2 MiB page the translation answered for. `read_volatile`: this is a crash report, and two folded reads would print a value never fetched.
         Some(unsafe { phys.as_ptr::<u64>().read_volatile() })
     };
 
@@ -2186,51 +1564,25 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
         } else {
             log!("  FS base {:#x} NOT MAPPED!", fs_base);
         }
-        // TLS alloc info is in ThreadData; FS base dump above gives the relevant info.
     }
 }
 
-/// What a crash report learned when it asked for a user address's symbol.
-///
-/// **Not a bool.** A bool says "no symbol was logged" for two facts that are
-/// not the same one — an address the tables genuinely do not cover, and an
-/// address nothing looked up because a lock was held — and a caller would print
-/// the same bare number for both. A fault report that says `0x10000004cbb`
-/// where the backtrace three lines below says `fault_gate_child::main+0x136`
-/// has told the reader something false about the binary
-/// (`issues/panic-path/`).
+/// What a crash report learned when it asked for a user address's symbol. Not a `bool`: "no symbol was logged" would conflate an address the tables genuinely don't cover with one nothing looked up because a lock was held.
 #[must_use = "an address with no symbol line still has to be printed"]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SymbolLookup {
     /// Resolved: the line naming it has already been logged.
     Named,
-    /// The symbol table was read and covers no such address. A bare address is
-    /// the whole truth about it.
+    /// The symbol table was read and covers no such address.
     Unnamed,
-    /// Nothing was read: a scheduler pass already held this CPU's task record
-    /// when the report began, so the running task — and its symbols — could not
-    /// be reached.
-    ///
-    /// **The one concession left, and it is not hypothetical.** A Rust `panic!`
-    /// raised *inside* `driver::pass` reports from a CPU whose record is exactly
-    /// that: `sched_stress`'s `invariant P` fired at
-    /// `timer_handler -> driver::pass -> SchedPass::finish` on a KVM shard
-    /// (`src/redlist.rs`), and a panic there with a user `syscall_rip` behind it
-    /// asks this question and gets this answer.
+    /// Nothing was read: a scheduler pass already held this CPU's task record when the report began, so the running task's symbols were unreachable.
     InPass,
-    /// Nothing was read: this CPU is running no task, so there is no process
-    /// whose symbols could be meant. The idle context, and boot before the first
-    /// task.
+    /// Nothing was read: no task is running on this CPU (idle, or before the first task).
     NoTask,
 }
 
 impl SymbolLookup {
-    /// Log the bare address for a lookup that produced no symbol line, saying
-    /// *why* there is none. [`Named`](Self::Named) logs nothing: its line is
-    /// already out.
-    ///
-    /// Every caller goes through this rather than testing the variant, so a
-    /// concession can never be printed as a verdict.
+    /// Log the bare address for a lookup with no symbol line, saying why; [`Named`](Self::Named) logs nothing — its line is already out.
     pub fn log_bare(self, addr: u64) {
         match self {
             Self::Named => {}
@@ -2245,58 +1597,23 @@ impl SymbolLookup {
     }
 }
 
-/// Resolve and log a user-mode address against the running process's symbol
-/// table. Safe to call from a fault or panic report; see
-/// [`with_current_symbols`] for what the answer means.
+/// Resolve and log a user-mode address against the running process's symbol table; see [`with_current_symbols`].
 pub fn resolve_user_symbol(addr: u64) -> SymbolLookup {
     with_current_symbols(|syms| crate::symbols::resolve_user(syms, addr))
 }
 
-/// [`resolve_user_symbol`] for a backtrace frame's return address — see
-/// [`crate::symbols::SymbolTable::resolve_return`].
+/// [`resolve_user_symbol`] for a backtrace frame's return address — see [`crate::symbols::SymbolTable::resolve_return`].
 pub fn resolve_user_symbol_return(return_addr: u64) -> SymbolLookup {
     with_current_symbols(|syms| crate::symbols::resolve_user_return(syms, return_addr))
 }
 
-/// Run `f` against the symbol table of the task this CPU is running, and say
-/// what happened.
-///
-/// **The contract, which is three-way and not two.** `f` decides between
-/// [`Named`](SymbolLookup::Named) and [`Unnamed`](SymbolLookup::Unnamed); the
-/// remaining answers are this function's own, and each one says that the address
-/// was never looked up at all. The caller must print the address for any of them
-/// — [`SymbolLookup::log_bare`] is that print — and a report that renders a
-/// concession as a bare number is the defect this shape exists to make
-/// unwritable.
-///
-/// **No lock, and that is the whole of it.** Taking `PROCESS_TABLE` to find the
-/// faulting process's entry could only ever be a `try_lock`: this runs from the
-/// fault and panic reports, the faulting thread may itself hold that lock — not
-/// a hypothesis, it is what `try_recover_from_panic` is written for — and a wait
-/// would be a deadlock on the one path that must always produce output. But a
-/// `try_lock` that may not wait is a `try_lock` that sometimes loses, and what
-/// it loses is the name: under a twelve-wide suite, three of twelve
-/// `fault_gates` + `panic_recovery` rounds printed
-/// `<symbol unread: the process table was held>` for a frame whose own backtrace
-/// named it a line later. There is no lock holder to go and fix, either — the
-/// takers in that window were a spawn, a demand-paged fault and an exit, which
-/// is every process in the machine doing ordinary work.
-///
-/// So the table is not asked. A task carries its process's symbols on its own
-/// record (`sched::payload::KernelPayload::symbols`), the report reads them off
-/// the task it is reporting on, and the `Arc` is what keeps the bytes alive for
-/// the length of the read. `sched::driver::current_symbols` is the read and
-/// argues why nothing can start a pass underneath it.
-///
-/// **The pid is not a parameter, and that is a narrowing rather than a
-/// convenience.** A report is always about the process whose CPU is producing
-/// it, and a pid parameter would let a caller ask for another process's names —
-/// which resolves to nothing this path can reach.
+/// Run `f` against the symbol table of the task this CPU is running, and say what happened.
+/// Three-way, not two: `f` decides between [`Named`](SymbolLookup::Named) and [`Unnamed`](SymbolLookup::Unnamed); every other answer means the address was never looked up, and the caller must print it via [`SymbolLookup::log_bare`].
+/// No lock: this runs from fault/panic reports, where the faulting thread may hold `PROCESS_TABLE`, so a task carries its own process's symbols on its own record ([`sched::driver::current_symbols`]) instead.
+/// `pid` is not a parameter: a report is always about the process whose CPU is producing it.
 fn with_current_symbols(f: impl FnOnce(&crate::symbols::SymbolTable) -> bool) -> SymbolLookup {
     let Some(syms) = crate::sched::driver::current_symbols() else {
-        // Two causes, and this CPU cannot change its mind between the two reads:
-        // a report is not reschedulable (`preempt::enable` declines while
-        // `PerCpu::fault_state` is non-zero), so no pass can begin or end here.
+        // This CPU cannot switch between the two causes mid-report: a report is not reschedulable while `PerCpu::fault_state` is non-zero.
         return if crate::sched::driver::in_pass() {
             SymbolLookup::InPass
         } else {
@@ -2311,15 +1628,7 @@ fn with_current_symbols(f: impl FnOnce(&crate::symbols::SymbolTable) -> bool) ->
 }
 
 /// Kill the process an object names.
-///
-/// **The handle is the whole authorization**, and not the parent relationship:
-/// a relationship the kernel happens to remember means a parent can always kill
-/// a child and nobody else ever can. A `Process` handle carrying
-/// `Rights::MANAGE` is the thing that says who may, and it can be narrowed away
-/// or handed on.
-///
-/// Answers `Ok` for a process that is already gone: the caller asked for it to
-/// be dead and it is.
+/// The handle is the whole authorization, not the parent relationship: a `Process` handle carrying `Rights::MANAGE` says who may, and it can be narrowed away or handed on. `Ok` for an already-gone process: the caller asked for it to be dead and it is.
 pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
     let target_pid = object.pid();
 
@@ -2328,8 +1637,7 @@ pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
         let mut guard = PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();
 
-        // A process that is gone and one another path is already tearing down
-        // are the same answer here: the caller asked for it to be dead.
+        // Gone, and already-tearing-down, are the same answer here: the caller asked for it to be dead.
         if !proclife::claim_teardown(table, target_pid) {
             return 0;
         }
@@ -2340,9 +1648,7 @@ pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
         (Arc::clone(&proc.process_data), Arc::clone(&main_thread.thread_data), proc.main_tid, tids)
     };
 
-    // Phase 2: retire every thread. A running target is forced to a scheduling
-    // boundary and dropped there, so a running process is never refused. Every
-    // thread is another process's, so unlike exit none is the current one.
+    // Phase 2: retire every thread; a running target is forced to a scheduling boundary and dropped there — never refused.
     let main_cpu_ns = retire_threads(target_pid, tids, main_tid, &process_data_arc);
 
     // Phases 3-5: the same teardown tail as exit.
@@ -2351,27 +1657,14 @@ pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
     0
 }
 
-/// What a killed process's exit code is. The shell convention for "died on
-/// SIGKILL", kept because every test that reads one already spells it.
+/// The shell convention for "died on SIGKILL"; kept because every test that reads one already spells it.
 pub const KILLED_EXIT_CODE: i32 = 137;
 
-/// What a process that named a handle it does not hold exits with. The shell
-/// convention for "died on SIGSEGV", which is the same class of mistake with a
-/// pointer instead of a handle.
+/// The shell convention for "died on SIGSEGV" (same mistake class, pointer instead of handle).
 pub const HANDLE_FAULT_EXIT_CODE: i32 = 139;
 
-/// End a process that named a handle it does not hold.
-///
-/// **The fail-fast rule, applied at the one boundary where it is userland's bug
-/// rather than the kernel's.** A handle is a local name a process was given; a
-/// name it was not given, one it closed, or one of the wrong type is a bug in
-/// that process, and a word it can ignore lets the bug survive. It cannot be a
-/// kernel panic — the rule about untrusted input holds — so the process dies
-/// alone and says why.
-///
-/// Must be reached with nothing held: this is `exit`, and `exit` takes the
-/// process's own lock, the table lock and whatever a released object reaches
-/// for.
+/// End a process that named a handle it does not hold — userland's bug, not the kernel's, so the process dies alone rather than panicking the kernel.
+/// Must be reached with nothing held: this calls `exit`, which takes the process's own lock, the table lock, and whatever a released object reaches for.
 pub fn handle_fault(error: crate::object::HandleError) -> ! {
     log!(
         "handle fault: pid={} tid={} syscall={} {error}",

@@ -1,33 +1,25 @@
 //! What memory type firmware gave a physical range.
 //!
-//! Read-only: these registers are firmware's, and the kernel programs none of
-//! them. It reads them because they are half of the answer to what a mapping
-//! costs. The other half is the PAT entry the page selects
-//! ([`crate::arch::pat`]), and every mapping made with
-//! [`CachePolicy::DeferToMtrr`](crate::mm::paging::CachePolicy) selects entry
-//! 0 — WB, the entry that takes whatever the MTRR says (SDM Vol. 3A
-//! Table 11-7). For those pages what is here is the whole of the answer.
-//!
-//! The exception is the one range that asks for [`effective_under_wc`], where
-//! the MTRR is *outvoted* rather than consulted.
+//! Read-only: firmware owns these registers, the kernel programs none. A
+//! mapping with [`CachePolicy::DeferToMtrr`](crate::mm::paging::CachePolicy)
+//! selects PAT entry 0 (WB), so what this module reports is the effective
+//! type; the exception is [`effective_under_wc`], where WC outvotes the MTRR
+//! instead of deferring to it.
 
 use crate::arch::cpu;
 
 const IA32_MTRRCAP: u32 = 0xFE;
 const IA32_MTRR_DEF_TYPE: u32 = 0x2FF;
 const IA32_MTRR_PHYSBASE0: u32 = 0x200;
-/// Bit 11 of `IA32_MTRR_DEF_TYPE`: variable and fixed MTRRs are consulted at
-/// all. Cleared means the whole address space is UC, whatever the ranges say.
+/// Bit 11 of `IA32_MTRR_DEF_TYPE`: clear means the whole address space is UC.
 const DEF_TYPE_ENABLE: u64 = 1 << 11;
 /// Bit 11 of an `IA32_MTRR_PHYSMASK`.
 const PHYSMASK_VALID: u64 = 1 << 11;
-/// Physical address bits of a PHYSBASE/PHYSMASK. 4 KiB-aligned, and the top is
-/// bounded by the CPU's physical address width; masking to 52 bits is the
-/// architectural ceiling and never narrower than a real one.
+/// Physical address bits of a PHYSBASE/PHYSMASK: 4 KiB-aligned, masked to the
+/// 52-bit architectural ceiling, never narrower than a CPU's real width.
 const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// A memory type as the MTRRs encode it. Values are the architectural encoding,
-/// which is what the MSRs hold.
+/// A memory type in the MTRRs' architectural encoding, matching the MSR values.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MemoryType {
     Uncacheable,
@@ -60,9 +52,8 @@ impl MemoryType {
     }
 }
 
-/// Why a range has no single answer. Reported rather than resolved: a range
-/// that straddles two MTRRs is a question about firmware, and picking one of
-/// the two here would turn it into a claim.
+/// Why a range has no single answer, reported rather than resolved: picking one
+/// type here would be inventing an answer firmware never gave.
 pub enum Unknown {
     /// A variable MTRR holds an encoding the architecture does not define.
     ReservedEncoding,
@@ -91,22 +82,9 @@ impl Effective {
     }
 }
 
-/// The memory type of a page whose PAT entry holds WC, over a range whose MTRR
-/// state is `mtrr`.
-///
-/// SDM Vol. 3A Table 11-7, "Effective Page-Level Memory Types for Pentium III
-/// and More Recent Processor Families": every row whose PAT entry value is WC
-/// gives WC, under all five MTRR types. The row this kernel stands on is
-/// `UC | WC | WC` — an MTRR's UC does **not** win over a PAT entry's WC, which
-/// is the one cell where the folk rule "strong UC beats every PAT type" is
-/// wrong, and is why the scanout needs no range register of its own.
-///
-/// [`Effective::MtrrsDisabled`] answers through that same row: §11.11.2.1 makes
-/// UC the type of all of physical memory when `MTRRdefType.E` is clear, and UC
-/// is one of the five the table indexes.
-///
-/// `None` where [`range_type`] has no single answer, because a range with no
-/// MTRR type has no row and so no effective type either.
+/// Effective type of a WC-PAT page over range `mtrr`: WC wins even over an
+/// MTRR's UC (SDM Vol. 3A Table 11-7); `None` only when `mtrr` has no single
+/// answer.
 pub fn effective_under_wc(mtrr: &Effective) -> Option<MemoryType> {
     match mtrr {
         Effective::Known(_) | Effective::MtrrsDisabled => Some(MemoryType::WriteCombining),
@@ -114,8 +92,7 @@ pub fn effective_under_wc(mtrr: &Effective) -> Option<MemoryType> {
     }
 }
 
-/// The architecture's rule for two MTRRs over the same address: UC beats
-/// anything, WT beats WB, and every other disagreement is undefined.
+/// Two MTRRs over one address: UC beats anything, WT beats WB, else undefined.
 fn combine(a: MemoryType, b: MemoryType) -> Option<MemoryType> {
     use MemoryType::{Uncacheable, WriteBack, WriteThrough};
     match (a, b) {
@@ -126,10 +103,8 @@ fn combine(a: MemoryType, b: MemoryType) -> Option<MemoryType> {
     }
 }
 
-/// The memory type firmware gave `[base, base + size)`.
-///
-/// Fixed MTRRs are not consulted: they describe the first 1 MiB only, and no
-/// caller of this is asking about that.
+/// The memory type firmware gave `[base, base + size)`; fixed MTRRs (first
+/// 1 MiB) are not consulted.
 pub fn range_type(base: u64, size: u64) -> Effective {
     let def_type = cpu::rdmsr(IA32_MTRR_DEF_TYPE);
     if def_type & DEF_TYPE_ENABLE == 0 {
@@ -147,9 +122,8 @@ pub fn range_type(base: u64, size: u64) -> Effective {
         if mask & PHYSMASK_VALID == 0 {
             continue;
         }
-        // A PHYSMASK's set bits are contiguous and high, so the region it
-        // describes is the aligned block starting at PHYSBASE whose length is
-        // the mask's lowest set bit.
+        // A PHYSMASK's contiguous high bits size the region: PHYSBASE plus
+        // 1 << its lowest set bit.
         let phys_mask = mask & PHYS_MASK;
         let base_msr = cpu::rdmsr(IA32_MTRR_PHYSBASE0 + i * 2);
         let region_start = base_msr & phys_mask;
@@ -158,8 +132,8 @@ pub fn range_type(base: u64, size: u64) -> Effective {
             continue;
         }
         if region_start > base || region_end < end {
-            // The range asked about is not uniform under this MTRR, and saying
-            // which half won would be inventing an answer.
+            // Not uniform under this MTRR; picking a winner would be
+            // inventing an answer.
             return Effective::Unknown(Unknown::PartiallyCovered);
         }
         let t = match MemoryType::from_encoding(base_msr as u8) {
