@@ -162,6 +162,11 @@ pub mod log_registry;
 #[path = "../../kernel/src/sched/reap_gate.rs"]
 pub mod reap_gate;
 
+/// Durability debt as generations. Pure `core`, so it compiles here unshimmed;
+/// `tests/durability.rs` drives the kernel's flush protocol over it.
+#[path = "../../kernel/src/durability.rs"]
+pub mod durability;
+
 /// The duration kinds and the two time types. It names nothing outside `core`,
 /// which is what lets a record carry an `Instant` into a model at all — and it
 /// is compiled here so that constraint is checked rather than remembered.

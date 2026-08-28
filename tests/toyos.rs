@@ -315,6 +315,13 @@ const RUST_SKIP: &[&str] = &[
     // `did not open` and passes on its exit code. `log_backing_read_error`
     // stages the file and reads the verdict.
     "log_volume_reread",
+    // Needs `usb-flush-fails` armed: on the shared boot the device flush
+    // succeeds and its two must-refuse assertions red for an honest reason.
+    // `fsync_failed_commit` boots it with the arm.
+    "fsync_flush_failed",
+    // Needs `test-small-caches` for the eviction its read-back rests on, and a
+    // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
+    "redirty_mid_flush",
 ];
 
 /// Binaries a machine test drives that the shared boot also runs on purpose.
@@ -885,6 +892,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
     ("fat_backing_revoked", Sched::Parallel, Tier::Fast),
+    // F5 and F6's negative controls: an fsync that must keep refusing while the
+    // device refuses its cache flush, and a mid-flush redirty raced for real and
+    // re-read off the image. Both bodies in `tests/common/volumes.rs`.
+    ("fsync_failed_commit", Sched::Parallel, Tier::Fast),
+    ("redirty_mid_flush", Sched::Parallel, Tier::Fast),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
@@ -7919,6 +7931,8 @@ fn run_machine_test(
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
         "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
+        "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
+        "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.

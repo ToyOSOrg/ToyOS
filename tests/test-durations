@@ -180,6 +180,7 @@ foreign_disk_untouched 4688
 fpu_isolation 14662
 fs_large_file 94
 fs_truncate_persist 17
+fsync_failed_commit 18446744073709551615
 futex_wake_counts 1007
 handle_basic 19
 handle_kill_policy 515
@@ -265,6 +266,7 @@ process_lifecycle 225
 process_stats 221
 query_modules_size 12
 readdir_bound 4899
+redirty_mid_flush 18446744073709551615
 reentry_names_the_first_panic 5073
 sched_check_build 6833
 sched_stress 1292
