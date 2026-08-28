@@ -53,6 +53,7 @@ dependencies = [
  "toyos-gpt",
  "toyos-hda",
  "toyos-pci",
+ "toyos-pcid",
  "toyos-proclife",
  "toyos-ps2",
  "toyos-sched",
@@ -108,6 +109,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-pci"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-pcid"
 version = "0.1.0"
 
 [[package]]

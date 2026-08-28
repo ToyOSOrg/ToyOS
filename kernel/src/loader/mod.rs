@@ -416,7 +416,11 @@ pub fn spawn(
     let t_deps = crate::clock::nanos_since_boot();
 
     // ELF segments are demand-faulted; the address space starts empty.
-    let child_pt: PageTables = Arc::new(Lock::new(crate::mm::paging::AddressSpace::new_user()));
+    let Some(space) = crate::mm::paging::AddressSpace::new_user() else {
+        log!("spawn: {}: no user PCID free — too many live address spaces", path);
+        return Err(SyscallError::ResourceExhausted.into());
+    };
+    let child_pt: PageTables = Arc::new(Lock::new(space));
     insert_elf_regions(&mut child_pt.lock(), &layout, base, &backing)?;
 
     // Libraries get user addresses before any relocation is written: RELATIVE

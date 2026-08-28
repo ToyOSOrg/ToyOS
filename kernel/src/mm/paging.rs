@@ -11,6 +11,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
+use toyos_pcid::{Alloc, Pcid, PcidPool};
+
 use super::{UserAddr, PAGE_2M};
 use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
@@ -318,7 +320,9 @@ impl Cr3 {
         (self.0 & 0xFFF) as u16
     }
 
-    /// Sets NOFLUSH when PCID is active, to preserve other processes' TLB entries.
+    /// Sets NOFLUSH when PCID is active — sound only because a user tag is owned:
+    /// no other live space holds it, and a reused one was flushed from every CPU
+    /// before this space took it (`toyos_pcid`).
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn activate(self) {
@@ -337,24 +341,52 @@ impl Cr3 {
     }
 }
 
-/// Next PCID to allocate. Range 1..4095. PCID 0 is reserved for the kernel.
-static NEXT_PCID: Lock<u16> = Lock::new(1);
+/// The user PCID allocator: `toyos_pcid` owns the decision that no live tag is
+/// reissued; here it is given the shootdown its [`Alloc::NeedsFlush`] asks for.
+static PCID_POOL: Lock<PcidPool> = Lock::new(PcidPool::new());
 
-/// On wrap past 4095, flushes every CPU's TLB before recycling; the shootdown
-/// runs outside the lock, safe because the caller (`new_user`) has not yet
-/// activated the recycled tag.
-fn alloc_pcid() -> u16 {
-    {
-        let mut next = NEXT_PCID.lock();
-        let pcid = *next;
-        if pcid <= 4095 {
-            *next = pcid + 1;
-            return pcid;
-        }
-        *next = 2;
+/// A user tag owned for one address space's life; its drop returns the tag to
+/// the pool. Non-`Copy`, so no second live space can name it.
+struct PcidGuard(Pcid);
+
+impl Drop for PcidGuard {
+    fn drop(&mut self) {
+        PCID_POOL.lock().free(self.0);
     }
-    crate::arch::tlb::shootdown();
-    1
+}
+
+/// Which tag an address space carries, and who returns it.
+enum PcidHandle {
+    /// The reserved tag 0; the kernel space is leaked, so it is never returned.
+    Kernel,
+    /// A user tag, returned to the pool when this handle drops.
+    User(PcidGuard),
+}
+
+impl PcidHandle {
+    fn value(&self) -> u16 {
+        match self {
+            Self::Kernel => toyos_pcid::KERNEL_PCID,
+            Self::User(g) => g.0.get(),
+        }
+    }
+}
+
+/// `None` when all 4095 tags are held by live spaces. The pool lock is held
+/// across the reclaim shootdown — safe under it because a CPU spinning for the
+/// lock polls shootdowns, and so that one CPU reclaims at a time.
+fn alloc_pcid() -> Option<PcidGuard> {
+    let mut pool = PCID_POOL.lock();
+    loop {
+        match pool.alloc() {
+            Alloc::Ready(p) => return Some(PcidGuard(p)),
+            Alloc::NeedsFlush => {
+                crate::arch::tlb::shootdown();
+                pool.reclaim();
+            }
+            Alloc::Exhausted => return None,
+        }
+    }
 }
 
 /// PML4[0..255] user, PML4[256..511] kernel direct map (shared).
@@ -365,8 +397,9 @@ pub struct AddressSpace {
     pages: HashMap<u64, super::pmm::PhysPage>,
     /// All virtual memory regions, keyed by start address.
     regions: BTreeMap<UserAddr, Region>,
-    /// PCID for this address space. 0 = kernel, 1..4095 = user.
-    pcid: u16,
+    /// Owned for this space's life: dropping the space returns a user tag, so two
+    /// live spaces can never share one.
+    pcid: PcidHandle,
 }
 
 /// Needed because a *placed* mapping (`sys_mmap`'s FIXED arm) skips
@@ -386,8 +419,10 @@ fn align_up_2m(v: u64) -> u64 {
 }
 
 impl AddressSpace {
-    /// Create a new user address space with kernel entries shallow-copied.
-    pub fn new_user() -> Self {
+    /// Create a new user address space with kernel entries shallow-copied, or
+    /// `None` when every user PCID is held by a live space.
+    pub fn new_user() -> Option<Self> {
+        let pcid = alloc_pcid()?;
         let kernel_as = kernel().lock();
         let mut pml4 = Box::new(PageTablePage([0; 512]));
 
@@ -397,17 +432,17 @@ impl AddressSpace {
             }
         }
 
-        Self {
+        Some(Self {
             root: pml4,
             children: Vec::new(),
             pages: HashMap::new(),
             regions: BTreeMap::new(),
-            pcid: alloc_pcid(),
-        }
+            pcid: PcidHandle::User(pcid),
+        })
     }
 
     pub fn cr3(&self) -> Cr3 {
-        Cr3(self.root.phys() | self.pcid as u64)
+        Cr3(self.root.phys() | self.pcid.value() as u64)
     }
 
     /// Empty PDE slots (aligned, asserted) mean nothing can be stale.
@@ -927,7 +962,7 @@ pub(super) fn init(memory_map: &[MemoryMapEntry]) {
         children: Vec::new(),
         pages: HashMap::new(),
         regions: BTreeMap::new(),
-        pcid: 0, // Kernel always uses PCID 0
+        pcid: PcidHandle::Kernel,
     };
 
     let mut addr: u64 = 0;
