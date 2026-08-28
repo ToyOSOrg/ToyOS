@@ -404,7 +404,7 @@ impl Hw for KernelHw {
         let restore = token.restore_ptr();
         // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.fs_base` is this kernel's own canonical value for the thread being installed.
         unsafe {
-            (*save).fs_base = cpu::rdfsbase();
+            (*save).fs_base = cpu::read_fs_base();
             (*save).preempt = crate::preempt::count();
             let incoming: &KernelCtx = &*restore;
             // The only load of `incoming.rsp`: reading it again after `cr3.activate()`'s clobber would be a second, unguarded load.
@@ -426,7 +426,7 @@ impl Hw for KernelHw {
                     crate::heartbeat::note_dispatch();
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.cr3.activate();
-                    cpu::wrfsbase(incoming.fs_base);
+                    cpu::write_fs_base(incoming.fs_base);
                 }
                 // idle's stack top is per-CPU, unknowable at boot-time init, so it is read here instead.
                 None => {

@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use toyos_pci::{bar, msi, msix};
+use toyos_pci::{bar, caps, msi, msix};
 
 use crate::mm::Mmio;
 use crate::mm::paging::CachePolicy;
@@ -13,7 +13,7 @@ const PROG_IF: u64 = 0x09;
 const SUBCLASS: u64 = 0x0A;
 const CLASS: u64 = 0x0B;
 const HEADER_TYPE: u64 = 0x0E;
-const CAPABILITIES_PTR: u64 = 0x34;
+pub(crate) const CAPABILITIES_PTR: u64 = 0x34;
 
 const MULTI_FUNCTION: u8 = 0x80;
 const INVALID_VENDOR: u16 = 0xFFFF;
@@ -32,6 +32,12 @@ pub struct Capability<'a> {
 impl Capability<'_> {
     pub fn id(&self) -> u8 {
         self.device.read_config_u8(self.offset)
+    }
+
+    /// The config-space offset this capability sits at, for the cap self-test to name the link the walk yielded.
+    #[cfg(feature = "boot-actuators")]
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
     }
 
     pub fn read_u8(&self, field: u64) -> u8 {
@@ -70,6 +76,12 @@ impl PciDevice {
             | ((dev as u64) << 15)
             | ((func as u64) << 12);
         Self { mmio: ecam.subregion(offset, 4096), bus, dev, func }
+    }
+
+    /// A function over a caller-owned config-space window, for the cap self-test to drive the real walk over lists no hardware in reach produces.
+    #[cfg(feature = "boot-actuators")]
+    pub(crate) fn over_config(mmio: crate::mm::Mmio) -> Self {
+        Self { mmio, bus: 0, dev: 0, func: 0 }
     }
 
     pub fn vendor_id(&self) -> u16 {
@@ -183,7 +195,7 @@ impl PciDevice {
 
     pub fn capabilities(&self) -> CapabilityIter<'_> {
         let first = self.mmio.read_u8(CAPABILITIES_PTR);
-        CapabilityIter { device: self, next: first }
+        CapabilityIter { device: self, walk: caps::CapWalk::new(), next: first }
     }
 
     pub fn is_id(&self, vendor: u16, device: u16) -> bool {
@@ -202,6 +214,7 @@ impl PciDevice {
 
 pub struct CapabilityIter<'a> {
     device: &'a PciDevice,
+    walk: caps::CapWalk,
     next: u8,
 }
 
@@ -209,12 +222,11 @@ impl<'a> Iterator for CapabilityIter<'a> {
     type Item = Capability<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.next == 0 {
-            return None;
-        }
-        let offset = self.next as u64;
-        self.next = self.device.read_config_u8(offset + 1);
-        Some(Capability { device: self.device, offset })
+        // The next-pointer is the device's; a malformed or cyclic link ends the
+        // walk rather than running it off the window or forever.
+        let offset = self.walk.step(self.next)?;
+        self.next = self.device.read_config_u8(offset as u64 + 1);
+        Some(Capability { device: self.device, offset: offset as u64 })
     }
 }
 

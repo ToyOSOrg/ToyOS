@@ -42,6 +42,16 @@ pub fn in_user_half(ptr: u64, len: u64) -> bool {
     }
 }
 
+/// The load base an `ET_DYN` image rebases to `vm_base` (`vm_base - vaddr_min`),
+/// or `None` when it cannot: a `vaddr_min` above `vm_base` underflows the
+/// subtraction, and a `span` reaching from `vm_base` past the user half does not
+/// fit. The ELF spec leaves an `ET_DYN` `p_vaddr` unconstrained, so the kernel
+/// that picks `vm_base` is the only place that can refuse one.
+pub fn rebase_base(vm_base: u64, vaddr_min: u64, span: u64) -> Option<u64> {
+    let base = vm_base.checked_sub(vaddr_min)?;
+    in_user_half(vm_base, span).then_some(base)
+}
+
 /// Whether the kernel may read or write a `size`-byte value of alignment
 /// `align` at `ptr` through one translation.
 ///
@@ -144,5 +154,30 @@ mod tests {
     fn a_zero_sized_object_is_nothing_to_dereference() {
         assert!(!is_user_object(PAGE_2M, 0, 1));
         assert!(in_user_half(PAGE_2M, 0));
+    }
+
+    /// The loader's `USER_VM_BASE`, by value.
+    const USER_VM_BASE: u64 = 0x100_0000_0000;
+
+    #[test]
+    fn an_image_at_vaddr_zero_rebases_to_the_base_itself() {
+        assert_eq!(rebase_base(USER_VM_BASE, 0, PAGE_2M), Some(USER_VM_BASE));
+        assert_eq!(rebase_base(USER_VM_BASE, USER_VM_BASE, PAGE_2M), Some(0));
+    }
+
+    /// The ELF spec fixes no ceiling on an `ET_DYN` `p_vaddr`, so `vaddr_min` may
+    /// exceed the base — the subtraction the loader would underflow.
+    #[test]
+    fn a_vaddr_min_above_the_base_cannot_rebase() {
+        assert_eq!(rebase_base(USER_VM_BASE, 0x200_0000_0000, PAGE_2M), None);
+        assert_eq!(rebase_base(USER_VM_BASE, USER_VM_BASE + 1, PAGE_2M), None);
+        assert_eq!(rebase_base(USER_VM_BASE, u64::MAX, PAGE_2M), None);
+    }
+
+    #[test]
+    fn an_image_that_rebases_past_the_user_half_is_refused() {
+        assert_eq!(rebase_base(USER_VM_BASE, 0, USER_TOP - USER_VM_BASE), Some(USER_VM_BASE));
+        assert_eq!(rebase_base(USER_VM_BASE, 0, USER_TOP - USER_VM_BASE + 1), None);
+        assert_eq!(rebase_base(USER_VM_BASE, 0, u64::MAX), None);
     }
 }
