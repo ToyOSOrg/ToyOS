@@ -1116,6 +1116,10 @@ name = "toyos-pci"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-pcid"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-proclife"
 version = "0.1.0"
 dependencies = [
