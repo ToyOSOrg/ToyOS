@@ -14,9 +14,8 @@ pub mod issuegate;
 pub mod libc;
 pub mod mergehealth;
 pub mod pr;
-/// The comment law and its ratchet over `src/prose-ledger`, read by nothing but
-/// its own tests.
-#[cfg(test)]
+/// The comment law and its ratchet over `src/prose-ledger`; the ratchet is its
+/// own tests', the one line classifier also `writinglaw`'s.
 pub mod prosegate;
 pub mod redlist;
 pub mod soundfont;
@@ -30,6 +29,7 @@ pub mod tiers;
 pub mod toolchain;
 pub mod wallpaper;
 pub mod worktree;
+pub mod writinglaw;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
