@@ -517,7 +517,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // F9's negative control: a budget-refused /home fsync retried to durable,
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
-    ("home_budget_refusal_retried", Sched::Parallel, Tier::Fast),
+    ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
@@ -916,7 +916,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel, Tier::Fast),
-    ("redirty_mid_flush", Sched::Parallel, Tier::Fast),
+    ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),

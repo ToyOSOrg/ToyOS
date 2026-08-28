@@ -267,6 +267,32 @@ pub const RELEGATED: &[Relegated] = &[
                  double-boot only adds the runtime witness that the instruction faults.",
     },
     Relegated {
+        test: "home_budget_refusal_retried",
+        ci_ms: 18_661,
+        why: Why::Cost,
+        guards: "A budget-refused /home fsync retried to durable, its bytes then read \
+                 off the NVMe image by the host build of the bcachefs reader. What still \
+                 runs per pull request: the compile-time invariants — the two-variant \
+                 `bcachefs::DeviceError` makes the BudgetExpired-into-Io collapse \
+                 uncompilable, and a durability settle needs the `Settlement` its work \
+                 was copied from — plus host-tests' must-red `durability-settle-blind` \
+                 loom step and the crate-boundary `a_refused_sync_stays_refused` \
+                 differential; the nightly boot adds the end-to-end runtime witness.",
+    },
+    Relegated {
+        test: "redirty_mid_flush",
+        ci_ms: 21_262,
+        why: Why::Cost,
+        guards: "Two processes racing one page across 128 flush windows, each round \
+                 evicted and re-read off the device, then re-judged off the image by the \
+                 host's own FAT reader. What still runs per pull request: the loom \
+                 durability model over the exact flush call order with its must-red \
+                 `durability-settle-blind` control, the private `Settlement` token that \
+                 makes a blind clear uncompilable, and the Fast `fsync_failed_commit` \
+                 control on the same generation gate; the nightly race adds the \
+                 end-to-end runtime witness that a mid-flush write survives.",
+    },
+    Relegated {
         test: "desktop_audio_client",
         ci_ms: 121_441,
         why: Why::Cost,
