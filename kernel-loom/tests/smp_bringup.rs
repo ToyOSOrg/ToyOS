@@ -36,19 +36,16 @@ fn a_committed_count_never_outruns_its_slot() {
             loom::thread::spawn(move || r.commit(attempt, LAPIC))
         };
 
-        let reader = {
-            let r = r.clone();
-            loom::thread::spawn(move || {
-                if r.count() >= 2 {
-                    let got = r.apic_id(1);
-                    SAW.store(true, SeqCst);
-                    assert_eq!(
-                        got, LAPIC,
-                        "a reader saw cpu1 counted while its LAPIC slot was still unfilled",
-                    );
-                }
-            })
-        };
+        let reader = loom::thread::spawn(move || {
+            if r.count() >= 2 {
+                let got = r.apic_id(1);
+                SAW.store(true, SeqCst);
+                assert_eq!(
+                    got, LAPIC,
+                    "a reader saw cpu1 counted while its LAPIC slot was still unfilled",
+                );
+            }
+        });
 
         committer.join().unwrap();
         reader.join().unwrap();
@@ -72,24 +69,21 @@ fn a_released_machine_is_answering() {
             loom::thread::spawn(move || r.release())
         };
 
-        let initiator = {
-            let r = r.clone();
-            loom::thread::spawn(move || {
-                for _ in 0..POLLS {
-                    if r.released() {
-                        let answering = r.answering();
-                        SAW.store(true, SeqCst);
-                        assert!(
-                            answering,
-                            "a CPU saw the machine released but not answering: a shootdown \
-                             here is local-only and skips an AP that may already have joined",
-                        );
-                        break;
-                    }
-                    loom::thread::yield_now();
+        let initiator = loom::thread::spawn(move || {
+            for _ in 0..POLLS {
+                if r.released() {
+                    let answering = r.answering();
+                    SAW.store(true, SeqCst);
+                    assert!(
+                        answering,
+                        "a CPU saw the machine released but not answering: a shootdown \
+                         here is local-only and skips an AP that may already have joined",
+                    );
+                    break;
                 }
-            })
-        };
+                loom::thread::yield_now();
+            }
+        });
 
         release.join().unwrap();
         initiator.join().unwrap();
