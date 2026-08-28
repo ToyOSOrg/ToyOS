@@ -6,32 +6,24 @@ use toyos_abi::syscall::SyscallError;
 
 pub use toyos_abi::net::NicInfo;
 
-/// Hardware-agnostic network interface. Implement this for any NIC driver
-/// (virtio-net, RTL8125, Intel i225, etc.) and register it with `net::register()`.
+/// Hardware-agnostic NIC driver interface.
 pub trait Nic: Send {
     fn has_packet(&self) -> bool;
 
-    /// Poll for a received frame without copying. Returns (buf_index, frame_len).
+    /// Poll for a received frame without copying, returning `(buf_index, frame_len)`.
     fn poll_rx(&mut self) -> Option<(usize, usize)> { None }
-    /// Resubmit an RX buffer to the hardware after the frame has been consumed.
-    ///
-    /// `buf_index` is a raw syscall argument and the slot it names is only
-    /// populated by a prior `poll_rx`, so both arms are untrusted input
-    /// rather than driver invariants. The default refuses, so a driver that
-    /// implements `poll_rx` and forgets this fails closed.
+    /// Resubmit an RX buffer to the hardware.
     fn refill_rx_buf(&mut self, _buf_index: usize) -> Result<(), SyscallError> {
         Err(SyscallError::NotSupported)
     }
-    /// Submit the TX buffer to hardware. Frame data (with net header) must already be written.
+    /// Submit the TX buffer to hardware.
     ///
-    /// `total_len` becomes the DMA descriptor length verbatim. Callers must
-    /// have bounded it by `tx_buf_len` — see `net::submit_tx`.
+    /// Frame data (with net header) must already be written before this is called.
+    ///
+    /// `total_len` must already be bounded by `tx_buf_len` before this is called (see `net::submit_tx`).
     fn submit_tx(&mut self, _total_len: usize) {}
 
-    /// Size in bytes of the TX buffer userland writes into. The submitted
-    /// length is a descriptor length starting at that buffer, so this is the
-    /// only thing standing between a `u64` from userland and the device
-    /// reading adjacent kernel memory onto the wire.
+    /// Size in bytes of the TX buffer userland writes into.
     fn tx_buf_len(&self) -> usize { 0 }
 }
 
@@ -85,10 +77,7 @@ pub fn refill_rx_buf(buf_index: usize) -> Result<(), SyscallError> {
 
 /// Hand the device the TX buffer's first `total_len` bytes.
 ///
-/// The length arrives from userland as a bare `u64` and there is no pointer
-/// and no copy on this path — the frame was written straight into the shared
-/// DMA buffer — so the destination size cannot bound it the way a copy would.
-/// Bounding it here is the only bound there is.
+/// This path has no pointer and no copy — the frame is written straight into shared DMA — so nothing else bounds `total_len`, which is why this check is the only bound.
 pub fn submit_tx(total_len: usize) -> Result<(), SyscallError> {
     let mut guard = NIC.lock();
     let Some(nic) = guard.as_mut() else { return Err(SyscallError::NotFound) };

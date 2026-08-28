@@ -1,15 +1,6 @@
-//! Getting a freshly built process onto a CPU, and deciding what it holds when
-//! it gets there.
-//!
-//! The two trampolines are the only per-architecture code in the loader.
-//! Everything else — the address space, the relocations, the TLS block — is
-//! arch-neutral, so a second architecture adds this file and nothing more.
-//!
-//! The other half is [`build_child_handles`] and [`PendingHandles`], which are
-//! where a spawn's two handle vectors are read: the duplicates a child is born
-//! with, and the endowments that leave the parent at the point of no return.
-//! Both answer an unresolvable handle the way the rest of the kernel does —
-//! `object::HandleError`'s rule, which has one exception and this is not it.
+//! Loads a built process onto a CPU and builds the handle table it starts
+//! with. The two trampolines below are the loader's only per-architecture
+//! code; everything else here is architecture-neutral.
 
 use alloc::vec::Vec;
 
@@ -23,8 +14,7 @@ use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_ENDOWMENTS, MAX_LABELS_LEN, MAX_SLOT_MAP};
 
-/// One `[child_slot, parent_handle]` pair of `SpawnArgs::slot_map_ptr`, in
-/// bytes.
+/// One `[child_slot, parent_handle]` pair of `SpawnArgs::slot_map_ptr`, in bytes.
 pub const SLOT_PAIR_LEN: usize = 8;
 
 /// Allocate a kernel stack and lay out the frame `context_switch` will restore.
@@ -37,17 +27,10 @@ pub(crate) fn alloc_kernel_stack(
     let alloc = OwnedAlloc::new(KERNEL_STACK_SIZE, 4096)?;
     scheduler::write_stack_canary(&alloc);
     let top = alloc.ptr() as u64 + KERNEL_STACK_SIZE as u64;
-    // Must match context_switch: pushfq, push rbp..r15 (8 values), then the
-    // return address.
+    // Layout must match context_switch's pop sequence: pushfq, rbp..r15, return address.
     let frame = (top - 8 * 8) as *mut u64;
-    // SAFETY: `alloc` is a fresh, exclusively-owned `OwnedAlloc::new
-    // (KERNEL_STACK_SIZE, 4096)` above, and `frame = top - 64` — the eight
-    // `u64` writes below cover exactly `[frame, frame + 64)`, the top 64
-    // bytes of that allocation (`KERNEL_STACK_SIZE` is a whole kernel stack,
-    // far larger than one context-switch frame), so every `frame.add(i)`
-    // for `i in 0..8` stays in bounds. Nothing else can be writing this
-    // memory: `alloc` was just allocated and has not been published
-    // anywhere yet.
+    // SAFETY: `alloc` is fresh and exclusively owned; the eight writes cover
+    // `[frame, frame + 64)`, the top 64 bytes of that allocation.
     unsafe {
         *frame.add(0) = 0; // r15
         *frame.add(1) = arg; // r14
@@ -61,12 +44,8 @@ pub(crate) fn alloc_kernel_stack(
     Some((alloc, frame as u64))
 }
 
-/// Entry point for new processes, reached through `context_switch`'s `ret`.
-/// r12 = entry point, r13 = user stack pointer.
-///
-/// The state is loaded after the unlock and not before: what it displaces is
-/// whatever the CPU's previous tenant left in the registers, and the unlock is
-/// still that tenant's kernel code.
+/// Entry point for new processes, reached through `context_switch`'s `ret`. r12 = entry point, r13 = user stack pointer.
+// State loads after `unlock`, not before: earlier, registers hold the previous tenant's kernel context.
 #[unsafe(naked)]
 pub(crate) extern "C" fn process_start() {
     ring3_trampoline_asm!(
@@ -114,24 +93,8 @@ pub(crate) extern "C" fn thread_start() {
     );
 }
 
-/// Entry point for a **kernel** thread: the one trampoline that never reaches
-/// Ring 3.
-///
-/// It is strictly simpler than the two above and the absences are the point —
-/// no `initial_user_state!`, no `iretq`, no `USER_CS`/`USER_DS` — because
-/// nothing about this context is a user context. r12 carries the body, r14 its
-/// argument, and `alloc_kernel_stack` put both there.
-///
-/// **The `sti` is load-bearing and there is nowhere else to put it.**
-/// `alloc_kernel_stack` writes RFLAGS with `IF` clear into the frame
-/// `context_switch` pops, and the two Ring 3 trampolines set `IF` in the
-/// `iretq` frame instead. A kernel thread that skipped this would run with
-/// interrupts masked forever: no timer, no preemption, no wake. It comes
-/// *after* `trampoline_entry`, whose `kernel_exit_to_user_check` requires
-/// `IF` clear on entry and returns with it clear.
-///
-/// A body that returns is a kernel bug, and it dies as one rather than falling
-/// off the end of a stack that has no return address on it.
+/// Entry point for a kernel thread: r12 = body, r14 = argument. Never reaches Ring 3.
+// The `sti` is load-bearing: `alloc_kernel_stack` leaves `IF` clear, and `trampoline_entry` requires it clear on entry.
 #[unsafe(naked)]
 pub(crate) extern "C" fn kernel_start() {
     core::arch::naked_asm!(
@@ -145,11 +108,7 @@ pub(crate) extern "C" fn kernel_start() {
     );
 }
 
-/// What [`kernel_start`] calls when a kernel thread's body returns.
-///
-/// Loud rather than a `hlt`: a body that returns has left the machine without
-/// whatever it was there to do, and a silent halt of one CPU is exactly the
-/// kind of quiet this branch exists to remove.
+/// What [`kernel_start`] calls when a kernel thread's body returns: panics rather than halting silently.
 extern "C" fn kernel_thread_returned() -> ! {
     panic!("a kernel thread's body returned; nothing runs on this stack now");
 }
@@ -164,27 +123,16 @@ pub(crate) fn make_name(path: &str) -> [u8; crate::process::THREAD_NAME_LEN] {
 }
 
 /// A child's table, and the endowments that have not left the parent yet.
-///
-/// **The move is the last thing a spawn does.** `SYS_SPAWN` can still fail long
-/// after its arguments are read — the program may not exist, its ELF may not
-/// parse, its stack may not fit — and a parent told "that did not happen" while
-/// its endowed handles have already gone holds numbers that name nothing, and
-/// under the bad-handle policy its own `close` of one is fatal.
+// The move must be last: an earlier move leaves a failed spawn's parent holding handles that name nothing.
 pub enum PendingHandles {
     /// Built by the kernel and owing nobody anything — the boot's `/bin/init`.
     Ready(HandleTable, Endowments),
-    /// A caller's request: the table holds the `slot_map` duplicates, and the
-    /// blob is the `endow` vector that still has to leave the caller's table.
+    /// A caller's request: `endow` has not left the caller's table yet.
     Moving { table: HandleTable, endow: Vec<u8>, labels: Vec<u8> },
 }
 
 impl PendingHandles {
-    /// Take the endowed handles out of the parent's table.
-    ///
-    /// **All or nothing, under one hold of the parent's lock**: the handles
-    /// resolve, they carry `TRANSFER`, the labels are in range and the child's
-    /// table has room — and only then is anything removed. A refusal leaves the
-    /// parent's table exactly as it was.
+    /// Take the endowed handles out of the parent's table, all under one lock hold: a refusal leaves it unchanged.
     pub fn commit(self) -> Result<(HandleTable, Endowments), Refusal> {
         let (mut table, endow, labels) = match self {
             Self::Ready(table, endowments) => return Ok((table, endowments)),
@@ -205,30 +153,19 @@ impl PendingHandles {
             if end > labels.len() {
                 return Err(SyscallError::InvalidArgument.into());
             }
-            // Verified against the *parent's* rights here and removed below, so
-            // a handle that is missing `TRANSFER` refuses the spawn rather than
-            // leaving the child a hole where its parent said a capability would
-            // be.
+            // Checked before any removal, so a missing `TRANSFER` refuses the spawn instead of leaving a hole.
             let rights = data.handles.rights_of(handle)?;
             if !rights.contains(Rights::TRANSFER) {
                 return Err(SyscallError::PermissionDenied.into());
             }
-            // **Named twice is refused here, because the preflight cannot see
-            // it later.** Every check above runs against a table nothing has
-            // been taken out of yet, so a repeat passes both times; the first
-            // removal then retires the slot and the second answers `Stale`,
-            // which the `expect` below turns into a kernel panic a caller
-            // reaches with one argument. `sys_handle_send` refuses the same
-            // shape for the same reason.
+            // A duplicate is refused here: unremoved handles let it pass twice, then the second removal's
+            // `expect` below panics.
             if moving.iter().any(|(_, seen)| *seen == handle) {
                 return Err(SyscallError::InvalidArgument.into());
             }
             moving.push((EndowEntry { label_off, label_len, handle, _pad: 0 }, handle));
         }
-        // The child's table must be able to take all of them before the
-        // parent's gives any up: an install that failed halfway would have
-        // moved a handle out of a table that is about to be told the spawn did
-        // not happen.
+        // Checked before any removal, so a failed install can't strand a handle out of a table that never spawned.
         if !table.has_room(moving.len()) {
             return Err(SyscallError::ResourceExhausted.into());
         }
@@ -248,25 +185,8 @@ impl PendingHandles {
     }
 }
 
-/// Read the two vectors `SpawnArgs` carries.
-///
-/// **Two verbs.** `slot_map` *duplicates* — the parent keeps its stdout — and
-/// `endow` *moves*. The duplicates are taken here, because a copy costs the
-/// parent nothing if the spawn then fails; the moves are checked for shape and
-/// carried to [`PendingHandles::commit`], which is the point of no return.
-///
-/// **Every refusal here is before anything about the child exists, which is
-/// what makes ending the caller safe.** A slot-map pair naming an unheld
-/// handle is a handle fault and kills the parent where it stands, and the
-/// frame it dies on holds nothing that needs unwinding: the parent's table is
-/// borrowed shared, so no accessor that could edit it is even reachable; no
-/// address space, pid or thread has been made; and the endowment vector has
-/// not left the parent's table, because `commit` runs later. What does get
-/// dropped is the child's half-built table, and every entry in it is either a
-/// duplicate whose object the parent still holds — so its count cannot reach
-/// zero — or a `Console` this loop just minted, whose row is `immediate` and
-/// has no hook to run. Nothing is enqueued, nothing is orphaned, and the
-/// parent's table is exactly as it was.
+/// Reads `SpawnArgs`'s two handle vectors into the child's pending handle state.
+// Every refusal here precedes any child state, so nothing is enqueued or orphaned.
 pub fn build_child_handles(
     slot_map: &UserBytes,
     endow: &UserBytes,
@@ -275,12 +195,8 @@ pub fn build_child_handles(
     if endow.len() / ENDOW_ENTRY_LEN > MAX_ENDOWMENTS {
         return Err(SyscallError::InvalidArgument.into());
     }
-    // **Before the loop, because the loop is the cost.** `install_at`'s cap
-    // refuses a *slot* past the table and says nothing about how many pairs
-    // name the same one: a caller repeating `(0, h)` keeps the child's table at
-    // one entry while every iteration duplicates a handle under the parent's
-    // lock and hands back a live entry this call has to hold until the lock is
-    // released.
+    // Checked before the loop: `install_at`'s cap misses a repeated slot, which would duplicate
+    // handles under the parent's lock without bound.
     if slot_map.len() / SLOT_PAIR_LEN > MAX_SLOT_MAP {
         return Err(SyscallError::InvalidArgument.into());
     }
@@ -290,45 +206,25 @@ pub fn build_child_handles(
     let data_arc = process_data();
     let data = data_arc.lock();
     let mut handles = HandleTable::new();
-    // Carried out of the guard rather than dropped inside it. Every entry a
-    // stdio pair displaces here is a duplicate this same loop just made, so the
-    // decrement reaches nothing — but `install_at`'s contract is that the
-    // caller decides *where* it happens, and a site that is right by accident
-    // is one an added slot kind makes wrong.
+    // Dropped after the lock releases, not inside it: `install_at` leaves *where* to the caller.
     let mut displaced = Vec::new();
-    // Parent console objects this call has already minted a replacement for,
-    // by the parent object's address. See the console arm below.
+    // Parent console objects already minted a replacement for, keyed by address.
     let mut minted: Vec<(usize, crate::object::KObjectRef)> = Vec::new();
     for i in 0..slot_map.len() / SLOT_PAIR_LEN {
         let mut pair = [0u8; SLOT_PAIR_LEN];
         slot_map.read_at(i * SLOT_PAIR_LEN, &mut pair);
         let child_slot = u32::from_ne_bytes([pair[0], pair[1], pair[2], pair[3]]);
         let parent = RawHandle(u32::from_ne_bytes([pair[4], pair[5], pair[6], pair[7]]));
-        // **A pair naming a handle the parent does not hold ends the parent**,
-        // by the same rule as every other resolution in the kernel
-        // (`object::HandleError`). Skipping the pair — "the child simply does
-        // not get it" — is silent degradation at both ends: the child cannot
-        // tell a slot it was denied from one nobody named, and the parent is
-        // told its spawn happened as asked. `rights_of`
-        // answers `BadHandle` or `Stale`, and `Refusal` carries either out of
-        // this guard to the syscall boundary, where it does not come back.
+        // An unheld handle ends the parent (`object::HandleError`'s rule) rather than silently skipping the slot.
         let rights = data.handles.rights_of(parent)?;
-        // A device claim carries no `DUP`, so it cannot come this way. The
-        // refusal is by name rather than a skip, which would start the child
-        // without a handle it asked for — the endowment vector below is the
-        // move that *can* carry one.
+        // A device claim carries no `DUP` and is refused by name.
         let entry = data.handles.duplicate_entry(parent, rights)?;
-        // **A console is minted for the child, never duplicated into it.** The
-        // object *is* the line buffer (`object::device::ConsoleObject`), so a
-        // child sharing its parent's would accumulate into one buffer with it
-        // and the two half-lines would splice inside the mechanism that exists
-        // to stop splicing. Authority does not move: a child gets a console
-        // exactly when this pair says it does, and the duplicate above is what
-        // refuses a handle without `DUP`. Aliasing does not move either — two
-        // slots naming one parent object get one child object, so a program
-        // whose stdout and stderr are the same console still writes one stream.
+        // A console is minted, not duplicated: it is its own line buffer, and sharing one would splice
+        // two half-lines together.
         let entry = match entry.object() {
             crate::object::KObjectRef::Console(parent_console) => {
+                // Two slots naming the same parent console land on one child console — what this
+                // address-keyed lookup preserves — or aliased stdout/stderr would split into two buffers.
                 let key = alloc::sync::Arc::as_ptr(parent_console) as usize;
                 let object = match minted.iter().find(|(seen, _)| *seen == key) {
                     Some((_, object)) => object.clone(),
@@ -340,8 +236,7 @@ pub fn build_child_handles(
                         object
                     }
                 };
-                // The duplicate goes back with everything else this loop
-                // displaces, outside the parent's lock.
+                // The duplicate is displaced too, dropped outside the parent's lock.
                 displaced.push(Some(entry));
                 crate::object::HandleEntry::new(object, rights)
             }

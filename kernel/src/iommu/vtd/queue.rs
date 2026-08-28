@@ -1,18 +1,9 @@
-//! Queued invalidation: telling the unit that what it cached is no longer what
-//! memory says.
-//!
-//! **This is synchronous** — a descriptor followed by an Invalidation Wait
-//! descriptor with a status write, polled to completion — and the wait is
-//! bounded by a named constant whose expiry is a panic. A unit that will not
-//! acknowledge an invalidation has left the kernel unable to say what a device
-//! can reach, and there is no safe way to continue from that.
-//!
-//! A unit without `ECAP.QI` could be served through `CCMD_REG` and
-//! `IOTLB_REG` instead, which is correct and slower. No such register path is
-//! written here: every unit anyone can boot has queued invalidation, so that
-//! path would be an arm no machine in reach executes. A unit that lacks it
-//! is left unprogrammed and says so, which is the eventual refusal one stage
-//! early and costs that machine nothing it has today.
+//! Queued invalidation: submits a descriptor and an Invalidation Wait
+//! descriptor, then polls the wait's status write to completion.
+//! Acknowledgement timeout is a panic — the kernel cannot say what a device
+//! can reach past it. Only the queued-invalidation path is implemented: every
+//! unit reachable here has it, so a `CCMD_REG`/`IOTLB_REG` fallback would be
+//! dead code; a unit without `ECAP.QI` is left unprogrammed.
 
 use crate::mm::Mmio;
 use crate::time::{Duration, Tripwire};
@@ -20,40 +11,27 @@ use crate::time::{Duration, Tripwire};
 use super::table::{Table, Tables};
 use super::{FSTS_REG, IQA_REG, IQT_REG};
 
-/// 4 KiB of descriptors: 256 of 16 bytes, which is `IQA.QS = 0` and the
-/// smallest queue the architecture defines.
+/// 4 KiB of descriptors: 256 entries of 16 bytes (`IQA.QS = 0`).
 const QUEUE_ENTRIES: usize = 256;
 
-/// Descriptor types.
 const CONTEXT_CACHE: u64 = 0x1;
 const IOTLB: u64 = 0x2;
 const WAIT: u64 = 0x5;
 
-/// Granularity field, bits 5:4. `01` is global — every domain, every entry.
+/// Granularity field, bits 5:4: `01` is global — every domain, every entry.
 const GLOBAL: u64 = 1 << 4;
-/// Drain writes / drain reads: the unit does not report the invalidation done
-/// until transactions already in flight against the old translation have
-/// completed. Set on every IOTLB invalidation here, because "the entry is
-/// gone" is not the claim `Flushed` will make at I4 — "nothing is still using
-/// it" is.
+/// Set on every IOTLB invalidation: waits for in-flight transactions against
+/// the old translation to finish, not just for the entry to be gone.
 const DRAIN_WRITES: u64 = 1 << 6;
 const DRAIN_READS: u64 = 1 << 7;
 
-/// Status write, and the value the unit writes.
 const WAIT_STATUS_WRITE: u64 = 1 << 5;
 const WAIT_DONE: u32 = 1;
 
-/// `FSTS` bits that mean the queue itself went wrong: a descriptor the unit
-/// would not decode, a completion it could not write, a timeout on a device
-/// TLB. Any of them stalls the head, so a wait that never completes should say
-/// which one rather than only that it waited.
+/// `FSTS` bits meaning the queue itself failed; any of them stalls the head,
+/// so a wait that never completes says which one rather than only that it waited.
 const FSTS_QUEUE_ERRORS: u32 = (1 << 4) | (1 << 5) | (1 << 6);
 
-/// How long the unit is given to acknowledge. Linux uses one second for the
-/// same wait; this is not a measurement of anything and does not pretend to
-/// be, it is the bound past which the kernel gives up rather than spins for
-/// ever. Expiry is a panic: what a device can reach is unknown from
-/// there.
 const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(1),
     "Linux waits one second for the same acknowledgement, and what a device can reach is unknown past it",
@@ -61,33 +39,23 @@ const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
 
 pub struct Queue {
     descriptors: Table,
-    /// The unit writes its completion here. Its own page: the descriptor ring
-    /// uses all 4 KiB of its own, and a status word inside it would be a
-    /// descriptor slot the unit also reads.
+    /// Own page: the ring uses its full 4 KiB, so an inline status word would collide with a descriptor slot.
     status: Table,
     tail: usize,
 }
 
 impl Queue {
-    /// Allocate the ring and point the unit at it. The caller enables
-    /// `GCMD.QIE` afterwards — arming a queue the unit has not been told about
-    /// is a queue it never reads.
+    /// The caller enables `GCMD.QIE` only after this returns, since a queue the unit has not been pointed at is a queue it never reads.
     pub fn new(tables: &mut Tables, regs: Mmio) -> Self {
         let queue = Self { descriptors: tables.alloc(), status: tables.alloc(), tail: 0 };
-        // Descriptor width 0 (128-bit) and queue size 0 (256 entries), so the
-        // register is the base address and nothing else.
+        // Descriptor width 0, queue size 0: the register is the base address alone.
         regs.write_u64(IQA_REG, queue.descriptors.phys());
         regs.write_u64(IQT_REG, 0);
         queue
     }
 
-    /// Every cached translation and every cached context entry, gone, and the
-    /// unit has said so before this returns.
-    ///
-    /// Both directions, always, and never a branch on `CAP.CM`: the
-    /// arm that skips an invalidation is the arm that is right on hardware and
-    /// wrong under the only configuration a test can stage, and code that
-    /// always invalidates is code the harness can certify.
+    /// Every cached translation and context entry, gone, acknowledged by the
+    /// unit before this returns.
     pub fn invalidate_all(&mut self, regs: Mmio) {
         self.submit(
             regs,

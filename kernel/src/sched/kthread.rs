@@ -1,34 +1,8 @@
-//! Kernel threads: a task with no address space of its own, and the one place
-//! that says what a panic inside one means.
-//!
-//! There are three: `klogd`, the console drainer; `drivers::xhci::usbd`; and
-//! `crate::iod`. [`ROWS`] carries all three, and the machine has one thread per
-//! kind of work that must not borrow whichever thread happened to trap — a
-//! stuck USB enumeration must not stop the log.
-//!
-//! **A kernel thread is not a special kind of task.** It is an ordinary task
-//! that names `mm::paging::kernel` as its address space — the one every CPU is
-//! already in between two user threads — reached through a trampoline that
-//! never issues an `iretq` (`loader::start::kernel_start`). It shows up in `ps`
-//! and in Ctrl+Alt+D, and it logs like anything else.
-//!
-//! **It is preemptible and stealable only where its body reaches a preemption
-//! point, and a Ring 0 loop does not.** `need_resched` is set by the timer's
-//! Ring 0 stub on every tick and read in exactly two places: the Ring 3 exit
-//! check, and `preempt::enable`'s slow path when the count reaches zero. A body
-//! that never returns to Ring 3 and takes no `Lock` reaches neither, so the
-//! byte is set on every tick and nothing ever consumes it. Migration follows
-//! from that and not from a second mechanism — only a *Ready* task is stolen,
-//! so a task that is never switched out never moves, and a park that does reach
-//! the scheduler comes back to the CPU it left. Anything that needs a kernel
-//! thread to run on two CPUs has to be given a preemption point, and a body
-//! like these three is not one.
-//!
-//! It gets a process-table entry rather than a bare task, and that is what
-//! makes it nameable: `share_for` is keyed by `Pid`, `sched::dump`'s census
-//! walks the table, and `crash_report_panic` prints the process's *name* — so
-//! without an entry a panicking kernel thread would report a pid nothing in the
-//! machine could resolve.
+//! Kernel threads: ordinary tasks that name `mm::paging::kernel` as their
+//! address space, enter through `loader::kernel_start`, and hold a process-table
+//! entry. One is preempted or stolen only at a preemption point its body reaches,
+//! and a Ring 0 loop reaches none. [`ROWS`] holds every one, and
+//! [`panic_recovers_here`] says what a panic inside one means.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -45,66 +19,33 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
-/// How many kernel threads the machine may have.
-///
-/// Three, and all three exist: `klogd` (`log::console`), `usbd`
-/// (`drivers::xhci::usbd`) and `iod` (`crate::iod`). A fourth is a design
-/// decision and gets to notice that it is one — `Claim::take` dies naming the
-/// thread that had nowhere to go, before it takes the process table.
-///
-/// **The test kernel carries room for one `log-storm` thread per shard on top,
-/// and the shipping kernel carries none of it.** That storm is one ordinary
-/// stealable task per CPU, and it exists only in the build that has the
-/// actuator. A shipping kernel spawning a fourth still dies naming it, so the
-/// rule above is untouched where it applies.
+/// `klogd`, `usbd` and `iod`, plus one `log-storm` thread per shard in the actuator build.
 #[cfg(not(feature = "boot-actuators"))]
 const MAX_KERNEL_TASKS: usize = 3;
 #[cfg(feature = "boot-actuators")]
 const MAX_KERNEL_TASKS: usize = 3 + toyos_abi::log::MAX_LOG_SHARDS;
 
-/// No task. `TaskId::pack` puts a `Pid` in the high word and a `Tid` in the
-/// low one, and neither id map ever issues `u32::MAX`, so this collides with
-/// nothing an entry can hold.
+/// Collides with no packed id: neither id map issues `u32::MAX`.
 const NO_TASK: u64 = u64::MAX;
 
-/// A row somebody is filling in. Collides with nothing for [`NO_TASK`]'s reason
-/// — its high word is `u32::MAX` too — and it is what lets the identity be the
-/// **last** thing published rather than the first.
+/// Distinct from a published identity, so the identity can be stored last,
+/// after the policy word, without another claimant matching the same row.
 const CLAIMING: u64 = u64::MAX - 1;
 
-/// One kernel thread, and whether a panic inside it may be recovered from.
-///
-/// **The column exists because the ordinary predicate is not about a kernel
-/// thread at all.** `main.rs`'s panic handler recovers where
-/// `percpu::in_syscall()` holds, and a kernel thread has no syscall to be
-/// inside: there is no process to kill and no user frame to return to, so
-/// every one of them would answer `false` and halt the machine. The row is
-/// what makes the answer a property of the thread.
-///
-/// **[`Row::task`] is the last word written and the first word read**, and that
-/// is the whole publication protocol. A reader searches on the identity, so
-/// publishing it before the policy beside it leaves a window where the row is
-/// findable and answers with a default nobody chose — which is a second way to
-/// get the nondeterminism this type exists to remove. The identity is stored
-/// `Release` after the payload and loaded `Acquire` before it.
+/// `task` is stored `Release` after `recoverable` and loaded `Acquire` before it,
+/// so a row found by identity never answers with an unwritten policy.
 struct Row {
     task: AtomicU64,
+    // `recoverable` exists because `percpu::in_syscall()` is never true for a kernel
+    // thread, which would otherwise make every kernel-thread panic halt the machine by default.
     recoverable: AtomicU64,
 }
 
-/// A row reserved before its thread exists, to be published before that thread
-/// can run.
-///
-/// **Two phases because the two failures are at opposite ends.** Reserving
-/// needs no [`TaskId`] and must happen before the process table is locked, so
-/// that "there is room for a fourth kernel thread" is answered by a panic that
-/// holds no lock. Publishing must happen before `enqueue_new`, because from
-/// that call the task is runnable, stealable, and able to panic — and a panic
-/// on a task whose row does not exist yet is answered by the coin toss above.
+/// A row reserved before the table lock and published before `enqueue_new`.
 struct Claim(&'static Row);
 
 impl Claim {
-    /// Reserve a row, or die naming the thread that had nowhere to go.
+    /// Reserve a row, or panic naming the thread.
     fn take(name: &str) -> Self {
         for row in &ROWS {
             if row
@@ -118,8 +59,7 @@ impl Claim {
         panic!("kthread: {name} is the {}th kernel thread and there is room for {MAX_KERNEL_TASKS}", MAX_KERNEL_TASKS + 1);
     }
 
-    /// Fill the payload, then publish the identity. In that order, and the
-    /// order is the point.
+    /// Payload first, then the identity `Release`.
     fn publish(self, id: TaskId, on_panic: OnPanic) {
         self.0
             .recoverable
@@ -128,8 +68,7 @@ impl Claim {
     }
 }
 
-/// Every kernel thread, registered at spawn and never removed: these do not
-/// exit.
+/// Registered at spawn and never cleared: a dead `Recover` thread's row stays.
 static ROWS: [Row; MAX_KERNEL_TASKS] =
     [const { Row { task: AtomicU64::new(NO_TASK), recoverable: AtomicU64::new(0) } };
         MAX_KERNEL_TASKS];
@@ -137,30 +76,14 @@ static ROWS: [Row; MAX_KERNEL_TASKS] =
 /// What a kernel thread's panic does.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OnPanic {
-    /// The thread is killed and the machine carries on, which is what a
-    /// kernel thread whose absence is survivable and *visible* may ask for.
+    /// Ask for `Recover` only when the thread's absence is both survivable and visible.
     Recover,
-    /// The machine halts with a report.
-    ///
-    /// `klogd`'s answer, and the reason is its own: it is the machine's only
-    /// console drainer on a live machine, so a killed `klogd` is a machine that
-    /// goes quiet with nothing left able to say so. That is the exact failure
-    /// the panel exists to make impossible, and it is why the recoverable
-    /// branch may not be reached by accident.
+    /// `Halt` is `klogd`'s answer: it is the machine's only console drainer,
+    /// so killing it would leave the machine silently mute.
     Halt,
 }
 
-/// The row of the task this CPU is running, if it is a kernel thread.
-///
-/// **Two per-CPU words and at most [`MAX_KERNEL_TASKS`] acquire loads**, and
-/// the cheapness is a requirement rather than a nicety: one caller is the panic
-/// handler, which may hold any lock and may not fault, and the other is
-/// `scheduler::blocking_baseline`, which runs on every blocking call in the
-/// machine **with preemption still on**. Asking the `CpuSched` instead — the
-/// structural question, "was this task given an address space" — is unsound from
-/// a preemptible context: `with_cpu` hands a pass `&mut CpuSched`, so a timer
-/// landing inside the read aliases it and the running task's record may be
-/// moving underneath. The identity words cannot move under their own thread.
+/// Lock-free and fault-free, so it may run with any lock held or preemption on.
 fn current_row() -> Option<&'static Row> {
     let (Some(pid), Some(tid)) = (
         crate::arch::percpu::current_pid(),
@@ -169,53 +92,29 @@ fn current_row() -> Option<&'static Row> {
         return None;
     };
     let packed = TaskId(pid, tid).pack();
-    // `Acquire` against `Claim::publish`'s `Release`: what the pair orders is
-    // the policy word beside the identity, not the identity. A relaxed load here
-    // could find the row and then read a `recoverable` nobody had written yet.
+    // Pairs with `Claim::publish`'s `Release`: a relaxed load could read an unwritten `recoverable`.
     ROWS.iter().find(|row| row.task.load(Ordering::Acquire) == packed)
 }
 
 /// Is the task this CPU is running a kernel thread?
-///
-/// **A pid a row holds is never reused, and the reason is `id_map`'s rather
-/// than this module's.** `usbd` and `iod` carry [`OnPanic::Recover`], so one of
-/// them *can* die — its entry is zombified by the idle loop and reaped — and a
-/// row holding a dead task's identity would then answer for whoever took the pid
-/// next. Nobody does: `IdMap` counts up from zero and never reissues a key,
-/// which is the property that makes a row safe to leave standing.
 pub fn current_is_kernel_thread() -> bool {
     current_row().is_some()
 }
 
-/// Is `id` one of this machine's kernel threads?
-///
-/// The same question [`current_is_kernel_thread`] asks, about a task that is not
-/// the one running — `sched::dump`'s census walks the process table and wants to
-/// name these three however they happen to be scheduled. At most
-/// [`MAX_KERNEL_TASKS`] acquire loads and no lock, which is what the dump needs:
-/// it runs from `drain_irqs` on a machine that is already suspected of being
-/// stuck, and may take nothing.
+/// Is `id` a kernel thread?
+// No lock: `drain_irqs` calls this on a machine already suspected of being
+// stuck, where taking one could hang diagnostics.
 pub fn is_kernel_task(id: TaskId) -> bool {
     let packed = id.pack();
     ROWS.iter().any(|row| row.task.load(Ordering::Acquire) == packed)
 }
 
-/// Whether a panic on the task this CPU is running is recoverable, or `None`
-/// when the running task is not a kernel thread and the ordinary predicate
-/// decides.
+/// Whether a panic on the running task recovers; `None` unless it is a kernel thread.
 pub fn panic_recovers_here() -> Option<bool> {
     Some(current_row()?.recoverable.load(Ordering::Relaxed) != 0)
 }
 
-/// Start a kernel thread running `body(arg)` on its own kernel stack.
-///
-/// Returns the scheduler faces of the new task; `klogd`'s wake reaches it
-/// through the `shared` half without going near the process table.
-///
-/// Panics on failure. Every caller is kernel init: a machine that cannot
-/// allocate a [`crate::process::KERNEL_STACK_SIZE`] stack at boot has nothing
-/// to fall back to, and a kernel thread that silently did not start is the
-/// failure this whole subsystem exists to make impossible.
+/// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
 pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPanic) -> ThreadSched {
     let (stack, entry_rsp) = crate::loader::alloc_kernel_stack(
         crate::loader::kernel_start,
@@ -225,25 +124,17 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
     )
     .unwrap_or_else(|| panic!("kthread: no kernel stack for {name}"));
 
-    // **Reserved here, before the table lock, and published before
-    // `enqueue_new`.** Its refusal is a panic, and a panic holding the process
-    // table is `issues/panic-path/panic-holding-process-table-hangs.md`.
+    // Before the table lock: a panic holding the process table hangs the machine.
     let claim = Claim::take(name);
 
     let mut short = [0u8; THREAD_NAME_LEN];
     let len = name.len().min(THREAD_NAME_LEN - 1);
     short[..len].copy_from_slice(&name.as_bytes()[..len]);
 
-    // A kernel thread has no user half, so it has no user symbols either — and
-    // it names the empty table rather than being an exception to what a task
-    // carries. A crash report on one resolves nothing here and everything
-    // through `symbols::resolve_kernel`, which is the right answer for a thread
-    // whose every frame is kernel text.
+    // No user half: the empty table, and frames resolve through `symbols::resolve_kernel`.
     let syms = Arc::new(SymbolTable::empty());
 
-    // The whole insert-then-place sequence under one hold of the table lock,
-    // exactly as `loader::spawn` does it and for the same reason: once the pid
-    // is visible its main thread is already in the scheduler.
+    // One hold across insert and place: a visible pid already has its thread scheduled.
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().expect("kthread: spawned before process::init");
     let pid = table.insert_with(|pid| {
@@ -256,15 +147,9 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
         )
     });
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
-    // **Before `enqueue_new` and not after it.** That call is where the task
-    // becomes runnable, stealable and able to panic, and a panic on a task whose
-    // row is not published yet is answered by the coin toss the row exists to
-    // replace.
+    // Before `enqueue_new`: from that call the task can run and panic.
     claim.publish(TaskId(pid, tid), on_panic);
-    // **The kernel address space, named rather than defaulted to.** A kernel
-    // thread runs in the one every CPU is already in between two user threads,
-    // and naming it here is what keeps one declaration deciding every task's
-    // `cr3`.
+    // The kernel address space, named so one declaration decides every task's `cr3`.
     let (sched, _dst) = scheduler::enqueue_new(
         TaskId(pid, tid),
         stack,
@@ -292,12 +177,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64, on_panic: OnPa
     sched
 }
 
-/// A process record for a thread that has no user half at all.
-///
-/// Every field is the empty value rather than a plausible one: there is no ELF,
-/// no TLS, no stack in user memory, no handle and no endowment, and a kernel
-/// thread that ever reached one of them would be reaching for something that
-/// was never there.
+/// Every field is the empty value: a kernel thread has no user half.
 fn kernel_process_data(name: &str) -> ProcessData {
     ProcessData {
         handles: crate::object::HandleTable::new(),
