@@ -242,7 +242,8 @@ fn resolve_dtpoff(lib: &LoadedLib, r_sym: u32, r_addend: i64, tls_info: &TlsModu
     }
 }
 
-// TPOFF = base_offset + symbol_offset + addend - total_memsz (linker's convention).
+/// `S + A - tp` for one initial-exec reference: `S`'s place in the block and
+/// the addend go through `tls::tpoff`, which folds in `A` on every branch.
 fn compute_tpoff(
     lib: &LoadedLib,
     r_sym: u32,
@@ -252,16 +253,16 @@ fn compute_tpoff(
     tls_info: &TlsModuleInfo,
 ) -> i64 {
     if r_sym == 0 {
-        return lib_base_offset as i64 + r_addend - total_memsz as i64;
+        return toyos_elf::tls::tpoff(lib_base_offset as u64, r_addend, total_memsz);
     }
     let symbols = lib.symbols();
     if let Some(sym) = symbols.get(r_sym as usize).filter(|s| s.is_defined()) {
-        return lib_base_offset as i64 + sym.value as i64 + r_addend - total_memsz as i64;
+        return toyos_elf::tls::tpoff(lib_base_offset as u64 + sym.value, r_addend, total_memsz);
     }
     let name = symbols.name(r_sym as usize);
     match defining_module(name, tls_info) {
         Some((module, sym_offset)) => {
-            module.base_offset as i64 + sym_offset as i64 - total_memsz as i64
+            toyos_elf::tls::tpoff(module.base_offset as u64 + sym_offset, r_addend, total_memsz)
         }
         None => {
             log!("tpoff: unresolved TLS symbol: {}", name);

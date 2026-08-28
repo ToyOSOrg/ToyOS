@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 
 use crate::mm::{KernelSlice, MAX_HEAP_ALLOC};
-use toyos_elf::{RelaCounts, RelaTable, RelocKind};
+use toyos_elf::{Rela, RelaCounts, RelaTable, RelocKind};
 
 /// Relocation entries the loader needs, grouped by what it does with them.
 pub struct ParsedRelaEntries {
@@ -17,6 +17,26 @@ pub struct ParsedRelaEntries {
     pub glob_dat: Vec<(u64, u32, i64)>,
     pub tpoff64: Vec<(u64, u32, i64)>,
     pub tpoff32: Vec<(u64, u32, i64)>,
+}
+
+impl ParsedRelaEntries {
+    /// Every entry as a `Rela` for `rela::validate`; `GLOB_DAT` stands for the
+    /// `JUMP_SLOT` grouped with it, since kind carries width and symbol-need.
+    pub fn as_relas(&self) -> impl Iterator<Item = Rela> + '_ {
+        let rel = self.relative.iter().map(|&(offset, addend)| Rela {
+            offset, sym: 0, kind: RelocKind::Relative, addend,
+        });
+        let bind = self.glob_dat.iter().map(|&(offset, sym, addend)| Rela {
+            offset, sym, kind: RelocKind::GlobDat, addend,
+        });
+        let t64 = self.tpoff64.iter().map(|&(offset, sym, addend)| Rela {
+            offset, sym, kind: RelocKind::Tpoff64, addend,
+        });
+        let t32 = self.tpoff32.iter().map(|&(offset, sym, addend)| Rela {
+            offset, sym, kind: RelocKind::Tpoff32, addend,
+        });
+        rel.chain(bind).chain(t64).chain(t32)
+    }
 }
 
 /// Groups both relocation tables, returning `None` when any one group would not fit a single kernel allocation.
