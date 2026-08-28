@@ -1,40 +1,11 @@
-//! Kernel event tracing — per-CPU ring buffer of scheduler/timer/IRQ events.
+//! Kernel event tracing — per-CPU ring buffer of scheduler/timer/IRQ events,
+//! dumped from LLDB on a wedged kernel via the `TRACE_RINGS` symbol.
+//! Writer is single-CPU but tolerates interrupt recursion via `fetch_add` on
+//! the head index; payload writes are non-atomic, so a reader may see a torn
+//! record for the most recent entry.
 //!
-//! Designed to be dumped from LLDB on a wedged kernel. Writer is single-CPU (the
-//! ring belongs to the current CPU) but must tolerate interrupt recursion, so
-//! slot allocation uses `fetch_add` on the head index. Event payload writes are
-//! non-atomic — a reader may observe a torn record for the most recent entry,
-//! which is acceptable for a debug tool.
-//!
-//! Symbol `TRACE_RINGS` is the array of per-CPU rings. From LLDB:
-//!   (lldb) p &TRACE_RINGS
-//!   (lldb) memory read --size 8 --count 2 <head_addr>
-//!
-//! # Relationship to `toyos_sched::hw::TraceEvent`
-//!
-//! The kernel and the simulator share one event vocabulary in two
-//! representations, and deliberately so:
-//!
-//! * `hw::TraceEvent` is the vocabulary — a closed Rust enum the simulator
-//!   holds by value and asserts on. It has no layout guarantee, so it cannot
-//!   be the thing on the wire.
-//! * [`Record`] below is the wire form — `repr(C)`, 24 bytes, discriminants
-//!   fixed by hand — because its reader is `memory read` in LLDB, which cannot
-//!   parse a Rust enum.
-//!
-//! [`record`] is the total mapping from the first onto the second, and is what
-//! [`crate::hw::KernelHw`] installs as `Machine::trace`. The ring also keeps
-//! kinds the core cannot produce ([`Kind::IrqDrain`], [`Kind::TimerArm`],
-//! [`Kind::Preempt`]) — kernel observations from below the boundary.
-//!
-//! **There is one reader, not two.** LLDB alone wants every property of the
-//! wire form; this ring cannot feed a simulator replay, because a sim
-//! `Scenario` is a *workload* — which queue each thread blocks on, what makes
-//! its condition true, how long it runs — and the ring records none of that. It
-//! records an observed schedule, from a buffer of [`RING_CAPACITY`] entries
-//! that wraps, so a capture is a tail with no initial state to replay from. So
-//! a numeric discriminant has one consumer, and the const assertions below are
-//! what make "do not reorder" a build error rather than a comment.
+//! [`Record`] is the `repr(C)` wire form of `toyos_sched::hw::TraceEvent`;
+//! [`record`] maps one onto the other and is `Machine::trace`.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -45,17 +16,11 @@ use crate::arch::percpu;
 
 pub const RING_CAPACITY: usize = 4096;
 
-/// Event kind discriminant. Stable — do not reorder; LLDB reads these by
-/// numeric value off a hexdump, with no symbol to check them against.
-///
-/// 1..=13 are the kernel's own observations. 14.. are the `hw::TraceKind`
-/// variants with no kernel-native counterpart, which arrive through
-/// [`record`].
+/// Event kind discriminant, stable — do not reorder; read by LLDB as a raw `u16`.
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A task was picked and dispatched. `pid`/`tid` name the *incoming*
-    /// task; `data` = 0 — the quantum is in the `TimerArm` that follows.
+    /// `pid`/`tid` name the incoming task; `data` = 0.
     SchedPick   = 1,
     SchedIdle   = 2,  // data = next_deadline_ms_low
     Preempt     = 3,  // data = 0
@@ -67,15 +32,11 @@ pub enum Kind {
     Mark        = 9,  // data = user-defined
     IdleEnter   = 10, // data = 0 — about to halt; the armed deadline is in TimerArm
     IdleExit    = 11, // data = 0 — ring observed cpu woke from halt
-    /// Burst summary of Ring 0 timer fires since the previous kernel→user
-    /// transition. `data` = number of fires. Emitted once per
-    /// `kernel_exit_to_user_check` so a long demand-paging burst doesn't
-    /// drown the ring buffer.
+    /// Burst summary of Ring 0 timer fires since the last kernel→user transition; `data` = fire count.
+    /// Batched so a demand-paging burst does not drown the ring buffer.
     TimerFireBurst = 12,
-    /// An `irq_ring` record was consumed. `data` = IrqSource discriminant in
-    /// the top byte, IRQ→service latency (µs, saturated) in the low 24 bits —
-    /// the observable form of the completion-delivery delay. Distinct from
-    /// [`Kind::Irq`], which is entry rather than consumption.
+    /// `data` = IrqSource discriminant in the top byte, latency in µs in the low 24 bits.
+    /// Distinct from [`Kind::Irq`]: this is consumption, not entry.
     IrqDrain = 13,
     /// The two-phase wait commit parked the task.
     ParkCommit = 14,
@@ -87,19 +48,8 @@ pub enum Kind {
     Irq = 18,
 }
 
-/// Every discriminant, pinned.
-///
-/// `Kind`'s doc says "do not reorder", and until this block nothing made that
-/// true: the only reader is an LLDB hexdump, which sees a `u16` and has no
-/// symbol to check it against, so a variant inserted mid-list renames every
-/// event after it in every capture ever taken — including the ones already
-/// captured off metal, which cannot be re-read.
-/// The failure is silent, retroactive and unrecoverable, which is exactly the
-/// shape that belongs in a compile-time assertion rather than a test.
-///
-/// Listed rather than derived, so that adding a variant means writing its
-/// number here on purpose. What stops this list from silently covering a
-/// *prefix* of the enum is [`every_kind_is_pinned`] below, not anything here.
+// Must list every `Kind` variant; `every_kind_is_pinned` below enforces completeness.
+// Renumbering would silently relabel events in traces already captured off metal, which cannot be re-read.
 const _: () = {
     assert!(Kind::SchedPick as u16 == 1);
     assert!(Kind::SchedIdle as u16 == 2);
@@ -121,12 +71,7 @@ const _: () = {
     assert!(Kind::Irq as u16 == 18);
 };
 
-/// The other half of the pin: a variant added to [`Kind`] makes this `match`
-/// non-exhaustive and the kernel stops compiling, so the flat list above cannot
-/// silently come to cover a prefix of the enum instead of all of it.
-///
-/// Never called. A wildcard arm here would delete the whole guarantee, which is
-/// `record`'s reason for having no wildcard either.
+// No wildcard arm: adding a `Kind` variant must break this compile, not silently match.
 #[allow(dead_code)]
 const fn every_kind_is_pinned(kind: Kind) {
     match kind {
@@ -151,8 +96,7 @@ const fn every_kind_is_pinned(kind: Kind) {
     }
 }
 
-/// The wire record. 24 bytes, `repr(C)`; field order chosen so an LLDB
-/// hexdump is easy to read.
+/// Wire record: `repr(C)`, 24 bytes; field order chosen for LLDB hexdump reading.
 #[repr(C)]
 pub struct Record {
     pub timestamp_ns: u64,
@@ -182,8 +126,7 @@ pub struct TraceRing {
     pub events: UnsafeCell<[Record; RING_CAPACITY]>,
 }
 
-// SAFETY: writer uses atomic slot allocation; torn reads on the most recent
-// entry are acceptable for a debug ring.
+// SAFETY: atomic slot allocation partitions writers; torn reads on the newest entry are tolerated.
 unsafe impl Sync for TraceRing {}
 
 impl TraceRing {
@@ -208,8 +151,7 @@ pub fn enable() {
     ENABLED.store(true, Ordering::Release);
 }
 
-/// Record a trace event on the current CPU. Wait-free, safe from any context
-/// (including interrupt handlers). No-op until `enable()` has been called.
+/// Records a trace event on the current CPU; wait-free and safe from any context, no-op until `enable()` is called.
 #[inline]
 pub fn trace(kind: Kind, data: u32) {
     let tid = percpu::current_tid().map_or(u32::MAX, |t| t.raw());
@@ -217,12 +159,7 @@ pub fn trace(kind: Kind, data: u32) {
     push(percpu::cpu_id(), crate::clock::nanos_since_boot(), kind, pid, tid, data);
 }
 
-/// Write one [`Record`] into `cpu`'s ring.
-///
-/// `cpu` is a parameter rather than an ambient `cpu_id()` read because the
-/// scheduler core carries CPU identity in the event — and because the ring's
-/// single-writer property is per-CPU, so the caller naming the wrong one is the
-/// only way to break it.
+// `cpu` is explicit, not `cpu_id()`, because a wrong value is the only way to break the ring's per-CPU single-writer property.
 #[inline]
 fn push(cpu: u32, timestamp_ns: u64, kind: Kind, pid: u32, tid: u32, data: u32) {
     if !ENABLED.load(Ordering::Relaxed) {
@@ -233,8 +170,7 @@ fn push(cpu: u32, timestamp_ns: u64, kind: Kind, pid: u32, tid: u32, data: u32) 
     let ring = &TRACE_RINGS[cpu];
     let slot = ring.head.fetch_add(1, Ordering::Relaxed) as usize % RING_CAPACITY;
 
-    // SAFETY: single-CPU writer; the atomic fetch_add guarantees each IRQ-vs-
-    // kernel writer gets a distinct slot on this CPU.
+    // SAFETY: fetch_add gives each IRQ-vs-kernel writer on this CPU a distinct slot.
     unsafe {
         let slot_ptr = (*ring.events.get()).as_mut_ptr().add(slot);
         core::ptr::write(slot_ptr, Record {
@@ -249,10 +185,7 @@ fn push(cpu: u32, timestamp_ns: u64, kind: Kind, pid: u32, tid: u32, data: u32) 
     }
 }
 
-/// Encode a scheduler-core event into the ring. `Machine::trace`'s body.
-///
-/// Total by construction — no wildcard arm, so a new core variant is a
-/// compile error here rather than a silently dropped event.
+/// Encodes a scheduler-core event into the ring; no wildcard arm, so a new `TraceKind` variant fails to compile rather than being silently dropped.
 pub fn record(ev: TraceEvent) {
     let (kind, task, data) = match ev.kind {
         TraceKind::Schedule { task } => (Kind::SchedPick, Some(task), 0),
@@ -267,9 +200,7 @@ pub fn record(ev: TraceEvent) {
         TraceKind::Irq => (Kind::Irq, None, 0),
         TraceKind::TimerFire => (Kind::TimerFire, None, 0),
     };
-    // A `TaskKey` is a packed `TaskId` (pid in the high half) — the same
-    // encoding `TaskId::pack` writes. Events with no task carry whatever is
-    // loaded on the CPU, which for an idle-enter is nothing.
+    // `TaskKey` packs `TaskId` with pid in the high half, matching `TaskId::pack`.
     let (pid, tid) = match task {
         Some(key) => ((key.0 >> 32) as u32, key.0 as u32),
         None => (
