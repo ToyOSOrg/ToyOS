@@ -16,10 +16,6 @@ use crate::UserAddr;
 use toyos_elf::{RelaCounts, RelocKind};
 
 /// A module's non-`RELATIVE` relocations, extracted once at cache time.
-///
-/// A library is about 99.5 % `RELATIVE` and none of those are kept, so this
-/// saves iterating 211 K entries on every clone to find the thousand that
-/// matter.
 #[derive(Clone)]
 pub struct CachedRelocs {
     /// `GLOB_DAT` and `JUMP_SLOT`: (offset, symbol).
@@ -32,30 +28,18 @@ pub struct CachedRelocs {
     pub dtpoff64: Vec<(u64, u32, i64)>,
 }
 
-/// Extract every non-`RELATIVE` entry, or `None` when the result would not fit
-/// one kernel allocation.
-///
-/// Counted by kind and reserved exactly, never grown: bounding by the tables'
-/// total size would refuse to cache the largest library in the tree, and
-/// growth by doubling asks the page source for more than the ceiling it just
-/// passed. These tables are `KernelSlice`s over the loaded image and are
-/// bounded by the image's own size rather than by `MAX_HEAP_ALLOC`, so a large
-/// enough `.so` reaches the heap's assert through here.
-///
-/// Refusing costs only the cache: every consumer of `cached_relocs` falls back
-/// to scanning the tables directly.
+// Extracts every non-`RELATIVE` entry, or `None` if it would not fit one kernel allocation.
 fn prescan_relocs(lib: &LoadedLib) -> Option<CachedRelocs> {
     let counts = RelaCounts::of(lib.relocations());
     let widest = core::mem::size_of::<(u64, u32, i64)>();
-    // Only the kinds this keeps. `relative` is 99.5 % of a real library and
-    // none of them are stored, so bounding on it would refuse to cache
-    // every library in the tree.
+    // Excludes `Relative`: bounding on it would refuse to cache nearly every library.
     let kept = [RelocKind::GlobDat, RelocKind::Tpoff64, RelocKind::Tpoff32,
         RelocKind::DtpMod64, RelocKind::DtpOff64];
     if counts.max_of(&kept).checked_mul(widest).is_none_or(|b| b > MAX_HEAP_ALLOC) {
         log!("dlopen: prescan {:?} will not fit one allocation, not caching", counts);
         return None;
     }
+    // Capacities are reserved exactly from `counts`; growing them could allocate past the bound just checked.
     let mut relocs = CachedRelocs {
         bind: Vec::with_capacity(counts.bind),
         tpoff64: Vec::with_capacity(counts.tpoff64),
@@ -76,13 +60,7 @@ fn prescan_relocs(lib: &LoadedLib) -> Option<CachedRelocs> {
     Some(relocs)
 }
 
-/// Everything about a loaded module that does not depend on where it is
-/// mapped.
-///
-/// The one place these fields are listed twice instead of three times. Both
-/// the cache entry and every clone of it are the same bytes at the same
-/// physical address; only the memory ownership, the assigned user base and the
-/// pre-scanned relocations differ.
+// Fields identical between the cache entry and every clone: only memory ownership, user base and relocations differ.
 #[derive(Clone, Copy)]
 struct Snapshot {
     image: KernelSlice,
@@ -165,31 +143,23 @@ struct CachedLib {
     relocs: CachedRelocs,
 }
 
+// Entries are pushed only, never removed: `clone_from_cache`'s SAFETY depends on `cached.alloc` staying live forever.
 static SO_CACHE: Lock<Vec<(String, CachedLib)>> = Lock::new(Vec::new());
 
-/// Take ownership of a freshly loaded library and hand back a clone of it in
-/// `Shared` mode, with a private writable window.
-///
-/// `rw_offset`/`rw_size` come from `load_shared_lib` so that the window a
-/// relocation was validated against and the window `rw_alloc` covers cannot
-/// drift apart. A library that cannot be cached is handed back unchanged: this
-/// is an optimisation, and refusing it costs only the next load's time.
+/// Takes ownership of `lib` and returns a clone in `Shared` mode with a private writable window; returns it unchanged if it cannot be cached.
 pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: usize) -> LoadedLib {
     if !matches!(lib.memory, LibMemory::Owned(_)) {
         return lib;
     }
     let snapshot = Snapshot::of(&lib);
     let user_base = lib.user_base;
-    // Before the allocation moves out of `lib`, because the scan reads the
-    // relocation tables through it.
+    // Must scan before `lib.memory` moves out: the scan reads the tables through `lib`.
     let scanned = prescan_relocs(&lib);
     let LibMemory::Owned(alloc) = lib.memory else {
         unreachable!("the check above established this")
     };
 
-    // Refusing to prescan means refusing to cache: the cached image is what
-    // `cached_relocs` describes, so a lib without one must keep taking the
-    // scan-every-table path.
+    // A lib without prescanned relocs keeps the scan-every-table path: the cache always stores what `cached_relocs` describes.
     let owned = |alloc| snapshot.into_lib(LibMemory::Owned(alloc), user_base, None);
     let Some(relocs) = scanned else {
         return owned(alloc);
@@ -204,16 +174,7 @@ pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: u
         return owned(alloc);
     };
     let alloc_ptr = alloc.ptr();
-    // SAFETY: `alloc` is exactly `load_shared_lib`'s `load_size`-byte
-    // allocation, and `rw_offset`/`rw_size` are the same values that
-    // function derived from the writable window — this function's own doc
-    // names the invariant ("the window ... cannot drift apart"):
-    // `rw_offset + rw_size` is `rw_end_aligned <= load_size`, since `rw_hi
-    // <= layout.span()` and both round up through the same
-    // `align_2m_checked`. So `alloc_ptr.add(rw_offset)` stays inside
-    // `alloc`'s tail, valid for `rw_size` bytes. `rw_alloc` is a fresh,
-    // distinct `PageAlloc::new(rw_size, ...)` just above, so the ranges
-    // cannot overlap.
+    // SAFETY: `rw_offset`/`rw_size` are `load_shared_lib`'s validated window, so `alloc_ptr.add(rw_offset)` stays inside `alloc`; `rw_alloc` is a fresh, distinct allocation, so the ranges cannot overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(alloc_ptr.add(rw_offset), rw_alloc.ptr(), rw_size);
     }
@@ -243,24 +204,14 @@ pub fn try_clone_cached(path: &str) -> Option<LoadedLib> {
     clone_from_cache(&cache[idx].1)
 }
 
-/// Share the read-only pages, copy the writable ones.
-///
-/// The base address stays the cache's, so `RELATIVE` relocations need no fixup
-/// until `spawn` or `dlopen` assigns the module a user address.
+// Base address stays the cache's: `RELATIVE` relocations need no fixup until spawn/dlopen assigns a user address.
 fn clone_from_cache(cached: &CachedLib) -> Option<LoadedLib> {
     let t0 = crate::clock::nanos_since_boot();
 
     let rw_alloc = PageAlloc::new(cached.rw_size, crate::mm::pmm::Category::Elf)?;
-    // SAFETY: `cached.alloc`/`cached.rw_offset`/`cached.rw_size` are exactly
-    // the values `cache_loaded_lib` validated when it built this `CachedLib`
-    // (see the `SAFETY` there) — the sum stays inside `cached.alloc`'s
-    // allocation. `CachedLib` is immortal once cached (this struct's own
-    // doc, and `SO_CACHE` never removes an entry), so `cached.alloc` is
-    // still live here.
+    // SAFETY: `rw_offset + rw_size` was validated inside `cached.alloc` when this `CachedLib` was built; `CachedLib` is immortal once cached, so `cached.alloc` is still live.
     let src = unsafe { cached.alloc.ptr().add(cached.rw_offset) };
-    // SAFETY: `src` is valid for `cached.rw_size` bytes per the `SAFETY`
-    // above; `rw_alloc` is a fresh, distinct `PageAlloc::new(cached.rw_size,
-    // ...)` on the line above, so the two ranges cannot overlap.
+    // SAFETY: `src` is valid for `cached.rw_size` bytes per the `SAFETY` above; `rw_alloc` is a fresh, distinct allocation, so the ranges cannot overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(src, rw_alloc.ptr(), cached.rw_size);
     }

@@ -19,9 +19,7 @@ static AP_STARTED: AtomicBool = AtomicBool::new(false);
 static SMP_READY: AtomicBool = AtomicBool::new(false);
 static CPU_COUNT: AtomicU32 = AtomicU32::new(1); // BSP counts as 1
 
-/// cpu_id → LAPIC id, filled during AP bring-up. Needed for targeted IPIs
-/// (`apic::kick_cpu`) — cpu ids are kernel-assigned and dense, LAPIC ids
-/// come from the MADT and need not be.
+// cpu_id → LAPIC id; cpu ids are kernel-assigned and dense, LAPIC ids from the MADT need not be.
 static CPU_APIC_IDS: [AtomicU32; crate::scheduler::MAX_CPUS] =
     [const { AtomicU32::new(0) }; crate::scheduler::MAX_CPUS];
 
@@ -29,28 +27,20 @@ pub fn cpu_count() -> u32 {
     CPU_COUNT.load(Ordering::Relaxed)
 }
 
-/// LAPIC id of `cpu_id`. Panics on out-of-range ids — callers must only
-/// target CPUs that exist.
+/// LAPIC id of `cpu_id`; panics if `cpu_id` is not online.
 pub fn apic_id_for(cpu_id: u32) -> u32 {
     assert!(cpu_id < cpu_count(), "apic_id_for: cpu {cpu_id} not online");
     CPU_APIC_IDS[cpu_id as usize].load(Ordering::Relaxed)
 }
 
-/// Signal APs that the kernel is fully initialized and they can join the scheduler.
-///
-/// Also the point from which a TLB shootdown waits for acknowledgements. Until
-/// here every AP that `CPU_COUNT` has counted is parked in the spin below with
-/// `IF` clear and cannot take the IPI, so waiting for one would hang; the flush
-/// each of them does on release is what settles the shootdowns issued in the
-/// meantime (`arch::tlb::join`).
+/// Signal APs that the kernel is fully initialized and can join the scheduler; also the point a TLB shootdown waits for acknowledgements from.
+// Before this, every counted AP is parked with `IF` clear and cannot take the shootdown IPI, so waiting for its ack here would hang.
 pub fn set_ready() {
     SMP_READY.store(true, Ordering::Release);
     crate::arch::tlb::siblings_answer();
 }
 
-// Shared between BSP (Rust) and AP (assembly trampoline at 0x8000).
-// Field offsets are hardcoded in the global_asm! below — the static
-// assertion at the bottom guarantees the struct matches.
+// Field offsets are hardcoded in the global_asm! trampoline below; the static assertion at the bottom checks the match.
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
@@ -96,11 +86,7 @@ struct TrampolineData {
 
 const _: () = assert!(size_of::<TrampolineData>() == 0x80);
 
-// Trampoline blob (linked into .text, copied to 0x8000 at runtime)
 
-// These are assembly labels — we must use inline asm to get their addresses
-// directly, bypassing GOT/PLT stubs that the PIE linker generates for
-// `extern "C" { static }` references (which resolve to stubs in wrong order).
 
 extern "C" {
     static _trampoline_start: u8;
@@ -110,24 +96,13 @@ extern "C" {
     static _ap_cs_reload: u8;
 }
 
-/// The address of an assembly label, straight out of a `lea`.
-///
-/// **Safe, and the `unsafe` is inside**: a `lea` off `rip` computes an address
-/// and reads nothing, so there is no caller obligation to state — the six sites
-/// that spelled `unsafe { asm_label_addr!(…) }` were each restating the same
-/// nothing. What the address then *means* is the caller's, and every caller here
-/// treats it as an integer.
-///
-/// A macro rather than a function because `sym` needs the label as a token, and
-/// inline asm rather than `&raw const $label` because the PIE linker resolves an
-/// `extern "C" { static }` reference through a GOT stub, which for these labels
-/// is filled in the wrong order.
+/// Address of an assembly label via a `rip`-relative `lea`; reads no memory, so this needs no `unsafe` contract from callers.
+// A macro, not a function: `sym` needs the label as a compile-time token.
+// Inline asm, not `extern "C" { static }`: the PIE linker's GOT stubs for these labels resolve in the wrong order.
 macro_rules! asm_label_addr {
     ($label:ident) => {{
         let addr: usize;
-        // SAFETY: `lea` with `nomem` reads and writes no memory; the operand is
-        // an assembler symbol, so the only thing that can go wrong is the name
-        // not existing, which is a link error rather than undefined behaviour.
+        // SAFETY: `lea` with `nomem` reads and writes no memory.
         unsafe {
             core::arch::asm!(
                 "lea {}, [rip + {}]",
@@ -140,20 +115,14 @@ macro_rules! asm_label_addr {
     }};
 }
 
-/// Copy the trampoline assembly blob to physical page 0x8000.
-/// Accesses via the kernel direct map (PHYS_OFFSET) since there's no identity map.
+/// Copies the trampoline blob to physical page 0x8000 via the direct map; there is no identity map this early.
 fn copy_trampoline() {
     let start = asm_label_addr!(_trampoline_start);
     let end = asm_label_addr!(_trampoline_end);
     let size = end as usize - start as usize;
     assert!(size <= DATA_OFFSET, "trampoline code exceeds data block");
     let dest = crate::DirectMap::from_phys(TRAMPOLINE_PAGE).as_mut_ptr::<u8>();
-    // SAFETY: `start..end` is the `global_asm!` blob below, `'static` bytes of
-    // this kernel's own `.text`. `dest` is the direct-map address of physical
-    // page 0x8000, which `mm` reserves for exactly this and which no allocator
-    // hands out; `size <= DATA_OFFSET` was just asserted, so the copy stays
-    // clear of the `TrampolineData` block at 0x8F00 and inside the page. The two
-    // ranges are kernel text and low physical memory, so they cannot overlap.
+    // SAFETY: `start..end` is this kernel's own `.text`; `dest` is physical page 0x8000, reserved for this and never allocator-owned; the asserted `size <= DATA_OFFSET` keeps the copy clear of the `TrampolineData` block and inside the page; the two ranges are kernel text and low physical memory, so they cannot overlap.
     unsafe {
         core::ptr::copy_nonoverlapping(start, dest, size);
     }
@@ -171,14 +140,9 @@ fn build_trampoline_data() -> TrampolineData {
     let lm64_addr = label_addr(asm_label_addr!(_ap_lm64));
     let cs_reload_addr = label_addr(asm_label_addr!(_ap_cs_reload)) as u64;
 
-    // Read kernel's current GDT and IDT descriptors
     let mut kernel_gdt = DescriptorTablePointer { limit: 0, base: 0 };
     let mut kernel_idt = DescriptorTablePointer { limit: 0, base: 0 };
-    // SAFETY: both instructions write ten bytes to the address they are given,
-    // and each is given a `&mut` to a live `DescriptorTablePointer` — `repr(C,
-    // packed)` over a `u16` and a `u64`, which is that shape and that size.
-    // Irreducible: `sgdt`/`sidt` are the only way to ask what this CPU loaded,
-    // and they answer into memory rather than into a register.
+    // SAFETY: both write ten bytes to a `&mut DescriptorTablePointer` (`repr(C, packed)` u16+u64), matching that shape and size.
     unsafe {
         core::arch::asm!("sgdt [{}]", in(reg) &mut kernel_gdt, options(nostack));
         core::arch::asm!("sidt [{}]", in(reg) &mut kernel_idt, options(nostack));
@@ -214,10 +178,7 @@ fn build_trampoline_data() -> TrampolineData {
     }
 }
 
-/// Boot all Application Processors found in the MADT.
-/// `boot_cr3` is the physical address of the bootloader's PML4 (has both
-/// identity map and high-half). APs use this during their transition to
-/// long mode, then switch to the kernel PML4 in `ap_entry`.
+/// Boot all Application Processors found in the MADT, using `boot_cr3` — the bootloader's identity+high-half PML4 — until each AP switches to the kernel PML4 in `ap_entry`.
 pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     let bsp_id = apic::id();
     CPU_APIC_IDS[0].store(bsp_id, Ordering::Relaxed);
@@ -232,12 +193,8 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         if ap_id == bsp_id { continue; }
 
         let stack_layout = Layout::from_size_align(AP_STACK_SIZE, 4096).unwrap();
-        // SAFETY: `AP_STACK_SIZE` is non-zero and 4096 is a power of two, which
-        // is `alloc_zeroed`'s whole contract. Irreducible for the reason
-        // `percpu::alloc_percpu`'s is: the block is never freed and becomes an
-        // AP's `rsp`, so no owning handle can hold it — a `Box` dropped here
-        // would free the stack a CPU is running on, and no `Vec<u8>` expresses
-        // the page alignment the trampoline's stack needs.
+        // SAFETY: `AP_STACK_SIZE` is non-zero and 4096 is a power of two, `alloc_zeroed`'s whole contract.
+        // Never freed: the block becomes an AP's `rsp`, so no owning handle can hold it.
         let stack_base = unsafe { alloc_zeroed(stack_layout) };
         assert!(!stack_base.is_null(), "SMP: failed to allocate AP stack");
 
@@ -249,23 +206,15 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         data.stack_top = stack_base as u64 + AP_STACK_SIZE as u64;
         data.entry = ap_entry as *const () as u64;
         data.percpu_ptr = ap_percpu as u64;
-        // SAFETY: `target` is the direct-map address of physical 0x8F00, the
-        // 0x80-byte `TrampolineData` block `copy_trampoline`'s assertion keeps
-        // clear of the blob — reserved low memory no allocator hands out, and
-        // written only here. Unaligned because `TrampolineData` is `repr(C,
-        // packed)`. The AP this describes has not been sent its INIT-SIPI yet,
-        // and `boot_aps` waits for `AP_STARTED` before writing the block again,
-        // so no CPU is reading it while this lands.
+        // SAFETY: `target` is reserved physical memory written only here; unaligned because `TrampolineData` is `repr(C, packed)`; this AP has not been sent its SIPI yet, and the previous AP already signaled `AP_STARTED` before this loop wrote again, so no CPU is reading it.
         unsafe { core::ptr::write_unaligned(target, data); }
 
         AP_STARTED.store(false, Ordering::Release);
 
-        // INIT-SIPI-SIPI sequence. Both delays are spent rather than waited
-        // on: nothing is polled across either and neither can fail.
+        // Both delays are spent, not waited on: nothing is polled across either.
         const AFTER_INIT: Delay =
             Delay::from_spec(Duration::from_millis(10), "SDM §8.4.4.1, after the INIT IPI");
-        /// SDM §8.4.4.1 asks 200us here; a millisecond is the same shape with
-        /// room, and it is paid once per AP at boot.
+        /// SDM §8.4.4.1 asks 200us here; a millisecond gives room and is paid once per AP.
         const BETWEEN_SIPIS: Delay =
             Delay::from_spec(Duration::from_millis(1), "SDM §8.4.4.1, between the two SIPIs");
         apic::send_init(ap_id);
@@ -278,15 +227,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             apic::send_sipi(ap_id, TRAMPOLINE_VECTOR);
         }
 
-        // How long an AP gets to reach `ap_entry` before it is declared
-        // absent by name and the machine boots without it.
-        //
-        // **A [`Budget`] and not the `Tripwire` offered as the alternative to
-        // finding a source.** Its expiry is already a degraded
-        // answer that says so — "failed to start!", one fewer CPU, a machine
-        // that boots — and making it a panic would be a behaviour change,
-        // which C1's own gate forbids. The number itself still has no source:
-        // SDM §8.4.4.1's numbers are the two delays above, not this.
+        // Budget, not Tripwire or panic: a slow AP degrades to one fewer CPU rather than crashing, and a panic here would be a behaviour change C1's gate forbids.
         const AP_START: Budget = Budget::of(
             Duration::from_millis(100),
             "the AP is named as failed to start and the machine boots one CPU short",
@@ -297,12 +238,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             core::hint::spin_loop();
         }
 
-        // One line per AP, carrying both halves of the identity: the cpu_id is
-        // assigned here and appears in every later log prefix, the lapic_id is
-        // what the INIT-SIPI-SIPI went to, and nothing else prints the pairing.
-        // It is what lets the three lines this replaced go — `starting AP`,
-        // `percpu: AP`, and the AP's own `Hello from CPU` each restated a
-        // subset of it, four lines per core on a machine with eight.
+        // Only place that logs the cpu_id↔lapic_id pairing.
         if AP_STARTED.load(Ordering::Acquire) {
             CPU_COUNT.fetch_add(1, Ordering::Relaxed);
             log!("SMP: AP cpu{} lapic={} online", ap_cpu_id, ap_id);
@@ -313,58 +249,41 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
 }
 
 extern "C" fn ap_entry() -> ! {
-    // The trampoline reaches long mode by OR-ing two bits into whatever INIT
-    // left in CR0, so this is the first instruction that gives this CPU the
-    // machine configuration the rest of the kernel is written against — and it
-    // is before `pat::init`, which restores the CR0 it found.
+    // Must run before `pat::init`, which restores the CR0 this call sets.
     crate::arch::control_regs::init_cr0(percpu::cpu_id());
 
-    // Before this CPU can reach a page that selects the entry it writes: the
-    // framebuffer is already mapped write-combining by now.
+    // Must run before this CPU touches the framebuffer, which needs write-combining mapped first.
     crate::arch::pat::init();
 
-    // Switch from boot PML4 (identity + high-half) to kernel PML4 (high-half only).
-    // We're already executing at a high-half address, so this is safe — which is
-    // what `load_kernel_flush` says once instead of here.
     crate::mm::paging::load_kernel_flush();
 
     // GS base was set by the trampoline; finish percpu init (GDT, CR4).
     percpu::init_ap(percpu::percpu_ptr());
     syscall::init();
-    // Calibration is one global measurement done on the BSP; `arm_one_shot`
-    // programs divide and LVT per call, so there is nothing left for an AP to
-    // do here.
+    // Calibration is a one-time BSP measurement; nothing left for an AP to do here.
     apic::init_ap();
 
     AP_STARTED.store(true, Ordering::Release);
 
-    // Wait for BSP to finish kernel init
     while !SMP_READY.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
 
-    // Before this CPU touches anything it did not map itself. The BSP mapped
-    // every driver's registers and re-typed the framebuffer's leaf while this
-    // one was parked above with `IF` clear, so no shootdown could reach it; the
-    // acquire on `SMP_READY` makes those writes visible and this flush is what
-    // discards whatever the spin left cached over them.
+    // A parked AP could not take a shootdown IPI, so this flush stands in for the ones missed while spinning.
+    // Must run before touching anything not self-mapped: the acquire on `SMP_READY` makes the BSP's mappings visible, and this flush discards what the spin cached over them.
     crate::arch::tlb::join();
 
     log!("CPU {}: joining scheduler", percpu::cpu_id());
     process::ap_idle();
 }
 
-/// Spend a [`Delay`]. Boot only: there is no scheduler to give the CPU back
-/// to, so the wait is a spin and not a park.
+/// Spend a [`Delay`] by spinning; boot-only, there is no scheduler to park against.
 fn delay(span: Delay) {
     let start = clock::nanos_since_boot();
     while clock::nanos_since_boot() - start < span.nanos() {}
 }
 
-// Real mode → protected mode → long mode → Rust entry.
-// Assembled as a blob in .text, copied to 0x8000 at runtime.
-// All memory addresses reference TrampolineData at 0x8F00.
-// BSP fills far-jump targets and other fields at runtime.
+// Real mode → protected mode → long mode → Rust entry, copied to 0x8000 at runtime; addresses below are offsets into TrampolineData at 0x8F00.
 global_asm!(
     ".global _trampoline_start",
     ".global _trampoline_end",

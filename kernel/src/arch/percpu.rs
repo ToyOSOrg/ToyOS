@@ -17,17 +17,7 @@ pub const USER_DS: u16 = 0x1B;
 pub const USER_CS: u16 = 0x23;
 const TSS_SEL: u16 = 0x28;
 
-/// `STAR[63:48]`, which `SYSRET` derives both user selectors from: SS is this
-/// plus 8 and CS is this plus 16.
-///
-/// **RPL 3 belongs in this value rather than to the CPU, because the two
-/// vendors disagree about who supplies it.** Intel's SDM forces it into both —
-/// SYSRET's operation reads `SS.Selector := (IA32_STAR[63:48]+8) OR 3` — while
-/// AMD's APM forces it into CS alone and takes SS's straight from this field.
-/// So a bare [`KERNEL_DS`] here runs every user thread on an AMD machine with
-/// `SS = 0x18`, and the first interrupt taken from one dies on the handler's
-/// `iretq`: a return to an outer privilege level requires `SS.RPL == CS.RPL`,
-/// and 0 is not 3. `#GP(0x18)`, naming the selector.
+/// `STAR[63:48]`; SYSRET sets SS to this+8, CS to this+16, and RPL 3 must be baked in here — AMD doesn't OR it into SS as Intel does.
 pub const STAR_SYSRET_BASE: u16 = USER_DS - 8;
 const _: () = assert!(STAR_SYSRET_BASE + 8 == USER_DS);
 const _: () = assert!(STAR_SYSRET_BASE + 16 == USER_CS);
@@ -62,7 +52,7 @@ impl Tss {
     }
 }
 
-/// Per-CPU fault state machine. Encodes the escalation policy for nested faults.
+/// Per-CPU fault state machine for the escalation policy on nested faults.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CpuFaultState {
@@ -72,9 +62,7 @@ pub enum CpuFaultState {
     Panic = 3,       // panic handler running
 }
 
-/// Per-CPU data, reached through the GS segment. Every access — Rust and
-/// assembly alike — names an `OFF_*` constant below, so the layout is this
-/// type's alone and a field that moves moves its accessors with it.
+/// Per-CPU data, reached through the GS segment; every access names an `OFF_*` constant below, so a field move carries its accessors.
 #[repr(C)]
 pub struct PerCpu {
     self_ptr: u64,
@@ -96,12 +84,9 @@ pub struct PerCpu {
     pub syscall_num: u64,
     /// Saved user RBP at last syscall entry (for panic diagnostics).
     pub syscall_rbp: u64,
-    /// The task whose syscall this CPU is inside, packed pid:tid, or
-    /// [`NO_SYSCALL`] — which is what makes the three words above readable:
-    /// they are diagnostics of *that* task's entry and of no other.
+    /// The task whose syscall this CPU is inside: packed pid:tid, or [`NO_SYSCALL`].
     syscall_task: u64,
-    /// `lock add/sub` because IRQ entry/exit and Rust kernel code mutate it
-    /// on the same CPU.
+    /// `lock add/sub`: IRQ entry/exit and kernel code both mutate it on this CPU.
     pub preempt_count: AtomicU32,
     pub need_resched: AtomicU8,
     _pad_after_need_resched: [u8; 3],
@@ -110,49 +95,17 @@ pub struct PerCpu {
     pub last_seen_ring0_fires: u32,
     fault_state: u8,
     _pad_after_fault_state: [u8; 3],
-    /// Ticks the Ring 0 timer asm re-arms with. Per-CPU: one-shot
-    /// timers are armed independently on every CPU; a shared value would let
-    /// any CPU's arm/stop clobber every other CPU's re-arm fallback.
+    /// Ticks the Ring 0 timer re-arms with; per-CPU to avoid cross-CPU clobber.
     pub last_armed_ticks: AtomicU32,
-    /// This CPU's [`log::Shard`], reached by [`reserve_log_slot`].
-    ///
-    /// **Never null on a live CPU**: [`alloc_percpu`] fills it for cpu0 and for
-    /// every AP, and the BSP allocates an AP's whole `PerCpu` before that AP
-    /// executes an instruction. That is why `emit` needs no check — an absent
-    /// shard is not a state this field can be in.
+    /// This CPU's [`log::Shard`]; never null on a live CPU ([`alloc_percpu`] fills it first).
     log_shard: u64,
-    /// Non-zero while this CPU is inside its NMI handler, written by
-    /// `arch::idt::nmi`'s entry and by nothing else.
-    ///
-    /// **The checked half of a proof.** IST2 is not re-entrant, so a second NMI
-    /// entered while the first is still on that stack would write its frame over
-    /// the first's; the architecture blocks NMI delivery from entry until the
-    /// handler's `iretq` (SDM Vol. 3A §6.7.1), and the handler cannot fault, so
-    /// no such entry exists — and this word is what turns that argument into an
-    /// observation rather than an assumption.
+    /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
     _pad_after_nmi_active: [u8; 4],
-    /// Interrupt deliveries this CPU has taken: the machine's total, then one
-    /// counter per `irq_census::Source`.
-    ///
-    /// **Written by one `add qword ptr gs:[…], 1` per counter and by nothing
-    /// else** — `irq_census::irq_took!` is the only writer and it runs in
-    /// interrupt handlers on this CPU. `AtomicU64` because a sibling reads them
-    /// to print the census; no `lock` prefix, for the reasons `irq_census`'
-    /// module header states. Last on purpose: the array's length is
-    /// `irq_census::SLOTS`, so a new `Source` grows it without moving any
-    /// other field.
+    /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so growing `SLOTS` moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
 }
 
-// GDT layout:
-//   0x00: null
-//   0x08: kernel code64 (DPL=0)
-//   0x10: kernel data   (DPL=0)
-//   0x18: user data     (DPL=3)
-//   0x20: user code64   (DPL=3)
-//   0x28: TSS low       (filled at init)
-//   0x30: TSS high      (filled at init)
 const GDT_ENTRIES: [u64; 7] = [
     0x0000_0000_0000_0000, // null
     0x00AF_9A00_0000_FFFF, // kernel code64
@@ -170,7 +123,6 @@ struct GdtPointer {
 }
 
 impl PerCpu {
-    /// Build the TSS descriptor and write it into gdt[5..7].
     fn init_tss_descriptor(&mut self) {
         let tss_addr = &self.tss as *const Tss as u64;
         let tss_limit = (size_of::<Tss>() - 1) as u64;
@@ -188,9 +140,7 @@ impl PerCpu {
     }
 
     /// Load this CPU's GDT, reload segment registers, and load TSS.
-    ///
-    /// # Safety
-    /// Must be called exactly once per CPU during init.
+    /// # Safety: must be called exactly once per CPU during init.
     unsafe fn load_gdt(&self) {
         let ptr = GdtPointer {
             limit: (size_of::<[u64; 7]>() - 1) as u16,
@@ -207,8 +157,7 @@ impl PerCpu {
             "mov ds, {ds:x}",
             "mov es, {ds:x}",
             "mov fs, {ds:x}",
-            // Skip GS — its base is managed via IA32_GS_BASE MSR.
-            // Writing the selector would zero the cached base.
+            // GS is skipped: reloading its selector would zero the IA32_GS_BASE-loaded base.
             "mov ss, {ds:x}",
             in(reg) &ptr,
             cs = in(reg) KERNEL_CS as u64,
@@ -220,18 +169,11 @@ impl PerCpu {
     }
 }
 
-// Where each field this kernel reaches through `gs:` sits inside `PerCpu`.
-//
-// **Derived from the type, and the only spelling any access has.** Every GS
-// access — the primitives below, `preempt`, `irq_census`, and the five naked
-// entry stubs of `arch::syscall` and `arch::idt` — feeds one of these in as a
-// `const` operand, a naked stub exactly as an ordinary `asm!`. So no
-// displacement is written down twice and none can be left behind by a field
-// edit.
+// Every GS access reaches its field through one of these `const`s; no
+// displacement is duplicated.
 const OFF_SELF_PTR: u32 = offset_of!(PerCpu, self_ptr) as u32;
 const OFF_CPU_ID: u32 = offset_of!(PerCpu, cpu_id) as u32;
-/// The kernel stack `arch::syscall`'s entry switches to, and the one field of
-/// this type the hardware never reads for itself.
+/// The kernel stack `arch::syscall`'s entry switches to.
 pub(crate) const OFF_KERNEL_RSP: u32 = offset_of!(PerCpu, kernel_rsp) as u32;
 pub(crate) const OFF_USER_RSP: u32 = offset_of!(PerCpu, user_rsp) as u32;
 const OFF_CURRENT_TID: u32 = offset_of!(PerCpu, current_tid) as u32;
@@ -244,48 +186,23 @@ const OFF_SYSCALL_TASK: u32 = offset_of!(PerCpu, syscall_task) as u32;
 pub(crate) const OFF_RING0_TIMER_FIRES: u32 = offset_of!(PerCpu, ring0_timer_fires) as u32;
 const OFF_LAST_SEEN_RING0_FIRES: u32 = offset_of!(PerCpu, last_seen_ring0_fires) as u32;
 pub(crate) const OFF_LAST_ARMED_TICKS: u32 = offset_of!(PerCpu, last_armed_ticks) as u32;
-/// `reserve_log_slot`'s naked read of this CPU's [`log::Shard`] pointer names
-/// this rather than an inline `offset_of!`, so no GS access spells a raw field.
+/// Used by `reserve_log_slot`'s asm so no GS access spells a raw offset.
 const OFF_LOG_SHARD: u32 = offset_of!(PerCpu, log_shard) as u32;
-/// `arch::syscall`'s and `arch::idt`'s entry stubs open and close this count in
-/// naked assembly, and `preempt` is the Rust half of the same word.
+/// Opened/closed by `arch::syscall`'s and `arch::idt`'s naked stubs; `preempt` is the Rust half.
 pub(crate) const OFF_PREEMPT_COUNT: u32 = offset_of!(PerCpu, preempt_count) as u32;
 /// Set by the timer ISR, cleared by the deferred-preempt epilogue — `preempt`.
 pub(crate) const OFF_NEED_RESCHED: u32 = offset_of!(PerCpu, need_resched) as u32;
-/// Read by `preempt::enable`'s slow path, which declines to reschedule a CPU
-/// that is inside a fault or panic report.
+/// Read by `preempt::enable`'s slow path to decline rescheduling a faulting CPU.
 pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
-/// Set and cleared by `arch::idt::nmi`'s naked entry, which is the only writer.
-/// Its stub reaches the word through this constant (`active = const
-/// OFF_NMI_ACTIVE`), not a hardcoded displacement.
+/// Set/cleared only by `arch::idt::nmi`'s naked entry, via this constant.
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
-/// Where this CPU's interrupt counters start. `irq_census::slot_offset` derives
-/// every `add qword ptr gs:[…]` in the interrupt handlers from it, so the
-/// instrument names no number of its own.
+/// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
 
 /// Every GS-relative access this kernel makes, as `const`-generic primitives.
-///
-/// **Here because this module owns the layout they index into.** The offsets
-/// above are declared and asserted a few lines up, the entry stubs hardcode the
-/// same numbers, and a GS access written anywhere else is a third place that has
-/// to know both.
-///
-/// The offset is a `const` operand, so each still assembles to the
-/// immediate-displacement form a hand-written `asm!` string produced —
-/// `mov %gs:8, %eax`, `lock addl $1, %gs:240` — and no register is spent
-/// reaching it.
-///
-/// **What none of them can check, and every caller owes**: `GS_BASE` must
-/// already point at this CPU's `PerCpu`. [`init_bsp`] writes it on the BSP and
-/// the trampoline in `arch::smp` writes it before an AP executes any Rust;
-/// `preempt`'s callers ask `percpu_ready()` first, because they run on the BSP
-/// before `init_bsp` does.
-///
-/// Each is irreducible in the same way: a GS-relative access is a machine
-/// facility with no Rust operation behind it, and `PerCpu` cannot be a `static`
-/// because every CPU needs a different one under the same name.
+/// Caller-owed and unchecked: `GS_BASE` must already point at this CPU's `PerCpu`
+/// — set by [`init_bsp`] on the BSP and by the AP trampoline before an AP runs Rust.
 pub(crate) mod gs {
     use core::arch::asm;
 
@@ -293,11 +210,7 @@ pub(crate) mod gs {
     #[inline]
     pub fn read_u64<const OFF: u32>() -> u64 {
         let v: u64;
-        // SAFETY: `OFF` is one of this module's asserted field offsets, so
-        // `GS_BASE + OFF` is a live, naturally aligned word of this CPU's own
-        // `PerCpu` once the caller's half of the contract above holds. `nomem`
-        // because the access reaches no memory any Rust value names;
-        // `preserves_flags` because `mov` writes none.
+        // SAFETY: `OFF` is asserted; GS_BASE points at this CPU's PerCpu per the module contract.
         unsafe {
             asm!("mov {v}, gs:[{off}]", v = out(reg) v, off = const OFF,
                 options(nomem, nostack, preserves_flags));
@@ -317,22 +230,17 @@ pub(crate) mod gs {
         v
     }
 
-    /// One naturally aligned per-CPU `u32` store. No `lock` prefix: a 32-bit
-    /// store to an aligned address is atomic on x86, and a same-CPU IRQ cannot
-    /// land inside one instruction.
+    /// One naturally aligned per-CPU `u32` store; no `lock` prefix — aligned stores are atomic on x86.
     #[inline]
     pub fn write_u32<const OFF: u32>(v: u32) {
-        // SAFETY: `read_u64`'s argument, minus `nomem` — this one does write the
-        // word, and every other writer of it is on this CPU, so the store's own
-        // atomicity is the whole of the synchronization.
+        // SAFETY: `read_u64`'s argument, minus `nomem`; single-CPU-writer atomicity is the sync.
         unsafe {
             asm!("mov gs:[{off}], {v:e}", off = const OFF, v = in(reg) v,
                 options(nostack, preserves_flags));
         }
     }
 
-    /// One naturally aligned per-CPU `u64` store. No `lock` prefix, for
-    /// [`write_u32`]'s reason at eight bytes.
+    /// One naturally aligned per-CPU `u64` store. No `lock` prefix, per [`write_u32`] at eight bytes.
     #[inline]
     pub fn write_u64<const OFF: u32>(v: u64) {
         // SAFETY: `write_u32`'s argument, for eight bytes.
@@ -354,8 +262,7 @@ pub(crate) mod gs {
         v
     }
 
-    /// One per-CPU byte store, from a register. Single-byte stores are
-    /// naturally atomic on x86 — no `lock` prefix needed.
+    /// One per-CPU byte store, from a register; single-byte stores are atomic on x86, no `lock` needed.
     #[inline]
     pub fn write_u8<const OFF: u32>(v: u8) {
         // SAFETY: `write_u32`'s argument, for one byte.
@@ -365,12 +272,7 @@ pub(crate) mod gs {
         }
     }
 
-    /// One per-CPU byte store, from an *immediate*.
-    ///
-    /// Its own primitive rather than [`write_u8`] called with a constant,
-    /// because the instruction differs: this is the one-instruction
-    /// `mov byte ptr gs:[{off}], 1`, where the register form would first
-    /// materialise the value.
+    /// One per-CPU byte store from an *immediate* — avoids materialising the constant into a register first.
     #[inline]
     pub fn write_u8_imm<const OFF: u32, const VAL: u8>() {
         // SAFETY: `write_u32`'s argument, for one byte.
@@ -380,24 +282,10 @@ pub(crate) mod gs {
         }
     }
 
-    /// One `lock`-prefixed increment of a per-CPU `u32`.
-    ///
-    /// The prefix is not optional and is why the two counter primitives are
-    /// their own: both kernel code and IRQ entry read-modify-write
-    /// `preempt_count` on the same CPU, and an interrupt landing between the
-    /// load and the store of a plain `add` loses whichever side went second.
-    ///
-    /// Increment and decrement stay two functions rather than one taking a
-    /// delta, so the instruction is still the immediate-form `lock add`/`lock
-    /// sub` every description of this path names — `arch::syscall`'s and
-    /// `arch::idt`'s entry stubs open and close the same count with the same two
-    /// instructions.
+    /// One `lock`-prefixed increment of a per-CPU `u32`; required since an IRQ can split a plain `add`'s load/store on this CPU.
     #[inline]
     pub fn lock_inc_u32<const OFF: u32>() {
-        // SAFETY: `write_u32`'s argument. **No `preserves_flags`**, and its
-        // absence is deliberate: `lock add` writes OF, SF, ZF, AF, CF and PF, so
-        // a caller claiming it would be telling the compiler it could keep a
-        // comparison's result live across a preempt-count change.
+        // SAFETY: `write_u32`'s argument; no `preserves_flags` — `lock add` writes OF/SF/ZF/AF/CF/PF.
         unsafe {
             asm!("lock add dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
         }
@@ -406,139 +294,43 @@ pub(crate) mod gs {
     /// One `lock`-prefixed decrement of a per-CPU `u32`. See [`lock_inc_u32`].
     #[inline]
     pub fn lock_dec_u32<const OFF: u32>() {
-        // SAFETY: `lock_inc_u32`'s argument exactly, including why
-        // `preserves_flags` is absent.
+        // SAFETY: `lock_inc_u32`'s argument exactly.
         unsafe {
             asm!("lock sub dword ptr gs:[{off}], 1", off = const OFF, options(nostack));
         }
     }
 }
 
-/// **One stack size, so "which stack am I on" is not a question kernel code
-/// has to answer.**
-///
-/// The idle loop runs a scheduler pass, `drain_irqs` — which reaches USB
-/// enumeration — and `object::drain_zero_handles`, which releases arbitrary
-/// kernel objects. The depth this stack can be driven to is a measured **11,505
-/// bytes of 16,384**, off a filesystem write down to a block device with the USB
-/// command path still below the probe, and `drain_irqs` still reaches a device
-/// from here.
-///
-/// The object drain is why this is the same number a task's kernel stack is.
-/// `kobject!` classifies each object `deferred` or `immediate`, and an
-/// `immediate` row's promise is that its destructor runs on the dropping
-/// thread's 128 KiB stack rather than here. **A `deferred` object may own an
-/// `immediate` one**: a `File`
-/// sent over a connection whose peer dies is released from the drain, so the
-/// classification is defeated by nesting and the macro cannot see it. Nothing
-/// expressible in the object layer fixes that, because the entries are dropped
-/// wherever the drain runs — so the drain gets a stack, and the invariant
-/// becomes one every release path already has.
-///
-/// The cost is 112 KiB per CPU of a machine's physical memory, 14 MiB at 128
-/// cores.
+/// Same size as a task's kernel stack: a `deferred` [`kobject!`] object may
+/// own an `immediate` one, whose destructor then runs here instead.
 const IDLE_STACK_SIZE: usize = crate::process::KERNEL_STACK_SIZE;
 
-/// One unmapped 4 KiB page below every idle stack.
-///
-/// The idle stack is ordinary physical memory, so without this an overflow does
-/// not fault — it rewrites whatever is underneath, and the damage surfaces
-/// later and elsewhere.
-///
-/// Unmapped rather than [`IST_GUARD_SIZE`]'s fill pattern, and the difference
-/// is the stack, not the taste: #PF has no IST, so a frame pushed past the
-/// bottom faults again on the same stack and the CPU takes a #DF — which
-/// *does* have a stack, and reports. On IST1 there is no such second chance,
-/// which is why that guard detects after the fact instead of trapping.
-///
-/// Either way the machine halts: a fault on a kernel address is a kernel bug
-/// and `fatal_exception` treats it as fatal. What the guard buys is that the
-/// overflow is reported at all, rather than found later as a corrupted heap
-/// allocation somewhere else.
+/// One unmapped 4 KiB page below every idle stack: unmapped, not filled like
+/// [`IST_GUARD_SIZE`], so a fault here escalates to IST1's `#DF` rather than silently corrupting memory.
 const IDLE_GUARD_SIZE: usize = 4096;
 
-/// **Every IST stack this machine has, and which vector takes which.**
-///
-/// The index is the `ist` column of `arch::idt`'s table, and the reason each row
-/// has one is the same: the CPU builds the frame on the stack this names
-/// *whatever `rsp` holds*, so a vector that can arrive while `rsp` is not a
-/// kernel stack is a vector that must have one (SDM Vol. 3A §6.14.5). Three
-/// instructions of `SYSCALL` entry and one of its exit run at CPL 0 on the
-/// user's stack, and an exception taken there writes its frame to a user page
-/// from CPL 0 — which SMAP refuses, so the `#PF` lands on the same stack and
-/// escalates to `#DF`.
-///
-/// - **IST1, `#DF`** — the crash report's own stack, and the reason the number
-///   below is what it is.
-/// - **IST2, NMI** — vector 2 arrives between arbitrary instructions and is not
-///   maskable, so the window above is reachable by it whenever anything sends
-///   one; `sched::dump` does, on Ctrl+Alt+D.
-/// - **IST3, `#MC`** — an abort, so the machine is going down either way; the
-///   stack is what lets it say so instead of triple-faulting on the way.
-///
-/// `Tss::ist` is a seven-entry array and a gate's `ist` byte indexes it from 1,
-/// so IST*n* is `ist[n - 1]`.
+/// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC` — vectors
+/// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
 pub(crate) const IST_STACKS: usize = 3;
 
-/// The double fault stack, and now every IST stack: one size, for the reason
-/// [`IDLE_STACK_SIZE`] gives — which stack a handler is on is not a question its
-/// code should have to answer. What runs on IST1 is the whole crash report plus
-/// `halt_all_cpus` — render, then `panic_flush` — and the nested-NMI report on
-/// IST2 ends in the same `halt_all_cpus`, so the deepest of the three decides
-/// the number for all of them.
-///
-/// **The measured high water is 6,688 bytes**, `ist1_report` off a real #DF on a
-/// `double_fault_stack` run with the guard intact. It is taken after `render`
-/// and after `panic_flush`, so it covers the deepest the report goes — the
-/// record merge and the paint included. 16384 is then the smallest power of two
-/// that leaves the report room to double, which is the margin
-/// `double_fault_stack` asserts: 6,688 doubled is 13,376 of 16,384.
-///
-/// **What is large on that path — type sizes, not a decomposition of the
-/// measurement.** These are what `size_of` says, and they come to 4,352 against
-/// the measured 6,688; the 2,336 between them is frames, spills, alignment and
-/// everything the path does that is not one of these. Largest first, at
-/// `RECORD_BYTES` of 1024: `log::console`'s rendered line (1,152); `emit`'s
-/// `LogRecord` (1,024) beside `snapshot_committed`'s one materialised record
-/// (1,024) and its eight `Descent`s (384); `paint`'s row table (768). The
-/// elision's tail buffer (452 — its head is streamed and buffers nothing) is on
-/// a branch no symbol in this tree reaches.
-///
-/// At [`IST_STACKS`] stacks and a guard each it costs 60 KiB per CPU.
+/// One size for every IST stack, for [`IDLE_STACK_SIZE`]'s reason; must leave room to double the measured high water, which `double_fault_stack` asserts.
 const IST_STACK_SIZE: usize = 16384;
 
-/// Filled with [`STACK_FILL`] and never written by anything legitimate, so an
-/// overflow is observable after the fact.
-///
-/// Deliberately not an unmapped guard page: a page fault taken while already
-/// on the double fault stack is a triple fault, which resets the machine and
-/// takes the report with it. Detecting the overflow is worth more here than
-/// trapping it, because the report is the entire reason this stack exists.
+/// Filled with [`STACK_FILL`], not unmapped: a fault already on IST1 is a triple fault, so detecting after the fact beats trapping it.
 const IST_GUARD_SIZE: usize = 4096;
 
 /// Chosen so a zeroed or ASCII byte cannot be mistaken for untouched stack.
 const STACK_FILL: u8 = 0xA5;
 const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
 
-/// Allocate and initialize PerCpu for a CPU. Returns a raw pointer (lives forever).
-///
-/// **One `write` of the whole struct, so the allocator zeroes nothing this
-/// function means.** A field added to [`PerCpu`] does not compile until it is
-/// given a value here, and three of these have a non-zero idle state.
+/// Allocate and initialize `PerCpu` for a CPU; the pointer lives forever, one `write` of the whole struct so a new field must be given a value here.
 fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     let layout = Layout::from_size_align(size_of::<PerCpu>(), 16).unwrap();
-    // SAFETY: `size_of::<PerCpu>()` is non-zero and 16 is a power of two, which
-    // is the whole of `alloc_zeroed`'s contract. Irreducible because the block
-    // is never freed and is published into `IA32_GS_BASE`, so no owning handle
-    // — `Box`, `Vec`, `OwnedAlloc` — can hold it: the machine's lifetime is the
-    // allocation's, and a drop would be a bug rather than a release.
+    // SAFETY: size non-zero, 16 a power of two; never freed — published into IA32_GS_BASE for the machine's life.
     let ptr = unsafe { alloc_zeroed(layout) } as *mut PerCpu;
     assert!(!ptr.is_null(), "percpu: alloc failed");
 
-    // SAFETY: the allocation above succeeded (asserted) and is
-    // `size_of::<PerCpu>()` bytes at 16-byte alignment, so it is an aligned,
-    // writable place for one `PerCpu` that nothing else references or reads
-    // until this function returns.
+    // SAFETY: the allocation succeeded (asserted), is aligned and sized for one `PerCpu`, unreferenced so far.
     unsafe {
         core::ptr::write(
             ptr,
@@ -573,73 +365,34 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
         );
     }
 
-    // SAFETY: the write above initialised the allocation, which nothing else
-    // references, so this `&mut` is the only one in the machine.
+    // SAFETY: the write above initialised it, and nothing else references it.
     let percpu = unsafe { &mut *ptr };
-    // After the write and not inside it: the descriptor holds the *address* of
-    // the TSS, which is a property of where this block was allocated.
+    // After the write, not inside it: the descriptor holds this block's own address.
     percpu.init_tss_descriptor();
-    // The counters themselves are reached through `gs:`; this is what lets a
-    // *sibling* read them, and it is published here for the same reason the log
-    // shard is — the whole block exists before the CPU it belongs to has run an
-    // instruction, so there is no window in which the census misses a CPU that
-    // is already taking interrupts.
+    // Published before the CPU it belongs to runs an instruction — no window where the census misses it.
     crate::irq_census::publish(cpu_id, percpu.irq_counts.as_ptr());
     ptr
 }
 
-/// This CPU's log shard: cpu0's is the boot shard, and every other is a fresh
-/// zeroed one.
-///
-/// **Here rather than in [`init_ap`].** `init_ap` calls `control_regs::init` and
-/// `fpu::log_state`,
-/// both of which log — so an AP whose shard were allocated there would log into
-/// a shard that did not exist yet, and the only candidate is cpu0's, which
-/// another CPU is writing. The whole `PerCpu` is BSP-allocated before the AP
-/// runs an instruction, so allocating here closes that window rather than
-/// narrowing it.
-///
-/// The slots stay zeroed, while [`log::Shard::initialize_zeroed`] writes the
-/// nonzero first reservation number into `head`. cpu0 gets the same state from
-/// [`log::Shard::new`] in `.bss`.
+/// This CPU's log shard: cpu0's is the boot shard, every other fresh; allocated here rather than in [`init_ap`], which already logs.
 fn alloc_log_shard(cpu_id: u32) -> u64 {
     if cpu_id == 0 {
         return &raw const log::BOOT_SHARD as u64;
     }
     let layout = Layout::from_size_align(size_of::<log::Shard>(), 64).unwrap();
-    // SAFETY: `alloc_percpu`'s argument — a non-zero size at a power-of-two
-    // alignment, never freed, and the allocation this CPU logs into for the life
-    // of the machine.
+    // SAFETY: `alloc_percpu`'s argument — non-zero size, power-of-two alignment, never freed.
     let ptr = unsafe { alloc_zeroed(layout) } as *mut log::Shard;
     assert!(!ptr.is_null(), "percpu: log shard alloc failed for cpu{cpu_id}");
-    // SAFETY: this is a fresh zeroed, 64-byte-aligned allocation which is not
-    // published into `PerCpu` until this function returns.
+    // SAFETY: fresh, zeroed, 64-byte-aligned, and not yet published.
     unsafe { log::Shard::initialize_zeroed(ptr) };
-    // A writer finds its shard through `gs:` and a reader cannot, so the shard
-    // is published to `log::shards` here — before the CPU it belongs to has
-    // executed an instruction, which is the same window `PerCpu` itself is
-    // built in.
-    //
-    // SAFETY: the allocation above is live for the life of the machine and is
-    // initialised.
+    // Published before the CPU executes an instruction: a reader can't find it through `gs:` otherwise.
+    // SAFETY: the allocation is live for the machine's life and initialised.
     unsafe { log::publish_ap_shard(cpu_id, ptr) };
     ptr as u64
 }
 
 /// This CPU's shard, its identity, and one sequence number out of that shard.
-///
-/// The `xadd` has **no `lock` prefix**. It is atomic against an interrupt on its
-/// own CPU because instructions retire whole, and it is not atomic against
-/// another CPU — which is sound only while this CPU owns the shard. The live
-/// [`crate::arch::LogCommitGuard`] proves that neither migration nor a
-/// single-step #DB can happen from this pointer read through publication.
-///
-/// **Four reads in one `asm!` block rather than four [`gs`] calls, and the
-/// difference is the absent `nomem`.** Without it the block is an implicit
-/// memory clobber, which is what keeps the shard *selection* on the closed side
-/// of the compiler barrier the guard opened — the same reason
-/// [`crate::arch::LogCommitGuard::close`] spells its `pushfq` without `nomem`.
-/// A `gs::read_u64` here would carry `nomem` and let the selection float.
+/// The `xadd` has no `lock` prefix, sound only while the live [`crate::arch::LogCommitGuard`] proves ownership; the four reads are one `asm!` block, not four [`gs`] calls, so the absent `nomem` keeps shard selection inside the guard's barrier.
 pub fn reserve_log_slot(
     guard: &crate::arch::LogCommitGuard,
 ) -> (*const log::Shard, u64, u32, u32, u32) {
@@ -648,14 +401,8 @@ pub fn reserve_log_slot(
     let cpu: u32;
     let tid: u32;
     let pid: u32;
-    // SAFETY: the four `mov`s are `gs`'s contract — `GS_BASE` points at this
-    // CPU's `PerCpu`, which the live `guard` also proves has not migrated. The
-    // `reserve` below dereferences `log_shard`, which `alloc_percpu` fills for
-    // cpu0 and for every AP before that AP executes an instruction, so it is
-    // never null on a live CPU (the field's own doc carries that argument), and
-    // the shard is a `'static` allocation that is never freed. `guard` is passed
-    // through to `reserve`, which is where the unlocked `xadd`'s soundness
-    // condition is stated.
+    // SAFETY: `gs`'s contract — GS_BASE points at this CPU's `PerCpu`, proven unmigrated by the live `guard`.
+    // `log_shard` is never null on a live CPU; `guard` passes to `reserve`, where the `xadd`'s soundness is stated.
     unsafe {
         core::arch::asm!(
             "mov {shard}, gs:[{shard_off}]",
@@ -672,16 +419,7 @@ pub fn reserve_log_slot(
             pid_off = const OFF_CURRENT_PID,
             options(preserves_flags),
         );
-        // **`log-nested-reserve`'s injection point, and it is here rather than
-        // anywhere tidier because "between the shard pointer and the `xadd`" is
-        // the whole claim**: the self-IPI goes out with the shard pointer
-        // already in a register and the sequence number not yet taken,
-        // so whether the handler's own records are reserved *before* this one is
-        // decided by the guard's `cli` and by nothing else. `emit` stamped
-        // `record.at_ns` before this call, so a handler that gets in ahead
-        // carries the later timestamps under the lower sequence numbers — which
-        // is the observable. Empty in every build but the test kernel's, so this
-        // folds to the two statements it is written between.
+        // `log-nested-reserve`'s injection point: must sit between the shard-pointer read and the `xadd`, the only place ordering is decided (no-op outside tests).
         crate::log::nested::reserve_window();
         seq = (&*(shard as *const log::Shard)).reserve(guard);
     }
@@ -691,17 +429,8 @@ pub fn reserve_log_slot(
 /// One idle stack and the guard page under it.
 const IDLE_SLOT: usize = IDLE_GUARD_SIZE + IDLE_STACK_SIZE;
 
-/// Idle stacks come out of 2 MiB pages of their own, not the kernel heap.
-///
-/// The guard is a hole in the direct map, and punching one costs the whole
-/// 2 MiB leaf its large page. From the heap that leaf also holds hot kernel
-/// structures, which the split takes from one TLB entry to 512 — enough to cut
-/// `i8042_mouse` from 1006 pointer events to 27 under the full suite. An arena
-/// the stacks alone share keeps that cost where it belongs: 15 of them per
-/// leaf, and nothing else in it.
-///
-/// Never freed, which is what makes the permanent split sound — a leaf handed
-/// back to the PMM would be reissued with a hole in its direct map.
+/// Idle stacks come from their own 2 MiB pages, not the kernel heap: the guard's hole in the direct map would split a heap-shared leaf's TLB entry into 512.
+/// Never freed — a leaf returned to the PMM would keep the hole.
 static IDLE_STACKS: crate::sync::Lock<IdleArena> = crate::sync::Lock::new(IdleArena {
     pages: alloc::vec::Vec::new(),
     stacks: alloc::vec::Vec::new(),
@@ -711,9 +440,7 @@ static IDLE_STACKS: crate::sync::Lock<IdleArena> = crate::sync::Lock::new(IdleAr
 
 struct IdleArena {
     pages: alloc::vec::Vec<crate::mm::pmm::PhysPage>,
-    /// The bottom of every idle stack this machine has, so the deepest any of
-    /// them has ever gone can be read from one CPU. Without it the measurement
-    /// is per-CPU and the CPU that ran deepest is the one that is not asking.
+    /// The bottom of every idle stack, so the deepest any CPU has gone reads from one.
     stacks: alloc::vec::Vec<u64>,
     /// Direct-map address of the next free slot.
     next: u64,
@@ -740,17 +467,7 @@ fn alloc_idle_slot() -> u64 {
 fn alloc_idle_stack(percpu: &mut PerCpu) {
     let base = alloc_idle_slot();
     crate::mm::paging::guard_kernel_page(base);
-    // Filled rather than zeroed, for [`idle_stack_high_water`]: a zero is a
-    // value the stack legitimately holds, so it cannot tell untouched from
-    // written. After the guard, because the guard's page is no longer mapped.
-    //
-    // SAFETY: `alloc_idle_slot` returned `IDLE_SLOT` bytes of direct-mapped
-    // physical memory it owns forever, `guard_kernel_page` has since unmapped
-    // the first `IDLE_GUARD_SIZE` of them, and this writes the `IDLE_STACK_SIZE`
-    // above that — the whole of what is left, and nothing else. Irreducible in
-    // that the region is a stack about to be entered by an `iretq`, not a Rust
-    // value: `&mut [u8]` over it would be a borrow of memory a CPU is about to
-    // start pushing frames onto.
+    // SAFETY: exactly `IDLE_STACK_SIZE` bytes above the unmapped guard, within the returned `IDLE_SLOT` — filled, not zeroed, so zero can't mark "untouched" for [`idle_stack_high_water`].
     unsafe {
         core::ptr::write_bytes(
             (base + IDLE_GUARD_SIZE as u64) as *mut u8,
@@ -761,24 +478,13 @@ fn alloc_idle_stack(percpu: &mut PerCpu) {
     percpu.idle_stack_top = base + IDLE_SLOT as u64;
 }
 
-/// How big one idle stack is. Read by `SYS_DEBUG`, so the high water below is
-/// a fraction of something rather than a number with no scale.
+/// How big one idle stack is; read by `SYS_DEBUG` for scale.
 #[cfg(feature = "test-actuators")]
 pub fn idle_stack_size() -> usize {
     IDLE_STACK_SIZE
 }
 
-/// The deepest any CPU's idle stack has ever been, in bytes.
-///
-/// **The instrument that says whether [`IDLE_STACK_SIZE`] is a decision or a
-/// hope.** The guard page below turns an overflow into a reported fault, which
-/// is a machine that stopped; this answers before it, from a running one, and
-/// is what a churn test asserts against so a release path that grows deep is a
-/// red rather than a halt.
-///
-/// Read from the bottom up, so it is the high water and not the current depth:
-/// nothing legitimate writes [`STACK_FILL`], and a frame that reached a byte
-/// leaves it changed for the rest of the boot.
+/// The deepest any CPU's idle stack has ever been, in bytes, read from the bottom up: nothing legitimate writes [`STACK_FILL`], so a touched byte stays changed.
 #[cfg(feature = "test-actuators")]
 pub fn idle_stack_high_water() -> usize {
     let arena = IDLE_STACKS.lock();
@@ -794,70 +500,38 @@ pub fn idle_stack_high_water() -> usize {
         .unwrap_or(0)
 }
 
-/// One stack per [`IST_STACKS`] row, filled and guarded alike.
-///
-/// **Every one of them, in one loop, because a vector whose row says `ist n` and
-/// whose `ist[n - 1]` is zero is a vector that faults to address 0.** The CPU
-/// does not check: it loads the TSS word and pushes there.
+/// One stack per [`IST_STACKS`] row; an `ist[n-1]` left zero faults to address 0 unchecked.
 fn alloc_ist_stacks(percpu: &mut PerCpu) {
     let total = IST_GUARD_SIZE + IST_STACK_SIZE;
     for slot in 0..IST_STACKS {
         let layout = Layout::from_size_align(total, 4096).unwrap();
-        // SAFETY: `alloc_percpu`'s argument — non-zero size, power-of-two
-        // alignment, never freed. The 4096 is not decoration: `IST_GUARD_SIZE`
-        // is a page and the guard's detection rests on it starting at one.
+        // SAFETY: `alloc_percpu`'s argument; 4096 is load-bearing — the guard starts at a page.
         let base = unsafe { alloc_zeroed(layout) };
         assert!(!base.is_null(), "percpu: IST{} stack alloc failed", slot + 1);
-        // SAFETY: `total` bytes from `base`, which is exactly the allocation just
-        // made and asserted non-null. Same irreducibility as `alloc_idle_stack`'s
-        // fill: what is being written is a stack the CPU will switch to on a
-        // fault, not a Rust value that could hold a borrow.
+        // SAFETY: `total` bytes from `base`, exactly the allocation just made and asserted non-null.
         unsafe { core::ptr::write_bytes(base, STACK_FILL, total) };
         let top = base as u64 + total as u64;
-        // SAFETY: `Tss` is `repr(C, packed)`, so `&raw mut percpu.tss.ist[slot]`
-        // is a well-formed but possibly unaligned pointer into a live `PerCpu`
-        // this function holds `&mut` to — which is precisely `write_unaligned`'s
-        // domain and why the plain assignment it replaces would be undefined.
-        // `slot < IST_STACKS <= 7`, which is `Tss::ist`'s length.
+        // SAFETY: `Tss` is `repr(C, packed)` (possibly unaligned); `slot < IST_STACKS <= 7 == Tss::ist.len()`.
         unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.ist[slot], top); }
     }
 }
 
 const _: () = assert!(IST_STACKS <= 7, "a TSS has seven IST slots");
 
-/// The IST1 stack top this CPU's TSS holds, if it looks like one.
-///
-/// Read through GS like everything else here, and checked rather than trusted:
-/// the callers are on the panic path, where a corrupted percpu block is one of
-/// the things that could have brought us here.
+/// The IST1 stack top this CPU's TSS holds, if it looks like one — checked, not trusted, since callers are on the panic path where the block may be corrupt.
 fn ist1_top() -> Option<u64> {
     let percpu = gs::read_u64::<OFF_SELF_PTR>() as *const PerCpu;
     if !crate::mm::is_kernel_addr(percpu as u64) {
         return None;
     }
-    // SAFETY: the address came out of this CPU's own `self_ptr` and has just
-    // been checked to be a kernel one, which is as far as a panic-path reader
-    // can get — the whole point of this function is that the block may be
-    // corrupt, so the read is checked afterwards rather than trusted. Unaligned
-    // because `Tss` is `repr(C, packed)`.
+    // SAFETY: the address is this CPU's own `self_ptr`, checked to be a kernel address; unaligned since `Tss` is packed.
     let top = unsafe { core::ptr::read_unaligned(&raw const (*percpu).tss.ist[0]) };
     let total = (IST_GUARD_SIZE + IST_STACK_SIZE) as u64;
     let base = top.checked_sub(total)?;
     (crate::mm::is_kernel_addr(base) && top % 4096 == 0).then_some(top)
 }
 
-/// Report how much of the double fault stack the crash report actually used,
-/// straight to the UART.
-///
-/// Called from `halt_all_cpus` *after* `panic_flush`, which is the deepest the
-/// path ever gets, and only when this CPU is running on IST1 — so it says
-/// nothing on the ordinary fatal paths, which are on an ordinary stack.
-///
-/// It bypasses the log ring on purpose. The ring has just been drained and the
-/// machine is about to halt, so anything queued there would never come out;
-/// and if this reports damage, the ring is exactly what may have been
-/// corrupted. The whole point is a channel that does not depend on the thing
-/// under suspicion.
+/// Report how much of the double fault stack the crash report used, straight to the UART — bypassing the log ring, which is drained and may itself be corrupt.
 pub fn ist1_report() {
     let Some(top) = ist1_top() else { return };
     let rsp = cpu::read_rsp();
@@ -885,112 +559,70 @@ pub fn ist1_report() {
     });
 }
 
-/// Sequential u64s from `base`. Every address is inside the allocation the
-/// caller just bounds-checked, so there is nothing here that can fault.
+/// Sequential u64s from `base`; every address is inside the caller's already-bounds-checked allocation.
 fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
-    // SAFETY: `i < len / 8`, so every address is inside `[base, base + len)`,
-    // which both callers have already established is a live stack allocation of
-    // theirs — `ist1_report` after bounding `rsp` inside it, `idle_stack_high_water`
-    // off the arena's own record. `read_volatile` because a fill pattern being
-    // read back is exactly the observation the optimiser is entitled to remove.
+    // SAFETY: `i < len/8` bounds each address inside the caller's checked allocation; `read_volatile` keeps the fill-pattern read.
     (0..len / 8).map(move |i| unsafe { core::ptr::read_volatile((base as *const u64).add(i)) })
 }
 
 /// Initialize per-CPU data for the BSP. Call after paging + allocator but before IDT/syscall.
 pub fn init_bsp(lapic_id: u32) {
     let ptr = alloc_percpu(0);
-    // SAFETY: `alloc_percpu` just returned a live, initialised, never-freed
-    // `PerCpu` that nothing else has a reference to — it is not published into
-    // `IA32_GS_BASE` until the `wrmsr` below.
+    // SAFETY: `alloc_percpu` just returned a live, initialised `PerCpu` with no other reference until the `wrmsr` below.
     let percpu = unsafe { &mut *ptr };
 
     percpu.kernel_rsp = cpu::read_rsp();
-    // SAFETY: `Tss` is `repr(C, packed)`, so `rsp0` may be unaligned; the
-    // pointer is into the `&mut PerCpu` above.
+    // SAFETY: `Tss` is `repr(C, packed)`; `rsp0` may be unaligned.
     unsafe { core::ptr::write_unaligned(&raw mut percpu.tss.rsp0, cpu::read_rsp()); }
     alloc_idle_stack(percpu);
     alloc_ist_stacks(percpu);
 
-    // SAFETY: `load_gdt` asks to be called exactly once per CPU during init, and
-    // this is the BSP's one call — `init_ap` is every AP's. The GDT and TSS it
-    // loads are this `PerCpu`'s own, filled by `alloc_percpu` and
-    // `alloc_ist_stacks` above.
+    // SAFETY: `load_gdt`'s once-per-CPU contract — this is the BSP's call; `init_ap` is every AP's.
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(0);
     super::fpu::init();
 
-    // SAFETY: `wrmsr` asks its caller to own the MSR it names and the value it
-    // writes. `IA32_GS_BASE` is where every `gs:` access in this kernel lands,
-    // and this write is what makes those accesses mean anything at all on the
-    // BSP — before it, `gs:` is whatever firmware left. `ptr` is the live,
-    // never-freed `PerCpu` `alloc_percpu` returned above, whose `&mut` ended at
-    // the `load_gdt` line, so publishing it hands the CPU the only reference
-    // there is. Nothing between the allocation and here may read `gs:`, which is
-    // why `PERCPU_READY` is stored on the line below rather than earlier.
+    // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
 
-    // GS base is now valid — enable CPU/TID context in log! macro
+    // Ordering matters: gs: is invalid until the wrmsr above runs.
     crate::log::PERCPU_READY.store(true, core::sync::atomic::Ordering::Release);
 
     log!("percpu: BSP cpu_id=0 lapic_id={lapic_id}");
     super::fpu::log_state();
 }
 
-/// Allocate percpu for an AP on the BSP. Returns the raw pointer for the trampoline
-/// to write into IA32_GS_BASE before loading the IDT.
+/// Allocate percpu for an AP; the trampoline writes the pointer into IA32_GS_BASE.
 pub fn alloc_ap(cpu_id: u32) -> *mut PerCpu {
     let ptr = alloc_percpu(cpu_id);
-    // SAFETY: `init_bsp`'s argument — a live, never-freed `PerCpu` nothing else
-    // references. This one runs on the BSP for an AP that has not been sent its
-    // INIT-SIPI yet, so the CPU it belongs to has executed no instruction.
+    // SAFETY: `init_bsp`'s argument; this AP hasn't been sent its INIT-SIPI yet, so it ran no instruction.
     let percpu = unsafe { &mut *ptr };
     alloc_idle_stack(percpu);
     alloc_ist_stacks(percpu);
     ptr
 }
 
-/// Finish AP percpu initialization (called from ap_entry after GS base is set by trampoline).
-///
-/// `control_regs::init` and `fpu::log_state` are the two things here that print,
-/// and each says at its own definition why it may not assume this CPU answers
-/// like the BSP. Everything else is silent: `boot_aps` already logs one line per
-/// AP that came up.
+/// Finish AP percpu init, called from `ap_entry` after the trampoline sets GS base.
 pub fn init_ap(percpu_ptr: *mut PerCpu) {
-    // SAFETY: the pointer is this CPU's own `PerCpu`, read back out of `gs:[0]`
-    // by the one caller (`smp::ap_entry`) after the trampoline put it in
-    // `IA32_GS_BASE`; the BSP built it in `alloc_ap` and dropped its `&mut`
-    // before sending the SIPI, so this is again the only reference to it.
+    // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`; the BSP dropped its `&mut` before the SIPI.
     let percpu = unsafe { &mut *percpu_ptr };
-    // SAFETY: `load_gdt` asks to be called exactly once per CPU during init, and
-    // this is that call for this AP — `init_bsp` is the BSP's.
+    // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(percpu.cpu_id);
     super::fpu::init();
     super::fpu::log_state();
 }
 
-/// Update both the percpu kernel_rsp (for syscall entry) and tss.rsp0 (for interrupts).
-/// Called during context switch when switching to a new process.
-///
-/// # Safety
-/// Must be called from the CPU whose GS base points to the relevant PerCpu.
+/// Update `kernel_rsp` and `tss.rsp0` for a context switch to a new process.
+/// # Safety: must be called from the CPU whose GS base points to the relevant PerCpu.
 pub unsafe fn set_kernel_stack(rsp: u64) {
     let percpu = gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu;
     (*percpu).kernel_rsp = rsp;
     core::ptr::write_unaligned(&raw mut (*percpu).tss.rsp0, rsp);
 }
 
-/// The two words [`set_kernel_stack`] writes: the stack `syscall` switches to
-/// (`kernel_rsp`) and the one an interrupt from Ring 3 switches to (`tss.rsp0`).
-///
-/// **Read only by an instrument, and it reads both because they are written
-/// together and used apart.** Every Ring 3 → Ring 0 entry in the machine takes
-/// its stack from one of these two, so a value here that is not the running
-/// task's stack top is a stack pointer aimed at memory some other execution
-/// owns — and the entry that uses it writes a return address there.
-///
-/// # Safety
-/// Must be called from the CPU whose GS base points to the relevant PerCpu.
+/// The two words [`set_kernel_stack`] writes: `kernel_rsp` (syscall entry) and `tss.rsp0` (Ring 3 interrupt entry); read only by an instrument.
+/// # Safety: must be called from the CPU whose GS base points to the relevant PerCpu.
 #[cfg(feature = "stack-witness")]
 pub unsafe fn entry_stacks() -> (u64, u64) {
     let percpu = gs::read_u64::<OFF_SELF_PTR>() as *const PerCpu;
@@ -1027,21 +659,12 @@ pub fn set_current_pid(pid: Option<crate::process::Pid>) {
     gs::write_u32::<OFF_CURRENT_PID>(pid.map_or(u32::MAX, |p| p.raw()));
 }
 
-/// This CPU's `PerCpu`, reached through its own self-reference at `gs:[0]`.
-///
-/// Only [`init_ap`]'s caller needs it: every field this module publishes is read
-/// through [`gs`] at the field's own offset, one instruction, with no pointer
-/// materialised at all.
+/// This CPU's `PerCpu`, reached through its own self-reference at `gs:[0]`; only [`init_ap`]'s caller needs it — everything else reads through [`gs`].
 pub fn percpu_ptr() -> *mut PerCpu {
     gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu
 }
 
-/// The count of Ring 0 timer fires the assembly stub has taken, and the count
-/// the trace has already accounted for.
-///
-/// Written by the Ring 0 timer stub with a plain `inc` (IF is clear there, and
-/// only that stub writes); read and reconciled by `arch::idt`'s exit-to-user
-/// path, which owns the difference.
+/// Ring 0 timer fires the assembly stub has taken; written with a plain `inc` (IF clear there).
 pub fn ring0_timer_fires() -> u32 {
     gs::read_u32::<OFF_RING0_TIMER_FIRES>()
 }
@@ -1054,15 +677,12 @@ pub fn set_last_seen_ring0_fires(v: u32) {
     gs::write_u32::<OFF_LAST_SEEN_RING0_FIRES>(v);
 }
 
-/// Remember the one-shot count this CPU just armed, for the Ring 0 timer stub's
-/// reload — `arch::apic` is the only caller, and the stub reads the same word
-/// from `gs:` with no Rust in its path.
+/// The one-shot count this CPU just armed, for the timer stub's reload; `arch::apic` is the only caller.
 pub fn set_last_armed_ticks(ticks: u32) {
     gs::write_u32::<OFF_LAST_ARMED_TICKS>(ticks);
 }
 
-/// The byte immediately below this CPU's idle stack — the last byte of its
-/// guard page, and the first thing an overflowing frame reaches.
+/// The last byte of this CPU's idle guard page — the first byte an overflow reaches.
 #[cfg(feature = "test-actuators")]
 pub fn idle_guard_byte() -> u64 {
     idle_stack_top() - IDLE_STACK_SIZE as u64 - 1
@@ -1073,13 +693,10 @@ pub fn idle_stack_top() -> u64 {
     gs::read_u64::<OFF_IDLE_STACK_TOP>()
 }
 
-/// No task on this CPU is inside a syscall. Not an identity anything can hold:
-/// [`pack_task`] never produces it, because no id map issues `u32::MAX`.
+/// No task on this CPU is inside a syscall; [`pack_task`] never produces this value.
 const NO_SYSCALL: u64 = u64::MAX;
 
-/// The identity a syscall bracket records — the pid and the tid together,
-/// because a tid is per-process and `Tid(0)` is the main thread of every
-/// process on the machine.
+/// The identity a syscall bracket records: pid and tid together, since `Tid(0)` is every process's main thread.
 fn pack_task(pid: u32, tid: u32) -> u64 {
     ((pid as u64) << 32) | tid as u64
 }
@@ -1097,18 +714,8 @@ pub fn leave_syscall() {
     gs::write_u64::<OFF_SYSCALL_TASK>(NO_SYSCALL);
 }
 
-/// Whether the task this CPU is running is inside a syscall right now.
-///
-/// **An identity and not a flag**, because the word is per-CPU while the
-/// question is about a thread: the comparison is what rules out a thread in
-/// Ring 3 on a CPU that once served a syscall, and a thread in Ring 3 while a
-/// sibling sits parked inside one.
-///
-/// It errs one way, the safe one: a syscall that parked and resumed on a CPU
-/// that finished somebody else's in between answers `false`, so a panic there
-/// halts and reports instead of recovering. The other answer needs the word
-/// saved and restored across a switch, as `preempt_count` is
-/// (`hw::KernelHw::switch`).
+/// Whether the task this CPU is running is inside a syscall right now, comparing identity rather than a flag since the word is per-CPU but the question is per-thread.
+/// Errs false on a migrated/resumed syscall, so a panic there halts rather than hiding.
 pub fn in_syscall() -> bool {
     let recorded = gs::read_u64::<OFF_SYSCALL_TASK>();
     recorded != NO_SYSCALL
@@ -1116,8 +723,7 @@ pub fn in_syscall() -> bool {
             == pack_task(gs::read_u32::<OFF_CURRENT_PID>(), gs::read_u32::<OFF_CURRENT_TID>())
 }
 
-/// User RIP saved at last syscall entry, meaningful only while
-/// [`in_syscall`] holds.
+/// User RIP saved at last syscall entry; meaningful only while [`in_syscall`] holds.
 pub fn syscall_rip() -> u64 {
     gs::read_u64::<OFF_SYSCALL_RIP>()
 }
@@ -1137,13 +743,7 @@ pub fn syscall_rbp() -> u64 {
     gs::read_u64::<OFF_SYSCALL_RBP>()
 }
 
-/// Swap the per-CPU fault state. Returns the previous state.
-/// Not atomic — safe because only exception/panic entry points read or write
-/// fault_state, and they all run with interrupts disabled (interrupt gate for
-/// exceptions, explicit cli for panics). The timer handler never touches it.
-///
-/// Read and written through [`gs`], which is also how `preempt::faulting` reads
-/// the same byte — one way to reach a per-CPU field, not two.
+/// Swap the per-CPU fault state, returning the previous one; not atomic, but sound because only exception/panic entry points touch it, always with interrupts disabled.
 pub fn swap_fault_state(new: CpuFaultState) -> CpuFaultState {
     let old = gs::read_u8::<OFF_FAULT_STATE>();
     gs::write_u8::<OFF_FAULT_STATE>(new as u8);
