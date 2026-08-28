@@ -27,6 +27,10 @@
 //! tracker's record (`the-eased-merge-law-carries-a-threshold`); `--pr`
 //! remains the local half either way.
 //!
+//! Two rules gate a branch here and in CI's `abi-split` job alike: the
+//! ABI-first rule ([`abi_lands_alone`]) and the writing law
+//! (`crate::writinglaw`).
+//!
 //! Nothing here rewrites history and nothing pushes `main`.
 
 use std::fs;
@@ -54,21 +58,30 @@ pub fn dispatch_sync(root: &Path) {
 }
 
 /// The ABI-first rule as a check something other than a human can run.
-///
-/// `--base <ref>` because CI has no local `main`: a pull-request checkout of the
-/// head branch knows `origin/main` and nothing else.
 pub fn dispatch_abi_check(root: &Path, args: &[String]) {
-    let base = args
-        .iter()
-        .position(|a| a == "--base")
-        .map_or("origin/main", |pos| {
-            args.get(pos + 1).map_or("origin/main", String::as_str)
-        })
-        .to_string();
+    let base = base_arg(args);
     report(abi_lands_alone(root, &base).map(|()| {
         format!("[abi] this branch's commits against {base} do not mix the shared sysroot's \
                  sources with work that depends on them.")
     }));
+}
+
+/// The writing law as the same kind of check; `crate::writinglaw` is the rule.
+pub fn dispatch_writing_law_check(root: &Path, args: &[String]) {
+    let base = base_arg(args);
+    report(crate::writinglaw::judge(root, &base).map(|line| format!("[prose] {line}")));
+}
+
+/// The `--base <ref>` both checks take, because CI has no local `main`: a
+/// pull-request checkout of the head branch knows `origin/main` and nothing
+/// else.
+fn base_arg(args: &[String]) -> String {
+    args.iter()
+        .position(|a| a == "--base")
+        .map_or("origin/main", |pos| {
+            args.get(pos + 1).map_or("origin/main", String::as_str)
+        })
+        .to_string()
 }
 
 /// `--land` is retired, and it answers rather than going missing.
@@ -112,6 +125,7 @@ fn prepare(root: &Path) -> Result<String, String> {
     let mut lines = vec![sync(root)?];
 
     abi_lands_alone(root, "origin/main")?;
+    lines.push(crate::writinglaw::judge(root, "origin/main")?);
 
     let merged = merge_base_into_branch(root, &branch)?;
     lines.push(merged);
@@ -511,7 +525,7 @@ fn canonical(path: &Path) -> PathBuf {
 
 /// `Err` carries what git printed, both streams, because a refusal that hides
 /// git's own message makes the agent run the command again by hand to see it.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -526,15 +540,15 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
 
     /// A bare "origin" with a `main`, and a clone of it on a branch — the only
     /// shape `--pr` runs in. Signing off and an identity on each repository:
     /// the host's global config signs every commit, and a test that waited on
-    /// gpg would be a test that hangs.
-    fn repo(name: &str) -> (PathBuf, PathBuf) {
+    /// gpg would be a test that hangs. `writinglaw`'s tests stage in it too.
+    pub(crate) fn repo(name: &str) -> (PathBuf, PathBuf) {
         let pid = std::process::id();
         let origin = std::env::temp_dir().join(format!("toyos-pr-{name}-{pid}.git"));
         let work = std::env::temp_dir().join(format!("toyos-pr-{name}-{pid}"));
@@ -564,7 +578,7 @@ mod tests {
         sh(dir, &["config", "commit.gpgsign", "false"]);
     }
 
-    fn sh(dir: &Path, args: &[&str]) {
+    pub(crate) fn sh(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
             .args(args)
             .current_dir(dir)
@@ -574,7 +588,7 @@ mod tests {
         assert!(ok, "git {args:?} in {}", dir.display());
     }
 
-    fn commit(dir: &Path, file: &str, text: &str, msg: &str) {
+    pub(crate) fn commit(dir: &Path, file: &str, text: &str, msg: &str) {
         if let Some(parent) = Path::new(file).parent() {
             fs::create_dir_all(dir.join(parent)).unwrap();
         }

@@ -1,27 +1,11 @@
-//! The virtio-net driver: bring-up, the two virtqueues, and the one page a
-//! claimant maps.
+//! The virtio-net driver: bring-up and the two virtqueues.
 //!
-//! **Two DMA pools, and the line between them is who writes an address.** A
-//! split virtqueue puts every address this driver ever programs in one place —
-//! the descriptor table — so the tables, the available rings and the used rings
-//! live in [`KERNEL_DMA_BYTES`] of memory no process maps, and what a
-//! `DeviceType::Nic` claim grants is the frame buffers and nothing else.
-//!
-//! Until 2026-08-23 it was one pool and the whole 2 MiB page was the grant, so
-//! `netd` mapped 7,088 bytes of live virtqueue writable: 256 RX descriptors
-//! carrying the physical address the NIC would DMA the next frame into, and a
-//! TX descriptor the device reads. Rewriting one aimed the device at any
-//! physical address in the machine — kernel text, a page table, another process
-//! — in either direction, and the IOMMU refuses nothing
-//! (`kernel/src/iommu/mod.rs`). `virtio_sound` had already split its pools for
-//! this reason and `virtio_gpu` publishes only its framebuffer; virtio-net was
-//! the one device that handed its virtqueue out, and it predates both.
-//!
-//! [`assert_queues_are_private`] is that rule stated against the addresses the
-//! device was really programmed with, so re-merging the pools cannot be done
-//! quietly. The kernel page costs one 2 MiB frame it does not fill —
-//! `DmaPool` allocates whole pages and a claim maps a whole page, so the two
-//! cannot share one.
+//! Two DMA pools, split by who writes an address: the kernel-only pool holds
+//! both virtqueues in full — every address this driver programs — and the
+//! shared pool, the one a `DeviceType::Nic` claim maps, holds only the frame
+//! buffers. [`assert_queues_are_private`] checks that split against the
+//! addresses the device was actually programmed with. `DmaPool` allocates whole
+//! pages and a claim maps a whole page, so the two pools cannot share one.
 
 use alloc::boxed::Box;
 
@@ -50,17 +34,14 @@ const TX_QUEUE_SIZE: u16 = 16;
 const RX_BUF_COUNT: usize = 256;
 const RX_BUF_SIZE: u32 = 4096;
 
-// The kernel-only pool (byte offsets, 4 KiB-aligned): both virtqueues in full.
-// No process maps a byte of this.
+// The kernel-only pool: no process maps a byte of this.
 const OFF_RXQ_DESC: usize  = 0x0000;
 const OFF_RXQ_AVAIL: usize = 0x1000;
 const OFF_RXQ_USED: usize  = 0x2000;
 const OFF_TXQ: usize       = 0x3000;
 const KERNEL_DMA_BYTES: usize = 0x4000;
 
-// The shared pool: the frame buffers, and nothing else. `NicInfo`'s offsets are
-// relative to this pool's first byte, which is the first byte of the page a
-// claim maps.
+// The shared pool: `NicInfo`'s offsets are relative to its first byte, the claim page's first byte.
 const OFF_RX_BUFS: usize = 0x0000;
 const OFF_TX_BUF: usize  = OFF_RX_BUFS + RX_BUF_COUNT * RX_BUF_SIZE as usize;
 const TX_BUF_LEN: usize  = 0x1000;
@@ -80,45 +61,26 @@ const _: () = {
 
 const VIRTIO_NET_VECTOR: u8 = 0x22;
 
-/// **The RX buffers are [`Dma`] views and not raw pointers, and that is what
-/// deleted this type's `unsafe impl Send`.** A view knows its own physical
-/// address and its own length, so `rx_phys` went with the pointers.
-///
-/// `'static` because both pools are leaked at `init`: a NIC this kernel has
-/// bound is bound for the boot, its RX buffers are mapped into `netd`, and the
-/// `static Lock<Option<DmaPool>>` that used to hold the pages alive said all
-/// that only by existing.
-///
-/// The two queues here are views of the kernel-only pool and the buffers are
-/// views of the shared one — see the module header for why that is not an
-/// arrangement anyone may tidy away.
+/// `'static` because both DMA pools are leaked at `init`.
 struct VirtioNic {
     device: VirtioDevice,
     rxq: Virtqueue<'static>,
     txq: Virtqueue<'static>,
     tx_phys: u64,
     rx_bufs: [Dma<'static>; RX_BUF_COUNT],
-    // Maps virtqueue descriptor index -> rx_bufs index
+    // Descriptor index -> rx_bufs index.
     desc_to_buf: [u16; RX_QUEUE_SIZE as usize],
-    /// The RX queue's refusal count as of the last line this driver wrote
-    /// about it.
-    ///
-    /// `poll_used` cannot log — `virtio_console` calls it under the serial
-    /// backend's own lock — so the count is carried and named here, which is
-    /// the one virtio queue whose used ring a userland process could reach.
+    // `poll_used` cannot log because `virtio_console` calls it under the serial backend's own lock.
     reported_refusals: u32,
-    /// Stash area: slot returned by poll_used, indexed by buf_idx, consumed by refill_rx_buf.
+    // Slot from poll_used, indexed by buf_idx, consumed by refill_rx_buf.
     pending_rx_slots: [Option<DescSlot>; RX_BUF_COUNT],
     tx_slot: Option<DescSlot>,
 }
 
 impl VirtioNic {
     fn refill_rx(&mut self, buf_idx: usize, slot: DescSlot) {
-        // Bounded by construction: the subview is exactly `NET_HDR_SIZE` bytes
-        // at the front of a `RX_BUF_SIZE` buffer. This runs before the
-        // descriptor is handed back to the device, so nothing is writing the
-        // buffer, and `buf_idx` came from `desc_to_buf`, whose every entry
-        // `poll_used` bounded to this queue.
+        // `buf_idx` is bounded by `desc_to_buf`.
+        // Nothing else writes this buffer yet.
         self.rx_bufs[buf_idx].subview(0, NET_HDR_SIZE).zero();
         let desc_id = self.rxq.submit(
             slot,
@@ -138,10 +100,9 @@ impl crate::net::Nic for VirtioNic {
 
     fn poll_rx(&mut self) -> Option<(usize, usize)> {
         let polled = self.rxq.poll_used();
-        // Named here and not in `poll_used`: this runs on the `irq_ring` drain,
-        // where a log line is ordinary, and it is the used ring an untrusted
-        // process is closest to. Reported on change rather than per element, so
-        // a device or a peer writing garbage costs one line and not a flood.
+        // The refusal count is tracked here, not in `poll_used`, because this runs on the
+        // `irq_ring` drain where a log line is safe.
+        // On change, not per element — a flood of refusals costs one line, not many.
         let refused = self.rxq.refused();
         if refused != self.reported_refusals {
             log!(
@@ -152,25 +113,19 @@ impl crate::net::Nic for VirtioNic {
             self.reported_refusals = refused;
         }
         let (slot, written_len) = polled?;
-        // In range by construction: `poll_used` refuses a head past the queue,
-        // and `desc_to_buf` is exactly `RX_QUEUE_SIZE` long.
+        // In range by construction: `poll_used` bounds the head to `RX_QUEUE_SIZE`.
         let buf_idx = self.desc_to_buf[slot.id() as usize] as usize;
         let total = written_len as usize;
         if total <= NET_HDR_SIZE {
             self.refill_rx(buf_idx, slot);
             return None;
         }
-        // Stash the slot for refill_rx_buf to consume later
         self.pending_rx_slots[buf_idx] = Some(slot);
         Some((buf_idx, total - NET_HDR_SIZE))
     }
 
     fn refill_rx_buf(&mut self, buf_index: usize) -> Result<(), SyscallError> {
-        // RX_BUF_COUNT is not a chosen number: it is the length of
-        // `pending_rx_slots`/`rx_bufs` and the buffer count baked
-        // into the DMA pool layout, so this check is exactly the array bound.
-        // An index past it used to be silently ignored *and* reported as
-        // success; an unpolled index used to panic the kernel.
+        // RX_BUF_COUNT is the array bound for pending_rx_slots and rx_bufs.
         if buf_index >= RX_BUF_COUNT { return Err(SyscallError::InvalidArgument); }
         let Some(slot) = self.pending_rx_slots[buf_index].take() else {
             return Err(SyscallError::InvalidArgument);
@@ -193,14 +148,12 @@ impl crate::net::Nic for VirtioNic {
     }
 }
 
-/// Arm this NIC's RX interrupt, or say why the machine has no NIC.
+/// Nothing in this driver polls: `poll_rx` only runs off the `irq_ring` record
+/// vector 0x22's ISR publishes, so an unarmed NIC delivers nothing for the
+/// life of the boot.
 ///
-/// A refusal rather than a panic, and that is the whole of what this returns.
-/// Nothing in this driver polls: `poll_rx` runs behind an `irq_ring` record
-/// only vector 0x22's ISR publishes, so a NIC whose messages cannot reach a CPU
-/// delivers nothing for the life of the boot. A machine that cannot have
-/// networking still boots, still has a console, and still says why — which is
-/// what the xHCI driver settled for the same shape of question.
+/// Returns false rather than panicking so a machine without networking still
+/// boots.
 fn arm_interrupt(pci_dev: &PciDevice, device: &VirtioDevice) -> bool {
     if !pci_dev.enable_msix(VIRTIO_NET_VECTOR) {
         log!("VirtIO net: NOT INITIALISED at PCI {:02x}:{:02x}.{} — its MSI-X could not be \
@@ -217,16 +170,11 @@ fn arm_interrupt(pci_dev: &PciDevice, device: &VirtioDevice) -> bool {
     true
 }
 
-/// **The rule the two pools exist to keep**, stated against the six addresses
-/// this device was really programmed with rather than against the layout
-/// constants above: no ring of either virtqueue is inside the page a
-/// `DeviceType::Nic` claim maps.
+/// No ring of either virtqueue may be inside the page a `DeviceType::Nic`
+/// claim maps.
 ///
-/// A panic, and the only one on this path. Every other refusal here is a
-/// machine that boots without networking; this one is a kernel that has just
-/// handed a userland process the ability to name any physical address in the
-/// machine, and it would be silent for the life of the boot. Six comparisons,
-/// once per bind.
+/// Panics rather than allowing it, since the alternative is a userland
+/// process able to name any physical address in the machine.
 fn assert_queues_are_private(rxq: &Virtqueue<'_>, txq: &Virtqueue<'_>, shared_phys: u64) {
     let page = shared_phys..shared_phys + crate::mm::PAGE_2M;
     for (what, phys) in [
@@ -256,21 +204,16 @@ pub fn init(devices: &[PciDevice]) {
         }
     };
     log!("VirtIO net: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
-    // Leaked rather than held in a `static`: this NIC is never unbound and its
-    // buffer window is handed to whoever claims the class, so the pages outlive
-    // every scope by design.
+    // Leaked, not `static`: this NIC is never unbound, so the pages must outlive every scope.
     let kernel_mem = DmaPool::alloc(KERNEL_DMA_BYTES).leak();
     let shared = DmaPool::alloc(SHARED_DMA_BYTES).leak();
-    // Exclusive: the pools were allocated on the two lines above and nothing
-    // else holds a view of either. The shared one is zeroed because a claimant
-    // maps the whole 2 MiB page — every byte past the buffers included — and
-    // those are pages this machine has already used for something else.
+    // Exclusive: allocated on the two lines above, nothing else holds a view.
+    // Zeroed because these pages held other data before this allocation.
     shared.zero();
     pci_dev.enable_bus_master();
 
     let device = VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC);
 
-    // RX queue: 256 entries, separate pages for desc/avail/used
     let rxq_regions = VirtqueueRegions::from_separate(
         kernel_mem.subview(OFF_RXQ_DESC, OFF_RXQ_AVAIL - OFF_RXQ_DESC),
         kernel_mem.subview(OFF_RXQ_AVAIL, OFF_RXQ_USED - OFF_RXQ_AVAIL),
@@ -279,7 +222,6 @@ pub fn init(devices: &[PciDevice]) {
     );
     let mut rxq = Virtqueue::from_regions(&rxq_regions, RX_QUEUE_SIZE);
 
-    // TX queue: 16 entries, all three rings inside one page
     let mut txq = Virtqueue::new(
         kernel_mem.subview(OFF_TXQ, KERNEL_DMA_BYTES - OFF_TXQ),
         TX_QUEUE_SIZE,
@@ -307,9 +249,6 @@ pub fn init(devices: &[PciDevice]) {
     });
     let tx_phys = shared.phys() + OFF_TX_BUF as u64;
 
-    // `DmaPool` allocations are whole 2 MiB pages, so the pool's first byte is
-    // the first byte of the page a claim maps and `NicInfo`'s offsets are
-    // relative to it.
     let dma_region = Region {
         phys: crate::DirectMap::from_phys(shared.phys()),
         size: crate::mm::PAGE_2M,

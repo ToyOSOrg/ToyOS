@@ -14,8 +14,7 @@ use crate::sync::Lock;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::DirectMap;
 
-// PipeId — raw identifier, Copy, used internally for lookups and in
-// ProcessState. Does NOT carry a refcount. Not public outside the kernel.
+/// Raw pipe identifier; carries no refcount, not exposed outside the kernel.
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct PipeId(usize);
@@ -37,13 +36,10 @@ pub use handle::{PipeReader, PipeWriter};
 
 /// Owned references to a pipe's two ends.
 ///
-/// The id inside each handle is private to this module, and `pipe.rs` is this
-/// module's *parent*, so nothing in the kernel — this file included — can name
-/// a pipe as an owned reference except through `acquire`. `acquire` takes the
-/// `&mut Pipe` that only a holder of `PIPES` can produce, so finding the pipe
-/// and taking the reference that keeps it alive are one acquisition. There is
-/// no program point between them at which the last other end can close and
-/// free it, which is what an `exists`-then-`add_reader` pair had.
+/// The id inside each handle is private to this module; only `acquire`, which
+/// requires the `&mut Pipe` a `PIPES` lock produces, may look up a pipe and
+/// take a counted reference, so no program point exists between the two where
+/// the last other end could close and free it.
 mod handle {
     use super::{close_read, close_write, with_pipes_mut, Pipe, PipeId};
 
@@ -54,8 +50,7 @@ mod handle {
     pub struct PipeWriter(PipeId);
 
     impl PipeReader {
-        /// The only constructor. Taking the reference and counting it are the
-        /// same statement, so an uncounted `PipeReader` cannot be written.
+        /// The only constructor: taking and counting the reference is one statement.
         pub(super) fn acquire(pipe: &mut Pipe) -> Self {
             pipe.readers = pipe.readers.checked_add(1).expect("pipe reader overflow");
             pipe.publish_ends();
@@ -75,9 +70,7 @@ mod handle {
         pub fn id(&self) -> PipeId { self.0 }
     }
 
-    /// A live handle proves the count is at least one, which proves the pipe is
-    /// in the table — so unlike `open_reader` this cannot fail on a race, and
-    /// its `expect` is the kernel-bug assert it looks like.
+    /// A live handle proves the pipe is still in the table, so `expect` here cannot fail on a race.
     impl Clone for PipeReader {
         fn clone(&self) -> Self {
             with_pipes_mut(|pipes| {
@@ -107,64 +100,32 @@ mod handle {
     }
 }
 
-// Pipe internals — owns physical memory, tracks refcounts only.
-// Mapping into user address spaces is managed by the handle layer.
 
 pub const PIPE_SIZE: usize = PAGE_2M as usize;
 
-/// A pipe's ring page and the cursors over it.
-///
-/// The cursors are kernel memory, because `SYS_PIPE_MAP` maps `page` into the
-/// process writable: anything read back out of that page is a value the
-/// process chose.
+/// A pipe's ring page and the cursors over it — cursors stay in kernel memory
+/// because `SYS_PIPE_MAP` maps `page` writable, so anything read back from the page is user-chosen.
 struct Backing {
     page: pmm::PhysPage,
     ring: Ring,
 }
 
 struct Pipe {
-    /// Its own key in `PIPES`. A handle's id comes from here rather than from
-    /// the caller of `acquire`, so a handle cannot be built naming a different
-    /// pipe than the one whose count it bumped.
+    /// Its own key in `PIPES`, so a handle cannot be built naming a different pipe than the one whose count it bumped.
     id: PipeId,
-    /// `None` until the pipe is first used. A pipe costs 2 MiB and a
-    /// connection is two of them, so allocating on `create` charged every
-    /// `SYS_CONNECT` 4 MiB of physical memory before either end had sent a
-    /// byte — for a pending connection, before the server had even agreed to
-    /// the conversation.
+    /// `None` until first use — allocating eagerly would charge every pending `SYS_CONNECT` 4 MiB before either end sent a byte.
     backing: Option<Backing>,
     readers: u32,
     writers: u32,
     inbox_watchers: Vec<InboxId>,
-    /// This pipe end's waiter set, as a completion subject. Held
-    /// by `Arc` so a blocking site can clone it out from under the table lock
-    /// and hold it across its own park.
-    ///
-    /// **One list per end where there were two.** The `KWaitQueue` beside each
-    /// of these went with the park it served: a reader arms here and parks on
-    /// its own queue.
+    /// Held by `Arc` so a blocking site can clone it out from under the table lock and hold it across its own park.
     readers_watch: Arc<Watch>,
     writers_watch: Arc<Watch>,
-    /// An RT thread wrote to this pipe and the boost has not been claimed
-    /// yet. The next thread to consume data inherits transient RT priority —
-    /// covering readers that were runnable (not blocked) at write time,
-    /// which the wake-time boost in `wake_pipe_readers` misses.
+    /// Set when a write should hand the next reader transient RT priority — covers readers already runnable, which the wake-time boost misses.
     rt_boost_pending: bool,
 }
 
-// SAFETY: `Pipe` is `!Send` for exactly one reason — `Backing::ring` is a
-// `toyos_abi::ring::Ring`, which holds a `*mut u8` at the ring page's
-// direct-map address. That page is the `PhysPage` beside it in the same
-// `Backing`, so pointer and allocation move together and nothing is left
-// behind on the CPU a pipe moves off; every other field is plain data, a
-// `Vec`, or an `Arc<Watch>`. What serialises access to any of it is the
-// `PIPES` table lock, which is the only way to reach a `Pipe` at all.
-//
-// Irreducible while the ring is a raw window, and *checked* rather than
-// assumed — deleting this impl fails to compile (`pipe.rs:209: *mut u8 cannot
-// be sent between threads safely`), which is the test the two vestigial
-// `Send`/`Sync` pairs in `mm::`/`object::` failed. `Ring`'s base cannot become
-// a `&mut [u8]`: `SYS_PIPE_MAP` maps the same page into the process.
+// SAFETY: `Backing::ring`'s raw pointer and its owning `PhysPage` move together in the same struct, and the `PIPES` lock is the only way to reach a `Pipe`, serializing all access to it.
 unsafe impl Send for Pipe {}
 
 impl Pipe {
@@ -181,14 +142,11 @@ impl Pipe {
         }
     }
 
-    /// Allocate the ring page if this is the first use. `None` when physical
-    /// memory is exhausted — which userland drives, so it is an error return
-    /// and not a panic.
+    /// Allocate the ring page if this is the first use; `None` on exhaustion, an error return rather than a panic since userland drives it.
     fn back(&mut self) -> Option<&mut Backing> {
         if self.backing.is_none() {
             let page = pmm::alloc_page(pmm::Category::Pipe)?;
-            // SAFETY: a fresh 2 MiB page this `Pipe` owns for as long as the
-            // `Ring` addresses it.
+            // SAFETY: a fresh 2 MiB page this `Pipe` owns for as long as the `Ring` addresses it.
             let ring = unsafe { Ring::new(page.direct_map().as_mut_ptr(), PIPE_SIZE) };
             self.backing = Some(Backing { page, ring });
             self.publish_ends();
@@ -196,12 +154,7 @@ impl Pipe {
         self.backing.as_mut()
     }
 
-    /// Republish "is the other end gone?" into the mapped header.
-    ///
-    /// The kernel never reads those bits back — its own counts decide — so
-    /// this is a publication for netd, and it derives from the counts rather
-    /// than being toggled alongside them. A pipe that is not backed yet has
-    /// nowhere to publish to and picks the bits up when it is.
+    /// Republish "is the other end gone?" into the mapped header, for netd; the kernel itself decides from its own counts.
     fn publish_ends(&mut self) {
         let Some(backing) = self.backing.as_mut() else { return };
         if self.readers == 0 { backing.ring.close_reader() } else { backing.ring.open_reader() }
@@ -212,8 +165,7 @@ impl Pipe {
         self.backing.as_ref().map_or(0, |b| b.ring.available())
     }
 
-    /// A pipe with no page yet has its whole capacity free — the allocation
-    /// that would make that true is deferred, not refused.
+    /// A pipe with no page yet reports its whole capacity free — the allocation is deferred, not refused.
     fn space(&self) -> u32 {
         self.backing.as_ref().map_or(u32::MAX, |b| b.ring.space())
     }
@@ -237,11 +189,7 @@ pub fn init() {
 
 /// Create a new pipe. Returns owned reader + writer references.
 ///
-/// Infallible: a pipe with no traffic on it owns no physical memory, so there
-/// is nothing here that can be exhausted. The 2 MiB ring page is allocated by
-/// the first `try_write` or `map_page`, and *that* is where userland driving
-/// physical memory — `SYS_PIPE` or `SYS_CONNECT` in a loop — meets an error
-/// return.
+/// Infallible: a pipe with no traffic owns no physical memory, so nothing here can be exhausted; the ring page is allocated on first `try_write` or `map_page`.
 pub fn create() -> (PipeReader, PipeWriter) {
     with_pipes_mut(|pipes| {
         let id = pipes.insert_with(Pipe::new);
@@ -254,9 +202,7 @@ pub fn create() -> (PipeReader, PipeWriter) {
 
 /// The pipe's ring page, allocating it if this is its first use.
 ///
-/// `None` when the id names no pipe or its page cannot be allocated — the
-/// caller holds a descriptor for it, which rules the first out, so what
-/// reaches userland from here is physical memory exhaustion.
+/// `None` when the id names no pipe or its page cannot be allocated — the caller holds a descriptor, so this is physical memory exhaustion.
 pub fn map_page(pipe_id: PipeId) -> Option<DirectMap> {
     with_pipes_mut(|pipes| Some(pipes.get_mut(pipe_id)?.back()?.page.direct_map()))
 }
@@ -282,8 +228,7 @@ pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
         }
     });
     if boost {
-        // Boost-on-consume: outside the PIPES lock — the scheduler takes
-        // its own CPU-queue lock.
+        // Outside the PIPES lock: the scheduler takes its own CPU-queue lock.
         crate::scheduler::boost_current_rt_inherited();
     }
     result
@@ -292,9 +237,7 @@ pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
 pub enum PipeWrite {
     Wrote(usize),
     BrokenPipe,
-    /// The first write to this pipe, and its ring page could not be
-    /// allocated. Distinct from `None`: there is no amount of waiting that
-    /// makes space appear, so a caller must not park on it.
+    /// The ring page could not be allocated; distinct from `None`, no wait makes space appear so a caller must not park on it.
     NoMemory,
 }
 
@@ -327,8 +270,7 @@ pub fn has_space(pipe_id: PipeId) -> bool {
     })
 }
 
-/// Mark the pipe so the next consumer inherits RT priority. Called by the
-/// wake path when the writer is RT (see `Pipe::rt_boost_pending`).
+/// Mark the pipe so the next consumer inherits RT priority.
 pub fn set_rt_boost_pending(pipe_id: PipeId) {
     with_pipes_mut(|pipes| {
         if let Some(pipe) = pipes.get_mut(pipe_id) {
@@ -411,8 +353,7 @@ pub fn remove_inbox_watcher(pipe_id: PipeId, inbox_id: InboxId) {
     });
 }
 
-/// The waiter set of this pipe's read end, cloned out for a blocking site or a
-/// wake path to hold on its own stack.
+/// The waiter set of this pipe's read end, cloned out for a blocking or wake path to hold on its own stack.
 pub fn readers_queue(pipe_id: PipeId) -> Option<PipeEnd> {
     with_pipes(|pipes| {
         pipes.get(pipe_id).map(|p| PipeEnd {
@@ -429,10 +370,7 @@ pub fn writers_queue(pipe_id: PipeId) -> Option<PipeEnd> {
     })
 }
 
-/// One end of a pipe, as a blocking site sees it: the queue it registers on
-/// and the subject it arms. Cloned out of the table together, because two
-/// lookups would be two acquisitions of `PIPES` on the path a pipe write
-/// already pays for.
+/// One end of a pipe: the queue a blocking site registers on and the subject it arms.
 pub struct PipeEnd {
     pub watch: Arc<Watch>,
 }

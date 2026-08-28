@@ -1,19 +1,9 @@
 //! What one process reaches another through: pipes, ports and the namespaces
 //! that name them, connections, shared memory, and inboxes.
-//!
-//! **Nothing here is addressed by name or by pid.** A port is created and its
-//! two ends installed in the creator's own table; a namespace is built out of
-//! connectors the caller already holds; a connection is opened by presenting one
-//! of those connectors. There is no registry to look a peer up in, which is what
-//! lets [`sys_connection_join`] be as simple as it is where its id-addressed
-//! predecessor needed a rule about who was entitled to a number.
-//!
-//! **Every all-or-nothing claim here is structural.** [`sys_namespace_build`]
-//! resolves every name and checks every connector before it installs anything,
-//! [`sys_handle_send`] verifies the whole batch before it removes one entry, and
-//! [`sys_handle_recv`] measures the batch before it takes it — so a refusal
-//! leaves the caller's table exactly as it was, and `Gone` and
-//! `ResourceExhausted` stay honest answers about the peer.
+//! No peer is addressed by name or pid: ports, namespaces and connections are
+//! built only from connectors and handles the caller already holds.
+//! Every all-or-nothing claim here is structural: names and connectors are
+//! resolved and checked before anything is installed or removed.
 
 use alloc::vec::Vec;
 
@@ -49,19 +39,8 @@ pub(super) fn sys_pipe() -> u64 {
     })
 }
 
-/// Map a pipe's ring page into the caller.
-///
-/// The window is recorded against the pipe (`process::PipeMap`) so that
-/// closing the last descriptor for it takes the mapping away. It used to be
-/// recorded nowhere: `SYS_PIPE`, `SYS_PIPE_MAP`, close both ends freed the ring
-/// page back to the PMM with the caller's writable mapping of it still live,
-/// and whatever the PMM handed that page to next — another process's pipe, a
-/// kernel heap region, a DMA buffer — was readable and writable by a process
-/// that owned nothing.
-///
-/// A second call for the same pipe returns the window the first one made,
-/// rather than a second window onto the same page. That is what keeps
-/// `pipe_maps` bounded by the descriptor table.
+/// Map a pipe's ring page into the caller, tracked against the pipe so
+/// closing its last descriptor unmaps it.
 pub(super) fn sys_pipe_map(h: RawHandle) -> u64 {
     let mapped = process::with_process_data(|data| {
         let pipe_id = match data.handles.get_ref(h, Rights::MAP) {
@@ -71,6 +50,7 @@ pub(super) fn sys_pipe_map(h: RawHandle) -> u64 {
         let Some(pipe_id) = pipe_id else {
             return Ok(SyscallError::InvalidArgument.to_u64());
         };
+        // A second call returns the existing window, keeping pipe_maps bounded by the handle table.
         if let Some(existing) = data.pipe_maps.iter().find(|m| m.pipe == pipe_id) {
             return Ok(existing.addr.raw());
         }
@@ -92,16 +72,7 @@ pub(super) fn sys_pipe_map(h: RawHandle) -> u64 {
     }
 }
 
-/// Join a pipe read end and a pipe write end into one duplex connection.
-///
-/// The caller must already hold both, in the right direction, and keeps them:
-/// this takes references of its own. It grants nothing — everything it can
-/// reach is something the caller could already read or write — which is what
-/// lets it be this simple where its id-addressed predecessor needed a rule
-/// about who was entitled to a number.
-///
-/// `std`'s `TcpStream` is one handle and netd's data path is two pipes, and
-/// that is the whole of why this exists.
+/// Join a pipe read end and a pipe write end into one duplex connection; the caller keeps both handles and gains no more than it already held.
 pub(super) fn sys_connection_join(rx_h: RawHandle, tx_h: RawHandle) -> u64 {
     let ends = process::with_process_data(|data| {
         let rx = data.handles.get::<crate::object::pipe::PipeReadEnd>(rx_h, Rights::READ)?;
@@ -116,11 +87,7 @@ pub(super) fn sys_connection_join(rx_h: RawHandle, tx_h: RawHandle) -> u64 {
     process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
 }
 
-/// Make a port and install both ends.
-///
-/// Needs no right and grants none: a port with no clients is not authority.
-/// The two handles come back packed, which cannot be read as an error — see
-/// [`SYS_PORT_CREATE`].
+/// Make a port and install both ends; needs no right and grants none, since a port with no clients is not authority. The two handles come back packed into one word, which cannot be read as an error.
 pub(super) fn sys_port_create() -> u64 {
     let (acceptor, connector) = port::create();
     process::with_process_data(|data| {
@@ -130,8 +97,7 @@ pub(super) fn sys_port_create() -> u64 {
         let install_c =
             ops::install(&mut data.handles, KObjectRef::Connector(connector));
         let Ok(c) = install_c else {
-            // The acceptor goes back, so a refused pair leaves no port half in
-            // a table with nothing on the other side of it.
+            // The acceptor goes back so a refused pair leaves no orphaned port half.
             drop(data.handles.remove(a));
             return SyscallError::ResourceExhausted.to_u64();
         };
@@ -139,11 +105,7 @@ pub(super) fn sys_port_create() -> u64 {
     })
 }
 
-/// A namespace built from a base's kept names plus new bindings.
-///
-/// Every name is resolved against the base *before* anything is installed, and
-/// every added connector is checked for `TRANSFER` first, so a refusal leaves
-/// the caller's table exactly as it was.
+/// Build a namespace from a base's kept names plus new bindings; a refusal leaves the caller's table unchanged (every name resolved and connector checked first).
 pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -> u64 {
     let total = args.keep_n.saturating_add(args.add_n);
     if total > MAX_NAMESPACE_ENTRIES as u64 {
@@ -186,10 +148,7 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
             let Some(name) = name_at(off, len) else {
                 return SyscallError::InvalidArgument.to_u64();
             };
-            // A name the base does not carry is silently absent from the
-            // child's: a parent narrowing a namespace is asking for an
-            // intersection, and asking for a name it does not itself hold
-            // grants nothing either way.
+            // A name absent from the base is silently absent from the child: narrowing asks for an intersection, not an error.
             if let Some(connector) = base.lookup(&name) {
                 entries.push((name, connector.clone()));
             }
@@ -216,12 +175,7 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
                 data.handles.get::<port::Connector>(handle, Rights::TRANSFER)
             }) {
                 Ok(c) => c,
-                // **The one place a wrong type is not provably the caller's
-                // bug.** An added connector is routinely one a *peer*
-                // transferred — that is what a `provides` name is, and
-                // `/bin/init`'s launcher builds a namespace out of handles a
-                // client sent it. Faulting here let any process holding the
-                // `launcher` connector end init by sending it a pipe.
+                // WrongType returns InvalidArgument here instead of ending the caller: an added connector is often one a peer transferred, not proof of a caller bug.
                 Err(crate::object::HandleError::WrongType { .. }) => {
                     return SyscallError::InvalidArgument.to_u64()
                 }
@@ -245,12 +199,7 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
     })
 }
 
-/// Open a connection to `name` in the namespace `ns_h` holds.
-///
-/// **Two facts, two words.** A name this namespace does not carry is
-/// `NotFound` — a statement about this process. A name whose port has closed is
-/// `Gone` — a statement about the machine. Only the kernel can tell them apart,
-/// so only the kernel may collapse them, and it does not.
+/// Open a connection to `name` in the namespace `ns_h` holds; `NotFound` means the namespace lacks the name, `Gone` means its port has closed.
 pub(super) fn sys_namespace_open(ns_h: RawHandle, name: &str) -> u64 {
     let connector = match process::with_process_data(|data| {
         let ns = data
@@ -272,14 +221,10 @@ fn connect_through(connector: &port::Connector) -> u64 {
     }
     let (cs_reader, cs_writer) = pipe::create(); // client → server
     let (sc_reader, sc_writer) = pipe::create(); // server → client
-    // Cross-wired here and nowhere else: what the client sends is what the
-    // server receives, and the server's end is built out of the same two
-    // queues when it accepts.
+    // Cross-wired here only: the server's end is built from the same two queues when it accepts.
     let (to_server, to_client) = crate::object::service::ConnectionEnd::pair_queues();
 
-    // The client's own end first. Installing it can fail on a full handle
-    // table, and a connection queued for a server whose client never got a
-    // handle is one the server accepts and finds already dead.
+    // Client's end installed first: queuing before that would let a server accept a connection whose client has no handle.
     let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::new(
         sc_reader,          // client reads from server→client
         cs_writer,          // client writes to client→server
@@ -332,8 +277,7 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
 
     loop {
         if let Some(conn) = acceptor.pop() {
-            // PipeReader/PipeWriter move from the queue into the connection. No
-            // refcount change — ownership transfers.
+            // PipeReader/PipeWriter move from queue into connection: ownership transfers, no refcount change.
             let object = KObjectRef::Connection(
                 crate::object::service::ConnectionEnd::new(
                     conn.rx,
@@ -347,10 +291,7 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
             });
             return handle_result(installed);
         }
-        // The last handle to this acceptor has gone — another thread of this
-        // process closed it — so nothing will ever be queued again and the
-        // condition below has become permanently false. Answering is the only
-        // alternative to parking forever.
+        // A closed acceptor will never queue again, so returning here is the only alternative to parking forever.
         if acceptor.closed() {
             return SyscallError::Gone.to_u64();
         }
@@ -370,11 +311,7 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
     }
 }
 
-/// Make a shared region and hand back the one handle to it.
-///
-/// The creator's handle carries `MAP`, `DUP` and `TRANSFER`: mapping is what a
-/// region is for, and giving one away is the whole point of the object. There
-/// is no grant list — being able to name it *is* being allowed to map it.
+/// Make a shared region and hand back the one handle to it, carrying MAP, DUP and TRANSFER — naming it is what authorizes mapping it.
 pub(super) fn sys_shm_create(size: u64) -> u64 {
     let object = match crate::object::shm::SharedMemObject::create(size) {
         Ok(shm) => KObjectRef::SharedMem(shm),
@@ -397,22 +334,7 @@ pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
     }
 }
 
-/// Move handles to the peer of a connection, all or nothing.
-///
-/// Every handle is verified — it resolves, it carries `TRANSFER`, it is named
-/// once, and it is not the connection itself — before any of them is removed,
-/// and a peer's queue that refuses the batch afterwards hands it back. **So
-/// every refusal leaves the caller's table exactly as it was**, which is what
-/// makes `Gone` and `ResourceExhausted` honest: they are answers about the
-/// peer, and a caller retrying or closing what it still holds is right rather
-/// than fatal. Refusing to send the connection over itself is what keeps a
-/// cross-pair reference cycle to two objects rather than one.
-///
-/// **Rights travel unchanged, `TRANSFER` included.** A move requires it and
-/// carries it, so everything that can be moved can be moved on: the
-/// non-transitive grant the pid ACL had is not expressible, and making it so
-/// is a rights word on *both* move paths rather than on this one
-/// (`issues/isolation/a-moved-handle-is-always-re-movable.md`).
+/// Move handles to the peer of a connection, all or nothing; rights, including `TRANSFER`, travel unchanged.
 pub(super) fn sys_handle_send(conn_h: RawHandle, handles: &crate::user_ptr::UserBytes, count: usize) -> u64 {
     let mut wanted = [RawHandle(0); MAX_TRANSFER_HANDLES];
     for (i, slot) in wanted.iter_mut().enumerate().take(count) {
@@ -435,10 +357,7 @@ pub(super) fn sys_handle_send(conn_h: RawHandle, handles: &crate::user_ptr::User
                 return Err(SyscallError::PermissionDenied.into());
             }
         }
-        // The peer's queue can still refuse, and both of its refusals are ones
-        // a caller reads as "the handles did not go" — so they must not have
-        // gone. `transfer` puts every entry back at its own number, under this
-        // same hold, where nothing can observe the gap.
+        // The peer's queue can still refuse; transfer restores every entry at its own number so a refusal is invisible.
         data.handles
             .transfer(wanted, |batch| conn.send(batch))
             .map_err(crate::object::Refusal::Error)
@@ -450,17 +369,6 @@ pub(super) fn sys_handle_send(conn_h: RawHandle, handles: &crate::user_ptr::User
 }
 
 /// Take the oldest batch the peer sent. Never blocks; zero means none queued.
-///
-/// The whole thing runs under one hold of this process's table, so the batch
-/// whose size was checked is the batch that is installed — the peer can only
-/// add to the far end of the queue, and a sibling thread of this process is
-/// serialised by the same lock.
-///
-/// **Every refusal is answered outside that hold**, per [`HandleError::refuse`]:
-/// three of the five kinds end the caller, and ending it takes the same
-/// non-reentrant lock this closure is running under.
-///
-/// [`HandleError::refuse`]: crate::object::HandleError::refuse
 pub(super) fn sys_handle_recv(
     conn_h: RawHandle,
     out: &mut crate::user_ptr::UserBytesMut,
@@ -470,12 +378,8 @@ pub(super) fn sys_handle_recv(
         let conn = data
             .handles
             .get::<crate::object::service::ConnectionEnd>(conn_h, Rights::READ)?;
-        // **Measured before it is taken, and both refusals leave it queued.**
-        // A batch popped and then dropped is capabilities nobody can ask for
-        // again, reported as an error a caller reads as "they did not arrive".
-        // Only the peer pushes, and only to the far end, so the front this saw
-        // is the front the pop takes — or the queue closed under it, which is
-        // the same answer as an empty one.
+        // The front measured here is the front recv_bounded takes: only the peer pushes, and only to the far end.
+        // Width is measured before the batch is taken: refusing after popping would drop already-taken handles, leaking capabilities nobody could ask for again.
         let Some(width) = conn.peek_width() else { return Ok(0) };
         if width > cap {
             return Err(SyscallError::InvalidArgument.into());
@@ -491,16 +395,14 @@ pub(super) fn sys_handle_recv(
         }
         Ok::<_, crate::object::Refusal>(count as u64)
     });
+    // Refused outside this hold: ending the caller takes the same non-reentrant lock.
     match taken {
         Ok(n) => n,
         Err(e) => e.refuse(),
     }
 }
 
-/// Make an inbox and tell the caller where it is.
-///
-/// The inbox owns its page and this maps it. An inbox is not something two
-/// processes share, so nothing else may name that page.
+/// Make an inbox and tell the caller where it is; the inbox owns its page and only this mapping may name it.
 pub(super) fn sys_inbox_setup(ctx: &SyscallContext, depth: u32, out: u64) -> u64 {
     let out = match UserAddr::checked(out) {
         Some(addr) => addr,
@@ -536,10 +438,7 @@ pub(super) fn sys_inbox_submit(
     min_complete: u32,
     timeout_nanos: u64,
 ) -> u64 {
-    // The table's own words, not one invented here: a handle that is gone is
-    // `NotFound` and one of the wrong type is `PermissionDenied`, the same as
-    // every other call. Collapsing both into `InvalidArgument` made "this
-    // inbox was closed" indistinguishable from "this argument is nonsense".
+    // NotFound and PermissionDenied are the table's own words for gone/wrong-type, not collapsed into InvalidArgument.
     let inbox_id = process::with_process_data(|data| {
         data.handles
             .get::<crate::object::inbox::InboxObject>(
