@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn the_laptop_s_speaker_is_told_to_power_its_external_amplifier() {
-        // §6.4 item 1: both output pins report EAPD capable and read the bit
+        // Both output pins report EAPD capable and read the bit
         // back clear at boot, so a path configured without this is correct and
         // silent. Removing the `pin.eapd` arm reds here and nowhere else.
         let (codecs, path) = laptop();
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_two_halves_of_the_laptop_s_volume_control_are_written_where_they_exist() {
-        // §6.4 item 2: mute on the pin, gain on the converter, and neither
+        // Mute on the pin, gain on the converter, and neither
         // widget implements the other's field.
         let (codecs, path) = laptop();
         let sent = verbs(&codecs, &path, 0x4011, 1).unwrap();

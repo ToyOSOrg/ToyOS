@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use crate::elf;
 use crate::object::{ops, HandleTable, KObjectRef};
 use crate::mm::paging::{CachePolicy, Prot};
-use crate::mm::PAGE_2M;
+use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
     ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Pid,
     ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserStack,
@@ -68,7 +68,7 @@ pub(crate) fn read_file_range(
     let mut result = Vec::with_capacity(len);
     let mut remaining = len;
     let mut file_off = offset;
-    let mut page_buf = [0u8; 4096];
+    let mut page_buf = [0u8; PAGE_BYTES];
 
     while remaining > 0 {
         let off_in_block = (file_off % 4096) as usize;

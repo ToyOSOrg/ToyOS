@@ -21,7 +21,7 @@ pub use reloc::{
     resolve_dlopen_relocs, resolve_lib_bind_relocs,
 };
 
-use crate::mm::{align_2m_checked, KernelSlice, MAX_HEAP_ALLOC, PAGE_2M};
+use crate::mm::{align_2m_checked, KernelSlice, MAX_HEAP_ALLOC, PAGE_2M, PAGE_BYTES};
 use crate::process::PageAlloc;
 use crate::UserAddr;
 use toyos_elf::dynamic::Dynamic;
@@ -283,7 +283,7 @@ pub(crate) fn read_backing_into(
     let mut remaining = dst.size();
     let mut file_off = offset;
     let mut buf_off = 0usize;
-    let mut page_buf = [0u8; 4096];
+    let mut page_buf = [0u8; PAGE_BYTES];
     while remaining > 0 {
         let off_in_block = (file_off % 4096) as usize;
         let chunk = (4096 - off_in_block).min(remaining);

@@ -132,7 +132,7 @@ kernel/src/main.rs 69 0
 kernel/src/mm/alloc.rs 88 0
 kernel/src/mm/dma.rs 34 0
 kernel/src/mm/mmio.rs 17 0
-kernel/src/mm/mod.rs 20 0
+kernel/src/mm/mod.rs 21 0
 kernel/src/mm/paging.rs 206 0
 kernel/src/mm/pmm.rs 27 0
 kernel/src/mm/region.rs 17 0
@@ -210,7 +210,7 @@ src/toolchain.rs 778 29
 src/wallpaper.rs 124 0
 src/worktree.rs 74 0
 src/writinglaw.rs 21 0
-tests/common/audio.rs 404 0
+tests/common/audio.rs 397 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
 tests/common/console.rs 249 2
@@ -491,7 +491,7 @@ toyos-mixer/src/format.rs 123 0
 toyos-mixer/src/gain.rs 43 0
 toyos-mixer/src/lib.rs 43 0
 toyos-mixer/src/mix.rs 38 0
-toyos-mixer/src/shape.rs 103 0
+toyos-mixer/src/shape.rs 102 0
 toyos-mixer/src/stats.rs 122 0
 toyos-pci/src/bar.rs 97 0
 toyos-pci/src/caps.rs 13 0
@@ -637,7 +637,7 @@ userland/libc/src/stdio.rs 92 0
 userland/libc/src/string.rs 8 0
 userland/libc/src/time.rs 9 0
 userland/logd/src/main.rs 188 1
-userland/logd/src/policy.rs 151 5
+userland/logd/src/policy.rs 150 5
 userland/logd/src/store.rs 109 0
 userland/logd/src/wall.rs 100 3
 userland/netd/src/main.rs 237 0

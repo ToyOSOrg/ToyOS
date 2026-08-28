@@ -158,7 +158,7 @@ fn client() -> ! {
         }
         "gone" => {
             assert_eq!(n, 0, "a connection whose server left returned {n} bytes");
-            // **`NotFound` and not `Gone`, which §8.2 asks for and
+            // **`NotFound` and not `Gone`, which
             // `issues/isolation/a-broken-pipe-answers-not-found.md`
             // is about.** What this arm is for is that the client is *told*, by
             // the kernel, without a timer — which either word does.

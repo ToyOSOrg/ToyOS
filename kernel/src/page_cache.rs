@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use hashbrown::HashMap;
 
 use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId};
+use crate::mm::PAGE_BYTES;
 use crate::sync::Lock;
 
 // Lock ordering: BLOCK_CACHE → BLOCK_DEV (never reversed).
@@ -55,7 +56,7 @@ impl core::ops::DerefMut for PageCacheGuard {
 
 /// Reads a block directly from disk, bypassing the cache; locks only the device.
 #[must_use = "a failed read leaves the buffer holding whatever it held before"]
-pub fn raw_block_read(block: u64, buf: &mut [u8; 4096]) -> BlockResult {
+pub fn raw_block_read(block: u64, buf: &mut [u8; PAGE_BYTES]) -> BlockResult {
     let mut dev = BLOCK_DEV.lock();
     let dev = dev.as_mut().expect("block device not initialized");
     dev.read_blocks(block, 1, buf)
@@ -64,7 +65,7 @@ pub fn raw_block_read(block: u64, buf: &mut [u8; 4096]) -> BlockResult {
 /// Writes a block directly to disk, bypassing the cache's slots but not its
 /// flush debt: the bytes land in the device's write cache, which the next [`PageCache::sync`] owes a flush.
 #[must_use = "a failed write did not reach the device"]
-pub fn raw_block_write(block: u64, buf: &[u8; 4096]) -> BlockResult {
+pub fn raw_block_write(block: u64, buf: &[u8; PAGE_BYTES]) -> BlockResult {
     let mut guard = lock();
     let (cache, dev) = guard.cache_and_dev();
     cache.flush.record_write();

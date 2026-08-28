@@ -1,0 +1,2 @@
+# scenario: double_drop_exit_race
+# expect: pass

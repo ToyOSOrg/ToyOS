@@ -114,8 +114,8 @@ fn a_post_before_the_arm_is_still_there_after_it() {
 /// rechecks. The run may not end with the poster having claimed nobody **and**
 /// the parker having parked.
 ///
-/// **The subject's leaf lock is in the model because it is in the proof.** §5.4
-/// puts C1 — the record store — *under* that lock, and the poster's walk of the
+/// **The subject's leaf lock is in the model because it is in the proof.** The
+/// record store is *under* that lock, and the poster's walk of the
 /// watch list is under it too; a parker registers under the same lock before it
 /// rechecks. That is what closes the window this file's first two drafts
 /// reported: a poster that finds no waiter registered has already stored its

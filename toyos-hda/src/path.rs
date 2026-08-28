@@ -77,7 +77,7 @@ pub struct OutputPath {
     pub device: DefaultDevice,
     pub output: PinSetup,
     /// A headphone pin the same converter feeds, when the codec offers one
-    /// and it is not already the chosen output. §2.5's routing wants both ends
+    /// and it is not already the chosen output. The routing wants both ends
     /// of one converter rather than two that would have to be kept in step.
     pub headphone: Option<PinSetup>,
 }

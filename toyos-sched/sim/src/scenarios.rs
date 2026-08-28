@@ -74,9 +74,9 @@ fn process(name: &'static str, initial: Vec<usize>, templates: Vec<Script>) -> P
 /// message, so the task is inside a container or inside a message at every
 /// instant. Under [`Protocol::OldSteal`] it is on a stack, invisible to the
 /// scan that concludes the process has no threads left.
-pub fn crash_md_exit_race() -> Scenario {
+pub fn double_drop_exit_race() -> Scenario {
     scenario(
-        "crash_md_exit_race",
+        "double_drop_exit_race",
         2,
         vec![queue(WaitClass::Ipc)],
         vec![process(
@@ -302,7 +302,7 @@ pub fn old_rt_starved_the_corpse() -> Scenario {
 /// that has never rejected the bug class it was built for proves nothing, so a
 /// green run of everything else is only meaningful while this stays red.
 pub fn old_steal_port() -> Scenario {
-    let mut scenario = crash_md_exit_race().with_protocol(Protocol::OldSteal);
+    let mut scenario = double_drop_exit_race().with_protocol(Protocol::OldSteal);
     scenario.name = "old_steal_port";
     scenario
 }
@@ -356,7 +356,7 @@ pub fn old_commit_fused() -> Scenario {
 /// Run it with [`crate::explore::run_catching`]; `run` would take the abort
 /// down with it.
 ///
-/// The base workload is `crash_md_exit_race` rather than `lost_wake_pipe`,
+/// The base workload is `double_drop_exit_race` rather than `lost_wake_pipe`,
 /// and the reason is worth stating: reaching the window needs an interrupt
 /// *delivered* into it, and the only messages that carry `Urgency::Preempt` —
 /// the only ones that kick unconditionally — are the retire and an RT wake.
@@ -366,7 +366,7 @@ pub fn old_commit_fused() -> Scenario {
 /// the blocked CPU declines its own pass. That is reachable in principle and
 /// was not reached in 500 schedules.
 pub fn old_preemptible_window() -> Scenario {
-    let mut scenario = crash_md_exit_race().with_window(WindowShape::Preemptible);
+    let mut scenario = double_drop_exit_race().with_window(WindowShape::Preemptible);
     scenario.name = "old_preemptible_window";
     scenario
 }
@@ -1040,7 +1040,7 @@ pub fn overlong_pass() -> Scenario {
 /// while it was measured.
 pub fn all() -> Vec<Scenario> {
     vec![
-        crash_md_exit_race(),
+        double_drop_exit_race(),
         retire_under_balance(),
         rt_saturated_retire(),
         lost_wake_pipe(),

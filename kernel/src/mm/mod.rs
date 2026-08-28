@@ -37,6 +37,9 @@ pub use toyos_userbound::PAGE_2M;
 /// The hardware page size; `paging::PAGE_SIZE_BIT` marks a PDE mapping directly at this granularity.
 pub const PAGE_SIZE: u64 = 4096;
 
+/// [`PAGE_SIZE`] as a `usize`, for the array types and buffers that span one page.
+pub const PAGE_BYTES: usize = PAGE_SIZE as usize;
+
 /// Rounds `size` up to the next 2MB boundary; only for a size the kernel computed, not outside input.
 pub const fn align_2m(size: usize) -> usize {
     (size + PAGE_2M as usize - 1) & !(PAGE_2M as usize - 1)

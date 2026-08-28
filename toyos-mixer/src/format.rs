@@ -63,7 +63,7 @@ impl Xorshift32 {
     }
 }
 
-/// §5.4. TPDF dither is defined against a **round-to-nearest** quantizer; that
+/// TPDF dither is defined against a **round-to-nearest** quantizer; that
 /// pairing is what makes the error zero-mean and its variance
 /// signal-independent. `as i16` truncates instead, which biases every sample
 /// 0.5 LSB toward zero and swallows the dither whole — a 2-LSB dead zone at

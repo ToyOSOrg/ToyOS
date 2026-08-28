@@ -61,7 +61,7 @@ fn main() {
 
     // **The watchdog is what makes a lost wake a number.** Without it a
     // dropped completion parks this process for ever, the harness's guard
-    // expires, and the suite prints `STALL` — which §20.3 disqualifies as a
+    // expires, and the suite prints `STALL` — which is disqualified as a
     // verdict, because it is the one class the harness names apart and tells
     // nobody to bisect. With it, the round the machine stopped at is the
     // failure message.

@@ -76,7 +76,7 @@ fn pass(world: &World, rx: &mut MailboxConsumer<Msg>, drained: &mut Vec<Msg>) {
             "I2: this CPU halted while its own interrupted context is inside a \
              push. That context cannot resume while the CPU sleeps, so every \
              message queued behind its unlinked node stays invisible with no \
-             doorbell edge left to raise (spec §7.2). Drained so far: \
+             doorbell edge left to raise. Drained so far: \
              {drained:?}",
         );
     }

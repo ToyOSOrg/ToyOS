@@ -490,7 +490,7 @@ fn volume_lines(log: &str) -> String {
 /// - **The shutdown path standing in for the continuous one.** The mid-run read
 ///   happens before `run shutdown` and must already have `Boot: complete`; the
 ///   post-shutdown read must additionally have the shutdown's own last line,
-///   which only §6.3's bounded wait on `LOG_DURABLE_NS` can deliver.
+///   which only the bounded wait on `LOG_DURABLE_NS` can deliver.
 ///
 /// A second boot, from `tests/logrotatecase`, drives the bound: rotation is
 /// what stops the file filling the owner's stick, and at the shipped mebibyte
@@ -771,7 +771,7 @@ fn rotation(
             .unwrap_or_default();
         let newest = String::from_utf8_lossy(&newest).into_owned();
         return Err(format!(
-            "the shutdown's last line is in none of the {} parts on the volume ({}), so §6.3's \
+            "the shutdown's last line is in none of the {} parts on the volume ({}), so the \
              bounded wait on LOG_DURABLE_NS did not deliver it.\nthe newest part ends:\n{}\nwhat \
              the guest said:\n{}",
             logs.len(),
@@ -1840,10 +1840,9 @@ pub fn log_partition_layout(
             ));
         }
     }
-
-    // Born clean. The ESP is not and cannot be until `fatfs` is forked (known
-    // issues §10); this volume has no subdirectory for either of those defects
-    // to arise in, and its free-cluster count is recorded at format time.
+    // Born clean. The ESP is not and cannot be until `fatfs` is forked; this
+    // volume has no subdirectory for a fatfs defect to arise in, and its
+    // free-cluster count is recorded at format time.
     let complaints = check(&image[log_start..log_start + log_len]);
     if !complaints.is_empty() {
         return Err(format!("the log partition is not born clean:\n{}", describe(&complaints)));
@@ -2034,7 +2033,7 @@ pub fn log_partition_identity(
     }
     if !log.contains("logd: no /log on this machine") {
         return Err(format!(
-            "logd said nothing about a machine with no /log, so §5.6's other half is missing:\n{}",
+            "logd said nothing about a machine with no /log, so its no-/log path is missing:\n{}",
             volume_lines(&log)
         ));
     }
