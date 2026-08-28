@@ -32,7 +32,9 @@ and tripped gate A's own harm verdict. Baseline arm at host load 5.0–6.6, slow
 arm at 1.3–1.5, so the direction is not the host's. Both arms, one session, one
 tree.
 
-[`client-cpu-takes-the-log-flush.md`](client-cpu-takes-the-log-flush.md) and
+The log-flush deferral fix — whose affordability heuristic left the kernel with
+the log architecture, so no CPU takes a flush now — and
 [`stop-the-device-voice-keep-the-wake.md`](stop-the-device-voice-keep-the-wake.md)
 are the fixes that came before. Each was right about its own defect; both chose
-which CPU absorbs a stall whose duration neither touched.
+which CPU absorbs a stall whose duration neither touched. The pinning disk wait
+is logd's `fsync` through the three spinlocks above.

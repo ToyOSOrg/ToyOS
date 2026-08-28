@@ -1,14 +1,11 @@
 //! Applying relocations to a loaded module.
 //!
-//! Every write here goes through [`LoadedLib::write_at`], and every offset it
-//! is given was validated against the module's writable window by
-//! `load_shared_lib` before the module existed. That is why the asserts in
-//! `write_at` are kernel-bug asserts and not refusals: reaching one means the
-//! validation let something through.
-//!
-//! Unresolved symbols are logged and left alone, never fatal. A `.so` naming a
-//! symbol nothing defines is a malformed file, and the process faults on the
-//! slot if it ever uses it — which is userland's problem, in userland.
+//! Every write goes through [`LoadedLib::write_at`]; every offset given to it
+//! was already validated against the module's writable window by
+//! `load_shared_lib`, so `write_at`'s asserts are kernel-bug asserts, not
+//! refusals. Unresolved symbols are logged and left unresolved, never fatal:
+//! a `.so` naming an undefined symbol is untrusted input, not a kernel bug,
+//! and the process faults on the slot only if it later uses it.
 
 use super::{CachedRelocs, LibMemory, LoadedLib, TlsModule, TlsModuleInfo};
 use crate::UserAddr;
@@ -17,26 +14,13 @@ use toyos_elf::RelocKind;
 impl LoadedLib {
     /// Write a value at a byte offset within this module's kernel mapping.
     ///
-    /// `offset` is a relocation's `r_offset`, i.e. it came out of the file.
-    /// Each arm asserts the bound protecting *its own* destination, which for
-    /// the `Shared` arm is `rw_alloc` — a separate, smaller allocation, so the
-    /// image's bounds do not cover it.
-    ///
     /// # Safety
-    /// The bound each arm needs is checked here, at runtime, on every call —
-    /// that is this module's whole design (its own header: the asserts are
-    /// "kernel-bug asserts, not refusals", because `load_shared_lib`/
-    /// `rela::validate` already refused a malformed `r_offset` before any
-    /// `LoadedLib` existed). What is *not* checked is exclusivity: the
-    /// caller must be the only writer of this module's image (or its
-    /// `rw_alloc`) for the duration of the call — true for every current
-    /// caller, each of which runs during a module's single-threaded loading/
-    /// binding phase (spawn, `dlopen`), never concurrently with another
-    /// relocation pass over the same `LoadedLib`.
+    /// Caller must be the sole writer of this module's image (or `rw_alloc`) for the duration of the call.
     pub(super) unsafe fn write_at<T: Copy>(&self, offset: u64, value: T) {
         let end = (offset as usize)
             .checked_add(core::mem::size_of::<T>())
             .expect("LoadedLib::write_at: r_offset + width overflows");
+        // Each arm asserts the bound protecting its own destination.
         match &self.memory {
             LibMemory::Owned(_) => {
                 assert!(
@@ -61,11 +45,6 @@ impl LoadedLib {
         }
     }
 
-    /// The pre-scanned entries of one kind, or the module's own tables when it
-    /// was never cached.
-    ///
-    /// The two paths differ only in cost. A cached module's tables are scanned
-    /// once at cache time; an uncached one is scanned per use.
     fn bind_entries(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
         let cached = self.cached_relocs.as_ref().map(|r| r.bind.iter().copied());
         let scanned = self.cached_relocs.is_none().then(|| {
@@ -93,24 +72,14 @@ impl LoadedLib {
 
 /// Add `delta` to every `R_X86_64_RELATIVE` slot.
 ///
-/// Called once the module has been given a user address, which differs from
-/// the physical base `load_shared_lib` applied them with.
-///
-/// Reads the old value out of the shared image rather than the private
-/// writable window: the only state this is ever called in is a freshly cloned
-/// window, which is a byte-for-byte copy of the image's.
+/// Reads the old value from the shared image, not the private window, because
+/// this only runs on a freshly cloned window that's still byte-identical to it.
 pub fn rebase_relative_relocs(lib: &LoadedLib, delta: i64) {
     for r in lib.relocations() {
         if r.kind == RelocKind::Relative {
-            // SAFETY: `r.offset` is a `RELATIVE` entry's offset, already
-            // checked by `rela::validate` against the writable window at
-            // `load_shared_lib` time (module header) — a range inside
-            // `image`'s own bounds, per `write_at`'s `# Safety`. No
-            // concurrent writer: this runs only on a freshly cloned window
-            // nothing else has touched yet (this function's own doc).
+            // SAFETY: this window was just cloned; nothing else writes to it yet.
             let old = unsafe { lib.image.read::<u64>(r.offset as usize) };
-            // SAFETY: see `write_at`'s `# Safety` — `r.offset` was validated
-            // the same way as the read just above.
+            // SAFETY: see write_at's `# Safety`.
             unsafe { lib.write_at::<u64>(r.offset, (old as i64 + delta) as u64) };
         }
     }
@@ -126,9 +95,7 @@ pub fn resolve_dlopen_relocs(lib: &LoadedLib, other_libs: &[LoadedLib]) {
         let name = symbols.name(sym as usize);
         match other_libs.iter().find_map(|other| other.resolve(name)) {
             Some(addr) => {
-                // SAFETY: `offset` came from `lib.bind_entries()`, one of
-                // `load_shared_lib`'s `rela::validate`d tables — see
-                // `write_at`'s `# Safety`.
+                // SAFETY: see write_at's `# Safety`.
                 unsafe { lib.write_at::<u64>(offset, addr.raw()) };
                 resolved += 1;
             }
@@ -158,20 +125,15 @@ pub fn resolve_lib_bind_relocs(
             .copied()
             .or_else(|| libs.iter().find_map(|other| other.resolve(name)));
         match resolved {
-            // SAFETY: same as `resolve_dlopen_relocs` above — `offset` came
-            // from `lib.bind_entries()`, validated the same way.
+            // SAFETY: see write_at's `# Safety`.
             Some(addr) => unsafe { lib.write_at::<u64>(offset, addr.raw()) },
             None => log!("dynamic: lib unresolved symbol: {}", name),
         }
     }
 }
 
-/// Apply `R_X86_64_TPOFF64` and `R_X86_64_TPOFF32`: the initial-exec model,
-/// where a TLS reference is a fixed offset from the thread pointer.
-///
-/// `lib_base_offset` is this module's placement within the combined block and
-/// `total_memsz` the whole block's size; the linker computes
-/// `TPOFF = offset - memsz`, so both are needed.
+/// Apply `R_X86_64_TPOFF64` and `R_X86_64_TPOFF32`: the initial-exec TLS
+/// model, a fixed offset from the thread pointer.
 pub fn apply_tpoff_relocs(
     lib: &LoadedLib,
     lib_base_offset: usize,
@@ -181,16 +143,14 @@ pub fn apply_tpoff_relocs(
     let mut count64 = 0u64;
     for (offset, sym, addend) in lib.typed_entries(RelocKind::Tpoff64, |r| &r.tpoff64) {
         let tpoff = compute_tpoff(lib, sym, addend, lib_base_offset, total_memsz, tls_info);
-        // SAFETY: `offset` came from `lib.typed_entries(RelocKind::Tpoff64,
-        // ...)`, one of `load_shared_lib`'s `rela::validate`d tables — see
-        // `write_at`'s `# Safety`.
+        // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<u64>(offset, tpoff as u64) };
         count64 += 1;
     }
     let mut count32 = 0u64;
     for (offset, sym, addend) in lib.typed_entries(RelocKind::Tpoff32, |r| &r.tpoff32) {
         let tpoff = compute_tpoff(lib, sym, addend, lib_base_offset, total_memsz, tls_info);
-        // SAFETY: same as the TPOFF64 loop above, for `RelocKind::Tpoff32`.
+        // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<i32>(offset, tpoff as i32) };
         count32 += 1;
     }
@@ -202,23 +162,20 @@ pub fn apply_tpoff_relocs(
     }
 }
 
-/// Apply `R_X86_64_DTPMOD64` and `R_X86_64_DTPOFF64`: the general-dynamic
-/// model, where a TLS reference is a (module id, offset) pair
-/// `__tls_get_addr` turns into an address through the DTV.
+/// Apply `R_X86_64_DTPMOD64` and `R_X86_64_DTPOFF64`: the general-dynamic TLS
+/// model resolved through the DTV.
 pub fn apply_dtpmod_relocs(lib: &LoadedLib, module_id: u64, tls_info: &TlsModuleInfo) {
     let mut count_mod = 0u64;
     for (offset, sym, _) in lib.typed_entries(RelocKind::DtpMod64, |r| &r.dtpmod64) {
         let mid = resolve_dtpmod(lib, sym, module_id, tls_info);
-        // SAFETY: `offset` came from `lib.typed_entries(RelocKind::DtpMod64,
-        // ...)`, one of `load_shared_lib`'s `rela::validate`d tables — see
-        // `write_at`'s `# Safety`.
+        // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<u64>(offset, mid) };
         count_mod += 1;
     }
     let mut count_off = 0u64;
     for (offset, sym, addend) in lib.typed_entries(RelocKind::DtpOff64, |r| &r.dtpoff64) {
         let value = resolve_dtpoff(lib, sym, addend, tls_info);
-        // SAFETY: same as the DTPMOD64 loop above, for `RelocKind::DtpOff64`.
+        // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<u64>(offset, value as u64) };
         count_off += 1;
     }
@@ -230,18 +187,15 @@ pub fn apply_dtpmod_relocs(lib: &LoadedLib, module_id: u64, tls_info: &TlsModule
     }
 }
 
-/// The module in `tls_info` that defines a TLS symbol, matched by template
-/// pointer — unique per module, since each points into a distinct image.
-///
-/// `None` when no module defines it — including the inconsistency where a lib
-/// resolves the symbol but has no module in the combined block; callers turn
-/// that into their unresolved-symbol path rather than a silently wrong offset.
+/// The module in `tls_info` that defines `name`, or `None` if none does.
 pub fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&'a TlsModule, u64)> {
     for lib in tls_info.libs {
         if lib.tls_memsz == 0 {
             continue;
         }
         if let Some(sym_offset) = lib.resolve_tls(name) {
+            // Template pointer is unique per module: each points into a distinct image.
+            // No matching module here means inconsistent tables; treated as unresolved, not a bug.
             let module = tls_info
                 .modules
                 .iter()
@@ -252,12 +206,6 @@ pub fn defining_module<'a>(name: &str, tls_info: &'a TlsModuleInfo) -> Option<(&
     None
 }
 
-/// Which module id a `DTPMOD64` slot gets.
-///
-/// An undefined TLS symbol that no module defines is a `.so` naming something
-/// that is not there, which `dlopen` puts squarely on the untrusted side. Every
-/// other unresolved-symbol path in this module logs and leaves the slot for
-/// userland to fault on; these two used to panic the kernel instead.
 fn resolve_dtpmod(lib: &LoadedLib, r_sym: u32, self_module_id: u64, tls_info: &TlsModuleInfo) -> u64 {
     if r_sym == 0 {
         return self_module_id;
@@ -276,8 +224,6 @@ fn resolve_dtpmod(lib: &LoadedLib, r_sym: u32, self_module_id: u64, tls_info: &T
     }
 }
 
-/// The offset a `DTPOFF64` slot gets: within the *defining* module's TLS
-/// segment, since `__tls_get_addr` adds it to that module's block.
 fn resolve_dtpoff(lib: &LoadedLib, r_sym: u32, r_addend: i64, tls_info: &TlsModuleInfo) -> i64 {
     if r_sym == 0 {
         return r_addend;
@@ -296,7 +242,7 @@ fn resolve_dtpoff(lib: &LoadedLib, r_sym: u32, r_addend: i64, tls_info: &TlsModu
     }
 }
 
-/// The thread-pointer-relative offset a `TPOFF` slot gets.
+// TPOFF = base_offset + symbol_offset + addend - total_memsz (linker's convention).
 fn compute_tpoff(
     lib: &LoadedLib,
     r_sym: u32,

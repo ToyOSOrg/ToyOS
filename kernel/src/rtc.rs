@@ -1,26 +1,7 @@
-//! The CMOS real-time clock, decoded once per boot.
-//!
-//! This is the one piece of hardware in the machine that knows what day it is,
-//! and it is also hardware this kernel cannot make behave: it may be absent, it
-//! may be wedged, and an unclaimed x86 port answers `0xFF` to every read —
-//! whose bit 7, in register A, means "an update is in progress". Waiting for
-//! that bit to clear with no bound is a boot that hangs before anything has
-//! been printed, on a machine whose screen says nothing yet. Every loop here is
-//! bounded.
-//!
-//! So this module is a decoder for untrusted input and its answer is a
-//! [`Result`]. [`clock`] asks once, at boot, and a machine that cannot say what
-//! time it is boots anyway with that fact recorded, rather than with a
-//! plausible wrong number. Nothing here panics.
-//!
-//! # What one read is
-//!
-//! Six registers hold one instant between them, and the clock updates while
-//! they are being read. Checking the update flag once and then reading them one
-//! at a time leaves a window: an update landing after the check gives a time up
-//! to a minute wrong, and on New Year's Eve a year wrong. [`read`] takes the
-//! whole set twice and accepts only two that agree, which is the only evidence
-//! available that the set describes a single instant.
+//! CMOS real-time clock: decoded once per boot into a [`Result`], never a
+//! panic, because a read can be absent, wedged, or torn mid-update.
+//! [`read`] takes the six-register set twice and accepts only two matching
+//! reads, since a mid-update read is the only way two reads can disagree.
 
 use core::fmt;
 
@@ -50,48 +31,26 @@ const BINARY: u8 = 1 << 2;
 /// Bit 7 of the hours register, in 12-hour mode only.
 const PM: u8 = 1 << 7;
 
-/// How long [`UPDATE_IN_PROGRESS`] may stay set before this module gives up on
-/// the clock.
-///
-/// The MC146818 raises the flag 244 µs ahead of an update and clears it when
-/// the update ends, at most 1984 µs later, so a working RTC clears it inside
-/// 2.3 ms. This is fifty times that, because the two errors are not symmetric:
-/// erring long costs a boot delay nobody can perceive on a machine whose clock
-/// is broken anyway, and erring short costs the wall clock on a machine that is
-/// merely slow.
-///
-/// What the caller sees when it is hit is [`RtcFault::Updating`], which reaches
-/// the boot log by name and leaves this boot with no wall clock — a state every
-/// consumer of [`clock`] can represent.
-///
-/// A [`Bound`]: the number is the MC146818's own, and its expiry is a named
-/// refusal ([`RtcFault::Updating`]) rather than a retry or a panic.
+/// Expiry is [`RtcFault::Updating`], not a retry or a panic.
+/// 50x the hardware's own worst case: erring long only delays a boot whose
+/// clock is already broken.
 const MAX_UIP: Bound = Bound::from_spec(
     Duration::from_millis(100),
     "MC146818: the flag is raised 244us ahead of an update and cleared at most 1984us later",
 );
 
-/// How many times [`read`] takes the whole register set hoping for two in a row
-/// that agree.
-///
-/// Four, so three disagreements in a row are needed before it gives up. One
-/// update can land between any two reads; two in a row means the reads are
-/// slower than the clock, and three means the registers are not describing an
-/// instant at all.
+/// Four: three disagreements in a row means the registers never held one
+/// instant.
 const MAX_READ_ATTEMPTS: u32 = 4;
 
 /// Why this machine did not say what time it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtcFault {
-    /// The update flag never cleared inside [`MAX_UIP`]. What an absent
-    /// RTC looks like: an unclaimed port reads `0xFF`, and bit 7 of that is the
-    /// flag.
+    /// [`UPDATE_IN_PROGRESS`] never cleared inside [`MAX_UIP`].
     Updating,
-    /// No two consecutive reads of the register set agreed, in
-    /// [`MAX_READ_ATTEMPTS`] tries.
+    /// No two of [`MAX_READ_ATTEMPTS`] reads agreed.
     Unstable,
-    /// The registers agreed on something that is not a date — a BCD digit above
-    /// nine, a thirteenth month, an hour no clock has.
+    /// The registers agreed on a value that is not a valid date.
     NotADate,
 }
 
@@ -112,16 +71,12 @@ impl fmt::Display for RtcFault {
     }
 }
 
-/// What time the machine says it is, in whatever zone it keeps its clock in.
-///
-/// `century_reg` is the CMOS index the FADT named, from
-/// [`acpi::rtc_century_register`](crate::drivers::acpi::rtc_century_register).
-/// `None` there is firmware saying the machine has no such register, and the
-/// year then comes from two digits and the assumption [`decode`] states.
+/// Current time; `century_reg` is `None` when firmware names no century
+/// register.
 pub fn read(century_reg: Option<u8>) -> Result<Civil, RtcFault> {
-    // The bound below is a duration, so the monotonic clock has to be running
-    // already. Init order is the kernel's own business, which makes this
-    // fail-fast rather than one of the faults above.
+    // Requires the monotonic clock already running: this bound is a duration.
+    // An uncalibrated clock here is the kernel's own init order, not a
+    // hardware fault, so this fails fast rather than returning one.
     assert!(clock::calibrated(), "rtc::read before the monotonic clock was calibrated");
 
     let mut previous = read_registers(century_reg)?;
@@ -135,10 +90,7 @@ pub fn read(century_reg: Option<u8>) -> Result<Civil, RtcFault> {
     Err(RtcFault::Unstable)
 }
 
-/// One read of every register the instant is spread across.
-///
-/// `PartialEq` is the reason this is a struct: two of these being equal is the
-/// whole argument that either of them describes a real instant.
+/// Equality between two reads is the evidence they describe one instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Registers {
     sec: u8,
@@ -147,8 +99,7 @@ struct Registers {
     day: u8,
     month: u8,
     year: u8,
-    /// `None` when the FADT named no century register, which is a different
-    /// fact from a century register that holds zero.
+    /// `None` means no century register, distinct from one holding zero.
     century: Option<u8>,
     status_b: u8,
 }
@@ -167,14 +118,8 @@ fn read_registers(century_reg: Option<u8>) -> Result<Registers, RtcFault> {
     })
 }
 
-/// The century register the FADT named, at the index it named.
-///
-/// The actuator here answers the *next* century instead of what the register
-/// holds, which is the only way to see the register's contents reach the year.
-/// QEMU maintains the clock registers from `-rtc base=` and leaves CMOS 0x32
-/// alone at whatever firmware last wrote — measured: a guest booted at 2101
-/// reads century 20 and year 01, and reports 2001 — so the host can set every
-/// digit of the date except this one.
+/// Answers the *next* century, so a test can see the register's value reach
+/// the target year.
 fn century_read(reg: u8) -> u8 {
     if crate::actuator::rtc_century_next() { 0x21 } else { cmos_read(reg) }
 }
@@ -190,10 +135,8 @@ fn wait_for_update() -> Result<(), RtcFault> {
     Ok(())
 }
 
-/// Register B declares the format of the other six, so both encodings and both
-/// hour conventions are read out of it rather than assumed. This is the
-/// boundary the hardware's format is decoded at, and nothing inward of it knows
-/// that a clock can count in BCD.
+/// Register B's format bits are read here; nothing past this point assumes
+/// BCD or 12-hour.
 fn decode(r: Registers) -> Result<Civil, RtcFault> {
     let binary = r.status_b & BINARY != 0;
     let field = |raw: u8| {
@@ -220,19 +163,14 @@ fn decode(r: Registers) -> Result<Civil, RtcFault> {
     let year = match r.century {
         Some(raw) => {
             let century = field(raw)?;
-            // 1900 at the earliest. A machine reporting a century before that
-            // is reporting a register nobody maintains, and refusing is the
-            // answer rather than dropping back to the two-digit assumption
-            // below: firmware named this register, so what is in it is the
-            // machine's own claim about what year it is.
+            // Below 1900 the register is unmaintained; refuse rather than
+            // fall back to the two-digit year.
             if !(19..=99).contains(&century) {
                 return Err(RtcFault::NotADate);
             }
             century as u64 * 100 + year_lo as u64
         }
-        // Two digits and nothing to widen them with. 2000 rather than the
-        // pivot older systems use, because this kernel boots UEFI machines and
-        // there are none of those from the 1900s.
+        // 2000, not an older pivot: this kernel only boots UEFI machines.
         None => 2000 + year_lo as u64,
     };
 
@@ -257,46 +195,27 @@ fn bcd_to_bin(bcd: u8) -> Option<u8> {
 }
 
 fn port_read(reg: u8) -> u8 {
-    // SAFETY: `outb` asks its caller to own the port and the byte. `CMOS_ADDR`
-    // is 0x70, the CMOS/RTC index register's fixed architectural address, and
-    // the byte selects which of the chip's own registers 0x71 then answers with
-    // — an index and never a command, so no value of `reg` makes the RTC do
-    // anything but present a different byte. Bit 7 of the index is the NMI mask,
-    // and nothing here sets it: the register numbers above are 0x00..=0x0B
-    // constants, and the one index that comes from outside — the century
-    // register the FADT names — is refused outside `0x0E..=0x7F` by
-    // [`acpi::rtc_century_register`](crate::drivers::acpi::rtc_century_register)
-    // before it reaches this file.
+    // SAFETY: `CMOS_ADDR`/`CMOS_DATA` are the fixed CMOS ports; `reg` is
+    // always this module's constants or the century index
+    // `acpi::rtc_century_register` already bounds below 0x80, so it never
+    // sets the index port's NMI-mask bit — no value makes the RTC do
+    // anything but answer a different byte.
     unsafe { cpu::outb(CMOS_ADDR, reg) };
     cpu::inb(CMOS_DATA)
 }
 
-/// What the *hardware* answers, and the one place either clock actuator
-/// replaces it. Everything downstream — the decoder, the matched-pair rule,
-/// [`wait_for_update`]'s bound — is shipped code reading whatever comes back.
-///
-/// `rtc-dead` is an RTC that is not there: every register reads `0xFF`, which
-/// is what an unclaimed x86 port answers and what an absent or wedged clock
-/// looks like from software. Bit 7 of that is [`UPDATE_IN_PROGRESS`], so it is
-/// also the only way to reach [`wait_for_update`]'s bound.
-///
-/// `rtc-unstable` is a clock whose registers change under the reader: the
-/// seconds register answers a different valid BCD value every read, so no two
-/// reads of the set can agree. That is [`read`]'s matched-pair requirement seen
-/// from the failing side — what a torn read looks like when it never stops.
-///
-/// Neither can be staged from the host: QEMU has no switch that removes or
-/// wedges the mc146818, and its RTC presents the guest a coherent register set
-/// at every instant.
+/// The one substitution point for actuator-injected RTC faults; everything
+/// downstream reads whatever this returns.
 fn cmos_read(reg: u8) -> u8 {
     if crate::actuator::rtc_dead() {
+        // 0xFF sets `UPDATE_IN_PROGRESS`, so a dead RTC surfaces as `Updating`.
         return 0xFF;
     }
     if crate::actuator::rtc_unstable() && reg == SECONDS {
         use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
         static TICK: AtomicU8 = AtomicU8::new(0);
-        // 0x01..=0x09, so every answer is a valid BCD second and what this
-        // stages is `Unstable` rather than `NotADate`.
+        // 0x01..=0x09: always valid BCD, so this stages `Unstable`, not
+        // `NotADate`.
         return TICK.fetch_add(1, Relaxed) % 9 + 1;
     }
     port_read(reg)

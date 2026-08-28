@@ -1,13 +1,6 @@
-//! What the kernel attaches to a task, and the two environment-supplied
-//! pieces the core crate refuses to implement itself: the leaf lock and the
-//! saved-context type.
-//!
-//! The split between [`KernelCtx`] and [`KernelPayload`] is not cosmetic. The
-//! context switch reaches a task through a raw `*mut X::Ctx` and nothing else,
-//! so everything the switch needs — rsp, cr3, fs_base, the kernel stack top,
-//! the identity to publish into percpu — lives in the context. Everything the
-//! *kernel* needs about a live task and must release exactly once lives in the
-//! payload, which only `Hw::release` ever consumes.
+//! The kernel's `SchedPayload`: [`KernelCtx`] is what `Hw::switch` loads
+//! through the raw context pointer; [`KernelPayload`] is what must be
+//! released exactly once, by `Hw::release`.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -26,10 +19,7 @@ use crate::process::{OwnedAlloc, PageTables, ProcessAccounting, TaskId};
 use crate::symbols::SymbolTable;
 use crate::sync::Lock;
 
-/// The environment's small shared cell. The kernel's `Lock` already raises the
-/// preempt count for its whole lifetime, which is exactly the property the core
-/// demands of a mailbox producer — so a wake path that holds one is
-/// automatically a legal producer.
+/// The environment's leaf lock; holding it raises the preempt count, making a wake path a legal mailbox producer.
 pub struct KernelLock<T>(Lock<T>);
 
 impl<T> KernelLock<T> {
@@ -49,11 +39,7 @@ pub type KShared = TaskShared<KMsg>;
 pub type KShare = FairShare<KernelLock<ShareState>>;
 pub type KWaitList = KernelLock<WaitList<KMsg>>;
 pub type KWaitQueue = WaitQueue<KMsg, KWaitList>;
-/// The core's wait ticket in the kernel's one instantiation of the two-phase
-/// commit. Blocking sites never see this: they hold [`driver::Ticket`], which
-/// wraps it in the preempt guard the registration window needs.
-///
-/// [`driver::Ticket`]: super::driver::Ticket
+/// The core's wait ticket; blocking sites use `driver::Ticket`, which wraps it in the needed preempt guard.
 pub type RawTicket<'q> = WaitTicket<'q, KMsg, KWaitList>;
 
 /// A queue in a `static` — the device queues and the futex/park buckets.
@@ -61,8 +47,7 @@ pub const fn static_queue(class: WaitClass) -> KWaitQueue {
     KWaitQueue::new(class, KernelLock::new(WaitList::new()))
 }
 
-/// The saved callee context, plus everything `Hw::switch` must load without
-/// dereferencing anything else.
+/// The saved callee context; everything `Hw::switch` must load without dereferencing anything else.
 pub struct KernelCtx {
     /// Saved kernel stack pointer, written by the `context_switch` asm.
     pub rsp: u64,
@@ -71,47 +56,20 @@ pub struct KernelCtx {
     pub kernel_stack_top: u64,
     /// `None` is this CPU's idle context.
     pub id: Option<TaskId>,
-    /// This context's own preempt depth, swapped with the per-CPU word at every
-    /// switch (see [`crate::preempt::set_count`]). Contexts do not all owe the
-    /// same number of `enable`s, so the word cannot simply be inherited.
+    /// Swapped with the per-CPU word at every switch; contexts don't all owe the same `enable` count.
     pub preempt: u32,
 }
 
-/// Everything the kernel owns per task and must release exactly once. The
-/// address-space `Arc` in here is the double-drop hazard: it is handed back
-/// by `DeadTask::finalize`, which consumes the only owner, so it cannot be
-/// released twice.
+/// Everything the kernel owns per task, released exactly once (the address-space `Arc` cannot double-drop).
 pub struct KernelPayload {
     pub id: TaskId,
     pub kernel_stack: OwnedAlloc,
-    /// The address space this task runs in. **Not an `Option`**: a kernel thread
-    /// runs in the kernel's, and `mm::paging::kernel` hands that out in the same
-    /// `PageTables` shape a process's has — so there is no task without one and
-    /// no second answer for `driver::spawn` to choose between.
+    /// The address space this task runs in; never `Option` — a kernel thread runs in the kernel's own.
     pub address_space: PageTables,
-    /// The cross-CPU-readable face of this task. A `CpuSched` is `!Sync`, so a
-    /// remote `ps` cannot walk it; what it can read is here.
+    /// The cross-CPU-readable face of this task; a `CpuSched` is `!Sync` and cannot be walked remotely.
     pub handle: Arc<TaskHandle>,
-    /// This task's process's symbol table — every thread of a process carries a
-    /// clone of the one `Arc` its [`ProcessEntry`] holds.
-    ///
-    /// **Here so that a crash report never has to ask the process table for a
-    /// name.** The report runs on the CPU whose task faulted, and this is that
-    /// task's own; `driver::current_symbols` is the read and
-    /// `process::resolve_user_symbol` is the whole of what asks. A `pid` plus a
-    /// table walk would be a `try_lock` that can only lose — every spawn, every
-    /// demand-paged fault and every exit in the machine takes that lock — so a
-    /// report that raced one would print a bare address for a symbol its own
-    /// backtrace named a line later.
-    ///
-    /// **On the payload and not on the [`TaskHandle`]** even though the handle
-    /// is the other thing a running task carries: the handle outlives the task
-    /// — the process table keeps one in every [`ThreadSched`] until the entry is
-    /// reaped — and these are megabytes of the process's own pages. The payload
-    /// is released by `Hw::release`, after the task is off every CPU, which is
-    /// exactly the last instant a report on it could still be reading.
-    ///
-    /// [`ProcessEntry`]: crate::process::ProcessEntry
+    /// This task's process's symbol table; kept here, not looked up via the process table, so a crash report never takes that lock.
+    /// On the payload, not the handle: the handle outlives the task until reaped, and this is megabytes of process pages.
     pub symbols: Arc<SymbolTable>,
 }
 
@@ -126,61 +84,24 @@ pub const SCHED_READY: u8 = 1;
 pub const SCHED_BLOCKED: u8 = 2;
 pub const SCHED_UNKNOWN: u8 = 3;
 
-/// What a thread other than the one running can be asked about.
-///
-/// A `CpuSched` is `!Sync` and reachable only from its own CPU, so a remote
-/// reader cannot walk it. What one actually wants is published here instead,
-/// by the owning CPU, at each end of a pass.
+/// What a thread other than the one running can be asked about; published here since a `CpuSched` is `!Sync` and unreachable remotely.
 pub struct TaskHandle {
     cpu_ns: AtomicU64,
-    /// Dispatch timestamp while running, 0 otherwise. A reader adds the live
-    /// slice itself, so a running thread's CPU time does not stand still
-    /// between passes.
+    /// Dispatch timestamp while running, 0 otherwise; a reader adds the live slice itself.
     running_since: AtomicU64,
     acct: Lock<TaskAccounting>,
-    /// Set by `Hw::release`, after the payload is dropped. The one fact a
-    /// retirer needs: the thread is off every CPU and its kernel stack and
-    /// address-space reference are gone.
+    /// Set by `Hw::release`; the one fact a retirer needs, that the thread is off every CPU.
     released: AtomicBool,
-    /// Where this thread parks.
-    ///
-    /// **Its own queue, one waiter, and never woken as a queue.** The
-    /// rendezvous protocol needs a `WaitQueue` to register on — that is what
-    /// closes the check-then-block window — but after the completion work
-    /// nothing is *woken* by queue: a post writes a record into the inbox and
-    /// then claims this task's rendezvous word directly. So the queue is a
-    /// parking place and nothing else: one list of one, where shared hashed
-    /// buckets would make `Registration::finish` scan past every unrelated
-    /// sleeper.
+    /// Where this thread parks: its own one-waiter queue, never woken as a queue — a post claims the rendezvous word directly.
+    /// One list of one, not shared hashed buckets — those would make `Registration::finish` scan past every unrelated sleeper.
     park: KWaitQueue,
-    /// What another thread arms on to be told this one moved — its exit, for
-    /// `SYS_THREAD_JOIN`, and its release, for the retirer.
+    /// What another thread arms on to be told this one moved: its exit, for `SYS_THREAD_JOIN`, and its release, for the retirer.
     watch: Watch,
-    /// Cancels reported to this thread.
-    ///
-    /// One is the design: `completion::wait` answers `Cancelled`, the caller
-    /// propagates it, guards drop on the way out and the thread dies at the
-    /// syscall boundary. **Two is a caller that swallowed the first**, and it
-    /// panics at the call site that asked rather than spinning — which is what
-    /// a loop that re-waits instead of returning would otherwise do.
+    /// Cancels reported to this thread; a second one means a caller swallowed the first, so it panics rather than spinning.
     cancels: AtomicU32,
-    /// This thread's completions — the first of the two inboxes.
-    ///
-    /// **Here rather than in a thread table, and the reason is the same one
-    /// this struct exists for**: it is the cross-CPU-readable face of a task,
-    /// already `Arc`'d, already released with the task, and already what a
-    /// remote CPU may hold. A poster lends itself a clone of that `Arc` when
-    /// the waiter arms, so a post reaches the inbox without asking the process
-    /// table anything — which a park on a hot path could not afford.
+    /// This thread's completions inbox; kept on the cross-CPU handle so a post never asks the process table.
     inbox: Inbox,
-    /// The operation this thread is inside, if it is inside one.
-    ///
-    /// **On the handle and not on the `CpuSched`**, for the reason the two
-    /// fields above it are here: a `CpuSched` is `!Sync` and cannot be walked,
-    /// and this word has to survive the migration a sleep-lock-holding thread
-    /// can take mid-operation. It travels with the thread because the handle
-    /// does. `scheduler::Operation` owns every rule about it; nothing here
-    /// reads it.
+    /// The operation this thread is inside, if any; kept here so it survives a mid-operation migration. `scheduler::Operation` owns the rules.
     operation: OperationSlot,
 }
 
@@ -205,21 +126,17 @@ impl TaskHandle {
             .store(running_since.map_or(0, |n| n.0), Ordering::Relaxed);
     }
 
-    /// Called once, by `Hw::release`, with the accounting the linear value
-    /// carried. From here on the thread's numbers are frozen.
+    /// Called once, by `Hw::release`; from here on the thread's numbers are frozen.
     pub(crate) fn finalize(&self, acct: TaskAccounting) {
         self.cpu_ns.store(acct.cpu_ns, Ordering::Relaxed);
         self.running_since.store(0, Ordering::Relaxed);
         *self.acct.lock() = acct;
     }
 
-    /// Announce the death, *after* the payload has been dropped — that
-    /// ordering is the whole guarantee a retirer buys with its park.
+    /// Announces the death only after the payload is dropped; that ordering is the guarantee a retirer's park buys.
     pub(crate) fn publish_released(&self) {
         self.released.store(true, Ordering::Release);
-        // The retirer is armed on this thread's own watch — the same subject a
-        // joiner uses, and the reason the release no longer needs a queue of
-        // its own.
+        // The retirer arms on this thread's own watch, the same subject a joiner uses.
         crate::completion::post(
             crate::completion::Subject::of(&self.watch),
             crate::completion::Outcome::Gone(crate::completion::Reason::Closed),
@@ -235,8 +152,7 @@ impl TaskHandle {
         &self.inbox
     }
 
-    /// Where this thread's establishment lives. Read and written only by
-    /// `scheduler::Operation`, which is where every rule about it is stated.
+    /// Where this thread's establishment lives; `scheduler::Operation` owns every rule about it.
     pub fn operation(&self) -> &OperationSlot {
         &self.operation
     }
@@ -279,11 +195,7 @@ impl TaskHandle {
     }
 }
 
-/// A thread's two scheduler-visible faces, kept by the process table.
-///
-/// They are separate values because they are created at different instants:
-/// the counters exist before the task record does (the payload owns them), and
-/// the rendezvous word is minted by `TaskBuilder::build`.
+/// A thread's two scheduler-visible faces, kept by the process table; created at different instants.
 #[derive(Clone)]
 pub struct ThreadSched {
     pub handle: Arc<TaskHandle>,
@@ -302,8 +214,7 @@ impl ThreadSched {
     }
 }
 
-/// The core's per-class blocked-time array, spread over the kernel's named
-/// counters. One place, so the class order is stated once.
+/// The core's per-class blocked-time array, spread over the kernel's named counters.
 pub fn merge_accounting(acct: &TaskAccounting, target: &mut ProcessAccounting) {
     target.blocked_io_ns += acct.blocked_ns[WaitClass::Io.index()];
     target.blocked_futex_ns += acct.blocked_ns[WaitClass::Futex.index()];

@@ -1,25 +1,11 @@
 //! One process's handle table.
 //!
-//! Lives inside `ProcessData`, behind the lock that is already there — no new
-//! lock and no new ordering edge. Every accessor hands back an **owned** value:
-//! no borrow into the table can outlive the guard, which is what stops a
-//! syscall holding a reference into a table another thread of the same process
-//! is editing.
+//! Lives behind `ProcessData`'s own lock; every accessor returns an owned
+//! value, so no borrow into the table outlives the guard.
 //!
-//! **This is not a file-descriptor table and the word does not appear here.**
-//! A process holds typed handles; `fd` names the interface of exactly one layer,
-//! `userland/libc`, and std's POSIX surface keeps it by charter. Anywhere else
-//! in this tree — kernel, ABI, SDK, a test binary — the word is wrong (owner
-//! ruling), and so is `io_uring`: that mechanism is an inbox.
-//!
-//! **A slot's generations are finite and what happens at the end of them is a
-//! security decision, not an overflow.** A handle carries twelve bits of slot
-//! and twenty of generation, so a slot has 1,048,575 lifecycles; a table that
-//! wrapped would hand the holder of an ancient handle a live object again,
-//! which is a use-after-free of authority however improbable. It does not wrap:
-//! by owner ruling a slot at its last generation **retires**, and
-//! [`Slot`] is the shape that decision takes — a retired slot has no generation
-//! to be issued at, so no insertion path can offer one by forgetting to look.
+//! Not a file-descriptor table — `fd` names only `userland/libc`'s POSIX
+//! surface (owner ruling) — and a slot at its last generation retires
+//! rather than wrapping, so a stale handle can never resolve again.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -30,43 +16,18 @@ use toyos_abi::syscall::SyscallError;
 
 use super::{KObjectRef, KObjectVariant};
 
-/// The table has no slot left. The one failure of an *install*, which is why it
-/// is its own type: [`HandleError::refuse`] may take the process down, and the
-/// object layer installs under the process's own lock where it may not be
-/// called. A type with one state cannot carry a kind that kills.
+/// The table has no slot left — its own type since `install` runs under the process's own lock, where [`HandleError::refuse`] must not be called.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TableFull;
 
 /// Why a handle did not resolve.
-///
-/// **Three of these are bugs in the process that named the handle and two are
-/// not.** A process may legitimately hold an attenuated handle and probe what
-/// it can do with it, so `Rights` is an error return for ever, and a table with
-/// no room is a resource limit. `BadHandle`, `Stale` and `WrongType` are
-/// different: a handle is a local name a process was given, so naming one it
-/// does not hold — or asking a pipe to accept a connection — is not something a
-/// correct program can do. Fail-fast is for bugs, so [`refuse`] takes the
-/// process down for those three rather than handing back a word it can ignore.
-///
-/// **The rule has exactly one named exception, and by owner ruling there is not
-/// a second.** The exception is the connector argument to
-/// `SYS_NAMESPACE_BUILD`: an added connector is routinely one a *peer*
-/// transferred, so `WrongType` there is not provably the caller's bug, and
-/// faulting on it let any process holding the `launcher` connector end
-/// `/bin/init` by sending it a pipe (`arch::syscall::sys_namespace_build`).
-/// A spawn's slot map is not a second: a parent naming a handle it does not
-/// hold has made exactly the mistake this rule is about, and it ends like every
-/// other (`loader::start::build_child_handles`).
-///
-/// [`refuse`]: Self::refuse
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HandleError {
     /// Out of range, or an empty slot.
     BadHandle,
-    /// The slot has moved past this handle: it was closed, or its generations
-    /// ran out and it retired. Either way the number names nothing, and it will
-    /// never name anything again.
+    /// The slot has moved past this handle: closed, or its generations ran out.
     Stale,
+    /// Not the caller's bug at `SYS_NAMESPACE_BUILD`'s connector argument — the sole named exception.
     WrongType { held: &'static str, wanted: &'static str },
     /// The handle is fine and does not carry what the call needs.
     Rights { held: Rights, needed: Rights },
@@ -74,19 +35,12 @@ pub enum HandleError {
 }
 
 impl HandleError {
-    /// Answer this failure at the syscall boundary.
-    ///
-    /// **Call it with nothing held.** For the three kinds that are a bug in the
-    /// caller it does not come back: it tears the process down where it stands,
-    /// which needs the process's own lock, the table lock and the VFS lock.
-    /// Every producer therefore carries the error *out* of whatever guard
-    /// resolved the handle and refuses it there.
+    /// Answer this failure at the syscall boundary; call with nothing held.
     pub fn refuse(self) -> u64 {
         self.refuse_as_error().to_u64()
     }
 
-    /// [`refuse`](Self::refuse) for a call site whose answer is a `Result`. The
-    /// same rule: nothing held.
+    /// [`refuse`](Self::refuse) for a `Result`-returning call site: same rule.
     pub fn refuse_as_error(self) -> SyscallError {
         match self {
             Self::Rights { .. } => SyscallError::PermissionDenied,
@@ -96,13 +50,7 @@ impl HandleError {
     }
 }
 
-/// A refusal on its way out of the guard that produced it.
-///
-/// A syscall that resolves handles under the process's own lock cannot answer a
-/// [`HandleError`] where it finds one — [`HandleError::refuse`] may take the
-/// process down, which needs that lock. So the closure hands back one of these
-/// and the caller refuses it with nothing held. The `From` impls are what make
-/// `?` inside such a closure work for both halves.
+/// A refusal carried out of a lock guard, to be resolved with nothing held.
 pub enum Refusal {
     Handle(HandleError),
     Error(SyscallError),
@@ -147,22 +95,14 @@ impl core::fmt::Display for HandleError {
 }
 
 /// One handle: what it names and what it may do to it.
-///
-/// **`!Clone`, and it moves by value between every container.** A second entry
-/// for one slot is therefore not something a call site can write, and the
-/// `handle_count` this drop decrements was incremented by exactly one
-/// construction.
+// Not `Clone`: a second entry for one slot would double the `handle_count`.
 pub struct HandleEntry {
     object: KObjectRef,
     rights: Rights,
 }
 
 impl HandleEntry {
-    /// Count one more handle to `object`.
-    ///
-    /// The only constructor. Resurrection — a fresh handle to an object whose
-    /// count already reached zero — is a kernel bug and never a userland one,
-    /// because userland cannot name an object it holds no handle to.
+    /// The only constructor; resurrecting an already-retired object is a kernel bug.
     pub fn new(object: KObjectRef, rights: Rights) -> Self {
         let core = object.core();
         assert!(
@@ -202,14 +142,7 @@ impl Drop for HandleEntry {
                 self.object.kind(),
                 core.koid().raw(),
             );
-            // Never inline: see `object::drain_zero_handles`. This is the one
-            // statement that makes "a hook cannot run under a lock" structural.
-            //
-            // Only for a type that *has* a hook. An object with none has
-            // nothing to run with nothing held, and queueing it would move its
-            // destructor off this stack onto whichever CPU drains next — a
-            // killed process's file flush landed on a 16 KiB idle stack that
-            // way and wrote through the guard page below it.
+            // Deferred, not run inline: a release hook must never run under this lock.
             if self.object.defers_release() {
                 super::enqueue_zero_handles(self.object.clone());
             }
@@ -217,52 +150,20 @@ impl Drop for HandleEntry {
     }
 }
 
-/// One slot of a process's table, and there are exactly two things it can be.
-///
-/// **A retired slot carries no generation, which is what makes retirement a
-/// state rather than a check every insertion path has to remember.** A slot is
-/// issued by handing out `RawHandle::new(slot, generation)`, and `Serving` is
-/// the only place a generation exists — so a site that forgets to ask whether a
-/// slot is still allocatable has no number to hand out and does not compile.
-///
-/// Parking an exhausted slot at `MAX_GENERATION` and leaving the free list to
-/// keep it out of circulation holds for [`install`](HandleTable::install),
-/// which allocates from that list, and not for
-/// [`install_at`](HandleTable::install_at), which names its own slot: `dup2`
-/// onto an exhausted slot reissues it at `MAX_GENERATION` — for slot 4095 that
-/// encoding *is* `HANDLE_INVALID` — and the close after it steps the counter to
-/// `MAX_GENERATION + 1`, whose overflowing bit `RawHandle::new` discards without
-/// panicking in any profile, putting the slot back on the free list at
-/// generation 0 with every handle ever issued for it live again.
+/// One slot of a process's table: allocatable at a generation, or retired for good.
 enum Slot {
-    /// Issuable, at this generation. A handle naming an earlier one is `Stale`,
-    /// which is a different fact from `BadHandle` and is worth telling a crash
-    /// report apart by. `entry` says whether anything is in it: an empty
-    /// `Serving` slot is on `HandleTable::free` and a full one is not.
+    /// Issuable at this generation; `entry` says whether anything is in it.
     Serving { generation: u32, entry: Option<HandleEntry> },
-    /// Spent. Never issued again and never written again — the table is one
-    /// slot smaller for the rest of this process's life.
-    ///
-    /// **Owner ruling**, over widening the field, randomising the token, and
-    /// accepting the wrap under a stated threat model: a handle that becomes
-    /// valid again is a use-after-free of *authority*, and one leaked slot in
-    /// 4096 buys it away for good. It is
-    /// also this tree's standing instinct about a name that is spent — a
-    /// deleted syscall's number is retired and never reused
-    /// (`toyos_abi::syscall`).
+    /// Spent: never issued or written again — the table is permanently one slot smaller.
     Retired,
 }
 
 /// Handles one process may hold.
-///
-/// Policy on the primitive, `MAX_*`-named, refused by name and never truncated.
 pub const MAX_HANDLES: usize = RawHandle::MAX_SLOTS;
 
 pub struct HandleTable {
     slots: Vec<Slot>,
-    /// Slots whose entry is gone and whose generation has room left. A retired
-    /// slot is in neither this nor the live set — it is simply never offered
-    /// again.
+    // A retired slot is never on this list — it is simply never offered again.
     free: Vec<u16>,
 }
 
@@ -272,23 +173,14 @@ impl HandleTable {
     }
 
     /// Whether `n` more `install`s can all succeed.
-    ///
-    /// Spawn's endowment vector asks before it takes anything out of the
-    /// parent's table, because a move that fails halfway has already emptied a
-    /// slot the caller is about to be told nothing happened to.
-    ///
-    /// A retired slot is counted in neither term — it is in `slots` and never
-    /// in `free` — so the room it used to be is gone from this answer, which is
-    /// what "the table is one slot smaller" means at the only place anything
-    /// asks how big it is.
+    // A retired slot counts in neither term, so it permanently costs one slot of room.
     pub fn has_room(&self, n: usize) -> bool {
         self.free.len() + (MAX_HANDLES - self.slots.len()) >= n
     }
 
     pub fn install(&mut self, entry: HandleEntry) -> Result<RawHandle, TableFull> {
         if let Some(slot) = self.free.pop() {
-            // A retired slot is never pushed onto the free list and an occupied
-            // one is taken off it, so a vacancy is the one shape this holds.
+            // The free list never holds a retired or occupied slot, so this is always a vacancy.
             let Slot::Serving { generation, entry: vacancy } = &mut self.slots[slot as usize]
             else {
                 unreachable!("the free list offered a retired slot");
@@ -306,32 +198,6 @@ impl HandleTable {
     }
 
     /// Install at a caller-chosen slot, replacing whatever is there.
-    ///
-    /// Spawn's stdio seeding and `SYS_HANDLE_DUP_AT`. The displaced entry is
-    /// returned rather than dropped here, so its `handle_count` decrement
-    /// happens where the caller decides — outside whatever guard it is holding.
-    ///
-    /// **Replacing a live slot does not advance its generation, and that is the
-    /// point of `dup2` rather than an oversight.** A handle the caller was
-    /// already holding for the displaced object therefore names the
-    /// replacement. The alternative was considered and is wrong: the number is
-    /// what a POSIX caller keeps using — `printf` writes to the literal `1`,
-    /// and `userland/libc`'s `dup2` hands back `f.0 as i32` — so bumping here
-    /// would make every write after `dup2(pipe, 1)` `Stale`, which ends the
-    /// process. [`remove`](Self::remove) bumps because *there* the slot is
-    /// being given up; here it is being pointed somewhere else by its owner,
-    /// and no authority crosses a process boundary either way.
-    ///
-    /// The consequence to know: a `RawHandle` names one object for as long as
-    /// its holder does not itself redirect the slot. Anything using a handle
-    /// value as a *name* — `toyos::surface::ClientId` — is relying on that
-    /// narrower statement.
-    ///
-    /// **A retired slot is refused here, and this is the path that needed
-    /// saying so.** Naming the slot is the whole of what this call does, so the
-    /// free list — which is what keeps a spent slot away from `install` — stands
-    /// in front of nothing here. The word is the cap's own: a slot the table no
-    /// longer has is the same answer as a slot past the end.
     #[must_use = "the displaced entry must be dropped by the caller"]
     pub fn install_at(
         &mut self,
@@ -339,9 +205,7 @@ impl HandleTable {
         entry: HandleEntry,
     ) -> Result<(RawHandle, Option<HandleEntry>), TableFull> {
         let slot_index = slot as usize;
-        // `MAX_HANDLES` **is** the slot range, so a slot past the end is the
-        // table's cap rather than a malformed argument, and the caller sees the
-        // same `ResourceExhausted` the allocating path gives it.
+        // A slot past MAX_HANDLES is the table's cap, not a malformed argument.
         if slot_index >= MAX_HANDLES {
             return Err(TableFull);
         }
@@ -350,18 +214,16 @@ impl HandleTable {
             self.slots.push(Slot::Serving { generation: 0, entry: None });
         }
         self.free.retain(|&s| s != slot);
+        // A retired slot answers `TableFull` too: the table no longer has that slot at all.
         let Slot::Serving { generation, entry: at } = &mut self.slots[slot_index] else {
             return Err(TableFull);
         };
+        // Generation stays put: dup2 keeps the number the caller already holds valid.
         let displaced = at.replace(entry);
         Ok((RawHandle::new(slot, *generation), displaced))
     }
 
-    /// The entry a handle names, or why it names none.
-    ///
-    /// A retired slot answers `Stale` rather than `BadHandle`: the slot is in
-    /// range and the handle is one from before it was given up, which is the
-    /// same fact about the same slot that a moved generation states.
+    /// The entry a handle names, or why it names none; a retired slot is `Stale`, not `BadHandle`, since the slot is in range.
     fn entry_of(&self, h: RawHandle) -> Result<&HandleEntry, HandleError> {
         match self.slots.get(h.slot() as usize).ok_or(HandleError::BadHandle)? {
             Slot::Retired => Err(HandleError::Stale),
@@ -372,10 +234,7 @@ impl HandleTable {
         }
     }
 
-    /// The typed accessor.
-    ///
-    /// Returns an owned `Arc`, so the object outlives the guard and the guard
-    /// outlives no reference into the table.
+    /// The typed accessor: an owned `Arc` that outlives the guard.
     pub fn get<T: KObjectVariant>(
         &self,
         h: RawHandle,
@@ -390,15 +249,7 @@ impl HandleTable {
             .ok_or(HandleError::WrongType { held: entry.object.kind(), wanted: T::NAME })
     }
 
-    /// The borrowing accessor, for a call that runs to completion under the
-    /// guard it was resolved through.
-    ///
-    /// `read` and `write` are that call, and they are the hottest pair in the
-    /// kernel: cloning the `Arc` out would put one atomic read-modify-write on
-    /// each of them, which is the operation TCG runs a translation block
-    /// exclusively for — measured at 350 ms of boot for a few hundred of them
-    /// on the log path. Nothing escapes: the lifetime is `&self`'s, so the
-    /// compiler refuses a borrow that outlives the table.
+    /// The borrowing accessor, for a call that completes while still holding the guard.
     pub fn get_ref(&self, h: RawHandle, need: Rights) -> Result<&KObjectRef, HandleError> {
         let entry = self.entry_of(h)?;
         if !entry.rights.contains(need) {
@@ -430,12 +281,7 @@ impl HandleTable {
         self.entry_of(h)?.duplicate(rights)
     }
 
-    /// Take a handle out of the table.
-    ///
-    /// The entry is returned rather than dropped, so the `handle_count`
-    /// decrement — and the deferred hook it may enqueue — happen at a point the
-    /// caller chose. The slot's generation is bumped here, which is what makes
-    /// a handle to it `Stale` rather than a name for whatever lands there next.
+    /// Take a handle out of the table and retire its slot.
     #[must_use = "the removed entry must be dropped by the caller"]
     pub fn remove(&mut self, h: RawHandle) -> Result<HandleEntry, HandleError> {
         let entry = self.take_for_transfer(h)?;
@@ -443,12 +289,7 @@ impl HandleTable {
         Ok(entry)
     }
 
-    /// Take an entry out, leaving its slot claimed and at its own generation.
-    ///
-    /// [`remove`](Self::remove) is this plus [`retire`](Self::retire), and the
-    /// split exists because retiring is what makes putting an entry back
-    /// unrepresentable: a bumped generation means the handle number the caller
-    /// still holds names nothing. See [`transfer`](Self::transfer).
+    /// Take an entry out, leaving its slot claimed at its own generation.
     #[must_use = "the entry must be given back or its slot retired"]
     fn take_for_transfer(&mut self, h: RawHandle) -> Result<HandleEntry, HandleError> {
         match self.slots.get_mut(h.slot() as usize).ok_or(HandleError::BadHandle)? {
@@ -460,14 +301,7 @@ impl HandleTable {
         }
     }
 
-    /// The handle is gone for good, and the slot either moves on or stops.
-    ///
-    /// **A slot at its last generation retires, never wraps** — the owner's
-    /// ruling, and the reason [`Slot::Retired`] exists rather than a counter
-    /// parked at its maximum. One leaked slot of 4096 against a handle
-    /// that silently names a different object is not a trade; it is also what
-    /// keeps `HANDLE_INVALID` unreachable, since that encoding is slot 4095 at
-    /// `MAX_GENERATION` and no slot is ever issued at that generation now.
+    /// A slot retires at its last generation instead of advancing, keeping `HANDLE_INVALID` (slot 4095 at `MAX_GENERATION`) unissuable.
     fn retire(&mut self, h: RawHandle) {
         let index = h.slot() as usize;
         let spent = match &mut self.slots[index] {
@@ -502,21 +336,8 @@ impl HandleTable {
         *vacancy = Some(entry);
     }
 
-    /// Move `handles` out of this table into `sink`, and put every one of them
-    /// back at its own number if `sink` refuses.
-    ///
-    /// **A refusal that keeps the handles is the reason this exists.** The two
-    /// things a peer's queue can say — the reading end has gone, and the queue
-    /// is full — are ones a caller reads as backpressure, and `ResourceExhausted`
-    /// is exactly what a slow or hostile peer produces. Taking the entries out
-    /// and dropping them on that answer destroys capabilities the caller was
-    /// told nothing happened to: its next `close` of one is `Stale`, which ends
-    /// it — `/bin/init` answering a client that hung up is that caller.
-    ///
-    /// `sink` therefore hands the batch back with its refusal, which is the
-    /// whole of the discipline: the type says a refused transfer still owns
-    /// what it was given. Every handle must have been verified under this same
-    /// hold — a number that does not resolve here is a kernel bug.
+    /// Move `handles` into `sink`; if `sink` refuses, every handle is restored to its own slot.
+    // A refused transfer must not drop the entries: the caller was told nothing happened.
     pub fn transfer<E>(
         &mut self,
         handles: &[RawHandle],
@@ -544,16 +365,14 @@ impl HandleTable {
         }
     }
 
-    /// Empty the table. Process exit and kill both come through here, on the
-    /// killer's CPU, and the caller drops what it gets with nothing held.
+    /// Empty the table; the caller drops what it gets with nothing held.
     #[must_use = "the drained entries must be dropped by the caller"]
     pub fn drain(&mut self) -> Vec<HandleEntry> {
         let mut out = Vec::new();
         for slot in &mut self.slots {
             match slot {
                 Slot::Serving { entry, .. } => out.extend(entry.take()),
-                // Nothing to give back: a slot retires on the close that has
-                // already taken its entry out.
+                // A retired slot's entry was already taken when it retired.
                 Slot::Retired => {}
             }
         }
@@ -570,22 +389,8 @@ impl HandleTable {
         })
     }
 
-    /// Test actuator: put a free slot at the last generation it can be issued
-    /// at, and answer the handle its next install will carry.
-    ///
-    /// **The near-exhaustion instrument, and there is no other way to reach
-    /// this state.** A slot's counter is twenty bits, so running one out for
-    /// real is 1,048,575 close/reopen round trips against a table that answers
-    /// each in a syscall, so the property under test would be gated by a test
-    /// nobody could afford to run.
-    /// Nothing is faked: the generation is the shipped field, the install that
-    /// follows is the shipped path, and [`retire`](Self::retire) makes the
-    /// shipped decision about what it finds.
-    ///
-    /// A slot that still holds an entry is refused, so this can never invalidate
-    /// a handle its process is holding — the caller stages a slot it has just
-    /// closed, and what comes back is the number the next `install` of it
-    /// answers.
+    /// Test actuator: park a free slot at its last generation and answer the handle its next install will carry.
+    // Real exhaustion needs a generation's worth of close/install cycles; this stages the field directly.
     #[cfg(feature = "test-actuators")]
     pub fn stage_last_generation(&mut self, slot: u16) -> Option<RawHandle> {
         match self.slots.get_mut(slot as usize)? {
