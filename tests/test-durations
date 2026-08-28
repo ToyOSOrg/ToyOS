@@ -191,6 +191,7 @@ hda_client_stall 19047
 hda_tone 13389
 hda_two_live_refused 4848
 heap_ceiling_recovery 4696
+home_budget_refusal_retried 18446744073709551615
 home_backing_revoked 663
 i8042_absent 9221
 i8042_budget_expiry 3135
