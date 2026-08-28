@@ -1,51 +1,11 @@
-//! The i8042 PS/2 controller: the laptop's built-in keyboard, and its
-//! TrackPoint on the aux port.
+//! The i8042 PS/2 controller: keyboard and TrackPoint aux port.
 //!
-//! **Init treats the machine as untrusted.** Firmware and an embedded
-//! controller are not kernel code; CLAUDE.md's corollary applies literally.
-//! Every wait is bounded against the wall clock, nothing panics, and a
-//! controller that does not answer costs the keyboard and never the boot.
-//! Each failure is one short line, because on a machine with no UART those
-//! lines are read off the next boot checkpoint's repaint of the log tail.
-//!
-//! **The ISR reads the device, which no other ISR here does.** Every other
-//! device has a DMA ring its consumer can re-derive from, so those handlers
-//! only timestamp. The i8042 has a one-byte output buffer and will not
-//! assert another edge until it is read, so draining in the ISR is the only
-//! correct shape rather than a shortcut. That makes the prohibitions below
-//! load-bearing rather than stylistic:
-//!
-//! - **No `Lock`.** `Lock::lock` disables preemption but not interrupts
-//!   (`sync.rs`), so an ISR taking a lock a thread on the same CPU holds
-//!   self-deadlocks. The handler touches neither `PS2`, nor the key/mouse
-//!   queues, nor the I/O APIC. The prohibition binds every *other* ISR too:
-//!   `drain` holds those locks in thread context, so any handler that reached
-//!   them — the timer tick's device poll was the one that could — wedges the
-//!   CPU rather than this one misbehaving.
-//! - **No allocation.** `VecDeque::push_back` reaches the allocator, and a
-//!   panic holding the allocator lock wedges the recovered CPU.
-//! - **No `log!`.** It is ISR-safe, and it is still banned: at key-repeat
-//!   rates it is noise, and the ring lock is a same-CPU spin for nothing.
-//! - **No wake.** Waking enters the scheduler and possibly sends an IPI.
-//! - **No unbounded loop.** A controller with OBF stuck high would spin a
-//!   CPU with IF=0 forever; hence `ISR_BURST` and the quarantine.
-//!
-//! This module imports neither `alloc` nor `sync::Lock` into the ISR's
-//! reach: the byte ring is a static of atomics, and everything that needs a
-//! lock lives behind `service`, which runs in thread context only.
-//!
-//! **Delivery is pinned to one CPU** (`IRQ_CPU`, physical destination), which
-//! is what makes the ISR the sole reader of port 0x60 and the byte ring a
-//! genuine single-producer queue. Two CPUs taking these interrupts would
-//! race on a one-byte register. Input is ~100 Hz; there is no load argument
-//! for spreading it.
-//!
-//! The corollary binds the *drain*, which runs on whichever CPU entered the
-//! scheduler: any polled port I/O it wants to do — the aux re-enable is the
-//! only one — has to happen on `IRQ_CPU` with interrupts off there. Nothing
-//! weaker works. Masking the redirection entries does not: it stops neither an
-//! ISR already executing nor a vector already latched in that CPU's LAPIC, and
-//! an edge asserted on a masked edge-triggered entry is dropped outright.
+//! The ISR is the sole reader of port 0x60 and must never take a `Lock`,
+//! allocate, call `log!`, wake a waiter, or loop unboundedly — see
+//! [`handler`]. Delivery is pinned to one CPU (`IRQ_CPU`); the drain's own
+//! polled port I/O must run there too, with interrupts off. Init treats the
+//! controller as untrusted hardware: every wait is bounded and a failure
+//! costs the keyboard, never the boot.
 
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -71,18 +31,13 @@ const OBF: u8 = 1 << 0;
 const IBF: u8 = 1 << 1;
 const AUXB: u8 = 1 << 5;
 
-/// `IAPC_BOOT_ARCH` bit 1, "the motherboard has a port 60/64 keyboard
-/// controller" (ACPI 6.5 table 5.10; ACPICA calls it `ACPI_FADT_8042`).
+/// `IAPC_BOOT_ARCH` bit 1 (ACPI 6.5 §5.10): "the motherboard has a port
+/// 60/64 keyboard controller".
 const FADT_8042: u16 = 1 << 1;
 
-/// A port no device decodes floats high, so `0xff` is every status bit set at
-/// once: both buffers full, both error flags, the keyboard simultaneously
-/// locked and transmitting. No controller produces that, and a machine without
-/// one produces nothing else however long it is asked — so this is the value
-/// every wait below gives up on rather than waits out. A deadline alone is not
-/// enough: it makes a machine with no controller spend the whole init budget in
-/// the first wait, and since the probe no longer asks firmware's permission,
-/// that machine is now reachable.
+/// A floating bus reads `0xff`; every wait below gives up on this value
+/// rather than only a deadline, so a machine with no controller doesn't
+/// spend the whole init budget waiting on hardware that isn't there.
 const FLOATING_BUS: u8 = 0xFF;
 
 const CMD_READ_CONFIG: u8 = 0x20;
@@ -105,9 +60,8 @@ const CFG_TRANSLATE: u8 = 1 << 6;
 const ISA_IRQ_KEYBOARD: u8 = 1;
 const ISA_IRQ_AUX: u8 = 12;
 
-/// The largest legitimate burst is a 3-byte mouse packet plus a 4-byte
-/// extended key sequence. Anything past this is a controller that is not
-/// going to stop, and the drain masks its line rather than let it hold a CPU.
+/// Larger than any legitimate burst (3-byte mouse packet + 4-byte extended
+/// key); past this the drain masks the line rather than hold the CPU.
 const ISR_BURST: usize = 16;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -117,153 +71,66 @@ static AUX_EVENTS: AtomicU32 = AtomicU32::new(0);
 static LOST_EDGES: AtomicU32 = AtomicU32::new(0);
 static DROPPED: AtomicU32 = AtomicU32::new(0);
 static DROPPED_TOTAL: AtomicU32 = AtomicU32::new(0);
-/// Pointer bytes the framer threw away at a packet boundary — how far a desync
-/// ran, and the one number that separates a mis-framed pointer from a silent
-/// one. A healthy stream discards nothing at all (`toyos-ps2`'s
-/// `a_healthy_stream_discards_nothing_and_leaves_no_byte_unaccounted`), so any
-/// value here is a real hole in the byte stream and not a resting TrackPoint.
+/// Pointer bytes the framer discarded resyncing. Zero in a healthy stream.
 static DISCARDS: AtomicU32 = AtomicU32::new(0);
-/// Set-1 overrun codes. A keyboard telling us it lost bytes is a different
-/// failure from a keyboard we cannot decode.
+/// Set-1 overrun codes: a keyboard reporting lost bytes, not one we cannot decode.
 static OVERRUNS: AtomicU32 = AtomicU32::new(0);
 static KEYBOARD_GSI: AtomicU32 = AtomicU32::new(u32::MAX);
 static AUX_GSI: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// Every interrupt the pin has delivered, split by what the ISR found behind
-/// it. The ISR's only bookkeeping, and the one number that answers the question
-/// `init`'s success line cannot: that line says the driver armed the line, not
-/// that anything ever came back over it.
-///
-/// Entries and not bytes, deliberately. `handler_poll` puts bytes in the ring
-/// from `init` with interrupts off, so a byte count cannot tell a delivered
-/// interrupt from a byte that was already sitting in the output buffer — which
-/// is exactly the confusion this counter exists to remove.
-///
-/// One word rather than two counters, and `tally.rs` is the whole argument: as
-/// a subtraction of two numbers the ISR writes at either end of its burst, "did
-/// anything arrive to decode" is answered wrongly by a reader inside the burst.
+/// Interrupts split by whether the ISR found a byte behind them. One atomic
+/// value, not two counters (`tally.rs`): read mid-burst, two counters would
+/// answer "did anything arrive" wrongly.
 static TALLY: Tally = Tally::new();
 
-/// Bytes taken off the ring, counted in [`pop`] before the byte leaves it.
-///
-/// **Where it is counted is load-bearing.** The mute verdict's `has_bytes`
-/// guard defers the report to the pass that holds the byte; a byte popped and
-/// not yet added here is in neither place, so counting after the drain lets a
-/// report from another CPU say `0 bytes` about a byte that had arrived and was
-/// in front of a decoder at that moment. Counted in `pop`, a delivered byte is
-/// in the ring or in this number at every instant and the guard means what it
-/// says.
+/// Bytes taken off the ring, counted in [`pop`] before the byte leaves it —
+/// so a byte is always in the ring or in this count, never in neither.
 static RX_BYTES: AtomicU32 = AtomicU32::new(0);
 
-/// When the pin first asserted. Set in the handler, which is the only place it
-/// and the tally can be made to agree — the health line says "first seen" and
-/// there is more than one line, so reading the clock where the line is written
-/// would date the second one to when it was printed rather than to the event it
-/// reports. Published by the tally's release, so a reader that sees the
-/// interrupt counted sees the stamp it belongs to. Never written by
-/// `handler_poll`: those bytes came from a poll and no pin asserted for them.
+/// When the pin first asserted. Set only in the ISR — never in
+/// `handler_poll`, whose bytes came from a poll, not an assertion.
 static FIRST_IRQ_NS: AtomicU64 = AtomicU64::new(0);
 
-/// When the pin last asserted. What makes the periodic line's verdict exact
-/// however coarse its period is: the line says when the last byte arrived, not
-/// when somebody got round to looking.
+/// When the pin last asserted.
 static LAST_IRQ_NS: AtomicU64 = AtomicU64::new(0);
 
-/// The CPU the vector is pinned to. Two things are only true there: the ISR is
-/// the sole reader of port 0x60, and an `irq_ring` record for this source can
-/// exist at all (records are strictly per-CPU). Both are load-bearing below.
+/// The CPU the vector is pinned to: the sole reader of port 0x60, and the
+/// only CPU an `irq_ring` record for this source can exist on.
 static IRQ_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 
 fn is_irq_cpu() -> bool {
     IRQ_CPU.load(Ordering::Relaxed) == crate::arch::percpu::cpu_id()
 }
 
-// The health verdict.
-//
-// `init` reports what it did, which is not what happened afterwards: a driver
-// that armed the pin and then never received a byte would say one green line at
-// 0.1 s and nothing ever again, and on a machine whose only channel is the
-// panel that is indistinguishable from a driver that is working and a user who
-// has not typed. Both transitions out of that state are stated out loud.
-//
-// Neither is a poll, and neither can be silently dropped:
-//
-// - The **first interrupt** is reported by the pass that interrupt schedules.
-//   It cannot be missed, because the event being reported is what causes the
-//   report to run.
-// - The **quiet verdict** is reported from the first pass that finds a CPU with
-//   nothing left to run (`verdict_due`, wired into the idle loop's pre-halt
-//   check). A wall-clock deadline was the obvious alternative and it is the
-//   wrong one: `service` only runs inside a scheduler pass, so on the machine
-//   this exists for — a diagnostic boot that reaches `Boot: complete` and then
-//   has nothing to do — no pass would run to notice the deadline and the line
-//   would simply never appear. "The machine has gone still" is also the moment
-//   the statement first means anything: before it, "nothing has arrived" only
-//   says the boot is still busy.
-//
-// The cost is one relaxed load per scheduler pass and one per idle entry, both
-// of which fall to a single load-and-compare for the life of the boot once the
-// verdict is out.
+// The first interrupt and the quiet verdict are each reported exactly once,
+// from the pass that discovers them — never a wall-clock deadline, since
+// `service` only runs inside a scheduler pass and an idle boot may never
+// enter one again to notice it expired.
 
 /// `init` never armed the pin, so there is nothing to say.
 const HEALTH_OFF: u8 = 0;
 /// Armed and watching.
 const HEALTH_ARMED: u8 = 1;
-/// A CPU has run out of work; the quiet verdict is owed and one more pass will
-/// emit it.
+/// A CPU ran out of work; the quiet verdict is owed and the next pass emits it.
 const HEALTH_QUIET_DUE: u8 = 2;
-/// The quiet verdict is out. Still watching, because an interrupt that arrives
-/// afterwards — the owner finally pressing a key — is the answer.
+/// The quiet verdict is out; still watching, since a later interrupt answers it.
 const HEALTH_QUIET_SAID: u8 = 3;
-/// The boot verdict is out; from here the counters speak for themselves.
+/// The boot verdict is out; the counters speak for themselves from here.
 const HEALTH_DONE: u8 = 4;
-/// Bytes arrived and decoded to nothing. Said once, and still watching: the
-/// byte that completes a sequence is one interrupt away, and a first line
-/// reading `1 bytes, 0 keys` on a keyboard that is in fact working must not be
-/// the last word.
+/// Bytes arrived and decoded to nothing, said once; still watching, since the
+/// byte that completes a sequence may be one interrupt away.
 const HEALTH_MUTE_SAID: u8 = 5;
-/// The pin has asserted and **no interrupt has carried a byte** ([`EMPTY_IRQS`]
-/// accounts for all of them). A state of its own rather than a variant of
-/// [`HEALTH_MUTE_SAID`], because the mute verdict is still owed: the first byte
-/// that does arrive and decodes to nothing has to be reported, and a state that
-/// had already said "nothing decoded" would swallow it.
+/// The pin asserted with no byte behind it, distinct from `HEALTH_MUTE_SAID`
+/// so the first byte that does decode to nothing is still reported.
 const HEALTH_EMPTY_SAID: u8 = 6;
 
 static HEALTH: AtomicU8 = AtomicU8::new(HEALTH_OFF);
 static ARMED_NS: AtomicU64 = AtomicU64::new(0);
 
-// The counters, after the verdict.
-//
-// A verdict said once is the last word the driver ever says, and a machine that
-// loses its keyboard, TrackPoint and touchpad — all three are behind this
-// controller — leaves that line as the log's last `i8042:` word. Nothing in it
-// then separates **the pin stopped asserting** from **bytes kept arriving and
-// decoded to nothing**: opposite defects, in opposite subsystems, told apart
-// only by counters read more than once.
-//
-// So the counters repeat. Two properties make that affordable and make the
-// answer unambiguous:
-//
-// - **Only when the pin has asserted since the last line.** A machine nobody is
-//   touching says nothing, forever, for two relaxed loads per scheduler pass.
-// - **Therefore silence is evidence.** Past the first repeat, no line means no
-//   interrupt — not a driver that stopped looking. That is the whole point, and
-//   it is only true because the report cannot be skipped for any other reason.
-//
-// The first repeat is guaranteed rather than gated on a change, because it is
-// the one that dates the last byte: `REPORTED_IRQS` starts at 0 and the verdict
-// deliberately does not seed it.
-//
-// No `to_screen`: a repaint is a screenful of framebuffer writes and the ring
-// is the primary channel. The panel keeps the verdict, which is the line a
-// person standing in front of a dead machine needs.
-//
-// The period is policy. 10 s is the PMM dump's cadence, which is what the log
-// already costs a reader per idle minute, and it bounds the line to one per
-// 10 s of *typing* — an idle machine pays nothing.
+// Repeats, but only when the pin has asserted since the last line — so past
+// the first repeat, silence means no interrupt, not a driver that stopped.
 fn health_period_ns() -> u64 {
-    /// A log-rate limit, which is what a `Cadence` covers here: what makes the
-    /// rate affordable is that an idle machine pays nothing at all.
+    /// A log-rate limit; an idle machine pays nothing.
     const HEALTH: Cadence = Cadence::every(
         Duration::from_secs(10),
         "the PMM dump's own cadence, and one line per 10s of typing",
@@ -277,28 +144,8 @@ fn health_period_ns() -> u64 {
 static NEXT_REPORT_NS: AtomicU64 = AtomicU64::new(u64::MAX);
 static REPORTED_IRQS: AtomicU32 = AtomicU32::new(0);
 
-/// Bytes the drain did not turn into an event, oldest first.
-///
-/// `N bytes, 0 keys` is a true statement that names no suspect. 84 of the 256
-/// single byte values decode to nothing under set 1, and `handle_key` drops a
-/// break for a usage that was not held, so the arithmetic alone cannot separate
-/// a keyboard that reset behind our back (`0xAA`, which is left Shift's break
-/// under translation) from a late ack (`0xFA`), or from a wire carrying raw
-/// set 2, where Enter is `0x5A` and Backspace `0x66` and 23 such codes land on
-/// unmapped slots. The byte tells them apart and nothing else does. The aux
-/// flag rides along because a lone pointer byte frames no packet and is
-/// equally invisible in `0 motion`.
-///
-/// **A byte a decoder is still holding is not one of these.** Without that
-/// distinction the list fills with the heads and first body bytes of
-/// well-framed pointer packets — `6 bytes, 0 keys, 2 motion, no event from
-/// [aux 0x08, aux 0x06, aux 0x08, aux 0x0e]` from a TrackPoint that is framing
-/// perfectly — and a list naming two thirds of a healthy pointer stream is not
-/// a list of suspects. `Partial` below is what holds a run until the byte that
-/// ends it says whether any of it produced anything.
-///
-/// Written only from `drain`, which holds `PS2` and is the one place that knows
-/// both the byte and whether anything came of it.
+/// Bytes the drain did not turn into an event, oldest first — a byte a
+/// decoder is still holding is not one of these.
 const UNEXPLAINED_LEN: usize = 8;
 static UNEXPLAINED: [AtomicU16; UNEXPLAINED_LEN] = [const { AtomicU16::new(0) }; UNEXPLAINED_LEN];
 static UNEXPLAINED_N: AtomicU32 = AtomicU32::new(0);
@@ -311,9 +158,7 @@ fn record_unexplained(byte: u8, aux: bool) {
     }
 }
 
-/// Renders ` no event from [0xe0, aux 0x08],` — and nothing at all when every
-/// byte became an event, because a clause naming an empty list is a column of
-/// panel width for no information.
+/// Renders ` no event from [0xe0, aux 0x08],` — empty when every byte decoded.
 struct Unexplained;
 
 impl core::fmt::Display for Unexplained {
@@ -346,14 +191,9 @@ fn claim_health(from: u8, to: u8) -> bool {
         .is_ok()
 }
 
-/// Called from the idle loop with interrupts off, before a CPU halts: pure
-/// atomics, no lock, no port I/O.
-///
-/// `true` keeps that CPU awake for exactly one more pass, which is what emits
-/// the verdict — the same self-clearing shape as the log ring's pre-halt check
-/// beside it. It cannot spin: the pass moves the state on, and an inactive
-/// driver (quarantined, or one `init` never armed) answers `false` outright, so
-/// no path leaves a CPU awake for a report nobody will make.
+/// Called from the idle loop, interrupts off, before halting: pure atomics,
+/// no lock, no port I/O. `true` keeps the CPU awake for exactly one more
+/// pass; an inactive driver answers `false`, so nothing spins.
 pub fn verdict_due() -> bool {
     if !ACTIVE.load(Ordering::Relaxed) {
         return false;
@@ -376,37 +216,9 @@ fn first_irq_ms() -> u64 {
     FIRST_IRQ_NS.load(Ordering::Relaxed) / 1_000_000
 }
 
-/// Say once whether the armed pin has ever asserted. Runs in thread context
-/// from `service`, on whichever CPU took the pass; the compare-exchange is what
-/// keeps two CPUs from both reporting.
-///
-/// **"Nothing decoded" is a claim about bytes, so it is only made when bytes
-/// have arrived and been accounted for.** Three producers would make it about
-/// something else, each printing a line naming no byte at all — the one shape
-/// `Unexplained` exists to replace, and the one `i8042_undecoded_bytes` reads
-/// as a report about its own injection:
-///
-/// - An interrupt with no byte behind it. Classified by the ISR and counted
-///   apart in [`TALLY`], said in its own words below; the mute verdict stays
-///   owed.
-/// - An interrupt still *inside* its burst. `carried` moving on the way in
-///   would leave a reader between the pin and the first `push_isr` with a count
-///   of arrived bytes and no byte anywhere. `tally.rs` is why that is not
-///   representable: the count moves once, after the burst, and after the bytes
-///   are in the ring.
-/// - A byte still in the ring, or one popped and not yet counted. `service`
-///   drains before it reports, but the pin is live between the two, so an
-///   interrupt landing in that gap is counted here with its byte undecoded. One
-///   `has_bytes` load defers the report to the pass that has the byte, which is
-///   where the report was always meant to be made — and [`RX_BYTES`] is counted
-///   in `pop` so that a byte in mid-decode is on one side of that guard rather
-///   than neither.
-///
-/// Between them: `carried > 0` means bytes reached the ring, and a byte that
-/// reached the ring is in it or in `RX_BYTES` at every instant, so `N interrupts
-/// and 0 bytes, nothing decoded` cannot be printed. The one exception says so
-/// itself — a ring overflow drops bytes the ISR had already counted, and
-/// `drain` logs that on its own line.
+/// Say once whether the armed pin has ever asserted; "nothing decoded" is
+/// claimed only once every arrived byte is accounted for, via the
+/// `has_bytes` guard.
 fn report_health(state: u8) {
     let counts = TALLY.read();
     let irqs = counts.irqs();
@@ -416,12 +228,8 @@ fn report_health(state: u8) {
         }
         let keys = KBD_EVENTS.load(Ordering::Relaxed);
         let motion = AUX_EVENTS.load(Ordering::Relaxed);
-        // Two lines at most, and the second only when the picture changes from
-        // "nothing decoded" to "something did". The first interrupt's own pass
-        // is the earliest moment this can be said and also the least settled
-        // one: a keystroke is up to six bytes and the pass runs between them,
-        // so a report that went straight to DONE would freeze the panel on a
-        // half-arrived sequence and never correct itself.
+        // The second line only fires when the picture changes from mute to
+        // decoded — a half-arrived keystroke must not freeze here as DONE.
         let next = if keys + motion == 0 { HEALTH_MUTE_SAID } else { HEALTH_DONE };
         if next == state || !claim_health(state, next) {
             return;
@@ -446,17 +254,11 @@ fn report_health(state: u8) {
             );
         }
         to_screen();
-        // Whichever of the two it was, the counters are now on the record and
-        // the repeat can start measuring from here.
         arm_repeat();
         return;
     }
-    // The pin asserts and nothing has come over it. Said in its own words
-    // because neither of the two above is true: "nothing decoded" would be a
-    // verdict on bytes that never arrived, and "the pin has never asserted"
-    // below is false — this is the third thing a controller can do, and on a
-    // machine whose only channel is the panel it is the difference between an
-    // init that took its own answers and a keyboard nobody has touched.
+    // The third case: the pin asserts but nothing has come over it — distinct
+    // from "nothing decoded" (bytes exist) and "never asserted" below.
     if irqs > 0 {
         if state != HEALTH_EMPTY_SAID && claim_health(state, HEALTH_EMPTY_SAID) {
             log!(
@@ -485,12 +287,9 @@ fn arm_repeat() {
     NEXT_REPORT_NS.store(crate::clock::nanos_since_boot() + health_period_ns(), Ordering::Relaxed);
 }
 
-/// Say the counters again, at most once per [`health_period_ns`] and only when
-/// the pin has asserted since the last line.
-///
-/// Thread context, from `service`. On a settled machine it is two relaxed loads
-/// and a compare; the compare-exchange is what keeps two CPUs in the same pass
-/// from both reporting, and is reached only when a line is actually owed.
+/// Say the counters again, at most once per [`health_period_ns`] and only
+/// when the pin has asserted since the last line. No `to_screen`: the ring
+/// is the primary channel and this line already appears there.
 fn report_counters() {
     let counts = TALLY.read();
     let irqs = counts.irqs();
@@ -507,12 +306,8 @@ fn report_counters() {
         return;
     }
     REPORTED_IRQS.store(irqs, Ordering::Relaxed);
-    // `empty` rides with the fault counters because that is the only place it
-    // can still be read once traffic starts: the line above it fires only while
-    // *every* interrupt was empty, and the common case is one at bring-up
-    // followed by a keyboard that works. It comes out of the same reading as
-    // the total, so the two cannot disagree about how many interrupts there
-    // were.
+    // `empty` is read from the same snapshot as `irqs`, so the two counts
+    // cannot disagree about how many interrupts there were.
     log!(
         "i8042: {} interrupts, {} bytes, {} keys, {} motion, {} undecoded, {} discarded, {} overruns, {} dropped, {} lost edges, {} empty — last byte at {}ms",
         irqs,
@@ -529,30 +324,9 @@ fn report_counters() {
     );
 }
 
-/// What the line looks like from outside, for a machine on which the pin has
-/// gone quiet and nothing else can say why.
-///
-/// [`report_counters`] speaks only when the pin has asserted since its last
-/// line, which is what makes its silence evidence — but evidence of one fact
-/// with three causes, and it cannot separate them:
-///
-/// - **the controller is still holding a byte nobody took.** Delivery is edge
-///   triggered, so it does not assert again until port 0x60 is read, and the
-///   only reader is an ISR that will never run. `OBF` set on sample after
-///   sample is that state and nothing else is.
-/// - **the redirection entry changed.** Masked, re-pointed, or carrying a
-///   vector that is no longer ours — all one word, printed raw.
-/// - **neither, and the counters are flat**, which puts the fault at the EC or
-///   the device and takes this driver out of it.
-///
-/// Every read is free of side effects: 0x64 is the status register, and an
-/// entry is read through `IOREGSEL`/`IOWIN` under the topology's own lock. So
-/// this does not have to run on the CPU the vector is pinned to, and it does
-/// not disturb the ISR's sole ownership of 0x60.
-///
-/// Behind `heartbeat` because it can only be asked from the idle loop and only
-/// a `diag-tick` build reaches that on a machine with nothing to run — which is
-/// exactly the machine it is for.
+/// One status-register snapshot, for a machine with nothing else to explain
+/// a quiet pin. Side-effect-free (0x64, and an RTE read under the topology's
+/// own lock), so it need not run on `IRQ_CPU` and cannot race the ISR.
 #[cfg(feature = "boot-actuators")]
 pub fn report_line() {
     if !ACTIVE.load(Ordering::Relaxed) {
@@ -585,20 +359,9 @@ impl core::fmt::Display for Rte {
     }
 }
 
-/// Put the verdict on the panel as well as in the log ring, and only on a
-/// machine that has nowhere else to put it.
-///
-/// The ring is the primary channel and the permanent one: it is what a serial
-/// console carries today and what any later log sink drains. This is the
-/// fallback for the machine the panic console was built for in the first place
-/// — no UART, no virtio-console — and `panic_flush` declines on exactly the
-/// same test. Repainting over a working console would cost a screenful and the
-/// full framebuffer write for a line the owner can already read.
-///
-/// Best-effort by construction: `boot_checkpoint` returns without painting once
-/// userland claims the framebuffer, so on an image that starts a compositor
-/// this does nothing. That is what `diag/system.toml` exists to avoid and it is
-/// not this driver's to solve.
+/// Put the verdict on the panel too, but only when there is no other
+/// channel: declines once `serial::has_console()`, mirroring
+/// `panic_flush`'s own test.
 fn to_screen() {
     if crate::drivers::serial::has_console() {
         return;
@@ -610,34 +373,25 @@ fn to_screen() {
 static AUX_RESET_PENDING: AtomicBool = AtomicBool::new(false);
 static AUX_REENABLE_FAILURES: AtomicU32 = AtomicU32::new(0);
 
-/// A device that answers at all answers a one-byte command in well under a
-/// millisecond; this is interrupts-off time on the one CPU that takes the
-/// vector, so it is sized for "the controller is gone", not for slowness.
+/// Sized for "the controller is gone": a live device acks a one-byte command
+/// in well under a millisecond, and this is interrupts-off time.
 const AUX_REENABLE: Budget = Budget::of(
     Duration::from_millis(30),
     "the re-enable handshake is abandoned and counted against AUX_REENABLE_GIVE_UP",
 );
 
-/// A TrackPoint that resets in a loop would otherwise buy the same handshake
-/// forever. After this many consecutive failures the aux line is masked and
-/// the pointer is written off, which is one log line rather than a stall.
+/// Consecutive re-enable failures before the aux line is masked and the
+/// pointer written off, rather than retried forever.
 const AUX_REENABLE_GIVE_UP: u32 = 3;
 
-// The byte ring.
-//
-// Producer is single by construction: delivery is pinned to one CPU and the
-// gate is an interrupt gate, so the handler cannot nest. Consumers are
-// serialized by `PS2`, which no ISR takes. `irq_ring`'s Relaxed-everywhere
-// argument rests on every access being same-CPU and does not transfer here,
-// because a drain runs on whichever CPU entered the scheduler — hence
-// Release/Acquire on both indices. On x86 that is a compiler fence.
+// Single producer, pinned to one CPU behind an interrupt gate so the
+// handler cannot nest; Release/Acquire on both indices since a drain can
+// run on any CPU.
 
 const RING_LEN: usize = 256;
 const AUX_FLAG: u64 = 1 << 8;
-/// The rest of the slot is the arrival time in microseconds. The mouse framer
-/// resyncs on the gap between adjacent bytes and nothing else, so the time the
-/// *drain* ran is useless to it — a batch would flatten every gap to zero. 55
-/// bits of microseconds is longer than any machine stays up.
+/// Microsecond arrival time in the rest of the slot. The mouse framer
+/// resyncs on the gap between adjacent bytes, so batching would flatten it.
 const TIME_SHIFT: u32 = 9;
 
 static BYTES: [AtomicU64; RING_LEN] = [const { AtomicU64::new(0) }; RING_LEN];
@@ -664,10 +418,8 @@ fn pop() -> Option<(u8, bool, u64)> {
         return None;
     }
     let value = BYTES[tail as usize % RING_LEN].load(Ordering::Relaxed);
-    // Counted *before* the slot is released, so that a byte is in the ring or in
-    // this number and never in neither: `report_health`'s `has_bytes` guard is
-    // only a guard if a byte in mid-decode is on one side of it. See
-    // [`RX_BYTES`].
+    // Counted before the slot releases: a byte is in the ring or in this
+    // count, never in neither. See [`RX_BYTES`].
     RX_BYTES.fetch_add(1, Ordering::Relaxed);
     TAIL.store(tail.wrapping_add(1), Ordering::Release);
     Some((value as u8, value & AUX_FLAG != 0, (value >> TIME_SHIFT) * 1_000))
@@ -677,9 +429,9 @@ fn has_bytes() -> bool {
     HEAD.load(Ordering::Acquire) != TAIL.load(Ordering::Relaxed)
 }
 
-/// Under `i8042-fault`, armed at the end of a successful init so the next
-/// interrupt makes the output buffer look permanently full. The only way to
-/// reach the ISR's bound without a controller that is genuinely broken.
+/// Under `i8042-fault`, armed after init so the next interrupt looks
+/// permanently full — the only way to reach the ISR's bound without a
+/// genuinely broken controller.
 static FAULT: AtomicBool = AtomicBool::new(false);
 
 #[inline]
@@ -695,8 +447,7 @@ fn buffer_full(status: u8) -> bool {
 pub extern "sysv64" fn handler() {
     crate::irq_census::irq_took!(I8042);
     let timestamp = crate::clock::nanos_since_boot();
-    // No compare-exchange: delivery is pinned to one CPU behind an interrupt
-    // gate, so this handler cannot nest and there is no second writer.
+    // No compare-exchange: this handler cannot nest, so there's no second writer.
     if FIRST_IRQ_NS.load(Ordering::Relaxed) == 0 {
         FIRST_IRQ_NS.store(timestamp, Ordering::Relaxed);
     }
@@ -707,11 +458,8 @@ pub extern "sysv64" fn handler() {
         if !buffer_full(status) {
             break;
         }
-        // Read where the byte is read, not once for the burst. The mouse framer
-        // has no start marker and resyncs on the idle gap between *adjacent*
-        // bytes, so one timestamp for a burst is the flattening `mouse.rs` says
-        // must not happen — and a burst is what a delayed ISR takes, which is
-        // the same delay under which bytes get lost and the gap is needed.
+        // Timestamped per byte, not once for the burst: the mouse framer
+        // resyncs on the gap between adjacent bytes, and a burst would flatten it.
         push_isr(inb(DATA), status & AUXB != 0, crate::clock::nanos_since_boot());
         n += 1;
     }
@@ -719,10 +467,8 @@ pub extern "sysv64" fn handler() {
         // It cannot mask the line itself — that needs the I/O APIC lock.
         QUARANTINE.store(true, Ordering::Relaxed);
     }
-    // One release-add, here and not on the way in: what this says is what the
-    // burst *found*, so it is only sayable now — and the release publishes the
-    // bytes above it, so no reader can see this interrupt counted and go looking
-    // for a byte that has not landed. `tally.rs` carries the argument.
+    // Recorded after the burst, not before: the Release here also publishes
+    // the bytes above it, so no reader sees the count without the bytes.
     TALLY.record(if n == 0 { Carried::Nothing } else { Carried::Bytes });
     if n > 0 {
         crate::irq_ring::isr_publish(IrqSource::I8042, timestamp);
@@ -731,22 +477,9 @@ pub extern "sysv64" fn handler() {
     crate::arch::apic::eoi();
 }
 
-/// A run of bytes a decoder has taken and not yet accounted for.
-///
-/// A packet is three bytes and a Pause is six, spread over as many scheduler
-/// passes as the interrupts fall in, and only the byte that *ends* the run says
-/// whether any of it produced anything. Holding the run is what lets the whole
-/// of an undecodable sequence be named — `0xE1 0x1D 0x45 0xE1 0x9D 0xC5` rather
-/// than its last byte — without naming the identical bytes of one that worked.
-///
-/// One per stream, because the keyboard's and the pointer's interleave in the
-/// ring. Capped at what the report can print; past that the oldest bytes of an
-/// over-long run are the ones worth keeping.
-///
-/// A partial the mouse framer abandons on the idle gap is not reported as
-/// abandoned, so its bytes stay here until the next run ends. That over-names
-/// at most two bytes, in a stream that has already lost one — never in the
-/// healthy case this exists for.
+/// Bytes a decoder has taken but not yet resolved. Held until the byte that
+/// *ends* the run, so a multi-byte undecodable sequence can be named whole
+/// rather than by its last byte alone.
 struct Partial {
     bytes: [u8; UNEXPLAINED_LEN],
     len: usize,
@@ -786,6 +519,8 @@ struct Decoders {
     aux_partial: Partial,
 }
 
+/// No ISR may lock this: `drain` holds it in thread context, so an ISR
+/// taking it here self-deadlocks the CPU.
 static PS2: Lock<Decoders> = Lock::new(Decoders {
     keys: KeyDecoder::new(),
     pointer: MouseDecoder::new(),
@@ -796,9 +531,8 @@ static PS2: Lock<Decoders> = Lock::new(Decoders {
 /// Turn whatever the ISR published into events and wakes. Runs at the top of
 /// every scheduler pass on every CPU, so the idle cost is one atomic load.
 pub fn service() {
-    // Unconditionally, and before any other test: an undrained `irq_ring`
-    // record keeps `any_pending_self` true, and the idle loop rechecks it
-    // before halting — so a record nobody consumes spins a CPU forever.
+    // Unconditional and first: an undrained `irq_ring` record keeps
+    // `any_pending_self` true, spinning a CPU that never halts.
     let recorded = crate::irq_ring::take(IrqSource::I8042).is_some();
     if QUARANTINE.load(Ordering::Relaxed) {
         quarantine();
@@ -807,41 +541,28 @@ pub fn service() {
     if !ACTIVE.load(Ordering::Relaxed) {
         return;
     }
-    // Polled port I/O, so only the CPU the vector is pinned to may do it. Any
-    // other CPU leaves the request standing; this one is in a pass at least
-    // once a tick, and a lid-open is not a deadline.
+    // Polled I/O: only `IRQ_CPU` may run this; another CPU leaves the
+    // request standing until its own next pass.
     if AUX_RESET_PENDING.load(Ordering::Relaxed) && is_irq_cpu() {
         aux_reenable();
     }
     widen_edge_window();
-    // Unconditional, not gated on `recorded`: this is what detects a lost
-    // edge and what heals it in the same pass.
     if has_bytes() {
-        // The ISR fills the ring before it publishes its record, so bytes this
-        // pass finds may belong to an interrupt that arrived after the record
-        // was read absent. Asking again with the bytes in hand is what tells
-        // that apart from an edge nothing ever delivered.
+        // Asked again with bytes in hand: a record read absent may belong
+        // to an interrupt that arrived just after that read.
         let recorded = recorded || crate::irq_ring::take(IrqSource::I8042).is_some();
         service_bytes(recorded);
     }
-    // Last, so the line it may print counts the bytes this pass just decoded.
-    // Reported from the top, the first interrupt's own pass says `2 interrupts,
-    // 0 bytes` — true at the instant it is read and useless to read.
+    // Last: reported from the top, the first pass would print "0 bytes".
     let health = HEALTH.load(Ordering::Relaxed);
     if health != HEALTH_DONE {
         report_health(health);
     }
-    // Not gated on the state: a machine whose bytes all decode to nothing stays
-    // in `HEALTH_MUTE_SAID` forever, and that is the case the repeat is most
-    // needed for.
     report_counters();
 }
 
-/// Under `i8042-edge-race`, hold the pass between reading the record and
-/// reading the ring for long enough that an interrupt lands in between.
-///
-/// Unwidened that window is a handful of instructions on one CPU, which no
-/// injection the harness can time and no load it can stage reaches.
+/// Under `i8042-edge-race`, widens the window between reading the record and
+/// reading the ring so an interrupt can land inside it.
 fn widen_edge_window() {
     if !crate::actuator::i8042_edge_race() {
         return;
@@ -854,13 +575,10 @@ fn widen_edge_window() {
 /// Decode what the ISR left in the ring and wake whoever it belongs to.
 /// `recorded` is whether this pass found an `irq_ring` record for the source.
 fn service_bytes(recorded: bool) {
-    // Only `IRQ_CPU` can hold a record for this source, so only `IRQ_CPU` can
-    // read anything into its absence. On any other CPU `!recorded` is a fact
-    // about `irq_ring`'s per-CPU shape, and counting it there reports a lost
-    // edge on every healthy `--smp N>1` boot.
+    // Only `IRQ_CPU` can hold a record for this source; counting `!recorded`
+    // on any other CPU would report a lost edge on every `--smp N>1` boot.
     if !recorded && is_irq_cpu() {
-        // Loud the first time, silent after — a rate is what would matter and
-        // nothing reads one.
+        // Loud the first time, silent after: nothing reads a rate.
         if LOST_EDGES.fetch_add(1, Ordering::Relaxed) == 0 {
             log!("i8042: bytes with no IRQ record — an edge was lost");
         }
@@ -868,8 +586,8 @@ fn service_bytes(recorded: bool) {
 
     let Drained { bytes, keys, motion, aux_reset } = drain();
 
-    // Wake only when the decode queued something. Readiness that disagrees
-    // with `has_data()` parks the next reader until the following real event.
+    // Wake only when the decode queued something, or a stray wake parks the
+    // next reader until the following real event.
     let woke_kb = keys > 0;
     if woke_kb {
         crate::keyboard::wake_waiters();
@@ -906,10 +624,9 @@ struct Drained {
     aux_reset: bool,
 }
 
-/// Consume the ring. Releases `PS2` before returning, so the caller's wakes —
-/// which reach the scheduler, cross-CPU doorbells and possibly an IPI —
-/// never run under a driver lock. Lock order is PS2 → KEY_BUF, never the
-/// reverse.
+/// Consume the ring. Releases `PS2` before returning, so the caller's wakes
+/// never run under the driver lock. Lock order: PS2 before KEY_BUF, never
+/// the reverse.
 fn drain() -> Drained {
     let mut state = PS2.lock();
     let mut out = Drained { bytes: 0, keys: 0, motion: 0, aux_reset: false };
@@ -918,9 +635,7 @@ fn drain() -> Drained {
     let dropped = DROPPED.swap(0, Ordering::Relaxed);
     DROPPED_TOTAL.fetch_add(dropped, Ordering::Relaxed);
     if dropped > 0 {
-        // Never expected: 256 slots against ~300 B/s, drained at every
-        // scheduler pass. It costs a gesture, not the framing, which is what
-        // the decoder resets below are for.
+        // Never expected: 256 slots against ~300 B/s, drained every pass.
         log!("i8042: ring overflow, {} bytes dropped — resyncing", dropped);
         // A hole in a framed stream: both decoders' partial state is
         // meaningless now, and the pointer would stay one byte off forever.
@@ -933,11 +648,8 @@ fn drain() -> Drained {
 
     while let Some((byte, aux, arrived)) = pop() {
         out.bytes += 1;
-        // Whether the byte's *run* is over, and whether anything came of it.
-        // The whole path, not the decoder's verdict: `handle_key` drops a break
-        // for a usage nothing held, and `handle_motion` drops a packet that
-        // moved the cursor nowhere, and both are bytes that produced no event
-        // just as much as an unmapped code is.
+        // Whether the run is over and whether it produced anything — a
+        // dropped break or a zero-motion packet counts as "nothing" too.
         let explained = if aux {
             match state.pointer.feed(byte, arrived) {
                 MouseOutcome::Pending => {
@@ -978,9 +690,7 @@ fn drain() -> Drained {
                     }
                     queued
                 }
-                // The overrun codes explain themselves and are counted rather
-                // than blamed: `0x00`/`0xFF` name the fault outright, which is
-                // more than the byte list could add.
+                // Overrun codes explain themselves; counted, not blamed.
                 KeyOutcome::Lost => {
                     OVERRUNS.fetch_add(1, Ordering::Relaxed);
                     lost = true;
@@ -998,9 +708,8 @@ fn drain() -> Drained {
     }
 
     if lost {
-        // The break codes for whatever is down may be among what was lost —
-        // and so may the packet that lifts a held pointer button, which no
-        // later report from another pointer can clear.
+        // A held key's break, or the packet lifting a held pointer button,
+        // may be among what was lost — so every held input is released.
         out.keys += crate::keyboard::release_all();
         if crate::mouse::release_buttons(crate::mouse::PointerSource::PS2) {
             out.motion += 1;
@@ -1009,8 +718,7 @@ fn drain() -> Drained {
 
     KBD_EVENTS.fetch_add(out.keys as u32, Ordering::Relaxed);
     AUX_EVENTS.fetch_add(out.motion as u32, Ordering::Relaxed);
-    // `RX_BYTES` is not here: `pop` counts each byte as it takes it, which is
-    // what keeps a byte from being invisible for the length of its own decode.
+    // `RX_BYTES` is not here: `pop` already counted each byte as it took it.
     out
 }
 
@@ -1019,16 +727,13 @@ fn drain() -> Drained {
 fn quarantine() {
     QUARANTINE.store(false, Ordering::Relaxed);
     ACTIVE.store(false, Ordering::Relaxed);
-    // The line below carries the same counters the health verdict would, and
-    // the pin is about to be masked, so there is nothing left for it to say.
+    // The pin is about to be masked, so no health verdict follows this line.
     HEALTH.store(HEALTH_DONE, Ordering::Relaxed);
-    // Whatever was down stays down otherwise: no further report can arrive to
-    // lift it, and the pointer merge republishes it on every other pointer's
-    // motion for the rest of the boot.
+    // Force-released: nothing else can lift a held key or pointer button
+    // once the line is masked.
     crate::keyboard::release_all();
     crate::mouse::release_buttons(crate::mouse::PointerSource::PS2);
-    // The count, not the intent: "one masked line and a dead keyboard,
-    // never a spinning CPU" is only true if the mask actually took.
+    // The count, not the intent: the log line is only true if the mask took.
     let mut masked = 0;
     for line in [KEYBOARD_GSI.load(Ordering::Relaxed), AUX_GSI.load(Ordering::Relaxed)] {
         if line != u32::MAX && ioapic::set_masked(Gsi(line), true).is_ok() {
@@ -1044,9 +749,8 @@ fn quarantine() {
     );
 }
 
-/// The `woke_*` fields are the gates the wakes actually ran under, not a
-/// re-derivation of them — so a test can assert the gate agrees with the
-/// event count.
+/// `woke_*` are the gates the wakes actually ran under, not a re-derivation,
+/// so a test can assert the gate agrees with the event count.
 fn trace_drain(bytes: usize, keys: usize, motion: usize, woke_kb: bool, woke_ms: bool) {
     if !crate::actuator::i8042_trace() {
         return;
@@ -1061,78 +765,50 @@ fn trace_drain(bytes: usize, keys: usize, motion: usize, woke_kb: bool, woke_ms:
     );
 }
 
-// Polled port I/O.
-//
-// Everything below reads the controller's one-byte output buffer by polling,
-// and each read is done as its sole reader — never merely because `ACTIVE` is
-// clear. Init polls before the vector is armed and with interrupts off (its
-// closing `handler_poll` runs after `ACTIVE` is set); the runtime aux
-// re-enable polls on the pinned CPU under `IrqGuard::close`; the panic pager's
-// `poll_byte` polls with every CPU halted. So no ISR can be racing any of it.
+// Each read below is done as its section's sole reader: init before the
+// vector is armed, the aux re-enable on `IRQ_CPU` under `IrqGuard::close`,
+// and the panic pager with every CPU halted — so no ISR ever races them.
 
 fn deadline(millis: u64) -> u64 {
     crate::clock::nanos_since_boot() + millis * 1_000_000
 }
 
-/// The millisecond figure this module's polled init is written in.
-///
-/// Every stage below is a [`Budget`] — expiry names the stage and degrades the
-/// probe's answer, never panics — and the arithmetic that sums them stays in
-/// milliseconds, where it was written and where its own doc argues about it.
+/// Each stage below is a [`Budget`]; expiry names the stage and degrades the
+/// probe's answer rather than panicking.
 const fn ms(budget: Budget) -> u64 {
     budget.duration().millis()
 }
 
-/// Everything that is not inside a named stage draws on this: the initial
-/// disable and flush, the config read-modify-write and its read-back, both
-/// interface tests, and the arming write at the end. Each is a controller
-/// command with no PS/2 device behind it, so none of them waits on an EC's
-/// firmware — but the time is still spent, and leaving it out of the total
-/// makes the total wrong.
-///
-/// An allowance, not a measurement. No real EC has ever been timed here, in
-/// either direction.
+/// Covers every controller-only step outside a named stage (disable, flush,
+/// config r/w, both interface tests, the arming write) — none waits on an
+/// EC, but the time is still spent.
 const CONTROLLER: Budget = Budget::of(
     Duration::from_millis(250),
     "the stage that ran out is named and the probe reports DISABLED",
 );
-/// `0xAA`. A floating bus is already gone by here, so what this separates is
-/// "a controller" from "something else decoding 0x60/0x64" — firmware trapping
-/// the ports in SMM for USB legacy emulation is the case that exists.
+/// `0xAA`; separates "a controller" from "something else decoding
+/// 0x60/0x64" (SMM-trapped ports for USB legacy emulation).
 const SELFTEST: Budget = Budget::of(
     Duration::from_millis(500),
     "the controller is reported absent and the machine boots with no PS/2 input",
 );
-/// `0xF5`, the `0xF0 0x00` read-back and `0xF4`, each acknowledged by the
-/// keyboard itself rather than by the controller.
+/// `0xF5`, the `0xF0 0x00` read-back and `0xF4` — each acknowledged by the
+/// keyboard, not the controller.
 const KEYBOARD: Budget = Budget::of(
     Duration::from_millis(750),
     "the keyboard stage is named as the one that ran out",
 );
-/// The aux port's `0xFF` is a *device reset*: a real PS/2 device answers it
-/// with a self-test that takes real time, which is why this stage is the one
-/// that must not be shortened to make an arithmetic error go away.
+/// The aux port's `0xFF` is a device reset, answered with a real self-test:
+/// this stage must not be shortened to fix an arithmetic error elsewhere.
 const AUX_RESET: Budget = Budget::of(
     Duration::from_millis(600),
     "the pointer is written off and the keyboard half still comes up",
 );
 
-/// Derived, never written down independently.
-///
-/// A literal total drifts from the stages under it, and one short of their sum
-/// runs out on a machine slow enough to use a meaningful fraction of each stage
-/// — with the arming write still to come, after which every `wait_writable` and
-/// `read_data` returns immediately and a *timeout* presents as
-/// `DISABLED — cfg … did not take`, a controller fault. Deriving the total is
-/// what makes that disagreement unrepresentable; naming the stage that ran out
-/// is what makes the remaining case legible. The direction is forced: each
-/// stage number is what
-/// that step is worth waiting *from here*, so shrinking one silently shortens a
-/// real device's wait, and the aux reset's is the last one to touch.
-/// `i8042-budget-expired` spends the whole of it before the probe starts, so
-/// the expiry paths run on a controller that is answering perfectly. QEMU
-/// answers every step in microseconds and no real EC timing has ever been
-/// taken, so nothing else can reach them.
+/// Derived, never written down independently: a literal short of the
+/// stages' sum would let a slow-but-real machine exhaust it before the
+/// arming write, and that timeout would then present as `DISABLED — cfg …
+/// did not take`, a controller fault it is not.
 fn init_budget_ms() -> u64 {
     if crate::actuator::i8042_budget_expired() {
         0
@@ -1141,14 +817,9 @@ fn init_budget_ms() -> u64 {
     }
 }
 
-/// A stage's own deadline, never past the whole probe's — and `None` when the
-/// probe's is already spent.
-///
-/// The clamp alone cannot say *why* a step gave up. With the budget gone every
-/// `wait_writable` and `read_data` below returns immediately, so a slow EC
-/// produces the log line a broken controller produces. On a machine that cannot
-/// be single-stepped, naming the stage that ran out is the whole difference
-/// between "your firmware is slow" and "your controller is broken".
+/// A stage's own deadline, clamped to the probe's; `None` once the probe's
+/// own budget is already spent. Names the stage that ran out, since the
+/// clamp alone can't tell a slow EC from a broken controller.
 fn stage(millis: u64, budget: u64, name: &str) -> Option<u64> {
     if crate::clock::nanos_since_boot() >= budget {
         log!(
@@ -1197,12 +868,9 @@ fn read_data(deadline: u64) -> Option<u8> {
 
 fn command(cmd: u8, deadline: u64) -> bool {
     wait_writable(deadline) && {
-        // SAFETY: `outb` asks its caller to own the port and the byte.
-        // `COMMAND` is 0x64, the 8042's fixed architectural command port — no
-        // other device on any machine this kernel targets decodes it, and the
-        // controller has no path to memory. Every `cmd` that reaches here is one
-        // of this module's `CMD_*` constants, which are the controller's own
-        // documented command bytes.
+        // SAFETY: COMMAND (0x64) is the 8042's fixed command port; `cmd` is
+        // always one of this module's own `CMD_*` constants, and the
+        // controller has no path to memory.
         unsafe { outb(COMMAND, cmd) };
         true
     }
@@ -1210,11 +878,8 @@ fn command(cmd: u8, deadline: u64) -> bool {
 
 fn write_data(byte: u8, deadline: u64) -> bool {
     wait_writable(deadline) && {
-        // SAFETY: `command`'s argument for the port — `DATA` is 0x60, the other
-        // half of the same controller's two-port block. The byte is either a
-        // configuration word this module built or a device command destined for
-        // the keyboard or the mouse behind the controller, neither of which can
-        // reach memory.
+        // SAFETY: DATA (0x60) is the controller's data port; `byte` is a
+        // config word or device command, neither reaching memory.
         unsafe { outb(DATA, byte) };
         true
     }
@@ -1228,10 +893,8 @@ fn write_config(value: u8, deadline: u64) -> bool {
     command(CMD_WRITE_CONFIG, deadline) && write_data(value, deadline)
 }
 
-/// Iteration-bounded rather than clock-bounded, and takes no deadline for that
-/// reason: draining a one-byte buffer 32 times is already past every legitimate
-/// backlog, and a controller still asserting OBF after that is not going to
-/// stop.
+/// Iteration-bounded, not clock-bounded: draining 32 times is already past
+/// any legitimate backlog, and OBF still set after that will not clear.
 fn flush() -> bool {
     for _ in 0..32 {
         match status() {
@@ -1245,15 +908,10 @@ fn flush() -> bool {
     status().is_some_and(|s| s & OBF == 0)
 }
 
-/// Send a device command byte by byte, each acknowledged with 0xFA. `aux`
-/// prefixes every byte with the controller command that redirects the next
-/// write to port 2 (the pointing device); without it the bytes go to the
-/// keyboard.
-///
-/// No retry on 0xFE (resend): it is a wire-error recovery this driver has
-/// never seen QEMU produce and cannot exercise, and a silent retry would
-/// hide the one case worth knowing about. The byte that came back instead of
-/// the ack is logged, which is what makes it diagnosable on metal.
+/// Sends a device command byte by byte, each acked with 0xFA. `aux` prefixes
+/// every byte with the controller command that redirects it to port 2.
+/// No retry on 0xFE (resend): unreachable on QEMU, and a silent retry would
+/// hide the one wire-error case worth knowing about.
 fn port_command(bytes: &[u8], deadline: u64, aux: bool) -> bool {
     let tag = if aux { "aux" } else { "kbd" };
     for &byte in bytes {
@@ -1279,26 +937,18 @@ fn device_command(bytes: &[u8], deadline: u64) -> bool {
 
 /// What `0xF0 0x00` established.
 enum SetQuery {
-    /// The read-back byte, translated by the controller like every other byte
-    /// from port 1 — so it names the wire format, not just the set.
+    /// The read-back byte, translated like every other byte from port 1.
     Told(u8),
-    /// A byte that is not an ack came back. The device does not implement the
-    /// exchange, and the byte is the diagnosis.
+    /// A non-ack byte came back; the device does not implement the exchange.
     Refused(u8),
-    /// Nothing came back at all, or the controller never took a write.
+    /// Nothing came back, or the controller never took the write.
     Silent,
 }
 
-/// Ask the keyboard which scancode set it is in. Read, never write.
-///
-/// The matching write, `0xF0 0x02`, is not sent. On a translating controller
-/// nothing else in the machine's life sends it either: Linux's
-/// `atkbd_select_set` returns set 2 outright when `atkbd->translated` (which
-/// `i8042.c` derives from the XLATE bit of the config byte the BIOS left), and
-/// EDK2's `Ps2KeyboardDxe` selects a set only under `ExtendedVerification`,
-/// which its own comment says is skipped when booting an OS. A write cannot
-/// improve on a read that already answers, and an EC that mishandles it is left
-/// in a state nothing can name.
+/// Ask which scancode set the keyboard is in. Read, never write: nothing
+/// else in the machine's life sends the matching `0xF0 0x02` either (Linux's
+/// `atkbd_select_set`, EDK2's `Ps2KeyboardDxe`), and a write cannot improve
+/// on a read that already answers.
 fn query_scancode_set(deadline: u64) -> SetQuery {
     if !write_data(0xF0, deadline) {
         return SetQuery::Silent;
@@ -1323,14 +973,8 @@ fn query_scancode_set(deadline: u64) -> SetQuery {
     }
 }
 
-/// Under `i8042-kbd-echo`, the argument byte is answered `0xEE` — ECHO's own
-/// reply, and the shape a real EC's refusal takes.
-/// QEMU's PS/2 keyboard implements `0xF0` to the letter and no device or
-/// machine property makes it stop, so nothing on the host side can hand the
-/// driver a keyboard that will not report its set. Only the verdict is
-/// replaced: the two bytes still go out and the reply the device queued behind
-/// them stays in the output buffer, which is the residue a real EC in an
-/// unnameable state would leave.
+/// Under `i8042-kbd-echo`, answers the argument byte `0xEE` — ECHO's own
+/// reply, and the shape a real EC's refusal takes; QEMU always reports its set.
 fn echo_the_argument(real: Option<u8>) -> Option<u8> {
     if crate::actuator::i8042_kbd_echo() {
         Some(0xEE)
@@ -1339,40 +983,25 @@ fn echo_the_argument(real: Option<u8>) -> Option<u8> {
     }
 }
 
-/// Same, for the aux port: every byte is prefixed with the controller command
-/// that redirects the next write to port 2.
+/// Same as `port_command`, prefixed for port 2.
 fn aux_command(bytes: &[u8], deadline: u64) -> bool {
     port_command(bytes, deadline, true)
 }
 
-/// Re-enable data reporting after the device reset itself. The EC does this
-/// after suspend or a lid event, and without it the TrackPoint goes silent
-/// for the rest of the boot. Caller has already established `is_irq_cpu`.
-///
-/// Interrupts off on this CPU, and the lines left alone. Masking them is wrong
-/// twice over: masking an RTE stops neither an ISR already executing nor a
-/// vector already latched in that CPU's LAPIC, so it never makes this the sole
-/// reader of the one-byte output buffer; and an edge asserted on a masked
-/// edge-triggered entry is *dropped*, so a
-/// byte landing in that window leaves OBF full with no interrupt ever again —
-/// both PS/2 devices dead for the rest of the boot, silently. Being the pinned
-/// CPU with IF=0 is what "sole reader" actually requires, and it costs no edge:
-/// one asserted here is latched in the LAPIC and delivered on the way out, to
-/// an ISR that finds the buffer already empty.
+/// Re-enables data reporting after the device resets itself. Lines are left
+/// unmasked: masking stops neither an executing ISR nor a latched vector,
+/// and drops an edge on a masked entry outright.
 fn aux_reenable() {
     AUX_RESET_PENDING.store(false, Ordering::Relaxed);
     let ok = {
         let _irq = crate::hw::IrqGuard::close();
         let budget = deadline(ms(AUX_REENABLE));
-        // The keyboard is still scanning — masking the *line* does not stop
-        // the *device*. `init` disables port 1 for exactly this reason: a
-        // keystroke arriving mid-handshake is consumed as the aux ack, and
-        // with reporting still off no further aux byte would ever ask again.
+        // Masking the line doesn't stop the device: port 1 is disabled so a
+        // stray keystroke mid-handshake can't be consumed as the aux ack.
         command(CMD_DISABLE_PORT1, budget);
         let ok = aux_command(&[0xF4], budget);
         command(CMD_ENABLE_PORT1, budget);
-        // With edge delivery a byte left in OBF means no further interrupt
-        // ever, so the buffer must be empty before interrupts come back.
+        // Edge delivery: a byte left in OBF means no further interrupt ever.
         handler_poll();
         ok
     };
@@ -1394,16 +1023,10 @@ fn aux_reenable() {
     log!("i8042: aux re-enable failed {failures} times — pointer written off, line masked");
 }
 
-/// What firmware claims about the 8042, which is never what decides.
-///
-/// The substitute is a real laptop's own answer:
-/// FADT revision 6, `iapc_boot_arch=0x0011` — `LEGACY_DEVICES` set,
-/// **8042 clear**, `NO_ASPM` set — on a machine whose integrated keyboard is
-/// PS/2. It exists because QEMU cannot stage the disagreement: `i8042=off`
-/// clears the bit *by removing the device*, and `-device i8042` puts the device
-/// back into the QOM tree the bit is derived from, so on QEMU the claim and the
-/// hardware always agree. Handing the driver a denial on a machine that has a
-/// controller is the only way to test that the denial does not stop it.
+/// What firmware claims about the 8042 — never what decides. Under
+/// `i8042-fadt-denial`, substitutes a real laptop's own FADT (8042 clear)
+/// for QEMU's, whose flag and hardware always agree — the only way to test
+/// that a denial doesn't stop the probe.
 fn firmware_claim(rsdp_addr: u64) -> Result<(u8, u16), crate::drivers::acpi::TableError> {
     if crate::actuator::i8042_fadt_denial() {
         return Ok((6, 0x0011));
@@ -1412,21 +1035,8 @@ fn firmware_claim(rsdp_addr: u64) -> Result<(u8, u16), crate::drivers::acpi::Tab
 }
 
 pub fn init(rsdp_addr: u64) {
-    // Firmware's claim is logged and not obeyed, and the asymmetry is the
-    // reason. `IAPC_BOOT_ARCH` bit 1 is one summary bit a vendor wrote once;
-    // the handshake below is a config-byte read-back, a `0xAB` port interface
-    // test and a `0xF0 0x00` scancode-set query checked against `0x41` — three
-    // direct observations of the machine in front of us, each of which is
-    // strictly better evidence than the claim. Gating the strong check on the
-    // weak one is backwards: bit 1 is clear on a laptop whose integrated
-    // keyboard is PS/2, so obeying it never gives the controller a chance to
-    // answer.
-    //
-    // The line stays, because the *disagreement* is the diagnosis. What
-    // firmware said and what the controller answered are two separate facts,
-    // and a machine that cannot be single-stepped needs both on the same
-    // screen. An unreadable table is a third answer and is spelled differently
-    // again: a refusal from the parser says nothing about the hardware.
+    // Logged, never obeyed: bit 1 is one summary bit, while the handshake
+    // below is three direct observations of the machine in front of us.
     match firmware_claim(rsdp_addr) {
         Ok((revision, flags)) => log!(
             "i8042: FADT rev {} iapc_boot_arch={:#06x}, bit 1 (8042) {} — probing either way",
@@ -1444,10 +1054,8 @@ pub fn init(rsdp_addr: u64) {
         return;
     }
 
-    // The whole probe, from the first port touch to the last. Every stage
-    // clamps to it, and it is the sum of the stages plus what the controller
-    // steps between them are allowed, so no machine can spend it before the
-    // last stage has had its own.
+    // The whole probe's budget: the sum of every stage plus the steps
+    // between them, so no machine can spend it before the last stage has its own.
     let budget = deadline(init_budget_ms());
 
     // Firmware may leave scanning on. A keystroke arriving mid-handshake
@@ -1464,9 +1072,8 @@ pub fn init(rsdp_addr: u64) {
         log!("i8042: absent (no config byte)");
         return;
     };
-    // Interrupts off until the device has answered; translation on, because
-    // the keyboard is about to be put in set 2 and set 1 is what this kernel
-    // decodes; port-1 clock on.
+    // IRQs off until the device answers; translate on, since set 1 is what
+    // this kernel decodes; port-1 clock on.
     let wanted = (before & !(CFG_PORT1_IRQ | CFG_PORT2_IRQ | CFG_PORT1_CLOCK_OFF)) | CFG_TRANSLATE;
     if !write_config(wanted, budget) {
         log!("i8042: absent (config write never accepted)");
@@ -1504,9 +1111,8 @@ pub fn init(rsdp_addr: u64) {
         log!("i8042: port 1 interface test {:?} — no keyboard", port1);
         return;
     }
-    // Enabling port 2 clears its clock-disable bit iff the port exists. The
-    // interface test is then the cheap way to learn it does not, instead of
-    // waiting out the whole aux-reset stage on every machine without one.
+    // Enabling port 2 clears its clock-disable bit iff the port exists; the
+    // interface test is the cheap way to learn it does not.
     command(CMD_ENABLE_AUX, budget);
     let dual = read_config(budget).is_some_and(|c| c & CFG_PORT2_CLOCK_OFF == 0);
     command(CMD_DISABLE_AUX, budget);
@@ -1531,23 +1137,9 @@ pub fn init(rsdp_addr: u64) {
         log!("i8042: kbd would not stop scanning — disabled");
         return;
     }
-    // The controller translates the reply too, so the read-back names the wire
-    // format outright. Refusing to decode a format we did not ask for is the
-    // point: one loud line naming the observed byte beats a keyboard that types
-    // nonsense on a machine we cannot single-step.
-    //
-    // A device that will not answer at all — real hardware whose EC returns
-    // ECHO — is not a device that answers wrongly. There the
-    // wire format falls back to the *only* other evidence there is: the
-    // translate bit firmware itself left in the config byte. That is not a
-    // weaker version of the read-back, it is Linux's entire test — `i8042.c`
-    // sets `i8042_direct` from XLATE in the BIOS-left CTR and `atkbd` decodes
-    // set 1 on the strength of it, sending neither `0xF0` nor even `0xF2` on a
-    // portable device. Enabling a set2->set1 translator is coherent only for a
-    // device emitting set 2, so firmware having enabled it *is* a statement
-    // about the wire, made by the one party that had a working keyboard on it.
-    // Firmware having left translation off says nothing at all, and there the
-    // driver still refuses.
+    // The controller translates the reply too, so the read-back names the
+    // wire format outright; refusing to decode a format we did not ask for
+    // beats typing nonsense on a machine we cannot single-step.
     let (wire, how) = match query_scancode_set(kbd) {
         SetQuery::Told(0x41) => ("set2+xlat", "readback 0x41"),
         SetQuery::Told(0x01) => ("set1 raw", "readback 0x01, translation not applied"),
@@ -1606,9 +1198,8 @@ pub fn init(rsdp_addr: u64) {
                     }
                     true
                 }
-                // 100 samples/s, 8 counts/mm. No IntelliMouse knock: the
-                // TrackPoint has no wheel, and a fixed 3-byte frame is what
-                // makes resync trivially self-healing.
+                // No IntelliMouse knock: a fixed 3-byte frame is what makes
+                // resync trivially self-healing.
                 && aux_command(&[0xF3, 0x64], reset)
                 && aux_command(&[0xE8, 0x03], reset)
                 && aux_command(&[0xF4], reset)
@@ -1627,17 +1218,16 @@ pub fn init(rsdp_addr: u64) {
         log!("i8042: no I/O APIC covers IRQ 1 — keyboard cannot be routed");
         return;
     };
-    // The physical destination field is 8 bits without interrupt remapping,
-    // and `route` refuses rather than mis-route. A keyboard-less boot is
-    // diagnosable; an interrupt delivered to the wrong CPU is not.
+    // `route` refuses rather than mis-route: a keyboard-less boot is
+    // diagnosable, an interrupt delivered to the wrong CPU is not.
     if let Err(e) = ioapic::route(kbd_line.gsi, I8042_VECTOR, apic_id, kbd_line.trigger, kbd_line.polarity)
     {
         log!("i8042: GSI {} not routable to apic {}: {:?}", kbd_line.gsi.0, apic_id, e);
         return;
     }
     KEYBOARD_GSI.store(kbd_line.gsi.0, Ordering::Relaxed);
-    // `apic_id` is this CPU's, so this is the CPU the vector was just pinned
-    // to. Everything downstream that says "the pinned CPU" reads it from here.
+    // `apic_id` is this CPU's: everything downstream that says "the pinned
+    // CPU" reads it from here.
     IRQ_CPU.store(crate::arch::percpu::cpu_id(), Ordering::Relaxed);
 
     let aux_line = aux.then(|| ioapic::gsi_for_isa_irq(ISA_IRQ_AUX)).flatten().filter(|l| {
@@ -1653,33 +1243,25 @@ pub fn init(rsdp_addr: u64) {
         AUX_GSI.store(l.gsi.0, Ordering::Relaxed);
     }
 
-    // Arm the lines with interrupts off on this CPU. The vector is pinned
-    // here, so this stays the sole reader of 0x60 across the switch: a byte
-    // that landed between the last flush and the unmask would otherwise sit
-    // in OBF forever, because with edge delivery the controller does not
-    // re-assert until it is read.
+    // Interrupts off while arming: a byte landing between the last flush and
+    // the unmask would sit in OBF forever otherwise (edge delivery doesn't
+    // re-assert until read).
     crate::arch::cpu::disable_interrupts();
     let mut config = wanted | CFG_PORT1_IRQ;
     if aux_line.is_some() {
-        // Clearing the clock-disable bit as well as setting the IRQ bit:
-        // `wanted` was derived from what firmware left behind, which has
-        // port 2 disabled, and writing it back would undo the 0xA8 above.
+        // `wanted` has port 2 disabled (from firmware's config); writing it
+        // back unchanged would undo the 0xA8 enable above.
         config = (config | CFG_PORT2_IRQ) & !CFG_PORT2_CLOCK_OFF;
     }
-    // The one write that arms the pin, and the one whose read-back may not be
-    // skipped: a controller that drops it still fills the output buffer and
-    // still never asserts, so nothing downstream can tell — no byte reaches the
-    // ring, no edge is recorded as lost, and every line below prints green.
+    // The read-back may not be skipped: a controller that drops the write
+    // still fills the output buffer and never asserts, so nothing else
+    // downstream can tell.
     let wrote = write_config(config, budget);
     let readback = read_config(budget);
     if !wrote || readback != Some(config) {
         crate::arch::cpu::enable_interrupts();
-        // The last step of the probe, so it is also where a budget that ran out
-        // anywhere upstream surfaces: with the budget gone this write and its
-        // read-back both give up instantly and look exactly like a controller
-        // that dropped them. Saying which it was is the difference between
-        // "your EC is slow" and "your controller is broken", on the one machine
-        // that cannot be single-stepped.
+        // A budget spent upstream makes this write and its read-back give up
+        // instantly, indistinguishable from a dropped write — named explicitly.
         if budget_spent(budget) {
             log!(
                 "i8042: DISABLED — the {}ms init budget was spent before the pin could be armed; this is a timeout, not a controller fault",
@@ -1701,9 +1283,8 @@ pub fn init(rsdp_addr: u64) {
         return;
     }
     let unmasked = ioapic::set_masked(kbd_line.gsi, false).is_ok();
-    // Captured, not discarded: an aux GSI that would not unmask is the
-    // TrackPoint and touchpad silently dead on a boot whose every line reads
-    // green, which is what the read-back above exists to prevent.
+    // Captured, not discarded: an aux GSI that won't unmask is the
+    // TrackPoint silently dead on a boot that otherwise reads green.
     let aux_unmasked = aux_line.is_some_and(|l| ioapic::set_masked(l.gsi, false).is_ok());
     ACTIVE.store(true, Ordering::Relaxed);
     ARMED_NS.store(crate::clock::nanos_since_boot(), Ordering::Relaxed);
@@ -1737,15 +1318,8 @@ pub fn init(rsdp_addr: u64) {
     }
 }
 
-/// One byte from the controller if it has one, and whether the aux port sent
-/// it. Never waits: a machine whose keyboard is dead, disabled or absent costs
-/// the caller one `inb` and answers `None` forever.
-///
-/// **Only legal once every CPU is halted.** It reads port 0x60, which this
-/// module's whole design makes the ISR the sole reader of, and the halt is what
-/// stands in for that: there is no ISR left to race. It exists for the panic
-/// console's pager, which may take no lock and so cannot reach [`PS2`]'s
-/// decoders — it feeds a [`KeyDecoder`] of its own instead.
+/// One byte from the controller if it has one; never waits. Only legal once
+/// every CPU is halted — port 0x60's sole reader is otherwise the ISR.
 pub fn poll_byte() -> Option<(u8, bool)> {
     let status = inb(STATUS);
     if status & OBF == 0 {
@@ -1754,13 +1328,9 @@ pub fn poll_byte() -> Option<(u8, bool)> {
     Some((inb(DATA), status & AUXB != 0))
 }
 
-/// The handler's drain loop, without the EOI. Runs with interrupts off on the
-/// CPU the vector is pinned to, which is what keeps `push_isr`'s single
-/// producer single.
-///
-/// It publishes the same record the ISR does. Bytes in the ring with no record
-/// is precisely what `service` reports as a lost edge, so a silent push here
-/// manufactures one on every boot that finds a byte in the buffer.
+/// The handler's drain loop, without the EOI. Runs with interrupts off on
+/// `IRQ_CPU`, keeping `push_isr`'s producer single. Publishes the same
+/// record the ISR does — a silent push here would manufacture a lost edge.
 fn handler_poll() {
     let timestamp = crate::clock::nanos_since_boot();
     let mut n = 0;

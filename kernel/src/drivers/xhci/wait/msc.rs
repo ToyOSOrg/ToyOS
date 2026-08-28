@@ -1,35 +1,12 @@
-//! USB Mass Storage, Bulk-Only Transport with a transparent SCSI command set
-//! (interface class 0x08, subclass 0x06, protocol 0x50).
-//!
-//! **That triple is the whole of what this speaks, and the rest is absent on
-//! purpose.** UAS (protocol 0x62) and the floppy-era CBI/CB subclasses are not
-//! matched at all — `device.rs`'s interface walk takes 0x08/0x06/0x50 and
-//! nothing else, which every enclosure advertising UAS still offers as well.
-//! One logical unit per device: `GET MAX LUN` is never issued and the CBW's LUN
-//! byte is always 0, so a four-slot card reader presents as its first slot.
-//! Nothing handles removable media — no `PREVENT ALLOW MEDIUM REMOVAL`, and no
-//! unit-attention handling past the `REQUEST SENSE` that clears it during
-//! bring-up — so a card swapped under a running system is not noticed. No `MODE
-//! SENSE`, so write protection is discovered by a WRITE failing rather than in
-//! advance. And one command at a time per controller: `with_disk` holds the
-//! `XHCI` ticket spinlock, preemption off, for the whole of it. That is right
-//! at boot and is what a filesystem doing real I/O over USB will outgrow first,
-//! since the transfer rings already allow the queue depth.
-//!
-//! Everything that arrives here came off a wire, so nothing in this file may
-//! panic on it: a capacity, a block size, a CSW tag and a residue are all
-//! numbers a broken or hostile device chooses. They are checked and the device
-//! is refused by name — never truncated to fit, and never trusted because the
-//! transfer that carried them succeeded.
+//! USB Mass Storage, Bulk-Only Transport with SCSI (interface class 0x08,
+//! subclass 0x06, protocol 0x50) only — no UAS, no CBI/CB, one logical unit,
+//! no removable-media handling, no MODE SENSE. One command in flight per
+//! controller: `with_disk` holds the controller lock for the whole of it.
+//! Everything here comes off the wire and is checked, never trusted; refusal
+//! is by name, never a panic.
 
-//! **This file is the tree's one user of [`crate::mm::Unaligned`]**, and the
-//! reason is the Command Block Wrapper: USB BOT 1.0 §5.1 and §5.2 lay a CBW and
-//! a CSW out as bytes at fixed offsets, and neither is a structure a Rust ABI
-//! would produce. Nothing races those two reads and writes either — a CBW is
-//! written before the transfer naming it is enqueued and a CSW is read after
-//! `framed_phase` returned `Ok` — so the volatile discipline would be claiming
-//! an ordering the transport already provides. Everything else here moves whole
-//! buffers with `copy_from`/`copy_to`, which both disciplines share.
+//! CBW/CSW use [`crate::mm::Unaligned`] (USB BOT §5.1/§5.2 raw bytes) with no
+//! concurrent access to race.
 
 use crate::mm::{Dma, Unaligned};
 
@@ -44,62 +21,24 @@ use super::super::{CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_
 use super::super::{MSC_IN_RING, MSC_OUT_RING, MSC_CBW, MSC_CSW, MSC_SCRATCH, MSC_SCRATCH_LEN};
 use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS};
 
-/// Where a command's data phase lands, or `None` for a command that has none.
-///
-/// **A region and not an address, which is the whole of what makes the length
-/// checkable.** The CBW tells the device how many bytes to move, and that
-/// number is now the region's own size — so no command can name a length its
-/// destination does not have. It was a `(u64, u32)` pair, and four of the five
-/// call sites pointed at a 64-byte scratch buffer while the bound above them
-/// was the 32 KiB data buffer's.
+/// A region, not an address: the CBW's length is the region's own size, so
+/// no command can name a length its destination lacks.
 type DataPhase = Option<Dma<'static>>;
 
 
-/// The block size the layer above this one is written in. A device that
-/// addresses in anything this does not divide by is unimplemented, not
-/// unsupported-but-approximated — see `bring_up`.
+/// The block size everything above this driver is written in; a device
+/// whose sizes don't divide it is unimplemented, not approximated.
 const HOST_BLOCK: u32 = 4096;
 
-/// How long the driver spends coaxing a freshly configured device into
-/// answering TEST UNIT READY.
-///
-/// A wall-clock budget rather than an attempt count, because the two bound
-/// different things: a stick that answers NOT READY quickly deserves several
-/// tries, and one that answers nothing at all has already spent the transfer
-/// timeout and must not be given three more of them.
-///
-/// **It bounds when [`bring_up`] stops *starting* attempts, and nothing about
-/// the attempt already running.** Boot time is what is being protected, and
-/// this is one of the two numbers that decide it — the other is
-/// [`USB_TIMEOUT_NS`], which bounds each transfer an attempt waits out, and the
-/// boot-time figure is their product. The loop tests the budget after an
-/// attempt, so at least one always runs in full: against a device that answers
-/// nothing that is the command phase and then Reset Recovery's class request
-/// and a `CLEAR_FEATURE` per halted endpoint — four transfers, so up to 8 s
-/// (`4 * USB_TIMEOUT_NS`, arithmetic on the two constants and not a
-/// measurement) against this 500 ms, and again for every further mass-storage
-/// device on the bus that behaves the same way.
+/// Wall-clock budget on bring-up's ready attempts: bounds when [`bring_up`]
+/// stops *starting* attempts, not the one already running.
 const READY_BUDGET: Budget = Budget::of(
     Duration::from_millis(500),
     "the device is reported as not becoming ready and the boot goes on without it",
 );
 
-/// How many times one SCSI command is issued when the transport breaks under
-/// it.
-///
-/// **Derived rather than tuned.** A transfer the driver stopped waiting for is
-/// still the device's to answer, and that answer can undo one Reset Recovery
-/// (see [`XhciController::reset_recovery`]) — once, because there is one such
-/// transfer and it is answered once. So the first attempt can break on the
-/// fault itself, the second on the recovery that answer undid, and a third
-/// attempt runs over a transport nothing left over is still able to disturb. A
-/// command that breaks all three times is a device that is not recovering, and
-/// the caller is told so rather than being made to wait for a fourth
-/// [`USB_TIMEOUT_NS`].
-///
-/// It costs nothing on a device that is merely gone: [`XhciController::scsi`]
-/// re-issues only after a Reset Recovery that *succeeded*, and a dead device
-/// fails that on the class request it does not answer.
+/// Three attempts: the first may break on the fault itself, the second on
+/// the Reset Recovery that answer undid, the third runs clean.
 const MAX_TRANSPORT_ATTEMPTS: u8 = 3;
 
 const CBW_SIGNATURE: u32 = 0x4342_5355;
@@ -107,15 +46,9 @@ const CSW_SIGNATURE: u32 = 0x5342_5355;
 const CBW_LEN: u32 = 31;
 const CSW_LEN: u32 = 13;
 
-/// What the configuration descriptor said about a mass-storage interface.
-///
-/// Both endpoints, always. A value of this type cannot describe an interface
-/// with one bulk endpoint or with an address this driver may not turn into a
-/// device context index, because [`Endpoint`] carries a private field and so
-/// can only be built by its own constructor, in the parser — so `bind` has
-/// nothing left to check. The private *field* is what buys that; a private
-/// constructor beside public fields would leave `bind`'s own struct literal
-/// able to name any `dci` at all.
+/// What the configuration descriptor said about a mass-storage interface;
+/// both endpoints, always, each valid because `Endpoint` only comes from
+/// its own constructor.
 #[derive(Clone, Copy)]
 pub struct MscInterface {
     pub iface_num: u8,
@@ -123,10 +56,8 @@ pub struct MscInterface {
     pub out_ep: Endpoint,
 }
 
-/// One bound disk. `Copy` because every operation takes it out of the
-/// controller's vec, works on it, and writes it back — which is what lets a
-/// command borrow the controller and the device's own rings at the same time
-/// without the controller holding a borrow of itself.
+/// One bound disk; `Copy` so a command can borrow the controller and the
+/// device's own rings at once without the controller borrowing itself.
 #[derive(Clone, Copy)]
 pub struct MscDevice {
     slot_id: u8,
@@ -137,9 +68,8 @@ pub struct MscDevice {
     out_dci: u8,
     /// Byte offset of this device's block in its controller's DMA pool.
     block: usize,
-    /// And of the *device* block, which is a different one: it holds the output
-    /// device context the controller publishes this device's endpoint states
-    /// in, and those states are what decides which recovery command is legal.
+    /// Byte offset of the device context block; its endpoint states decide
+    /// which recovery command is legal.
     dev_block: usize,
     ep0_ring: TrbRing,
     in_ring: TrbRing,
@@ -148,33 +78,22 @@ pub struct MscDevice {
     logical_block_bytes: u32,
     sectors_per_block: u32,
     blocks: u64,
-    /// Set when recovery itself failed. The device is not spoken to again:
-    /// every further command would spend the transfer timeout to learn what
-    /// this already records.
+    /// Set when recovery itself failed; the device is not spoken to again.
     failed: bool,
-    /// Set once the device has said it does not implement SYNCHRONIZE CACHE.
-    ///
-    /// What it buys is that the answer is reported once rather than per flush,
-    /// and that is not tidiness: on a machine whose log lives on this stick, a
-    /// line per flush is pending content in the ring the next flush drains, so
-    /// it is the same self-sustaining write loop reading the refusal as a
-    /// failure produced.
+    /// Set once the device refuses SYNCHRONIZE CACHE; logged once, not per
+    /// flush — a log line would itself be pending content the next flush drains.
     no_write_cache: bool,
 }
 
 impl MscDevice {
-    /// Whether the driver will still speak to this device.
-    ///
-    /// Published rather than inferred, because the geometry survives a failure:
-    /// it is what the device reported before it broke, so `blocks > 0` answers
-    /// "did this disk ever come up", not "is it still there".
+    /// Whether the driver will still speak to this device — distinct from
+    /// `blocks > 0`, which survives a failure.
     #[cfg(feature = "boot-actuators")]
     pub fn online(&self) -> bool {
         !self.failed
     }
 
-    /// Which slot this disk is on, for a caller holding an event that needs to
-    /// know whether a disk is behind it.
+    /// Which slot this disk is on.
     pub fn slot_id(&self) -> u8 {
         self.slot_id
     }
@@ -192,52 +111,35 @@ impl MscDevice {
     }
 }
 
-/// How one Bulk-Only round trip ended, when it ended at all.
-///
-/// Two variants and not three: a round trip that broke is the error half of
-/// [`XhciController::bot`]'s `Result`, and `delivered` cannot exceed the
-/// transfer it describes because both of the checks that bound it run before
-/// this value exists.
+/// How one Bulk-Only round trip ended; `delivered` never exceeds the
+/// transfer it describes.
 enum Bot {
-    /// CSW status 0, with the bytes of the data phase that are really there.
-    ///
-    /// **Two things count that number and the smaller one is the answer.** The
-    /// controller reports what it moved into the buffer; the device reports in
-    /// the CSW what it did not move. Keeping only the device's account means a
-    /// device that under-delivers a READ(10) and then claims a residue of zero
-    /// hands the caller whatever the last transfer left in the data window,
-    /// from whatever LBA that was.
+    /// CSW status 0; `delivered` is the smaller of what the controller moved
+    /// and the device says it didn't — else stale data from an earlier LBA leaks.
     Done { delivered: u32 },
     /// CSW status 1: the device understood and refused. Sense data says why.
     Failed,
 }
 
-/// Why a Bulk-Only round trip could not be completed.
-///
-/// One word for all of these is the whole diagnosis on a machine with no serial
-/// port: `transport broke on SCSI 0x2a` and nothing whatever about how, on the
-/// one path where *what happened* is what decides which recovery command is
-/// even legal.
+/// Why a Bulk-Only round trip could not be completed; what happened decides
+/// which recovery command is legal.
 enum Broke {
     /// The controller reported this completion code for the named phase.
     Code { phase: &'static str, code: u32 },
     /// Nothing came back for the named phase, for [`Quiet`]'s reason.
     Silence { phase: &'static str, why: Quiet },
-    /// The phase completed and moved the wrong number of bytes. A command block
-    /// and a status block are fixed-length structures, so a short one is not a
-    /// short transfer — it is a device that did not take the whole thing.
+    /// The phase moved the wrong byte count; CBW/CSW are fixed length, so
+    /// short is not a short transfer.
     Short { phase: &'static str, moved: u32, wanted: u32 },
     /// The endpoint stalled and the reset did not take.
     Stall { phase: &'static str },
-    /// CSW status 2. The class calls this a phase error and requires Reset
-    /// Recovery for it — and it is one of the shapes that leaves both endpoints
-    /// *Running*, which is what makes an unconditional Reset Endpoint illegal.
+    /// CSW status 2: a phase error, which leaves both endpoints Running, so
+    /// an unconditional Reset Endpoint is illegal here.
     PhaseError,
     /// The CSW arrived and named somebody else's transfer.
     Csw { what: &'static str, got: u32, want: u32 },
-    /// The CSW claims more bytes unmoved than the transfer had. Believing it
-    /// would underflow the byte count every caller then uses to decide how much
-    /// of the buffer is real.
+    /// More bytes claimed unmoved than the transfer had; believing it would
+    /// underflow the byte count every caller uses.
     Residue { unmoved: u32, of: u32 },
 }
 
@@ -261,20 +163,9 @@ impl core::fmt::Display for Broke {
     }
 }
 
-/// Abandon one bulk transfer without waiting for it, once per boot, on the
-/// first WRITE(10) the driver issues.
-///
-/// **A kernel feature because nothing on the host side can stage it.** QEMU's
-/// `usb-storage` answers every CBW, data phase and CSW it is handed, in
-/// microseconds and in order; no device, drive or machine property makes one
-/// bulk transfer not complete, and `rerror`/`werror` fail the whole drive rather
-/// than leaving a transfer in flight. What is replaced is not a verdict — no
-/// completion code is invented and no CSW is forged. The TRB really is on the
-/// ring, the endpoint really is Running, and the controller really does complete
-/// the transfer afterwards; only the *wait* is skipped, which is precisely the
-/// state a transfer that ran out [`USB_TIMEOUT_NS`] leaves behind. So the
-/// recovery below runs against a real endpoint state, which is the whole thing
-/// under test. Same reason `xhci-one-slot` and `xhci-slow-connect` exist.
+/// Abandon one bulk transfer without waiting, once per boot, on the first
+/// WRITE(10): only the wait is skipped, so recovery runs against a real
+/// endpoint state — staged since nothing on the host side leaves one in flight.
 #[cfg(feature = "boot-actuators")]
 mod transport_break {
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -296,23 +187,8 @@ mod transport_break {
     }
 }
 
-/// Make one Reset Recovery run against a device that answers nothing, where
-/// the harness asks for it: the recovery's control transfers — the Bulk-Only
-/// Mass Storage Reset and both CLEAR_FEATUREs — are enqueued, rung and not
-/// waited for, once.
-///
-/// **A kernel feature because nothing on the host side can stage it.** QEMU's
-/// `usb-storage` answers every EP0 request in microseconds and has no device,
-/// drive or machine property that makes it stop, so "the reset escalation
-/// itself failed" — one of the exactly three evidences a volume may be
-/// declared failed on, beside a device error status and the deadman — has no
-/// host-side producer at all. What is replaced is only the waits, which is the
-/// state a device that stopped answering EP0 leaves behind; the recovery then
-/// reports failure off its own shipped checks, [`MscDevice::failed`] is set by
-/// the shipped path, and the disk is never spoken to again — so the late
-/// completions QEMU still delivers answer transfers nothing is waiting on.
-/// Same reason `usb-transport-break` exists, one layer further down the
-/// escalation.
+/// Stage one Reset Recovery to run its control transfers unwaited, once —
+/// staged because nothing on the host side stops answering EP0 on its own.
 #[cfg(feature = "boot-actuators")]
 pub(in crate::drivers::xhci) mod reset_break {
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -320,8 +196,8 @@ pub(in crate::drivers::xhci) mod reset_break {
     static UNSPENT: AtomicBool = AtomicBool::new(true);
     static ACTIVE: AtomicBool = AtomicBool::new(false);
 
-    /// Called at the top of one Reset Recovery. `true` means this recovery is
-    /// the staged one and must call [`end`] on its way out.
+    /// `true` means this recovery is the staged one and must call [`end`] on
+    /// its way out.
     pub fn begin() -> bool {
         if !crate::actuator::usb_reset_break() || !UNSPENT.swap(false, Ordering::Relaxed) {
             return false;
@@ -334,36 +210,14 @@ pub(in crate::drivers::xhci) mod reset_break {
         ACTIVE.store(false, Ordering::Relaxed);
     }
 
-    /// Read where `wait_transfer` would begin waiting. Only the staged
-    /// recovery's own control transfers can see it set: the window is opened
-    /// and closed inside one `reset_recovery` call, on one CPU, under the
-    /// controller lock every transfer wait already holds.
+    /// Only the staged recovery's own control transfers can see this set.
     pub fn active() -> bool {
         ACTIVE.load(Ordering::Relaxed)
     }
 }
 
-/// Make the controller's account of one READ(10) data phase and the device's
-/// own account of it disagree, once, where the harness asks for it.
-///
-/// **A kernel feature because nothing on the host side can stage it.** QEMU's
-/// `usb-storage` derives the CSW residue from the same transfer the xHC
-/// completed, so the two accounts of how many bytes moved are one number there
-/// and can never contradict each other — no device, drive or machine property
-/// makes them, and `rerror` fails the whole command rather than under-filling
-/// one buffer. On real hardware they are two: a device that ends its data
-/// phase early and then reports `dCSWDataResidue` as zero is a firmware bug
-/// that ships, and a driver believing the residue alone hands the caller
-/// another LBA's data.
-///
-/// **What is replaced is the transfer, not the verdict.** The completion code
-/// is the controller's own, the CSW is the device's own, and the bytes put back
-/// into the tail of the window are the ones the *previous* transfer left there
-/// — read off that window rather than invented, so what a caller is handed on
-/// the unfixed path is another LBA's data exactly as it would be on the wire.
-/// Only the residue is the injection's, and it names bytes that really are not
-/// this transfer's. Same reason `usb-transport-break` and `xhci-one-slot`
-/// exist.
+/// Make the controller's transfer account and the device's CSW residue
+/// disagree by [`SHORT_BY`] bytes, once — only the residue is the injection's.
 #[cfg(feature = "boot-actuators")]
 pub(in crate::drivers::xhci) mod short_read {
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -371,11 +225,8 @@ pub(in crate::drivers::xhci) mod short_read {
     use super::Quiet;
     use crate::mm::Dma;
 
-    /// How many bytes at the end of the buffer the controller is made not to
-    /// have moved. One 512-byte sector out of the 4096 a block read asks for:
-    /// a device stopping one sector short is the shape firmware bugs take, and
-    /// it leaves the rest of the block correct so that what fails the caller's
-    /// comparison is unambiguously the held tail.
+    /// Bytes held back at the buffer tail: one 512-byte sector of the
+    /// 4096-byte block a read asks for.
     pub const SHORT_BY: u32 = 512;
 
     static ARMED: AtomicBool = AtomicBool::new(false);
@@ -394,8 +245,7 @@ pub(in crate::drivers::xhci) mod short_read {
         bytes: [u8; SHORT_BY as usize],
     }
 
-    /// Copy the last [`SHORT_BY`] bytes of the buffer at `at` out, if this is
-    /// the transfer that was asked for.
+    /// Copy the last [`SHORT_BY`] bytes out, if this is the transfer asked for.
     pub fn hold(dma: Dma<'static>, at: usize, len: u32, eligible: bool) -> Option<Held> {
         if !eligible || len < SHORT_BY || !ARMED.swap(false, Ordering::Relaxed) {
             return None;
@@ -422,41 +272,27 @@ pub(in crate::drivers::xhci) mod short_read {
 /// The completion of one SCSI command, after the transport's own recovery.
 enum Scsi {
     Ok { delivered: u32 },
-    /// The device understood the command and declined it, carrying the sense
-    /// key, ASC and ASCQ it gave for declining. Carried rather than logged and
-    /// dropped, because a caller issuing an *optional* command has to tell
-    /// "I will not" from "I cannot" and these three bytes are the only place
-    /// that answer exists.
+    /// Understood and declined, carrying the sense key/ASC/ASCQ: an optional
+    /// command's caller must tell "I will not" from "I cannot".
     Refused { key: u8, asc: u8, ascq: u8 },
-    /// The transport broke, or the device contradicted itself. Nothing about
+    /// The transport broke, or the device contradicted itself; nothing about
     /// the buffer is known.
     Broken,
-    /// The command was **not issued**: the caller's [`crate::block::OPERATION`]
-    /// budget had already expired when this attempt came up.
-    ///
-    /// **Apart from [`Self::Broken`], because it is not a fact about the
-    /// disk.** One value for both is a stick that answered every transfer, a
-    /// recovery that succeeded in 1 ms, and a log volume given up permanently
-    /// because "your budget expired" reaches `/bin/logd` as "this disk cannot
-    /// flush". Nothing was on a ring when
-    /// this is returned, no endpoint owes a completion, [`MscDevice::failed`]
-    /// is clear, and the next operation finds the transport exactly as this
-    /// one left it — which is what makes asking again the honest answer, and
-    /// `object/ops.rs`'s fsync loop the caller that asks.
+    /// Not issued: the caller's [`crate::block::OPERATION`] budget had
+    /// already expired. Distinct from [`Self::Broken`] because it is not a
+    /// fact about the disk — [`MscDevice::failed`] stays clear.
     Budget,
 }
 
 impl Scsi {
-    /// SBC's ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE: the device does
-    /// not have this opcode. For a command SBC makes optional that is an
-    /// answer and not a failure.
+    /// SBC's ILLEGAL REQUEST/INVALID COMMAND OPERATION CODE: an answer, not
+    /// a failure, for a command SBC makes optional.
     fn unimplemented(&self) -> bool {
         matches!(self, Self::Refused { key: 0x05, asc: 0x20, ascq: 0x00 })
     }
 
-    /// What this command's outcome means to [`crate::block::BlockDevice`]'s
-    /// caller. `Ok` never reaches here — the three callers each have their own
-    /// idea of what a complete transfer is.
+    /// `Ok` never reaches here — each of the three callers has its own idea
+    /// of what a complete transfer is.
     fn as_block_error(&self) -> BlockError {
         match self {
             Self::Budget => BlockError::BudgetExpired,
@@ -465,13 +301,8 @@ impl Scsi {
     }
 }
 
-/// The one line a device's refusal produces, wherever it is noticed.
-///
-/// One function and not three, because the three callers of [`scsi`] make the
-/// same report about the same device, and a per-caller wording would make the
-/// log say which code path noticed rather than what the device said.
-///
-/// [`scsi`]: XhciController::scsi
+/// The one line a device's refusal produces, wherever it is noticed — one
+/// function so per-caller wording never obscures what the device said.
 fn log_refusal(cdb: &[u8], key: u8, asc: u8, ascq: u8) {
     log!(
         "usb-storage: SCSI {:#04x} failed, sense {key:#04x}/{asc:#04x}/{ascq:#04x}",
@@ -479,23 +310,9 @@ fn log_refusal(cdb: &[u8], key: u8, asc: u8, ascq: u8) {
     );
 }
 
-/// The sense a test makes SYNCHRONIZE CACHE answer with, in place of the
-/// device's own answer, or `None` on a shipped kernel.
-///
-/// A kernel feature because nothing on the host side can stage it: QEMU's
-/// `scsi-disk` implements 0x35 for every front end that reaches it —
-/// `usb-storage` and `usb-bot` over `scsi-hd` and `scsi-block` alike — and no
-/// device or drive property turns it off, while `scsi-generic` would need a
-/// real host SCSI device the harness cannot assume exists. The command is
-/// issued either way, so the transport under the injection is the shipped
-/// transport; only the CSW's verdict is replaced. Same reason `xhci-one-slot`
-/// and `i8042-fault` exist.
-///
-/// The two values are the two halves of the same question. ILLEGAL REQUEST /
-/// INVALID COMMAND OPERATION CODE is what a conformant stick without a write
-/// cache answers, and must not be a failure; HARDWARE ERROR / INTERNAL TARGET
-/// FAILURE is a flush that was tried and did not work, and must reach the
-/// caller as one.
+/// The sense a test actuator makes SYNCHRONIZE CACHE answer with, or `None`
+/// on a shipped kernel. ILLEGAL REQUEST/INVALID COMMAND OPERATION CODE must
+/// not fail the caller; HARDWARE ERROR/INTERNAL TARGET FAILURE must.
 fn flush_sense() -> Option<(u8, u8, u8)> {
     if crate::actuator::usb_flush_unimplemented() {
         Some((0x05, 0x20, 0x00))
@@ -506,23 +323,9 @@ fn flush_sense() -> Option<(u8, u8, u8)> {
     }
 }
 
-/// Where this device's `block` field stands and what it held, taken at the top
-/// of a [`XhciController::bot`] round trip.
-///
-/// **Because `dev.block` is a stack slot and it changed inside one call.** The
-/// recorded shape is `bot`'s status phase refused for 13 bytes (`CSW_LEN`) past
-/// the 2 MiB DMA pool, at an offset that makes `dev.block` a **kernel text
-/// address** — twenty lines after the command phase narrowed the same field
-/// successfully, so the write lands during the wait.
-///
-/// [`XhciController::with_storage`] copies the whole `Disk` out of
-/// `self.msc[at]` onto its own frame and writes it back afterwards, so the
-/// `&mut MscDevice` every phase holds points into **this task's kernel stack**,
-/// at a fixed depth, above the frames that are running. A mid-function text
-/// address landing there is a *return address*: something executed with that
-/// slot as its stack pointer. The DMA bounds check is what notices, and it
-/// notices far too late to say where — this says where, the moment the phase
-/// that waited comes back.
+/// Snapshot of `dev.block`'s address and value at the top of one round
+/// trip, to catch a write to `MscDevice` from outside the driver while a
+/// phase is waiting.
 #[cfg(feature = "stack-witness")]
 #[derive(Clone, Copy)]
 struct BlockWitness {
@@ -535,9 +338,8 @@ fn block_witness(dev: &MscDevice) -> BlockWitness {
     BlockWitness { at: &raw const dev.block as u64, was: dev.block }
 }
 
-/// See [`BlockWitness`]. Nothing in this driver writes `block` after
-/// [`bind_msc`] hands the device over, so any difference here is a write from
-/// outside the driver entirely.
+/// Nothing in this driver writes `block` after `bind` hands the device
+/// over, so any difference here is a write from outside it.
 #[cfg(feature = "stack-witness")]
 fn block_witness_holds(dev: &MscDevice, entered: BlockWitness) {
     let at = &raw const dev.block as u64;
@@ -560,8 +362,8 @@ fn block_witness_holds(dev: &MscDevice, entered: BlockWitness) {
     );
 }
 
-/// Which way a block transfer moves, so one batching loop serves both without
-/// a `&[u8]` pretending to be a `&mut [u8]`.
+/// Which way a block transfer moves, so one loop serves both without a
+/// `&[u8]` pretending to be a `&mut [u8]`.
 enum Host<'a> {
     Into(&'a mut [u8]),
     From(&'a [u8]),
@@ -577,10 +379,8 @@ impl Host<'_> {
 }
 
 impl XhciController {
-    /// Run `f` against the disk in this controller's `at`-th pool block,
-    /// writing the device's state back whatever `f` did with it. `None` for a
-    /// block with no disk behind it, which after an unplug includes one a disk
-    /// used to be behind.
+    /// Run `f` against the disk at `at`, writing state back regardless of
+    /// outcome; `None` if no disk is there.
     fn with_storage<R>(
         &mut self,
         at: usize,
@@ -592,29 +392,14 @@ impl XhciController {
         Some(out)
     }
 
-    /// The three below are this driver's **operation entry points**, and the
-    /// one place in it that recovers the caller's budget.
-    ///
-    /// The deadline is established by
-    /// [`crate::block::begin_operation`] above `BlockDevice` and read off the
-    /// running context here, because the two frames in between —
-    /// `toyos_fat32::BlockAccess::read_at` and `BlockDevice::read_blocks` —
-    /// cannot carry it. From here down it is an ordinary argument again, which
-    /// is what keeps [`Self::scsi`] usable by `bring_up`: an enumeration is not
-    /// a block-device operation, has no establishment above it, and passes
-    /// [`Deadline::never`] by name.
-    ///
-    /// **They answer [`BlockResult`] and not `bool`**, because the budget they
-    /// recover is also the budget they can *refuse* on, and that refusal is not
-    /// a fact about the disk. One word for both costs a boot its log;
-    /// [`Scsi::Budget`] carries the difference up.
+    /// One of three operation entry points: recovers the caller's deadline
+    /// via [`Operation::deadline`], never done again below this call.
     pub(super) fn msc_read(&mut self, at: usize, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
         let until = Operation::deadline();
         self.with_storage(at, |ctrl, disk| {
             ctrl.transfer_blocks(&mut disk.dev, lba, count, Host::Into(buf), until)
         })
-        // No disk under this index: the controller has nothing to ask, which is
-        // a device fact and never a budget.
+        // No disk under this index is a device fact, never a budget.
         .unwrap_or(Err(BlockError::Device))
     }
 
@@ -634,20 +419,15 @@ impl XhciController {
             if dev.failed {
                 return Err(BlockError::Device);
             }
-            // LBA 0, block count 0: the whole medium, which is the only thing
-            // a cache flush above a block device can mean.
+            // LBA 0, count 0: the whole medium — all a block-device flush can mean.
             let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
             let issued = ctrl.scsi(dev, &cdb, 10, None, false, until);
             let outcome = match flush_sense() {
                 Some((key, asc, ascq)) => Scsi::Refused { key, asc, ascq },
                 None => issued,
             };
-            // SYNCHRONIZE CACHE is optional in SBC and a great many USB sticks
-            // do not have it. A device with no write cache has nothing this
-            // command could have made durable, so the writes before it are
-            // already as durable as they will get: reporting a failure reports
-            // the wrong thing, and the caller above turns a failed sync into a
-            // log line, which is itself the next flush.
+            // No write cache means nothing here could have been made durable,
+            // so reporting a failure would report the wrong thing.
             if outcome.unimplemented() {
                 if !dev.no_write_cache {
                     dev.no_write_cache = true;
@@ -663,21 +443,16 @@ impl XhciController {
                     Err(BlockError::Device)
                 }
                 Scsi::Broken => Err(BlockError::Device),
-                // The flush was never issued. Unlogged here — `scsi` already
-                // named the budget in the line it wrote — and unlogged above,
-                // because `FatFs::sync`'s own doc says a line written on the
-                // log mount is the next flush.
+                // Unlogged: `scsi` already named the budget, and a line here
+                // would itself be the next flush.
                 Scsi::Budget => Err(BlockError::BudgetExpired),
             }
         })
         .unwrap_or(Err(BlockError::Device))
     }
 
-    /// Move `count` 4 KiB blocks between the caller's buffer and the disk.
-    ///
-    /// `until` bounds the whole of it and not one command: the loop below is
-    /// `ceil(count / MSC_MAX_BLOCKS)` commands, and it is [`Self::scsi`] that
-    /// refuses to start one past the deadline.
+    /// Move `count` 4 KiB blocks; `until` bounds the whole call, not one
+    /// command — [`Self::scsi`] refuses to start a command past the deadline.
     fn transfer_blocks(
         &mut self,
         dev: &mut MscDevice,
@@ -687,9 +462,8 @@ impl XhciController {
         until: Deadline,
     ) -> BlockResult {
         let write = matches!(host, Host::From(_));
-        // The caller is the kernel and the trait states this contract, so a
-        // mismatch is a kernel bug and gets fail-fast. Everything below this
-        // line is about the *device's* numbers, which get refusals instead.
+        // Caller/trait mismatch is a kernel bug: fail-fast. Below this line
+        // every check is about device numbers and gets a refusal instead.
         assert_eq!(host.len(), count as usize * HOST_BLOCK as usize);
         if dev.failed {
             return Err(BlockError::Device);
@@ -715,9 +489,8 @@ impl XhciController {
             let sector_lba = (lba + done as u64) * dev.sectors_per_block as u64;
             let sectors = batch * dev.sectors_per_block;
 
-            // `bring_up` refused any disk whose last sector does not fit a
-            // 32-bit LBA, so this driver's READ(10)/WRITE(10) can address
-            // every block it reported.
+            // `bring_up` refused any disk whose last sector doesn't fit 32
+            // bits, so READ/WRITE(10) can address every block reported.
             let lba32 = sector_lba as u32;
             let cdb = [
                 if write { 0x2Au8 } else { 0x28 },
@@ -738,9 +511,8 @@ impl XhciController {
 
             match self.scsi(dev, &cdb, 10, Some(data.subview(0, bytes)), !write, until) {
                 Scsi::Ok { delivered } if delivered as usize == bytes => {}
-                // Short of what was asked, and reported as success. Nothing
-                // above here has a way to say "these blocks arrived and those
-                // did not", so a partial transfer is a failed one.
+                // Short of what was asked: nothing above can say which
+                // blocks arrived, so a partial transfer is a failed one.
                 Scsi::Ok { delivered } => {
                     log!("usb-storage: {delivered} of {bytes} B at block {}", lba + done as u64);
                     return Err(BlockError::Device);
@@ -749,14 +521,9 @@ impl XhciController {
                     log_refusal(&cdb, key, asc, ascq);
                     return Err(BlockError::Device);
                 }
-                // **A partial transfer whose remainder ran out of budget is a
-                // failure of the whole operation and not a retryable one.** The
-                // blocks already moved are on the device and the caller's buffer
-                // half describes them, so `done > 0` is a state no re-issue can
-                // resume from — only the first batch may honestly answer "ask
-                // again". Every caller in this kernel transfers eight blocks or
-                // fewer (`MSC_MAX_BLOCKS`), so the loop turns once and this is
-                // the reachable arm; it is written for the day one does not.
+                // `done > 0` means blocks already moved are on the device
+                // with no way to resume; only the first batch may answer "ask
+                // again".
                 other @ (Scsi::Broken | Scsi::Budget) => {
                     return Err(if done == 0 { other.as_block_error() } else { BlockError::Device });
                 }
@@ -770,40 +537,11 @@ impl XhciController {
         Ok(())
     }
 
-    /// One SCSI command, with the transport's recovery applied and the command
-    /// re-issued over the transport that recovery gave back. `Scsi::Ok` means
-    /// the device reported success and moved `delivered` bytes.
-    ///
-    /// **Reset Recovery restores the transport and says nothing about the
-    /// command**, so a driver that recovers and then reports failure has thrown
-    /// away a write it could have completed — the laptop's boot disk losing a
-    /// block to one transport hiccup. Every CDB this file issues is
-    /// idempotent, and the caller's bytes are still in the same DMA window
-    /// nothing between two attempts touches, so an attempt is a genuine
-    /// re-issue of the same command and not an approximation of one.
-    ///
-    /// # The caller's budget, and why it is spent *here*
-    ///
-    /// `until` is [`crate::block::OPERATION`]'s deadline for the whole
-    /// operation this command is part of, and this is the one place in the
-    /// driver that reads it. Not because it is convenient: it is the only place
-    /// where a refusal costs the device nothing. Between two commands there is
-    /// no TRB on a ring, no endpoint owing a completion and no phase half done,
-    /// so refusing here is a decision about the *caller's* time and never a
-    /// verdict about the disk — nothing is abandoned, [`MscDevice::failed`]
-    /// stays clear, and the next operation finds the transport exactly as this
-    /// one left it. Taking the same decision one level down, inside
-    /// [`Self::bot`] or its recovery, would abandon a transfer the device is
-    /// still going to answer and then read the wreckage as a device that is not
-    /// recovering — a slow disk marked permanently offline for having been slow.
-    ///
-    /// So what this bounds is a device that *answers*, which is exactly the
-    /// failure `USB_TIMEOUT_NS` cannot see: that bound is only ever reached by a
-    /// device that has stopped answering, and a stick that completes every
-    /// transfer in 2 ms can still hold one `read_blocks` for as long as the
-    /// batching, the retries and the recoveries take. The overshoot is the
-    /// command in flight when the deadline passes, which the transfer bound
-    /// covers.
+    /// One SCSI command with transport recovery applied and re-issued;
+    /// every CDB here is idempotent, so a re-issue is genuine. `until` is
+    /// checked only here, between commands — it costs the device nothing (no
+    /// TRB on a ring, no phase half done); checking inside [`Self::bot`]
+    /// would abandon a transfer the device is still going to answer.
     #[allow(clippy::too_many_arguments)]
     fn scsi(
         &mut self,
@@ -815,20 +553,15 @@ impl XhciController {
         until: Deadline,
     ) -> Scsi {
         let opcode = cdb.first().copied().unwrap_or(0);
-        // Which disk this command is on, in every line the retry writes. A
-        // machine that boots off USB carries at least two — the stick it
-        // started from and whatever else is plugged in — and an unnamed
-        // `transport broke` cannot be attributed to either, so a harness
-        // assertion counts the boot stick's own recovery against the disk under
-        // test (`issues/hardware/`).
+        // Named per line so a multi-disk boot's retry log attributes to the
+        // right disk.
         let slot = self.slot(dev.slot_id);
         for attempt in 1..=MAX_TRANSPORT_ATTEMPTS {
             if until.reached(crate::clock::now()) {
                 log!("usb-storage: {slot} SCSI {opcode:#04x} not issued: {}",
                     crate::block::OPERATION);
-                // Not `Broken`: nothing was issued, nothing is on a ring, and
-                // `dev.failed` is untouched. One value for both is what makes
-                // `/bin/logd` give up a volume on a stick that is answering.
+                // Not `Broken`: nothing was issued and `dev.failed` stays
+                // untouched.
                 return Scsi::Budget;
             }
             match self.bot(dev, cdb, cdb_len, data, data_in) {
@@ -858,22 +591,16 @@ impl XhciController {
         Scsi::Broken
     }
 
-    /// REQUEST SENSE, as (sense key, ASC, ASCQ) and zeroed if the device would
-    /// not say. Never a decision about the *transport*, which is what
-    /// [`Bot::Broken`] covers and what recovery answers; the sense bytes decide
-    /// only what the device meant by declining a command it understood, and
-    /// zeroes fall on the failing side of every such decision.
+    /// REQUEST SENSE as (key, ASC, ASCQ), zeroed if the device would not
+    /// say — zero is the failing side of every decision made from it.
     fn request_sense(&mut self, dev: &mut MscDevice) -> (u8, u8, u8) {
         let dma = self.dma();
         let scratch = dma.subview(dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
         scratch.zero();
         let cdb = [0x03u8, 0, 0, 0, 18, 0];
-        // Recursion is not possible: a failing REQUEST SENSE goes through
-        // `bot` directly, so it cannot ask for sense data about itself.
-        // ASCQ is byte 13 of the fixed-format sense data, so fourteen bytes is
-        // what makes all three readable. Short of that they are whatever the
-        // zeroing above left, and zero ASC/ASCQ is exactly the value
-        // [`Scsi::unimplemented`] tests for.
+        // Goes through `bot` directly, so it cannot recurse into asking for
+        // sense about itself. ASCQ is byte 13, so 14 bytes must arrive or all
+        // three stay zero, which is what `Scsi::unimplemented` tests for.
         match self.bot(dev, &cdb, 6, Some(scratch.subview(0, 18)), true) {
             Ok(Bot::Done { delivered }) if delivered >= 14 => {
                 let mut resp = [0u8; 18];
@@ -884,9 +611,8 @@ impl XhciController {
         }
     }
 
-    /// One fixed-length leg of the round trip — the command block or the status
-    /// block — which the device has to take or give in full. `what` names it in
-    /// the line a break produces.
+    /// One fixed-length leg of the round trip (command or status block),
+    /// which the device must take or give in full.
     fn framed_phase(
         &mut self,
         dev: &mut MscDevice,
@@ -896,11 +622,9 @@ impl XhciController {
         what: &'static str,
     ) -> Result<(), Broke> {
         match self.bulk(dev, in_dir, phys, len) {
-            // Short Packet is how an xHC reports a transfer that ended on a
-            // packet smaller than the endpoint's maximum, which a 13-byte CSW
-            // on a 512-byte endpoint is. With no residue behind it the whole
-            // block arrived, and reading the code alone would make a complete
-            // status phase an error.
+            // Short Packet is how the xHC reports a sub-maximum-packet
+            // transfer (a 13-byte CSW on a 512-byte endpoint); zero residue
+            // means it all arrived.
             Ok((CC_SUCCESS | CC_SHORT_PACKET, 0)) => Ok(()),
             Ok((CC_SUCCESS | CC_SHORT_PACKET, residue)) => Err(Broke::Short {
                 phase: what,
@@ -941,11 +665,8 @@ impl XhciController {
         let tag = dev.next_tag();
         #[cfg(feature = "stack-witness")]
         let entered_with = block_witness(dev);
-        // The unaligned discipline, and the file header says why. Bounded by
-        // each write against `CBW_LEN`: the last field ends at `15 + cdb_len`,
-        // `cdb_len <= 16` was asserted on entry, and `CBW_LEN` is 31. Exclusive:
-        // the transfer naming this block has not been enqueued yet, and a device
-        // block belongs to one device.
+        // Unaligned per the file header; bounded by CBW_LEN (15+cdb_len <=
+        // 31) and exclusive — not yet enqueued.
         let cbw: Dma<'static, Unaligned> =
             super::super::zero_dma(dma, dev.block + MSC_CBW, CBW_LEN as usize).unaligned();
         cbw.write::<u32>(0, CBW_SIGNATURE.to_le());
@@ -959,8 +680,8 @@ impl XhciController {
         let cbw_phys = dma.phys() + (dev.block + MSC_CBW) as u64;
         self.framed_phase(dev, false, cbw_phys, CBW_LEN, "command")?;
 
-        // What the *controller* says reached the buffer, which is the account
-        // the CSW's residue is checked against below.
+        // What the controller says reached the buffer; checked against the
+        // CSW's residue below.
         let mut moved = 0u32;
         if data_len > 0 {
             #[cfg(feature = "boot-actuators")]
@@ -981,10 +702,9 @@ impl XhciController {
                 Ok((CC_SUCCESS | CC_SHORT_PACKET, unmoved)) => {
                     moved = data_len.saturating_sub(unmoved);
                 }
-                // A stalled data phase is ordinary — an unsupported command
-                // or a read past the end stalls here — and the CSW still
-                // arrives once the endpoint is unhalted. Recovering and then
-                // reading the status is what turns it into a clean refusal.
+                // A stalled data phase is ordinary (unsupported command,
+                // read past the end); recovering it and reading the status
+                // turns it into a clean refusal.
                 Ok((CC_STALL, unmoved)) => {
                     if !self.restart_bulk(dev, data_in) {
                         return Err(Broke::Stall { phase: "data" });
@@ -1001,7 +721,7 @@ impl XhciController {
         let mut got = self.framed_phase(dev, true, csw_phys, CSW_LEN, "status");
         if let Err(Broke::Code { code: CC_STALL, .. }) = got {
             // The spec's one legal retry: the device may stall the status
-            // phase once, and a second stall means it has lost the plot.
+            // phase once.
             if !self.restart_bulk(dev, true) {
                 return Err(Broke::Stall { phase: "status" });
             }
@@ -1012,12 +732,9 @@ impl XhciController {
 
         #[cfg(feature = "stack-witness")]
         block_witness_holds(dev, entered_with);
-        // The unaligned discipline again, for the CSW's half of the header's
-        // argument. Bounded by each read against the `CSW_LEN`-byte subview; the
-        // last field is a `u8` at 12 of 13. The transfer has completed —
-        // `framed_phase` returned `Ok` above — so the device is not writing this
-        // block. Every number read here is the device's and is checked on the
-        // lines below, never believed.
+        // Unaligned again; bounded by the CSW_LEN subview, exclusive because
+        // `framed_phase` returned `Ok`. Every field is checked below, never
+        // believed.
         let csw = dma.subview(dev.block + MSC_CSW, CSW_LEN as usize).unaligned();
         let (signature, csw_tag, residue, status) = (
             u32::from_le(csw.read::<u32>(0)),
@@ -1028,10 +745,8 @@ impl XhciController {
         if signature != CSW_SIGNATURE {
             return Err(Broke::Csw { what: "signature", got: signature, want: CSW_SIGNATURE });
         }
-        // A CSW carrying somebody else's tag is a device out of step with the
-        // driver, and accepting it would attribute one command's status to
-        // another — the failure mode where a write reports the success of the
-        // read before it.
+        // Accepting a mismatched tag would attribute one command's status to
+        // another — a write reporting the read before it as success.
         if csw_tag != tag {
             return Err(Broke::Csw { what: "tag", got: csw_tag, want: tag });
         }
@@ -1039,9 +754,8 @@ impl XhciController {
             return Err(Broke::Residue { unmoved: residue, of: data_len });
         }
         match status {
-            // The device's account of the transfer and the controller's, and
-            // the driver keeps neither on trust: what a caller may read is what
-            // both of them say arrived.
+            // Neither account is trusted alone: a caller may read only what
+            // both the device and the controller say arrived.
             0 => Ok(Bot::Done { delivered: moved.min(data_len - residue) }),
             1 => Ok(Bot::Failed),
             _ => Err(Broke::PhaseError),
@@ -1077,11 +791,8 @@ impl XhciController {
         self.wait_transfer(slot, dci, at)
     }
 
-    /// One of this disk's bulk endpoints, as the recovery needs to see it.
-    ///
-    /// The route is [`XhciController::restart_endpoint`]'s to choose, because
-    /// which command is legal is a property of the endpoint's state and nothing
-    /// about that is per class. All this decides is which of the pair is meant.
+    /// One of this disk's bulk endpoints, packaged for recovery; which
+    /// command is legal is [`XhciController::restart_endpoint`]'s to decide.
     fn bulk_endpoint<'a>(dev: &'a mut MscDevice, in_dir: bool) -> Restart<'a> {
         let (dci, ep_addr, ring_off) = if in_dir {
             (dev.in_dci, dev.in_ep, MSC_IN_RING)
@@ -1104,26 +815,11 @@ impl XhciController {
         self.restart_endpoint(Self::bulk_endpoint(dev, in_dir))
     }
 
-    /// Bulk-Only Mass Storage Reset plus whatever each endpoint needs: what the
-    /// class specification requires once the device's command/data/status state
-    /// machine no longer agrees with the driver's.
-    ///
-    /// **Both endpoints come off their transfers before the device is spoken
-    /// to, and that order is the whole of the correctness.** The transfer this
-    /// recovers from is one the driver stopped waiting for, which is not one
-    /// that is over: it is still the controller's to run and still the device's
-    /// to answer. A class request issued into that window is undone by the
-    /// answer when it lands — the device finishes the command it was given, is
-    /// left owing a status block again, and stalls the next command block the
-    /// driver sends. That is a second broken transfer out of one fault, and a
-    /// caller's write lost with it. Whether the window opens at all is a race
-    /// between the guest and the device, which is why the dev host has never
-    /// seen it and CI reproduces it every run (`issues/hardware/`).
-    ///
-    /// [`Owed`](super::Owed) is what keeps that order rather than a comment.
-    /// Everything this says to the device is [`Self::reset_the_device`], whose
-    /// arguments are the two endpoints' quiesces — so there is no order of
-    /// these three lines that speaks first.
+    /// Bulk-Only Mass Storage Reset plus each endpoint's CLEAR_FEATURE.
+    /// Both endpoints come off their transfers before the device is spoken
+    /// to: a class request issued while a transfer is still the device's to
+    /// answer is undone when that answer lands, breaking a second transfer
+    /// out of the one fault. [`Owed`](super::Owed) is what keeps that order.
     fn reset_recovery(&mut self, dev: &mut MscDevice) -> bool {
         #[cfg(feature = "boot-actuators")]
         let staged = reset_break::begin();
@@ -1137,14 +833,10 @@ impl XhciController {
         recovered
     }
 
-    /// Every word of Reset Recovery that reaches the device, in BOT §5.3.4's
-    /// order: the class request, then a CLEAR_FEATURE for each endpoint that is
-    /// halted.
-    ///
-    /// It takes both endpoints' [`Owed`](super::Owed) because the class request
-    /// may not go out until the controller has taken both of them off their
-    /// transfers — see [`Self::reset_recovery`]. Reading them afterwards would
-    /// have been the same code with the guarantee taken out.
+    /// Reset Recovery's device-facing half, in BOT §5.3.4 order: the class
+    /// request, then CLEAR_FEATURE per halted endpoint. Takes both endpoints'
+    /// [`Owed`](super::Owed) because the class request may not go out before
+    /// both are off their transfers.
     fn reset_the_device(&mut self, dev: &mut MscDevice, in_ep: Owed, out_ep: Owed) -> bool {
         let slot = dev.slot_id;
         let iface = dev.iface as u16;
@@ -1154,10 +846,9 @@ impl XhciController {
         if !reset.done() {
             log!("usb-storage: slot {slot} would not take a Bulk-Only Reset: {reset}");
         }
-        // Both halts are cleared even if the class request did not land: the
-        // endpoints are what the next command touches, and leaving one halted
-        // because another step failed turns a recoverable device into a
-        // permanently offline one.
+        // Both halts are cleared even if the class request failed: leaving
+        // one halted over another step's failure would make a recoverable
+        // device permanently offline.
         let cleared_in = self.clear_endpoint_halt(slot, block, &mut dev.ep0_ring, in_ep);
         let cleared_out = self.clear_endpoint_halt(slot, block, &mut dev.ep0_ring, out_ep);
         reset.done() && cleared_in && cleared_out
@@ -1165,31 +856,22 @@ impl XhciController {
 }
 
 /// One mass-storage device's pool block and the two bulk rings its endpoint
-/// contexts name, as [`prepare`] left them.
-///
-/// Carried from the Configure Endpoint act to the bind behind it rather than
-/// rebuilt there: `TrbRing::init` zeroes, and by then the memory is the
-/// controller's to read.
+/// contexts name, as [`prepare`] left them — not rebuilt here, since
+/// `TrbRing::init` would zero memory the controller now reads.
 #[derive(Clone, Copy)]
 pub(in crate::drivers::xhci) struct MscRings {
-    /// Which of [`super::super::MSC_BLOCKS`] this is, which is what the teardown gives
-    /// back.
+    /// Which of [`super::super::MSC_BLOCKS`] this is; teardown gives it back.
     at: usize,
     block: usize,
     in_ring: TrbRing,
     out_ring: TrbRing,
 }
 
-/// Claim a pool block for this device and write its two bulk endpoints into the
-/// input context, ready for the Configure Endpoint the sequence issues.
-///
-/// **Claimed before the endpoints are configured** and released only by the
-/// teardown that disables this slot, so the block cannot be reissued while the
-/// previous holder's contexts still name it. `storage.len()` is a different
-/// question: it counts the disks that *finished*.
-///
-/// `None` when the pool is out, which is a refusal and not a failure — nothing
-/// is spent, because nothing was handed out.
+/// Claim a pool block and write its two bulk endpoints into the input
+/// context, ready for the Configure Endpoint the sequence issues.
+/// Claimed before the endpoints are configured, released only by teardown,
+/// so the block is never reissued while the previous holder's contexts
+/// still name it. `None` when the pool is out — a refusal, not a failure.
 pub(in crate::drivers::xhci) fn prepare(
     ctrl: &mut XhciController,
     slot_id: u8,
@@ -1214,11 +896,8 @@ pub(in crate::drivers::xhci) fn prepare(
     ctrl.write_ctx32(input_ctx, 1, 0, ((speed as u32) << 20) | (max_dci << 27));
     ctrl.write_ctx32(input_ctx, 1, 1, (port_idx as u32 + 1) << 16);
 
-    // EP Type 2 is Bulk Out and 6 is Bulk In; CErr 3 is the retry count the
-    // controller applies before reporting a transaction error. Average TRB
-    // Length is advisory — the controller uses it for bandwidth bookkeeping —
-    // and the endpoint's own maximum packet size is the honest answer for a
-    // driver that issues one TRB per transfer.
+    // EP Type 2=Bulk Out, 6=Bulk In, CErr 3; Average TRB Length is advisory,
+    // so the endpoint's own max packet size is used instead.
     for (dci, ep_type, mps, burst, ring) in [
         (out_dci, 2u32, info.out_ep.max_packet, info.out_ep.max_burst, &out_ring),
         (in_dci, 6u32, info.in_ep.max_packet, info.in_ep.max_burst, &in_ring),
@@ -1239,20 +918,13 @@ pub(in crate::drivers::xhci) fn prepare(
     Some(MscRings { at, block, in_ring, out_ring })
 }
 
-/// Ask the disk what it is, and register it if the answer is one this driver
-/// serves. `dev_block` is the device's own block, which is where its EP0 ring
-/// already lives.
-///
-/// **The last blocking path a scheduler pass can reach**: everything below is
-/// Bulk-Only Transport, which is a machine of its own and does not have one yet
-/// (`issues/hardware/the-bot-scsi-machine-is-still-hand-written-in-the-kernel.md`).
-/// A hot-plugged disk has to be brought up by *some*body and there is no other
-/// context that may block, so until then it is brought up here.
-///
-/// No return value: every failure path below logs, so a `bool` would carry
-/// nothing the one caller wants — and it would be dropped in statement
-/// position, silently, because Rust does not warn about a discarded `bool`.
-/// `true` if a disk came of it — the caller gives the slot back if not.
+/// Ask the disk what it is and register it if it's one this driver serves.
+/// `dev_block` is the device's own block, where its EP0 ring already lives.
+/// The last blocking path a scheduler pass can reach: bring-up has to run
+/// somewhere and there is no other context that may block.
+/// Returns `true` if a disk came of it; every failure path already logs, so
+/// a `bool` return carries nothing more and risks being silently dropped —
+/// on `false` the caller releases the claimed block.
 pub(in crate::drivers::xhci) fn bind(
     ctrl: &mut XhciController,
     ep0_ring: TrbRing,
@@ -1285,10 +957,9 @@ pub(in crate::drivers::xhci) fn bind(
     if !bring_up(ctrl, &mut dev) {
         return false;
     }
-    // The machine-wide number, taken here because here is where there is a disk
-    // to give one to: it is what `usb_storage::open` indexes by and what a mount
-    // holds for its whole life, so it must not move when some other controller
-    // binds or loses a disk — see [`super::super::DISKS_BOUND`].
+    // Machine-wide index: what `usb_storage::open` looks up by and a mount
+    // holds for life, so it must not move when another controller binds or
+    // loses a disk.
     let index = super::super::DISKS_BOUND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     log!(
         "usb-storage: disk {index} ready on slot {slot_id}, {} blocks of {} B \
@@ -1305,10 +976,9 @@ pub(in crate::drivers::xhci) fn bind(
 /// TEST UNIT READY, INQUIRY and READ CAPACITY: everything between a configured
 /// interface and a disk with a size.
 fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
-    // Driving the transport rather than `scsi` here, for two reasons: a device
-    // that answers NOT READY is expected rather than an error, so it must not
-    // produce a log line per attempt, and the sense fetch that reports it is
-    // also what clears the condition on a stick still spinning up.
+    // Drives the transport directly, not `scsi`: NOT READY is expected, not
+    // an error, so it must not log per attempt, and fetching sense also
+    // clears the condition on a device still spinning up.
     let give_up = crate::clock::nanos_since_boot() + READY_BUDGET.nanos();
     let mut sense = (0u8, 0u8, 0u8);
     let mut ready = false;
@@ -1338,14 +1008,9 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
 
     let dma = ctrl.dma();
     let scratch = dma.subview(dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
-    // **No caller's budget here, and that is not an omission.**
-    // [`crate::block::OPERATION`] bounds one *block-device operation*, and a
-    // bring-up is not one: nobody has asked for anything yet, there is no
-    // `BlockDevice` handle to hand an `Err` to, and the two bounds this
-    // sequence does answer to are its own — `READY_BUDGET` above and the
-    // transport's `USB_TIMEOUT_NS` under every transfer. A device that never
-    // finishes bring-up is refused by name and never becomes a disk, which is
-    // the give-up policy at this layer.
+    // No caller budget here: bring-up isn't an operation with a
+    // `BlockDevice` handle to answer — it answers only to `READY_BUDGET` and
+    // `USB_TIMEOUT_NS`.
     let until = Deadline::never();
     let read_scratch = |ctrl: &mut XhciController,
                         dev: &mut MscDevice,
@@ -1354,9 +1019,8 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
                         want: u32,
                         out: &mut [u8]| {
         scratch.zero();
-        // `subview` is what refuses a command asking for more than the scratch
-        // buffer holds, at the buffer rather than against a constant somewhere
-        // else.
+        // `subview` refuses a command asking for more than the scratch
+        // buffer holds.
         match ctrl.scsi(dev, cdb, cdb_len, Some(scratch.subview(0, want as usize)), true, until) {
             Scsi::Ok { delivered } if delivered as usize >= out.len() => {
                 dma.copy_to(dev.block + MSC_SCRATCH, out);
@@ -1384,9 +1048,8 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
     log!("usb-storage: slot {} vendor {} product {}", dev.slot_id,
         Printable(&inquiry[8..16]), Printable(&inquiry[16..32]));
 
-    // READ CAPACITY(10) reports an all-ones last LBA when the disk is too big
-    // to describe in 32 bits, which is the device asking for the 16-byte form
-    // rather than an answer.
+    // READ CAPACITY(10) reports an all-ones last LBA when the disk needs the
+    // 16-byte form to describe its size.
     let mut cap10 = [0u8; 8];
     if !read_scratch(ctrl, dev, &[0x25u8, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10, 8, &mut cap10) {
         log!("usb-storage: slot {} would not answer READ CAPACITY(10)", dev.slot_id);
@@ -1414,20 +1077,16 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> bool {
         )
     };
 
-    // Every number below came off the wire. A block size of zero divides, a
-    // block size above 4096 makes `4096 / block_bytes` zero and then divides
-    // by *that* — the same `#DE` an 8 KiB NVMe namespace produces without the
-    // same check in that driver. The set is not policy: it
-    // is which sizes divide the 4 KiB block everything above here is written
-    // in.
+    // A zero or >4096 block size divides by zero below (`4096 /
+    // block_bytes`); the allowed set is which sizes divide the 4 KiB host
+    // block.
     if !matches!(block_bytes, 512 | 1024 | 2048 | 4096) {
         log!("usb-storage: slot {} reports {block_bytes}-byte blocks; this driver \
              serves 4096-byte blocks and needs 512..=4096", dev.slot_id);
         return false;
     }
-    // READ(10) and WRITE(10) carry a 32-bit LBA, so a disk whose last sector
-    // does not fit one has blocks this driver cannot address. Serving the
-    // first 2 TiB of it would be a silent truncation of the device.
+    // READ/WRITE(10) carry a 32-bit LBA; serving the first 2 TiB of a
+    // bigger disk would silently truncate it.
     if last_lba > u32::MAX as u64 {
         log!("usb-storage: slot {} has {} sectors; this driver issues READ(10) and \
              addresses 2^32", dev.slot_id, last_lba as u128 + 1);
@@ -1463,19 +1122,12 @@ impl core::fmt::Display for Printable<'_> {
         f.write_str("\"")
     }
 }
-/// Read `count` 4 KiB blocks at `lba`. On `Err` the transfer did not happen and
-/// `buf` holds nothing the caller may believe.
-///
-/// **The caller must be inside a block-device operation**
-/// ([`crate::block::begin_operation`]), because that is where the device-time
-/// budget for this one comes from: [`XhciController::msc_read`] recovers it and
-/// [`XhciController::scsi`] is where it is honoured. A call with no
-/// establishment above it is refused by name rather than served without a
-/// budget.
-///
-/// [`BlockError::BudgetExpired`] is that refusal and
-/// [`BlockError::Device`] is everything else — including no disk under this
-/// index, which the controller has nothing to ask about.
+/// Read `count` 4 KiB blocks at `lba`. On `Err` the transfer did not happen
+/// and `buf` holds nothing the caller may believe.
+/// The caller must be inside a block-device operation
+/// ([`crate::block::begin_operation`]); a call with no budget established
+/// above it is refused by name. [`BlockError::BudgetExpired`] is that
+/// refusal; [`BlockError::Device`] is everything else.
 pub fn storage_read(index: usize, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
     with_disk(index, |ctrl, local| ctrl.msc_read(local, lba, count, buf))
         .unwrap_or(Err(BlockError::Device))

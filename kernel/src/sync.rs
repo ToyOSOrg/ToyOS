@@ -10,21 +10,10 @@ use crate::cell::UnsafeCell;
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicU32, Ordering};
 
-/// The load that decides ownership, and what it carries.
-///
-/// `try_lock` CASes `ticket`, but the atomic an unlock publishes through is
-/// `now` — so whichever operation reads `now` is the one that has to carry the
-/// acquire, and an acquire on `ticket` would synchronize with nothing.
-///
-/// **A cargo feature rather than a comment, because a model that has never
-/// failed proves nothing.** `kernel-loom`'s `lock-acquire-off` makes this
-/// `Relaxed` and `kernel-loom/tests/ticket_lock.rs` must red under it: the
-/// previous owner's writes are then unordered against the next owner's reads,
-/// which is exactly the class x86's TSO hides from every guest test in this
-/// tree. Loom drives `try_lock`'s load and not `lock`'s — the spin is an
-/// unbounded branch it cannot explore — so the model that fails is
-/// `try_lock_observes_the_previous_owners_writes`. No kernel build can turn the
-/// name on: the kernel declares it only so `cfg` checking knows it.
+// Unlock publishes through `now`, not `ticket`; the load that reads `now`
+// is the one that must carry the acquire.
+// `lock-acquire-off` drops this to `Relaxed` so `kernel-loom` can prove the
+// acquire is load-bearing; no real kernel build turns it on.
 #[cfg(not(feature = "lock-acquire-off"))]
 const ACQUIRED: Ordering = Ordering::Acquire;
 #[cfg(feature = "lock-acquire-off")]
@@ -37,13 +26,13 @@ pub struct Lock<T> {
     data: UnsafeCell<T>,
 }
 
-// SAFETY: The ticket spinlock ensures exclusive access to T.
-// T: Send required because Lock allows T to be accessed from any thread.
+// SAFETY: the ticket protocol serializes access to `data`; `Send` is required
+// because a lock can hand `T` to a different thread than the one that owned it.
 unsafe impl<T: Send> Sync for Lock<T> {}
 
 impl<T> Lock<T> {
-    /// Every `Lock` in the kernel is a `static`, so this must stay `const`.
-    /// Loom's atomics have no const constructor, hence the second arm.
+    /// Must stay `const`: every `Lock` in the kernel is a `static`, and loom's
+    /// atomics have no const constructor — hence the non-const arm below.
     #[cfg(not(feature = "loom"))]
     pub const fn new(val: T) -> Self {
         Self {
@@ -70,13 +59,8 @@ impl<T> Lock<T> {
         let mut next_warn = 50_000_000u64;
         while self.now.load(ACQUIRED) != my_ticket {
             core::hint::spin_loop();
-            // A waiter answers TLB shootdowns. This spin is the one unbounded
-            // wait in the kernel that routinely runs with `IF` clear — every
-            // interrupt and exception gate clears it, and handlers take locks —
-            // so without this an initiator that waits for acknowledgements while
-            // holding a lock is a two-CPU deadlock, and which locks those are
-            // could not be enumerated once and stay true. `arch::tlb` has the
-            // argument in full.
+            // Polls TLB shootdowns: this spin runs with `IF` clear, so skipping
+            // it here can deadlock a shootdown initiator that holds a lock.
             crate::arch::tlb::poll();
             spins += 1;
             if spins == next_warn {
@@ -106,8 +90,8 @@ impl<T> Lock<T> {
         }
     }
 
-    /// Raw pointer to the underlying data. Does not acquire the lock.
-    /// Only for statics that need a stable address for asm (GDT, TSS, IDT).
+    /// Raw pointer to `data`, without locking — only for statics needing a
+    /// stable address for asm (GDT, TSS, IDT).
     pub fn data_ptr(&self) -> *mut T {
         self.data.get()
     }
@@ -120,22 +104,16 @@ pub struct LockGuard<'a, T> {
 impl<T> Deref for LockGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        // SAFETY: a `LockGuard` exists only where `lock()`/`try_lock()` handed
-        // the ticket out, and the ticket is released in `Drop` — so for this
-        // guard's whole life no other CPU holds one over the same `Lock`.
-        // Irreducible: turning a `&UnsafeCell<T>` into a `&T` is the entire
-        // job of a lock, and there is no safe operation that does it — the
-        // proof that nothing else is looking lives in the ticket protocol
-        // above, not in a type.
+        // SAFETY: a live `LockGuard` is the ticket protocol's only proof that no
+        // other CPU holds `data`.
         unsafe { &*self.lock.data.get() }
     }
 }
 
 impl<T> DerefMut for LockGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: same ticket argument as `deref`, and `&mut self` adds that
-        // no `&T` minted from this guard is alive either. Irreducible for
-        // `deref`'s reason.
+        // SAFETY: same ticket argument as `deref`; `&mut self` also excludes an
+        // outstanding `&T` from this guard.
         unsafe { &mut *self.lock.data.get() }
     }
 }

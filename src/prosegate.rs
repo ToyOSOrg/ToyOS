@@ -74,7 +74,7 @@ const UNLEDGERED: &[&str] = &["rust", "target", ".git"];
 /// Declared apart from the ledger so admitting one dated comment line costs an
 /// edit here as well as there. It only goes down: a sweep that removes
 /// chronology lowers this and the rows together.
-const DATED_TOTAL: usize = 230;
+const DATED_TOTAL: usize = 227;
 
 /// The sentence a raised entry has to be worth.
 const RAISING: &str =
