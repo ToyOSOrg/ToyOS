@@ -802,8 +802,8 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
 /// Kernel builds the ordinary test suite is allowed to make.
-pub const TEST_SUITE_KERNEL_BUILDS: [&str; 4] =
-    ["", "boot-actuators,test-actuators", "fpu-save-nothing", "sched-check"];
+pub const TEST_SUITE_KERNEL_BUILDS: [&str; 5] =
+    ["", "boot-actuators,test-actuators", "fpu-save-nothing", "sched-check", "user-writable-gsbase"];
 
 /// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
 ///
@@ -1775,6 +1775,8 @@ mod tests {
                 "switch-witness-mutate-frame",
                 "switch-witness-mutate-rsp",
                 "test-actuators",
+                // `FSGSBASE` back in `CR4`: `gsbase_locked`'s negative control.
+                "user-writable-gsbase",
                 // Costs no kernel build at all, for `loom`'s reason: declared
                 // so `cfg` checking knows the name, and turned on only by
                 // `kernel-loom` — to remove the log wake path's two `SeqCst`

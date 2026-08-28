@@ -181,6 +181,7 @@ fpu_isolation 14662
 fs_large_file 94
 fs_truncate_persist 17
 futex_wake_counts 1007
+gsbase_locked 13091
 handle_basic 19
 handle_kill_policy 515
 handle_lifetime 33
@@ -241,6 +242,7 @@ metal_sim_pointer_churn 16658
 metal_sim_scanout_wc 0
 metal_sim_window_caps 148
 metal_sim_window_drag 6256
+mkdir_cap 6878
 mmap_prot 32
 mmap_stress 45
 munmap_reissues_read_window 100
@@ -258,6 +260,7 @@ nvme_large_device 6052
 nvme_wide_sector 3500
 operation_nesting 5075
 panic_recovery 130
+pci_capability_walk 5775
 poller_capacity 36
 port_poll_churn 84
 pre_idle_wedge_speaks 3688

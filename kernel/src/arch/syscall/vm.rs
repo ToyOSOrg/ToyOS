@@ -351,8 +351,8 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
     };
 
     // Found through the thread's own kernel-side TLS allocation, never by
-    // chasing a pointer out of the FS base: FSGSBASE lets userland set that
-    // register. Every thread gets an allocation from `setup_tls`/
+    // chasing a pointer out of the FS base, which addresses user-writable
+    // memory. Every thread gets an allocation from `setup_tls`/
     // `setup_combined_tls`; its absence here is a kernel bug.
     process::with_current_data(|data| {
         let tls = data.tls_pages.as_ref().expect("sys_tls_alloc_block: thread has no TLS allocation");

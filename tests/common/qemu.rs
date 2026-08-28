@@ -195,7 +195,7 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// A fifth entry is that decision again, and it gets this paragraph's argument
 /// made afresh. Interactive debug mode is separate: it builds
 /// [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
-pub const DECLARED_KERNEL_BUILDS: [&str; 4] =
+pub const DECLARED_KERNEL_BUILDS: [&str; 5] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
 /// How many guests the phase now running may have up at once.

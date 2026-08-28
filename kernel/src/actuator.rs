@@ -154,6 +154,9 @@ actuators! {
     /// Run `Virtqueue::poll_used` over eleven crafted used-ring elements at init.
     virtio_used_selftest = "virtio-used-selftest";
 
+    /// Walk the PCI capability list and window check over eleven crafted config-space layouts at init.
+    pci_cap_selftest = "pci-cap-selftest";
+
     /// Raise the local APIC's spurious vector on this CPU once.
     lapic_spurious_selftest = "lapic-spurious-selftest";
 
