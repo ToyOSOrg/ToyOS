@@ -40,17 +40,14 @@ const LEN: usize = 8 * 4096;
 const VICTIM_BYTE: u8 = 0xA7;
 const ATTACKER_BYTE: u8 = 0x5C;
 
-/// Setup patience with a device the host's load has slowed: five of the 2 s
-/// operation budgets behind the kernel's `WouldBlock` refusal
-/// (`kernel/src/block.rs::OPERATION`). Device patience is not what this test
-/// is about — revocation after unlink is — so its setup asks again the way
-/// logd's flush policy does instead of reading a slow stick as a red.
+/// Five of the 2 s operation budgets behind the kernel's `WouldBlock` refusal
+/// (`kernel/src/block.rs::OPERATION`): device patience is not what this test
+/// is about, so its setup asks again the way logd's flush policy does.
 const SETUP_PATIENCE: Duration = Duration::from_secs(10);
 const SETUP_PAUSE: Duration = Duration::from_millis(200);
 
-/// Runs one idempotent setup step, asking again on `WouldBlock` until
-/// [`SETUP_PATIENCE`] is spent; any other error, or the budget's end, panics
-/// with the step's own message.
+/// One idempotent setup step, asked again on `WouldBlock` until
+/// [`SETUP_PATIENCE`] is spent; anything else panics with the step's message.
 fn patient<T>(what: &str, mut op: impl FnMut() -> std::io::Result<T>) -> T {
     let start = Instant::now();
     loop {
@@ -70,8 +67,7 @@ fn write_file(path: &str, byte: u8) {
     {
         let mut f = patient(&format!("create {path}"), || fs::File::create(path));
         // Not `patient`: a `write_all` refused partway has advanced the cursor,
-        // so asking again blind would double bytes — and it lands in the cache,
-        // not the device, so the operation budget is not in its path.
+        // so asking again blind would double bytes; it lands in the cache anyway.
         f.write_all(&vec![byte; LEN]).unwrap_or_else(|e| panic!("write {path}: {e}"));
         patient(&format!("fsync {path}"), || f.sync_all());
     } // close: the last handle drops here.
