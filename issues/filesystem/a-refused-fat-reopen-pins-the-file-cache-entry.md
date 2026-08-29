@@ -58,9 +58,10 @@ deferred release — it never arrives:
 - The pinned file's dirty pages are never written back and never evictable
   (`evict_one` skips dirty pages, `file_cache.rs:510-512`), so each leaked file
   also holds non-evictable kernel heap and silently loses its unflushed bytes
-  unless userland calls `SYS_FSYNC`. This is exactly the escape
-  `issues/kernel/file-cache-budget-is-soft-where-the-harness-asserts-it-hard.md`
-  measures, given a userland-driven source.
+  unless userland calls `SYS_FSYNC`. This is exactly the budget's one declared
+  escape — eviction never takes a dirty page, the turnover line reports its
+  dirty count, and `cache_eviction` stages and bounds it — given a
+  userland-driven source that never flushes.
 - `file.ref_count += 1` is not saturating, unlike the `saturating_sub` at
   `file_cache.rs:133`, and the kernel ships with `overflow-checks = true`
   (`kernel/Cargo.toml:343-348`, enforced by `src/build.rs`'s

@@ -112,6 +112,15 @@ fn main() {
     // what asks the cache for room it cannot make — the case where the sweep
     // has to give up over budget rather than take something it cannot replace.
     const DIRTY_PAGES: usize = 64;
+    // Then past the budget with every page dirty, through a second file: the
+    // sweep now has nothing it may take and must report over-budget rather
+    // than hold 64 — staged here on every run, where CI met it by another
+    // writer's un-flushed page landing beside the 64. Eight pages, not one,
+    // so a stray clean page another process left resident cannot absorb the
+    // whole overage.
+    const OVERAGE_PAGES: usize = 8;
+    const OVERAGE_TAG: usize = 77;
+    let over_path = format!("/home/cache_small_{}.bin", SMALL_FILES - 1);
     {
         let mut w = fs::OpenOptions::new().write(true).open(BIG).expect("reopen big to rewrite");
         for page in 0..DIRTY_PAGES {
@@ -123,12 +132,34 @@ fn main() {
         for page in 0..SMALL_PAGES {
             check_page(&mut r, &path, 1, page, "pressure while the budget is dirty");
         }
+        let mut over =
+            fs::OpenOptions::new().write(true).open(&over_path).expect("reopen for overage");
+        for page in 0..OVERAGE_PAGES {
+            over.seek(SeekFrom::Start((page * PAGE) as u64)).expect("seek overage");
+            over.write_all(&page_bytes(OVERAGE_TAG, page)).expect("dirty past the budget");
+        }
         w.sync_all().expect("fsync the rewrite");
+        over.sync_all().expect("fsync the overage");
     }
     {
         let mut f = fs::File::open(BIG).expect("reopen big after rewrite");
         for page in 0..DIRTY_PAGES {
             check_page(&mut f, BIG, 7, page, "dirty page survived eviction pressure");
+        }
+    }
+    // The budget holds again the moment the writers flushed: a sweep over
+    // every small file forces evictions whose turnover lines the harness
+    // reads back within the bound, and proves the pages written past the
+    // budget round-trip like any others.
+    for tag in 0..SMALL_FILES {
+        let path = format!("/home/cache_small_{tag}.bin");
+        let mut f = fs::File::open(&path).expect("reopen for the flushed sweep");
+        for page in 0..SMALL_PAGES {
+            if tag == SMALL_FILES - 1 && page < OVERAGE_PAGES {
+                check_page(&mut f, &path, OVERAGE_TAG, page, "flushed sweep, overage pages");
+            } else {
+                check_page(&mut f, &path, tag + 1, page, "flushed sweep");
+            }
         }
     }
 
@@ -158,6 +189,10 @@ fn main() {
         assert!(bad.is_none(), "rewritten page {page} byte {} differs", bad.unwrap());
     }
 
-    let pages = BIG_PAGES * 2 + SMALL_FILES * SMALL_PAGES * 3 + TMP_PAGES + SMALL_PAGES + DIRTY_PAGES;
+    let pages = BIG_PAGES * 2
+        + SMALL_FILES * SMALL_PAGES * 4
+        + TMP_PAGES
+        + SMALL_PAGES
+        + DIRTY_PAGES;
     println!("cache eviction ok: {pages} page reads verified");
 }

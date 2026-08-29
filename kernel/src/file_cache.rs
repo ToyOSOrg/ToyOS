@@ -51,6 +51,8 @@ struct FileCache {
     evictions: u64,
     /// CLOCK hand, in (file, page) key order; kept across calls so eviction costs one step, not a full scan.
     hand: (FileId, u32),
+    /// The over-budget state has been said; cleared when residency returns within budget, so an episode costs one line.
+    over_said: bool,
 }
 
 static FILE_CACHE: Lock<FileCache> = Lock::new(FileCache {
@@ -61,6 +63,7 @@ static FILE_CACHE: Lock<FileCache> = Lock::new(FileCache {
     max_pages: 0,
     evictions: 0,
     hand: (0, 0),
+    over_said: false,
 });
 
 /// Install the memory budget; must run after the PMM sizes RAM and before any file is opened.
@@ -476,6 +479,13 @@ fn copy_page_region_to_buf(page: &[u8], offset: usize, buf: &mut UserBytesMut, v
 fn evict_if_needed(cache: &mut FileCache) {
     assert!(cache.max_pages != 0, "file cache used before init installed a budget");
     if cache.cached_pages <= cache.max_pages {
+        // A teardown can end an over-budget episode between admissions; the
+        // closing line still prints, so the episode's end is an event and
+        // never a matter of which admission happened to cross a turnover.
+        if cache.over_said {
+            cache.over_said = false;
+            turnover_line(cache);
+        }
         return;
     }
     let before = cache.evictions;
@@ -485,12 +495,35 @@ fn evict_if_needed(cache: &mut FileCache) {
             break;
         }
     }
-    // Logs once per full turnover of the cache so the rate scales with the budget, not a fixed count.
+    // Once per full turnover so the rate scales with the budget, plus once at
+    // each over-budget episode's start and end — the sweep giving up, and the
+    // budget holding again, are states the series must carry.
     let turnover = cache.max_pages as u64;
-    if cache.evictions != before && (before == 0 || before / turnover != cache.evictions / turnover) {
-        log!("file cache: {} evictions, {}/{} pages resident",
-            cache.evictions, cache.cached_pages, cache.max_pages);
+    let over = cache.cached_pages > cache.max_pages;
+    let crossed =
+        cache.evictions != before && (before == 0 || before / turnover != cache.evictions / turnover);
+    if crossed || over != cache.over_said {
+        turnover_line(cache);
     }
+    cache.over_said = over;
+}
+
+/// The dirty count is on the line because over-budget is lawful exactly when
+/// every resident page is dirty; the harness holds that shape.
+fn turnover_line(cache: &FileCache) {
+    log!("file cache: {} evictions, {}/{} pages resident, {} dirty",
+        cache.evictions, cache.cached_pages, cache.max_pages, dirty_pages(cache));
+}
+
+/// Dirty pages among the governed resident set, counted under the same lock
+/// hold as the residency they explain.
+fn dirty_pages(cache: &FileCache) -> usize {
+    cache
+        .files
+        .values()
+        .filter(|f| f.is_cache())
+        .map(|f| f.pages.values().filter(|p| p.dirty).count())
+        .sum()
 }
 
 /// One CLOCK step-and-evict; returns false when a full revolution found no page it was allowed to take.
