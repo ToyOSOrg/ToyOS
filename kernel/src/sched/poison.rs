@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicU64, Ordering};
 
-/// The vacant value; no live task packs to it — a pid would have to reach `u32::MAX`.
+/// The vacant value; a packed id collides with it only if a task's pid and tid are both `u32::MAX`.
 pub const EMPTY: u64 = u64::MAX;
 
 /// Deaths one CPU can bank between idle trips; fixed — the panic path may not allocate.
