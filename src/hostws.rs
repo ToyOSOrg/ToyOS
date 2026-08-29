@@ -7,9 +7,8 @@
 //! workflow *and* a set of standalone workspace roots, and the two drifted
 //! three times: four pure crates until 2026-08-08, `toyos-keymap` and
 //! `bcachefs` until 2026-08-14, and `toyos-abi` and `toyos-manifest` — 23 tests
-//! between them — which reached no workflow at all
-//! (`issues/build/three-host-crates-are-tested-nowhere.md`, closed by the
-//! commit that added this file).
+//! between them — which reached no workflow at all (the tracker entry closed
+//! by the commit that added this file).
 //!
 //! A third copy of the list would restore the defect, so there is exactly one:
 //! the `[workspace]` table. This module is its only reader. [`target_dir`]
@@ -319,8 +318,8 @@ mod tests {
     /// **The gate.** A crate added to this repository joins the host workspace
     /// or is excluded from it with a reason, and there is no third option.
     ///
-    /// This is the defect `issues/build/three-host-crates-are-tested-nowhere.md`
-    /// recorded, and it had already recurred twice before that: a host-testable
+    /// This is the drift the module header recounts, and it had already
+    /// recurred twice before it was recorded: a host-testable
     /// crate arrives, nobody adds it to the workflow's loop, and its tests run
     /// nowhere while reading as though they run everywhere. There is one list
     /// now and the tree is held against it.

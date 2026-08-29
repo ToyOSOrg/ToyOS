@@ -324,9 +324,10 @@ two trailing `u32`s leave no tail padding for kernel stack bytes to hide in
 (all on 2026-08-22).
 
 `syscall.rs`'s two raw writes into `PageAlloc` memory are a third site of the
-shape `issues/kernel/pagealloc-has-no-checked-window.md` already carries, and
-the TLS one has its bound fifty lines and one function away from the write;
-both say so at the site rather than opening a second file about it.
+unchecked-window shape the demand-paging fill was (since bounded through
+`PageAlloc::window`, which closed that tracker entry), and the TLS one has its
+bound fifty lines and one function away from the write; both say so at the
+site rather than opening a second file about it.
 
 **The oracle was the compiler, and the numbers say what moved.** Emitting the
 kernel's assembly at the guest's own `[profile.toyos]` with both actuator

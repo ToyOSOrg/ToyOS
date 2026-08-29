@@ -161,10 +161,10 @@ session's own edits — three files deleted and one filed, both below):
 By `kind` alone: defect 222, finding 95, track 33, rejected 8, and one file
 (`issues/diagnostics/a-console-tag-is-composed-by-replacing-a-bracket.md`)
 carrying `kind: design-debt` — one of the ten closed *area* names, not one of
-the five defined `kind` values. Filed as
-`issues/build/one-issue-file-carries-an-area-name-as-its-kind.md` rather than
+the five defined `kind` values. Filed as its own build entry rather than
 fixed, per this repository's own rule against fixing what a bookkeeping pass
-finds.<sup>3</sup>
+finds; `src/issuegate.rs` has since closed that entry by gating the two
+fields.<sup>3</sup>
 
 **Opened this week vs. closed/deleted this week.** The README's "Closing
 one" section is unambiguous: *"Delete the file. Git keeps the story."* — so a
@@ -226,7 +226,7 @@ issues/kernel/every-driver-is-still-in-the-kernel.md
 issues/kernel/every-interrupt-lands-on-the-boot-cpu.md
 issues/kernel/nothing-charges-kernel-memory-to-a-process.md
 issues/kernel/page-global-is-a-decision-nobody-has-made.md
-issues/kernel/scheduler-policy-behavior-has-no-quantified-suite.md
+[one row since closed: the scheduler policy suite landed, its track with it]
 issues/kernel/the-capability-end-state-is-twelve-answers.md
 issues/kernel/the-iommu-stops-at-translation.md
 issues/kernel/the-kernel-still-parses-what-userland-writes.md

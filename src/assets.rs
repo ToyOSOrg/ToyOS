@@ -364,9 +364,9 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
 mod tests {
     use super::*;
 
-    /// A sample of the `ch(de)` characters `issues/design-debt/
-    /// console-font-lacks-the-altgr-layer.md` named as unrenderable — past
-    /// Latin-1, so absent unless a layout's own reach is rasterized.
+    /// A sample of the `ch(de)` AltGr characters the console font once could
+    /// not render — past Latin-1, so absent unless a layout's own reach is
+    /// rasterized.
     #[test]
     fn the_console_font_covers_the_swiss_german_altgr_layer() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

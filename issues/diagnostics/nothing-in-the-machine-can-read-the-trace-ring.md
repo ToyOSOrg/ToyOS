@@ -6,9 +6,9 @@ opened: 2026-07-30
 
 # Nothing inside the machine can read the trace ring, and nothing samples RIP
 
-Rewritten 2026-08-24. This was `profiling-layers-2-and-3-not-built`, three
-sentences pointing at a "diagnostics roadmap" in CLAUDE.md that no longer
-exists, and the layer numbering it used is unreadable without that document.
+Rewritten 2026-08-24 from three sentences on unbuilt profiling layers 2 and 3
+that pointed at a "diagnostics roadmap" in CLAUDE.md which no longer exists,
+in a layer numbering unreadable without that document.
 Read against the tree instead, one of the two things it said was missing is
 built and the other's stated blocker is gone.
 
