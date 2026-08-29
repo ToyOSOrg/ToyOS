@@ -31,6 +31,8 @@ pub use crate::sched::driver::{
 };
 pub use crate::sched::MAX_CPUS;
 
+use crate::sched::poison;
+
 /// Panics unless the preempt depth equals `baseline`: a mismatch means a
 /// spinlock is held across a scheduler entry that switches.
 #[track_caller]
@@ -565,9 +567,9 @@ pub fn retire_task(sched: &ThreadSched) {
     }
 }
 
-/// Per-CPU hand-off slot for a thread that died in panic recovery: the panic
+/// Per-CPU hand-off bank for threads that died in panic recovery: the panic
 /// path may hold any lock, so it can only store here.
-static POISONED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static POISONED: [poison::PoisonSet; MAX_CPUS] = [const { poison::PoisonSet::new() }; MAX_CPUS];
 
 /// Whether [`reap_poisoned`] has anything to do; claimed by whichever idle
 /// trip takes the work.
@@ -581,18 +583,18 @@ pub fn note_reapable() {
 
 pub fn poison_tid(id: TaskId) {
     let cpu = percpu::cpu_id() as usize;
-    let Some(slot) = POISONED.get(cpu) else {
+    let Some(bank) = POISONED.get(cpu) else {
         crate::log!("poison_tid: cpu {cpu} >= MAX_CPUS — {id} will never be reaped");
         return;
     };
-    let prev = slot.swap(id.pack(), Ordering::Release);
-    // After the slot is written, never before: the gate's release is what
+    let banked = bank.bank(id.pack());
+    // After the bank is written, never before: the gate's release is what
     // carries it to the CPU that claims the work.
     REAP_GATE.raise();
-    if prev != u64::MAX {
+    if !banked {
         crate::log!(
-            "poison_tid: cpu {cpu} slot still held {} — its waiter is stranded",
-            TaskId::unpack(prev)
+            "poison_tid: cpu {cpu} banked {} deaths since its last reap — {id}'s waiter is stranded",
+            poison::SLOTS
         );
     }
 }
@@ -606,7 +608,8 @@ pub(crate) fn reap_poisoned() {
     if !REAP_GATE.take() {
         return;
     }
-    let mut wakes: [Option<process::PoisonWake>; MAX_CPUS] = [const { None }; MAX_CPUS];
+    let mut wakes: [Option<process::PoisonWake>; MAX_CPUS * poison::SLOTS] =
+        [const { None }; MAX_CPUS * poison::SLOTS];
     // Dropped after the guard: an entry's drop reaches `remove_vruntime`.
     let reaped;
     {
@@ -615,14 +618,13 @@ pub(crate) fn reap_poisoned() {
         // SAFETY: `reap_poisoned`'s one caller, `sched::driver::idle_loop`,
         // runs on the per-CPU idle stack, which is what `IdleProof` requires.
         reaped = process::reap_finished(table, unsafe { process::IdleProof::new_unchecked() });
-        for (slot, wake) in POISONED.iter().zip(wakes.iter_mut()) {
-            let raw = slot.load(Ordering::Relaxed);
-            if raw == u64::MAX {
-                continue;
-            }
-            let id = TaskId::unpack(raw);
-            *wake = process::zombify_poisoned(table, id.0, id.1);
-            slot.store(u64::MAX, Ordering::Relaxed);
+        let mut next = 0;
+        for bank in POISONED.iter() {
+            bank.drain(|raw| {
+                let id = TaskId::unpack(raw);
+                wakes[next] = process::zombify_poisoned(table, id.0, id.1);
+                next += 1;
+            });
         }
     }
     drop(reaped);

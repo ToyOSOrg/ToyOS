@@ -28,3 +28,11 @@ Found while writing the filesystem transactionality control
 (`tests/toyos-rust-tests/src/bin/fs_transactional.rs`), which sidesteps it by
 regrowing with `ftruncate` before writing into the hole. Orthogonal to the
 rename/shrink transactionality defects.
+
+## Reopened 2026-08-29: a fix exists and is measured to wedge the machine
+
+A complete fix with its POSIX-oracle test landed and was reverted the same
+day: the test's own filesystem activity left its shared boot wedged in 4 of 5
+full fast-tier runs. Do not re-derive the fix without reading
+`issues/kernel/past-eof-holes-wedge-a-shared-boot.md` first — it carries the
+commit to revert-the-revert of, the measurement table, and where to start.

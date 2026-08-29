@@ -667,7 +667,6 @@ fn drain_irqs() {
     crate::drivers::panic_console::hold_report();
 
     if crate::irq_ring::take(crate::irq_ring::IrqSource::Net).is_some() {
-        crate::net::wake_waiters();
         let watchers = crate::net::inbox_watchers();
         if !watchers.is_empty() {
             crate::inbox::complete_pending_for_event(

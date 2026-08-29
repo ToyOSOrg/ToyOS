@@ -115,6 +115,29 @@ impl PciDevice {
         }
     }
 
+    /// The byte size Memory Space BAR `index` advertises, by the spec's
+    /// write-ones probe; `index` must be ≤ [`bar::MAX_INDEX`]. Memory decode is
+    /// off for the probe, so nothing can read through the BAR mid-dance.
+    pub fn bar_size(&self, index: u8) -> Result<u64, bar::BadSize> {
+        assert!(index <= bar::MAX_INDEX, "PCI: BAR {index} — a Type 0 header has six");
+        let offset = bar::BASE + index as u64 * 4;
+        let cmd = self.mmio.read_u16(COMMAND);
+        self.mmio.write_u16(COMMAND, cmd & !0x2);
+        let lo = self.mmio.read_u32(offset);
+        self.mmio.write_u32(offset, u32::MAX);
+        let mask_lo = self.mmio.read_u32(offset);
+        self.mmio.write_u32(offset, lo);
+        let mask_hi = bar::is_wide(lo).then(|| {
+            let hi = self.mmio.read_u32(offset + 4);
+            self.mmio.write_u32(offset + 4, u32::MAX);
+            let mask = self.mmio.read_u32(offset + 4);
+            self.mmio.write_u32(offset + 4, hi);
+            mask
+        });
+        self.mmio.write_u16(COMMAND, cmd);
+        bar::advertised_size(mask_lo, mask_hi)
+    }
+
     pub fn write_config_u16(&self, offset: u64, val: u16) {
         self.mmio.write_u16(offset, val)
     }

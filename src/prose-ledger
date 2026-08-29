@@ -18,6 +18,7 @@ kernel-loom/tests/log_publish.rs 35 1
 kernel-loom/tests/log_record.rs 162 1
 kernel-loom/tests/log_wake.rs 59 0
 kernel-loom/tests/log_zeroed_init.rs 24 1
+kernel-loom/tests/poison_set.rs 17 0
 kernel-loom/tests/reap_gate.rs 53 1
 kernel-loom/tests/sleep_lock.rs 80 1
 kernel-loom/tests/smp_bringup.rs 11 0
@@ -76,16 +77,16 @@ kernel/src/drivers/ioapic.rs 30 0
 kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 127 0
 kernel/src/drivers/panic_console/mod.rs 210 0
-kernel/src/drivers/pci.rs 15 0
+kernel/src/drivers/pci.rs 18 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
-kernel/src/drivers/virtio.rs 94 0
+kernel/src/drivers/virtio.rs 105 0
 kernel/src/drivers/virtio_console.rs 31 0
 kernel/src/drivers/virtio_gpu.rs 29 0
 kernel/src/drivers/virtio_net.rs 39 0
 kernel/src/drivers/virtio_sound.rs 68 0
 kernel/src/drivers/xhci/device.rs 78 0
-kernel/src/drivers/xhci/hid.rs 24 0
+kernel/src/drivers/xhci/hid.rs 26 0
 kernel/src/drivers/xhci/legacy.rs 31 0
 kernel/src/drivers/xhci/mod.rs 222 0
 kernel/src/drivers/xhci/usbd.rs 8 0
@@ -134,7 +135,7 @@ kernel/src/log/user.rs 16 0
 kernel/src/main.rs 70 0
 kernel/src/mm/alloc.rs 88 0
 kernel/src/mm/dma.rs 34 0
-kernel/src/mm/mmio.rs 17 0
+kernel/src/mm/mmio.rs 18 0
 kernel/src/mm/mod.rs 21 0
 kernel/src/mm/paging.rs 206 0
 kernel/src/mm/pmm.rs 27 0
@@ -169,8 +170,9 @@ kernel/src/sched/dump.rs 80 0
 kernel/src/sched/kthread.rs 35 0
 kernel/src/sched/mod.rs 3 0
 kernel/src/sched/payload.rs 35 0
+kernel/src/sched/poison.rs 16 0
 kernel/src/sched/reap_gate.rs 9 0
-kernel/src/sched/waitqs.rs 7 0
+kernel/src/sched/waitqs.rs 8 0
 kernel/src/sched_gate.rs 7 0
 kernel/src/scheduler.rs 150 0
 kernel/src/shootdown.rs 21 0
@@ -367,7 +369,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4936 23
+tests/toyos.rs 4937 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
@@ -502,7 +504,7 @@ toyos-mixer/src/lib.rs 43 0
 toyos-mixer/src/mix.rs 38 0
 toyos-mixer/src/shape.rs 102 0
 toyos-mixer/src/stats.rs 131 0
-toyos-pci/src/bar.rs 97 0
+toyos-pci/src/bar.rs 109 0
 toyos-pci/src/caps.rs 13 0
 toyos-pci/src/lib.rs 20 0
 toyos-pci/src/msi.rs 35 0

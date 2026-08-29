@@ -212,7 +212,14 @@ pub fn init(devices: &[PciDevice]) {
     shared.zero();
     pci_dev.enable_bus_master();
 
-    let device = VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC);
+    let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC) {
+        Ok(device) => device,
+        Err(why) => {
+            log!("VirtIO net: PCI {:02x}:{:02x}.{} {why} — device refused",
+                pci_dev.bus, pci_dev.dev, pci_dev.func);
+            return;
+        }
+    };
 
     let rxq_regions = VirtqueueRegions::from_separate(
         kernel_mem.subview(OFF_RXQ_DESC, OFF_RXQ_AVAIL - OFF_RXQ_DESC),

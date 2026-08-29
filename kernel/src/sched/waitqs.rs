@@ -8,9 +8,8 @@ const FUTEX_BUCKETS: usize = 64;
 static FUTEX_WATCH: [Watch; FUTEX_BUCKETS] = [const { Watch::new() }; FUTEX_BUCKETS];
 
 /// Device wait subjects; a reader arms directly on one and parks on its own thread's queue.
+/// Two carry every blocking read — keyboard, one for both audio backends; `read_block_device` refuses the rest.
 pub static KEYBOARD_WATCH: Watch = Watch::new();
-pub static MOUSE_WATCH: Watch = Watch::new();
-pub static NETWORK_WATCH: Watch = Watch::new();
 pub static AUDIO_WATCH: Watch = Watch::new();
 
 /// Wakes every waiter armed on `watch`.

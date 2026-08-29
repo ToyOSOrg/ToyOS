@@ -1734,6 +1734,7 @@ mod tests {
                 // `heap-lockspin`'s other arm: the same visit to the pass path,
                 // for the same span, without the allocator's lock.
                 "pass-spin",
+                "poison-overwrite",
                 "reap-raise-relaxed",
                 // `smp_roster.rs`'s count relaxed; `smp_bringup.rs` reds.
                 "roster-commit-relaxed",

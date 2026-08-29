@@ -637,7 +637,6 @@ fn service_bytes(recorded: bool) {
     }
     let woke_ms = motion > 0;
     if woke_ms {
-        crate::mouse::wake_waiters();
         let watchers = crate::mouse::inbox_watchers();
         if !watchers.is_empty() {
             crate::inbox::complete_pending_for_event(
