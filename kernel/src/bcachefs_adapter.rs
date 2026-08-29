@@ -85,9 +85,16 @@ fn as_syscall_error(err: &FsError) -> SyscallError {
         | FsError::NotEnoughBlocks { .. }
         | FsError::TreeTooDeep(_)
         | FsError::BadSuperblock { .. }
-        | FsError::NodeOverfull { .. } => SyscallError::Io,
+        | FsError::NodeOverfull { .. }
+        | FsError::TargetTooLong { .. } => SyscallError::Io,
     }
 }
+
+/// Ceiling on the one allocation `read_link` materialises from a disk-declared
+/// size: the kernel's heap ceiling, which `bcachefs` cannot know and the
+/// volume bound does not reach.
+const MAX_LINK_TARGET: u64 = crate::user_ptr::MAX_USER_STR;
+const _: () = assert!(MAX_LINK_TARGET <= crate::mm::MAX_HEAP_ALLOC as u64);
 
 /// Logs the error's detail, then maps it to the `SyscallError` a caller can act on.
 fn mapped<T>(op: &str, name: &str, result: Result<T, FsError>) -> Result<T, SyscallError> {
@@ -216,7 +223,7 @@ impl FileSystem for BcacheFsAdapter {
     }
 
     fn read_link(&mut self, name: &str) -> Result<Option<String>, SyscallError> {
-        mapped("read_link", name, self.fs.read_link(name))
+        mapped("read_link", name, self.fs.read_link(name, MAX_LINK_TARGET))
     }
 
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
@@ -359,7 +366,7 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
     }
 
     fn read_link(&mut self, name: &str) -> Result<Option<String>, SyscallError> {
-        mapped("read_link", name, self.fs.read_link(name))
+        mapped("read_link", name, self.fs.read_link(name, MAX_LINK_TARGET))
     }
 
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {

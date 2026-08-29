@@ -210,7 +210,6 @@ pub fn init(devices: &[PciDevice]) {
     // Exclusive: allocated on the two lines above, nothing else holds a view.
     // Zeroed because these pages held other data before this allocation.
     shared.zero();
-    pci_dev.enable_bus_master();
 
     let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC) {
         Ok(device) => device,

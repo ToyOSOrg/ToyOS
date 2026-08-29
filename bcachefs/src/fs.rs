@@ -93,6 +93,9 @@ pub enum FsError {
     /// A node whose entries do not fit the block. Defence in depth behind
     /// `EntryTooLarge` — nothing should reach it.
     NodeOverfull { used: usize, max: usize },
+    /// A symlink target declaring more bytes than the caller's ceiling —
+    /// refused before the one allocation the declared size drives.
+    TargetTooLong { size: u64, max: u64 },
 }
 
 pub struct ReadOnly;
@@ -662,10 +665,14 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     }
 
     /// Read a symlink's target by name. `None` when the name is not a symlink.
-    pub fn read_link(&self, name: &str) -> Result<Option<String>, FsError> {
+    /// `max_len` caps the allocation the target's declared size drives.
+    pub fn read_link(&self, name: &str, max_len: u64) -> Result<Option<String>, FsError> {
         let Some((_, value)) = self.find_by_name(name)? else { return Ok(None) };
         match self.decode(&value)? {
             LeafValue::Symlink { size, extents, .. } => {
+                if size > max_len {
+                    return Err(FsError::TargetTooLong { size, max: max_len });
+                }
                 let data = read_extents(&self.io, &extents, size, self.sb.block_count)?;
                 Ok(String::from_utf8(data).ok())
             }
@@ -1424,7 +1431,7 @@ mod tests {
 
         let fs = mount(raw).expect("mount");
         crate::alloc_probe::take_peak();
-        let target = fs.read_link("victim.txt");
+        let target = fs.read_link("victim.txt", u64::MAX);
         let peak = crate::alloc_probe::take_peak();
 
         // The allocation is asserted first: it is the harm, and it happened
@@ -1438,6 +1445,38 @@ mod tests {
                 assert_eq!((needed, available), (size / BLOCK_SIZE as u64, blocks));
             }
             Err(other) => panic!("expected NotEnoughBlocks, got {other:?}"),
+            Ok(target) => panic!(
+                "a symlink declaring {size} bytes resolved to a {}-byte target",
+                target.map_or(0, |t| t.len()),
+            ),
+        }
+    }
+
+    #[test]
+    fn a_size_inside_the_volume_but_over_the_ceiling_never_reaches_the_allocator() {
+        // The band the volume bound leaves open: a size the volume holds and a
+        // kernel heap cannot. Same instrument as above, with a smaller number.
+        let blocks = 2048;
+        let mut raw = image(blocks);
+        let root = read_u64_at(&raw, 24);
+        let size = 3_000_000u64;
+        let ceiling = 65_536u64;
+        craft_entry(&mut raw, root, 2, size, &[(3, 1)]);
+
+        let fs = mount(raw).expect("mount");
+        crate::alloc_probe::take_peak();
+        let target = fs.read_link("victim.txt", ceiling);
+        let peak = crate::alloc_probe::take_peak();
+
+        assert!(
+            peak <= BLOCK_SIZE,
+            "a symlink declaring {size} bytes asked the allocator for {peak}",
+        );
+        match target {
+            Err(FsError::TargetTooLong { size: got, max }) => {
+                assert_eq!((got, max), (size, ceiling));
+            }
+            Err(other) => panic!("expected TargetTooLong, got {other:?}"),
             Ok(target) => panic!(
                 "a symlink declaring {size} bytes resolved to a {}-byte target",
                 target.map_or(0, |t| t.len()),
