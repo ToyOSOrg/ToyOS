@@ -652,7 +652,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // further, which moves records from `read` into `lost` and leaves the law
     // exactly where it was.
     ("log_conservation_smp1", Sched::Parallel, Tier::Fast),
-    ("log_conservation_smp4", Sched::Parallel, Tier::Fast),
+    ("log_conservation_smp4", Sched::Parallel, Tier::Nightly),
     ("log_conservation_smp8", Sched::Parallel, Tier::Fast),
     ("log_nested_emit", Sched::Parallel, Tier::Fast),
     // The same interrupt one window earlier — between a record's shard-pointer

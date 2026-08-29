@@ -205,6 +205,17 @@ pub struct Relegated {
 /// Every test the fast tier does not run.
 pub const RELEGATED: &[Relegated] = &[
     Relegated {
+        test: "log_conservation_smp4",
+        ci_ms: 8_248,
+        why: Why::Cost,
+        guards: "The log's conservation law at the middle SMP width, four CPUs. What still runs \
+                 per pull request: `log_conservation_smp1` and `log_conservation_smp8` at 4686 \
+                 and 5112 ms with margin — the two subject shapes the law turns on, the producer \
+                 sharing the reader's CPU and not — so only the four-CPU width, whose CI price \
+                 straddles the fast line (8248 and 8572 ms against a 5512 ms dev-host baseline), \
+                 moves to nightly.",
+    },
+    Relegated {
         test: "klogd_hosted",
         ci_ms: 11_805,
         why: Why::Cost,

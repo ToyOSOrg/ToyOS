@@ -2864,7 +2864,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "log_conservation_smp4",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "relegated Why::Cost to Nightly in this landing — the straddling four-CPU width \
+             leaves the per-PR durations gate, and smp1/smp8 keep the conservation law at both \
+             subject shapes",
+        ),
         what: "not the test — its **price**: `log_conservation_smp4 is priced at 8248 ms — over \
                the 8000 ms a Fast test may be committed at and under the 10000 ms line — and \
                log_conservation_smp4 remains Fast: priced without margin, so relegate it or make \
