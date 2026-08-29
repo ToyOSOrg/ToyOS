@@ -65,6 +65,10 @@ const SHT_DYNSYM: u32 = 11;
 
 const R_X86_64_RELATIVE: u64 = 8;
 const R_X86_64_DTPMOD64: u64 = 16;
+const R_X86_64_TPOFF64: u64 = 18;
+
+const STT_TLS: u8 = 6;
+const STB_GLOBAL: u8 = 1;
 
 const PH_OFF: usize = 64;
 const PH_SIZE: usize = 56;
@@ -485,6 +489,22 @@ fn main() {
     //     in the loader logs and carries on.
     dlopen_survives("dtpmod_unresolved.so", &so_with_dtpmod());
 
+    // 13. A RELATIVE write beginning in a page's last seven bytes: r_offset
+    //     0x1FFE + 8 crosses 0x2000. Dropped by the per-page applier; refused now.
+    spawn_refused(
+        "reloc_straddles_fill_page",
+        &Elf::new(0x4000)
+            .ph(Phdr::load(0, 0, 0x4000, 0x4000, PF_R | PF_W))
+            .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
+            .entry(0)
+            .dynamic(0x1000, &[(DT_RELA, 0x1200), (DT_RELASZ, 24)])
+            .rela(0x1200, 0x1FFE, R_X86_64_RELATIVE, 0)
+            .build(),
+    );
+
+    // 14. A cross-module initial-exec TLS reference resolves to `S + A - tp`.
+    f13_cross_module_addend_is_kept();
+
     // The kernel heap is intact: allocate and touch enough to walk it, then
     // prove the real loader still works.
     let mut blocks: Vec<Vec<u8>> = Vec::new();
@@ -535,5 +555,78 @@ fn so_with_dtpmod() -> Vec<u8> {
         .poke(0x3001, b"tls_nowhere\0")
         .rela(0x2800, 0x20_0000, (1u64 << 32) | R_X86_64_DTPMOD64, 0)
         .shdr(0x3800, SHT_DYNSYM, 0x2000, 48, 24)
+        .build()
+}
+
+thread_local! {
+    // A non-empty static TLS block, so `dlopen` runs the TPOFF pass at all.
+    static F13_KEEP_TLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// psABI `R_X86_64_TPOFF64` is `S + A - tp`. Two references to one cross-module
+/// symbol, addends 0 and `ADDEND`, are differenced so the kernel-side absolute
+/// parts cancel and the gap is the addend alone — `ADDEND` kept, 0 dropped.
+fn f13_cross_module_addend_is_kept() {
+    const ADDEND: i64 = 0x140;
+    F13_KEEP_TLS.with(|c| c.set(c.get()));
+
+    // `defs` loads first so it resolves `refs`'s TPOFF; both held to the read.
+    let defs = write_file("f13_defs.so", &tls_defs_so());
+    let refs = write_file("f13_refs.so", &tls_refs_so(ADDEND));
+    let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen f13_defs.so");
+    let lib_refs = unsafe { libloading::Library::new(&refs) }.expect("dlopen f13_refs.so");
+
+    let read = |name: &[u8]| -> u64 {
+        let sym = unsafe { lib_refs.get::<*const u64>(name) }
+            .unwrap_or_else(|e| panic!("dlsym {}: {e}", String::from_utf8_lossy(name)));
+        let addr: *const u64 = *sym;
+        unsafe { addr.read() }
+    };
+    let v0 = read(b"probe0");
+    let vn = read(b"probeN");
+    assert_eq!(
+        vn.wrapping_sub(v0) as i64,
+        ADDEND,
+        "cross-module TPOFF dropped the addend: probe0={v0:#x} probeN={vn:#x}",
+    );
+    drop(lib_refs);
+    drop(lib_defs);
+}
+
+/// Defines `xtls` (`STT_TLS`, offset 8) for a cross-module `TPOFF64`.
+fn tls_defs_so() -> Vec<u8> {
+    Elf::new(0x2000)
+        .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
+        .ph(Phdr { kind: PT_TLS, flags: PF_R, offset: 0x1800, vaddr: 0x1800, filesz: 0, memsz: 0x20, align: 8 })
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
+        .sections(0x1C00, 1, 64)
+        .dynamic(0x1000, &[(DT_SYMTAB, 0x1200), (DT_STRTAB, 0x1400), (DT_STRSZ, 0x40)])
+        // sym[1] xtls: defined (st_shndx == 1), STT_TLS, offset 8 in the block.
+        .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 1, 8)
+        .poke(0x1401, b"xtls\0")
+        .shdr(0x1C00, SHT_DYNSYM, 0x1200, 48, 24)
+        .build()
+}
+
+/// Two `TPOFF64` relocations against the undefined `xtls`, addends 0 and
+/// `addend`, patching exported data `probe0`/`probeN` a reader can difference.
+fn tls_refs_so(addend: i64) -> Vec<u8> {
+    Elf::new(0x4000)
+        .ph(Phdr::load(0, 0, 0x2000, 0x2000, PF_R | PF_X))
+        .ph(Phdr::load(0x2000, 0x2000, 0x2000, 0x2000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
+        .sections(0x1C00, 1, 64)
+        .dynamic(0x1000, &[
+            (DT_SYMTAB, 0x1200), (DT_STRTAB, 0x1400), (DT_STRSZ, 0x40),
+            (DT_RELA, 0x1600), (DT_RELASZ, 48),
+        ])
+        // sym[1] xtls undefined (shndx 0) → cross-module; sym[2]/[3] the probes.
+        .sym(0x1218, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
+        .sym(0x1230, 6, STB_GLOBAL << 4, 2, 0x2000)
+        .sym(0x1248, 13, STB_GLOBAL << 4, 2, 0x2008)
+        .poke(0x1401, b"xtls\0probe0\0probeN\0")
+        .rela(0x1600, 0x2000, (1u64 << 32) | R_X86_64_TPOFF64, 0)
+        .rela(0x1618, 0x2008, (1u64 << 32) | R_X86_64_TPOFF64, addend)
+        .shdr(0x1C00, SHT_DYNSYM, 0x1200, 96, 24)
         .build()
 }

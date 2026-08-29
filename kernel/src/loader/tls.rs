@@ -164,7 +164,8 @@ pub fn build_tls_layout(
     let mut next_module_id = 2u64;
 
     for lib in libs {
-        let (base_offset, next) = toyos_elf::tls::place_module(cursor, lib.tls_memsz)?;
+        let (base_offset, next) =
+            toyos_elf::tls::place_module(cursor, lib.tls_memsz, lib.tls_align)?;
         cursor = next;
         max_align = max_align.max(lib.tls_align);
         modules.push(TlsModule {
@@ -178,7 +179,8 @@ pub fn build_tls_layout(
     }
 
     if let Some(tls) = exe {
-        let (base_offset, next) = toyos_elf::tls::place_module(cursor, tls.memsz as usize)?;
+        let (base_offset, next) =
+            toyos_elf::tls::place_module(cursor, tls.memsz as usize, tls.align as usize)?;
         cursor = next;
         max_align = max_align.max(tls.align as usize);
         modules.push(TlsModule {

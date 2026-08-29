@@ -69,14 +69,23 @@ pub fn plan(
     })
 }
 
-/// One module's placement within a combined block: cursor rounded to 16, then
-/// advanced by the module's own size.
-///
-/// The exe and every startup library share one block, and each module's
-/// `base_offset` is what its `TPOFF` relocations are computed against.
-pub fn place_module(cursor: usize, memsz: usize) -> Option<(usize, usize)> {
-    let base = if cursor > 0 { align_up(cursor, 16)? } else { 0 };
+/// One module's placement in a combined block: `cursor` rounded up to the
+/// module's own `p_align` (psABI variant II, not a shared constant), floored at
+/// the 16 `cmpxchg16b` needs. `align` is a power of two ≤ [`crate::MAX_TLS_ALIGN`]
+/// by [`crate::Layout::parse`]; `tls_start` carries the max, so a base on the
+/// module's own align lands the module on it.
+pub fn place_module(cursor: usize, memsz: usize, align: usize) -> Option<(usize, usize)> {
+    let align = align.max(16);
+    let base = if cursor > 0 { align_up(cursor, align)? } else { 0 };
     Some((base, base.checked_add(memsz)?))
+}
+
+/// A static-TLS datum's initial-exec offset from the thread pointer: psABI
+/// `S + A - tp`, where `module_addr` is `S` (its module's `base_offset` plus the
+/// datum's offset) and `tp` sits `total_memsz` past the same origin. Every
+/// `TPOFF` branch passes the addend here, so none can drop `A`.
+pub fn tpoff(module_addr: u64, addend: i64, total_memsz: usize) -> i64 {
+    module_addr as i64 + addend - total_memsz as i64
 }
 
 fn align_up(value: usize, granule: usize) -> Option<usize> {
