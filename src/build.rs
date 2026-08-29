@@ -1674,6 +1674,9 @@ mod tests {
                 // kernel, which is a fact about where the flag reaches and would
                 // be indistinguishable from a broken reader without this.
                 "df-witness-mutate",
+                // Costs no kernel build, for `wake-fence-off`'s reason: only
+                // `kernel-loom` turns it on, and `durability` must red under it.
+                "durability-settle-blind",
                 // The kernel this tree had before `arch::entry`'s `cld`: the
                 // instruction gone and `DF` back out of the `SYSCALL` mask, so a
                 // build carrying it inherits a set direction flag from whatever

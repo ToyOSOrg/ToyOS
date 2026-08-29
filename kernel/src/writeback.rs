@@ -108,7 +108,7 @@ fn drain_one(vfs: &mut crate::vfs::Vfs, deadman: Deadline) -> Drained {
 
     // A deleted file has nothing to flush; its handle is already torn down.
     let probe = file_cache::writeback_probe(pending.file_id);
-    if probe.dirty_meta && !probe.deleted {
+    if probe.flush_owed && !probe.deleted {
         // Tags the flush as the drain's, for `fat-mirror-write-refuse` to stage on this path.
         #[cfg(feature = "boot-actuators")]
         crate::fat32_adapter::enter_drain_flush();
@@ -117,7 +117,7 @@ fn drain_one(vfs: &mut crate::vfs::Vfs, deadman: Deadline) -> Drained {
         crate::fat32_adapter::leave_drain_flush();
         match flushed {
             Ok(()) => {}
-            // Budget refusal, not a device fact: `flush_file` left `dirty_meta` set, so the re-enqueued entry redelivers the same bytes.
+            // Budget refusal, not a device fact: the flush's debt is unsettled, so the re-enqueued entry redelivers the same bytes.
             Err(SyscallError::WouldBlock) if !deadman.reached(crate::clock::now()) => {
                 // Re-enqueued under the same held VFS lock the pop used: never absent from both at once.
                 QUEUE.lock().push_back(pending);

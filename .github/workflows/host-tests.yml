@@ -530,6 +530,30 @@ jobs:
             exit 1
           fi
 
+      # Both two-threaded durability models must red under the blind clear:
+      # the page-flush model (F6's lost mid-flush write) and the commit-debt
+      # model (F5's forgotten failed device flush).
+      - name: kernel-loom durability settle has teeth
+        run: |
+          set -o pipefail
+          echo "=== kernel-loom --features durability-settle-blind --test durability (must red)" \
+            | tee -a /tmp/host.log
+          if cargo test --manifest-path kernel-loom/Cargo.toml \
+               --features durability-settle-blind --test durability 2>&1 \
+               | tee /tmp/durability-settle-blind.log | tee -a /tmp/host.log; then
+            echo "durability passed with the settle blind: the model has no teeth" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'a_page_marked_clean_is_on_the_device \.\.\. FAILED' \
+               /tmp/durability-settle-blind.log \
+             || ! grep -q 'a_settled_commit_covers_only_flushed_writes \.\.\. FAILED' \
+               /tmp/durability-settle-blind.log; then
+            echo "the durability-settle-blind build failed without both named durability models reaching a verdict: this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
       # **`toyos-sched-loom`'s own controls, wired for the first time
       # 2026-08-17.** The mandatory preempt-disabled push has
       # carried `no-preempt-guard` since before this file existed, and it was

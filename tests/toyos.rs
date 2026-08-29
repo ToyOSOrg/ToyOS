@@ -324,6 +324,16 @@ const RUST_SKIP: &[&str] = &[
     // `did not open` and passes on its exit code. `log_backing_read_error`
     // stages the file and reads the verdict.
     "log_volume_reread",
+    // Needs `usb-flush-fails` armed: on the shared boot the device flush
+    // succeeds and its two must-refuse assertions red for an honest reason.
+    // `fsync_failed_commit` boots it with the arm.
+    "fsync_flush_failed",
+    // Needs `fsync-budget-spent` and the NVMe `/home`; unstaged it passes
+    // vacuously. `home_budget_refusal_retried` boots it with both.
+    "home_fsync_budget",
+    // Needs `test-small-caches` for the eviction its read-back rests on, and a
+    // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
+    "redirty_mid_flush",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
 ];
@@ -510,6 +520,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("netd_hostile_peer", Sched::Serial, Tier::Nightly),
     ("launcher_refusals", Sched::Parallel, Tier::Fast),
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
+    // F9's negative control: a budget-refused /home fsync retried to durable,
+    // its bytes then read off the NVMe image by the host's own bcachefs
+    // reader. Body in `tests/common/storage.rs`.
+    ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
@@ -907,6 +921,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
     ("fat_backing_revoked", Sched::Parallel, Tier::Fast),
+    // F5 and F6's negative controls: an fsync that must keep refusing while the
+    // device refuses its cache flush, and a mid-flush redirty raced for real and
+    // re-read off the image. Both bodies in `tests/common/volumes.rs`.
+    ("fsync_failed_commit", Sched::Parallel, Tier::Nightly),
+    ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
@@ -7919,6 +7938,9 @@ fn run_machine_test(
         // Body in `tests/common/storage.rs`, so the hunk in this shared file
         // stays one line.
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
+        "home_budget_refusal_retried" => {
+            storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
+        }
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
@@ -7943,6 +7965,8 @@ fn run_machine_test(
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
         "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
+        "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
+        "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush

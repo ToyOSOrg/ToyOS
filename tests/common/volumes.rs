@@ -1104,6 +1104,181 @@ pub fn fat_backing_revoked(
     Ok(())
 }
 
+/// F5's negative control: under `usb-flush-fails` a second `fsync` must refuse
+/// like the first, because the mount's device commit is still owed — the
+/// pre-generation kernel answered the second call with success and issued
+/// nothing. The guest asserts both refusals; the host half proves the staging
+/// fired at the shipped site (the driver's own sense line, at least once).
+pub fn fsync_failed_commit(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["usb-flush-fails"];
+    /// `msc.rs::log_refusal` for SYNCHRONIZE CACHE(10) with the staged sense.
+    const REFUSED: &str = "usb-storage: SCSI 0x35 failed, sense 0x04/0x44/0x00";
+
+    let image_path = test_dir().join("fsync-failed-commit.img");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            kernel_params: PARAMS,
+            ..Default::default()
+        },
+    );
+    let mut log = qemu.boot_log().to_string();
+    if !log.contains("log-volume: partition mounted") {
+        return Err(format!(
+            "the log partition did not mount, so nothing below asks the device to flush:\n{}",
+            volume_lines(&log)
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_fsync_flush_failed", Duration::from_secs(30));
+    log.push_str(&result.before);
+    log.push_str(&result.stdout);
+    log.push_str(&result.serial);
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if log.contains(bad) {
+            return Err(format!("{bad:?} under a failing device flush\n{log}"));
+        }
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "fsync_flush_failed guest failed — an fsync answered success over a device that \
+             refused its cache flush:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    let refusals = log.matches(REFUSED).count();
+    if refusals == 0 {
+        return Err(format!(
+            "no {REFUSED:?} line — the staged flush failure never reached the driver, so the \
+             guest's two refusals prove nothing\n{log}"
+        ));
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!(
+        "  [f5] {refusals} refused device flush(es); both of the guest's fsyncs were refused"
+    );
+    Ok(())
+}
+
+/// F6's negative control, and its host-side oracle: after the guest's racing
+/// rounds the file is read off the image by the host's own FAT implementation
+/// — every slot must be on the device, `toyos-fat32-check` silent. The guest
+/// reds first on a kernel that clears a mid-flush redirty; this half reds if
+/// what the guest read back was the cache's word and not the device's.
+pub fn redirty_mid_flush(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    // The shipped eviction code under a 64-page budget: without it the file's
+    // pages stay resident all boot and the read-back never asks the device.
+    const PARAMS: &[&str] = &["test-small-caches"];
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/redirty_mid_flush.rs`.
+    const TARGET: &str = "redirty.bin";
+    const ROUNDS: u64 = 128;
+    const SLOTS_AT: usize = 64;
+
+    let image_path = test_dir().join("redirty-mid-flush.img");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = log_extent(&image, &image_path)?;
+    let complaints_before = check(&image[start..start + len]);
+    if !complaints_before.is_empty() {
+        return Err(format!(
+            "the log partition was not born clean, so this gate cannot tell a complaint the \
+             guest caused from one it inherited:\n{}",
+            describe(&complaints_before)
+        ));
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            kernel_params: PARAMS,
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+    if !boot.contains("log-volume: partition mounted") {
+        return Err(format!(
+            "the log partition did not mount, so the race had nowhere to run:\n{}",
+            volume_lines(&boot)
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_redirty_mid_flush", Duration::from_secs(120));
+    if let Some(err) = &result.error {
+        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "redirty_mid_flush guest failed — a write racing a flush was lost:\n{}\nkernel log \
+             while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    let volume = &after[start..start + len];
+    let complaints_after = check(volume);
+    if !complaints_after.is_empty() {
+        return Err(format!(
+            "the racing rounds left the log volume breaking the format:\n{}",
+            describe(&complaints_after)
+        ));
+    }
+    let got = need(read_files(volume, &[TARGET])?.pop().flatten(), TARGET)?;
+    for slot in 0..ROUNDS {
+        let at = SLOTS_AT + slot as usize * 8;
+        let held = got
+            .get(at..at + 8)
+            .map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes")))
+            .ok_or_else(|| format!("{TARGET} is {} bytes on the volume, short of slot {slot}", got.len()))?;
+        if held != slot {
+            return Err(format!(
+                "slot {slot} holds {held} on the device — a write the guest confirmed durable \
+                 is not in the bytes the host reads"
+            ));
+        }
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!(
+        "  [f6] {ROUNDS} racing rounds survived in-guest; all {ROUNDS} slots on the device by \
+         the host's own reader, checker silent"
+    );
+    Ok(())
+}
+
 /// A rename whose source is absent leaves the destination on the FAT `/log`
 /// volume, and `rename(p, p)` leaves the file — the **independent oracle** for
 /// the same reason `fat_backing_revoked` is one. The guest
@@ -1223,6 +1398,7 @@ pub fn fs_rename_durable(
     );
     Ok(())
 }
+
 
 /// The boot disk arrives *after* the port scan, and both mounts still happen.
 ///

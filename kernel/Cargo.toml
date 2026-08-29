@@ -44,6 +44,9 @@ log-commit-release-off = []
 # `src/log/registry.rs`'s pointer store and load go `Relaxed`, and
 # `log_publish` reds.
 shard-publish-relaxed = []
+# `src/durability.rs`'s `settle` becomes the pre-generation blind clear, and
+# `durability` reds.
+durability-settle-blind = []
 # The same arrangement for the sleep lock's acquire edge, and it is the first
 # *contended*-acquire model this tree has: `src/sleeplock.rs`'s two loads of
 # `now` — the ones that decide whose turn it is — go `Relaxed`, so the previous
