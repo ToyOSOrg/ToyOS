@@ -289,6 +289,16 @@ impl FileSystem for BcacheFsAdapter {
         fs_rename::replace_rename(self, old, new)
     }
 
+    // `NotSupported`, not a refusal: no directory representation here, so the
+    // VFS carries created directories itself.
+    fn create_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
+    }
+
+    fn remove_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
+    }
+
     fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {
         let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
         let name = info.name.clone();
@@ -399,6 +409,16 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
 
     fn rename(&mut self, _old: &str, _new: &str) -> Result<(), SyscallError> {
         Err(SyscallError::PermissionDenied)
+    }
+
+    // `NotSupported`, not a refusal: no directory representation here, so the
+    // VFS carries created directories itself.
+    fn create_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
+    }
+
+    fn remove_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
     }
 
     fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {

@@ -54,6 +54,13 @@ pub trait FileSystem: Send {
     fn delete(&mut self, name: &str) -> Result<(), SyscallError>;
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError>;
 
+    /// Create the directory `name` on the volume; `NotSupported` from a mount
+    /// with no directory representation makes the VFS carry it instead.
+    fn create_dir(&mut self, name: &str) -> Result<(), SyscallError>;
+    /// Remove the empty directory `name`, refusing a file, a missing name and
+    /// a non-empty directory each by its own error.
+    fn remove_dir(&mut self, name: &str) -> Result<(), SyscallError>;
+
     /// Write one dirty page to the device, allocating its block if needed.
     fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError>;
     /// Update file metadata (size, mtime) after flushing dirty pages.
@@ -303,10 +310,16 @@ impl Vfs {
         let matching = all_files.iter().filter(|(n, _)| under_prefix(n, &prefix).is_some()).count();
         let mut result = Vec::with_capacity(matching);
         let mut seen_dirs = hashbrown::HashSet::new();
+        let mut saw_self = false;
 
         for (name, size) in &all_files {
             let Some(rest) = under_prefix(name, &prefix) else { continue };
 
+            // The listed directory's own entry: proof it exists, not a child.
+            if rest.is_empty() {
+                saw_self = true;
+                continue;
+            }
             if let Some(slash_pos) = rest.find('/') {
                 let dir_name = format!("{}/", &rest[..slash_pos]);
                 if seen_dirs.insert(dir_name.clone()) {
@@ -317,9 +330,13 @@ impl Vfs {
             }
         }
 
-        // `created_dirs` is the only witness to an empty `mkdir`ed directory;
-        // without it an empty directory reads as one that was never there.
-        if result.is_empty() && !prefix.is_empty() && !self.created_dirs.contains(&directory(&mount, &subdir)) {
+        // An empty directory's witnesses: its own listing entry on a mount
+        // that represents directories, `created_dirs` on one the VFS carries.
+        if result.is_empty()
+            && !saw_self
+            && !prefix.is_empty()
+            && !self.created_dirs.contains(&directory(&mount, &subdir))
+        {
             return Err(SyscallError::NotFound);
         }
         Ok(result)
@@ -463,6 +480,18 @@ impl Vfs {
         if path.len() > MAX_PATH {
             return Err(SyscallError::InvalidArgument);
         }
+        let (mount, subdir) = self.resolve_path("/", path);
+        // `/` and a mount root already exist.
+        if subdir.is_empty() {
+            return Err(SyscallError::AlreadyExists);
+        }
+        if let Some((fs, fs_path)) = self.resolve_fs(&mount, &subdir) {
+            match fs.create_dir(&fs_path) {
+                // No directory representation on this mount; carried below.
+                Err(SyscallError::NotSupported) => {}
+                outcome => return outcome,
+            }
+        }
         // A new key past the cap is refused rather than grown; a repeat of one already held costs nothing and is let through.
         if !self.created_dirs.contains(path) && self.created_dirs.len() >= MAX_CREATED_DIRS {
             return Err(SyscallError::ResourceExhausted);
@@ -481,6 +510,21 @@ impl Vfs {
             return Err(SyscallError::InvalidArgument);
         }
         let dir = directory(&mount, &subdir);
+
+        let forwarded = {
+            let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
+            fs.remove_dir(&fs_path)
+        };
+        match forwarded {
+            // No directory representation on this mount; judged below from
+            // the listing and `created_dirs`, as `create_dir` carried it.
+            Err(SyscallError::NotSupported) => {}
+            Ok(()) => {
+                self.created_dirs.remove(&dir);
+                return Ok(());
+            }
+            outcome => return outcome,
+        }
 
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
         let names = fs.list(MAX_LIST_ENTRIES)?;
