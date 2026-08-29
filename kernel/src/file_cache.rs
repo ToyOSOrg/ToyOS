@@ -568,7 +568,7 @@ fn dirty_pages(cache: &FileCache) -> usize {
         .files
         .values()
         .filter(|f| f.is_cache())
-        .map(|f| f.pages.values().filter(|p| p.dirty).count())
+        .map(|f| f.pages.values().filter(|p| p.is_dirty()).count())
         .sum()
 }
 
