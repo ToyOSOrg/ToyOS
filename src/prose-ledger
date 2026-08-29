@@ -205,7 +205,7 @@ src/mergehealth.rs 229 3
 src/pr.rs 177 5
 src/prosegate.rs 128 0
 src/qemu.rs 113 0
-src/redlist.rs 507 25
+src/redlist.rs 512 25
 src/soundfont.rs 133 0
 src/sourcegate.rs 201 1
 src/stamps.rs 3 0
@@ -257,7 +257,7 @@ tests/toyos-rust-tests/src/bin/abuse_spawn_argv.rs 14 0
 tests/toyos-rust-tests/src/bin/abuse_thread_name.rs 37 0
 tests/toyos-rust-tests/src/bin/abuse_tls_alloc.rs 32 0
 tests/toyos-rust-tests/src/bin/allocator_stress.rs 34 0
-tests/toyos-rust-tests/src/bin/audio_idle_suspend.rs 18 0
+tests/toyos-rust-tests/src/bin/audio_idle_suspend.rs 19 0
 tests/toyos-rust-tests/src/bin/audio_tone.rs 3 0
 tests/toyos-rust-tests/src/bin/audio_tone_load.rs 5 0
 tests/toyos-rust-tests/src/bin/blocking_read_stress.rs 32 0
@@ -367,7 +367,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4934 23
+tests/toyos.rs 4936 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
@@ -501,7 +501,7 @@ toyos-mixer/src/gain.rs 43 0
 toyos-mixer/src/lib.rs 43 0
 toyos-mixer/src/mix.rs 38 0
 toyos-mixer/src/shape.rs 102 0
-toyos-mixer/src/stats.rs 122 0
+toyos-mixer/src/stats.rs 131 0
 toyos-pci/src/bar.rs 97 0
 toyos-pci/src/caps.rs 13 0
 toyos-pci/src/lib.rs 20 0
@@ -661,7 +661,7 @@ userland/soundd/src/command.rs 33 0
 userland/soundd/src/control.rs 122 0
 userland/soundd/src/hda.rs 52 0
 userland/soundd/src/main.rs 71 0
-userland/soundd/src/mix.rs 305 0
+userland/soundd/src/mix.rs 309 0
 userland/soundd/src/virtio.rs 92 0
 userland/sprite/src/lib.rs 17 0
 userland/sshd/src/main.rs 78 0

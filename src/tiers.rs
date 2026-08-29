@@ -8,16 +8,14 @@
 //! [`RELEGATED`] is exactly the set the nightly job selects, and `tests/toyos.rs`
 //! writes [`Tier::Nightly`] against each of those names in its own registration.
 //!
-//! **This is interim and it is a loss.** Fifty-three registered tests are
-//! Nightly: twenty-four for [`Why::Cost`] — a CI price without margin, which
-//! since 2026-08-21 means over [`FAST_COMMIT_MS`] rather than over the ceiling
-//! itself — twenty-five for [`Why::TimerAnchored`], Nightly by classification
-//! rather than by cost and mostly nowhere near the line — and four for
-//! [`Why::RidesTheBootOf`], riding `metal_sim_compositor`'s shared boot.
-//! Between them they carry 604.8 s of the 994.9 s the committed profile prices
-//! across 327 labels, and none is
-//! gated per pull request. `guards` on every row says what stopped being gated,
-//! because a run that quietly does less is the whole failure mode here.
+//! **This is interim and it is a loss.** Most of the committed profile's priced
+//! time is Nightly, for three reasons a row's [`Why`] names: a CI price without
+//! margin ([`Why::Cost`] — since 2026-08-21, over [`FAST_COMMIT_MS`] rather
+//! than over the ceiling itself), Nightly by classification rather than by cost
+//! ([`Why::TimerAnchored`]), or riding `metal_sim_compositor`'s shared boot
+//! ([`Why::RidesTheBootOf`]). None of it is gated per pull request. `guards`
+//! on every row says what stopped being gated, because a run that quietly does
+//! less is the whole failure mode here; the counts are [`RELEGATED`] itself.
 //!
 //! **Nothing here is an optimisation and nothing here changes an assertion.**
 //! A relegated test measures exactly what it measured; the manual nightly
@@ -204,6 +202,181 @@ pub struct Relegated {
 
 /// Every test the fast tier does not run.
 pub const RELEGATED: &[Relegated] = &[
+    Relegated {
+        test: "dump_nmi_probe",
+        ci_ms: 8_098,
+        why: Why::Cost,
+        guards: "The blocked-task dump's NMI probe: a CPU that misses its kick is asked where it \
+                 is with the one interrupt it cannot mask, and the rip that comes back must \
+                 resolve against the kernel's own symbols into the actuator's spin — the \
+                 separation of the three causes a silent CPU can have, which on the owner's T14 \
+                 named three CPUs without saying which. What still runs per pull request: \
+                 `blocked_dump` drives the dump itself, counts and kick budget, on the desktop \
+                 boot; the probe's answer and its symbolization have no other gate. Returned to \
+                 Fast on 2026-08-21 at 6,284 ms; back for margin at this price.",
+    },
+    Relegated {
+        test: "esp_filesystem",
+        ci_ms: 10_123,
+        why: Why::Cost,
+        guards: "Both FAT32 partitions as ordinary mounts, attacked from inside and judged from \
+                 outside: the tree's one host-writes-guest-reads staging direction, and the only \
+                 gate where a guest `fs::write` on `/boot` — the write that once truncated \
+                 `kernel.elf` to five bytes — is judged refused against the image the *device* \
+                 received, with `toyos-fat32-check` silent before and after and every build \
+                 artifact byte-identical. What still runs per pull request: \
+                 `boot_volume_metadata_error` gates `/boot`'s refused reads and \
+                 `writeback_durability` the host-judged `/log` write path; the `/boot` write \
+                 attack and the staged-file direction are gated only here.",
+    },
+    Relegated {
+        test: "fat_backing_revoked",
+        ci_ms: 8_226,
+        why: Why::Cost,
+        guards: "A `FatBacking` handed out before an unlink reading nothing after it — before \
+                 `FatFs::revoke`, a descriptor held across somebody else's `rm` demand-paged \
+                 whatever the reissued clusters got next — with the two questions the guest \
+                 cannot ask about itself answered on the host: `fatfs` reads the attacker's file \
+                 end to end off the image so the clusters really were reissued, and \
+                 `toyos-fat32-check` must stay silent on a partition asserted clean before the \
+                 boot. `revoke` lives in the kernel's adapters where no host suite reaches, and \
+                 no other test stages the cycle, so the refusal and both host-side questions go \
+                 nightly together.",
+    },
+    Relegated {
+        test: "heap_ceiling_recovery",
+        ci_ms: 10_371,
+        why: Why::Cost,
+        guards: "The machine surviving the report of its own heap-ceiling bug: one past \
+                 `mm::MAX_HEAP_ALLOC` kills its caller and nothing else, and the CPU that \
+                 recovered survives its next allocation — the check once sat inside the \
+                 allocator's lock, the kernel does not unwind, and reporting the bug wedged the \
+                 heap for the rest of the boot. One CPU is what makes the recovery claim \
+                 precise, and the `SYS_DEBUG` actuator is what makes the crossing observable at \
+                 all. Nothing still gates it per pull request: the kernel allocator has no host \
+                 suite and no other test crosses the ceiling.",
+    },
+    Relegated {
+        test: "idle_stack_guard",
+        ci_ms: 9_601,
+        why: Why::Cost,
+        guards: "The guard page under every per-CPU idle stack being really there: an overflow \
+                 off that stack once rewrote whatever the allocator had put underneath and \
+                 surfaced somewhere else entirely, so the page's absence is invisible to every \
+                 log line and screendump, and `SYS_DEBUG` action 9 on the test kernel supplies \
+                 the one read that asks — asserted down to the page walk's split leaf. Nothing \
+                 cheap still gates it per pull request: `double_fault_stack` bounds IST1, a \
+                 different stack, and nothing else touches this page, that being the point of a \
+                 guard page. Returned to Fast on 2026-08-21 at 5,049 ms; the price has nearly \
+                 doubled since its return.",
+    },
+    Relegated {
+        test: "locale_detect",
+        ci_ms: 8_607,
+        why: Why::Cost,
+        guards: "The wizard answered over QMP on the stand-in `locale_gate`, swiss-german \
+                 identified in two presses and the surface acting on the config it wrote. What \
+                 still runs per pull request: `console_locale_detect` and \
+                 `desktop_locale_detect` carry the same wizard to the same verdict on the two \
+                 surfaces the machine actually has — the console's own translator typing `ü` \
+                 off the re-read config, and the compositor forwarding transitions three \
+                 processes down — so the positive arm keeps both real-surface gates and only \
+                 the stand-in configuration moves.",
+    },
+    Relegated {
+        test: "locale_detect_unrecognized",
+        ci_ms: 8_260,
+        why: Why::Cost,
+        guards: "The wizard's negative control, in the guest: presses no layout agrees with \
+                 must end in `detect: Unrecognized` and never in a layout applied. What still \
+                 runs per pull request: `toyos-keymap`'s host suite (`tests/detect.rs`) drives \
+                 the same decision to `Step::Unrecognized`, so the verdict logic keeps a per-PR \
+                 gate; what moves is the in-guest half — the gate binary refusing rather than \
+                 applying — which no Fast test stages: both real-surface siblings answer the \
+                 wizard correctly.",
+    },
+    Relegated {
+        test: "log_partition_identity",
+        ci_ms: 9_516,
+        why: Why::Cost,
+        guards: "The log partition being named, never discovered — proved by moving the name: a \
+                 forged `log.guid` must produce a `gpt:` refusal naming the GUID it could not \
+                 find, cost nothing else (`/boot` mounts, the boot completes), and not fall \
+                 back, with the partition read back empty off the host afterwards — falling \
+                 back to the ESP would leave it empty too, so `logd` must not have opened a \
+                 file either. What still runs per pull request: `log_partition_layout` gates \
+                 the image-side bytes, GUIDs written out in full, on the volume a desktop OS \
+                 picks up; the boot-side refusal and the no-fallback proof move to nightly.",
+    },
+    Relegated {
+        test: "readdir_bound",
+        ci_ms: 8_578,
+        why: Why::Cost,
+        guards: "`read_dir` returning every entry or an error, never a short listing: a \
+                 directory pushed past `vfs::MAX_LIST_ENTRIES` must be refused where 32,769 \
+                 files from `fs::write` in a loop once panicked the kernel, and `SYS_READDIR` \
+                 must not report the bytes it managed to write as success, which once made \
+                 34,816 entries read as 4,125 and complete. Both are userland reaching a kernel \
+                 failure, and nothing cheap still gates either per pull request: the bound and \
+                 the count live in the kernel, not in a pure crate, and this is their only \
+                 test.",
+    },
+    Relegated {
+        test: "usb_short_read",
+        ci_ms: 8_150,
+        why: Why::Cost,
+        guards: "A data phase the controller cut short while the device's own CSW claims it \
+                 moved everything: the driver must count the xHC's residue, not the device's, \
+                 or an under-delivered READ(10) hands the caller the previous transfer's bytes \
+                 — another LBA's data under this LBA's number, with no error anywhere — judged \
+                 against bytes the host staged before the boot. What still runs per pull \
+                 request: `usb_storage_write_error` gates real write failures propagating; the \
+                 short-read refusal has no cheaper gate.",
+    },
+    Relegated {
+        test: "writeback_spawn",
+        ci_ms: 8_820,
+        why: Why::Cost,
+        guards: "One of the write-back queue's three negative controls (wall 4 of \
+                 `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`), on the arm the file \
+                 cache does not answer: with `writeback-stall` holding the flush provably owed, \
+                 a binary written, closed and spawned must run — `Vfs::open_backing` settles \
+                 the queue — where the kernel once answered `ELF: fewer bytes than a file \
+                 header`. Write, close, exec is the self-hosting sequence. What still runs per \
+                 pull request: `writeback_reopen` gates the handle-re-open arm the cache does \
+                 answer, and `writeback_durability` the host-judged volume; the device-view \
+                 arm is gated only here.",
+    },
+    Relegated {
+        test: "xhci_full_speed_device",
+        ci_ms: 8_833,
+        why: Why::Cost,
+        guards: "EP0's max packet size on a device that attaches at full speed, where only the \
+                 device knows it: the driver reads eight bytes, takes `bMaxPacketSize0` from \
+                 them, and only then reads the rest, and what it prints about a device is what \
+                 the device sent — the T14's port 9 was once logged `vendor=0000 product=0000` \
+                 off a buffer no transfer had filled. QEMU's `.full`-only descriptor tables are \
+                 the bytes a guest cannot invent. What still runs per pull request: \
+                 `xhci_descriptor_walk` walks descriptors at the speeds whose EP0 size is \
+                 fixed; the discovery sequence and the error channel are gated only here. This \
+                 is the straddler `FAST_COMMIT_MS`'s own doc prices — six hosted runs from \
+                 4,700 to 9,890 ms — so margin is exactly what it lacks.",
+    },
+    Relegated {
+        test: "xhci_slot_exhaustion",
+        ci_ms: 8_149,
+        why: Why::Cost,
+        guards: "A device count as untrusted input: more devices than the driver's DMA layout \
+                 has blocks for must cost those devices and nothing else, staged by clamping \
+                 the kernel to one block (`xhci-one-slot`) under a six-device bus — QEMU's \
+                 Enable Slot ignores MaxSlotsEn, so the slot ids really do run past the pool — \
+                 with the vacuousness check that the controller offers more slots than the \
+                 blocks, since a build whose ceiling stopped reaching `Layout::new` drops \
+                 nothing and goes green with no shortage in it. What still runs per pull \
+                 request: `usb_pool_exhausted` gates the MSC pool's refusal-by-name with \
+                 host-side byte proof — a different pool; the xHCI slot bound is gated only \
+                 here.",
+    },
     Relegated {
         test: "cache_eviction",
         ci_ms: 8_165,
@@ -763,9 +936,10 @@ pub const RELEGATED: &[Relegated] = &[
                  abandoned transfer and the Bulk-Only reset — its own doc says one break under \
                  KVM and two under TCG off the same tree. Dynamic USB goes nightly-only with \
                  the three below: what stays gated per pull request is enumeration, \
-                 descriptors, slots, PORTSC, short reads, write errors and pool exhaustion — \
-                 every static shape — but no pull request exercises a device arriving or \
-                 leaving while the machine runs.",
+                 fixed-speed descriptors, PORTSC, write errors and the MSC pool's exhaustion — \
+                 the slot bound, short reads and full-speed EP0 hold nightly Why::Cost rows of \
+                 their own — but no pull request exercises a device arriving or leaving while \
+                 the machine runs.",
     },
     Relegated {
         test: "xhci_hotplug",

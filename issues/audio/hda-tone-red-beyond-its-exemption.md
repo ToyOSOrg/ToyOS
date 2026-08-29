@@ -31,12 +31,19 @@ carries two rows for the name — one `Seen` on the dev host alone, sourced here
 and one at 4 of 5 on CI — so an agent who does meet it is told whose it is
 rather than reading it as theirs.
 
-Neither touches the verdict, and the verdict is what is owed. Every capture
-behind it was taken through QEMU's 48000→44100 resampler, which is no longer in
-the path, so this assertion and #88's both want re-judging on a fresh sample
-rather than carrying forward — `issues/audio/hda-verdicts-rest-on-pre-fix-captures.md`
-is where that is tracked. A capture taken beside other guests is not that
-sample.
+Neither touches the verdict, and the verdict was owed a fresh sample: every
+capture behind it had gone through QEMU's 48000→44100 resampler, since removed.
+
+**Re-judged 2026-08-29, and it stands.** On the current instrument (QEMU
+11.1.0), `main` at `48437ca4`: alone, 8 of 8 boots clean (`gaps none`); beside
+two other suites of this worktree (1-min load 5.1-21.6), **1 of 11 boots put one
+mid-tone period of silence in the capture** — `1 mid-tone silences in the
+capture: total 1 [1p×1]`, byte-identical to the line above, with 4 phase breaks
+beside it and a confirming re-boot that came back 8 breaks and no gap. So the
+red is real on the fixed pipeline, load-keyed, and roughly the shape of CI's 4
+of 5 — the re-judging that was tracked apart closed with this measurement, and
+the load-stall family (`issues/audio/thorough-tier-reds-on-unmodified-main.md`)
+is the standing suspect for the mechanism.
 
 Found while landing task #98/#12: the same test failed identically inside that
 landing's gate, and the A/B against `main` in the same session is what
