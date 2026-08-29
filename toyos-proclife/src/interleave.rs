@@ -41,7 +41,7 @@ pub enum Op {
     /// built between them.
     Spawn { pid: Pid, pc: u32 },
     /// `process::thread_exit` on a thread that is not the main one.
-    ThreadExit { pid: Pid, tid: Tid, code: i32, pc: u32, post: Option<Watch> },
+    ThreadExit { pid: Pid, tid: Tid, code: i32, pc: u32 },
     /// `sys_thread_join`: collect or arm, then re-check.
     Join { pid: Pid, target: Tid, waiter: Tid, pc: u32 },
     /// The idle loop's `reap_poisoned`, reap half.
@@ -59,7 +59,7 @@ impl Op {
         Op::Spawn { pid, pc: 0 }
     }
     pub fn thread_exit(pid: Pid, tid: Tid, code: i32) -> Self {
-        Op::ThreadExit { pid, tid, code, pc: 0, post: None }
+        Op::ThreadExit { pid, tid, code, pc: 0 }
     }
     pub fn join(pid: Pid, target: Tid, waiter: Tid) -> Self {
         Op::Join { pid, target, waiter, pc: 0 }
@@ -189,18 +189,12 @@ impl Op {
                     *pc = DONE;
                 }
             },
-            Op::ThreadExit { pid, tid, code, pc, post } => match *pc {
+            Op::ThreadExit { pid, tid, code, pc } => match *pc {
                 0 => match teardown::route_thread_exit(world, *pid, *tid) {
-                    teardown::ThreadExit::Sibling { post: on } => {
-                        *post = Some(on);
-                        *pc = 1;
-                    }
+                    teardown::ThreadExit::Sibling => *pc = 1,
                     // The entry went under this thread; the zombie mark has
                     // nothing to write and the rest is a sibling's exit.
-                    teardown::ThreadExit::Gone { post: on } => {
-                        *post = Some(on);
-                        *pc = 2;
-                    }
+                    teardown::ThreadExit::Gone => *pc = 2,
                     // The explorer scripts a sibling; a main thread's exit is
                     // `Op::Exit`.
                     teardown::ThreadExit::Process => *pc = DONE,
@@ -211,12 +205,10 @@ impl Op {
                     world.set_location(*pid, *tid, ThreadLocation::Zombie(*code));
                     *pc = 2;
                 }
-                // The post, with the table lock given up, before the exit pass
-                // — after it this thread does not run again.
+                // The exit pass, one pass later: the payload drops and
+                // `publish_released` posts on this thread's own watch — the one
+                // post a joiner is released by.
                 _ => {
-                    if let Some(on) = *post {
-                        world.post(on);
-                    }
                     world.retire(*pid, *tid);
                     *pc = DONE;
                 }
@@ -485,19 +477,19 @@ mod tests {
 
         assert_eq!(
             teardown::route_thread_exit(&world, pid, sibling),
-            teardown::ThreadExit::Gone { post: Watch::Thread(pid, sibling) },
+            teardown::ThreadExit::Gone,
             "a thread whose process was reaped under it leaves by the sibling door",
         );
 
         // The route is not the end of the exit: a thread routed to a state its
         // caller does not survive stops here, and one out of the sibling door
-        // still has its post and its retire to run.
+        // still has its retire to run.
         let mut exit = Op::thread_exit(pid, sibling, 0);
         exit.step(&mut world);
         assert!(
             !exit.done(),
             "the exit ended at its routing section: a thread whose entry went under it \
-             still has to post and retire, and one that stops here is the machine \
+             still has to retire, and one that stops here is the machine \
              stopping with it",
         );
         while !exit.done() {

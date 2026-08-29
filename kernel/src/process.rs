@@ -31,7 +31,7 @@ pub use crate::scheduler::TaskId;
 use toyos_abi::syscall::EndowEntry;
 
 /// The lifecycle's decisions; this file only performs them.
-pub use toyos_proclife::{ThreadLocation, Watch};
+pub use toyos_proclife::ThreadLocation;
 use toyos_proclife::{join, poison, reap, spawn as proclife_spawn, teardown as proclife, Lifecycle, Processes};
 
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
@@ -1132,31 +1132,19 @@ pub fn thread_exit(code: i32) -> ! {
         proclife::route_thread_exit(table, process_pid, tid)
     };
 
-    let post = match route {
+    match route {
         proclife::ThreadExit::Process => exit(code),
-        proclife::ThreadExit::Sibling { post } => post,
+        proclife::ThreadExit::Sibling => {}
         // The entry went under this thread on the way here (the race `mark_thread_zombie` already tolerates); it leaves by the sibling door.
-        proclife::ThreadExit::Gone { post } => {
+        proclife::ThreadExit::Gone => {
             log!("exit: pid={process_pid} tid={tid} outlived its process-table entry");
-            post
         }
-    };
+    }
 
     release_thread(process_pid, tid, code);
-    // Whoever joined this thread armed on it; post before the exit pass — after it this thread never runs again.
-    if let Some(handle) = crate::sched::driver::current_handle() {
-        // Held together by assertion, not shared state: the decision names the subject, this performs it via the CPU's own handle.
-        debug_assert_eq!(
-            post,
-            Watch::Thread(process_pid, tid),
-            "thread_exit posts through its own task handle, so the decision must have \
-             named its own watch",
-        );
-        crate::completion::post(
-            crate::completion::Subject::of(handle.watch()),
-            crate::completion::Outcome::Gone(crate::completion::Reason::Closed),
-        );
-    }
+    // No post here: the exit pass drops this thread's payload, and `publish_released`'s
+    // post on its own watch is the one place a joiner is released from — after the
+    // payload really is gone, never before.
     scheduler::exit_current(code);
 }
 

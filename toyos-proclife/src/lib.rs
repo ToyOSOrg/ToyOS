@@ -8,9 +8,9 @@
 //! rather than the arithmetic. A spawn builds a thread's TLS block, its kernel
 //! stack and its scheduler record between two acquisitions of the process
 //! table lock, and a kill on another CPU claims the process in that window; a
-//! thread's exit posts a completion whose subject decides whether a joiner ever
-//! runs again; an idle pass takes an entry whose threads another CPU may still
-//! be retiring.
+//! thread's death reaches its joiner only through the exit pass's release, so
+//! whether a joiner ever runs again is an ordering question; an idle pass takes
+//! an entry whose threads another CPU may still be retiring.
 //!
 //! So the decisions live here and the effects stay in `kernel/src/process.rs`.
 //! Nothing in this crate locks, retires a task, frees a page, reads a clock or
@@ -36,9 +36,9 @@
 //!
 //! A decision takes the lifecycle view, answers a value, and mutates only the
 //! two words it is about. It never performs the consequence: a
-//! [`teardown::ThreadExit::Sibling`] carries the [`Watch`] to post on and posts
-//! nothing, because the post must happen with the table lock given up and this
-//! crate cannot know that the caller is holding it.
+//! [`teardown::ThreadExit`] routes an exit and retires nothing, because the
+//! retire must happen with the table lock given up and this crate cannot know
+//! that the caller is holding it.
 //!
 //! [`Scheduled`]: ThreadLocation::Scheduled
 //! [`Zombie`]: ThreadLocation::Zombie
