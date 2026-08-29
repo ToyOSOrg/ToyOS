@@ -309,6 +309,9 @@ const RUST_SKIP: &[&str] = &[
     // back off the image after a shutdown by a FAT implementation that is not
     // the kernel's. `fat_backing_revoked` runs it.
     "fat_backing_revoked",
+    // Stages a rename with an absent source on `/log` and leaves the
+    // destination for `fs_rename_durable` to read back off the image.
+    "fs_rename_durable",
     // Needs an HDA controller, which `tests/testcases` has none of.
     "hda_client_stall",
     // Gate A's two, whose verdict is the wav the device captured — which the
@@ -920,6 +923,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel, Tier::Nightly),
     ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
+    // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
+    ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
@@ -7959,6 +7964,7 @@ fn run_machine_test(
         "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
+        "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.

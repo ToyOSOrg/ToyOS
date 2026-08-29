@@ -50,6 +50,7 @@ mod tmpfs;
 mod file_backing;
 mod bcachefs_adapter;
 mod fat32_adapter;
+mod fs_rename;
 #[cfg(feature = "boot-actuators")]
 mod heartbeat;
 mod vfs;

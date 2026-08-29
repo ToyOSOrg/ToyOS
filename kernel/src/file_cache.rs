@@ -415,6 +415,18 @@ fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
             for k in &removed {
                 file.pages.remove(k);
             }
+            // The page the new end falls inside is kept; zero its bytes past the
+            // new end and dirty it, in the one step that sets the size, so a
+            // later grow reads the hole as zeros rather than the discarded tail
+            // and the flush carries those zeros to the device.
+            let tail = (new_size % PAGE_SIZE as u64) as usize;
+            if tail != 0 {
+                let straddled = (new_size / PAGE_SIZE as u64) as u32;
+                if let Some(page) = file.pages.get_mut(&straddled) {
+                    page.data[tail..].fill(0);
+                    page.dirty = true;
+                }
+            }
             if is_cache { removed.len() } else { 0 }
         } else {
             0

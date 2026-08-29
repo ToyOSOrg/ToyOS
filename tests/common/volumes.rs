@@ -1279,6 +1279,127 @@ pub fn redirty_mid_flush(
     Ok(())
 }
 
+/// A rename whose source is absent leaves the destination on the FAT `/log`
+/// volume, and `rename(p, p)` leaves the file — the **independent oracle** for
+/// the same reason `fat_backing_revoked` is one. The guest
+/// (`test_rs_fs_rename_durable`) stages both; after the shutdown drain the two
+/// files are read off the image by the `fatfs` crate and must hold their bytes
+/// end to end, and `toyos-fat32-check` reads the whole volume against a
+/// partition asserted clean before the boot — a rename that freed the
+/// destination's clusters first would fail both, and every guest assertion none.
+pub fn fs_rename_durable(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/fs_rename_durable.rs`.
+    const VICTIM: &str = "fstx-rename-victim.bin";
+    const SELFED: &str = "fstx-rename-self.bin";
+    const LEN: usize = 5 * 4096 + 33;
+    fn payload() -> Vec<u8> {
+        (0..LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
+    }
+
+    let image_path = test_dir().join("fs-rename-durable.img");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = log_extent(&image, &image_path)?;
+
+    // Born clean, asserted rather than assumed, so a complaint after the run is
+    // the guest's and not one it inherited.
+    let complaints_before = check(&image[start..start + len]);
+    if !complaints_before.is_empty() {
+        return Err(format!(
+            "the log partition was not born clean, so this gate cannot tell a complaint the \
+             guest caused from one it inherited:\n{}",
+            describe(&complaints_before)
+        ));
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+    if !boot.contains("log-volume: partition mounted") {
+        return Err(format!(
+            "the log partition did not mount, so the guest had nowhere to stage the rename:\n{}",
+            volume_lines(&boot)
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_fs_rename_durable", Duration::from_secs(60));
+    if let Some(err) = &result.error {
+        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        // The kernel's own lines too: the refusal reaches userland as one error,
+        // and which layer refused is only in a `log!`.
+        return Err(format!(
+            "fs_rename_durable guest failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    if after.len() != image.len() {
+        return Err(format!("the image is {} bytes, was {}", after.len(), image.len()));
+    }
+    let volume = &after[start..start + len];
+
+    // The strongest claim first: the volume is still a volume, so a wrongly
+    // freed cluster is caught here and not only by the byte comparison below.
+    let complaints_after = check(volume);
+    if !complaints_after.is_empty() {
+        return Err(format!(
+            "the staged renames left the log volume breaking the format:\n{}",
+            describe(&complaints_after)
+        ));
+    }
+
+    let want = payload();
+    let mut files = read_files(volume, &[VICTIM, SELFED])?;
+    for (name, got) in [(SELFED, files.pop().flatten()), (VICTIM, files.pop().flatten())] {
+        let got = need(got, name)?;
+        if got.len() != LEN {
+            return Err(format!("{name} is {} bytes on the volume; the guest staged {LEN}", got.len()));
+        }
+        if let Some(at) = got.iter().zip(&want).position(|(a, b)| a != b) {
+            return Err(format!(
+                "{name} differs on the volume from what the guest staged at byte {at} — the \
+                 host's own FAT reader does not see the file the guest left"
+            ));
+        }
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!(
+        "  [fat] a rename with an absent source left its {LEN}-byte destination intact and \
+         rename(p, p) left its file, both end to end on the host's own reader, and the checker \
+         is silent"
+    );
+    Ok(())
+}
+
+
 /// The boot disk arrives *after* the port scan, and both mounts still happen.
 ///
 /// The machine the T14 was on the boot it lost `/boot` and `/log`, and the one
