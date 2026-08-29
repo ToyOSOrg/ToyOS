@@ -3,9 +3,8 @@ name: portability
 # The dependency doctrine's own premise, run rather than argued: root
 # CLAUDE.md's "only Rust and QEMU" is a claim about what a fresh machine of
 # any OS needs. Nothing checked that on any OS but this project's own dev
-# hosts until this file — issues/build/the-portability-premise-has-no-
-# instrument.md is the defect this answers, and it stays open after this PR:
-# the third step that issue originally sketched (`cargo test` where
+# hosts until this file — the tracker's portability-premise defect, which
+# this answers (since closed as answered): the third step it originally sketched (`cargo test` where
 # virtualization allows, a TCG run where it does not) is still future work,
 # deliberately not here — wiring it in would put this file on
 # `src/ci.rs`'s `GATES` list, which the linux and macos jobs below correctly
@@ -203,9 +202,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The natural third row: `host-tests.yml` already proves `macos-latest` is
-  # reachable on this plan, and the only gap was that nobody had pointed a
-  # `--build-only` at a fresh one — issues/build/the-portability-premise-has-
-  # no-instrument.md names it. What this job can and cannot prove differs
+  # reachable on this plan, and the only gap the portability-premise entry
+  # named was that nobody had pointed a `--build-only` at a fresh one. What this job can and cannot prove differs
   # from Linux's in one respect: Homebrew keeps exactly one version of the
   # `qemu` formula — whichever homebrew-core currently calls stable — and no
   # versioned `qemu@<x.y.z>` formula exists for it the way one does for

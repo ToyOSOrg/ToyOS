@@ -174,3 +174,7 @@ fn count(names: &[String], matches: impl Fn(&str) -> bool) -> usize {
 fn is_toyos_build(name: &str) -> bool {
     name.starts_with("toyos-build") || name.starts_with("toyos_build")
 }
+
+// A third host OS gets a named gap, not a missing-function error at a distance.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("process_names reads the process table per-OS, and this OS has no arm yet");

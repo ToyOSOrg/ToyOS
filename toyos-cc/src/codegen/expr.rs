@@ -515,6 +515,16 @@ impl Codegen {
             );
         }
         let load_ty = self.clif_type(&ty);
+        if load_ty == F32 || load_ty == F64 {
+            panic!(
+                "va_arg of a floating type is not implemented: this lowering reads the gp \
+                 save slots, and SysV classifies a floating argument SSE — fp_offset at \
+                 ap+4, threshold 176, xmm slots past the six gp ones — which va_start \
+                 records and nothing here reads. A silent gp read hands back another \
+                 argument's bits. Read it as a 64-bit integer and reinterpret, or pass a \
+                 pointer."
+            );
+        }
         let ap_name = match ap_expr {
             Expr::Ident(n) => n,
             other => panic!("va_arg: expected identifier, got {other:?}"),

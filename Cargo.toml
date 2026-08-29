@@ -86,8 +86,8 @@ license = "MIT OR Apache-2.0"
 fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
-# `statvfs` for `worktree::free_bytes`; `getloadavg` for gate A's
-# host-conditions annotation.
+# `statvfs` for `worktree::free_bytes`; `getloadavg` and the libproc pair
+# (`proc_listallpids`/`proc_pidpath`) for gate A's host-conditions line.
 libc = "0.2"
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }

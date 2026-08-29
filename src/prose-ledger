@@ -194,10 +194,10 @@ src/ci.rs 105 1
 src/clippy.rs 35 0
 src/day.rs 16 1
 src/durations.rs 365 6
-src/forkcheck.rs 156 1
+src/forkcheck.rs 160 1
 src/hostws.rs 187 2
 src/image.rs 186 1
-src/issuegate.rs 83 0
+src/issuegate.rs 109 0
 src/lib.rs 48 0
 src/libc.rs 31 1
 src/main.rs 70 0
@@ -222,7 +222,7 @@ tests/common/console.rs 249 2
 tests/common/faults.rs 345 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 85 0
-tests/common/hostload.rs 47 1
+tests/common/hostload.rs 48 1
 tests/common/iommu.rs 157 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
@@ -412,7 +412,7 @@ toyos-cc/tests/emission.rs 44 0
 toyos-cc/tests/pp_corpus.rs 43 1
 toyos-cc/tests/ppnumber.rs 24 0
 toyos-cc/tests/preprocessor.rs 10 0
-toyos-cc/tests/refusals.rs 22 0
+toyos-cc/tests/refusals.rs 25 0
 toyos-desktop/src/budget.rs 45 0
 toyos-desktop/src/damage.rs 47 0
 toyos-desktop/src/hit.rs 18 0

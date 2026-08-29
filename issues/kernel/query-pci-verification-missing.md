@@ -16,7 +16,7 @@ the same source it would be verifying.
 Same class as the scheduler entries this was filed beside —
 `per-process-fair-split-is-the-policy` and
 `granularity-bound-crossed-at-four-widths`: a rule requiring an instrument
-nobody built. A third, `sched-check-unreachable-from-build`, stood here until
-its instrument *was* built and it was closed; what this names is the class, not
+nobody built. A third — the sched-check binary unreachable from any build — stood here
+until its instrument *was* built and it was closed; what this names is the class, not
 a count. This one matters most for the metal track, where the whole point is that the machine's
 device set is not what the harness chose.

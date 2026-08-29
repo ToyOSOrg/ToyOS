@@ -140,19 +140,36 @@ const CALLERS_TAG: &str = "[abi-callers]";
 
 /// `cargo run -- --abi-callers <name>`: every use of `<name>` as a whole
 /// identifier across the pinned fork estate, read from the cargo checkouts
-/// the lockfiles resolve to. Offline, unlike the head comparison above.
+/// the lockfiles resolve to. Offline, unlike the head comparison above. The
+/// sweep reads `.rs` files only, and its count is of lines — first match per
+/// line.
 ///
 /// A "zero callers" claim about an ABI item is worth exactly the trees it
 /// searched, and a monorepo grep does not search the estate — `stack_info`
 /// is the recorded case: caller-less in the tree, called by the stacker fork
 /// at its pinned revision. Exit 0 is the claim "every pinned source swept,
-/// nothing found"; a hit or a pin with no checkout on disk both refuse it.
+/// nothing found"; a hit or a pin with no checkout on disk both refuse it,
+/// and a name `toyos-abi/` itself never spells is refused as a typo before
+/// the sweep can prove it caller-less.
 pub fn dispatch_callers(root: &Path, args: &[String]) {
     let at = args.iter().position(|a| a == "--abi-callers").expect("dispatched on this flag");
     let Some(name) = args.get(at + 1).filter(|n| !n.starts_with('-')) else {
         eprintln!("{CALLERS_TAG} --abi-callers takes the identifier to sweep for");
         std::process::exit(2);
     };
+    let mut abi = Vec::new();
+    rs_files(&root.join("toyos-abi"), &mut abi);
+    let known = abi.iter().any(|f| {
+        fs::read_to_string(f).is_ok_and(|text| !ident_lines(&text, name).is_empty())
+    });
+    if !known {
+        eprintln!(
+            "{CALLERS_TAG} nothing under toyos-abi/ spells `{name}`, so this sweep would \
+             prove a typo caller-less — name the ABI item as its declaration does"
+        );
+        std::process::exit(2);
+    }
+
     let rust = toolchain::rust_dir(root);
     let estate = collect(root, Some(&rust));
     let home = cargo_home();

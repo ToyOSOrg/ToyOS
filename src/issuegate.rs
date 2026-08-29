@@ -157,6 +157,91 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
     }
 }
 
+/// Whole files the citation gate does not read. An archive's rows name
+/// deleted files because that is its job — a record of what a fix closed is
+/// not a claim the files exist — and an entry here is a reviewed edit to the
+/// gate, not a marker any file can quietly give itself.
+const ARCHIVES: &[&str] = &["issues/build/defect-events.md"];
+
+fn is_slug_byte(c: char) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+}
+
+/// `issues/<area>/<slug>.md` claims in `s`, as (start, end, area, slug).
+fn path_claims(s: &str) -> Vec<(usize, usize, String, String)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(pos) = s[from..].find("issues/") {
+        let at = from + pos;
+        let rest = &s[at + "issues/".len()..];
+        from = at + "issues/".len();
+        let Some((area, tail)) = rest.split_once('/') else { continue };
+        if area.is_empty() || !area.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+            continue;
+        }
+        let end = tail.find(|c| !is_slug_byte(c)).unwrap_or(tail.len());
+        let slug = &tail[..end];
+        if slug.is_empty() || !tail[end..].starts_with(".md") {
+            continue;
+        }
+        let close = at + "issues/".len() + area.len() + 1 + slug.len() + ".md".len();
+        out.push((at, close, area.to_string(), slug.to_string()));
+    }
+    out
+}
+
+/// Whole-token dead-slug mentions in `s`, as (start, end, token).
+fn slug_mentions(s: &str, dead_slugs: &BTreeSet<String>) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, c) in s.char_indices().chain([(s.len(), ' ')]) {
+        match (start, is_slug_byte(c)) {
+            (None, true) => start = Some(i),
+            (Some(from), false) => {
+                let token = &s[from..i];
+                if token.contains('-') && dead_slugs.contains(token) {
+                    out.push((from, i, token.to_string()));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A line with its indentation and any comment leader removed, so a citation
+/// an editor wrapped can be rejoined across the break.
+fn stripped(line: &str) -> &str {
+    let t = line.trim_start();
+    for lead in ["//!", "///", "//", "#", "*"] {
+        if let Some(rest) = t.strip_prefix(lead) {
+            return rest.strip_prefix(' ').unwrap_or(rest);
+        }
+    }
+    t
+}
+
+/// Which lines of a Markdown file sit in or on a ``` fence: recorded command
+/// output has to reproduce verbatim, so what it says is history, not a claim.
+fn fenced_lines(path: &str, lines: &[&str]) -> Vec<bool> {
+    let mut out = vec![false; lines.len()];
+    if !path.ends_with(".md") {
+        return out;
+    }
+    let mut inside = false;
+    for (i, line) in lines.iter().enumerate() {
+        let fence = line.trim_start().starts_with("```");
+        if fence || inside {
+            out[i] = true;
+        }
+        if fence {
+            inside = !inside;
+        }
+    }
+    out
+}
+
 /// Every citation that does not resolve, one line each.
 ///
 /// Two shapes claim a file exists: `issues/<area>/<slug>.md` where `<area>`
@@ -164,44 +249,54 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
 /// area is not a claim), and a bare hyphenated token equal to a slug the
 /// tracker once held and no longer does. A slug without a hyphen is
 /// indistinguishable from a word of prose and is out of scope by that rule.
+/// Each line is scanned alone and then joined with its successor, keeping
+/// only what spans the seam — a wrapped citation is still one claim.
 fn citation_refusals(
     scanned: &[(String, String)],
     areas: &BTreeSet<String>,
     issue_files: &BTreeSet<String>,
     dead_slugs: &BTreeSet<String>,
 ) -> Vec<String> {
-    let is_slug_byte = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
     let mut bad = Vec::new();
-    for (path, text) in scanned {
-        for (i, line) in text.lines().enumerate() {
-            let n = i + 1;
-            let mut from = 0;
-            while let Some(pos) = line[from..].find("issues/") {
-                let rest = &line[from + pos + "issues/".len()..];
-                from += pos + "issues/".len();
-                let Some((area, tail)) = rest.split_once('/') else { continue };
-                if area.is_empty() || !area.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
-                    continue;
-                }
-                let end = tail.find(|c| !is_slug_byte(c)).unwrap_or(tail.len());
-                let slug = &tail[..end];
-                if slug.is_empty() || !tail[end..].starts_with(".md") || !areas.contains(area) {
-                    continue;
-                }
-                let cited = format!("issues/{area}/{slug}.md");
-                if !issue_files.contains(&cited) {
-                    bad.push(format!(
-                        "{path}:{n}: cites `{cited}` and no such file exists — the merge that \
-                         deletes an issue takes every mention of it"
-                    ));
-                }
+    let mut judge = |path: &str, n: usize, s: &str, seam: Option<usize>| {
+        for (start, end, area, slug) in path_claims(s) {
+            if seam.is_some_and(|at| start >= at || end <= at) || !areas.contains(&area) {
+                continue;
             }
-            for token in line.split(|c| !is_slug_byte(c)) {
-                if token.contains('-') && dead_slugs.contains(token) {
-                    bad.push(format!(
-                        "{path}:{n}: `{token}` is a deleted issue's slug — the close that \
-                         removed the file owed this mention too"
-                    ));
+            let cited = format!("issues/{area}/{slug}.md");
+            if !issue_files.contains(&cited) {
+                bad.push(format!(
+                    "{path}:{n}: cites `{cited}` and no such file exists — the merge that \
+                     deletes an issue takes every mention of it"
+                ));
+            }
+        }
+        for (start, end, token) in slug_mentions(s, dead_slugs) {
+            if seam.is_some_and(|at| start >= at || end <= at) {
+                continue;
+            }
+            bad.push(format!(
+                "{path}:{n}: `{token}` is a deleted issue's slug — the close that removed \
+                 the file owed this mention too"
+            ));
+        }
+    };
+    for (path, text) in scanned {
+        if ARCHIVES.contains(&path.as_str()) {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        let fenced = fenced_lines(path, &lines);
+        for (i, line) in lines.iter().enumerate() {
+            if fenced[i] {
+                continue;
+            }
+            judge(path, i + 1, line, None);
+            if let Some(next) = lines.get(i + 1) {
+                if !fenced[i + 1] {
+                    let head = stripped(line).trim_end();
+                    let joined = format!("{head}{}", stripped(next).trim_start());
+                    judge(path, i + 1, &joined, Some(head.len()));
                 }
             }
         }
@@ -232,11 +327,17 @@ fn tracked_files(root: &Path) -> Vec<(String, String)> {
 /// Slugs the tracker held and the working tree does not: deleted anywhere in
 /// history, or present in `HEAD` and since `git rm`ed — the second set is what
 /// makes `cargo test --lib` red *before* a close is pushed.
+///
+/// The deletion log takes no pathspec: the tracker has lived at more than one
+/// path (`specs/issues/` until it moved to the root), and a set scoped to the
+/// current one was blind to everything closed before the move. Any deleted
+/// path whose tail is `issues/<area>/<slug>.md` was a tracker file wherever
+/// the tracker stood.
 fn dead_slugs(root: &Path, live: &BTreeSet<&str>) -> BTreeSet<String> {
-    let gone = git(root, &["log", "--diff-filter=D", "--format=", "--name-only", "--", "issues/"]);
+    let gone = git(root, &["log", "--diff-filter=D", "--format=", "--name-only"]);
     let head = git(root, &["ls-tree", "-r", "--name-only", "HEAD", "--", "issues/"]);
     let mut out = BTreeSet::new();
-    for path in gone.lines().chain(head.lines()) {
+    for path in gone.lines().filter(|p| tracker_shaped(p)).chain(head.lines()) {
         let Some(stem) = path.rsplit('/').next().and_then(|f| f.strip_suffix(".md")) else {
             continue;
         };
@@ -245,6 +346,18 @@ fn dead_slugs(root: &Path, live: &BTreeSet<&str>) -> BTreeSet<String> {
         }
     }
     out
+}
+
+/// Whether a path's last three segments are `issues/<area>/<file>.md`.
+fn tracker_shaped(path: &str) -> bool {
+    let mut tail = path.rsplit('/');
+    let (Some(file), Some(area), Some(dir)) = (tail.next(), tail.next(), tail.next()) else {
+        return false;
+    };
+    dir == "issues"
+        && !area.is_empty()
+        && area.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+        && file.ends_with(".md")
 }
 
 #[cfg(test)]
@@ -338,6 +451,37 @@ mod tests {
         let both = judge("issues/area/bare.md was a-name-the-tracker-dropped");
         assert_eq!(both.len(), 2, "{both:?}");
         assert!(both.iter().all(|b| b.contains(":1:")), "{both:?}");
+
+        // A claim an editor wrapped is still one claim, in either shape, with
+        // or without a comment leader on the continuation.
+        let wrapped = judge("see issues/area/\nbare.md and then");
+        assert_eq!(wrapped.len(), 1, "{wrapped:?}");
+        assert!(judge("// see (`issues/area/\n// bare.md`) here")[0].contains("bare.md"));
+        assert!(judge("the a-name-the-\ntracker-dropped fix")[0].contains("deleted issue"));
+        // An unwrapped finding beside a seam is reported once, by the line scan.
+        assert_eq!(judge("a-name-the-tracker-dropped\nprose").len(), 1);
+        // A fence is recorded output, exempt to its closing line.
+        assert!(judge("```\nissues/area/bare.md\na-name-the-tracker-dropped\n```").is_empty());
+        assert!(judge("```\nfenced\n```\nissues/area/bare.md").len() == 1);
+        // An archive names deleted files as history; the gate does not read it.
+        let archive = citation_refusals(
+            &[("issues/build/defect-events.md".to_string(), "a-name-the-tracker-dropped".into())],
+            &areas,
+            &issue_files,
+            &dead,
+        );
+        assert!(archive.is_empty(), "{archive:?}");
+    }
+
+    /// The dead-slug set reads the whole deletion log: the tracker has moved,
+    /// and a set scoped to its current path missed everything closed before.
+    #[test]
+    fn a_tracker_file_is_recognised_wherever_the_tracker_stood() {
+        assert!(tracker_shaped("issues/area/some-old-entry.md"));
+        assert!(tracker_shaped("specs/issues/area/some-old-entry.md"));
+        assert!(!tracker_shaped("specs/some-plan.md"));
+        assert!(!tracker_shaped("issues/README.md"));
+        assert!(!tracker_shaped("docs/issues.md"));
     }
 
     /// The teeth, and the first case is the one this was written for: an area

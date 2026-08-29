@@ -11650,10 +11650,9 @@ fn run_machine_test(
             // in 5 s, against 1 on a healthy run — a regression this exact
             // shape would no longer trip a *count of lines* now that
             // `log_health` prints at a fixed rate whether the CPU behind it
-            // is halting or spinning (`issues/kernel/
-            // i8042-quarantine-health-line-count-is-vacuous.md`). What still
-            // moves at two different speeds is the `trips=` counter inside
-            // each line, which is not rate-limited.
+            // is halting or spinning — the vacuity the closed line-count
+            // entry named. What still moves at two different speeds is the
+            // `trips=` counter inside each line, which is not rate-limited.
             if let Some((cpu, delta)) = idle_is_spinning(&result.serial) {
                 return Err(format!(
                     "cpu{cpu}'s idle-trip counter moved by {delta} within the capture — spinning, not halting"
@@ -12769,7 +12768,7 @@ fn idle_is_spinning(serial: &str) -> Option<(u32, u64)> {
 /// negative side, because nothing in this tree can stage a CPU into spinning
 /// through idle on purpose.
 ///
-/// This is the demonstration `i8042-quarantine-health-line-count-is-vacuous`
+/// This is the demonstration the closed vacuous-line-count entry
 /// asked for: proof the restored assertion still fails when the condition it
 /// names is violated, not just that it still passes when it is not.
 fn idle_trip_verdict() -> Result<(), String> {

@@ -39,10 +39,11 @@ ledger was written.
   still standing on"), merged 2026-08-20T05:09:53Z. `RunQueue::pop_surplus`
   could hand a thief CPU a task whose saved context this CPU was still
   writing; reproduction went from 13 deaths in 1,272 boots to 0 in 1,584.
-  Closed four issue files (the three Ring 0 fetch sightings — at 0x1b during
-  a loaded boot, at 0x1b with the stack pointer on a page boundary, at zero
-  inside `SYS_READ` — and the shared boot's null jump spawning sched-stress)
-  and retired five redlist rows with it.
+  Closed four issue files (`a-ring-0-fetch-at-0x1b-during-a-loaded-boot.md`,
+  `a-ring-0-fetch-at-0x1b-with-the-stack-pointer-on-a-page-boundary.md`,
+  `a-ring-0-fetch-at-zero-inside-sys-read.md`,
+  `the-shared-boot-jumped-to-null-spawning-sched-stress.md`) and retired five
+  redlist rows with it.
 
 - **The i8042 byte drops** — origin: pre-existing (QEMU's own PS/2 device, not
   a kernel or harness regression). discoverer: independent agent (diagnosed
@@ -54,9 +55,10 @@ ledger was written.
   merged 2026-08-19T23:09:34Z: QEMU's PS/2 device holds sixteen bytes
   (`PS2_QUEUE_SIZE`) and past it drops one byte at a time with no signal,
   reproduced deterministically on QEMU 11.1 by putting 22 transitions through
-  one `input-send-event`. Closed the two i8042 tracker entries — the paired
-  shard verdicts, and the keyboard's lost sentinel that reded the durations
-  gate — retired two redlist rows.
+  one `input-send-event`. Closed
+  `issues/kernel/two-i8042-verdicts-red-together-on-one-ci-shard.md` and
+  `issues/build/i8042-keyboard-pays-a-lost-sentinel-and-reds-the-durations-gate.md`,
+  retired two redlist rows.
 
 - **The census lag** — origin: pre-existing. discoverer: automated gate
   (`handle_kill_policy`'s per-kind object census, first CI sighting run

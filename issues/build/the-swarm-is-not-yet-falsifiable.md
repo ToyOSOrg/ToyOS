@@ -226,7 +226,7 @@ issues/kernel/every-driver-is-still-in-the-kernel.md
 issues/kernel/every-interrupt-lands-on-the-boot-cpu.md
 issues/kernel/nothing-charges-kernel-memory-to-a-process.md
 issues/kernel/page-global-is-a-decision-nobody-has-made.md
-[one row since closed: the scheduler policy suite landed, its track with it]
+issues/kernel/scheduler-policy-behavior-has-no-quantified-suite.md
 issues/kernel/the-capability-end-state-is-twelve-answers.md
 issues/kernel/the-iommu-stops-at-translation.md
 issues/kernel/the-kernel-still-parses-what-userland-writes.md
