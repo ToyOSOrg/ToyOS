@@ -364,6 +364,18 @@ fn kernel_lines() -> Vec<(String, usize, String)> {
 /// The three log macros and the function they all expand to.
 const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit("];
 
+/// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
+/// Arming DMA comes after a site's refusals (virtio parses first and disarms
+/// on refusal; virtio_net once re-armed it before the parse), and the three
+/// early-enabling MMIO drivers are `issues/isolation/`'s to fix, not a precedent.
+const BUS_MASTER_SITES: &[(&str, usize)] = &[
+    ("kernel/src/drivers/pci.rs", 1),
+    ("kernel/src/drivers/virtio.rs", 1),
+    ("kernel/src/drivers/hda.rs", 1),
+    ("kernel/src/drivers/nvme.rs", 1),
+    ("kernel/src/drivers/xhci/wait/boot.rs", 1),
+];
+
 /// The one place in `kernel/` a `!!!` may still appear, and how many times.
 ///
 /// **Named by file and count rather than tested against the same line as a
@@ -564,6 +576,26 @@ mod tests {
             }
         }
         assert!(complaints.is_empty(), "{}", complaints.join("\n"));
+    }
+
+    /// Both directions: a resurrected early enable reds, and so does a stale row.
+    #[test]
+    fn bus_mastering_is_armed_at_exactly_the_declared_sites() {
+        let found = occurrences("enable_bus_master(");
+        for (file, n) in &found {
+            let allowed = BUS_MASTER_SITES.iter().find(|(f, _)| f == file).map_or(0, |(_, c)| *c);
+            assert_eq!(
+                *n, allowed,
+                "{file}: {n} × `enable_bus_master(`, {allowed} declared — arming DMA is a                  declared decision, and it comes after the site's refusals"
+            );
+        }
+        for (file, n) in BUS_MASTER_SITES {
+            let count = found.iter().find(|(f, _)| f == *file).map_or(0, |(_, c)| *c);
+            assert_eq!(
+                count, *n,
+                "{file} is declared {n} × `enable_bus_master(` and has {count} — a stale row                  is a permission nobody re-argued"
+            );
+        }
     }
 
     /// An exception that has gone stale is a permission nobody re-argued.
