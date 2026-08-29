@@ -205,6 +205,19 @@ pub struct Relegated {
 /// Every test the fast tier does not run.
 pub const RELEGATED: &[Relegated] = &[
     Relegated {
+        test: "cache_eviction",
+        ci_ms: 8_165,
+        why: Why::Cost,
+        guards: "The file-cache budget holding under pressure: eviction never takes a dirty \
+                 page, so a lawful over-budget episode is all-dirty, bounded, and returns to \
+                 budget once a flush lands, its pages read back byte-identical. Nightly because \
+                 it boots a guest and stages the all-dirty overage plus a post-flush sweep, and \
+                 the deterministic staging that made this test reliable also pushed it over the \
+                 fast line. What still holds per pull request is the code invariant it witnesses \
+                 — `evict_one` drains every clean, unreferenced page before it gives up — but no \
+                 cheap per-PR test proves the runtime bound, so that witness moves to nightly.",
+    },
+    Relegated {
         test: "log_conservation_smp4",
         ci_ms: 8_248,
         why: Why::Cost,

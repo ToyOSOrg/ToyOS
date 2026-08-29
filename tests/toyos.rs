@@ -891,7 +891,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
     ("log_partition_identity", Sched::Parallel, Tier::Fast),
-    ("cache_eviction", Sched::Parallel, Tier::Fast),
+    ("cache_eviction", Sched::Parallel, Tier::Nightly),
     // The write-back queue's three negative controls (wall 4 of
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
     // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator

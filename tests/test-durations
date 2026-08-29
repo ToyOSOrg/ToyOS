@@ -144,7 +144,7 @@ blocking_read_stress 41
 boot_partition_identity 5519
 boot_volume_metadata_error 4968
 c_capture_ignores_daemon_lines 4578
-cache_eviction 4879
+cache_eviction 8165
 connect_before_serve 23
 console_line_atomicity 8925
 console_locale_detect 3922
