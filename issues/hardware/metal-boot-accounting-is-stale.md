@@ -61,3 +61,11 @@ rather than boot time (`issues/filesystem/`).
 A live, actionable measurement table for boot-time task #65 to consume,
 correcting a stale ~17x figure another finding still cites as its owner's
 number. Owed to whoever picks up #65.
+
+Carried here when the scanout-price entry closed (#342), so
+the panic-console thread keeps its facts: the T14 measured 461/459 ms repaints
+on the panic path; the open painter-granularity question — a glyph assembled in
+a scratch row and blitted as one run would merge where the per-bit
+`write_volatile` stores do not — and the constraint that rules out the obvious
+fix: the panic path takes no lock, so a shared static scratch strip re-creates
+the multi-CPU race issues/panic-path/ records against capture().
