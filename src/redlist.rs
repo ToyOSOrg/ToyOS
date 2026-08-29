@@ -1214,11 +1214,12 @@ pub const KNOWN_RED: &[Red] = &[
         standing: Standing::Stands,
         what: "gate A's fast tier, failing its own two-boot rule — dropouts on the first boot *and* \
                on the confirming re-boot — four times in one session at smp=1, on two different \
-               trees. **The denominator is not readable**: the write-up says \"six runs in one \
-               session\" and its own listing is four reds, one green and \"twice more GREEN\", \
-               which is seven. smp=8 failed the same rule twice on 2026-08-07",
+               trees. **The denominator is not readable**: the closed sighting file said \"six \
+               runs in one session\" while its own listing is four reds, one green and \"twice \
+               more GREEN\", which is seven; its tables live in the commit that closed it into \
+               the source entry. smp=8 failed the same rule twice on 2026-08-07",
         evidence: "2026-08-04 session, 5408cfb with the bundle stashed and bundle D alternating",
-        source: "issues/audio/audio-tone-load-fast-tier-intermittent.md",
+        source: "issues/audio/thorough-tier-reds-on-unmodified-main.md",
         measured: "2026-08-04",
     },
     Red {
@@ -1230,7 +1231,7 @@ pub const KNOWN_RED: &[Red] = &[
                where every red carried 76–297 ms — soundd not being scheduled rather than a cost \
                per period",
         evidence: "task #58's A/B session, `main`'s tip against a branch, one host",
-        source: "issues/audio/audio-tone-load-fast-tier-intermittent.md",
+        source: "issues/audio/thorough-tier-reds-on-unmodified-main.md",
         measured: "2026-08-07",
     },
     // The contention class. Every one of these is a verdict that expires on the

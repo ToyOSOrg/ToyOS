@@ -4,10 +4,14 @@ kind: defect
 opened: 2026-08-07
 ---
 
-# Gate A's *thorough* tier reds on an unmodified `main`, and that is the rate `audio-tone-load-fast-tier-intermittent` asked for
+# Gate A's *thorough* tier reds on an unmodified `main`, and that is the rate the fast-tier intermittents asked for
 
-`audio-tone-load-fast-tier-intermittent` says "whoever takes it should get the rate first — the thorough
-tier (`--audio-gate N`) is the instrument". H3's session got it, and the
+The fast tier's two-boot rule failed intermittently through early August —
+dropouts on the first boot *and* the confirming re-boot, four times at smp=1 in
+one 2026-08-04 session on two trees at once, twice more at smp=8 on 2026-08-07 —
+and those sightings asked for the rate first, naming the thorough tier
+(`--audio-gate N`) as the instrument. (Closed into this entry 2026-08-29; their
+run tables are in that closing commit.) H3's session got the rate, and the
 instrument reds on the tree it is supposed to certify.
 
 `cargo test --test toyos-build -- --audio-gate 30` on `80fe031` — **main's tip,
@@ -21,8 +25,8 @@ no delta at all**, run as H3's A arm before that branch existed:
 The ten, by config and iteration: `audio_tone_load smp=1` at 4, 9, 13, 15;
 `audio_tone_load smp=8` at 9, 13, 14; `audio_tone smp=8` at 8, 9;
 `audio_tone smp=1` at 13. So **`audio_tone` at both widths reds too**, which
-`audio-tone-load-fast-tier-intermittent` had only established for
-`audio_tone_load`.
+the fast-tier sightings had established only for `audio_tone_load` — and at
+both of its widths there, so no config is anyone's quiet control in an A/B.
 
 **The load correlation is the wrong way round, and that is the finding.** The
 1-minute average across the run spanned 7.2 to 19.1 on 14 cores, with one to
@@ -30,7 +34,14 @@ five other guests and six other `toyos-build` processes throughout. The clean
 early iterations ran at 19.1 and 16.8; the three worst — 13, 14 and 15 — ran at
 11.4, 10.6 and 11.9. Every dropout carried a wake latency of 33-117 ms against
 5-17 ms on the clean runs, which is the same "soundd was not scheduled"
-signature as `audio-tone-load-fast-tier-intermittent` and `one-boot-put-142ms-of-silence-on-the-wire`.
+signature as the fast-tier sightings and as the 2026-08-03 boot that put 142 ms
+of silence on the wire — 49 underruns, one drain, a 5.6x worst-wake outlier,
+gaps, soundd stats and capture all agreeing (also closed into this entry
+2026-08-29). That boot's nearest suspect, the ESP-log flush on the kernel's
+idle path, no longer exists — the idle loop touches no filesystem — and the
+nearest *measured* mechanism on file is `issues/audio/disk-wait-pins-a-cpu.md`:
+a staged 2 ms disk-completion delay alone produced 165-260 ms soundd wakes and
+76 silent periods.
 
 What this changes for anyone reading them: the intermittency is not a property
 of one config, and it is **large enough to fail the thorough tier's own pooled
