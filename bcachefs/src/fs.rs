@@ -926,8 +926,7 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
             .ok_or(FsError::NotFound)?;
         let leaf = self.decode(&old_value)?;
 
-        let extents = if new_extents.is_empty() { leaf.extents() } else { new_extents };
-        let new_value = encode_leaf_value(old_key.key_type, leaf.name(), size, mtime, extents);
+        let new_value = encode_leaf_value(old_key.key_type, leaf.name(), size, mtime, new_extents);
         let new_entry = Entry { key: old_key, value: new_value };
 
         // No delete first. The key is unchanged and `btree::insert` replaces on
@@ -935,12 +934,24 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         // pre-check for `EntryTooLarge` does not cover `insert`'s other
         // rejection, a split with no free block to split into, and that one
         // left the entry deleted and never put back. Blocks the caller drops
-        // from the extent list are still leaked.
+        // from the extent list are the caller's to free, through
+        // [`Self::free_extents`], after this records the shortened list.
         self.sb.root_node = btree::insert(
             &self.io, &mut self.alloc,
             self.sb.root_node,
             new_entry,
         )?;
+        Ok(())
+    }
+
+    /// Return `extents`' blocks to the allocator. Record first, free second:
+    /// the caller shortens the entry's list before calling this, so a failure
+    /// between the two leaks blocks rather than leaving an entry naming freed
+    /// ones.
+    pub fn free_extents(&mut self, extents: &[Extent]) -> Result<(), FsError> {
+        for ext in extents {
+            self.alloc.free_range(&self.io, BlockNum::new(ext.start_block), ext.block_count)?;
+        }
         Ok(())
     }
 
@@ -1535,5 +1546,50 @@ mod tests {
             }
             other => panic!("expected BlockOffDevice, got {other:?}"),
         }
+    }
+
+    /// The kernel's shrink: record the shortened extent list, then free the
+    /// dropped tail. The record answers with the short list, an emptied list
+    /// records as empty rather than silently keeping the old blocks, and the
+    /// freed tail is the allocator's again — block for block.
+    #[test]
+    fn a_shortened_record_gives_its_tail_back() {
+        let mut fs = Formatted::format(VecBlockIO::new(64)).expect("format").mount();
+        fs.create("shrink.bin", b"", 1).expect("create");
+        let mut extents = Vec::new();
+        for page in 0..3 {
+            fs.resolve_or_alloc_block(&mut extents, page).expect("allocate");
+        }
+        fs.update_metadata("shrink.bin", &extents, 3 * BLOCK_SIZE as u64, 2)
+            .expect("record three pages");
+        let free_full = fs.alloc.free_blocks;
+
+        let kept = vec![Extent {
+            start_block: extents[0].start_block,
+            block_count: 1,
+            _reserved: 0,
+        }];
+        let dropped = vec![Extent {
+            start_block: extents[0].start_block + 1,
+            block_count: 2,
+            _reserved: 0,
+        }];
+        fs.update_metadata("shrink.bin", &kept, 100, 3).expect("record the shortened list");
+        fs.free_extents(&dropped).expect("free the dropped tail");
+        assert_eq!(
+            fs.alloc.free_blocks,
+            free_full + 2,
+            "the dropped tail did not come back to the allocator",
+        );
+
+        let (back, size) = fs.file_extents("shrink.bin").expect("file_extents").expect("present");
+        assert_eq!(size, 100);
+        assert_eq!(back.len(), 1, "the record kept the dropped tail: {back:?}");
+        assert_eq!(back[0].block_count, 1);
+
+        fs.update_metadata("shrink.bin", &[], 0, 5).expect("record an emptied list");
+        let (back, size) = fs.file_extents("shrink.bin").expect("file_extents").expect("present");
+        assert_eq!(size, 0);
+        assert!(back.is_empty(), "an emptied extent list kept blocks: {back:?}");
     }
 }

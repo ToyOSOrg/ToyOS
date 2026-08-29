@@ -42,6 +42,40 @@ impl FileBlocks {
         // Lock stays held across `f`: the write path resolves and allocates inside it.
         self.extents.lock().as_mut().map(f)
     }
+
+    /// Keep the first `keep` blocks and hand back the dropped tail runs, for
+    /// the caller to free once the shortened record is on the device. Every
+    /// backing sharing this cell reads the dropped range as a hole from here on.
+    pub fn truncate_to_blocks(&self, keep: u64) -> Vec<Extent> {
+        let mut guard = self.extents.lock();
+        let Some(runs) = guard.as_mut() else { return Vec::new() };
+        let mut dropped = Vec::new();
+        let mut remaining = keep;
+        let mut kept = Vec::with_capacity(runs.len());
+        for run in runs.drain(..) {
+            let count = run.block_count as u64;
+            if remaining >= count {
+                remaining -= count;
+                kept.push(run);
+            } else {
+                if remaining > 0 {
+                    kept.push(Extent {
+                        start_block: run.start_block,
+                        block_count: remaining as u32,
+                        _reserved: 0,
+                    });
+                }
+                dropped.push(Extent {
+                    start_block: run.start_block + remaining,
+                    block_count: (count - remaining) as u32,
+                    _reserved: 0,
+                });
+                remaining = 0;
+            }
+        }
+        *runs = kept;
+        dropped
+    }
 }
 
 /// The block holding `file_offset`, if the extents reach that far.

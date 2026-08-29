@@ -223,6 +223,11 @@ fn main() {
     // carries the straddled page to the device across a close.
     shrink_then_regrow_reads_zeros("/tmp", 2 * PAGE, false);
     shrink_then_regrow_reads_zeros("/home", PAGE, true);
+    // Multi-page and durable: the pages a shrink drops must not come back off
+    // the device after a close — the on-disk record has to give their blocks
+    // up, not only the page cache.
+    shrink_then_regrow_reads_zeros("/home", 3 * PAGE, true);
+    shrink_then_regrow_reads_zeros("/log", 3 * PAGE, true);
     write_into_hole_reads_zeros("/tmp");
     write_into_hole_reads_zeros("/home");
 

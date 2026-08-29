@@ -316,10 +316,17 @@ impl FileSystem for BcacheFsAdapter {
     fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError> {
         let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
         let name = info.name.clone();
-        let extents = Arc::clone(&info.blocks)
-            .with(|extents| extents.clone())
-            .ok_or(SyscallError::NotFound)?;
-        mapped("update_metadata", &name, self.fs.update_metadata(&name, &extents, size, mtime))
+        let blocks = Arc::clone(&info.blocks);
+        // A shrink gives the dropped tail up — record the shortened list
+        // first, free second, so a failure between the two leaks blocks
+        // rather than leaving the entry naming freed ones.
+        let dropped = blocks.truncate_to_blocks(size.div_ceil(crate::mm::PAGE_SIZE));
+        let extents = blocks.with(|extents| extents.clone()).ok_or(SyscallError::NotFound)?;
+        mapped("update_metadata", &name, self.fs.update_metadata(&name, &extents, size, mtime))?;
+        if !dropped.is_empty() {
+            mapped("free of a shrunk tail", &name, self.fs.free_extents(&dropped))?;
+        }
+        Ok(())
     }
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
