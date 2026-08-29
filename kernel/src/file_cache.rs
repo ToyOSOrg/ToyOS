@@ -479,9 +479,7 @@ fn copy_page_region_to_buf(page: &[u8], offset: usize, buf: &mut UserBytesMut, v
 fn evict_if_needed(cache: &mut FileCache) {
     assert!(cache.max_pages != 0, "file cache used before init installed a budget");
     if cache.cached_pages <= cache.max_pages {
-        // A teardown can end an over-budget episode between admissions; the
-        // closing line still prints, so the episode's end is an event and
-        // never a matter of which admission happened to cross a turnover.
+        // A teardown can end an over-budget episode between admissions; the closing line still prints.
         if cache.over_said {
             cache.over_said = false;
             turnover_line(cache);
@@ -496,8 +494,7 @@ fn evict_if_needed(cache: &mut FileCache) {
         }
     }
     // Once per full turnover so the rate scales with the budget, plus once at
-    // each over-budget episode's start and end — the sweep giving up, and the
-    // budget holding again, are states the series must carry.
+    // each over-budget episode's start and end.
     let turnover = cache.max_pages as u64;
     let over = cache.cached_pages > cache.max_pages;
     let crossed =
@@ -508,15 +505,13 @@ fn evict_if_needed(cache: &mut FileCache) {
     cache.over_said = over;
 }
 
-/// The dirty count is on the line because over-budget is lawful exactly when
-/// every resident page is dirty; the harness holds that shape.
+/// Dirty is on the line because over-budget is lawful exactly when every resident page is dirty; the harness holds that shape.
 fn turnover_line(cache: &FileCache) {
     log!("file cache: {} evictions, {}/{} pages resident, {} dirty",
         cache.evictions, cache.cached_pages, cache.max_pages, dirty_pages(cache));
 }
 
-/// Dirty pages among the governed resident set, counted under the same lock
-/// hold as the residency they explain.
+/// Governed dirty pages, counted under the same lock hold as the residency they explain.
 fn dirty_pages(cache: &FileCache) -> usize {
     cache
         .files

@@ -112,12 +112,9 @@ fn main() {
     // what asks the cache for room it cannot make — the case where the sweep
     // has to give up over budget rather than take something it cannot replace.
     const DIRTY_PAGES: usize = 64;
-    // Then past the budget with every page dirty, through a second file: the
-    // sweep now has nothing it may take and must report over-budget rather
-    // than hold 64 — staged here on every run, where CI met it by another
-    // writer's un-flushed page landing beside the 64. Eight pages, not one,
-    // so a stray clean page another process left resident cannot absorb the
-    // whole overage.
+    // Then past the budget through a second file with every page dirty: the
+    // sweep must report over-budget rather than hold 64. Eight pages, so a
+    // stray clean page another process left resident cannot absorb the overage.
     const OVERAGE_PAGES: usize = 8;
     const OVERAGE_TAG: usize = 77;
     let over_path = format!("/home/cache_small_{}.bin", SMALL_FILES - 1);
@@ -147,10 +144,8 @@ fn main() {
             check_page(&mut f, BIG, 7, page, "dirty page survived eviction pressure");
         }
     }
-    // The budget holds again the moment the writers flushed: a sweep over
-    // every small file forces evictions whose turnover lines the harness
-    // reads back within the bound, and proves the pages written past the
-    // budget round-trip like any others.
+    // The budget holds again once the writers flushed: this sweep forces the
+    // closing samples and round-trips the pages written past the budget.
     for tag in 0..SMALL_FILES {
         let path = format!("/home/cache_small_{tag}.bin");
         let mut f = fs::File::open(&path).expect("reopen for the flushed sweep");

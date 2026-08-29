@@ -123,9 +123,8 @@ const HEALTH_MUTE_SAID: u8 = 5;
 /// The pin asserted with no byte behind it, distinct from `HEALTH_MUTE_SAID`
 /// so the first byte that does decode to nothing is still reported.
 const HEALTH_EMPTY_SAID: u8 = 6;
-/// The mute verdict beat the sequence: said while a decoder still held the
-/// run, so it named nothing. Revised once, to [`HEALTH_MUTE_SAID`], when a
-/// byte is first blamed.
+/// The mute verdict beat the sequence and named nothing; revised once, to
+/// [`HEALTH_MUTE_SAID`], when a byte is first blamed.
 const HEALTH_MUTE_BLIND: u8 = 7;
 
 static HEALTH: AtomicU8 = AtomicU8::new(HEALTH_OFF);
@@ -445,10 +444,8 @@ fn has_bytes() -> bool {
 /// genuinely broken controller.
 static FAULT: AtomicBool = AtomicBool::new(false);
 
-/// Under `i8042-split-burst`: bytes the ISR has taken; past [`SPLIT_CAP`] it
-/// answers empty until [`SPLIT_RESCUED`], when `service` polls the rest on
-/// `IRQ_CPU` — the interleaving where the mute verdict beats the sequence,
-/// staged instead of waited for.
+/// Under `i8042-split-burst`: past [`SPLIT_CAP`] taken bytes the ISR answers
+/// empty until [`SPLIT_RESCUED`] — the verdict-beats-the-sequence interleaving, staged.
 static SPLIT_TAKEN: AtomicU32 = AtomicU32::new(0);
 static SPLIT_RESCUED: AtomicBool = AtomicBool::new(false);
 const SPLIT_CAP: u32 = 4;
@@ -575,9 +572,8 @@ pub fn service() {
         aux_reenable();
     }
     widen_edge_window();
-    // The staged split's second half: once the mute verdict is out, the bytes
-    // the ISR was hiding are polled in — with interrupts off, since
-    // `handler_poll` shares `push_isr`'s single-producer seat with the ISR.
+    // The staged split's second half: once the mute verdict is out, the hidden
+    // bytes are polled in — interrupts off, `handler_poll` shares `push_isr`'s producer seat.
     if crate::actuator::i8042_split_burst()
         && !SPLIT_RESCUED.load(Ordering::Relaxed)
         && HEALTH.load(Ordering::Relaxed) >= HEALTH_MUTE_SAID

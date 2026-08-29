@@ -10135,18 +10135,13 @@ fn run_machine_test(
                     block_series.len()
                 ));
             }
-            // The file cache's bound is asserted against the derivation, not
-            // as an absolute: eviction never takes a dirty page and gives up
-            // only when everything resident is dirty, so a sample over budget
-            // is lawful exactly when its own line says dirty == resident. A
-            // clean overage is still a broken bound. The guest stages an
-            // all-dirty overage on every run, so the admission below is
-            // exercised rather than waited for — and every episode must
-            // close with a sample back within the bound, which is the
-            // eviction half asserted in the direction the escape does not
-            // excuse. The kernel prints an episode's end unconditionally, so
-            // the closing sample is an event and never a turnover-crossing
-            // accident.
+            // The file cache's bound is the derivation, not an absolute:
+            // eviction never takes a dirty page and gives up only when
+            // everything resident is dirty, so an over-budget sample is
+            // lawful exactly when its own line says dirty == resident — a
+            // clean overage still reds. The guest stages the overage on
+            // every run, and every episode must close with a sample back
+            // within the bound (the kernel prints the close unconditionally).
             let mut over_samples = 0usize;
             for &(evictions, resident, dirty) in &file_series {
                 if resident > file_budget {
