@@ -62,7 +62,7 @@ kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
 kernel/src/arch/syscall/vm.rs 78 0
 kernel/src/arch/tlb.rs 32 0
-kernel/src/bcachefs_adapter.rs 70 0
+kernel/src/bcachefs_adapter.rs 71 0
 kernel/src/block.rs 33 0
 kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
@@ -185,7 +185,7 @@ kernel/src/tmpfs.rs 15 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
 kernel/src/user_ptr.rs 58 0
-kernel/src/vfs.rs 69 0
+kernel/src/vfs.rs 71 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 27 0

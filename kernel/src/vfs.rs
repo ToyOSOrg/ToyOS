@@ -530,7 +530,10 @@ impl Vfs {
         let names = fs.list(MAX_LIST_ENTRIES)?;
         let child_prefix = format!("{fs_path}/");
         let is_file = names.iter().any(|(n, _)| *n == fs_path);
-        let has_file_child = names.iter().any(|(n, _)| n.starts_with(&child_prefix));
+        // A mount that lists directories emits the dir's own `name/` entry — that
+        // self-entry is not a child, or every empty directory reads non-empty.
+        let has_file_child =
+            names.iter().any(|(n, _)| n.starts_with(&child_prefix) && *n != child_prefix);
 
         // The name resolves to a file, not a directory.
         if is_file {

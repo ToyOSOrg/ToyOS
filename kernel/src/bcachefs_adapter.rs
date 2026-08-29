@@ -318,8 +318,9 @@ impl FileSystem for BcacheFsAdapter {
         let name = info.name.clone();
         let blocks = Arc::clone(&info.blocks);
         // A shrink gives the dropped tail up — record the shortened list
-        // first, free second, so a failure between the two leaks blocks
-        // rather than leaving the entry naming freed ones.
+        // first, free second, so an error between the two leaks blocks rather
+        // than leaving the entry naming freed ones. Only an Err is ordered by
+        // this: nothing flushes until sync(), so power loss is not.
         let dropped = blocks.truncate_to_blocks(size.div_ceil(crate::mm::PAGE_SIZE));
         let extents = blocks.with(|extents| extents.clone()).ok_or(SyscallError::NotFound)?;
         mapped("update_metadata", &name, self.fs.update_metadata(&name, &extents, size, mtime))?;
