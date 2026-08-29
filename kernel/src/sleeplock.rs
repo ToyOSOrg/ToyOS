@@ -11,17 +11,18 @@
 #[cfg(not(feature = "loom"))]
 use core::cell::UnsafeCell;
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "loom")]
 use crate::cell::UnsafeCell;
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use loom::sync::atomic::{AtomicU64, Ordering};
 
 use core::ops::{Deref, DerefMut};
 
 use crate::completion::{self, Outcome, Subject, Token, Watch};
 use crate::scheduler::{current_task, Parkable, TaskId};
+use crate::sync::{AtomicTicket, Ticket};
 
 /// Acquire: orders the previous holder's writes before this read; `sleeplock-acquire-off` flips it to `Relaxed` so `kernel-loom` can prove the gap is real.
 #[cfg(not(feature = "sleeplock-acquire-off"))]
@@ -45,9 +46,9 @@ fn word_of(task: Option<TaskId>) -> u64 {
 /// A lock whose contended acquire parks.
 pub struct SleepLock<T> {
     /// Next ticket to hand out; an uncontended acquire CASes it from [`Self::now`].
-    ticket: AtomicU32,
+    ticket: AtomicTicket,
     /// Whose turn it is; the release publishes through this and [`TURN`] loads it.
-    now: AtomicU32,
+    now: AtomicTicket,
     /// [`FREE`], [`NOT_A_TASK`], or the holder's packed [`TaskId`]; not part of the ticket pair's exclusion.
     holder: AtomicU64,
     /// Contenders arm here with their own ticket as token; `completion::arm` refuses a second arm per inbox, so [`Self::lock`] must not be called from inside an armed wait's predicate.
@@ -63,8 +64,8 @@ impl<T> SleepLock<T> {
     #[cfg(not(feature = "loom"))]
     pub const fn new(value: T) -> Self {
         Self {
-            ticket: AtomicU32::new(0),
-            now: AtomicU32::new(0),
+            ticket: AtomicTicket::new(Ticket::ZERO),
+            now: AtomicTicket::new(Ticket::ZERO),
             holder: AtomicU64::new(FREE),
             watch: Watch::new(),
             data: UnsafeCell::new(value),
@@ -74,8 +75,8 @@ impl<T> SleepLock<T> {
     #[cfg(feature = "loom")]
     pub fn new(value: T) -> Self {
         Self {
-            ticket: AtomicU32::new(0),
-            now: AtomicU32::new(0),
+            ticket: AtomicTicket::new(Ticket::ZERO),
+            now: AtomicTicket::new(Ticket::ZERO),
             holder: AtomicU64::new(FREE),
             watch: Watch::new(),
             data: UnsafeCell::new(value),
@@ -97,12 +98,12 @@ impl<T> SleepLock<T> {
             return guard;
         }
         // Arms before re-reading `now`, so a release landing in between is not lost.
-        let mine = self.ticket.fetch_add(1, Ordering::Relaxed);
+        let mine = self.ticket.fetch_advance(Ordering::Relaxed);
         // Uncancellable: a killed holder still releases via `Drop` on unwind, so the wait is bounded.
         completion::wait_uncancellable_until(
             p,
             Subject::of(&self.watch),
-            Token::new(u64::from(mine)),
+            Token::new(u64::from(mine.raw())),
             || self.now.load(TURN) == mine,
         );
         self.holder.store(owner, Ordering::Relaxed);
@@ -118,12 +119,7 @@ impl<T> SleepLock<T> {
     fn take(&self, owner: u64) -> Option<SleepGuard<'_, T>> {
         let turn = self.now.load(TURN);
         self.ticket
-            .compare_exchange(
-                turn,
-                turn.wrapping_add(1),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
+            .compare_advance(turn, Ordering::Relaxed, Ordering::Relaxed)
             .ok()?;
         self.holder.store(owner, Ordering::Relaxed);
         Some(SleepGuard { lock: self })
@@ -173,15 +169,11 @@ impl<T> Drop for SleepGuard<'_, T> {
     // `holder` is cleared before the release: after the release another CPU may already hold the lock and have overwritten it.
     fn drop(&mut self) {
         self.lock.holder.store(FREE, Ordering::Relaxed);
-        let next = self
-            .lock
-            .now
-            .fetch_add(1, Ordering::Release)
-            .wrapping_add(1);
+        let next = self.lock.now.fetch_advance(Ordering::Release).succ();
         let _ = completion::post_n(
             Subject::of(&self.lock.watch),
             Outcome::Ready,
-            Token::new(u64::from(next)),
+            Token::new(u64::from(next.raw())),
             1,
         );
     }
