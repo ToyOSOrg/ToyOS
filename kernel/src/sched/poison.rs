@@ -11,8 +11,7 @@ use loom::sync::atomic::{AtomicU64, Ordering};
 /// The vacant value; no live task packs to it — a pid would have to reach `u32::MAX`.
 pub const EMPTY: u64 = u64::MAX;
 
-/// Deaths one CPU can bank between idle trips; fixed, because the panic path
-/// may hold any lock and may not allocate.
+/// Deaths one CPU can bank between idle trips; fixed — the panic path may not allocate.
 pub const SLOTS: usize = 8;
 
 /// A fixed bank of packed task ids, written by the panic path and drained by
@@ -35,9 +34,8 @@ impl PoisonSet {
         Self { slots: core::array::from_fn(|_| AtomicU64::new(EMPTY)) }
     }
 
-    /// Bank one packed id; `false` means every slot was full and the id is
-    /// dropped — loudly, by the caller. Each claim is one CAS, so a death
-    /// taken mid-scan costs a slot, never a loss.
+    /// Bank one packed id; `false` means every slot was full and the caller says so.
+    /// Each claim is one CAS, so a death taken mid-scan costs a slot, never a loss.
     #[cfg(not(feature = "poison-overwrite"))]
     pub fn bank(&self, packed: u64) -> bool {
         for slot in &self.slots {

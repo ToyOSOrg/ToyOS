@@ -2,16 +2,14 @@
 //!
 //! `scheduler::POISONED` was one slot per CPU and `poison_tid` swapped into it,
 //! so a second death on one CPU before its next idle trip erased the first.
-//! These models hold what the replacing bank claims, from every interleaving
-//! loom can build; the negative case is a cargo feature rather than a comment:
+//! The negative case is a cargo feature rather than a comment:
 //!
 //! ```text
 //! cargo test --manifest-path kernel-loom/Cargo.toml --features poison-overwrite \
 //!   --test poison_set
 //! ```
 //!
-//! restores the erasing one-slot swap, and [`a_second_death_banks_beside_the_first`]
-//! must red — the first id gone, which is the defect stated exactly.
+//! restores the erasing swap, and [`a_second_death_banks_beside_the_first`] must red.
 
 use kernel_loom::poison::{PoisonSet, SLOTS};
 use loom::sync::Arc;

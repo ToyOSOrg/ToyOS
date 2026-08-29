@@ -655,9 +655,8 @@ pub fn used_selftest() {
     log!("virtio: used-ring selftest {passed}/{CASES}");
 }
 
-/// Drive the real walk, window check and parse over config space no device
-/// produces: a cyclic or spec-forbidden link, a BAR, offset or length past the
-/// window, and a chain missing a required capability.
+/// Drive the real walk, window check and parse over config space no device produces: a cyclic
+/// or forbidden link, a BAR/offset/length past the window, a chain missing a required capability.
 #[cfg(feature = "boot-actuators")]
 pub fn cap_selftest() {
     use super::pci::{PciDevice, CAPABILITIES_PTR};

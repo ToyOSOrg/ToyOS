@@ -173,8 +173,7 @@ pub fn is_wide(low: u32) -> bool {
 pub enum BadSize {
     /// Every address bit read back zero: the register implements no window.
     Unimplemented,
-    /// The mask was not contiguous ones — the spec hardwires the low address
-    /// bits to zero, so this answer is not a size at all.
+    /// Not contiguous ones — the spec hardwires the low bits to zero, so this is no size.
     NotPowerOfTwo(u64),
 }
 
@@ -189,8 +188,7 @@ impl fmt::Display for BadSize {
     }
 }
 
-/// The size a Memory Space BAR advertises: the two's complement of the masked
-/// all-ones read-back (PCIe base spec §7.5.1.2.1).
+/// A BAR's advertised size: the two's complement of the masked all-ones read-back (PCIe §7.5.1.2.1).
 pub fn advertised_size(mask_lo: u32, mask_hi: Option<u32>) -> Result<u64, BadSize> {
     let masked = mask_lo & MEMORY_ADDRESS;
     let size = match mask_hi {
