@@ -262,6 +262,9 @@ actuators! {
 
     /// Make firmware name its own timezone.
     rtc_zone_east = "rtc-zone-east";
+
+    /// Run the leak-rollback controls (device mint, FAT reopen) after mount.
+    leak_rollback_selftest = "leak-rollback-selftest";
 }
 
 #[cfg(feature = "boot-actuators")]

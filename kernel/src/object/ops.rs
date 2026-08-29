@@ -105,9 +105,10 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
             }
             vfs.create_file(target.as_str(), mtime).map(|file_id| (file_id, mtime, 0))
         } else {
-            // `CREATE` acts on `NotFound` and nothing else — not on every refusal a mount can return.
-            match vfs.open_target(&target) {
-                Ok(file_id) => vfs.mtime_target(&target).map(|mtime| {
+            // `mtime_target` takes no reference, so it runs first and the reference-taking
+            // `open_target` runs last — a refusal cannot strand a reference. `CREATE` acts on `NotFound` only.
+            match vfs.mtime_target(&target) {
+                Ok(mtime) => vfs.open_target(&target).map(|file_id| {
                     let position =
                         if append { file_cache::size(file_id) as usize } else { 0 };
                     (file_id, mtime, position)

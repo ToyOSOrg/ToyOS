@@ -98,6 +98,20 @@ fn main() {
         assert_eq!(err(ret), Some(SyscallError::BadAddress), "dlopen took {addr:#x}");
     }
 
+    // 3b. A refused dlopen must register nothing: the library loads and maps
+    //     before the copy-out, so a `BadAddress` used to leave a module in the
+    //     process's list. `query_modules`' size is the census and climbs per leak.
+    let before = syscall::query_modules(&mut []).expect("query_modules size query");
+    for _ in 0..8 {
+        let ret = dlopen_raw(LIB, base + 4);
+        assert_eq!(err(ret), Some(SyscallError::BadAddress), "a misaligned init_out was not refused");
+    }
+    let after = syscall::query_modules(&mut []).expect("query_modules size query");
+    assert_eq!(
+        after, before,
+        "refused dlopens grew the module census {before} -> {after}: a BadAddress left modules registered",
+    );
+
     // 4. And the syscall still does its job, which is what none of the above
     //    may cost. Poisoned first, because a library with an empty init_array
     //    is written two zeros and that is not distinguishable from a write that
