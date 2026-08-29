@@ -3268,7 +3268,16 @@ fn run_screen_test(
                 ));
             }
             let rows = dump.console_rows(&font);
-            let log_rows = rows.iter().filter(|r| r.contains("[kernel ")).count();
+            // The panel carries logd's file format — a wall-clock stamp, then
+            // `[secs cpuN]` — not the serial's `[kernel …]` prefix.
+            let log_rows =
+                rows.iter().filter(|r| r.contains(" cpu") && r.contains("] ")).count();
+            if log_rows == 0 {
+                return Err(format!(
+                    "the seed witness is on the panel but no row reads as a log record, \
+                     so the format this counts by has drifted again\ndecoded screen:\n{after}"
+                ));
+            }
             eprintln!(
                 "  [console] {log_rows} kernel log rows above a prompt, and `echo \
                  {CONSOLE_NONCE}` typed on the i8042 answered on the panel"

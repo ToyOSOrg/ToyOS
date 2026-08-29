@@ -2079,7 +2079,7 @@ pub const KNOWN_RED: &[Red] = &[
                that is not at the bottom rather than a console that started blank",
         evidence: "PR #111 run 32040411208, job 95418635461 (`guest (3)`); the isolated re-run in \
                    the same job was green",
-        source: "issues/hardware/collapsed-scroll-paint-unasserted.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-17",
     },
     // ---------------------------------------------------------------------
