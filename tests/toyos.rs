@@ -563,6 +563,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
+    // One boot; the leak-rollback controls' two verdict lines. Carrying
+    // `UNMEASURED_MS` until the shards price it.
+    ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
     ("xhci_many_devices", Sched::Parallel, Tier::Fast),
     // Its whole assertion is that a keystroke injected from the host crossed a
     // USB keyboard on the *second* controller, and `input_events_run` sends
@@ -10897,6 +10900,31 @@ fn run_machine_test(
                      nothing, and both drops restored",
                     asked[0], asked[1], asked[2],
                 );
+            }
+            Ok(())
+        }
+        "leak_rollback_selftest" => {
+            // Two "acquire before a fallible step" controls run in the kernel at
+            // boot: each prints PASS only when the in-tree count returned to its
+            // baseline after a refused call; reverting either fix prints FAIL.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["leak-rollback-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            for probe in ["leak-selftest: device-mint", "leak-selftest: fat-reopen"] {
+                let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+                    return Err(format!("{probe} never ran:\n{log}"));
+                };
+                if !verdict.contains("PASS") {
+                    return Err(format!("{}\n{log}", verdict.trim()));
+                }
+                eprintln!("  [leak] {}", verdict.trim());
             }
             Ok(())
         }
