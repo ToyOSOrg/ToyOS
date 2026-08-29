@@ -672,7 +672,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // further, which moves records from `read` into `lost` and leaves the law
     // exactly where it was.
     ("log_conservation_smp1", Sched::Parallel, Tier::Fast),
-    ("log_conservation_smp4", Sched::Parallel, Tier::Fast),
+    ("log_conservation_smp4", Sched::Parallel, Tier::Nightly),
     ("log_conservation_smp8", Sched::Parallel, Tier::Fast),
     ("log_nested_emit", Sched::Parallel, Tier::Fast),
     // The same interrupt one window earlier — between a record's shard-pointer
@@ -905,7 +905,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
     ("log_partition_identity", Sched::Parallel, Tier::Fast),
-    ("cache_eviction", Sched::Parallel, Tier::Fast),
+    ("cache_eviction", Sched::Parallel, Tier::Nightly),
     // The write-back queue's three negative controls (wall 4 of
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
     // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator
@@ -10181,41 +10181,82 @@ fn run_machine_test(
             // is flat while the eviction count climbs. Boot and test output
             // both, since the block cache starts evicting during the format.
             let log = format!("{boot}\n{}", result.serial);
-            let file_series = parse_cache_series(&log, "file cache: ", "pages resident");
+            let file_series = parse_file_cache_series(&log);
             let block_series = parse_cache_series(&log, "page cache: ", "slots resident");
 
-            for (what, series, budget) in [
-                ("file cache", &file_series, file_budget),
-                ("block cache", &block_series, block_budget),
-            ] {
-                // One turnover line means one eviction happened and nothing
-                // more; the workload is 8x the budget in each cache, so a
-                // series this short means eviction is not keeping up with the
-                // pressure — or is not running at all.
-                if series.len() < 4 {
-                    return Err(format!(
-                        "{what}: {} turnover lines, want at least 4 — {series:?}\n{log}",
-                        series.len()
-                    ));
-                }
-                for &(evictions, resident) in series {
-                    if resident > budget {
+            // One turnover line means one eviction happened and nothing
+            // more; the workload is 8x the budget in each cache, so a
+            // series this short means eviction is not keeping up with the
+            // pressure — or is not running at all.
+            if file_series.len() < 4 {
+                return Err(format!(
+                    "file cache: {} turnover lines, want at least 4 — {file_series:?}\n{log}",
+                    file_series.len()
+                ));
+            }
+            if block_series.len() < 4 {
+                return Err(format!(
+                    "block cache: {} turnover lines, want at least 4 — {block_series:?}\n{log}",
+                    block_series.len()
+                ));
+            }
+            // The file cache's bound is the derivation, not an absolute:
+            // eviction never takes a dirty page and gives up only when
+            // everything resident is dirty, so an over-budget sample is
+            // lawful exactly when its own line says dirty == resident — a
+            // clean overage still reds. The guest stages the overage on
+            // every run, and every episode must close with a sample back
+            // within the bound (the kernel prints the close unconditionally).
+            let mut over_samples = 0usize;
+            for &(evictions, resident, dirty) in &file_series {
+                if resident > file_budget {
+                    over_samples += 1;
+                    if dirty != resident {
                         return Err(format!(
-                            "{what}: {resident} entries resident against a {budget} bound \
-                             after {evictions} evictions — the bound does not hold:\n{log}"
+                            "file cache: {resident} entries resident against a {file_budget} \
+                             bound after {evictions} evictions with only {dirty} dirty — the \
+                             overage is not the un-flushed working set, so eviction failed to \
+                             take a clean page it was allowed to:\n{log}"
                         ));
                     }
                 }
-                let (last, _) = series[series.len() - 1];
-                let (first, _) = series[0];
-                if last <= first {
-                    return Err(format!("{what}: eviction count never advanced: {series:?}"));
+            }
+            if over_samples == 0 {
+                return Err(format!(
+                    "the staged all-dirty overage never printed an over-budget sample, so the \
+                     budget's one declared escape ran unobserved:\n{log}"
+                ));
+            }
+            let last_over = file_series
+                .iter()
+                .rposition(|&(_, resident, _)| resident > file_budget)
+                .expect("over_samples > 0 was checked above");
+            if !file_series[last_over + 1..].iter().any(|&(_, r, _)| r <= file_budget) {
+                return Err(format!(
+                    "file cache: the last over-budget sample is never followed by one back \
+                     within the bound, after every writer flushed — the overage outlived its \
+                     excuse:\n{log}"
+                ));
+            }
+            for &(evictions, resident) in &block_series {
+                if resident > block_budget {
+                    return Err(format!(
+                        "block cache: {resident} entries resident against a {block_budget} bound \
+                         after {evictions} evictions — the bound does not hold:\n{log}"
+                    ));
                 }
+            }
+            if file_series[file_series.len() - 1].0 <= file_series[0].0 {
+                return Err(format!("file cache: eviction count never advanced: {file_series:?}"));
+            }
+            if block_series[block_series.len() - 1].0 <= block_series[0].0 {
+                return Err(format!("block cache: eviction count never advanced: {block_series:?}"));
             }
 
             eprintln!(
-                "  [cache] file {} evictions over {} turnovers, block {} evictions over {}; \
-                 residency never above {file_budget}/{block_budget}",
+                "  [cache] file {} evictions over {} turnovers ({over_samples} lawful all-dirty \
+                 over-budget sample(s)), block {} evictions over {}; clean residency never above \
+                 {file_budget}/{block_budget}",
                 file_series[file_series.len() - 1].0,
                 file_series.len(),
                 block_series[block_series.len() - 1].0,
@@ -11368,15 +11409,26 @@ fn run_machine_test(
             // Pause is the injection because it is the one key whose whole
             // sequence decodes to nothing by design — `E1 1D 45 E1 9D C5`,
             // swallowed to keep the stream in frame — so bytes-with-zero-events
-            // is reproduced without a kernel feature and without depending on
-            // how the drain happens to batch. Then one plain letter, which is
-            // the other half: the first line must not be the last word on a
-            // keyboard that works.
+            // is reproduced without depending on how the drain happens to
+            // batch. Then one plain letter, which is the other half: the first
+            // line must not be the last word on a keyboard that works.
+            //
+            // `i8042-split-burst` stages the interleaving this name's CI red
+            // recorded (run 31944633004): the ISR takes four of the six bytes
+            // and the mute verdict goes out with the decoder's run still open,
+            // so it names nothing — on every run here, where KVM produced it
+            // by scheduling luck. The verdict must then revise itself when the
+            // rest of the sequence lands, which is the assertion below.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
-                BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() },
+                BootOptions {
+                    profile: qemu::Profile::Metal,
+                    qmp: true,
+                    kernel_params: &["i8042-split-burst"],
+                    ..Default::default()
+                },
             );
             if !qemu.boot_log().contains("i8042: kbd set2+xlat") {
                 return Err(format!("the PS/2 keyboard never came up:\n{}", qemu.boot_log()));
@@ -11396,7 +11448,7 @@ fn run_machine_test(
             if let Some(err) = &result.error {
                 return Err(format!("{err}\n{}", result.stdout));
             }
-            // **Both lines are read from the injection onwards**, and that is
+            // **Every line is read from the injection onwards**, and that is
             // not tidiness: this driver reports on its own bring-up too, and a
             // `nothing decoded` line from before the Pause was pressed is not a
             // report about the Pause. Reading the first one in the whole capture
@@ -11405,17 +11457,38 @@ fn run_machine_test(
             // (`issues/kernel/an-i8042-interrupt-arrives-with-no-byte-during-init.md`).
             // The marker is the boundary the test knows, because the marker is
             // what the injection was timed off.
-            let capture = serial::Serial::named("i8042 capture", result.serial);
-            let mute = capture.must_say_after(I8042_READY, "nothing decoded").map_err(|why| {
-                format!("bytes arrived and decoded to nothing and the driver never said so: {why}")
+            let text = result.serial;
+            let capture = serial::Serial::named("i8042 capture", text.as_str());
+            let Some(at) = text.find(I8042_READY) else {
+                return Err(format!("{I8042_READY:?} never reached the capture:\n{text}"));
+            };
+            let from = text[at..].find('\n').map_or(text.len(), |n| at + n + 1);
+            let mut mutes = text[from..].lines().filter(|l| l.contains("nothing decoded"));
+            // The staged premise first: the split put the verdict out with the
+            // run still open, so the first mute line must name nothing. A first
+            // line that already names bytes means the arrangement did not
+            // happen and nothing below would be testing the revision.
+            let blind = mutes.next().ok_or_else(|| {
+                format!(
+                    "bytes arrived and decoded to nothing and the driver never said so:\n{text}"
+                )
             })?;
-            // The datum, not the count. `0xE1` is Pause's prefix and the first
-            // byte of the sequence whichever way the drain batched it; a line
-            // that reports only "N bytes, 0 keys" is the one this test exists
-            // to reject.
-            if !mute.contains("no event from [0xe1") {
-                return Err(format!("the line names no byte: {mute}"));
+            if blind.contains("no event from") {
+                return Err(format!(
+                    "the staged split never beat the verdict — the first mute line already \
+                     names bytes, so this run exercised nothing: {blind}"
+                ));
             }
+            // The revision. `0xE1` is Pause's prefix and the first byte of the
+            // sequence whichever way the drain batched it; a verdict that
+            // stands on the blind line — a true statement naming no suspect —
+            // is the one this test exists to reject.
+            let mute = mutes.find(|l| l.contains("no event from [0xe1")).ok_or_else(|| {
+                format!(
+                    "the verdict was said too early — {blind:?} — and never revised: no later \
+                     `nothing decoded` line names the sequence:\n{text}"
+                )
+            })?;
             // And the picture corrects itself. A one-shot report would freeze
             // the panel on the half-arrived sequence and never say the
             // keyboard works after all — which on the T14 is a reflash.
@@ -11435,6 +11508,7 @@ fn run_machine_test(
             if keys == 0 {
                 return Err(format!("the revised verdict still decodes nothing: {alive}"));
             }
+            eprintln!("  [i8042] {}", blind.trim());
             eprintln!("  [i8042] {}", mute.trim());
             eprintln!("  [i8042] {}", alive.trim());
             Ok(())
@@ -12195,6 +12269,27 @@ fn parse_cache_series(log: &str, prefix: &str, unit: &str) -> Vec<(u64, u64)> {
             let evictions = tail.split(" evictions,").next()?.trim().parse().ok()?;
             let resident = tail.split("evictions, ").nth(1)?.split('/').next()?.parse().ok()?;
             Some((evictions, resident))
+        })
+        .collect()
+}
+
+/// `file cache: E evictions, R/M pages resident, D dirty` as (E, R, D).
+///
+/// The dirty count is required, not optional: it is the only lawful reading
+/// of a sample over budget, so a kernel line that stops carrying it drops
+/// out of the series and fails the length assertion rather than passing as
+/// a bound nobody checked.
+fn parse_file_cache_series(log: &str) -> Vec<(u64, u64, u64)> {
+    log.lines()
+        .filter_map(|l| {
+            let tail = l.split("file cache: ").nth(1)?;
+            if !tail.contains("pages resident") {
+                return None;
+            }
+            let evictions = tail.split(" evictions,").next()?.trim().parse().ok()?;
+            let resident = tail.split("evictions, ").nth(1)?.split('/').next()?.parse().ok()?;
+            let dirty = tail.split("resident, ").nth(1)?.split(" dirty").next()?.parse().ok()?;
+            Some((evictions, resident, dirty))
         })
         .collect()
 }
