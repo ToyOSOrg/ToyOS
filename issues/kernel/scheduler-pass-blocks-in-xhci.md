@@ -38,11 +38,10 @@ and it would produce the same panic with `Blocked(CpuId(n))` in the message
 instead — the guard cannot tell a lost message from a busy CPU, which is what it
 is written as if it could.
 
-The second instance of the same shape is the idle loop, which runs
-`log_file::poll()` — already recorded in CLAUDE.md as "unbounded and
-uninterruptible" — before its `pass()`. On a machine whose log partition is on
-the USB stick it booted from, that flush is USB mass-storage I/O on the same 2 s
-transfer deadline, and a task adopted onto an idle CPU waits behind it.
+The second instance of the same shape used to be the idle loop's log flush;
+the idle loop touches no filesystem now — the log is logd's file — and the
+disk wait that survives, logd's `fsync` pinning a CPU for the device round
+trip, is `issues/audio/disk-wait-pins-a-cpu.md`'s subject.
 
 Closing this means making xHCI enumeration and endpoint recovery asynchronous, so
 that `drain_irqs` only ever does work it can finish: drain the event ring,
