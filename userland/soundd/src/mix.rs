@@ -29,6 +29,10 @@ use crate::command::{CommandRing, MixCommand};
 use crate::NULL_SINK_BUFFERS;
 
 const STATS_INTERVAL_NANOS: u64 = 2_000_000_000;
+/// Idle-wake lines said per idle window — the wake source a tripwire line
+/// names may be stuck readable, and the instrument must not amplify the spin
+/// it detects.
+const IDLE_WAKES_SAID: u32 = 8;
 
 /// One reporting window on the console. One line, one `write`.
 ///
@@ -222,6 +226,7 @@ pub(crate) fn mix_thread(
     let mut deferred_last: u32 = 0;
     let mut stats = MixStats::default();
     let mut next_stats_ns = syscall::clock_nanos() + STATS_INTERVAL_NANOS;
+    let mut idle_wakes: u32 = 0;
 
     // Exactly one emission of one of these markers is gate-asserted: the
     // `soundd: suspended` printed by the suspend block below, which
@@ -294,6 +299,7 @@ pub(crate) fn mix_thread(
         if !was_streaming && !streams.is_empty() {
             stats = MixStats::default();
             next_stats_ns = syscall::clock_nanos() + STATS_INTERVAL_NANOS;
+            idle_wakes = 0;
         }
 
         let n_records = backend.completions(&mut records);
@@ -581,8 +587,13 @@ pub(crate) fn mix_thread(
             say!("soundd: suspended");
         }
 
-        if wake_left_idle(was_streaming, started_at_wake, !streams.is_empty()) {
-            say!("soundd: idle wake (cmd={cmd_ready} records={n_records})");
+        if wake_left_idle(was_streaming, started_at_wake, !streams.is_empty(), cmd_ready) {
+            idle_wakes += 1;
+            if idle_wakes < IDLE_WAKES_SAID {
+                say!("soundd: idle wake {idle_wakes} ({n_records} records)");
+            } else if idle_wakes == IDLE_WAKES_SAID {
+                say!("soundd: idle wake {idle_wakes} ({n_records} records); the rest go unsaid");
+            }
         }
 
         // Flushing on the last disconnect keeps the tail between the final
@@ -644,6 +655,7 @@ pub(crate) fn null_sink_thread(
 
     let mut stats = MixStats::default();
     let mut next_stats_ns = syscall::clock_nanos() + STATS_INTERVAL_NANOS;
+    let mut idle_wakes: u32 = 0;
     // The virtual playout grid: the wall-clock instant the next period is due.
     // Meaningful only while streaming; re-anchored to now+one period when the
     // first client of a run connects.
@@ -689,6 +701,7 @@ pub(crate) fn null_sink_thread(
             next_period_ns = now + period_nanos;
             stats = MixStats::default();
             next_stats_ns = now + STATS_INTERVAL_NANOS;
+            idle_wakes = 0;
         }
 
         // Drain every period the grid says is due, discarding the mix. This is
@@ -742,8 +755,13 @@ pub(crate) fn null_sink_thread(
         retain_active(&mut streams);
 
         // No device here, so `device_started` is permanently false.
-        if wake_left_idle(was_streaming, false, !streams.is_empty()) {
-            say!("soundd: idle wake (cmd={cmd_ready})");
+        if wake_left_idle(was_streaming, false, !streams.is_empty(), cmd_ready) {
+            idle_wakes += 1;
+            if idle_wakes < IDLE_WAKES_SAID {
+                say!("soundd: idle wake {idle_wakes}");
+            } else if idle_wakes == IDLE_WAKES_SAID {
+                say!("soundd: idle wake {idle_wakes}; the rest go unsaid");
+            }
         }
 
         // Reporting: flush on the last disconnect so a short stream's tail is in

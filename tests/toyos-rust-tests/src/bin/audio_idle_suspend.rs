@@ -63,13 +63,19 @@ fn main() {
     );
     std::thread::sleep(std::time::Duration::from_millis(1000));
     let after = soundd_threads(&cap);
+    assert!(
+        after.len() >= 2,
+        "soundd lost a thread mid-sample: found {} of the 2 the first sample saw \
+         (before {before:?}, after {after:?})",
+        after.len()
+    );
     let total_before: u64 = before.iter().map(|(_, ns)| ns).sum();
     let total_after: u64 = after.iter().map(|(_, ns)| ns).sum();
     assert_eq!(
         total_after, total_before,
         "soundd consumed {}ns of CPU across ~1s with no client — it is not suspended \
          (per thread, before {before:?}, after {after:?})",
-        total_after - total_before
+        total_after.saturating_sub(total_before)
     );
     println!("soundd idle cpu delta: 0ns over ~1s");
 }

@@ -500,7 +500,7 @@ toyos-mixer/src/gain.rs 43 0
 toyos-mixer/src/lib.rs 43 0
 toyos-mixer/src/mix.rs 38 0
 toyos-mixer/src/shape.rs 102 0
-toyos-mixer/src/stats.rs 127 0
+toyos-mixer/src/stats.rs 131 0
 toyos-pci/src/bar.rs 97 0
 toyos-pci/src/caps.rs 13 0
 toyos-pci/src/lib.rs 20 0
@@ -660,7 +660,7 @@ userland/soundd/src/command.rs 33 0
 userland/soundd/src/control.rs 122 0
 userland/soundd/src/hda.rs 52 0
 userland/soundd/src/main.rs 71 0
-userland/soundd/src/mix.rs 306 0
+userland/soundd/src/mix.rs 309 0
 userland/soundd/src/virtio.rs 92 0
 userland/sprite/src/lib.rs 17 0
 userland/sshd/src/main.rs 78 0

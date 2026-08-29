@@ -102,4 +102,4 @@ fresh one holds 139,253-142,325 of the 144,256 submitted frames, so the
 9.1%-missing mechanism above is gone. The signature changed: breaks now come as
 adjacent-frame *pairs* with |period| in the hundreds, not the 118-frame
 clusters. And the load dependence is sharp where it used to be a correlation:
-0 of 8 alone against 3 of 7 beside other guests, same tree, same hour.
+0 of 8 alone against 3 of 11 beside other guests, same tree, same hour.
