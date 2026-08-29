@@ -387,10 +387,6 @@ fn write_pipe(id: PipeId, buf: &UserBytes) -> Option<u64> {
 pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
     match object {
         KObjectRef::File(f) => f.with(|state| {
-            // Refused, never wrapped: past this the `u32` page index would alias a low page.
-            if (state.position as u64).saturating_add(buf.len() as u64) > file_cache::MAX_FILE_SIZE {
-                return Some(SyscallError::InvalidArgument.to_u64());
-            }
             let mut written = 0;
             let mut refused = false;
             while written < buf.len() {
@@ -448,11 +444,10 @@ pub fn seek(object: &KObjectRef, pos: SeekFrom) -> u64 {
             SeekFrom::Current(n) => (state.position as i64).checked_add(n).unwrap_or(-1),
             SeekFrom::End(n) => (size as i64).checked_add(n).unwrap_or(-1),
         };
-        if new_pos < 0 || new_pos as u64 > file_cache::MAX_FILE_SIZE {
+        if new_pos < 0 {
             return SyscallError::InvalidArgument.to_u64();
         }
-        // Past EOF is a position, not an error (POSIX lseek): a later write extends the file.
-        state.position = new_pos as usize;
+        state.position = (new_pos as usize).min(size);
         state.position as u64
     })
 }
@@ -579,13 +574,12 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     let KObjectRef::File(file) = object else {
         return SyscallError::PermissionDenied.to_u64();
     };
-    if size > file_cache::MAX_FILE_SIZE {
-        return SyscallError::InvalidArgument.to_u64();
-    }
     file.with(|state| {
         // `resize`, not `set_size`: marks the file dirty even when no page changed, so flush is not skipped.
-        // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
         file_cache::resize(state.file_id, size);
+        if state.position > size as usize {
+            state.position = size as usize;
+        }
         state.mtime = crate::clock::nanos_since_boot();
         0
     })

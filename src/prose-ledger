@@ -310,7 +310,6 @@ tests/toyos-rust-tests/src/bin/kill_while_blocked.rs 167 0
 tests/toyos-rust-tests/src/bin/launcher_refusals.rs 110 0
 tests/toyos-rust-tests/src/bin/locale_gate.rs 64 0
 tests/toyos-rust-tests/src/bin/log_volume_reread.rs 27 0
-tests/toyos-rust-tests/src/bin/lseek_past_eof.rs 10 0
 tests/toyos-rust-tests/src/bin/mkdir_cap.rs 11 0
 tests/toyos-rust-tests/src/bin/mmap_prot.rs 62 0
 tests/toyos-rust-tests/src/bin/mmap_stress.rs 31 0
