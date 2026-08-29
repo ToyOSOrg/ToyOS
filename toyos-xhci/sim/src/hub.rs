@@ -41,11 +41,9 @@ pub enum ResetBehaviour {
     /// Inactive, which §4.19.1.2.4 says only a warm reset leaves. This is what
     /// the laptop's USB-A ports do and the state QEMU has no way to produce.
     HotResetKillsTheLink { warm_works: bool },
-    /// **A USB3 port whose bus reset sequence *completes* as a failure**
-    /// (§4.19.5): PRC comes, with the port disabled, the device undetected —
-    /// CCS and the speed field zero — and the link back at RxDetect. The
-    /// failure is distinguishable from success only at the register, and
-    /// §4.19.5.1's warm reset is the prescribed recovery.
+    /// **A USB3 bus reset that *completes* as a failure** (§4.19.5): PRC
+    /// comes with the port disabled, CCS and speed zero, the link at
+    /// RxDetect; §4.19.5.1's warm reset is the prescribed recovery.
     FailsTheBusReset { warm_works: bool },
 }
 
@@ -140,9 +138,8 @@ impl FakePort {
         // driver. A warm reset drives PR too, so what tells them apart is which
         // bit the driver wrote.
         let hot = value & PR != 0 && self.raw & CCS != 0;
-        // WPR is a link operation and runs with no device detected: recovering
-        // the port that reads CCS=0 after a failed bus reset is what
-        // §4.19.5.1 uses it for.
+        // WPR runs with no device detected: recovering the port that reads
+        // CCS=0 after a failed bus reset is what §4.19.5.1 uses it for.
         let warm = value & WPR != 0;
         if hot || warm {
             next = (next | PR) & !PED;

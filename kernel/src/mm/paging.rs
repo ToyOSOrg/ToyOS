@@ -95,9 +95,8 @@ impl WindowProt {
 pub enum CachePolicy {
     /// PAT entry 0 (WB); the range's actual type is the MTRR's (SDM Vol. 3A Table 11-7).
     DeferToMtrr,
-    /// PAT entry [`pat::UC_ENTRY`](crate::arch::pat::UC_ENTRY); UC under every
-    /// MTRR type (Table 11-7), so nothing firmware set or forgot can make the
-    /// range cacheable.
+    /// PAT entry [`pat::UC_ENTRY`](crate::arch::pat::UC_ENTRY): UC under
+    /// every MTRR type (Table 11-7), whatever firmware set or forgot.
     Uncacheable,
     /// PAT entry [`pat::WC_ENTRY`](crate::arch::pat::WC_ENTRY).
     WriteCombining,
@@ -138,8 +137,7 @@ const _: () = assert!(
 
 /// What an MMIO window may select — never PAT entry 0: device registers
 /// deferred to firmware's MTRR coverage were cacheable wherever an MTRR was
-/// missing, with no symptom naming the cause, and this type is what removes
-/// that as a possibility.
+/// missing, and this type removes that as a possibility.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MmioPolicy {
     /// Registers.
@@ -970,9 +968,8 @@ pub fn load_kernel_flush() {
 pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> super::Mmio {
     let mmio = kernel().lock().map_mmio(phys, size, policy.cache());
     crate::arch::tlb::shootdown();
-    // Read back off the table and logged beside what firmware's MTRRs say:
-    // the boot's own evidence that no register window trusts firmware for
-    // its memory type.
+    // Read back off the table and logged beside firmware's MTRR verdict: the
+    // boot's own evidence that no register window trusts firmware.
     let installed =
         kernel().lock().direct_map_policy(phys).expect("map_mmio: the window was just mapped");
     assert!(installed == policy.cache(), "map_mmio: {phys:#x} installed {installed:?}");

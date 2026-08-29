@@ -12096,11 +12096,9 @@ fn run_machine_test(
             Ok(())
         }
         "input_claim_absent" => {
-            // The one bootable machine with no input source of any kind: no
-            // xHCI — the boot volume rides its own NVMe controller — and the
-            // i8042 taken away, QEMU's single stageable absence. Three
-            // independent channels must agree: the argv stages the absence,
-            // the kernel's own drivers say what they found, and the claim
+            // The one bootable machine with no input source: no xHCI, the
+            // i8042 taken away. Three channels must agree — the argv stages
+            // the absence, the kernel's drivers report it, and the claim
             // syscall refuses by name.
             let options = BootOptions {
                 profile: qemu::Profile::MetalNoUsb,

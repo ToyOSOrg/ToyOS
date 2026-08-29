@@ -7,8 +7,7 @@ pub use toyos_abi::input::MouseEvent;
 
 static MOUSE_BUF: Lock<VecDeque<MouseEvent>> = Lock::new(VecDeque::new());
 
-/// [`crate::keyboard::source_exists`]'s twin: the aux port armed, or any
-/// xHCI controller bound.
+/// [`crate::keyboard::source_exists`]'s twin: the aux port armed, or any xHCI controller bound.
 static SOURCE_EXISTS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 

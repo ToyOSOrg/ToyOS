@@ -393,10 +393,8 @@ impl Driver {
                     if self.outstanding.busy() {
                         return Err(Stuck::Order(Broke::ActedWithAnAnswerOutstanding));
                     }
-                    // The kernel's `device::begin` acknowledges the completion
-                    // it consumed before submitting Enable Slot; mirrored, or a
-                    // warm reset's own connect edge cancels the enumeration it
-                    // just earned.
+                    // Mirrors `device::begin`'s acknowledge — without it a warm
+                    // reset's own connect edge cancels the enumeration it earned.
                     let fresh = port.read();
                     let ack = if self.state.has_flaw(Flaw::WriteBackWhatWasRead) {
                         toyos_xhci::portsc::Write::whole_word(fresh)

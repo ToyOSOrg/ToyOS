@@ -52,9 +52,8 @@ pub fn check(before: &PortState, step: &Step<'_>, read: Portsc, now: u64) -> Opt
     }
 }
 
-/// One write checked alone, for an acknowledge performed outside the machine:
-/// the simulator's effect sites hold it to the same word-soundness the machine's
-/// own writes get.
+/// One write checked alone: an acknowledge performed outside the machine
+/// gets the same word-soundness the machine's own writes do.
 pub fn check_write(write: portsc::Write, read: Portsc) -> Option<Violation> {
     // Mirrors the register's own bit positions rather than importing private
     // masks: an invariant that reads the world through the same accessor as the

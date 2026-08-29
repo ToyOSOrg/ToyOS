@@ -1754,9 +1754,8 @@ pub fn xhci_superspeed_ports(
             return Err(format!("{line:?} on a bus where every link is healthy\n{log}"));
         }
     }
-    // Every `mmio:` line is the kernel reading its own page table back: no
-    // device register window may defer its memory type to firmware's MTRR
-    // coverage, and the xHCI BAR in particular must have come up uncacheable.
+    // Every `mmio:` line is the kernel reading its own page table back; the
+    // xHCI BAR in particular must have come up uncacheable.
     let mmio: Vec<&str> = log.lines().filter(|l| l.contains("mmio: ")).collect();
     if mmio.is_empty() {
         return Err(format!("no mmio: line — the kernel never said what its windows select\n{log}"));

@@ -1,7 +1,5 @@
-//! On a machine with no i8042 and no USB controller, a Keyboard or Mouse
-//! claim must refuse `NotFound` — a claim is evidence, and this machine has
-//! no hardware that could ever feed either stream. Driven by
-//! `input_claim_absent` on the one bootable shape with no input source; on
+//! A Keyboard or Mouse claim must refuse `NotFound` on a machine with no
+//! i8042 and no USB controller. Driven by `input_claim_absent` alone: on
 //! every other machine both claims succeed, which is why it is in RUST_SKIP.
 
 use toyos::device::{Keyboard, Mouse};

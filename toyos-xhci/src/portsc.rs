@@ -191,11 +191,9 @@ impl Write {
         Self(self.0 | (seen.0 & (PRC | WRC)))
     }
 
-    /// Clear a connect change seen in `seen`, for the one caller whose connect
-    /// edge is an artifact: a warm reset retrains the link from scratch, so its
-    /// completion always carries CSC (§4.19.5.1) — evidence of nothing but the
-    /// reset itself, and left set it reads as a replug and cancels the
-    /// enumeration it belongs to.
+    /// Clear a connect change seen in `seen`, for the one caller whose edge is
+    /// an artifact: a warm completion always carries CSC (§4.19.5.1), and left
+    /// set it reads as a replug and cancels the enumeration it belongs to.
     pub const fn acknowledging_connect(self, seen: Portsc) -> Self {
         Self(self.0 | (seen.0 & CSC))
     }

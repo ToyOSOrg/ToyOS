@@ -13,8 +13,7 @@ pub use toyos_abi::input::{RawKeyEvent, MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_GUI, M
 static KEY_BUF: Lock<VecDeque<RawKeyEvent>> = Lock::new(VecDeque::new());
 
 /// Whether any driver that can ever feed this stream exists — the i8042's
-/// keyboard armed, or an xHCI controller bound, since hot-plug can add a
-/// keyboard at any time. What makes a `DeviceType::Keyboard` claim evidence.
+/// keyboard armed, or an xHCI controller bound (hot-plug). A claim's evidence.
 static SOURCE_EXISTS: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 

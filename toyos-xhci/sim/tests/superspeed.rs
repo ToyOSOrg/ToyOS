@@ -147,11 +147,9 @@ fn a_usb2_port_is_never_warm_reset() {
     );
 }
 
-/// **The other way a USB3 hot reset fails** (§4.19.5): the sequence
-/// *completes* — PRC comes — with the port disabled, the device undetected and
-/// the link back at RxDetect. A driver that reads only the completion flag
-/// enumerates a dead port and then drops it at its enabled-check; §4.19.5.1's
-/// answer is the same warm reset the deadline shape gets.
+/// **The other way a USB3 hot reset fails** (§4.19.5): it *completes* — PRC
+/// set — with the port disabled and the link at RxDetect; §4.19.5.1's answer
+/// is the same warm reset the deadline shape gets.
 #[test]
 fn a_reset_that_completes_failed_is_warm_reset() {
     let mut port = FakePort::occupied(ResetBehaviour::FailsTheBusReset { warm_works: true });
@@ -194,9 +192,8 @@ fn a_completed_failure_that_stays_failed_is_refused_by_name() {
     );
 }
 
-/// "USB2 protocol ports never fail" the bus reset sequence (§4.19.5) — so a
-/// controller that completes one disabled anyway is refused by its own name,
-/// and never written a WPR the port does not have.
+/// "USB2 protocol ports never fail" (§4.19.5): a controller that completes
+/// one disabled anyway is refused by name, never written a WPR it lacks.
 #[test]
 fn a_usb2_completed_failure_is_refused_not_warm_reset() {
     let mut port = FakePort::occupied(ResetBehaviour::FailsTheBusReset { warm_works: false });

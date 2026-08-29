@@ -1092,11 +1092,10 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
-    /// A machine with no USB at all — no xHCI, so no boot stick — and no
-    /// i8042 either once the boot passes `i8042: false`. The boot volume
-    /// rides a second NVMe controller instead, which works because userland
-    /// runs from the initrd: nothing after the bootloader needs the boot
-    /// disk. The one bootable shape on which no input source can ever exist.
+    /// No USB at all — no xHCI, so no boot stick — and no i8042 once the boot
+    /// passes `i8042: false`: the one bootable shape on which no input source
+    /// can ever exist. The boot volume rides a second NVMe controller, which
+    /// works because userland runs from the initrd.
     MetalNoUsb,
     /// metal-sim with the T14's internal xHCI actually populated: the boot
     /// stick plus five more devices, two of them keyboards. The laptop's
@@ -3596,8 +3595,7 @@ fn qemu_command(
     }
 
     if shape.xhci.is_empty() {
-        // No controller to carry the stick: the same boot volume rides its
-        // own NVMe controller, beside the scratch namespace every shape gets.
+        // No controller to carry the stick: the boot volume rides its own NVMe controller.
         qemu.arg("-device")
             .arg("nvme,serial=bootdisk,id=nvmebootctl,bootindex=0")
             .arg("-device")
