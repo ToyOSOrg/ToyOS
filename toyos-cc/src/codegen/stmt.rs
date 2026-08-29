@@ -681,6 +681,13 @@ impl Codegen {
     }
 
     fn compile_label(&mut self, ctx: &mut FuncCtx, label: &str, body: &Statement) {
+        self.enter_label_block(ctx, label);
+        self.compile_stmt(ctx, body);
+    }
+
+    /// Opens `label`'s block and moves the builder into it, so what the caller
+    /// compiles next lands after the label.
+    pub(crate) fn enter_label_block(&mut self, ctx: &mut FuncCtx, label: &str) {
         let block = if let Some(existing) = ctx.labels.get(label) {
             *existing
         } else {
@@ -695,7 +702,6 @@ impl Codegen {
         ctx.builder.switch_to_block(block);
         ctx.filled = false;
         // Don't seal yet — might have forward gotos
-        self.compile_stmt(ctx, body);
     }
 
     fn emit_zero(builder: &mut FunctionBuilder, ty: Type) -> Value {
