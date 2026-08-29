@@ -10,7 +10,7 @@ use toyos_abi::FramebufferInfo;
 
 use crate::device::{Claim, DeviceType};
 
-use super::handle::{HandleEntry, HandleTable};
+use super::handle::HandleTable;
 use super::shm::SharedMemObject;
 use super::{Held, KObjectRef, KObjectVariant, ObjectCore, ZeroHandles};
 
@@ -33,42 +33,47 @@ pub struct FramebufferBuffers {
 // MAP is required; DUP and TRANSFER let a daemon hand the buffer to another process.
 const BUFFER_RIGHTS: Rights = Rights::MAP.union(Rights::DUP).union(Rights::TRANSFER);
 
-fn install_buffer(
+fn install_buffers(
     table: &mut HandleTable,
-    buffer: &Arc<SharedMemObject>,
-) -> Result<RawHandle, SyscallError> {
-    table
-        .install(HandleEntry::new(KObjectRef::SharedMem(buffer.clone()), BUFFER_RIGHTS))
-        .map_err(|_| SyscallError::ResourceExhausted)
+    buffers: &[&Arc<SharedMemObject>],
+) -> Result<alloc::vec::Vec<RawHandle>, SyscallError> {
+    let objects = buffers
+        .iter()
+        .map(|b| (KObjectRef::SharedMem((*b).clone()), BUFFER_RIGHTS))
+        .collect();
+    table.install_all(objects).map_err(|_| SyscallError::ResourceExhausted)
 }
 
 impl DeviceInfo {
     /// The description as bytes, with a handle installed for every named buffer.
+    // All-or-nothing: a table too full for the whole batch installs none and leaves
+    // `described.bytes` unset, so the next read re-mints instead of binding stranded handles.
     fn mint(&self, table: &mut HandleTable) -> Result<Box<[u8]>, SyscallError> {
         Ok(match self {
             Self::Events => Box::new([]),
             Self::Framebuffer(info, buffers) => {
                 let mut info = *info;
-                info.scanout = [
-                    install_buffer(table, &buffers.scanout[0])?,
-                    install_buffer(table, &buffers.scanout[1])?,
-                ];
-                info.cursor = install_buffer(table, &buffers.cursor)?;
+                let h = install_buffers(
+                    table,
+                    &[&buffers.scanout[0], &buffers.scanout[1], &buffers.cursor],
+                )?;
+                info.scanout = [h[0], h[1]];
+                info.cursor = h[2];
                 info.as_bytes().into()
             }
             Self::Nic(info, dma) => {
                 let mut info = *info;
-                info.dma = install_buffer(table, dma)?;
+                info.dma = install_buffers(table, &[dma])?[0];
                 info.as_bytes().into()
             }
             Self::Hda(info, pcm) => {
                 let mut info = *info;
-                info.pcm = install_buffer(table, pcm)?;
+                info.pcm = install_buffers(table, &[pcm])?[0];
                 info.as_bytes().into()
             }
             Self::VirtioSound(info, dma) => {
                 let mut info = *info;
-                info.dma = install_buffer(table, dma)?;
+                info.dma = install_buffers(table, &[dma])?[0];
                 info.as_bytes().into()
             }
         })
@@ -143,6 +148,36 @@ impl DeviceClaim {
         described.bytes = Some(minted.clone());
         Ok(minted)
     }
+}
+
+/// Negative control for the mint's all-or-nothing rule: a three-handle
+/// framebuffer batch minted into a table with room for two must install none.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn mint_rollback_selftest() {
+    use crate::object::shm::{Region, SharedMemObject};
+    let mut table = HandleTable::new();
+    table.stage_room(2);
+    let buffers = FramebufferBuffers {
+        scanout: [SharedMemObject::over(Region::empty()), SharedMemObject::over(Region::empty())],
+        cursor: SharedMemObject::over(Region::empty()),
+    };
+    let info = DeviceInfo::Framebuffer(
+        FramebufferInfo {
+            scanout: [toyos_abi::HANDLE_INVALID; 2],
+            cursor: toyos_abi::HANDLE_INVALID,
+            width: 0,
+            height: 0,
+            stride: 0,
+            pixel_format: 0,
+            flags: 0,
+        },
+        buffers,
+    );
+    let before = table.iter().count();
+    let refused = info.mint(&mut table).is_err();
+    let installed = table.iter().count() - before;
+    let verdict = if refused && installed == 0 { "PASS" } else { "FAIL" };
+    crate::log!("leak-selftest: device-mint {verdict} (refused={refused} installed={installed})");
 }
 
 // Released on last handle, not last Arc: a parked daemon can strand an Arc without releasing.

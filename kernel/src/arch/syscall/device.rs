@@ -135,6 +135,12 @@ pub(super) fn sys_gpu_reset_scanout(
         cursor,
     };
     device::set_framebuffer_info(screen.clone());
+    // The output window is taken before the mint: a bad address must not leave a
+    // resolution, or fresh buffer handles, the caller was never handed. Length is `FramebufferInfo`'s.
+    let len = core::mem::size_of::<toyos_abi::FramebufferInfo>() as u64;
+    let Some(mut out) = ctx.user_bytes_mut(info_out, len) else {
+        return SyscallError::BadAddress.to_u64();
+    };
     let minted = process::with_process_data(|data| {
         let claim = data
             .handles
@@ -146,9 +152,6 @@ pub(super) fn sys_gpu_reset_scanout(
     let minted = match minted {
         Ok(bytes) => bytes,
         Err(e) => return e.refuse(),
-    };
-    let Some(mut out) = ctx.user_bytes_mut(info_out, minted.len() as u64) else {
-        return SyscallError::BadAddress.to_u64();
     };
     out.write_at(0, &minted);
     0
