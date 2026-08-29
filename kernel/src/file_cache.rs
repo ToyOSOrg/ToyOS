@@ -424,7 +424,8 @@ fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
                 let straddled = (new_size / PAGE_SIZE as u64) as u32;
                 if let Some(page) = file.pages.get_mut(&straddled) {
                     page.data[tail..].fill(0);
-                    page.dirty = true;
+                    page.dirt.record_write();
+                    file.dirt.record_write();
                 }
             }
             if is_cache { removed.len() } else { 0 }
