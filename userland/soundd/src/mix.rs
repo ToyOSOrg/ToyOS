@@ -19,7 +19,8 @@ use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use toyos_hda::stream;
 use toyos_mixer::{
-    deferral_floor_nanos, period_nanos, quantize_period, scratch_frames, Dll, MixStats, Xorshift32,
+    deferral_floor_nanos, period_nanos, quantize_period, scratch_frames, wake_left_idle, Dll,
+    MixStats, Xorshift32,
 };
 
 use crate::backend::{Backend, Pipeline};
@@ -282,6 +283,7 @@ pub(crate) fn mix_thread(
         if was_streaming {
             stats.wakes += 1;
         }
+        let started_at_wake = started;
 
         if cmd_ready {
             let mut drain = [0u8; 64];
@@ -579,6 +581,10 @@ pub(crate) fn mix_thread(
             say!("soundd: suspended");
         }
 
+        if wake_left_idle(was_streaming, started_at_wake, !streams.is_empty()) {
+            say!("soundd: idle wake (cmd={cmd_ready} records={n_records})");
+        }
+
         // Flushing on the last disconnect keeps the tail between the final
         // periodic window and the client leaving in the record — for a stream
         // shorter than two windows that tail is most of it.
@@ -734,6 +740,11 @@ pub(crate) fn null_sink_thread(
         stats.max_batch = stats.max_batch.max(batch);
 
         retain_active(&mut streams);
+
+        // No device here, so `device_started` is permanently false.
+        if wake_left_idle(was_streaming, false, !streams.is_empty()) {
+            say!("soundd: idle wake (cmd={cmd_ready})");
+        }
 
         // Reporting: flush on the last disconnect so a short stream's tail is in
         // the record, and every STATS_INTERVAL_NANOS while streaming — the same

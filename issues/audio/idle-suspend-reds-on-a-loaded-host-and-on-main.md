@@ -49,9 +49,9 @@ here — a one-test run and a full suite differ in more than load.
 
 They separate on **whether soundd's own wake counter moves**: `MixStats::wakes`
 is zeroed when the first client arrives and never reported while idle, so
-nothing today can see an idle wake. A `SYS_DEBUG` counter, or a single line
-soundd prints when it leaves the poller with no streams, decides it in one boot.
-Until then the fix is unknown and the test is measuring two things at once.
+nothing could see an idle wake when this was filed. The 2026-08-29 section
+below is that instrument existing; a red taken since then decides the split by
+itself.
 
 Not on `src/redlist.rs` — `cargo run -- --known-red audio_idle_suspend` answers
 `NOT ON THE LIST`. Adjudicating it there needs the rate above and a decision
@@ -86,3 +86,23 @@ record: one `main` invocation of the 42 failed differently — `expected soundd'
 mix and control threads in sysinfo, found 1` — so this test also races soundd's
 control thread into `sysinfo`, and a red carrying that sentence is not this
 issue at all.
+
+## 2026-08-29: the instrument is in, and a 40-invocation session could not raise the red on either arm
+
+The decisive instrument exists now. `mix_thread` and `null_sink_thread` name
+every wake that began with no client, found the device already stopped, and
+ended with none — `soundd: idle wake (cmd=.. records=..)`, decided by
+`toyos_mixer::wake_left_idle` and pinned by its truth-table test — so cause 1
+prints a line per wake and cause 2 cannot print one. The test now waits for
+both soundd threads before its first sample, which removes the `found 1` race
+above, and a red names each thread's delta apart, so the next red separates
+mix loop from control thread from accounting on sight.
+
+What a red did not do today: 40 invocations in one dev-host session — 12
+sequential, 16 beside two other suites of this worktree, then 12 of the
+*unmodified* test the same way (1-min load 5.1-21.6 across the loaded rounds)
+— were green 40 of 40, on both arms. The same loaded rounds raised `hda_tone`'s
+load-keyed reds on 3 boots of 11, so the load was real; this red's conditions
+were not met, which is the same session-to-session movement the 08-21 section
+records. The rate question stays open; the next red answers the cause question
+by itself.

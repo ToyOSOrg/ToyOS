@@ -20,46 +20,56 @@ use toyos::system;
 const HEADER: usize = system::SYSINFO_HEADER_SIZE;
 const ENTRY: usize = system::SYSINFO_ENTRY_SIZE;
 
-/// Sum of live cpu_ns over every soundd thread. The mix thread reports under
-/// the process name ("soundd"), the control thread under its own
-/// ("soundd-ctrl"); matching the prefix covers both and fails loudly if the
-/// daemon is missing.
-fn soundd_cpu_ns(cap: &SysCap) -> u64 {
+/// Live cpu_ns per soundd thread. The mix thread reports under the process
+/// name ("soundd"), the control thread under its own ("soundd-ctrl");
+/// matching the prefix covers both.
+fn soundd_threads(cap: &SysCap) -> Vec<(String, u64)> {
     let mut buf = vec![0u8; HEADER + ENTRY * 128];
     let n = cap.roster(&mut buf);
     assert!(n >= HEADER, "sysinfo failed");
 
-    let mut total = 0u64;
-    let mut threads = 0u32;
+    let mut threads = Vec::new();
     let mut pos = HEADER;
     while pos + ENTRY <= n {
         let name_bytes = &buf[pos + 32..pos + 60];
         let len = name_bytes.iter().position(|&b| b == 0).unwrap_or(28);
         if name_bytes[..len].starts_with(b"soundd") {
-            total += u64::from_le_bytes(buf[pos + 24..pos + 32].try_into().unwrap());
-            threads += 1;
+            let name = String::from_utf8_lossy(&name_bytes[..len]).into_owned();
+            let cpu_ns = u64::from_le_bytes(buf[pos + 24..pos + 32].try_into().unwrap());
+            threads.push((name, cpu_ns));
         }
         pos += ENTRY;
     }
-    assert!(
-        threads >= 2,
-        "expected soundd's mix and control threads in sysinfo, found {threads}"
-    );
-    total
+    threads
 }
 
 fn main() {
     let cap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("test-runner endows every binary it spawns a system capability");
-    let before = soundd_cpu_ns(&cap);
+    // soundd's control thread is spawned after the mix thread, so a roster
+    // read can land between the two; the measurement starts once both exist.
+    let mut before = soundd_threads(&cap);
+    let mut waited_ms = 0u32;
+    while before.len() < 2 && waited_ms < 5_000 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        waited_ms += 20;
+        before = soundd_threads(&cap);
+    }
+    assert!(
+        before.len() >= 2,
+        "expected soundd's mix and control threads in sysinfo, found {} after {waited_ms}ms",
+        before.len()
+    );
     std::thread::sleep(std::time::Duration::from_millis(1000));
-    let after = soundd_cpu_ns(&cap);
+    let after = soundd_threads(&cap);
+    let total_before: u64 = before.iter().map(|(_, ns)| ns).sum();
+    let total_after: u64 = after.iter().map(|(_, ns)| ns).sum();
     assert_eq!(
-        after,
-        before,
-        "soundd consumed {}ns of CPU across ~1s with no client — it is not suspended",
-        after - before
+        total_after, total_before,
+        "soundd consumed {}ns of CPU across ~1s with no client — it is not suspended \
+         (per thread, before {before:?}, after {after:?})",
+        total_after - total_before
     );
     println!("soundd idle cpu delta: 0ns over ~1s");
 }
