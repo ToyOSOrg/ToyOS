@@ -588,7 +588,7 @@ pub(crate) fn mix_thread(
         }
 
         if wake_left_idle(was_streaming, started_at_wake, !streams.is_empty(), cmd_ready) {
-            idle_wakes += 1;
+            idle_wakes = idle_wakes.saturating_add(1);
             if idle_wakes < IDLE_WAKES_SAID {
                 say!("soundd: idle wake {idle_wakes} ({n_records} records)");
             } else if idle_wakes == IDLE_WAKES_SAID {
@@ -756,7 +756,7 @@ pub(crate) fn null_sink_thread(
 
         // No device here, so `device_started` is permanently false.
         if wake_left_idle(was_streaming, false, !streams.is_empty(), cmd_ready) {
-            idle_wakes += 1;
+            idle_wakes = idle_wakes.saturating_add(1);
             if idle_wakes < IDLE_WAKES_SAID {
                 say!("soundd: idle wake {idle_wakes}");
             } else if idle_wakes == IDLE_WAKES_SAID {

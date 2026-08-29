@@ -105,4 +105,8 @@ sequential, 16 beside two other suites of this worktree, then 12 of the
 load-keyed reds on 3 boots of 11, so the load was real; this red's conditions
 were not met, which is the same session-to-session movement the 08-21 section
 records. The rate question stays open; the next red answers the cause question
-by itself.
+by itself — with one stated exception: `wake_left_idle` exempts every wake
+carrying a command byte, so an idle wake genuinely caused by the command pipe
+(a byte stranded between the drain and the ring pop) prints no line and would
+read as cause 2. A red with no idle-wake line therefore rules out every wake
+source except the command pipe, not every source.
