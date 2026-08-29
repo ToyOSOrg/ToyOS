@@ -300,7 +300,14 @@ pub fn init(devices: &[PciDevice]) {
     };
     log!("virtio-sound: found at PCI {:02x}:{:02x}.{}", pci.bus, pci.dev, pci.func);
 
-    let device = VirtioDevice::init(pci, VIRTIO_F_VERSION_1);
+    let device = match VirtioDevice::init(pci, VIRTIO_F_VERSION_1) {
+        Ok(device) => device,
+        Err(why) => {
+            log!("virtio-sound: NOT INITIALISED — PCI {:02x}:{:02x}.{} {why}",
+                pci.bus, pci.dev, pci.func);
+            return;
+        }
+    };
 
     let cfg = device.device_config();
     let (jacks, streams, chmaps) = (cfg.read_u32(0), cfg.read_u32(4), cfg.read_u32(8));

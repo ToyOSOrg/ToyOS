@@ -157,7 +157,14 @@ pub fn init(devices: &[PciDevice]) -> bool {
     // Leaked, not held in a `static`: the console is never unbound.
     let dma = DmaPool::alloc(DMA_SIZE).leak();
 
-    let device = VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1);
+    let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1) {
+        Ok(device) => device,
+        Err(why) => {
+            log!("virtio-console: PCI {:02x}:{:02x}.{} {why} — device refused",
+                pci_dev.bus, pci_dev.dev, pci_dev.func);
+            return false;
+        }
+    };
 
     let mut rx = Virtqueue::new(dma.subview(OFF_RXVQ, 0x1000), QUEUE_SIZE);
     let mut tx = Virtqueue::new(dma.subview(OFF_TXVQ, 0x1000), QUEUE_SIZE);

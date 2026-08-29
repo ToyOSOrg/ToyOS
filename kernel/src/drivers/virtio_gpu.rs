@@ -489,7 +489,14 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     // Leaked rather than held in a `static`: the display is never unbound.
     let dma = DmaPool::alloc(DMA_SIZE).leak();
 
-    let device = VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID);
+    let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID) {
+        Ok(device) => device,
+        Err(why) => {
+            log!("VirtIO GPU: PCI {:02x}:{:02x}.{} {why} — device refused",
+                pci_dev.bus, pci_dev.dev, pci_dev.func);
+            return None;
+        }
+    };
 
     let mut controlq = Virtqueue::new(dma.subview(OFF_CONTROLQ, 0x1000), 16);
     let mut cursorq = Virtqueue::new(dma.subview(OFF_CURSORQ, 0x1000), 16);

@@ -14,8 +14,10 @@ const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
 const PCI_CAP_ID_VENDOR: u8 = 0x09;
 
-/// The window each virtio BAR is mapped through; a capability naming an offset or length past it is refused, not mapped.
-const BAR_WINDOW: u64 = 0x4000;
+/// Ceiling on how much of a BAR the kernel maps: the window's page tables are
+/// real memory, so a device advertising more gets this much mapped and a named
+/// refusal for any capability past it.
+const BAR_WINDOW_CEILING: u64 = 16 << 20;
 
 const STATUS_ACKNOWLEDGE: u8 = 1;
 const STATUS_DRIVER: u8 = 2;
@@ -101,6 +103,28 @@ enum CapWindow {
     Unmapped,
 }
 
+/// The required capability a device's chain never produced a window for; its
+/// chain crossed a trust boundary, so the device is refused, never asserted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingCap {
+    Common,
+    Notify,
+    Isr,
+    Device,
+}
+
+impl core::fmt::Display for MissingCap {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = match self {
+            Self::Common => "COMMON_CFG",
+            Self::Notify => "NOTIFY_CFG",
+            Self::Isr => "ISR_CFG",
+            Self::Device => "DEVICE_CFG",
+        };
+        write!(f, "published no usable {name} capability")
+    }
+}
+
 /// The config sub-window a virtio PCI capability names, or why it names none:
 /// the device's index, offset and length checked before a subregion is taken.
 fn cap_subwindow(
@@ -111,15 +135,17 @@ fn cap_subwindow(
 ) -> Result<Mmio, CapWindow> {
     let bar_idx = Untrusted::new(bar_byte).index(mapped_bars.len()).map_err(CapWindow::Refused)?;
     let bar = mapped_bars[bar_idx].as_ref().ok_or(CapWindow::Unmapped)?;
+    // The mapped window is the BAR's advertised size or the ceiling, never under 16 bytes.
+    let window = bar.size();
     let size = (length as u64).max(4);
-    // length ≤ window keeps `BAR_WINDOW - size` from underflowing and offset + size inside the window.
-    Untrusted::new(length).at_most(BAR_WINDOW).map_err(CapWindow::Refused)?;
-    let offset = Untrusted::new(offset).at_most(BAR_WINDOW - size).map_err(CapWindow::Refused)?;
+    // length ≤ window keeps `window - size` from underflowing and offset + size inside the window.
+    Untrusted::new(length).at_most(window).map_err(CapWindow::Refused)?;
+    let offset = Untrusted::new(offset).at_most(window - size).map_err(CapWindow::Refused)?;
     Ok(bar.subregion(offset, size))
 }
 
 impl VirtioPciConfig {
-    fn parse(pci_dev: &PciDevice) -> Self {
+    fn parse(pci_dev: &PciDevice) -> Result<Self, MissingCap> {
         let mut common = None;
         let mut notify = None;
         let mut notify_off_multiplier = 0u32;
@@ -132,12 +158,21 @@ impl VirtioPciConfig {
             // The BAR index is the device's; one past the six the array holds skips the capability rather than indexing it.
             let Ok(bar_idx) = Untrusted::new(cap.read_u8(4)).index(mapped_bars.len()) else { continue };
             if mapped_bars[bar_idx].is_none() {
-                // A capability naming a non-memory BAR maps to no window; parse()'s `expect`s report which was missing.
+                // A capability naming a non-memory or unsizable BAR maps to no window.
                 match pci_dev.memory_bar(bar_idx as u8) {
-                    Ok(memory) => {
-                        mapped_bars[bar_idx] = Some(crate::mm::paging::map_mmio(
-                            memory.address(), BAR_WINDOW, CachePolicy::DeferToMtrr));
-                    }
+                    Ok(memory) => match pci_dev.bar_size(bar_idx as u8) {
+                        Ok(advertised) => {
+                            mapped_bars[bar_idx] = Some(crate::mm::paging::map_mmio(
+                                memory.address(),
+                                advertised.min(BAR_WINDOW_CEILING),
+                                CachePolicy::DeferToMtrr,
+                            ));
+                        }
+                        Err(why) => log!(
+                            "VirtIO: PCI {:02x}:{:02x}.{} BAR {bar_idx}: {why} — skipping \
+                             every capability in it",
+                            pci_dev.bus, pci_dev.dev, pci_dev.func),
+                    },
                     Err(why) => log!(
                         "VirtIO: PCI {:02x}:{:02x}.{} names BAR {bar_idx} and {why} — skipping \
                          every capability in it",
@@ -175,13 +210,13 @@ impl VirtioPciConfig {
             }
         }
 
-        Self {
-            common: common.expect("VirtIO: missing COMMON_CFG capability"),
-            notify: notify.expect("VirtIO: missing NOTIFY_CFG capability"),
+        Ok(Self {
+            common: common.ok_or(MissingCap::Common)?,
+            notify: notify.ok_or(MissingCap::Notify)?,
             notify_off_multiplier,
-            isr: isr.expect("VirtIO: missing ISR_CFG capability"),
-            device: device.expect("VirtIO: missing DEVICE_CFG capability"),
-        }
+            isr: isr.ok_or(MissingCap::Isr)?,
+            device: device.ok_or(MissingCap::Device)?,
+        })
     }
 }
 
@@ -620,8 +655,9 @@ pub fn used_selftest() {
     log!("virtio: used-ring selftest {passed}/{CASES}");
 }
 
-/// Drive the real walk and window check over config space no device produces: a
-/// cyclic or spec-forbidden link, and a BAR, offset or length past the window.
+/// Drive the real walk, window check and parse over config space no device
+/// produces: a cyclic or spec-forbidden link, a BAR, offset or length past the
+/// window, and a chain missing a required capability.
 #[cfg(feature = "boot-actuators")]
 pub fn cap_selftest() {
     use super::pci::{PciDevice, CAPABILITIES_PTR};
@@ -629,12 +665,15 @@ pub fn cap_selftest() {
     use crate::mm::{DirectMap, Mmio};
     use alloc::vec::Vec;
 
-    const CASES: usize = 11;
+    const CASES: usize = 13;
+    // Twice the 0x4000 the window bound used to guess, so a capability past the
+    // guess but inside the BAR's real size has a case to be accepted by.
+    const WINDOW: u64 = 0x8000;
     // One buffer for both the config space and the BAR window, so a permitted subregion stays inside it.
-    let pool = DmaPool::alloc(BAR_WINDOW as usize);
+    let pool = DmaPool::alloc(WINDOW as usize);
     let phys = pool.view().phys();
     // SAFETY: the pool owns this page until it drops at end of function, and no Mmio built over it escapes.
-    let cfg = unsafe { Mmio::over_phys(DirectMap::from_phys(phys), BAR_WINDOW) };
+    let cfg = unsafe { Mmio::over_phys(DirectMap::from_phys(phys), WINDOW) };
     let device = PciDevice::over_config(cfg);
 
     let mut passed = 0usize;
@@ -674,11 +713,23 @@ pub fn cap_selftest() {
         }
     };
     win_case("a window inside the BAR", 0, 0x100, 0x100, true);
-    win_case("a window ending exactly at the BAR's edge", 0, BAR_WINDOW as u32 - 4, 4, true);
+    win_case("a window ending exactly at the BAR's edge", 0, WINDOW as u32 - 4, 4, true);
+    // Reds on the guessed 0x4000 constant this bound used to be.
+    win_case("a window past the old guess, inside the BAR's real size", 0, 0x4000, 0x100, true);
     win_case("a BAR index past the six a header has", 7, 0, 4, false);
     win_case("a BAR the device did not map", 1, 0x100, 0x100, false);
-    win_case("an offset that carries the window past the BAR", 0, BAR_WINDOW as u32 - 3, 0x100, false);
-    win_case("a length past the whole BAR window", 0, 0, BAR_WINDOW as u32 + 1, false);
+    win_case("an offset that carries the window past the BAR", 0, WINDOW as u32 - 3, 0x100, false);
+    win_case("a length past the whole BAR window", 0, 0, WINDOW as u32 + 1, false);
+
+    // A chain lacking a required window is refused by name — this was four `expect`s and a panic.
+    for off in 0..0x100u64 {
+        cfg.write_u8(off, 0);
+    }
+    match VirtioPciConfig::parse(&device) {
+        Err(MissingCap::Common) => passed += 1,
+        Err(why) => log!("virtio: pci cap selftest FAILED on a chain missing its required caps: {why}"),
+        Ok(_) => log!("virtio: pci cap selftest FAILED: an empty chain parsed"),
+    }
 
     log!("virtio: pci cap selftest {passed}/{CASES}");
 }
@@ -706,10 +757,11 @@ pub struct VirtioDevice {
 
 impl VirtioDevice {
     /// Initialize a VirtIO PCI device: reset, negotiate features, prepare for queue setup.
-    pub fn init(pci_dev: &PciDevice, accepted_features: u64) -> Self {
+    /// `Err` names the required capability the device never published a usable window for.
+    pub fn init(pci_dev: &PciDevice, accepted_features: u64) -> Result<Self, MissingCap> {
         pci_dev.enable_bus_master();
 
-        let config = VirtioPciConfig::parse(pci_dev);
+        let config = VirtioPciConfig::parse(pci_dev)?;
         let common = config.common;
 
         // Order fixed by virtio 1.2 §3.1.1: reset, ACKNOWLEDGE, DRIVER, negotiate features, FEATURES_OK, verify.
@@ -745,7 +797,7 @@ impl VirtioDevice {
             "VirtIO: device rejected features"
         );
 
-        Self { config }
+        Ok(Self { config })
     }
 
     /// Configure a virtqueue's addresses and size; does not enable it — call `enable_queue()` after MSI-X vectors are set.

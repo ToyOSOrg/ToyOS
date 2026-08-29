@@ -32,6 +32,11 @@ impl Mmio {
         self.base as u64
     }
 
+    /// The window's byte size — the bound every access here is checked against.
+    pub fn size(self) -> u64 {
+        self.size
+    }
+
     pub fn subregion(self, offset: u64, size: u64) -> Mmio {
         assert!(offset + size <= self.size,
             "Mmio subregion OOB: offset={:#x} size={:#x} total={:#x}", offset, size, self.size);

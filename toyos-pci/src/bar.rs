@@ -163,6 +163,49 @@ pub fn decode(low: u32) -> Result<Width, Unusable> {
     }
 }
 
+/// Whether a sizing probe must also probe the register after this one.
+pub fn is_wide(low: u32) -> bool {
+    low & IO_SPACE == 0 && low & TYPE == TYPE_64
+}
+
+/// Why a sizing probe's answer describes no window the kernel can bound by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadSize {
+    /// Every address bit read back zero: the register implements no window.
+    Unimplemented,
+    /// The mask was not contiguous ones — the spec hardwires the low address
+    /// bits to zero, so this answer is not a size at all.
+    NotPowerOfTwo(u64),
+}
+
+impl fmt::Display for BadSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unimplemented => write!(f, "its sizing probe read back no address bits"),
+            Self::NotPowerOfTwo(size) => {
+                write!(f, "its sizing probe decodes to {size:#x}, not a power of two")
+            }
+        }
+    }
+}
+
+/// The size a Memory Space BAR advertises: the two's complement of the masked
+/// all-ones read-back (PCIe base spec §7.5.1.2.1).
+pub fn advertised_size(mask_lo: u32, mask_hi: Option<u32>) -> Result<u64, BadSize> {
+    let masked = mask_lo & MEMORY_ADDRESS;
+    let size = match mask_hi {
+        None => (!masked).wrapping_add(1) as u64,
+        Some(hi) => (!(((hi as u64) << 32) | masked as u64)).wrapping_add(1),
+    };
+    if size == 0 {
+        return Err(BadSize::Unimplemented);
+    }
+    if size & (size - 1) != 0 {
+        return Err(BadSize::NotPowerOfTwo(size));
+    }
+    Ok(size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +315,35 @@ mod tests {
         assert_eq!(wide(0xFEBD_0004, 0), 0xFEBD_0000);
         // A 32-bit BAR, which plenty of functions still publish.
         assert_eq!(narrow(0xFEB8_0000), 0xFEB8_0000);
+    }
+
+    /// PCIe base spec §7.5.1.2.1's arithmetic, and the flag nibble is never part of it.
+    #[test]
+    fn a_sizing_mask_decodes_to_the_spec_size() {
+        // A 16 KiB window — the size QEMU's virtio modern BAR answers.
+        assert_eq!(advertised_size(0xFFFF_C00C, None), Ok(0x4000));
+        // A 1 MiB window, and the smallest a memory BAR can be, 16 bytes.
+        assert_eq!(advertised_size(0xFFF0_0000, None), Ok(0x10_0000));
+        assert_eq!(advertised_size(0xFFFF_FFF0, None), Ok(0x10));
+        // 64-bit: every bit above the size reads back one, across both halves.
+        assert_eq!(advertised_size(0xFFFF_C00C, Some(0xFFFF_FFFF)), Ok(0x4000));
+        assert_eq!(advertised_size(0x0000_000C, Some(0xFFFF_FFFF)), Ok(0x1_0000_0000));
+    }
+
+    /// A device can answer the probe with anything; what describes no size is refused by name.
+    #[test]
+    fn a_sizing_mask_that_describes_no_size_is_refused() {
+        assert_eq!(advertised_size(0, None), Err(BadSize::Unimplemented));
+        assert_eq!(advertised_size(0xC, Some(0)), Err(BadSize::Unimplemented));
+        // A non-contiguous mask is not a power of two and not a size.
+        assert_eq!(
+            advertised_size(0xFFFA_C000, None),
+            Err(BadSize::NotPowerOfTwo(0x54000)),
+        );
+        // Sub-4-GiB with a zero high half: the spec has every bit above the size read back one.
+        assert!(matches!(
+            advertised_size(0xFFFF_C00C, Some(0)),
+            Err(BadSize::NotPowerOfTwo(_)),
+        ));
     }
 }
