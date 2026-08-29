@@ -318,8 +318,20 @@ changes.
   `desktop_locale_detect` above — a wizard waiting for a key it was never
   handed — but against `/bin/console` rather than `/bin/terminal`, so it is not
   provably the same boot race and is filed separately. `cargo run --
-  --known-red console_locale_detect` answered `NOT ON THE LIST`. Not
-  investigated.
+  --known-red console_locale_detect` answered `NOT ON THE LIST`.
+
+  **Investigated 2026-08-29, and it was never a boot race**: the job's own
+  capture shows the shell echoing `/home/root> locale dct` and running it
+  (`locale: no layout named 'dct…'`), with the i8042 counter line at 66 bytes
+  against the 72 the injection owes and the last byte at 1986ms — the
+  sighting's tree typed the whole line with `QmpInput::type_text`, 26 set-1
+  bytes in one batch against QEMU's 16-byte queue, unverified, so the queue
+  dropped six mid-word and the command that lends the wizard the keyboard
+  never ran. Exactly this file's typed-on-a-wall-clock class, and the class
+  fix had already landed when the row was read back: `shell_type_line`
+  (7a033450, 2026-08-26) bounds each burst by the queue and takes the guest's
+  own echo of the whole line as the verdict, with three tries. The redlist row
+  is retired against it.
 
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits

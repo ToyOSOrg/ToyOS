@@ -307,11 +307,23 @@ pub const KNOWN_RED: &[Red] = &[
         test: "cache_eviction",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the bound is asserted against the derivation, 2026-08-28. Eviction gives up only \
+             when every governed resident page is dirty, so the turnover line now carries its \
+             dirty count and says the over-budget state once per episode \
+             (`kernel/src/file_cache.rs`), the guest rewrites eight pages through a second file \
+             while the whole budget is dirty — the all-dirty overage staged on every run, where \
+             CI met it by another writer's un-flushed page — and the harness admits an \
+             over-budget sample only when its own line says dirty == resident, requires at least \
+             one such sample, and requires the last sample back within the bound once the \
+             writers flushed. A clean overage still reds. Control measured both ways: the staged \
+             overage reds the old hard assertion with this row's exact message and greens the \
+             derivation assertion",
+        ),
         what: "file cache: 65 entries resident against a 64 bound after 1280 evictions — \
                the bound does not hold",
         evidence: "ci.yml run 33159606357 guest (3); green ALONE in the same session",
-        source: "issues/kernel/file-cache-budget-is-soft-where-the-harness-asserts-it-hard.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-28",
     },
     Red {
@@ -2020,7 +2032,17 @@ pub const KNOWN_RED: &[Red] = &[
         test: "i8042_undecoded_bytes",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the verdict revises itself once, 2026-08-28. A mute line said while a decoder \
+             still holds the run is `HEALTH_MUTE_BLIND`, and the first blamed byte moves it to \
+             `HEALTH_MUTE_SAID` with the line that names the bytes \
+             (`kernel/src/drivers/i8042/mod.rs`). The interleaving this row records — the \
+             verdict out after four of Pause's six bytes — is no longer waited for: \
+             `i8042-split-burst` stages it on every run of `i8042_undecoded_bytes`, whose first \
+             mute line must name nothing and whose second must name the sequence. Control \
+             measured both ways: with the revision reverted and the stage kept, the test reds \
+             on this row's line shape; with it, green",
+        ),
         what: "`the line names no byte: [kernel 2.494 cpu1] i8042: 1 interrupts and 4 bytes, \
                nothing decoded — first seen at 2494ms`. **Four bytes and not zero, so this is a \
                different producer from the two dev-host rows under this name**: it is the test's \
@@ -2032,7 +2054,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "PR #94 run 31944633004, job 95158684534 (`guest (2)`); the isolated re-run in \
                    the same job reported the whole sequence, `2 interrupts and 6 bytes … no event \
                    from [0xe1, 0x1d, 0x45, 0xe1, 0x9d, 0xc5]`",
-        source: "issues/kernel/the-i8042-mute-verdict-cannot-revise-a-line-it-said-too-early.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-16",
     },
     Red {
@@ -2454,7 +2476,20 @@ pub const KNOWN_RED: &[Red] = &[
         test: "console_locale_detect",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "typing was the loss, and the fix had already landed when this row was read back: \
+             the sighting's tree typed `locale detect` with `QmpInput::type_text` — 26 set-1 \
+             bytes in one QMP batch against QEMU's 16-byte device queue, unverified — and the \
+             job's own capture shows what that costs: the shell echoed `locale dct` and ran it \
+             (`locale: no layout named 'dct…'`), the i8042 counter line reads 66 bytes against \
+             the 72 injected with the last at 1986ms, and the wizard was never asked for, so \
+             the marker wait ran out against a guest idling at a prompt. Not the \
+             `desktop_locale_detect` boot race this row filed it beside — the keyboard was \
+             never lent because the command that lends it never ran. `shell_type_line` \
+             (7a033450, 2026-08-26) is the fix: bursts bounded by the queue, the guest's own \
+             echo of the whole line as the verdict, three tries — a lost byte is retyped \
+             instead of stalling the marker wait",
+        ),
         what: "`STALLED: waiting for the wizard to ask for a key under /bin/console — the \
                console did not lend it the keyboard — it never stopped talking and never got \
                there`. Same shape as `desktop_locale_detect`'s terminal-boot-race family — a \
@@ -2466,7 +2501,7 @@ pub const KNOWN_RED: &[Red] = &[
                classification`",
         evidence: "push-triggered `ci` run 32314166262, job 96263949273 (`guest (9)`), headSha \
                    eba06ad6, 2026-08-19",
-        source: "issues/build/parallel-tests-red-under-other-suites.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-20",
     },
     // ---------------------------------------------------------------------
@@ -2820,6 +2855,38 @@ pub const KNOWN_RED: &[Red] = &[
                    interleaved in one session with six on `wt/toyos-freeze`",
         source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
         measured: "2026-08-27",
+    },
+    // ---------------------------------------------------------------------
+    // Two `main`-push `ci` runs on 2026-08-28, both red in the `durations`
+    // job and nowhere else: the shard that ran the name passed it.
+    // ---------------------------------------------------------------------
+    Red {
+        test: "log_conservation_smp4",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Retired(
+            "relegated Why::Cost to Nightly in this landing — the straddling four-CPU width \
+             leaves the per-PR durations gate, and smp1/smp8 keep the conservation law at both \
+             subject shapes",
+        ),
+        what: "not the test — its **price**: `log_conservation_smp4 is priced at 8248 ms — over \
+               the 8000 ms a Fast test may be committed at and under the 10000 ms line — and \
+               log_conservation_smp4 remains Fast: priced without margin, so relegate it or make \
+               it faster. A price this close to the line is decided by which partition ran it, \
+               and reds whichever pull request measures it next`. The gate's own sentence is the \
+               diagnosis: a straddler, the 2026-08-21 class `src/tiers.rs` documents, against a \
+               committed 5512 ms in `tests/test-durations`. `src/tiers.rs`'s law names the two \
+               exits — relegate it or make it faster — and its siblings say which: \
+               `log_conservation_smp1` and `log_conservation_smp8` are priced 4686 and 5112 with \
+               margin, so a `Why::Cost` relegation of the middle width alone keeps the log's \
+               conservation law per-pull-request at both subject shapes (producer sharing the \
+               reader's CPU, and not). Recorded rather than relegated in the same landing: a \
+               tier move is a coverage decision, left to its owner with this row as the case",
+        evidence: "`ci` runs 33202812787 (8572 ms) and 33212528174 (8248 ms), both `main` pushes \
+                   on 2026-08-28, each red only in `durations` and its aggregate; `guest (12)` \
+                   in the second passed the test itself in 8 s",
+        source: "tests/common/logread.rs",
+        measured: "2026-08-28",
     },
 ];
 

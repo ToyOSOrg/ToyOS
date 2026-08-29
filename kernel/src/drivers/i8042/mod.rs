@@ -117,12 +117,15 @@ const HEALTH_QUIET_DUE: u8 = 2;
 const HEALTH_QUIET_SAID: u8 = 3;
 /// The boot verdict is out; the counters speak for themselves from here.
 const HEALTH_DONE: u8 = 4;
-/// Bytes arrived and decoded to nothing, said once; still watching, since the
-/// byte that completes a sequence may be one interrupt away.
+/// Bytes arrived and decoded to nothing, said naming them; still watching,
+/// since the byte that completes a sequence may be one interrupt away.
 const HEALTH_MUTE_SAID: u8 = 5;
 /// The pin asserted with no byte behind it, distinct from `HEALTH_MUTE_SAID`
 /// so the first byte that does decode to nothing is still reported.
 const HEALTH_EMPTY_SAID: u8 = 6;
+/// The mute verdict beat the sequence and named nothing; revised once, to
+/// [`HEALTH_MUTE_SAID`], when a byte is first blamed.
+const HEALTH_MUTE_BLIND: u8 = 7;
 
 static HEALTH: AtomicU8 = AtomicU8::new(HEALTH_OFF);
 static ARMED_NS: AtomicU64 = AtomicU64::new(0);
@@ -228,13 +231,20 @@ fn report_health(state: u8) {
         }
         let keys = KBD_EVENTS.load(Ordering::Relaxed);
         let motion = AUX_EVENTS.load(Ordering::Relaxed);
-        // The second line only fires when the picture changes from mute to
-        // decoded — a half-arrived keystroke must not freeze here as DONE.
-        let next = if keys + motion == 0 { HEALTH_MUTE_SAID } else { HEALTH_DONE };
+        // A further line fires only when the picture changes — blind to named
+        // when the run ends and blames its bytes, mute to decoded when a key
+        // arrives — so a half-arrived keystroke never freezes here as DONE.
+        let next = if keys + motion > 0 {
+            HEALTH_DONE
+        } else if UNEXPLAINED_N.load(Ordering::Relaxed) == 0 {
+            HEALTH_MUTE_BLIND
+        } else {
+            HEALTH_MUTE_SAID
+        };
         if next == state || !claim_health(state, next) {
             return;
         }
-        if next == HEALTH_MUTE_SAID {
+        if next != HEALTH_DONE {
             log!(
                 "i8042: {} interrupts and {} bytes, nothing decoded —{} first seen at {}ms",
                 irqs,
@@ -434,6 +444,18 @@ fn has_bytes() -> bool {
 /// genuinely broken controller.
 static FAULT: AtomicBool = AtomicBool::new(false);
 
+/// Under `i8042-split-burst`: past [`SPLIT_CAP`] taken bytes the ISR answers
+/// empty until [`SPLIT_RESCUED`] — the verdict-beats-the-sequence interleaving, staged.
+static SPLIT_TAKEN: AtomicU32 = AtomicU32::new(0);
+static SPLIT_RESCUED: AtomicBool = AtomicBool::new(false);
+const SPLIT_CAP: u32 = 4;
+
+fn split_hidden() -> bool {
+    crate::actuator::i8042_split_burst()
+        && !SPLIT_RESCUED.load(Ordering::Relaxed)
+        && SPLIT_TAKEN.load(Ordering::Relaxed) >= SPLIT_CAP
+}
+
 #[inline]
 fn buffer_full(status: u8) -> bool {
     if crate::actuator::i8042_fault() && FAULT.load(Ordering::Relaxed) {
@@ -455,12 +477,15 @@ pub extern "sysv64" fn handler() {
     let mut n = 0;
     while n < ISR_BURST {
         let status = inb(STATUS);
-        if !buffer_full(status) {
+        if !buffer_full(status) || split_hidden() {
             break;
         }
         // Timestamped per byte, not once for the burst: the mouse framer
         // resyncs on the gap between adjacent bytes, and a burst would flatten it.
         push_isr(inb(DATA), status & AUXB != 0, crate::clock::nanos_since_boot());
+        if crate::actuator::i8042_split_burst() {
+            SPLIT_TAKEN.fetch_add(1, Ordering::Relaxed);
+        }
         n += 1;
     }
     if n == ISR_BURST && buffer_full(inb(STATUS)) {
@@ -547,6 +572,17 @@ pub fn service() {
         aux_reenable();
     }
     widen_edge_window();
+    // The staged split's second half: once the mute verdict is out, the hidden
+    // bytes are polled in — interrupts off, `handler_poll` shares `push_isr`'s producer seat.
+    if crate::actuator::i8042_split_burst()
+        && !SPLIT_RESCUED.load(Ordering::Relaxed)
+        && HEALTH.load(Ordering::Relaxed) >= HEALTH_MUTE_SAID
+        && is_irq_cpu()
+    {
+        SPLIT_RESCUED.store(true, Ordering::Relaxed);
+        let _irq = crate::hw::IrqGuard::close();
+        handler_poll();
+    }
     if has_bytes() {
         // Asked again with bytes in hand: a record read absent may belong
         // to an interrupt that arrived just after that read.

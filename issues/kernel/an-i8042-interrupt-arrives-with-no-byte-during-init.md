@@ -127,10 +127,14 @@ rendered nothing. The counters are honest and the conclusion is not: the
 sequence had not finished arriving.
 
 So the mute line has three producers that name no byte, and only two of them are
-this entry's. The third is its own defect in its own file —
-`issues/kernel/the-i8042-mute-verdict-cannot-revise-a-line-it-said-too-early.md`
-— because the fix differs in kind: no rule about *when* the report is triggered
-reaches it, the driver has to be able to revise a verdict it has already said.
+this entry's. The third was its own defect — the mute verdict could not revise a
+line it said too early — because the fix differs in kind: no rule about *when*
+the report is triggered reaches it, the driver has to be able to revise a
+verdict it has already said. Closed 2026-08-29: `HEALTH_MUTE_BLIND` in
+`kernel/src/drivers/i8042/mod.rs` is a mute verdict that named nothing, revised
+once — to the line that names the bytes — when a byte is first blamed, and the
+`i8042-split-burst` actuator stages the said-too-early interleaving on every run
+of `i8042_undecoded_bytes`.
 
 ## What landed, 2026-08-16
 
@@ -251,10 +255,10 @@ executions, so the day loom stops exploring that window the file reds instead of
 passing vacuously. The test half — anchoring on `===I8042_READY===` — was left
 exactly as it landed; nothing found it wrong.
 
-What that does **not** reach, and neither does anything here: the mute verdict
-said too early about a sequence still arriving
-(`issues/kernel/the-i8042-mute-verdict-cannot-revise-a-line-it-said-too-early.md`),
-which is the CI row under this test's name and a line with a non-zero byte count.
-The `i8042_health` marker above is also untouched — an empty bring-up interrupt
-still happens and still makes `the pin has never asserted` untrue — which is why
-this entry stays open.
+What that does **not** reach: the mute verdict said too early about a sequence
+still arriving — the CI row under this test's name and a line with a non-zero
+byte count — closed separately on 2026-08-29 by the revision above
+(`HEALTH_MUTE_BLIND`, `kernel/src/drivers/i8042/mod.rs`). The `i8042_health`
+marker is untouched by both — an empty bring-up interrupt still happens and
+still makes `the pin has never asserted` untrue — which is why this entry stays
+open.
