@@ -31,7 +31,6 @@ const ALSO_USED: &[Tool] = &[
         why: "rust/x runs rustc's bootstrap, which is Python — a clean clone and \
               every toolchain change need one",
     },
-    Tool { any: &["ps"], why: "gate A counts concurrent guests for its host-conditions line" },
 ];
 
 /// Where the OS would find `name`, if anywhere.
@@ -132,6 +131,12 @@ fn main() {
     // Same reason as the two above: before `check_prerequisites`.
     if args.iter().any(|a| a == "--merge-health") {
         toyos_build::mergehealth::dispatch(&root, &args);
+        return;
+    }
+    // Reads lockfiles and cargo's own checkouts, nothing else: the half of a
+    // "zero callers" ABI sweep a monorepo grep cannot see.
+    if args.iter().any(|a| a == "--abi-callers") {
+        toyos_build::forkcheck::dispatch_callers(&root, &args);
         return;
     }
 

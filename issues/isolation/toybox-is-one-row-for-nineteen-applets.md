@@ -23,7 +23,8 @@ where before it held two connectors it does not use.
 
 ## What it is not
 
-It is not the defect `shutdown-needs-no-capability` was. Before that change
+It is not the closed isolation defect that `SYS_SHUTDOWN` demanded no
+capability at all. Before that change
 *every process in the machine* could halt it with an argument-less syscall;
 now the set is one program's row plus `/bin/init`. The remaining exposure is a
 program a person deliberately runs from a shell, not a daemon endowed one

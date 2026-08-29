@@ -6,8 +6,6 @@ opened: 2026-08-28
 
 # `set_size_locked` keeps the page a shrink lands inside and never zeroes its tail, so a regrow serves the discarded bytes instead of a hole
 
-Suggested path: `issues/kernel/truncate-keeps-the-partial-page-s-tail.md` (frontmatter `status: open`, `kind: defect`).
-
 `ftruncate` to a size that is not a multiple of `PAGE_SIZE` drops every page
 *past* the new end and leaves the page the new end falls **inside** exactly as
 it was. Nothing zeroes the bytes between the new EOF and the end of that page,

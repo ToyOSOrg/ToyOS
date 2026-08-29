@@ -37,7 +37,8 @@ sound only because no entry in this kernel is global; the module header says so
 in as many words, and a `PGE` that goes in has to answer for every `discharge`
 there and for `guard_4k`'s local full flush.
 
-This file was `tlb-invalidation-is-chosen-not-derived`, whose other half — an
+This file's earlier heading said TLB invalidation was chosen, not derived; that
+question's other half — an
 invalidation chosen by each caller, an unconditional `invlpg` over a not-present
 entry, a duplicate one on the demand-paging path, and one aimed at the parent's
 PCID while writing a child's tables — is resolved. `git log --follow` on this

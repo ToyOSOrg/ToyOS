@@ -19,7 +19,7 @@ for the guest to do something and, when the number expires, reports the
 the cause. Every entry below that says `nothing typed at the terminal window reached a
 shell` — `desktop_typing_damage`, `desktop_locale_detect`, `blocked_dump`, and
 `desktop_audio_client` — is now known to be the
-`/bin/terminal` boot race (`kernel/terminal-races-compositor-at-boot`, since
+`/bin/terminal` boot race (its kernel entry since
 closed by the capability endowment branch: a port exists before either end's
 process does) reported through a wall-clock guard that could
 say nothing else: three of three such reds in an eight-suite session carried the

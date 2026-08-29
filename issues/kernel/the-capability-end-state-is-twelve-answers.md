@@ -63,8 +63,9 @@ deliberately outside it? **Recommendation: deliberately outside, and say so.** A
 directory capability would be a second namespace mechanism beside `Namespace`
 for no caller that exists, and the ambient path space is what makes `/bin/init`
 able to start `/bin/toybox` at all. What does not follow from that ruling is
-`SYS_SHUTDOWN`: it is not path authority, and it is separable — see
-`issues/isolation/shutdown-needs-no-capability.md`.
+`SYS_SHUTDOWN`: it is not path authority, and it was separated — the syscall
+demands the POWER capability now, and the isolation entry that tracked it is
+closed.
 
 ## 3. Are PIDs and TIDs identity-only, or can naming one confer authority? — COMMITTED
 

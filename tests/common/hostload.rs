@@ -25,10 +25,9 @@
 //!   else a laptop is doing. 1 is this run alone.
 //!
 //! A reading that cannot be taken is reported as unknown. A gate A verdict must
-//! not turn on whether `ps` answered.
+//! not turn on whether the process table answered.
 
 use std::fmt;
-use std::process::Command;
 
 #[derive(Clone, Copy)]
 pub struct HostLoad {
@@ -107,14 +106,62 @@ fn load_average() -> Option<[f64; 3]> {
 }
 
 /// Every process on the host, by executable basename.
+///
+/// A pid that exits between the sizing call and the read, or refuses its path
+/// (a zombie, another user's), contributes no name rather than failing the
+/// sample — the counts above are of processes that could be named.
+#[cfg(target_os = "macos")]
 fn process_names() -> Option<Vec<String>> {
-    let out = Command::new("ps").args(["-Ao", "comm="]).output().ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|line| line.trim().rsplit('/').next().unwrap_or(line).to_string())
-            .collect()
-    })
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return None;
+    }
+    // Slack for processes spawned between the sizing call and the fill.
+    let mut pids = vec![0 as libc::pid_t; count as usize + 16];
+    let bytes = i32::try_from(std::mem::size_of_val(&pids[..])).ok()?;
+    let filled = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if filled <= 0 {
+        return None;
+    }
+    pids.truncate(filled as usize);
+    let mut names = Vec::with_capacity(pids.len());
+    for pid in pids {
+        let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        if len <= 0 {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&buf[..len as usize]);
+        names.push(path.rsplit('/').next().unwrap_or(&path).to_string());
+    }
+    Some(names)
+}
+
+/// Every process on the host, by executable basename: `/proc/<pid>/exe`'s
+/// target where that link is readable, the kernel's 15-byte `comm` otherwise —
+/// every prefix `sample` matches on fits in either.
+#[cfg(target_os = "linux")]
+fn process_names() -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let is_pid = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if !is_pid {
+            continue;
+        }
+        if let Ok(path) = std::fs::read_link(entry.path().join("exe")) {
+            if let Some(name) = path.file_name() {
+                names.push(name.to_string_lossy().into_owned());
+                continue;
+            }
+        }
+        if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) {
+            names.push(comm.trim().to_string());
+        }
+    }
+    Some(names)
 }
 
 fn count(names: &[String], matches: impl Fn(&str) -> bool) -> usize {
@@ -127,3 +174,7 @@ fn count(names: &[String], matches: impl Fn(&str) -> bool) -> usize {
 fn is_toyos_build(name: &str) -> bool {
     name.starts_with("toyos-build") || name.starts_with("toyos_build")
 }
+
+// A third host OS gets a named gap, not a missing-function error at a distance.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+compile_error!("process_names reads the process table per-OS, and this OS has no arm yet");

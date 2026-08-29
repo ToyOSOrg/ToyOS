@@ -37,7 +37,11 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
+      # Full history: the issue tracker's citation gate derives deleted slugs
+      # from `git log` and refuses to run over a shallow clone.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: rust
         run: |

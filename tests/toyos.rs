@@ -1246,13 +1246,13 @@ const NOT_RUN: &[NotRun] = &[
     },
     NotRun {
         case: "73_arm64",
-        stage: Stage::Refused("arg 1 (v94) has type i32, expected i64"),
-        why: Why::Declined("aarch64-specific, and this target is x86-64. It does not stop with a refusal by name — it stops in the verifier, on a variadic call, which is a defect of ours reached through a case we decline anyway"),
+        stage: Stage::Refused("va_arg of a struct or union"),
+        why: Why::Declined("aarch64-specific, and this target is x86-64. Its myprintf pulls whole structs through va_arg, which toyos-cc refuses by name — the case used to reach the Cranelift verifier instead, through the one expression that yielded an aggregate as a scalar"),
     },
     NotRun {
         case: "89_nocode_wanted",
-        stage: Stage::Refused("failed to define function 'kb_wait_3'"),
-        why: Why::Open("issues/build/toyos-cc-goto-out-of-a-statement-expression.md"),
+        stage: Stage::Built,
+        why: Why::Open("issues/build/89-nocode-wanted-runs-green-and-is-not-priced.md"),
     },
     NotRun {
         case: "83_utf8_in_identifiers",
@@ -11656,10 +11656,9 @@ fn run_machine_test(
             // in 5 s, against 1 on a healthy run — a regression this exact
             // shape would no longer trip a *count of lines* now that
             // `log_health` prints at a fixed rate whether the CPU behind it
-            // is halting or spinning (`issues/kernel/
-            // i8042-quarantine-health-line-count-is-vacuous.md`). What still
-            // moves at two different speeds is the `trips=` counter inside
-            // each line, which is not rate-limited.
+            // is halting or spinning — the vacuity the closed line-count
+            // entry named. What still moves at two different speeds is the
+            // `trips=` counter inside each line, which is not rate-limited.
             if let Some((cpu, delta)) = idle_is_spinning(&result.serial) {
                 return Err(format!(
                     "cpu{cpu}'s idle-trip counter moved by {delta} within the capture — spinning, not halting"
@@ -12743,7 +12742,7 @@ const MAX_IDLE_TRIP_DELTA: u64 = 100_000;
 /// `SNAPSHOT_INTERVAL_NS` now, so a CPU that spins through idle and one that
 /// halts cleanly between rare wakes produce the same number of *lines* —
 /// only the counter inside each line still moves at the two different
-/// speeds (`issues/kernel/i8042-quarantine-health-line-count-is-vacuous.md`).
+/// speeds, which is what made the line count vacuous.
 /// Per CPU, and the worst offender rather than every one, because a spin on
 /// one CPU must not be hidden by averaging it against another CPU's healthy
 /// rate.
@@ -12775,7 +12774,7 @@ fn idle_is_spinning(serial: &str) -> Option<(u32, u64)> {
 /// negative side, because nothing in this tree can stage a CPU into spinning
 /// through idle on purpose.
 ///
-/// This is the demonstration `i8042-quarantine-health-line-count-is-vacuous`
+/// This is the demonstration the closed vacuous-line-count entry
 /// asked for: proof the restored assertion still fails when the condition it
 /// names is violated, not just that it still passes when it is not.
 fn idle_trip_verdict() -> Result<(), String> {

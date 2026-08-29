@@ -165,3 +165,24 @@ fn an_aggregate_parameter_is_copied_into_the_callee() {
     assert!(called.iter().any(|s| s == "memcpy"), "f is relocated against {called:?}");
     assert!(loads_immediate(&body(&obj, "f"), 32), "the copy was not sizeof(struct S) == 32");
 }
+
+/// A statement expression's value is its final expression statement's, labels
+/// unwrapped — never an earlier statement's. The two immediates encode
+/// differently, so the wrong one surviving to the return is visible here
+/// without running anything: the construct used to yield the *latest*
+/// expression statement compiled anywhere in the block.
+#[test]
+fn a_statement_expressions_value_is_its_tail_not_its_latest_expression() {
+    let obj = compile("int f(void) { return ({ 1234567; lab: 7654321; }); }");
+    let obj = object::File::parse(&*obj).unwrap();
+    let b = body(&obj, "f");
+    assert!(
+        loads_immediate(&b, 7654321),
+        "the labelled tail's value never reaches a register: {b:02x?}",
+    );
+    assert!(
+        !loads_immediate(&b, 1234567),
+        "the earlier statement's value is still materialized, so it is what \
+         the construct yields: {b:02x?}",
+    );
+}

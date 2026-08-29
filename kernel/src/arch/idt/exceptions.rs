@@ -14,8 +14,9 @@ pub(crate) fn kernel_backtrace(start_rbp: u64, max_frames: usize) {
         // SAFETY: `rbp` is checked non-zero, 8-aligned and a kernel address, so
         // both reads land in the direct map, mapped for the life of the machine.
         //
-        // Not `read_volatile` like `safe_read_kernel`: tracked as
-        // issues/kernel/user-pages-still-read-through-a-plain-deref.md.
+        // Not `read_volatile` like `safe_read_kernel`, whose double-fault path
+        // reads memory another CPU may still be writing: this walks the
+        // faulting thread's own frame chain from its handler.
         let saved_rbp = unsafe { *(rbp as *const u64) };
         // SAFETY: same as above, for the return address one word up.
         let return_addr = unsafe { *((rbp + 8) as *const u64) };
