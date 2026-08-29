@@ -391,10 +391,17 @@ fn parse_header(lba1: &[u8], lba_bytes: u32, lba_count: u64, header_lba: u64) ->
     // lawfully sit on the recovery copy. A [`Sectors`] caller adapting a
     // coarser block reports `lba_count` floored by up to one of its blocks
     // while an honest table is laid out against the true end, so the bound
-    // concedes that sliver rather than refusing every unaligned device.
+    // concedes that sliver. The cost: with a conformant array
+    // (`array_lbas >= floor_slack`), up to `floor_slack` LBAs of the mirror
+    // array's low end — corruptible, never forgeable, and a corrupted copy
+    // fails its own CRC. With a smaller array — `entry_count` is the table's
+    // own byte — the unclamped bound would reach the backup header, so the
+    // device's last block is never conceded.
     let floor_slack = (MAX_LBA_BYTES / lba_bytes) as u64 - 1;
-    let backup_array_lba =
-        lba_count.saturating_add(floor_slack).saturating_sub(1 + array_lbas);
+    let backup_array_lba = lba_count
+        .saturating_add(floor_slack)
+        .saturating_sub(1 + array_lbas)
+        .min(lba_count.saturating_sub(1));
     if header_lba == 1 && last_usable_lba >= backup_array_lba {
         return Err(GptError::UsableRangeCoversBackup { last: last_usable_lba, backup_array_lba });
     }

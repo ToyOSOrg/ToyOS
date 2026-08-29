@@ -465,7 +465,7 @@ toyos-fat32/tests/host_write.rs 86 1
 toyos-fat32/tests/hostile.rs 193 3
 toyos-gpt/src/crc32.rs 13 0
 toyos-gpt/src/guid.rs 19 0
-toyos-gpt/src/lib.rs 165 0
+toyos-gpt/src/lib.rs 168 0
 toyos-gpt/tests/parse.rs 90 0
 toyos-hda/src/caps.rs 60 0
 toyos-hda/src/config.rs 71 0

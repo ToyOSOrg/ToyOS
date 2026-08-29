@@ -679,3 +679,20 @@ fn two_entries_claiming_the_target_guid_are_refused() {
     // A duplicate of a GUID nobody asked for does not refuse the answer.
     assert_eq!(img.locate(guid(0xB2)).map(|f| f.partition.index), Ok(1));
 }
+
+/// `entry_count` is the table's own byte: 8 entries make a 2-LBA array, and
+/// the unclamped concession ran the bound past the device end — this table
+/// answered Ok with a partition covering LBA 2047, the backup header itself.
+#[test]
+fn a_tiny_entry_array_cannot_buy_the_backup_header() {
+    let mut b = Builder { entry_count: 8, last_usable: DISK_LBAS - 1, ..Default::default() };
+    b.entries[3] = Entry::new(TYPE_ESP, guid(0xD4), 300, DISK_LBAS - 1);
+    let mut img = b.build();
+    assert_eq!(
+        img.locate(guid(0xD4)),
+        Err(GptError::UsableRangeCoversBackup {
+            last: DISK_LBAS - 1,
+            backup_array_lba: DISK_LBAS - 1,
+        })
+    );
+}
