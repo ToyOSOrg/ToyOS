@@ -11082,11 +11082,12 @@ fn run_machine_test(
         }
         "pci_capability_walk" => {
             // A capability list is the device's, and QEMU publishes only
-            // well-formed ones, so the kernel drives thirteen crafted layouts —
+            // well-formed ones, so the kernel drives fourteen crafted layouts —
             // a cycle, a spec-forbidden link, a BAR/offset/length past the
             // window, a window past the old 0x4000 guess a bigger BAR makes
-            // legal, and a chain missing its required capabilities — over a
-            // crafted config space at init under this parameter.
+            // legal, a chain missing its required capabilities, and a refused
+            // device that must not keep bus mastering — over a crafted config
+            // space at init under this parameter.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -11103,8 +11104,8 @@ fn run_machine_test(
             let Some(verdict) = log.lines().find(|l| l.contains("pci cap selftest")) else {
                 return Err(format!("the walk's self-test never ran:\n{log}"));
             };
-            // `13/13`, not the absence of a FAILED line, which zero cases satisfy too.
-            if !verdict.contains("13/13") {
+            // `14/14`, not the absence of a FAILED line, which zero cases satisfy too.
+            if !verdict.contains("14/14") {
                 return Err(format!("not every crafted capability layout was answered: {verdict}"));
             }
             // Once for the machine: it reads no real device.
