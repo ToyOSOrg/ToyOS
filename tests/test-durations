@@ -237,6 +237,7 @@ log_partition_layout 477
 log_poll_outlives_a_close 4738
 log_reserve_window 7022
 log_reserve_window_negative 6791
+lseek_past_eof 37
 metal_sim_client_death 4126
 metal_sim_compositor 8986
 metal_sim_compositor_stall 11390

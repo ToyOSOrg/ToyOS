@@ -15,6 +15,10 @@ pub type FileId = u64;
 /// `mm::PAGE_SIZE`, in the width this file's arrays and slices index by.
 const PAGE_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 
+/// The one ceiling on a file position or size: the page index is a `u32`, so past
+/// this it would wrap and alias a low page — seek, write and truncate refuse it.
+pub const MAX_FILE_SIZE: u64 = (u32::MAX as u64 + 1) * PAGE_SIZE as u64;
+
 struct CachedPage {
     data: Box<[u8; PAGE_SIZE]>,
     /// Dirty state as generations, settled only against what a flush copied.
