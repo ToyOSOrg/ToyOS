@@ -918,7 +918,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // F5 and F6's negative controls: an fsync that must keep refusing while the
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
-    ("fsync_failed_commit", Sched::Parallel, Tier::Fast),
+    ("fsync_failed_commit", Sched::Parallel, Tier::Nightly),
     ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),

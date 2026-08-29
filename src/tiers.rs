@@ -287,10 +287,23 @@ pub const RELEGATED: &[Relegated] = &[
                  evicted and re-read off the device, then re-judged off the image by the \
                  host's own FAT reader. What still runs per pull request: the loom \
                  durability model over the exact flush call order with its must-red \
-                 `durability-settle-blind` control, the private `Settlement` token that \
-                 makes a blind clear uncompilable, and the Fast `fsync_failed_commit` \
-                 control on the same generation gate; the nightly race adds the \
+                 `durability-settle-blind` control and the private `Settlement` token that \
+                 makes a blind clear uncompilable; the nightly race adds the \
                  end-to-end runtime witness that a mid-flush write survives.",
+    },
+    Relegated {
+        test: "fsync_failed_commit",
+        ci_ms: 8_386,
+        why: Why::Cost,
+        guards: "One fsync over a device that refuses its SYNCHRONIZE CACHE, required to \
+                 come back refused rather than answered durable (F5) — the cheapest of the \
+                 three durability guest witnesses, but a full boot straddles the fast line \
+                 and cannot hold it. What still runs per pull request: the same compile-time \
+                 gate its siblings name — the two-variant `bcachefs::DeviceError` makes the \
+                 refusal-into-Io erasure uncompilable and the private `Settlement` makes a \
+                 blind clear uncompilable — plus host-tests' must-red `durability-settle-blind` \
+                 loom step and the `a_refused_sync_stays_refused` crate-boundary differential; \
+                 the nightly boot adds the runtime witness that fsync surfaces the refusal.",
     },
     Relegated {
         test: "desktop_audio_client",
