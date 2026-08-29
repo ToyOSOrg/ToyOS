@@ -80,3 +80,26 @@ new numbers add:
 So the next step is the host side. `isr_complete` is a weaker candidate than it
 was: `stream::decode` now refuses any mask that is not a walk of the ring, and
 soundd fills in the order that walk names rather than in index order.
+
+## Re-judged on the current instrument, 2026-08-29 — it stands, and it is load-keyed
+
+Every capture above predates QEMU 11.1.0, the instrument change that forced the
+baseline re-record (`960b96e3`). Fresh samples, `main` at `48437ca4` plus only
+the idle-wake tripwire (corpus-certified to leave the audible path
+bit-identical):
+
+- **Dev host TCG, alone: 8 of 8 clean.** `gaps none phase-breaks 0` on every
+  run, active 2.94 s — the virtio arm's own figure, where the broken captures
+  held 2.756 s — dither 24.8-26.2%.
+- **Dev host TCG, beside two other suites (1-min load 5.1-21.6): 3 of 11 boots
+  fire** — 2, 4 and 8 breaks; the 4-break boot also put one mid-tone period of
+  silence in the capture, the other red's line exactly.
+- **CI, hosted KVM: fires** — the 2026-08-29 scheduled run printed 4 breaks at
+  2047/2048 and 2559/2560.
+
+Three things move under the verdict. The captures are no longer starved — every
+fresh one holds 139,253-142,325 of the 144,256 submitted frames, so the
+9.1%-missing mechanism above is gone. The signature changed: breaks now come as
+adjacent-frame *pairs* with |period| in the hundreds, not the 118-frame
+clusters. And the load dependence is sharp where it used to be a correlation:
+0 of 8 alone against 3 of 7 beside other guests, same tree, same hour.
