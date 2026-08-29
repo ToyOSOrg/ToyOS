@@ -309,6 +309,9 @@ const RUST_SKIP: &[&str] = &[
     // back off the image after a shutdown by a FAT implementation that is not
     // the kernel's. `fat_backing_revoked` runs it.
     "fat_backing_revoked",
+    // Stages a rename with an absent source on `/log` and leaves the
+    // destination for `fs_rename_durable` to read back off the image.
+    "fs_rename_durable",
     // Needs an HDA controller, which `tests/testcases` has none of.
     "hda_client_stall",
     // Gate A's two, whose verdict is the wav the device captured — which the
@@ -905,6 +908,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
     ("fat_backing_revoked", Sched::Parallel, Tier::Fast),
+    // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
+    ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
     ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
@@ -7964,6 +7969,7 @@ fn run_machine_test(
             eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
             Ok(())
         }
+        "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
         // before it drains, so the guest can prove a re-open before the flush
         // reads the pinned pages and not the NVMe `/home` device.

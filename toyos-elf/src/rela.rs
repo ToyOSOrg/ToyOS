@@ -188,6 +188,19 @@ impl RelaCounts {
     }
 }
 
+/// The lattice a chunked writer applies relocations in: a write must land
+/// wholly within one page, since the page-at-a-time applier never revisits a
+/// tail handed to the next page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FillLattice {
+    /// Based at the image's `vaddr_min`; each write lies within one `granule`.
+    pub base: u64,
+    pub granule: u64,
+}
+
+/// The demand-fault page an executable's relocations are filled in.
+pub const FILL_GRANULE: u64 = 4096;
+
 /// Why a relocation cannot be applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelocError {
@@ -197,6 +210,8 @@ pub enum RelocError {
     OutsideWindow,
     /// `r_sym` names an entry past the end of `.dynsym`.
     SymbolPastTable,
+    /// The write would cross a fill page, so a chunked writer would drop it.
+    StraddlesFillPage,
 }
 
 impl RelocError {
@@ -205,6 +220,7 @@ impl RelocError {
             RelocError::OffsetOverflows => "ELF: relocation r_offset + width overflows",
             RelocError::OutsideWindow => "ELF: relocation r_offset outside the writable image",
             RelocError::SymbolPastTable => "ELF: relocation r_sym past .dynsym",
+            RelocError::StraddlesFillPage => "ELF: relocation crosses a fill-page boundary",
         }
     }
 }
@@ -226,10 +242,13 @@ impl core::fmt::Display for RelocError {
 /// The window is the *writable* one rather than the whole image: once the
 /// module is cached its read-only pages are shared between processes, and the
 /// write lands in a private allocation covering only that window.
+/// `fill` is `Some` for a chunked writer (the exe), refusing a page-crossing
+/// write; `None` for a contiguous one (a library).
 pub fn validate(
     entries: impl Iterator<Item = Rela>,
     window: (u64, u64),
     sym_count: usize,
+    fill: Option<FillLattice>,
 ) -> Result<(), RelocError> {
     let (lo, hi) = window;
     for rela in entries {
@@ -245,6 +264,12 @@ pub fn validate(
         }
         if rela.kind.needs_symbol() && rela.sym as usize >= sym_count {
             return Err(RelocError::SymbolPastTable);
+        }
+        if let Some(fill) = fill {
+            let within = rela.offset.wrapping_sub(fill.base) % fill.granule;
+            if within + width > fill.granule {
+                return Err(RelocError::StraddlesFillPage);
+            }
         }
     }
     Ok(())

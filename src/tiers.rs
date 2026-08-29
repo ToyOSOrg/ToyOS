@@ -205,6 +205,12 @@ pub struct Relegated {
 /// Every test the fast tier does not run.
 pub const RELEGATED: &[Relegated] = &[
     Relegated {
+        test: "fs_rename_durable",
+        ci_ms: 9_346,
+        why: Why::Cost,
+        guards: "The end-to-end durable witness: a rename staged on /log, the guest shut                  down, and the destination judged byte-for-byte off the raw FAT image by                  the in-tree toyos-fat32-check. Nightly because the boot-plus-shutdown                  costs a full cycle. What runs per pull request is the Fast                  `fs_transactional` control (a rename with an absent source keeps its                  destination, rename(p,p) is a no-op, a shrunk tail regrows as zeros) and                  the compile-time invariants that make the class unrepresentable: the                  `Committed` witness that forbids releasing a destination before the move                  commits, and `same_object`/`same_entry` that decides the no-op by backend                  identity so a FAT case-only rename cannot destroy the file.",
+    },
+    Relegated {
         test: "klogd_hosted",
         ci_ms: 11_805,
         why: Why::Cost,

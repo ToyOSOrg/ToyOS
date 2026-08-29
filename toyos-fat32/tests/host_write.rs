@@ -587,3 +587,18 @@ fn a_log_file_written_a_line_at_a_time() {
         assert_eq!(got, lines.concat());
     });
 }
+
+/// `same_entry` answers by entry location, so a case-only name is the same entry.
+#[test]
+fn same_entry_is_case_insensitive_identity() {
+    let image = image("identity");
+    let mut fs = Fat32::mount(image.device()).expect("mount");
+    fs.create("Report.TXT", stamp()).expect("create");
+    fs.create("Other.bin", stamp()).expect("create");
+
+    assert!(fs.same_entry("Report.TXT", "Report.TXT").expect("exact"));
+    assert!(fs.same_entry("Report.TXT", "report.txt").expect("case only"));
+    assert!(fs.same_entry("REPORT.txt", "Report.TXT").expect("case only, other way"));
+    assert!(!fs.same_entry("Report.TXT", "Other.bin").expect("distinct entries"));
+    assert!(!fs.same_entry("Report.TXT", "absent.bin").expect("destination absent"));
+}

@@ -23,6 +23,7 @@ use crate::mm::PAGE_BYTES;
 use crate::drivers::{usb_storage, xhci};
 use crate::file_backing::FileBacking;
 use crate::file_cache::{self, FileId};
+use crate::fs_rename::{self, Committed, ReplaceRename};
 use crate::gpt;
 use crate::sync::Lock;
 use crate::vfs::FileSystem;
@@ -594,6 +595,51 @@ impl FatFs {
     }
 }
 
+/// FAT cannot replace an entry in one step, so a replacing rename deletes the
+/// destination and then moves the source. The source is validated present and
+/// distinct first, so the delete never runs for a rename that would not find its
+/// source or would name its own entry. One residual device-error window is
+/// tracked in `issues/filesystem/fat-overwrite-rename-frees-the-destination-first.md`.
+impl ReplaceRename for FatFs {
+    type Displaced = ();
+
+    fn source_present(&mut self, old: &str) -> Result<bool, SyscallError> {
+        let role = self.role;
+        self.fs.exists(old).map_err(|e| refused(role, "exists", old, e))
+    }
+
+    fn same_object(&mut self, old: &str, new: &str) -> Result<bool, SyscallError> {
+        // Identity is the entry's location: FAT names one entry by two strings.
+        let role = self.role;
+        self.fs.same_entry(old, new).map_err(|e| refused(role, "same_entry", old, e))
+    }
+
+    fn commit(&mut self, old: &str, new: &str) -> Result<Committed<()>, SyscallError> {
+        let role = self.role;
+        // The destination goes first, but the source is already known present and
+        // distinct, so a rename onto its own entry never reaches this delete.
+        if self.fs.exists(new).map_err(|e| refused(role, "exists", new, e))? {
+            self.delete(new)?;
+        }
+        self.fs.rename(old, new).map_err(|e| refused(role, "rename", old, e))?;
+        Ok(Committed::new(()))
+    }
+
+    fn release(&mut self, old: &str, new: &str, _committed: Committed<()>) {
+        // Re-key, not revoke: the source's data did not move, so backings under
+        // the old name still read it.
+        if let Some(file_id) = self.by_name.remove(old) {
+            self.by_name.insert(String::from(new), file_id);
+            if let Some(info) = self.open.get_mut(&file_id) {
+                info.name = String::from(new);
+            }
+        }
+        if let Some(cell) = self.extents.remove(old) {
+            self.extents.insert(String::from(new), cell);
+        }
+    }
+}
+
 impl FileSystem for FatFs {
     /// The `limit` bound is honoured before each push, not after — unlike the
     /// bcachefs adapters.
@@ -676,28 +722,8 @@ impl FileSystem for FatFs {
         self.fs.remove(name).map_err(|e| refused(role, "delete", name, e))
     }
 
-    /// Rename, deleting the destination first when one exists: FAT has no
-    /// atomic replacement, so POSIX overwrite is emulated here.
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError> {
-        let role = self.role;
-        // Only the destination is revoked; the source's data moved with it,
-        // via `delete` above.
-        if self.fs.exists(new).map_err(|e| refused(role, "exists", new, e))? {
-            self.delete(new)?;
-        }
-        self.fs.rename(old, new).map_err(|e| refused(role, "rename", old, e))?;
-        if let Some(file_id) = self.by_name.remove(old) {
-            self.by_name.insert(String::from(new), file_id);
-            if let Some(info) = self.open.get_mut(&file_id) {
-                info.name = String::from(new);
-            }
-        }
-        // Re-keyed, not revoked: the file's data didn't move, so backings
-        // under the old name still read it.
-        if let Some(cell) = self.extents.remove(old) {
-            self.extents.insert(String::from(new), cell);
-        }
-        Ok(())
+        fs_rename::replace_rename(self, old, new)
     }
 
     fn write_page(
