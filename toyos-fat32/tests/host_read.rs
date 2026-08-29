@@ -8,7 +8,7 @@ mod common;
 
 use std::fs;
 
-use common::{pattern, read_all, sorted_walk, Image};
+use common::{pattern, read_all, sorted_walk, walk_expectation, Image};
 use toyos_fat32::{Error, Fat32};
 
 /// One cluster on the 512-byte-cluster image, so the sizes below are stated in
@@ -53,10 +53,7 @@ fn walk_sees_exactly_what_the_host_wrote() {
     let fx = populated(1, CLUSTER);
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
 
-    let mut expected: Vec<(String, u64)> =
-        fx.files.iter().map(|(n, d)| (n.clone(), d.len() as u64)).collect();
-    expected.sort();
-    assert_eq!(sorted_walk(&mut fs), expected);
+    assert_eq!(sorted_walk(&mut fs), walk_expectation(&fx.files));
 }
 
 /// The one macOS writes as a short entry with the NT lowercase bits set.
@@ -211,9 +208,5 @@ fn a_four_kib_cluster_volume_reads_the_same() {
     for (name, data) in &files {
         assert_eq!(&read_all(&mut fs, name), data, "{name}");
     }
-    let mut got = sorted_walk(&mut fs);
-    got.sort();
-    let mut want: Vec<(String, u64)> = files.iter().map(|(n, d)| (n.clone(), d.len() as u64)).collect();
-    want.sort();
-    assert_eq!(got, want);
+    assert_eq!(sorted_walk(&mut fs), walk_expectation(&files));
 }

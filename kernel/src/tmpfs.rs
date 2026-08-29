@@ -146,6 +146,16 @@ impl FileSystem for TmpFs {
         fs_rename::replace_rename(self, old, new)
     }
 
+    // `NotSupported`, not a refusal: no directory representation here, so the
+    // VFS carries created directories itself.
+    fn create_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
+    }
+
+    fn remove_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
+    }
+
     fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {
         Ok(()) // tmpfs: data is already in the file cache (canonical storage)
     }

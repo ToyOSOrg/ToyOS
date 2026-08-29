@@ -1400,6 +1400,137 @@ pub fn fs_rename_durable(
 }
 
 
+/// Directories on `/log` are real FAT32 directories — the **independent
+/// oracle** for the directory work, in the shape `fs_rename_durable` set: the
+/// guest (`test_rs_fs_dirs_durable`) makes one with `mkdir`, empties and
+/// removes another the mount grew for a file's path, and after the shutdown
+/// drain the image is read back by the `fatfs` crate — the kept directory must
+/// be a real, empty directory, the removed one gone — while `toyos-fat32-check`
+/// reads the whole volume against a partition asserted clean before the boot,
+/// so an `rmdir` that erased the entry and leaked its cluster chain is a lost
+/// cluster it names.
+pub fn fs_dirs_durable(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/fs_dirs_durable.rs`.
+    const KEEP: &str = "fsdir-keep";
+    const GONE: &str = "fsdir-gone";
+
+    let image_path = test_dir().join("fs-dirs-durable.img");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = log_extent(&image, &image_path)?;
+
+    // Born clean, asserted rather than assumed, as in `fs_rename_durable`.
+    let complaints_before = check(&image[start..start + len]);
+    if !complaints_before.is_empty() {
+        return Err(format!(
+            "the log partition was not born clean, so this gate cannot tell a complaint the \
+             guest caused from one it inherited:\n{}",
+            describe(&complaints_before)
+        ));
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
+    if !boot.contains("log-volume: partition mounted") {
+        return Err(format!(
+            "the log partition did not mount, so the guest had nowhere to stage directories:\n{}",
+            volume_lines(&boot)
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_fs_dirs_durable", Duration::from_secs(60));
+    if let Some(err) = &result.error {
+        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "fs_dirs_durable guest failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    if after.len() != image.len() {
+        return Err(format!("the image is {} bytes, was {}", after.len(), image.len()));
+    }
+    let volume = &after[start..start + len];
+
+    let complaints_after = check(volume);
+    if !complaints_after.is_empty() {
+        return Err(format!(
+            "the staged directories left the log volume breaking the format:\n{}",
+            describe(&complaints_after)
+        ));
+    }
+
+    let fs = fatfs::FileSystem::new(Cursor::new(volume.to_vec()), FsOptions::new())
+        .map_err(|e| format!("the volume does not mount on the host: {e}"))?;
+    let root = fs.root_dir();
+    let mut keep_is_dir = false;
+    for entry in root.iter() {
+        let entry = entry.map_err(|e| format!("reading the root directory: {e}"))?;
+        let name = entry.file_name();
+        if name == GONE {
+            return Err(format!("{GONE} is still on the volume after its rmdir"));
+        }
+        if name == KEEP {
+            if !entry.is_dir() {
+                return Err(format!("{KEEP} is on the volume as a file, not a directory"));
+            }
+            keep_is_dir = true;
+        }
+    }
+    if !keep_is_dir {
+        return Err(format!(
+            "{KEEP} is not on the volume: the guest's mkdir wrote nothing the host's own \
+             FAT reader can see"
+        ));
+    }
+    let inside: Vec<String> = root
+        .open_dir(KEEP)
+        .map_err(|e| format!("opening {KEEP} on the host: {e}"))?
+        .iter()
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .filter(|n| n != "." && n != "..")
+        .collect();
+    if !inside.is_empty() {
+        return Err(format!("{KEEP} holds {inside:?} on the volume; the guest left it empty"));
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!(
+        "  [fat] mkdir left a real empty directory the host's own reader lists, rmdir left \
+         no trace of the other, and the checker is silent"
+    );
+    Ok(())
+}
+
+
 /// The boot disk arrives *after* the port scan, and both mounts still happen.
 ///
 /// The machine the T14 was on the boot it lost `/boot` and `/log`, and the one

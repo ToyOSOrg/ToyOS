@@ -331,10 +331,10 @@ impl<D: BlockAccess> Fat32<D> {
     /// Every file in the volume, as a path relative to the root, paired with
     /// its size.
     ///
-    /// Files only: directories appear only as a prefix on the paths inside
-    /// them, which is the shape ToyOS's VFS `list` expects. An **empty
-    /// directory is therefore invisible here** — an adapter that needs to see
-    /// one has to ask [`Fat32::read_dir`].
+    /// A directory appears as its own entry — the path with a trailing `/`
+    /// and size 0 — as well as a prefix on the paths inside it, so an empty
+    /// directory is a visible entry rather than an absence ToyOS's VFS
+    /// `list` cannot tell from a name that was never there.
     ///
     /// Iterative, with a visited set of directory clusters and a depth bound,
     /// because the tree is on-disk data and a crafted volume can make it a
@@ -359,13 +359,14 @@ impl<D: BlockAccess> Fat32<D> {
                     if depth + 1 > MAX_WALK_DEPTH {
                         return Err(Error::LimitExceeded);
                     }
-                    if visited.len() >= limit {
+                    if visited.len() >= limit || out.len() >= limit {
                         return Err(Error::LimitExceeded);
                     }
                     let child =
                         self.geom.cluster(loc.raw.first_cluster()).ok_or(Error::CorruptDirectory)?;
                     if visited.insert(child) {
                         path.push('/');
+                        out.push((path.clone(), 0));
                         queue.push((child, path, depth + 1));
                     }
                 } else {

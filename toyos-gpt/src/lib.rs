@@ -123,6 +123,15 @@ pub enum GptError {
     /// rather than resolved: the caller's next move is to write to those
     /// blocks, and there is no reading of this table under which that is safe.
     PartitionOverlap { index: u32 },
+    /// The primary's `last_usable_lba` reaches into the backup GPT, whose
+    /// blocks start no later than `backup_array_lba`. The mirror is not
+    /// usable space: a partition allowed there is one whose writes destroy
+    /// the recovery copy.
+    UsableRangeCoversBackup { last: u64, backup_array_lba: u64 },
+    /// Two entries carry the searched-for unique GUID — the one fact
+    /// identifying the boot partition — so this table does not name one
+    /// partition. Refused rather than resolved first-wins.
+    DuplicateUniqueGuid { first: u32, second: u32 },
 }
 
 impl GptError {
@@ -134,7 +143,10 @@ impl GptError {
     fn primary_never_checked_out(self) -> bool {
         !matches!(
             self,
-            GptError::NotFound { .. } | GptError::PartitionRange { .. } | GptError::PartitionOverlap { .. }
+            GptError::NotFound { .. }
+                | GptError::PartitionRange { .. }
+                | GptError::PartitionOverlap { .. }
+                | GptError::DuplicateUniqueGuid { .. }
         )
     }
 }
@@ -372,6 +384,25 @@ fn parse_header(lba1: &[u8], lba_bytes: u32, lba_count: u64, header_lba: u64) ->
     if misplaced {
         return Err(GptError::EntryArrayMisplaced { lba: entry_array_lba, lbas: array_lbas });
     }
+    // The mirror of the backup arm's placement check above: the primary's
+    // usable range must stop below the backup GPT, or a partition may
+    // lawfully sit on the recovery copy. A [`Sectors`] caller adapting a
+    // coarser block reports `lba_count` floored by up to one of its blocks
+    // while an honest table is laid out against the true end, so the bound
+    // concedes that sliver. The cost: with a conformant array
+    // (`array_lbas >= floor_slack`), up to `floor_slack` LBAs of the mirror
+    // array's low end — corruptible, never forgeable, and a corrupted copy
+    // fails its own CRC. With a smaller array — `entry_count` is the table's
+    // own byte — the unclamped bound would reach the backup header, so the
+    // device's last block is never conceded.
+    let floor_slack = (MAX_LBA_BYTES / lba_bytes) as u64 - 1;
+    let backup_array_lba = lba_count
+        .saturating_add(floor_slack)
+        .saturating_sub(1 + array_lbas)
+        .min(lba_count.saturating_sub(1));
+    if header_lba == 1 && last_usable_lba >= backup_array_lba {
+        return Err(GptError::UsableRangeCoversBackup { last: last_usable_lba, backup_array_lba });
+    }
 
     Ok(Header {
         disk_guid: read_guid(lba1, 56),
@@ -414,6 +445,7 @@ fn scan_entries(
     let mut crc = Crc32::new();
     let mut remaining = header.entry_count as u64 * header.entry_bytes as u64;
     let mut found: Option<Partition> = None;
+    let mut duplicate: Option<(u32, u32)> = None;
     let mut used = 0u32;
     let mut index = 0u32;
     let mut lba = header.entry_array_lba;
@@ -433,14 +465,22 @@ fn scan_entries(
             if !type_guid.is_zero() {
                 used += 1;
                 let unique_guid = read_guid(entry, 16);
-                if unique_guid == target && found.is_none() {
-                    found = Some(Partition {
-                        index,
-                        type_guid,
-                        unique_guid,
-                        first_lba: le_u64(entry, 32),
-                        last_lba: le_u64(entry, 40),
-                    });
+                if unique_guid == target {
+                    match &found {
+                        None => {
+                            found = Some(Partition {
+                                index,
+                                type_guid,
+                                unique_guid,
+                                first_lba: le_u64(entry, 32),
+                                last_lba: le_u64(entry, 40),
+                            });
+                        }
+                        Some(first) if duplicate.is_none() => {
+                            duplicate = Some((first.index, index));
+                        }
+                        Some(_) => {}
+                    }
                 }
             }
             index += 1;
@@ -453,6 +493,10 @@ fn scan_entries(
     let computed = crc.finish();
     if computed != header.entry_array_crc {
         return Err(GptError::EntryArrayCrc { stored: header.entry_array_crc, computed });
+    }
+    // Held back until the CRC held, like the match itself.
+    if let Some((first, second)) = duplicate {
+        return Err(GptError::DuplicateUniqueGuid { first, second });
     }
     Ok((found, used))
 }

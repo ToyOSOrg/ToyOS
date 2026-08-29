@@ -473,6 +473,24 @@ pub fn sorted_walk<D: BlockAccess>(fs: &mut toyos_fat32::Fat32<D>) -> Vec<(Strin
     v
 }
 
+/// What `walk` must return for staged `files`: every file with its length,
+/// plus each directory on the way to one as a trailing-slash entry of size 0.
+pub fn walk_expectation(files: &[(String, Vec<u8>)]) -> Vec<(String, u64)> {
+    let mut want: Vec<(String, u64)> =
+        files.iter().map(|(n, d)| (n.clone(), d.len() as u64)).collect();
+    let mut dirs = std::collections::BTreeSet::new();
+    for (name, _) in files {
+        let mut at = 0;
+        while let Some(pos) = name[at..].find('/') {
+            at += pos + 1;
+            dirs.insert(name[..at].to_string());
+        }
+    }
+    want.extend(dirs.into_iter().map(|d| (d, 0)));
+    want.sort();
+    want
+}
+
 /// Read a whole file through the crate.
 pub fn read_all<D: BlockAccess>(fs: &mut toyos_fat32::Fat32<D>, path: &str) -> Vec<u8> {
     let mut f = fs.open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));

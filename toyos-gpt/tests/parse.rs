@@ -600,3 +600,97 @@ fn no_byte_of_the_table_can_panic_the_parser() {
     assert!(located > 0, "every single-byte change broke the table");
     assert!(img.locate(guid(0xC3)).is_ok(), "the sweep did not put the table back");
 }
+
+/// The backup GPT's blocks — 2015..=2047 here — are not usable space: a
+/// usable range reaching them lets a partition sit on the recovery copy.
+/// With one caller block of flooring conceded, the bound is 2022, not 2015.
+#[test]
+fn a_usable_range_reaching_the_backup_gpt_is_refused() {
+    let mut b = Builder { last_usable: DISK_LBAS - 2, backup: true, ..Default::default() };
+    b.entries[3] = Entry::new(TYPE_ESP, guid(0xD4), 300, DISK_LBAS - 2);
+    let mut img = b.build();
+    assert_eq!(
+        img.locate(guid(0xD4)),
+        Err(GptError::UsableRangeCoversBackup {
+            last: DISK_LBAS - 2,
+            backup_array_lba: DISK_LBAS + 7 - 33,
+        })
+    );
+
+    // The bound is exact: the last value inside the flooring concession
+    // passes, and the first past it is refused.
+    let mut img = Builder { last_usable: DISK_LBAS + 7 - 34, ..Default::default() }.build();
+    img.locate(guid(0xC3)).expect("the concession's edge parses");
+    let mut img = Builder { last_usable: DISK_LBAS + 7 - 33, ..Default::default() }.build();
+    assert_eq!(
+        img.locate(guid(0xC3)),
+        Err(GptError::UsableRangeCoversBackup {
+            last: DISK_LBAS + 7 - 33,
+            backup_array_lba: DISK_LBAS + 7 - 33,
+        })
+    );
+}
+
+/// The kernel's 4 KiB view floors a 512-byte disk's `lba_count` by up to 7
+/// LBAs while an honest table is laid out against the true end — a 2055-LBA
+/// disk (2055 % 8 = 7) seen as 2048, its last_usable 2021 at the conceded
+/// bound's edge, must parse. The unconceded bound refused every such disk.
+#[test]
+fn an_honest_table_on_a_floored_device_view_parses() {
+    struct Floored(Image, u64);
+    impl Sectors for Floored {
+        fn lba_bytes(&self) -> u32 {
+            self.0.lba_bytes()
+        }
+        fn lba_count(&self) -> u64 {
+            self.1
+        }
+        fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
+            self.0.read_lba(lba, buf)
+        }
+    }
+
+    let img = Builder {
+        lba_count: 2055,
+        last_usable: 2055 - 34,
+        backup: true,
+        ..Default::default()
+    }
+    .build();
+    let mut floored = Floored(img, 2048);
+    let found = toyos_gpt::locate(&mut floored, guid(0xC3)).expect("an honest disk lost /boot");
+    assert_eq!(found.partition.index, 2);
+}
+
+/// UEFI gives every entry a `UniquePartitionGUID` that must be unique. Two
+/// entries claiming the searched-for GUID must refuse, never resolve
+/// first-wins — either one could be the partition the firmware meant.
+#[test]
+fn two_entries_claiming_the_target_guid_are_refused() {
+    let mut b = Builder::default();
+    b.entries[3] = Entry::new(TYPE_OTHER, guid(0xC3), 300, 1999);
+    let mut img = b.build();
+    assert_eq!(
+        img.locate(guid(0xC3)),
+        Err(GptError::DuplicateUniqueGuid { first: 2, second: 3 })
+    );
+    // A duplicate of a GUID nobody asked for does not refuse the answer.
+    assert_eq!(img.locate(guid(0xB2)).map(|f| f.partition.index), Ok(1));
+}
+
+/// `entry_count` is the table's own byte: 8 entries make a 2-LBA array, and
+/// the unclamped concession ran the bound past the device end — this table
+/// answered Ok with a partition covering LBA 2047, the backup header itself.
+#[test]
+fn a_tiny_entry_array_cannot_buy_the_backup_header() {
+    let mut b = Builder { entry_count: 8, last_usable: DISK_LBAS - 1, ..Default::default() };
+    b.entries[3] = Entry::new(TYPE_ESP, guid(0xD4), 300, DISK_LBAS - 1);
+    let mut img = b.build();
+    assert_eq!(
+        img.locate(guid(0xD4)),
+        Err(GptError::UsableRangeCoversBackup {
+            last: DISK_LBAS - 1,
+            backup_array_lba: DISK_LBAS - 1,
+        })
+    );
+}

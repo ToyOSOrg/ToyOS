@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use common::{pattern, read_all, sorted_walk, write_new, Image, RefuseOnceInRange};
+use common::{pattern, read_all, sorted_walk, walk_expectation, write_new, Image, RefuseOnceInRange};
 use toyos_fat32::{Error, Fat32, FatTime, IoError};
 
 /// 2024-06-01 12:34:56, so every entry this crate stamps is checkable rather
@@ -508,9 +508,9 @@ fn our_own_reader_agrees_with_the_host_on_our_own_volume() {
     image.fsck();
 
     let mut fs = Fat32::mount(image.device()).expect("remount");
-    let mut want: Vec<(String, u64)> = files.iter().map(|(n, d)| ((*n).into(), d.len() as u64)).collect();
-    want.sort();
-    assert_eq!(sorted_walk(&mut fs), want);
+    let owned: Vec<(String, Vec<u8>)> =
+        files.iter().map(|(n, d)| ((*n).into(), d.clone())).collect();
+    assert_eq!(sorted_walk(&mut fs), walk_expectation(&owned));
     for (n, d) in &files {
         assert_eq!(&read_all(&mut fs, n), d, "{n}");
     }

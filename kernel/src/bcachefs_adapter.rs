@@ -296,6 +296,16 @@ impl FileSystem for BcacheFsAdapter {
         fs_rename::replace_rename(self, old, new)
     }
 
+    // `NotSupported`, not a refusal: no directory representation here, so the
+    // VFS carries created directories itself.
+    fn create_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
+    }
+
+    fn remove_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
+    }
+
     fn write_page(&mut self, file_id: FileId, page_idx: u32, data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {
         let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
         let name = info.name.clone();
@@ -313,10 +323,18 @@ impl FileSystem for BcacheFsAdapter {
     fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError> {
         let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
         let name = info.name.clone();
-        let extents = Arc::clone(&info.blocks)
-            .with(|extents| extents.clone())
-            .ok_or(SyscallError::NotFound)?;
-        mapped("update_metadata", &name, self.fs.update_metadata(&name, &extents, size, mtime))
+        let blocks = Arc::clone(&info.blocks);
+        // A shrink gives the dropped tail up — record the shortened list
+        // first, free second, so an error between the two leaks blocks rather
+        // than leaving the entry naming freed ones. Only an Err is ordered by
+        // this: nothing flushes until sync(), so power loss is not.
+        let dropped = blocks.truncate_to_blocks(size.div_ceil(crate::mm::PAGE_SIZE));
+        let extents = blocks.with(|extents| extents.clone()).ok_or(SyscallError::NotFound)?;
+        mapped("update_metadata", &name, self.fs.update_metadata(&name, &extents, size, mtime))?;
+        if !dropped.is_empty() {
+            mapped("free of a shrunk tail", &name, self.fs.free_extents(&dropped))?;
+        }
+        Ok(())
     }
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
@@ -406,6 +424,16 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
 
     fn rename(&mut self, _old: &str, _new: &str) -> Result<(), SyscallError> {
         Err(SyscallError::PermissionDenied)
+    }
+
+    // `NotSupported`, not a refusal: no directory representation here, so the
+    // VFS carries created directories itself.
+    fn create_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
+    }
+
+    fn remove_dir(&mut self, _name: &str) -> Result<(), SyscallError> {
+        Err(SyscallError::NotSupported)
     }
 
     fn write_page(&mut self, _file_id: FileId, _page_idx: u32, _data: &[u8; PAGE_BYTES]) -> Result<(), SyscallError> {

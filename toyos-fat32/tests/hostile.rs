@@ -158,6 +158,8 @@ fn the_corpus_is_a_volume_we_can_read() {
         vec![
             "A Long Name For Entries.bin",
             "plain.txt",
+            "sub/",
+            "sub/deeper/",
             "sub/deeper/leaf.txt",
             "sub/inner.dat",
         ]

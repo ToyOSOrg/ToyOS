@@ -601,8 +601,8 @@ impl FatFs {
         }
     }
 
-    /// Make sure every directory on the way to `name` exists; the VFS has no
-    /// per-mount `mkdir`, so `create` is the only notice this mount gets.
+    /// Make sure every directory on the way to `name` exists: a create may
+    /// land under a path no `mkdir` ever touched.
     fn ensure_parent(&mut self, name: &str, time: FatTime) -> Result<(), SyscallError> {
         let Some((parent, _)) = name.rsplit_once('/') else { return Ok(()) };
         let role = self.role;
@@ -741,6 +741,16 @@ impl FileSystem for FatFs {
 
     fn rename(&mut self, old: &str, new: &str) -> Result<(), SyscallError> {
         fs_rename::replace_rename(self, old, new)
+    }
+
+    fn create_dir(&mut self, name: &str) -> Result<(), SyscallError> {
+        let role = self.role;
+        self.fs.create_dir(name, now()).map_err(|e| refused(role, "mkdir", name, e))
+    }
+
+    fn remove_dir(&mut self, name: &str) -> Result<(), SyscallError> {
+        let role = self.role;
+        self.fs.remove_dir(name).map_err(|e| refused(role, "rmdir", name, e))
     }
 
     fn write_page(
