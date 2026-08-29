@@ -99,7 +99,7 @@ mod late_panic {
     }
 }
 
-use crate::mm::paging::CachePolicy;
+use crate::mm::paging::MmioPolicy;
 use alloc::boxed::Box;
 use arch::{apic, cpu, idt, pat, percpu, smp, syscall};
 use drivers::{acpi, gop, i8042, ioapic, nvme, pci, serial, virtio_console, virtio_gpu, virtio_net, virtio_sound, xhci};
@@ -344,7 +344,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     let ecam_base = acpi::find_ecam_base(kernel_args.rsdp_addr)
         .expect("ACPI: failed to find ECAM base address");
-    let ecam = mm::paging::map_mmio(ecam_base, 256 * 32 * 8 * 4096, CachePolicy::DeferToMtrr);
+    let ecam = mm::paging::map_mmio(ecam_base, 256 * 32 * 8 * 4096, MmioPolicy::Uncacheable);
     let pci_devices = pci::enumerate(&ecam);
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {

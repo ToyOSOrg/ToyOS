@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use toyos_pci::{bar, caps, msi, msix};
 
 use crate::mm::Mmio;
-use crate::mm::paging::CachePolicy;
+use crate::mm::paging::MmioPolicy;
 use crate::log;
 
 const VENDOR_ID: u64 = 0x00;
@@ -185,7 +185,7 @@ impl PciDevice {
         };
 
         let entry = address + MSIX_ENTRY as u64 * msix::ENTRY_BYTES;
-        let table = crate::mm::paging::map_mmio(entry, 0x1000, CachePolicy::DeferToMtrr);
+        let table = crate::mm::paging::map_mmio(entry, 0x1000, MmioPolicy::Uncacheable);
 
         table.write_u32(msix::ENTRY_ADDRESS_LO, MSG_ADDR);
         table.write_u32(msix::ENTRY_ADDRESS_HI, 0);

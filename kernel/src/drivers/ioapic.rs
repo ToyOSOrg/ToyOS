@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use crate::mm::paging::CachePolicy;
+use crate::mm::paging::MmioPolicy;
 use crate::log;
 use crate::mm::Mmio;
 use crate::sync::Lock;
@@ -119,7 +119,7 @@ pub fn init(madt: &MadtInfo) {
 
     for entry in &madt.io_apics {
         // 0x20 covers IOREGSEL and IOWIN; every entry is reached through those two.
-        let mmio = crate::mm::paging::map_mmio(entry.address as u64, 0x20, CachePolicy::DeferToMtrr);
+        let mmio = crate::mm::paging::map_mmio(entry.address as u64, 0x20, MmioPolicy::Uncacheable);
         let mut unit = Unit { mmio, gsi_base: entry.gsi_base, entries: 0 };
         let ver = unit.read(REG_VER);
         let version = ver & 0xFF;

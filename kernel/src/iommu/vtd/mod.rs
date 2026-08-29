@@ -15,7 +15,7 @@ mod table;
 use crate::drivers::acpi::TableError;
 use crate::drivers::pci::PciDevice;
 use crate::iommu::{AddressWidth, StreamId};
-use crate::mm::paging::CachePolicy;
+use crate::mm::paging::MmioPolicy;
 use crate::mm::Mmio;
 use crate::sync::Lock;
 use crate::time::{Duration, Tripwire};
@@ -187,7 +187,7 @@ fn window(base: u64) -> Option<Mmio> {
         return None;
     }
     Some(
-        crate::mm::paging::map_mmio(base, REGISTER_WINDOW, CachePolicy::DeferToMtrr),
+        crate::mm::paging::map_mmio(base, REGISTER_WINDOW, MmioPolicy::Uncacheable),
     )
 }
 
