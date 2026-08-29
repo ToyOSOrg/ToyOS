@@ -54,7 +54,7 @@ struct Node {
 /// indices cannot disagree. `entry_offset` is carried rather than recomputed
 /// because a directory entry never moves, and recomputing it means walking the
 /// directory's cluster chain from the start on every metadata update.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Loc {
     pub dir_start: Cluster,
     pub first_index: u32,
@@ -290,6 +290,19 @@ impl<D: BlockAccess> Fat32<D> {
             Err(Error::NotFound) | Err(Error::NotADirectory) => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    /// Whether two paths name the same directory entry — identity is the entry's
+    /// location, so case and 8.3/long variants of one name match. `false` when
+    /// `b` is absent.
+    pub fn same_entry(&mut self, a: &str, b: &str) -> Result<bool, Error> {
+        let a_loc = self.resolve(a)?.loc;
+        let b_loc = match self.resolve(b) {
+            Ok(node) => node.loc,
+            Err(Error::NotFound) | Err(Error::NotADirectory) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        Ok(a_loc == b_loc)
     }
 
     /// Every entry of one directory, refusing above `limit`.
