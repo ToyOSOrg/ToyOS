@@ -115,12 +115,33 @@ pub fn has_backing(file_id: FileId) -> bool {
     FILE_CACHE.lock().files.get(&file_id).is_some_and(|f| f.backing.is_some())
 }
 
-/// Increment ref_count for one more open handle; caller must hold the VFS lock, which [`finish_writeback`] also reads `ref_count` under to serialise re-opens against teardown.
-pub fn open(file_id: FileId) {
+/// Increment ref_count for one more open, returning a guard that undoes the
+/// increment on drop unless committed: a re-open whose backing lookup fails
+/// after this must not pin the file. Caller holds the VFS lock, which
+/// [`finish_writeback`] also reads `ref_count` under to serialise against teardown.
+#[must_use = "commit() once the re-open cannot fail, or the reference is released"]
+pub fn open(file_id: FileId) -> crate::rollback::Rollback<impl FnOnce()> {
+    {
+        let mut cache = FILE_CACHE.lock();
+        if let Some(file) = cache.files.get_mut(&file_id) {
+            file.ref_count += 1;
+        }
+    }
+    crate::rollback::Rollback::new(move || undo_open(file_id))
+}
+
+/// Undo one [`open`]: a re-open decrements a count another handle or a pending teardown keeps, never orphaning the file.
+fn undo_open(file_id: FileId) {
     let mut cache = FILE_CACHE.lock();
     if let Some(file) = cache.files.get_mut(&file_id) {
-        file.ref_count += 1;
+        file.ref_count = file.ref_count.saturating_sub(1);
     }
+}
+
+/// This file's open-reference count, for the leak-rollback self-test's census.
+#[cfg(feature = "boot-actuators")]
+pub fn ref_count(file_id: FileId) -> u32 {
+    FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.ref_count)
 }
 
 /// The verdict [`release_to_writeback`] hands its caller.

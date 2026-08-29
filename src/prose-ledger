@@ -23,7 +23,7 @@ kernel-loom/tests/sleep_lock.rs 80 1
 kernel-loom/tests/smp_bringup.rs 11 0
 kernel-loom/tests/ticket_lock.rs 35 1
 kernel-loom/tests/tlb_shootdown.rs 93 2
-kernel/src/actuator.rs 86 0
+kernel/src/actuator.rs 87 0
 kernel/src/arch/apic.rs 54 0
 kernel/src/arch/control_regs.rs 66 0
 kernel/src/arch/cpu.rs 60 0
@@ -49,7 +49,7 @@ kernel/src/arch/pat.rs 22 0
 kernel/src/arch/percpu.rs 137 0
 kernel/src/arch/smp.rs 53 0
 kernel/src/arch/syscall/debug.rs 14 0
-kernel/src/arch/syscall/device.rs 12 0
+kernel/src/arch/syscall/device.rs 14 0
 kernel/src/arch/syscall/dispatch.rs 89 0
 kernel/src/arch/syscall/fs.rs 12 0
 kernel/src/arch/syscall/gate.rs 23 0
@@ -59,7 +59,7 @@ kernel/src/arch/syscall/ipc.rs 32 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
-kernel/src/arch/syscall/vm.rs 74 0
+kernel/src/arch/syscall/vm.rs 78 0
 kernel/src/arch/tlb.rs 32 0
 kernel/src/bcachefs_adapter.rs 63 0
 kernel/src/block.rs 33 0
@@ -97,9 +97,9 @@ kernel/src/elf/cache.rs 24 0
 kernel/src/elf/index.rs 23 0
 kernel/src/elf/mod.rs 105 0
 kernel/src/elf/reloc.rs 38 0
-kernel/src/fat32_adapter.rs 169 0
+kernel/src/fat32_adapter.rs 172 0
 kernel/src/file_backing.rs 21 0
-kernel/src/file_cache.rs 70 0
+kernel/src/file_cache.rs 75 0
 kernel/src/fs_rename.rs 18 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
@@ -118,6 +118,7 @@ kernel/src/iommu/vtd/table.rs 37 0
 kernel/src/irq_census.rs 36 0
 kernel/src/irq_ring.rs 14 0
 kernel/src/keyboard.rs 17 0
+kernel/src/leak_selftest.rs 6 0
 kernel/src/loader/mod.rs 129 0
 kernel/src/loader/start.rs 45 0
 kernel/src/loader/symbols.rs 18 0
@@ -130,7 +131,7 @@ kernel/src/log/registry.rs 12 0
 kernel/src/log/shard.rs 55 0
 kernel/src/log/storm.rs 15 0
 kernel/src/log/user.rs 16 0
-kernel/src/main.rs 69 0
+kernel/src/main.rs 70 0
 kernel/src/mm/alloc.rs 88 0
 kernel/src/mm/dma.rs 34 0
 kernel/src/mm/mmio.rs 17 0
@@ -143,13 +144,13 @@ kernel/src/mouse.rs 20 0
 kernel/src/net.rs 15 0
 kernel/src/nmi_gate.rs 27 0
 kernel/src/nvme_gate.rs 8 0
-kernel/src/object/device.rs 18 0
+kernel/src/object/device.rs 22 0
 kernel/src/object/file.rs 3 0
-kernel/src/object/handle.rs 54 0
+kernel/src/object/handle.rs 60 0
 kernel/src/object/inbox.rs 6 0
 kernel/src/object/mod.rs 51 0
 kernel/src/object/namespace.rs 9 0
-kernel/src/object/ops.rs 58 0
+kernel/src/object/ops.rs 59 0
 kernel/src/object/pipe.rs 14 0
 kernel/src/object/port.rs 21 0
 kernel/src/object/process.rs 14 0
@@ -161,6 +162,7 @@ kernel/src/panic.rs 55 0
 kernel/src/pipe.rs 34 0
 kernel/src/preempt.rs 10 0
 kernel/src/process.rs 215 0
+kernel/src/rollback.rs 4 0
 kernel/src/rtc.rs 42 0
 kernel/src/sched/driver.rs 204 0
 kernel/src/sched/dump.rs 80 0
@@ -243,7 +245,7 @@ tests/toyos-rust-tests/src/bin/abuse_elf_segments.rs 58 0
 tests/toyos-rust-tests/src/bin/abuse_gpu_resolution.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_handle_table.rs 40 0
 tests/toyos-rust-tests/src/bin/abuse_inbox.rs 19 0
-tests/toyos-rust-tests/src/bin/abuse_kernel_addr.rs 45 0
+tests/toyos-rust-tests/src/bin/abuse_kernel_addr.rs 48 0
 tests/toyos-rust-tests/src/bin/abuse_listener_hijack.rs 77 0
 tests/toyos-rust-tests/src/bin/abuse_page_straddle.rs 37 0
 tests/toyos-rust-tests/src/bin/abuse_pipe_map.rs 22 0
@@ -365,7 +367,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4901 23
+tests/toyos.rs 4906 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

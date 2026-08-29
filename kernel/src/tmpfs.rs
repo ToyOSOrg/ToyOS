@@ -110,7 +110,7 @@ impl FileSystem for TmpFs {
     fn open_file(&mut self, name: &str) -> Result<(FileId, Option<Arc<dyn FileBacking>>), SyscallError> {
         match self.entries.get(name) {
             Some(Entry::File { id, .. }) => {
-                file_cache::open(*id);
+                file_cache::open(*id).commit();
                 Ok((*id, None)) // tmpfs: no backing, data is in the file cache
             }
             _ => Err(SyscallError::NotFound),

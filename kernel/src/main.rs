@@ -44,7 +44,10 @@ mod block;
 mod durability;
 mod gpt;
 mod page_cache;
+mod rollback;
 mod file_cache;
+#[cfg(feature = "boot-actuators")]
+mod leak_selftest;
 mod writeback;
 mod tmpfs;
 mod file_backing;
@@ -455,6 +458,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     vfs::lock().create_dir("/home/root/.config").expect("boot: /home/root/.config exceeds MAX_PATH");
 
     boot_phase!("subsystems ready", t_subsys);
+
+    // After the mounts above: the FAT reopen control drives `/log`.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::leak_rollback_selftest() {
+        leak_selftest::run();
+    }
 
     let t_devices = clock::nanos_since_boot();
 
