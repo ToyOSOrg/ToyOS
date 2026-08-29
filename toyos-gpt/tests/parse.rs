@@ -600,3 +600,49 @@ fn no_byte_of_the_table_can_panic_the_parser() {
     assert!(located > 0, "every single-byte change broke the table");
     assert!(img.locate(guid(0xC3)).is_ok(), "the sweep did not put the table back");
 }
+
+/// The blocks the backup GPT occupies — the device's last block and the entry
+/// array below it, 2015..=2047 on this disk — are not usable space: a primary
+/// whose usable range reaches them lets a partition lawfully sit on the
+/// recovery copy, and the caller's next move is to write to that partition.
+#[test]
+fn a_usable_range_reaching_the_backup_gpt_is_refused() {
+    let mut b = Builder { last_usable: DISK_LBAS - 2, backup: true, ..Default::default() };
+    b.entries[3] = Entry::new(TYPE_ESP, guid(0xD4), 300, DISK_LBAS - 2);
+    let mut img = b.build();
+    assert_eq!(
+        img.locate(guid(0xD4)),
+        Err(GptError::UsableRangeCoversBackup {
+            last: DISK_LBAS - 2,
+            backup_array_lba: DISK_LBAS - 33,
+        })
+    );
+
+    // The bound is exact: the default table's 2014 is every other test's
+    // green, and the backup array's own first block is the first refusal.
+    let mut img = Builder { last_usable: DISK_LBAS - 33, ..Default::default() }.build();
+    assert_eq!(
+        img.locate(guid(0xC3)),
+        Err(GptError::UsableRangeCoversBackup {
+            last: DISK_LBAS - 33,
+            backup_array_lba: DISK_LBAS - 33,
+        })
+    );
+}
+
+/// UEFI gives every entry a `UniquePartitionGUID` that must be unique. Two
+/// entries claiming the searched-for GUID must refuse, never resolve
+/// first-wins — either one could be the partition the firmware meant.
+#[test]
+fn two_entries_claiming_the_target_guid_are_refused() {
+    let mut b = Builder::default();
+    b.entries[3] = Entry::new(TYPE_OTHER, guid(0xC3), 300, 1999);
+    let mut img = b.build();
+    assert_eq!(
+        img.locate(guid(0xC3)),
+        Err(GptError::DuplicateUniqueGuid { first: 2, second: 3 })
+    );
+    // A duplicate of a GUID nobody asked for does not refuse the answer: the
+    // question this crate exists for is whether *this* GUID names one partition.
+    assert_eq!(img.locate(guid(0xB2)).map(|f| f.partition.index), Ok(1));
+}
