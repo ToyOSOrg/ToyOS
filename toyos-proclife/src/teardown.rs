@@ -22,7 +22,7 @@
 use alloc::vec::Vec;
 
 use crate::table::{Lifecycle, Processes};
-use crate::{Pid, ThreadLocation, Tid, TORN_DOWN_THREAD_CODE};
+use crate::{Pid, ThreadLocation, Tid, Watch, TORN_DOWN_THREAD_CODE};
 
 /// Claim exclusive teardown of a process.
 ///
@@ -145,16 +145,23 @@ pub enum ThreadExit {
     /// The main thread: this is the process's exit, and the whole teardown
     /// runs.
     Process,
-    /// A sibling: release its own mappings and mark it `Zombie(code)`. The exit
-    /// pass then drops its payload, and `publish_released`'s post on the
-    /// thread's own watch is the one place its death reaches a joiner — a
-    /// joiner therefore never runs before the payload is gone.
-    Sibling,
+    /// A sibling: release its own mappings, mark it `Zombie(code)`, and post
+    /// `Gone` on `post` before the exit pass — after it, this thread does not
+    /// run again.
+    Sibling {
+        /// **The subject a joiner armed on, which is the exiting thread's own
+        /// watch.** It was the process's main thread until `1bfe4e5b`, because
+        /// the wake was by name into a shared parking lot and whoever it
+        /// reached re-checked; a non-main thread joining a sibling was owed a
+        /// wake nobody sent, and slept until some unrelated wake happened to
+        /// reach it.
+        post: Watch,
+    },
     /// The process has no entry — another CPU's kill reaped it while this
-    /// thread was on its way here. **The same exit a sibling takes**: nothing
-    /// here is the main thread any more, so the teardown branch is skipped and
-    /// every table write is a no-op.
-    Gone,
+    /// thread was on its way here. **The same exit a sibling takes**, on the
+    /// same [`Watch`]: nothing here is the main thread any more, so the
+    /// teardown branch is skipped and every table write is a no-op.
+    Gone { post: Watch },
 }
 
 /// Route a thread's own exit.
@@ -164,19 +171,18 @@ pub enum ThreadExit {
 /// nothing has to leave, not take the machine with it.
 pub fn route_thread_exit<T: Processes>(table: &T, pid: Pid, tid: Tid) -> ThreadExit {
     let Some(proc) = table.get(pid) else {
-        return ThreadExit::Gone;
+        return ThreadExit::Gone { post: Watch::Thread(pid, tid) };
     };
     if proc.main_tid() == tid {
         return ThreadExit::Process;
     }
-    ThreadExit::Sibling
+    ThreadExit::Sibling { post: Watch::Thread(pid, tid) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::World;
-    use crate::Watch;
 
     #[cfg(not(feature = "mutate-claim-teardown-always-wins"))]
     #[test]
@@ -293,14 +299,15 @@ mod tests {
     #[test]
     fn an_exit_on_a_reaped_process_leaves_by_the_sibling_door() {
         let world = World::new();
-        assert_eq!(route_thread_exit(&world, Pid(3), Tid(1)), ThreadExit::Gone);
+        assert_eq!(
+            route_thread_exit(&world, Pid(3), Tid(1)),
+            ThreadExit::Gone { post: Watch::Thread(Pid(3), Tid(1)) },
+        );
     }
 
     /// Two siblings, and the one that is waiting is not the main thread — the
     /// exact shape the wake-by-name lost, when `thread_exit` posted one wake
-    /// and it was always `TaskId(pid, proc.main_tid)`. The release is the exit
-    /// pass's `publish_released`, on the dying thread's own watch; nothing else
-    /// posts on the exit path.
+    /// and it was always `TaskId(pid, proc.main_tid)`.
     #[test]
     fn a_sibling_join_is_released_by_the_sibling_it_named() {
         let mut world = World::new();
@@ -312,16 +319,16 @@ mod tests {
         // `sys_thread_join` does with `Subject::of(sched.handle.watch())`.
         world.arm(Watch::Thread(pid, dying), (pid, waiter));
 
-        let ThreadExit::Sibling = route_thread_exit(&world, pid, dying) else {
+        let ThreadExit::Sibling { post } = route_thread_exit(&world, pid, dying) else {
             panic!("a non-main thread's exit is a sibling exit");
         };
         world.set_location(pid, dying, ThreadLocation::Zombie(0));
-        world.retire(pid, dying);
+        world.post(post);
 
         assert!(
             world.released(Watch::Thread(pid, dying), (pid, waiter)),
-            "the joiner armed on {dying}: the exit pass's release must reach the \
-             joiner that named it",
+            "the joiner armed on {dying} and the exit posted on {post:?}: a thread's \
+             exit must reach the joiner that named it",
         );
     }
 }
