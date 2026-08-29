@@ -146,3 +146,68 @@ fn a_usb2_port_is_never_warm_reset() {
         driver.did
     );
 }
+
+/// **The other way a USB3 hot reset fails** (§4.19.5): the sequence
+/// *completes* — PRC comes — with the port disabled, the device undetected and
+/// the link back at RxDetect. A driver that reads only the completion flag
+/// enumerates a dead port and then drops it at its enabled-check; §4.19.5.1's
+/// answer is the same warm reset the deadline shape gets.
+#[test]
+fn a_reset_that_completes_failed_is_warm_reset() {
+    let mut port = FakePort::occupied(ResetBehaviour::FailsTheBusReset { warm_works: true });
+    let mut driver = Driver::new().speaking(Protocol::Usb3);
+    driver
+        .run_to(&mut port, 0, 4 * DEBOUNCE_NS + RESET_DEADLINE_NS, PASS)
+        .unwrap();
+
+    assert_eq!(
+        driver.resets(),
+        [Reset::Hot, Reset::Warm],
+        "the completed failure was not escalated to a warm reset: {:?}",
+        driver.did
+    );
+    assert_eq!(driver.enumerations(), 1, "the port never came up: {:?}", driver.did);
+    assert!(driver.attached());
+    // Exactly once: the recovery must not pay a phantom replug teardown for
+    // the connect edge its own retrain raised.
+    assert!(
+        !driver.did.iter().any(|d| matches!(d, Did::ToreDown(_))),
+        "the warm reset's own connect edge was read as a replug: {:?}",
+        driver.did
+    );
+}
+
+/// The same failure on a link that will not come back warm either: refused by
+/// the name the warm-reset dead end already has.
+#[test]
+fn a_completed_failure_that_stays_failed_is_refused_by_name() {
+    let mut port = FakePort::occupied(ResetBehaviour::FailsTheBusReset { warm_works: false });
+    let mut driver = Driver::new().speaking(Protocol::Usb3);
+    driver
+        .run_to(&mut port, 0, DEBOUNCE_NS + 3 * RESET_DEADLINE_NS, PASS)
+        .unwrap();
+    assert_eq!(driver.resets(), [Reset::Hot, Reset::Warm], "{:?}", driver.did);
+    assert!(
+        driver.did.contains(&Did::GaveUp(GaveUp::LinkNeverTrained)),
+        "{:?}",
+        driver.did
+    );
+}
+
+/// "USB2 protocol ports never fail" the bus reset sequence (§4.19.5) — so a
+/// controller that completes one disabled anyway is refused by its own name,
+/// and never written a WPR the port does not have.
+#[test]
+fn a_usb2_completed_failure_is_refused_not_warm_reset() {
+    let mut port = FakePort::occupied(ResetBehaviour::FailsTheBusReset { warm_works: false });
+    let mut driver = Driver::new().speaking(Protocol::Usb2);
+    driver
+        .run_to(&mut port, 0, 4 * DEBOUNCE_NS, PASS)
+        .unwrap();
+    assert_eq!(driver.resets(), [Reset::Hot], "{:?}", driver.did);
+    assert!(
+        driver.did.contains(&Did::GaveUp(GaveUp::ResetFailed(Reset::Hot))),
+        "{:?}",
+        driver.did
+    );
+}

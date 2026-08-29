@@ -25,8 +25,7 @@ list.** A teardown's Disable Slot and an endpoint recovery's three-in-a-row
 submit-and-return now, so the six seconds above are reachable only from the boot
 path and from `storage_read`/`storage_write` — the first has no scheduler to
 give a pass back to, and the second is the case named below that this conversion
-does not fix. `device::configure` is the one blocking caller `poll_if_pending`
-still reaches, and it is the piece still owed.
+does not fix.
 
 So a worst case is a CPU that does not reschedule for **six seconds**, and an
 ordinary hot-plug enumeration on the T14 is ~14 ms of it (`hotplug-blocks-a-scheduler-pass`).
@@ -34,16 +33,12 @@ Nothing in the suite can measure the bad case: QEMU answers every one of these
 in microseconds, which is why a driver built entirely out of them passed
 everything here for a season.
 
-**The conversion is the same idiom `PortWork` already uses** — the debounce and
-the port reset were spins until #94 and are now states the poll returns to — so
-the shape is known and the work is mechanical rather than novel. What makes it
-big is its extent: `configure` is a straight line of control transfers, and it
-has to become a state machine that gives the pass back between steps.
-`restart_endpoint`'s half of that is done: the route is
-`toyos_xhci::recovery`'s, driven twice — a blocking loop for a disk's bulk pair,
-which runs on the thread that faulted, and a stepped one for HID. **The sequence
-is shared and only the drive loop is not**, which is the shape `configure`
-should take too.
+**The hot-plug half of that conversion has landed**: enumeration is
+`device::begin`/`stepped`, submit-and-return, driven by the port machine — so
+no runtime path blocks a scheduler pass on it any more. `restart_endpoint`'s
+half is done the same way: the route is `toyos_xhci::recovery`'s, driven twice
+— a blocking loop for a disk's bulk pair, which runs on the thread that
+faulted, and a stepped one for HID.
 
 One case is *not* fixed by that and needs its own answer: `storage_read` and
 `storage_write` are called by the page cache on a faulting thread, so a thread

@@ -41,6 +41,12 @@ pub enum ResetBehaviour {
     /// Inactive, which §4.19.1.2.4 says only a warm reset leaves. This is what
     /// the laptop's USB-A ports do and the state QEMU has no way to produce.
     HotResetKillsTheLink { warm_works: bool },
+    /// **A USB3 port whose bus reset sequence *completes* as a failure**
+    /// (§4.19.5): PRC comes, with the port disabled, the device undetected —
+    /// CCS and the speed field zero — and the link back at RxDetect. The
+    /// failure is distinguishable from success only at the register, and
+    /// §4.19.5.1's warm reset is the prescribed recovery.
+    FailsTheBusReset { warm_works: bool },
 }
 
 pub struct FakePort {
@@ -134,7 +140,10 @@ impl FakePort {
         // driver. A warm reset drives PR too, so what tells them apart is which
         // bit the driver wrote.
         let hot = value & PR != 0 && self.raw & CCS != 0;
-        let warm = value & WPR != 0 && self.raw & CCS != 0;
+        // WPR is a link operation and runs with no device detected: recovering
+        // the port that reads CCS=0 after a failed bus reset is what
+        // §4.19.5.1 uses it for.
+        let warm = value & WPR != 0;
         if hot || warm {
             next = (next | PR) & !PED;
         } else {
@@ -169,6 +178,23 @@ impl FakePort {
                 }
                 1_000_000
             }
+            ResetBehaviour::FailsTheBusReset { warm_works } => {
+                if !self.warm {
+                    // §4.19.5's completed failure, bit for bit.
+                    self.resetting_since = None;
+                    self.raw &= !(PR | PED | (0xF << SPEED_SHIFT));
+                    if self.raw & CCS != 0 {
+                        self.raw = (self.raw & !CCS) | CSC;
+                    }
+                    self.raw |= PRC;
+                    self.set_link(PLS_RX_DETECT);
+                    return;
+                }
+                if !warm_works {
+                    return;
+                }
+                1_000_000
+            }
         };
         if now.saturating_sub(since) < after {
             return;
@@ -179,6 +205,13 @@ impl FakePort {
         self.raw |= PRC;
         if warm {
             self.raw |= WRC;
+            // §4.19.5's failure only lost *detection* of a device that never
+            // left; the warm retrain finds it again, connect edge and all.
+            if matches!(self.behaviour, ResetBehaviour::FailsTheBusReset { .. })
+                && self.raw & CCS == 0
+            {
+                self.raw |= CCS | CSC;
+            }
         }
         if self.raw & CCS != 0 {
             self.raw |= PED | ((self.speed as u32) << SPEED_SHIFT);

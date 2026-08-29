@@ -376,7 +376,7 @@ impl Driver {
                         return Ok(());
                     }
                 }
-                Step::Enumerate { trained, pending } => {
+                Step::Enumerate { after, pending } => {
                     if let Some(at) = busy {
                         self.wake_at = Some(at);
                         return Ok(());
@@ -393,11 +393,29 @@ impl Driver {
                     if self.outstanding.busy() {
                         return Err(Stuck::Order(Broke::ActedWithAnAnswerOutstanding));
                     }
+                    // The kernel's `device::begin` acknowledges the completion
+                    // it consumed before submitting Enable Slot; mirrored, or a
+                    // warm reset's own connect edge cancels the enumeration it
+                    // just earned.
+                    let fresh = port.read();
+                    let ack = if self.state.has_flaw(Flaw::WriteBackWhatWasRead) {
+                        toyos_xhci::portsc::Write::whole_word(fresh)
+                    } else {
+                        let mut ack = fresh.neutral().acknowledging_reset(fresh);
+                        if after == Some(Reset::Warm) {
+                            ack = ack.acknowledging_connect(fresh);
+                        }
+                        ack
+                    };
+                    if let Some(bad) = invariants::check_write(ack, fresh) {
+                        return Err(Stuck::Broke(bad));
+                    }
+                    port.write(ack.raw(), now);
                     // Submitted and left, exactly as the teardown is: the port
                     // stays inside the effect until the last act is answered,
                     // and the check above catches a step taken meanwhile.
                     let (seq, act) = Enumeration::begin();
-                    self.issue_act(seq, act, trained, now);
+                    self.issue_act(seq, act, after.is_none(), now);
                     self.wake_at = self.outstanding.wake_at();
                     return Ok(());
                 }

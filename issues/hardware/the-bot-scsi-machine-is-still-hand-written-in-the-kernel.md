@@ -48,6 +48,5 @@ Constraints the machine has to preserve:
   SuperSpeed ports read enabled the moment they are touched, so warm-reset
   correctness lives in the host model only.
 
-`issues/hardware/pulling-the-boot-stick-freezes-the-t14.md` and
-`issues/hardware/port-reset-gets-no-second-try.md` are both open and neither is
+`issues/hardware/pulling-the-boot-stick-freezes-the-t14.md` is open and is not
 closed by this.

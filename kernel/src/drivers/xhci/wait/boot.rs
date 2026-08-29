@@ -23,7 +23,7 @@ use super::super::{OP_CONFIG, OP_CRCR, OP_DCBAAP, OP_PAGESIZE, OP_PORT_BASE, OP_
 use super::super::{PORTSC_PP, PORT_REG_SIZE, PORT_WORK_AT, XHCI};
 use super::super::{controller_answers, PORT_DEBOUNCE_NS};
 use super::settles;
-use toyos_xhci::port::{self, Reset};
+use toyos_xhci::port::{self, GaveUp, Reset, ResetOutcome};
 use toyos_xhci::Protocol;
 
 /// How long a machine on which *nothing at all* has connected keeps looking.
@@ -417,39 +417,68 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
 }
 /// Initialize and configure one USB device on a port, waiting for each step.
 ///
-/// The reset kind is [`port::reset_needed`]'s answer alone: this path also runs
-/// during boot, so a fix reaching only hot-plug would miss it.
+/// The reset kind is [`port::reset_needed`]'s answer alone, and what a
+/// completion meant is [`port::reset_outcome`]'s: this path also runs during
+/// boot, so a fix reaching only hot-plug would miss it.
 pub fn init_device(ctrl: &mut XhciController, port_idx: u8, protocol: Option<Protocol>) {
-    let Some(kind) = port::reset_needed(protocol, ctrl.read_portsc(port_idx)) else {
+    let Some(mut kind) = port::reset_needed(protocol, ctrl.read_portsc(port_idx)) else {
         log!("xHCI: port {} link already trained, no reset needed", port_idx + 1);
-        return configure(ctrl, port_idx);
+        return configure(ctrl, port_idx, None);
     };
     reset_port(ctrl, port_idx, kind);
-
-    // Bounded: a port that never finishes its reset costs that port, not the boot.
-    if super::settles(|| reset_done(ctrl, port_idx)) {
-        return configure(ctrl, port_idx);
-    }
-
-    // xHCI 1.2 §4.19.1.2.4: a SuperSpeed link left Inactive by a failed hot
-    // reset needs a warm reset; without this the port is lost for the boot.
-    if kind == Reset::Hot && protocol == Some(Protocol::Usb3) {
-        log!("xHCI: port {} did not take a hot reset (link {:?}); warm resetting it",
-            port_idx + 1, ctrl.read_portsc(port_idx).link_state());
-        reset_port(ctrl, port_idx, Reset::Warm);
+    // At most two rounds: §4.19.5.1 has one escalation, hot to warm, and both
+    // failure shapes below leave `kind` warm, from which neither retries.
+    loop {
+        // Bounded: a port that never finishes its reset costs that port, not the boot.
         if super::settles(|| reset_done(ctrl, port_idx)) {
-            return configure(ctrl, port_idx);
+            match port::reset_outcome(kind, protocol, ctrl.read_portsc(port_idx)) {
+                ResetOutcome::Enumerate => return configure(ctrl, port_idx, Some(kind)),
+                ResetOutcome::Escalate(write) => {
+                    log!("xHCI: port {} failed its hot reset (PORTSC {:#010x}); warm resetting it",
+                        port_idx + 1, ctrl.read_portsc(port_idx).raw());
+                    ctrl.write_portsc(port_idx, write);
+                    kind = Reset::Warm;
+                    continue;
+                }
+                ResetOutcome::GaveUp(why) => {
+                    match why {
+                        GaveUp::LinkNeverTrained => log!(
+                            "xHCI: port {} is SuperSpeed and its link would not train, warm \
+                             reset included (PORTSC {:#010x}); skipping it",
+                            port_idx + 1, ctrl.read_portsc(port_idx).raw()),
+                        GaveUp::ResetFailed(k) => log!(
+                            "xHCI: port {} completed its {} reset without enabling \
+                             (PORTSC {:#010x}); skipping it",
+                            port_idx + 1,
+                            match k { Reset::Hot => "hot", Reset::Warm => "warm" },
+                            ctrl.read_portsc(port_idx).raw()),
+                        GaveUp::ResetNeverFinished(_) => {
+                            unreachable!("a completed reset cannot have never finished")
+                        }
+                    }
+                    return ctrl.port_bound(port_idx, None);
+                }
+            }
         }
+        // xHCI 1.2 §4.19.1.2.4: a SuperSpeed link left Inactive by a failed hot
+        // reset needs a warm reset; without this the port is lost for the boot.
+        if kind == Reset::Hot && protocol == Some(Protocol::Usb3) {
+            log!("xHCI: port {} did not take a hot reset (link {:?}); warm resetting it",
+                port_idx + 1, ctrl.read_portsc(port_idx).link_state());
+            reset_port(ctrl, port_idx, Reset::Warm);
+            kind = Reset::Warm;
+            continue;
+        }
+        log!("xHCI: port {} never finished its reset (PORTSC {:#010x}); skipping it",
+            port_idx + 1, ctrl.read_portsc(port_idx).raw());
+        return ctrl.port_bound(port_idx, None);
     }
-    log!("xHCI: port {} never finished its reset (PORTSC {:#010x}); skipping it",
-        port_idx + 1, ctrl.read_portsc(port_idx).raw());
-    ctrl.port_bound(port_idx, None);
 }
 
 /// Everything between a port that has just finished its reset and a device the
 /// driver can use, run to the end in place.
-pub fn configure(ctrl: &mut XhciController, port_idx: u8) {
-    begin(ctrl, port_idx);
+pub fn configure(ctrl: &mut XhciController, port_idx: u8, after: Option<Reset>) {
+    begin(ctrl, port_idx, after);
     ctrl.settle_outstanding();
 }
 /// Scans every port on the controller and initializes each connected device.

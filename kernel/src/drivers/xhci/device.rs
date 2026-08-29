@@ -260,11 +260,22 @@ enum Rings {
 
 
 /// Acknowledges the reset, reads what the port came up as, and asks for a slot — the only act with no device state to carry.
-pub(super) fn begin(ctrl: &mut XhciController, port_idx: u8) {
+///
+/// `after` is the reset this enumeration follows. A warm reset retrains the
+/// link from scratch, so its completion carries the retrain's own connect edge
+/// (§4.19.5.1) — consumed here, or it reads as a replug and cancels the
+/// enumeration it belongs to.
+pub(super) fn begin(ctrl: &mut XhciController, port_idx: u8, after: Option<Reset>) {
     let portsc = ctrl.read_portsc(port_idx);
-    ctrl.write_portsc(port_idx, portsc.neutral().acknowledging_reset());
+    let mut ack = portsc.neutral().acknowledging_reset(portsc);
+    if after == Some(Reset::Warm) {
+        ack = ack.acknowledging_connect(portsc);
+    }
+    ctrl.write_portsc(port_idx, ack);
 
     let portsc = ctrl.read_portsc(port_idx);
+    // A guard against the word changing under the effect, not the reset's
+    // verdict: `port::reset_outcome` decided that before this was reached.
     if !portsc.enabled() {
         log!("xHCI: port {} reset but not enabled (PORTSC {:#010x}); skipping it",
             port_idx + 1, portsc.raw());
