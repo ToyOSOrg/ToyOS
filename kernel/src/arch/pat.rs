@@ -16,6 +16,11 @@ const UC_MINUS: u8 = 0x07;
 /// 4..=7 select on the PAT bit alone, and 4 is the first no mapping selects.
 pub const WC_ENTRY: usize = 4;
 
+/// The entry device registers select — PCD and PWT set, the PAT bit clear.
+/// UC here *and* in the power-on reset table (SDM Vol. 3A §11.12.4), so a
+/// mapping through it is uncacheable whether or not [`init`] has run.
+pub const UC_ENTRY: usize = 3;
+
 /// `IA32_PAT` as this kernel programs it, one byte per entry.
 const ENTRIES: [u8; 8] = [WB, WT, UC_MINUS, UC, WC, WT, UC_MINUS, UC];
 
@@ -32,6 +37,7 @@ const fn packed(entries: [u8; 8]) -> u64 {
 const PAT_VALUE: u64 = packed(ENTRIES);
 
 const _: () = assert!(ENTRIES[WC_ENTRY] == WC);
+const _: () = assert!(ENTRIES[UC_ENTRY] == UC);
 
 /// Put [`ENTRIES`] in this CPU's `IA32_PAT`; every CPU must run it, and no
 /// rendezvous is needed because entry 4 selects nothing until it is mapped,

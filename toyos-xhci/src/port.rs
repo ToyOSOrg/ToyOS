@@ -70,6 +70,41 @@ pub enum GaveUp {
     /// §4.19.1.2 has nothing beyond a warm reset, so this is the end of the
     /// road for the port rather than one step short of it.
     LinkNeverTrained,
+    /// The reset *completed* with the port still disabled, where §4.19.5
+    /// offers no escalation ("USB2 protocol ports never fail"): a controller
+    /// misbehaving, not a link a warm reset could retrain.
+    ResetFailed(Reset),
+}
+
+/// What a completed reset means for the port — **the one place that question
+/// is answered**, for [`reset_needed`]'s reason: §4.19.5's failure signature
+/// (PRC set, the port still disabled) must route the boot scan and the
+/// hot-plug machine to the same §4.19.5.1 escalation.
+pub fn reset_outcome(kind: Reset, protocol: Option<Protocol>, portsc: Portsc) -> ResetOutcome {
+    if portsc.enabled() {
+        return ResetOutcome::Enumerate;
+    }
+    if kind == Reset::Hot && protocol == Some(Protocol::Usb3) {
+        // The failure word's change flags are the failed reset's own artifacts,
+        // and the reset-and-enumerate that follows already handles any real
+        // replug they could witness — so the escalation consumes them.
+        return ResetOutcome::Escalate(portsc.neutral().warm_resetting().acknowledging(portsc));
+    }
+    ResetOutcome::GaveUp(match kind {
+        Reset::Warm => GaveUp::LinkNeverTrained,
+        Reset::Hot => GaveUp::ResetFailed(Reset::Hot),
+    })
+}
+
+/// [`reset_outcome`]'s answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResetOutcome {
+    /// The reset enabled the port: enumerate what is on it.
+    Enumerate,
+    /// It failed: write this — §4.19.5.1's warm reset — and wait again.
+    Escalate(portsc::Write),
+    /// It failed with no escalation left.
+    GaveUp(GaveUp),
 }
 
 /// Which reset a port is being given.
@@ -110,10 +145,11 @@ pub enum Step<'a> {
     Reset(Reset, portsc::Write),
     /// Take down whatever this port had.
     Teardown(Gone, Pending<'a>),
-    /// Bring up whatever is in this port. `trained` is true when the link was
-    /// already up and no reset was issued, which is the ordinary way a USB3
-    /// port arrives and the thing the driver used to reset out of existence.
-    Enumerate { trained: bool, pending: Pending<'a> },
+    /// Bring up whatever is in this port. `after` names the reset this
+    /// enumeration follows, `None` for a link that arrived trained; the kind
+    /// matters to the caller's acknowledge, since a warm completion carries
+    /// the retrain's own connect edge (§4.19.5.1).
+    Enumerate { after: Option<Reset>, pending: Pending<'a> },
     /// Say this and leave the port alone until its device is pulled.
     GaveUp(GaveUp),
 }
@@ -297,6 +333,13 @@ impl PortState {
         Self { flaw, ..Self::EMPTY }
     }
 
+    /// Whether this driver was staged with `flaw`: a flawed acknowledge is
+    /// flawed at the simulator's effect sites too, not only in the machine.
+    #[cfg(feature = "flaws")]
+    pub fn has_flaw(&self, flaw: Flaw) -> bool {
+        self.flawed(flaw)
+    }
+
     #[cfg(feature = "flaws")]
     fn flawed(&self, flaw: Flaw) -> bool {
         self.flaw == flaw
@@ -325,7 +368,21 @@ impl PortState {
         // is waiting for.
         if let Work::Resetting { until, kind } = self.work {
             if portsc.reset_changed() {
-                return Step::Enumerate { trained: false, pending: Pending(self) };
+                match reset_outcome(kind, self.protocol, portsc) {
+                    ResetOutcome::Enumerate => {
+                        return Step::Enumerate { after: Some(kind), pending: Pending(self) };
+                    }
+                    ResetOutcome::Escalate(write) => {
+                        self.work =
+                            Work::Resetting { until: now + RESET_DEADLINE_NS, kind: Reset::Warm };
+                        return Step::Reset(Reset::Warm, write);
+                    }
+                    ResetOutcome::GaveUp(why) => {
+                        self.attached = true;
+                        self.work = Work::Settled;
+                        return Step::GaveUp(why);
+                    }
+                }
             }
             if now < until || self.flawed(Flaw::NoResetDeadline) {
                 return Step::Wait(until);
@@ -405,7 +462,7 @@ impl PortState {
         }
 
         let Some(kind) = reset_needed(self.protocol, portsc) else {
-            return Step::Enumerate { trained: true, pending: Pending(self) };
+            return Step::Enumerate { after: None, pending: Pending(self) };
         };
         self.work = Work::Resetting { until: now + RESET_DEADLINE_NS, kind };
         Step::Reset(kind, reset_write(kind, portsc))

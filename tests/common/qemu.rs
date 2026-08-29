@@ -1092,6 +1092,11 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
+    /// No USB at all — no xHCI, so no boot stick — and no i8042 once the boot
+    /// passes `i8042: false`: the one bootable shape on which no input source
+    /// can ever exist. The boot volume rides a second NVMe controller, which
+    /// works because userland runs from the initrd.
+    MetalNoUsb,
     /// metal-sim with the T14's internal xHCI actually populated: the boot
     /// stick plus five more devices, two of them keyboards. The laptop's
     /// controller carries a camera, Bluetooth and a fingerprint reader
@@ -1660,6 +1665,19 @@ impl Profile {
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
+                usb: &[],
+                nvme_bytes: NVME_SMALL,
+                nvme_lba_bytes: NVME_LBA_DEFAULT,
+                usb_disks: &[],
+                hda: &[],
+                iommu: Some(IOMMU_DEFAULT),
+            },
+            Self::MetalNoUsb => Shape {
+                vga: "none",
+                vgamem_mb: None,
+                virtio: Virtio::Absent,
+                xhci: &[],
+                storage_bus: "",
                 usb: &[],
                 nvme_bytes: NVME_SMALL,
                 nvme_lba_bytes: NVME_LBA_DEFAULT,
@@ -3519,6 +3537,10 @@ fn qemu_command(
             "if=none,id=stick,format=raw,file={}",
             boot_image.display()
         ));
+    assert!(
+        !shape.xhci.is_empty() || (shape.usb.is_empty() && shape.usb_disks.is_empty()),
+        "a USB device needs a controller"
+    );
 
     // Ahead of every other `-device`: QEMU gives a PCI function the bypassing
     // address space unless the unit exists when the function is created, so a
@@ -3572,12 +3594,20 @@ fn qemu_command(
         }
     }
 
-    qemu.arg("-device")
-        .arg(format!(
+    if shape.xhci.is_empty() {
+        // No controller to carry the stick: the boot volume rides its own NVMe controller.
+        qemu.arg("-device")
+            .arg("nvme,serial=bootdisk,id=nvmebootctl,bootindex=0")
+            .arg("-device")
+            .arg("nvme-ns,drive=stick,bus=nvmebootctl,logical_block_size=512,\
+                  physical_block_size=512");
+    } else {
+        qemu.arg("-device").arg(format!(
             "usb-storage,bus={},drive=stick,id={BOOT_STICK_ID},bootindex=0",
             shape.storage_bus
-        ))
-        .arg("-vga")
+        ));
+    }
+    qemu.arg("-vga")
         .arg(shape.vga)
         .arg("-display")
         .arg("none")

@@ -197,6 +197,9 @@ const RUST_SKIP: &[&str] = &[
     "i8042_keyboard",
     "i8042_mouse",
     "input_events",
+    // Meaningful only on `MetalNoUsb`, where no input source exists; on every
+    // other machine both claims succeed. `input_claim_absent` runs it.
+    "input_absent",
     "va_exhaustion",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
@@ -466,6 +469,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Fast),
     ("input_merge", Sched::Parallel, Tier::Fast),
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
+    ("input_claim_absent", Sched::Parallel, Tier::Fast),
     // One boot from here to `metal_sim_compositor_stall` (`METAL_SIM_DESKTOP`).
     ("metal_sim_compositor", Sched::Parallel, Tier::Nightly),
     // Reads the boot log this group already has, after the member above has
@@ -3264,7 +3268,16 @@ fn run_screen_test(
                 ));
             }
             let rows = dump.console_rows(&font);
-            let log_rows = rows.iter().filter(|r| r.contains("[kernel ")).count();
+            // The panel carries logd's file format — a wall-clock stamp, then
+            // `[secs cpuN]` — not the serial's `[kernel …]` prefix.
+            let log_rows =
+                rows.iter().filter(|r| r.contains(" cpu") && r.contains("] ")).count();
+            if log_rows == 0 {
+                return Err(format!(
+                    "the seed witness is on the panel but no row reads as a log record, \
+                     so the format this counts by has drifted again\ndecoded screen:\n{after}"
+                ));
+            }
             eprintln!(
                 "  [console] {log_rows} kernel log rows above a prompt, and `echo \
                  {CONSOLE_NONCE}` typed on the i8042 answered on the panel"
@@ -12080,6 +12093,57 @@ fn run_machine_test(
             }
             serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
             eprintln!("  [netcase] init refused three bad launches, named them, and kept launching");
+            Ok(())
+        }
+        "input_claim_absent" => {
+            // The one bootable machine with no input source: no xHCI, the
+            // i8042 taken away. Three channels must agree — the argv stages
+            // the absence, the kernel's drivers report it, and the claim
+            // syscall refuses by name.
+            let options = BootOptions {
+                profile: qemu::Profile::MetalNoUsb,
+                i8042: false,
+                ..Default::default()
+            };
+            let argv = qemu::profile_argv(&options);
+            if !argv.iter().any(|a| a.contains("i8042=off")) {
+                return Err("the i8042 is on; a PS/2 keyboard could feed the stream".to_string());
+            }
+            for banned in ["nec-usb-xhci", "usb-kbd", "usb-mouse", "usb-tablet", "usb-storage"] {
+                if let Some(a) = argv.iter().find(|a| a.contains(banned)) {
+                    return Err(format!("{a:?} on the machine whose point is having no USB"));
+                }
+            }
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let boot = qemu.boot_log().to_string();
+            for want in
+                ["i8042: absent", "xHCI: no controller on this machine, USB input unavailable"]
+            {
+                if !boot.contains(want) {
+                    return Err(format!("the kernel never said {want:?}:
+{boot}"));
+                }
+            }
+            let result = qemu.run_test("test_rs_input_absent", Duration::from_secs(30));
+            if let Some(err) = &result.error {
+                return Err(format!("{err}
+{}", result.stdout));
+            }
+            if result.exit_code != Some(0) {
+                return Err(format!(
+                    "input_absent exited {:?}:
+{}",
+                    result.exit_code, result.stdout
+                ));
+            }
+            for want in ["keyboard: refused NotFound", "mouse: refused NotFound"] {
+                if !result.stdout.contains(want) {
+                    return Err(format!("missing {want:?}:
+{}", result.stdout));
+                }
+            }
+            eprintln!("  [input] no input source exists and both claims refused NotFound");
             Ok(())
         }
         "metal_sim_input" => {

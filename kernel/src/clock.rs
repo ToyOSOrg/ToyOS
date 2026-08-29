@@ -5,7 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 
-use crate::mm::paging::CachePolicy;
+use crate::mm::paging::MmioPolicy;
 use crate::arch::cpu;
 use crate::time::{Delay, Duration, Instant};
 
@@ -17,7 +17,7 @@ static TSC_BOOT: AtomicU64 = AtomicU64::new(0);
 static TSC_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
 
 pub fn init(hpet_base: u64) {
-    let hpet = crate::mm::paging::map_mmio(hpet_base, 0x1000, CachePolicy::DeferToMtrr);
+    let hpet = crate::mm::paging::map_mmio(hpet_base, 0x1000, MmioPolicy::Uncacheable);
 
     let cap = hpet.read_u64(HPET_CAP);
     let hpet_period_fs = cap >> 32;

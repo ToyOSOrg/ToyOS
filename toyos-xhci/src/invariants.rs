@@ -39,7 +39,7 @@ pub fn check(before: &PortState, step: &Step<'_>, read: Portsc, now: u64) -> Opt
         return Some(Violation::SteppedWhileWorking);
     }
     match step {
-        Step::Write(write) | Step::Reset(_, write) => write_is_sound(*write, read),
+        Step::Write(write) | Step::Reset(_, write) => check_write(*write, read),
         Step::Enumerate { .. } => {
             // The register is the authority on whether there is anything there,
             // whether the port was reset into working or arrived that way.
@@ -52,7 +52,9 @@ pub fn check(before: &PortState, step: &Step<'_>, read: Portsc, now: u64) -> Opt
     }
 }
 
-fn write_is_sound(write: portsc::Write, read: Portsc) -> Option<Violation> {
+/// One write checked alone: an acknowledge performed outside the machine
+/// gets the same word-soundness the machine's own writes do.
+pub fn check_write(write: portsc::Write, read: Portsc) -> Option<Violation> {
     // Mirrors the register's own bit positions rather than importing private
     // masks: an invariant that reads the world through the same accessor as the
     // code it checks cannot catch that accessor being wrong.

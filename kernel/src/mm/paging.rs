@@ -89,12 +89,15 @@ impl WindowProt {
     }
 }
 
-/// Which PAT entry a 2 MiB mapping selects; PCD/PWT stay clear everywhere, so
-/// the PAT bit alone chooses between the two reachable entries.
+/// Which PAT entry a 2 MiB mapping selects, out of the three this kernel
+/// ever writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CachePolicy {
     /// PAT entry 0 (WB); the range's actual type is the MTRR's (SDM Vol. 3A Table 11-7).
     DeferToMtrr,
+    /// PAT entry [`pat::UC_ENTRY`](crate::arch::pat::UC_ENTRY): UC under
+    /// every MTRR type (Table 11-7), whatever firmware set or forgot.
+    Uncacheable,
     /// PAT entry [`pat::WC_ENTRY`](crate::arch::pat::WC_ENTRY).
     WriteCombining,
 }
@@ -103,18 +106,23 @@ impl CachePolicy {
     fn pde_bits(self) -> u64 {
         match self {
             Self::DeferToMtrr => 0,
+            Self::Uncacheable => PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
             Self::WriteCombining => PAGE_PAT_2M,
         }
     }
 
-    /// PCD or PWT set means an entry this code never wrote.
+    /// Any other combination is an entry this code never wrote.
     fn from_pde(pde: u64) -> Self {
-        assert!(
-            pde & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH) == 0,
-            "CachePolicy::from_pde: {pde:#x} selects a PAT entry outside 0 and {}",
-            crate::arch::pat::WC_ENTRY
-        );
-        if pde & PAGE_PAT_2M != 0 { Self::WriteCombining } else { Self::DeferToMtrr }
+        match (pde & PAGE_PAT_2M != 0, pde & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH)) {
+            (false, 0) => Self::DeferToMtrr,
+            (true, 0) => Self::WriteCombining,
+            (false, low) if low == PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH => Self::Uncacheable,
+            _ => panic!(
+                "CachePolicy::from_pde: {pde:#x} selects a PAT entry outside 0, {} and {}",
+                crate::arch::pat::UC_ENTRY,
+                crate::arch::pat::WC_ENTRY
+            ),
+        }
     }
 }
 
@@ -122,6 +130,30 @@ const _: () = assert!(
     crate::arch::pat::WC_ENTRY == 4,
     "WriteCombining sets the PAT bit and leaves PCD and PWT clear, which is entry 4",
 );
+const _: () = assert!(
+    crate::arch::pat::UC_ENTRY == 3,
+    "Uncacheable sets PCD and PWT and leaves the PAT bit clear, which is entry 3",
+);
+
+/// What an MMIO window may select — never PAT entry 0: device registers
+/// deferred to firmware's MTRR coverage were cacheable wherever an MTRR was
+/// missing, and this type removes that as a possibility.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MmioPolicy {
+    /// Registers.
+    Uncacheable,
+    /// The scanout alone.
+    WriteCombining,
+}
+
+impl MmioPolicy {
+    fn cache(self) -> CachePolicy {
+        match self {
+            Self::Uncacheable => CachePolicy::Uncacheable,
+            Self::WriteCombining => CachePolicy::WriteCombining,
+        }
+    }
+}
 
 /// A 4KB-aligned page of 512 entries, matching the hardware page table format.
 #[repr(C, align(4096))]
@@ -933,9 +965,18 @@ pub fn load_kernel_flush() {
 /// Free function (not a method): the lock and the shootdown are separate
 /// statements. Not optional — `map_2m` may change memory type under a
 /// sibling's stale entry, which is SDM Vol. 3A §11.12.4 undefined behaviour.
-pub fn map_mmio(phys: u64, size: u64, cache: CachePolicy) -> super::Mmio {
-    let mmio = kernel().lock().map_mmio(phys, size, cache);
+pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> super::Mmio {
+    let mmio = kernel().lock().map_mmio(phys, size, policy.cache());
     crate::arch::tlb::shootdown();
+    // Read back off the table and logged beside firmware's MTRR verdict: the
+    // boot's own evidence that no register window trusts firmware.
+    let installed =
+        kernel().lock().direct_map_policy(phys).expect("map_mmio: the window was just mapped");
+    assert!(installed == policy.cache(), "map_mmio: {phys:#x} installed {installed:?}");
+    crate::log!(
+        "mmio: {phys:#x}+{size:#x} PAT {installed:?} (MTRR {})",
+        crate::arch::mtrr::range_type(phys, size).name()
+    );
     mmio
 }
 

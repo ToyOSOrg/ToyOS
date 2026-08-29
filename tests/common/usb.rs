@@ -1754,6 +1754,22 @@ pub fn xhci_superspeed_ports(
             return Err(format!("{line:?} on a bus where every link is healthy\n{log}"));
         }
     }
+    // Every `mmio:` line is the kernel reading its own page table back; the
+    // xHCI BAR in particular must have come up uncacheable.
+    let mmio: Vec<&str> = log.lines().filter(|l| l.contains("mmio: ")).collect();
+    if mmio.is_empty() {
+        return Err(format!("no mmio: line — the kernel never said what its windows select\n{log}"));
+    }
+    for line in &mmio {
+        if !line.contains("PAT Uncacheable") && !line.contains("PAT WriteCombining") {
+            return Err(format!("{line:?} defers a register window to firmware\n{log}"));
+        }
+    }
+    if !mmio.iter().any(|l| l.contains("+0x10000 PAT Uncacheable")) {
+        return Err(format!(
+            "no xHCI register window came up uncacheable: {mmio:?}\n{log}"
+        ));
+    }
     if !log.contains("Boot: complete") {
         return Err(format!("the boot did not finish\n{log}"));
     }

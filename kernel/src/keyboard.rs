@@ -11,6 +11,19 @@ use crate::sync::Lock;
 pub use toyos_abi::input::{RawKeyEvent, MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_GUI, MOD_RELEASED};
 
 static KEY_BUF: Lock<VecDeque<RawKeyEvent>> = Lock::new(VecDeque::new());
+
+/// Whether any driver that can ever feed this stream exists — the i8042's
+/// keyboard armed, or an xHCI controller bound (hot-plug). A claim's evidence.
+static SOURCE_EXISTS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn declare_source() {
+    SOURCE_EXISTS.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn source_exists() -> bool {
+    SOURCE_EXISTS.load(core::sync::atomic::Ordering::Relaxed)
+}
 static INBOX_WATCHERS: Lock<Vec<InboxId>> = Lock::new(Vec::new());
 
 /// How many transitions the kernel holds for a reader that is not reading; the oldest is dropped on overflow.

@@ -4,7 +4,7 @@ use toyos_untrusted::{Refused, Untrusted};
 
 use crate::mm::Mmio;
 use super::pci::PciDevice;
-use crate::mm::paging::CachePolicy;
+use crate::mm::paging::MmioPolicy;
 use crate::log;
 
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
@@ -165,7 +165,7 @@ impl VirtioPciConfig {
                             mapped_bars[bar_idx] = Some(crate::mm::paging::map_mmio(
                                 memory.address(),
                                 advertised.min(BAR_WINDOW_CEILING),
-                                CachePolicy::DeferToMtrr,
+                                MmioPolicy::Uncacheable,
                             ));
                         }
                         Err(why) => log!(

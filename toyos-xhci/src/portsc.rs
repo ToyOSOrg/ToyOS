@@ -180,15 +180,22 @@ impl Write {
         Self(self.0 | (seen.0 & CHANGES))
     }
 
-    /// Clear the reset-finished flag and **only** that one.
+    /// Clear the reset-finished flags seen in `seen` and **only** those.
     ///
-    /// What the enumeration acknowledges, because it is the flag it consumed. A
-    /// connect change set while the reset ran means the device was replugged
-    /// during it, and that has to survive to be acted on — so an enumeration
-    /// that acknowledged everything would swallow the evidence that what it
-    /// just brought up is already gone.
-    pub const fn acknowledging_reset(self) -> Self {
-        Self(self.0 | PRC | WRC)
+    /// What the enumeration acknowledges, because they are the flags it
+    /// consumed. A connect change set while the reset ran means the device was
+    /// replugged during it, and that has to survive to be acted on — so an
+    /// enumeration that acknowledged everything would swallow the evidence
+    /// that what it just brought up is already gone.
+    pub const fn acknowledging_reset(self, seen: Portsc) -> Self {
+        Self(self.0 | (seen.0 & (PRC | WRC)))
+    }
+
+    /// Clear a connect change seen in `seen`, for the one caller whose edge is
+    /// an artifact: a warm completion always carries CSC (§4.19.5.1), and left
+    /// set it reads as a replug and cancels the enumeration it belongs to.
+    pub const fn acknowledging_connect(self, seen: Portsc) -> Self {
+        Self(self.0 | (seen.0 & CSC))
     }
 
     /// Reset the port, which for a USB2 port is how a device is enabled at all.

@@ -71,3 +71,11 @@ Two things deliberately not concluded:
   a PS/2 desync is not available here.
 - **The USB mouse plugged in at 30.4 s produced no motion either**, which is the
   xHCI HID completion-requeue item in this section and not this one.
+
+The endowment table stays indistinguishable here even after the presence gate
+landed (#342): on this machine the i8042 is present and both claims still mint
+whether the devices answer or not — the gate keys `declare_source()` on
+`aux_line.is_some()` / the GSI existing, while `unmasked`/`aux_unmasked`, both
+computed one line above (i8042/mod.rs:1320,1323), go unread. Gating the two
+declarations on those is the one-line fix direction the #342 review named; it
+needs this machine to prove.
