@@ -182,6 +182,11 @@ opt-level = 3
 # `src/build.rs` builds each of them a second time for
 # `x86_64-unknown-toyos`. `kernel/`, `bootloader/` and `userland/` are excluded
 # from this workspace and each declares its own copy.
+#
+# `incremental` stays at the dev default (on), which switches rustc's MIR
+# inliner off for every guest crate — LLVM inlines regardless, and a
+# non-incremental kernel edit loop measures 4-10x the wall clock. A codegen
+# backend with no inliner of its own (cranelift) reopens that trade.
 [profile.toyos]
 inherits = "dev"
 opt-level = 2

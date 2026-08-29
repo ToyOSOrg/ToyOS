@@ -23,7 +23,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Mirrored in `tests/common/volumes.rs::fat_backing_revoked`. Two halves of one
 /// fixture; a change to either alone fails loudly rather than passing quietly.
@@ -40,11 +40,40 @@ const LEN: usize = 8 * 4096;
 const VICTIM_BYTE: u8 = 0xA7;
 const ATTACKER_BYTE: u8 = 0x5C;
 
+/// Setup patience with a device the host's load has slowed: five of the 2 s
+/// operation budgets behind the kernel's `WouldBlock` refusal
+/// (`kernel/src/block.rs::OPERATION`). Device patience is not what this test
+/// is about — revocation after unlink is — so its setup asks again the way
+/// logd's flush policy does instead of reading a slow stick as a red.
+const SETUP_PATIENCE: Duration = Duration::from_secs(10);
+const SETUP_PAUSE: Duration = Duration::from_millis(200);
+
+/// Runs one idempotent setup step, asking again on `WouldBlock` until
+/// [`SETUP_PATIENCE`] is spent; any other error, or the budget's end, panics
+/// with the step's own message.
+fn patient<T>(what: &str, mut op: impl FnMut() -> std::io::Result<T>) -> T {
+    let start = Instant::now();
+    loop {
+        match op() {
+            Ok(v) => return v,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+                && start.elapsed() < SETUP_PATIENCE =>
+            {
+                thread::sleep(SETUP_PAUSE);
+            }
+            Err(e) => panic!("{what}: {e}"),
+        }
+    }
+}
+
 fn write_file(path: &str, byte: u8) {
     {
-        let mut f = fs::File::create(path).unwrap_or_else(|e| panic!("create {path}: {e}"));
+        let mut f = patient(&format!("create {path}"), || fs::File::create(path));
+        // Not `patient`: a `write_all` refused partway has advanced the cursor,
+        // so asking again blind would double bytes — and it lands in the cache,
+        // not the device, so the operation budget is not in its path.
         f.write_all(&vec![byte; LEN]).unwrap_or_else(|e| panic!("write {path}: {e}"));
-        f.sync_all().unwrap_or_else(|e| panic!("fsync {path}: {e}"));
+        patient(&format!("fsync {path}"), || f.sync_all());
     } // close: the last handle drops here.
     // The last close no longer drops the file from the cache on this thread —
     // it pins it and hands the teardown to `iod` (`kernel::writeback`). Let that

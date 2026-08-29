@@ -136,6 +136,144 @@ pub fn dispatch(root: &Path) {
     }
 }
 
+const CALLERS_TAG: &str = "[abi-callers]";
+
+/// `cargo run -- --abi-callers <name>`: every use of `<name>` as a whole
+/// identifier across the pinned fork estate, read from the cargo checkouts
+/// the lockfiles resolve to. Offline, unlike the head comparison above.
+///
+/// A "zero callers" claim about an ABI item is worth exactly the trees it
+/// searched, and a monorepo grep does not search the estate — `stack_info`
+/// is the recorded case: caller-less in the tree, called by the stacker fork
+/// at its pinned revision. Exit 0 is the claim "every pinned source swept,
+/// nothing found"; a hit or a pin with no checkout on disk both refuse it.
+pub fn dispatch_callers(root: &Path, args: &[String]) {
+    let at = args.iter().position(|a| a == "--abi-callers").expect("dispatched on this flag");
+    let Some(name) = args.get(at + 1).filter(|n| !n.starts_with('-')) else {
+        eprintln!("{CALLERS_TAG} --abi-callers takes the identifier to sweep for");
+        std::process::exit(2);
+    };
+    let rust = toolchain::rust_dir(root);
+    let estate = collect(root, Some(&rust));
+    let home = cargo_home();
+
+    let mut revs: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for pin in &estate.pins {
+        revs.entry((pin.url.clone(), pin.rev.clone())).or_default().insert(pin.lockfile.clone());
+    }
+
+    let mut hits = 0usize;
+    let mut swept = 0usize;
+    let mut unswept = Vec::new();
+    for ((url, rev), lockfiles) in &revs {
+        let pinned_by = lockfiles.iter().cloned().collect::<Vec<_>>().join(", ");
+        let Some(dir) = checkout(&home, url, rev) else {
+            unswept.push(format!(
+                "{} at {} (pinned by {pinned_by}): no checkout under {}",
+                repo_name(url),
+                short(rev),
+                home.join("git/checkouts").display(),
+            ));
+            continue;
+        };
+        swept += 1;
+        let mut files = Vec::new();
+        rs_files(&dir, &mut files);
+        for file in files {
+            let Ok(text) = fs::read_to_string(&file) else { continue };
+            for line in ident_lines(&text, name) {
+                println!(
+                    "{CALLERS_TAG} {}:{line}: {}",
+                    file.display(),
+                    text.lines().nth(line - 1).unwrap_or("").trim(),
+                );
+                hits += 1;
+            }
+        }
+    }
+
+    println!(
+        "{CALLERS_TAG} {hits} use(s) of `{name}` across {swept} of {} pinned source(s)",
+        revs.len(),
+    );
+    for gap in &unswept {
+        eprintln!("{CALLERS_TAG} UNSWEPT: {gap}");
+    }
+    if hits > 0 || !unswept.is_empty() {
+        std::process::exit(1);
+    }
+}
+
+/// Where cargo keeps its git checkouts on this machine.
+fn cargo_home() -> PathBuf {
+    std::env::var_os("CARGO_HOME").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").expect("no $HOME")).join(".cargo"),
+        PathBuf::from,
+    )
+}
+
+/// The working copy cargo checked out for `url` at `rev`:
+/// `git/checkouts/<repo>-<salt>/<seven hex digits>`. The salt is cargo's own
+/// URL hash, so the repository name is matched and the salt is not.
+fn checkout(cargo_home: &Path, url: &str, rev: &str) -> Option<PathBuf> {
+    let repo = repo_name(url).to_lowercase();
+    let short_rev = rev.get(..7)?;
+    let entries = fs::read_dir(cargo_home.join("git/checkouts")).ok()?;
+    for entry in entries.flatten() {
+        let dir = entry.file_name().to_string_lossy().to_lowercase();
+        let Some(salt) = dir.strip_prefix(&format!("{repo}-")) else { continue };
+        if salt.contains('-') {
+            continue;
+        }
+        let candidate = entry.path().join(short_rev);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Every `.rs` file under `dir`, `.git` excluded.
+fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if name != ".git" {
+                rs_files(&path, out);
+            }
+        } else if name.ends_with(".rs") {
+            out.push(path);
+        }
+    }
+    out.sort();
+}
+
+/// 1-based lines of `text` where `name` stands as a whole identifier — not as
+/// a fragment of a longer one, which is what makes a short ABI name
+/// sweepable at all.
+fn ident_lines(text: &str, name: &str) -> Vec<usize> {
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let bytes = line.as_bytes();
+        let mut from = 0;
+        while let Some(pos) = line[from..].find(name) {
+            let start = from + pos;
+            let end = start + name.len();
+            let free_before = start == 0 || !is_ident(bytes[start - 1]);
+            let free_after = end >= bytes.len() || !is_ident(bytes[end]);
+            if free_before && free_after {
+                out.push(i + 1);
+                break;
+            }
+            from = end.max(start + 1);
+        }
+    }
+    out
+}
+
 fn collect(root: &Path, rust: Option<&Path>) -> Estate {
     let mut manifests = Vec::new();
     let mut locks = Vec::new();
@@ -621,5 +759,37 @@ mod tests {
         let (report, wrong) = check(&root);
         assert_eq!(wrong, 1, "{report}");
         assert!(report.contains("UNKNOWN widget branch toyos"), "{report}");
+    }
+
+    #[test]
+    fn an_identifier_is_found_whole_and_never_as_a_fragment() {
+        let text = "let (base, _size) = toyos_abi::syscall::stack_info()?;\n\
+                    fn stack_info_extended() {}\n\
+                    // a stack_info mention in prose\n\
+                    let restack_info = 0;\n";
+        assert_eq!(ident_lines(text, "stack_info"), vec![1, 3]);
+        assert_eq!(ident_lines(text, "stack_info_extended"), vec![2]);
+        assert_eq!(ident_lines(text, "absent_name"), Vec::<usize>::new());
+    }
+
+    /// The checkout layout is cargo's: `<repo>-<salt>/<seven hex>`. The salt
+    /// is not matched, and a repository whose name extends another's must not
+    /// answer for it.
+    #[test]
+    fn a_checkout_is_found_by_repository_name_and_revision() {
+        let dir = case("checkout");
+        let rev = "c25842ac264c7121e33c5ad81f93dc7bba22cca2";
+        let inner = dir.join("git/checkouts/stacker-dd045e8025e5c69e").join(&rev[..7]);
+        fs::create_dir_all(&inner).unwrap();
+        let decoy = dir.join("git/checkouts/stacker-rs-ffffffffffffffff").join(&rev[..7]);
+        fs::create_dir_all(&decoy).unwrap();
+
+        let found = checkout(&dir, "https://github.com/Japabu/stacker", rev).unwrap();
+        assert_eq!(found, inner);
+        assert!(checkout(&dir, "https://github.com/Japabu/stacker", "0000000000").is_none());
+        assert_eq!(
+            checkout(&dir, "https://github.com/Japabu/stacker-rs", rev).unwrap(),
+            decoy,
+        );
     }
 }

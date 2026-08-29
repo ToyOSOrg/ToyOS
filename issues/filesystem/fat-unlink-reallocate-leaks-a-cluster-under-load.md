@@ -22,9 +22,10 @@ is gone from the volume, the 32768-byte file written into its place holds 0x5c
 end to end on the host's own reader, and the checker is silent*. The rest of
 the suite was 285 passed, 1 failed, 286 total.
 
-**This is not the failure `fat-backing-revoked-panics-on-a-budget-refused-create.md`
-tracks.** That one is the test's setup panicking on a `WouldBlock` from
-`fs::File::create`. This one runs the whole scenario, produces the right bytes,
+**This is not the setup failure the build tracker carried against this test's
+name** (since closed: the setup asks again on a `WouldBlock` from
+`fs::File::create` within a stated patience now, instead of panicking on the
+first one). This one runs the whole scenario, produces the right bytes,
 and leaves one cluster allocated with no directory entry reaching it — a FAT
 the driver wrote and `toyos-fat32-check` refuses. The oracle is
 Microsoft's fatgen103 checker and not this tree's own reader, which is what

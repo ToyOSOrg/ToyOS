@@ -237,8 +237,9 @@ macOS both arrive with the Xcode Command Line Tools; on Debian and Ubuntu they
 are `build-essential` and `python3`.
 
 `cargo run` names anything it needs and cannot find, before it does anything
-else — including `df`, `ps` and `find`, which cost one feature each rather than
-the build. Everything this project depends on that it did not write is named
+else — including the Python that only the toolchain bootstrap runs, which
+costs that bootstrap rather than the build.
+Everything this project depends on that it did not write is named
 where it is carried: `NOTICE` lists every committed third-party file with its
 hash, upstream and licence, and `forks.toml` lists every crate ToyOS patches
 with its upstream, pinned base and licence.
