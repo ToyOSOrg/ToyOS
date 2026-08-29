@@ -152,6 +152,12 @@ impl PciDevice {
         self.mmio.write_u16(COMMAND, cmd | 0x06);
     }
 
+    /// Clear bus mastering only — memory space stays, so config and BAR reads still work.
+    pub fn disable_bus_master(&self) {
+        let cmd = self.mmio.read_u16(COMMAND);
+        self.mmio.write_u16(COMMAND, cmd & !0x04);
+    }
+
     /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it, or return false if MSI-X cannot be armed.
     pub fn enable_msix(&self, vector: u8) -> bool {
         let Some(cap) = self.capabilities().find(|c| c.id() == msix::CAP_ID) else {

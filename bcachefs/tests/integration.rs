@@ -84,11 +84,11 @@ fn read_link() {
 
     let mounted = fs.mount_readonly();
 
-    let target = mounted.read_link("link.txt").expect("read_link");
+    let target = mounted.read_link("link.txt", u64::MAX).expect("read_link");
     assert_eq!(target.as_deref(), Some("real.txt"));
 
-    assert_eq!(mounted.read_link("real.txt").expect("read_link"), None);
-    assert_eq!(mounted.read_link("nope").expect("read_link"), None);
+    assert_eq!(mounted.read_link("real.txt", u64::MAX).expect("read_link"), None);
+    assert_eq!(mounted.read_link("nope", u64::MAX).expect("read_link"), None);
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn dangling_symlink_allowed() {
     fs.create_symlink("dangling", "/nonexistent/path", 0).expect("create dangling symlink");
 
     let mounted = fs.mount_readonly();
-    assert_eq!(mounted.read_link("dangling").expect("read_link").as_deref(), Some("/nonexistent/path"));
+    assert_eq!(mounted.read_link("dangling", u64::MAX).expect("read_link").as_deref(), Some("/nonexistent/path"));
     assert!(mounted.is_symlink("dangling").expect("is_symlink"));
 }
 
@@ -398,8 +398,8 @@ fn mounted_readwrite_symlink() {
     mounted.create("real.txt", b"real data", 0).expect("create");
     mounted.create_symlink("link.txt", "real.txt").expect("symlink");
 
-    assert_eq!(mounted.read_link("link.txt").expect("read_link").as_deref(), Some("real.txt"));
-    assert_eq!(mounted.read_link("real.txt").expect("read_link"), None);
+    assert_eq!(mounted.read_link("link.txt", u64::MAX).expect("read_link").as_deref(), Some("real.txt"));
+    assert_eq!(mounted.read_link("real.txt", u64::MAX).expect("read_link"), None);
     assert!(mounted.is_symlink("link.txt").expect("is_symlink"));
     assert!(!mounted.is_symlink("real.txt").expect("is_symlink"));
 }
@@ -802,8 +802,8 @@ fn a_rename_of_a_symlink_stays_a_symlink() {
     fs.rename("link", "moved-link").expect("rename");
 
     assert!(fs.is_symlink("moved-link").expect("is_symlink"), "the rename turned a symlink into a file");
-    assert_eq!(fs.read_link("moved-link").expect("read_link").as_deref(), Some("/home/target"));
-    assert_eq!(fs.read_link("link").expect("read_link"), None, "the old name still reads as a symlink");
+    assert_eq!(fs.read_link("moved-link", u64::MAX).expect("read_link").as_deref(), Some("/home/target"));
+    assert_eq!(fs.read_link("link", u64::MAX).expect("read_link"), None, "the old name still reads as a symlink");
     assert_eq!(names(&fs), ["moved-link"]);
 }
 

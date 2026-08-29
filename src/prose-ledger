@@ -3,7 +3,7 @@ bcachefs/src/alloc_bitmap.rs 43 0
 bcachefs/src/block_io.rs 103 0
 bcachefs/src/btree.rs 117 0
 bcachefs/src/crc32c.rs 9 0
-bcachefs/src/fs.rs 335 0
+bcachefs/src/fs.rs 340 0
 bcachefs/src/lib.rs 21 0
 bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 119 0
@@ -62,7 +62,7 @@ kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
 kernel/src/arch/syscall/vm.rs 78 0
 kernel/src/arch/tlb.rs 32 0
-kernel/src/bcachefs_adapter.rs 71 0
+kernel/src/bcachefs_adapter.rs 74 0
 kernel/src/block.rs 33 0
 kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
@@ -77,10 +77,10 @@ kernel/src/drivers/ioapic.rs 30 0
 kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 127 0
 kernel/src/drivers/panic_console/mod.rs 210 0
-kernel/src/drivers/pci.rs 18 0
+kernel/src/drivers/pci.rs 19 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
-kernel/src/drivers/virtio.rs 105 0
+kernel/src/drivers/virtio.rs 108 0
 kernel/src/drivers/virtio_console.rs 31 0
 kernel/src/drivers/virtio_gpu.rs 29 0
 kernel/src/drivers/virtio_net.rs 39 0
@@ -209,7 +209,7 @@ src/prosegate.rs 128 0
 src/qemu.rs 113 0
 src/redlist.rs 512 25
 src/soundfont.rs 133 0
-src/sourcegate.rs 201 1
+src/sourcegate.rs 207 1
 src/stamps.rs 3 0
 src/testargs.rs 97 0
 src/tiers.rs 338 26

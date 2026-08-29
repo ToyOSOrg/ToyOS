@@ -30,10 +30,10 @@ Recommendation, for the owner to decide:
 - **Done, 2026-08-23:** a file's extents are range-checked against the volume
   in `decode_leaf_value`, so "mounting a hostile volume is merely rude" no
   longer has an unchecked extent reaching a block read — or a bitmap write —
-  behind it. What that left is
-  `issues/isolation/read-link-allocates-a-volume-sized-vec.md`: the bound on
-  one kernel allocation is the volume's size, and the kernel's heap ceiling is
-  smaller.
+  behind it. The residual bound this left — `read_link` sizing one kernel
+  allocation from the volume rather than the smaller heap ceiling — was closed
+  by giving `Mounted::read_link` a `max_len` the adapter passes as
+  `MAX_LINK_TARGET`, refused as `FsError::TargetTooLong` before the allocation.
 - **The real fix, if the threat model wants one:** read-write requires
   something the attacker cannot compute — a keyed MAC, or a designation-like
   stamp — and everything else mounts read-only. ToyOS has no key store and no
