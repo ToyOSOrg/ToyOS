@@ -210,6 +210,7 @@ i8042_quarantine_verdict 0
 i8042_undecoded_bytes 4960
 idle_stack_guard 9601
 inbox_cancel_wakes 543
+input_claim_absent 2565
 input_merge 3326
 ioapic_topology 3142
 iommu_context_absent 5731

@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use toyos_abi::syscall::SyscallError;
 
 use crate::arch::{mtrr, pat};
-use crate::mm::paging::CachePolicy;
+use crate::mm::paging::{CachePolicy, MmioPolicy};
 use crate::mm::{PAGE_2M, align_2m_checked, DirectMap};
 use crate::gpu::{Gpu, GpuInfo};
 use crate::log;
@@ -47,7 +47,7 @@ pub fn init(
         .unwrap_or_else(|| panic!("GOP: firmware reports a {size}-byte framebuffer")) as u64;
     // SDM Vol. 3A §11.12.4: one physical page can't hold two memory types, so this
     // must match the cache policy used for the client mapping below.
-    crate::mm::paging::map_mmio(addr, aligned_size, CachePolicy::WriteCombining);
+    crate::mm::paging::map_mmio(addr, aligned_size, MmioPolicy::WriteCombining);
 
     let fb = DirectMap::from_phys(addr);
     // GOP has no second buffer; front and back scanout regions alias the same memory.

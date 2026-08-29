@@ -16,7 +16,7 @@ use toyos_hda::stream;
 
 use super::pci::PciDevice;
 use crate::log;
-use crate::mm::paging::CachePolicy;
+use crate::mm::paging::{CachePolicy, MmioPolicy};
 use crate::mm::Mmio;
 use crate::object::shm::Region;
 use crate::sync::Lock;
@@ -549,7 +549,7 @@ fn probe(pci: &PciDevice) -> Option<(Mmio, u16, u16)> {
     let regs = crate::mm::paging::map_mmio(
         base,
         MIN_BAR_BYTES * 4,
-        CachePolicy::DeferToMtrr,
+        MmioPolicy::Uncacheable,
     );
 
     let gcap = regs.read_u16(GCAP);

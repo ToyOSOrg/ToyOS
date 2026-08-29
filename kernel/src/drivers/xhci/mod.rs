@@ -1023,7 +1023,7 @@ impl XhciController {
 
     /// Step every port that is not where the driver left it, and say when it wants to be looked at again.
     ///
-    /// One step per call, no wait: the enumeration it eventually runs is the same blocking `wait::boot::configure`.
+    /// One step per call, no wait; the enumeration it eventually starts is submit-and-return too.
     fn service_ports(&mut self) -> Option<u64> {
         let now = crate::clock::nanos_since_boot();
         (0..self.max_ports)
@@ -1079,6 +1079,16 @@ impl XhciController {
                             portsc.raw(),
                             portsc.link_state()
                         ),
+                        GaveUp::ResetFailed(kind) => log!(
+                            "xHCI: port {} completed its {} reset without enabling \
+                             (PORTSC {:#010x}); skipping it",
+                            port_idx + 1,
+                            match kind {
+                                Reset::Hot => "hot",
+                                Reset::Warm => "warm",
+                            },
+                            portsc.raw()
+                        ),
                     }
                     return None;
                 }
@@ -1114,17 +1124,17 @@ impl XhciController {
                         return self.outstanding.wake_at();
                     }
                 }
-                Step::Enumerate { trained, pending } => {
+                Step::Enumerate { after, pending } => {
                     // A slot pending Disable may be handed straight back by Enable Slot below; deferring avoids zeroing the new device's DCBAA entry.
                     if busy.is_some() {
                         return busy;
                     }
                     pending.running();
-                    if trained {
+                    if after.is_none() {
                         // No reset needed: a SuperSpeed link trains itself, and resetting an already-Enabled port puts it into Inactive with no way back.
                         log!("xHCI: port {} connected, link already trained", port_idx + 1);
                     }
-                    device::begin(self, port_idx);
+                    device::begin(self, port_idx, after);
                     // Either enumeration is under way and the port waits, or it refused before spending a command.
                     return self.outstanding.wake_at();
                 }
