@@ -443,18 +443,44 @@ impl Codegen {
         self.compile_field_access(ctx, ptr, &pointee_ty, field)
     }
 
+    /// The construct's value is its *final* item's, never an earlier
+    /// statement's: taking the latest expression statement compiled anywhere
+    /// in the block handed the merge a value from whatever block computed it —
+    /// dead code included — which is both a wrong value and, past a `goto`, a
+    /// `Value` from a block that dominates nothing.
     fn compile_stmt_expr(&mut self, ctx: &mut FuncCtx, items: &[BlockItem]) -> TypedValue {
-        let mut last = TypedValue::signed(ctx.builder.ins().iconst(I64, 0));
-        for item in items {
+        let void = TypedValue::signed(ctx.builder.ins().iconst(I64, 0));
+        let mut last = void;
+        for (i, item) in items.iter().enumerate() {
             if ctx.filled { self.ensure_unfilled(ctx); }
+            let is_tail = i == items.len() - 1;
             match item {
                 BlockItem::Decl(d) => self.compile_local_decl(ctx, d),
-                BlockItem::Stmt(Statement::Expr(Some(e))) => { last = self.compile_expr(ctx, e); }
+                BlockItem::Stmt(s) if is_tail => {
+                    last = self.compile_stmt_expr_tail(ctx, s).unwrap_or(void);
+                }
                 BlockItem::Stmt(s) => self.compile_stmt(ctx, s),
             }
         }
         if ctx.filled { self.ensure_unfilled(ctx); }
         last
+    }
+
+    /// The tail statement, with labels unwrapped: `({ …; lab: e; })` yields
+    /// `e`, the way gcc and clang read it. Any other tail makes the construct
+    /// void.
+    fn compile_stmt_expr_tail(&mut self, ctx: &mut FuncCtx, s: &Statement) -> Option<TypedValue> {
+        match s {
+            Statement::Expr(Some(e)) => Some(self.compile_expr(ctx, e)),
+            Statement::Label(label, body) => {
+                self.enter_label_block(ctx, label);
+                self.compile_stmt_expr_tail(ctx, body)
+            }
+            other => {
+                self.compile_stmt(ctx, other);
+                None
+            }
+        }
     }
 
     fn compile_compound_literal(&mut self, ctx: &mut FuncCtx, tn: &TypeName, items: &[InitializerItem]) -> TypedValue {
@@ -479,7 +505,26 @@ impl Codegen {
     fn compile_va_arg(&mut self, ctx: &mut FuncCtx, ap_expr: &Expr, type_name: &TypeName) -> TypedValue {
         let ap_val = self.compile_expr(ctx, ap_expr).raw();
         let ty = self.resolve_typename(type_name);
+        if ty.is_aggregate() {
+            panic!(
+                "va_arg of a struct or union ({} bytes) is not implemented: every consumer \
+                 of an aggregate expression takes its address, and this lowering yields at \
+                 most eight of the value's bytes as a scalar — SysV classification of an \
+                 aggregate argument is the missing half. Pass a pointer to it instead.",
+                ty.size(),
+            );
+        }
         let load_ty = self.clif_type(&ty);
+        if load_ty == F32 || load_ty == F64 {
+            panic!(
+                "va_arg of a floating type is not implemented: this lowering reads the gp \
+                 save slots, and SysV classifies a floating argument SSE — fp_offset at \
+                 ap+4, threshold 176, xmm slots past the six gp ones — which va_start \
+                 records and nothing here reads. A silent gp read hands back another \
+                 argument's bits. Read it as a 64-bit integer and reinterpret, or pass a \
+                 pointer."
+            );
+        }
         let ap_name = match ap_expr {
             Expr::Ident(n) => n,
             other => panic!("va_arg: expected identifier, got {other:?}"),

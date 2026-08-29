@@ -88,3 +88,18 @@ fn an_unrecognised_pragma_is_ignored() {
     accepts("#pragma comment(option, \"-Wall\")\nint a;");
     accepts("#pragma STDC FP_CONTRACT OFF\nint a;");
 }
+
+/// `va_arg` of an SSE-class type walks the wrong save area (SysV fp_offset at
+/// ap+4, threshold 176 — recorded but never read), so until that half exists
+/// the construct is refused rather than handed another argument's bits.
+#[test]
+fn va_arg_of_a_floating_type_is_refused_by_name() {
+    let stdarg = "typedef __builtin_va_list va_list;\n";
+    let msg = common::refusal(&format!(
+        "{stdarg}double f(va_list ap) {{ return __builtin_va_arg(ap, double); }}"
+    ));
+    match msg {
+        Some(msg) => assert!(msg.contains("floating type"), "{msg}"),
+        None => panic!("va_arg(ap, double) compiled; the gp-slot read is live again"),
+    }
+}

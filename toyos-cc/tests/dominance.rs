@@ -104,3 +104,23 @@ fn a_vla_survives_a_continue() {
          }",
     );
 }
+
+/// The `89_nocode_wanted` shape: a forward `goto` inside a statement
+/// expression whose value feeds a conditional's merge. The construct's value
+/// used to be the latest expression statement compiled *anywhere* in the
+/// block, so the merge was handed the dead `i = i + 2`'s value — defined in a
+/// block the label's jump does not dominate.
+#[test]
+fn a_goto_inside_a_statement_expression_whose_value_reaches_a_merge() {
+    accepts(
+        "int printf(const char *, ...);
+         void f(void) {
+             unsigned long timeout = 2;
+             do {
+                 (1 ? printf(\"t=%ld\\n\", timeout)
+                    : ({ int i = 1; goto label; i = i + 2; label: i = i + 3; }));
+                 timeout--;
+             } while (timeout);
+         }",
+    );
+}
