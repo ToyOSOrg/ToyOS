@@ -123,16 +123,14 @@ pub enum GptError {
     /// rather than resolved: the caller's next move is to write to those
     /// blocks, and there is no reading of this table under which that is safe.
     PartitionOverlap { index: u32 },
-    /// The primary's `last_usable_lba` reaches into the backup GPT — the
-    /// device's last block and the entry array in the blocks below it, which
-    /// starts no later than `backup_array_lba`. The table's own mirror is not
+    /// The primary's `last_usable_lba` reaches into the backup GPT, whose
+    /// blocks start no later than `backup_array_lba`. The mirror is not
     /// usable space: a partition allowed there is one whose writes destroy
     /// the recovery copy.
     UsableRangeCoversBackup { last: u64, backup_array_lba: u64 },
-    /// Two entries carry the unique GUID being searched for. Refused rather
-    /// than resolved first-wins: that GUID is the one fact identifying the
-    /// boot partition, and a table in which two entries claim it does not
-    /// name one partition.
+    /// Two entries carry the searched-for unique GUID — the one fact
+    /// identifying the boot partition — so this table does not name one
+    /// partition. Refused rather than resolved first-wins.
     DuplicateUniqueGuid { first: u32, second: u32 },
 }
 

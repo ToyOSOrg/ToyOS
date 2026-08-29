@@ -601,11 +601,9 @@ fn no_byte_of_the_table_can_panic_the_parser() {
     assert!(img.locate(guid(0xC3)).is_ok(), "the sweep did not put the table back");
 }
 
-/// The blocks the backup GPT occupies — the device's last block and the entry
-/// array below it, 2015..=2047 on this disk — are not usable space: a primary
-/// whose usable range reaches them lets a partition lawfully sit on the
-/// recovery copy. With one caller block of flooring conceded, the bound on
-/// this 512-byte disk is 2022, not 2015.
+/// The backup GPT's blocks — 2015..=2047 here — are not usable space: a
+/// usable range reaching them lets a partition sit on the recovery copy.
+/// With one caller block of flooring conceded, the bound is 2022, not 2015.
 #[test]
 fn a_usable_range_reaching_the_backup_gpt_is_refused() {
     let mut b = Builder { last_usable: DISK_LBAS - 2, backup: true, ..Default::default() };
