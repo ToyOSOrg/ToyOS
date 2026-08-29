@@ -3,7 +3,7 @@ bcachefs/src/alloc_bitmap.rs 43 0
 bcachefs/src/block_io.rs 103 0
 bcachefs/src/btree.rs 117 0
 bcachefs/src/crc32c.rs 9 0
-bcachefs/src/fs.rs 337 0
+bcachefs/src/fs.rs 331 0
 bcachefs/src/lib.rs 21 0
 bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 119 0
@@ -62,7 +62,7 @@ kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
 kernel/src/arch/syscall/vm.rs 78 0
 kernel/src/arch/tlb.rs 32 0
-kernel/src/bcachefs_adapter.rs 69 0
+kernel/src/bcachefs_adapter.rs 66 0
 kernel/src/block.rs 33 0
 kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
@@ -77,10 +77,10 @@ kernel/src/drivers/ioapic.rs 30 0
 kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 127 0
 kernel/src/drivers/panic_console/mod.rs 210 0
-kernel/src/drivers/pci.rs 20 0
+kernel/src/drivers/pci.rs 19 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
-kernel/src/drivers/virtio.rs 110 0
+kernel/src/drivers/virtio.rs 108 0
 kernel/src/drivers/virtio_console.rs 31 0
 kernel/src/drivers/virtio_gpu.rs 29 0
 kernel/src/drivers/virtio_net.rs 39 0
@@ -369,7 +369,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4938 23
+tests/toyos.rs 4937 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

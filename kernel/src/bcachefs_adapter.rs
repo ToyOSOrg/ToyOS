@@ -86,16 +86,13 @@ fn as_syscall_error(err: &FsError) -> SyscallError {
         | FsError::TreeTooDeep(_)
         | FsError::BadSuperblock { .. }
         | FsError::NodeOverfull { .. }
-        // Past `MAX_LINK_TARGET` only a crafted volume: every write path in
-        // this kernel bounds a target at `MAX_USER_STR` on the way in.
         | FsError::TargetTooLong { .. } => SyscallError::Io,
     }
 }
 
-/// Ceiling on the one allocation `read_link` materialises from a size the disk
-/// declared. The volume also bounds it, and a `/home` is bigger than the
-/// kernel's heap ceiling — whose allocator asserts rather than refusing — so
-/// the adapter is where the kernel's own bound is applied.
+/// Ceiling on the one allocation `read_link` materialises from a disk-declared
+/// size: the kernel's heap ceiling, which `bcachefs` cannot know and the
+/// volume bound does not reach.
 const MAX_LINK_TARGET: u64 = crate::user_ptr::MAX_USER_STR;
 const _: () = assert!(MAX_LINK_TARGET <= crate::mm::MAX_HEAP_ALLOC as u64);
 

@@ -152,8 +152,7 @@ impl PciDevice {
         self.mmio.write_u16(COMMAND, cmd | 0x06);
     }
 
-    /// Clear bus mastering only — memory space stays, so config and BAR reads
-    /// still work on a function whose DMA a refusal just took away.
+    /// Clear bus mastering only — memory space stays, so config and BAR reads still work.
     pub fn disable_bus_master(&self) {
         let cmd = self.mmio.read_u16(COMMAND);
         self.mmio.write_u16(COMMAND, cmd & !0x04);

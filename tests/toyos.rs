@@ -11086,8 +11086,7 @@ fn run_machine_test(
             // a cycle, a spec-forbidden link, a BAR/offset/length past the
             // window, a window past the old 0x4000 guess a bigger BAR makes
             // legal, a chain missing its required capabilities, and a refused
-            // device that must not keep bus mastering — over a crafted config
-            // space at init under this parameter.
+            // device that must not keep bus mastering — at init under this parameter.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,

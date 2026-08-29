@@ -93,10 +93,8 @@ pub enum FsError {
     /// A node whose entries do not fit the block. Defence in depth behind
     /// `EntryTooLarge` — nothing should reach it.
     NodeOverfull { used: usize, max: usize },
-    /// A symlink target declaring more bytes than the caller's ceiling. The
-    /// volume bounds the declared size too, but a volume is bigger than a
-    /// kernel heap, so `read_link` takes the ceiling and refuses before the
-    /// one allocation the size drives.
+    /// A symlink target declaring more bytes than the caller's ceiling —
+    /// refused before the one allocation the declared size drives.
     TargetTooLong { size: u64, max: u64 },
 }
 
@@ -667,8 +665,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
     }
 
     /// Read a symlink's target by name. `None` when the name is not a symlink.
-    /// `max_len` caps the allocation the target's declared size drives — the
-    /// caller's ceiling, refused before a byte is materialised.
+    /// `max_len` caps the allocation the target's declared size drives.
     pub fn read_link(&self, name: &str, max_len: u64) -> Result<Option<String>, FsError> {
         let Some((_, value)) = self.find_by_name(name)? else { return Ok(None) };
         match self.decode(&value)? {
@@ -1457,11 +1454,8 @@ mod tests {
 
     #[test]
     fn a_size_inside_the_volume_but_over_the_ceiling_never_reaches_the_allocator() {
-        // The band the volume bound leaves open: a declared size the volume can
-        // hold and a kernel heap cannot — `mm::MAX_HEAP_ALLOC` is 2,093,056 and
-        // the kernel's allocator asserts past it. The ceiling is the caller's,
-        // so the refusal must come before the allocation, same instrument as
-        // above with a smaller number.
+        // The band the volume bound leaves open: a size the volume holds and a
+        // kernel heap cannot. Same instrument as above, with a smaller number.
         let blocks = 2048;
         let mut raw = image(blocks);
         let root = read_u64_at(&raw, 24);

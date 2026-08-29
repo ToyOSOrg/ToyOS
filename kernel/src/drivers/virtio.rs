@@ -730,10 +730,8 @@ pub fn cap_selftest() {
         Ok(_) => log!("virtio: pci cap selftest FAILED: an empty chain parsed"),
     }
 
-    // A refused device keeps no bus mastering. COMMAND arrives armed, as firmware
-    // can leave it; `init`'s refusal must clear Bus Master Enable — bit 2 of the
-    // COMMAND register, PCI 3.0 §6.2.2 — not leave a function it declined to
-    // trust able to issue memory requests.
+    // A refused device keeps no bus mastering: COMMAND arrives armed (bit 2, Bus
+    // Master Enable, PCI 3.0 §6.2.2) and `init`'s refusal must clear it.
     cfg.write_u16(0x04, 0x0006);
     let refused = VirtioDevice::init(&device, 0);
     let command = cfg.read_u16(0x04);
@@ -774,8 +772,8 @@ impl VirtioDevice {
     /// Initialize a VirtIO PCI device: reset, negotiate features, prepare for queue setup.
     /// `Err` names the required capability the device never published a usable window for.
     pub fn init(pci_dev: &PciDevice, accepted_features: u64) -> Result<Self, MissingCap> {
-        // Bus mastering only after the chain parses: a device the kernel refused to
-        // trust must not keep DMA, and firmware may have armed it before the refusal.
+        // Bus mastering only after the chain parses: a refused device keeps no DMA,
+        // and firmware may have armed the bit before the kernel ran.
         let config = match VirtioPciConfig::parse(pci_dev) {
             Ok(config) => config,
             Err(missing) => {
