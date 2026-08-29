@@ -586,14 +586,14 @@ mod tests {
             let allowed = BUS_MASTER_SITES.iter().find(|(f, _)| f == file).map_or(0, |(_, c)| *c);
             assert_eq!(
                 *n, allowed,
-                "{file}: {n} × `enable_bus_master(`, {allowed} declared — arming DMA is a                  declared decision, and it comes after the site's refusals"
+                "{file}: {n} × `enable_bus_master(`, {allowed} declared — arming DMA is a declared decision, and it comes after the site's refusals"
             );
         }
         for (file, n) in BUS_MASTER_SITES {
             let count = found.iter().find(|(f, _)| f == *file).map_or(0, |(_, c)| *c);
             assert_eq!(
                 count, *n,
-                "{file} is declared {n} × `enable_bus_master(` and has {count} — a stale row                  is a permission nobody re-argued"
+                "{file} is declared {n} × `enable_bus_master(` and has {count} — a stale row is a permission nobody re-argued"
             );
         }
     }

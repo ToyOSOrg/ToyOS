@@ -11071,7 +11071,7 @@ fn run_machine_test(
             // search — but virtio-net says so in its own words, so that the
             // legal case is *named* rather than inferred from the test running
             // at all.
-            if !log.contains("VirtIO net:") {
+            if !log.contains("VirtIO net: MAC") {
                 return Err(format!("the NIC did not come up on this boot\n{log}"));
             }
             if let Some(bad) = log.lines().find(|l| l.contains("refused") && l.contains("RX used-ring")) {
