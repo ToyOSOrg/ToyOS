@@ -7978,8 +7978,12 @@ fn run_machine_test(
             };
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let log =
-                qemu.boot_log().to_string() + &qemu.drain_serial(Duration::from_millis(500));
+            // A liveness ceiling, not a pace: a loaded shard once took past a
+            // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
+            let log = qemu.boot_log().to_string()
+                + &qemu.drain_until(Duration::from_secs(10), |l| {
+                    l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
+                });
             if log.contains("sysret-ss: NOT reloaded") {
                 return Err(format!(
                     "the switch did not reload SS — a sysretq here would hand userland an \
