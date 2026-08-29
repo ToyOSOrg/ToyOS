@@ -297,6 +297,45 @@ pub const RELEGATED: &[Relegated] = &[
                  double-boot only adds the runtime witness that the instruction faults.",
     },
     Relegated {
+        test: "home_budget_refusal_retried",
+        ci_ms: 18_661,
+        why: Why::Cost,
+        guards: "A budget-refused /home fsync retried to durable, its bytes then read \
+                 off the NVMe image by the host build of the bcachefs reader. What still \
+                 runs per pull request: the compile-time invariants — the two-variant \
+                 `bcachefs::DeviceError` makes the BudgetExpired-into-Io collapse \
+                 uncompilable, and a durability settle needs the `Settlement` its work \
+                 was copied from — plus host-tests' must-red `durability-settle-blind` \
+                 loom step and the crate-boundary `a_refused_sync_stays_refused` \
+                 differential; the nightly boot adds the end-to-end runtime witness.",
+    },
+    Relegated {
+        test: "redirty_mid_flush",
+        ci_ms: 21_262,
+        why: Why::Cost,
+        guards: "Two processes racing one page across 128 flush windows, each round \
+                 evicted and re-read off the device, then re-judged off the image by the \
+                 host's own FAT reader. What still runs per pull request: the loom \
+                 durability model over the exact flush call order with its must-red \
+                 `durability-settle-blind` control and the private `Settlement` token that \
+                 makes a blind clear uncompilable; the nightly race adds the \
+                 end-to-end runtime witness that a mid-flush write survives.",
+    },
+    Relegated {
+        test: "fsync_failed_commit",
+        ci_ms: 8_386,
+        why: Why::Cost,
+        guards: "One fsync over a device that refuses its SYNCHRONIZE CACHE, required to \
+                 come back refused rather than answered durable (F5) — the cheapest of the \
+                 three durability guest witnesses, but a full boot straddles the fast line \
+                 and cannot hold it. What still runs per pull request: the same compile-time \
+                 gate its siblings name — the two-variant `bcachefs::DeviceError` makes the \
+                 refusal-into-Io erasure uncompilable and the private `Settlement` makes a \
+                 blind clear uncompilable — plus host-tests' must-red `durability-settle-blind` \
+                 loom step and the `a_refused_sync_stays_refused` crate-boundary differential; \
+                 the nightly boot adds the runtime witness that fsync surfaces the refusal.",
+    },
+    Relegated {
         test: "desktop_audio_client",
         ci_ms: 121_441,
         why: Why::Cost,

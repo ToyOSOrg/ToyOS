@@ -54,14 +54,21 @@ impl Default for BlockBuf {
     }
 }
 
-/// The device did not do the transfer.
+/// The device did not do the transfer, and whether asking again can help —
+/// the two variants mean opposite give-up policies, so an implementation must
+/// choose and a conversion cannot erase the choice into a unit.
 ///
-/// Carries nothing: which block it was is the caller's, because the caller is
-/// what named it. [`BlockIOExt`] is where that gets attached, so an error a
-/// filesystem operation returns cannot name a block the operation never asked
-/// for.
+/// Which block it was stays the caller's, because the caller is what named it.
+/// [`BlockIOExt`] is where that gets attached, so an error a filesystem
+/// operation returns cannot name a block the operation never asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeviceError;
+pub enum DeviceError {
+    /// The device's own word: the transfer was attempted and failed.
+    Failed,
+    /// Refused before it was attempted, on the caller's time budget; safe to
+    /// ask again.
+    Refused,
+}
 
 /// The byte range block `block` occupies in an image, or `None` when that
 /// range cannot be expressed at all.
@@ -118,15 +125,15 @@ pub(crate) trait BlockIOExt {
 
 impl<T: BlockIO + ?Sized> BlockIOExt for T {
     fn read(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), FsError> {
-        self.read_block(block, buf).map_err(|DeviceError| FsError::DeviceRead(block))
+        self.read_block(block, buf).map_err(|e| FsError::DeviceRead(block, e))
     }
 
     fn write(&self, block: BlockNum, buf: &BlockBuf) -> Result<(), FsError> {
-        self.write_block(block, buf).map_err(|DeviceError| FsError::DeviceWrite(block))
+        self.write_block(block, buf).map_err(|e| FsError::DeviceWrite(block, e))
     }
 
     fn flush(&self) -> Result<(), FsError> {
-        self.sync().map_err(|DeviceError| FsError::DeviceSync)
+        self.sync().map_err(FsError::DeviceSync)
     }
 }
 
@@ -162,15 +169,15 @@ impl VecBlockIO {
 impl BlockIO for VecBlockIO {
     fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
         let data = self.data.borrow();
-        let (off, end) = byte_range(block).ok_or(DeviceError)?;
-        buf.0.copy_from_slice(data.get(off..end).ok_or(DeviceError)?);
+        let (off, end) = byte_range(block).ok_or(DeviceError::Failed)?;
+        buf.0.copy_from_slice(data.get(off..end).ok_or(DeviceError::Failed)?);
         Ok(())
     }
 
     fn write_block(&self, block: BlockNum, buf: &BlockBuf) -> Result<(), DeviceError> {
         let mut data = self.data.borrow_mut();
-        let (off, end) = byte_range(block).ok_or(DeviceError)?;
-        data.get_mut(off..end).ok_or(DeviceError)?.copy_from_slice(&buf.0);
+        let (off, end) = byte_range(block).ok_or(DeviceError::Failed)?;
+        data.get_mut(off..end).ok_or(DeviceError::Failed)?.copy_from_slice(&buf.0);
         Ok(())
     }
 
@@ -230,7 +237,7 @@ impl SliceBlockIO {
 
 impl BlockIO for SliceBlockIO {
     fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
-        buf.0.copy_from_slice(self.block(block).ok_or(DeviceError)?);
+        buf.0.copy_from_slice(self.block(block).ok_or(DeviceError::Failed)?);
         Ok(())
     }
 
@@ -239,7 +246,7 @@ impl BlockIO for SliceBlockIO {
     /// has no write operations — and a device that will not write is an answer
     /// either way.
     fn write_block(&self, _block: BlockNum, _buf: &BlockBuf) -> Result<(), DeviceError> {
-        Err(DeviceError)
+        Err(DeviceError::Failed)
     }
 
     fn block_count(&self) -> u64 {
@@ -296,7 +303,7 @@ mod slice_bounds {
         assert!(io.block(BlockNum::new(4)).is_none());
         assert!(io.block(BlockNum::new(u64::MAX / BLOCK_SIZE as u64)).is_none());
         let mut buf = BlockBuf::zeroed();
-        assert_eq!(io.read_block(BlockNum::new(3), &mut buf), Err(DeviceError));
+        assert_eq!(io.read_block(BlockNum::new(3), &mut buf), Err(DeviceError::Failed));
     }
 
     /// A block that *starts* inside the image and ends past it. `get(off..end)`

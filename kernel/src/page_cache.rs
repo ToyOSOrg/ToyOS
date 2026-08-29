@@ -62,11 +62,13 @@ pub fn raw_block_read(block: u64, buf: &mut [u8; PAGE_BYTES]) -> BlockResult {
     dev.read_blocks(block, 1, buf)
 }
 
-/// Writes a block directly to disk, bypassing the cache; locks only the device.
+/// Writes a block directly to disk, bypassing the cache's slots but not its
+/// flush debt: the bytes land in the device's write cache, which the next [`PageCache::sync`] owes a flush.
 #[must_use = "a failed write did not reach the device"]
 pub fn raw_block_write(block: u64, buf: &[u8; PAGE_BYTES]) -> BlockResult {
-    let mut dev = BLOCK_DEV.lock();
-    let dev = dev.as_mut().expect("block device not initialized");
+    let mut guard = lock();
+    let (cache, dev) = guard.cache_and_dev();
+    cache.flush.record_write();
     dev.write_blocks(block, 1, buf)
 }
 
@@ -92,6 +94,10 @@ pub struct PageCache {
     hand: u32,
     max_slots: usize,
     evictions: u64,
+    /// The device flush [`Self::sync`] still owes: raised by every write that
+    /// reached the device's cache, settled only by a `dev.flush()` that
+    /// returned `Ok` — so an empty dirty set never skips a flush that is owed.
+    flush: crate::durability::Owed,
     /// The device's size; nothing in this struct may size an allocation by it.
     block_count: u64,
     _device_id: DeviceId,
@@ -110,6 +116,7 @@ impl PageCache {
             hand: 0,
             max_slots,
             evictions: 0,
+            flush: crate::durability::Owed::new(),
             block_count,
             _device_id: device_id,
         }
@@ -250,7 +257,8 @@ impl PageCache {
             .filter(|&s| self.dirty[s as usize])
             .collect();
 
-        if pending.is_empty() {
+        // Nothing to write is not nothing to flush: a raw write, or a failed predecessor's runs, is still owed.
+        if pending.is_empty() && !self.flush.is_owed() {
             return Ok(());
         }
         pending.sort_unstable_by_key(|&s| self.slot_to_block[s as usize]);
@@ -278,6 +286,7 @@ impl PageCache {
             // A failed run stays dirty for retry; the loop continues rather than aborting on it.
             match dev.write_blocks(start, count as u32, &buf[..count * 4096]) {
                 Ok(()) => {
+                    self.flush.record_write();
                     for j in 0..count {
                         self.dirty[pending[i + j] as usize] = false;
                     }
@@ -291,9 +300,14 @@ impl PageCache {
             i += count;
         }
 
-        if let Err(e) = dev.flush() {
-            log!("page cache: flush failed; the write-back above is not durable");
-            failed = Some(failed.map_or(e, |had| had.worse(e)));
+        // The lock is held throughout, so the snapshot covers every write above.
+        let upto = self.flush.snapshot();
+        match dev.flush() {
+            Ok(()) => self.flush.settle(upto),
+            Err(e) => {
+                log!("page cache: flush failed; the write-back above is not durable");
+                failed = Some(failed.map_or(e, |had| had.worse(e)));
+            }
         }
         failed.map_or(Ok(()), Err)
     }

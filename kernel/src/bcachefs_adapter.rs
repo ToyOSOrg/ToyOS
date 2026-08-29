@@ -16,12 +16,24 @@ use crate::vfs::FileSystem;
 /// BlockIO implementation that wraps the kernel's global PageCache.
 pub struct PageCacheBlockIO;
 
+/// The one conversion between the kernel's block verdict and the crate's;
+/// keeping the retry discriminant is the point — a `BudgetExpired` collapsed
+/// into the device's own word turned into permanent write loss once (F9).
+impl From<crate::block::BlockError> for DeviceError {
+    fn from(e: crate::block::BlockError) -> Self {
+        match e {
+            crate::block::BlockError::Device => DeviceError::Failed,
+            crate::block::BlockError::BudgetExpired => DeviceError::Refused,
+        }
+    }
+}
+
 /// Errors propagate unchanged; nothing here invents a value for a refused transfer.
 impl BlockIO for PageCacheBlockIO {
     fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
         let mut guard = page_cache::lock();
         let (cache, dev) = guard.cache_and_dev();
-        let page = cache.read(dev, block.raw()).map_err(|_| DeviceError)?;
+        let page = cache.read(dev, block.raw()).map_err(DeviceError::from)?;
         buf.as_bytes_mut().copy_from_slice(page);
         Ok(())
     }
@@ -29,7 +41,7 @@ impl BlockIO for PageCacheBlockIO {
     fn write_block(&self, block: BlockNum, buf: &BlockBuf) -> Result<(), DeviceError> {
         let mut guard = page_cache::lock();
         let (cache, dev) = guard.cache_and_dev();
-        let page = cache.write_new(dev, block.raw()).map_err(|_| DeviceError)?;
+        let page = cache.write_new(dev, block.raw()).map_err(DeviceError::from)?;
         page.copy_from_slice(buf.as_bytes());
         Ok(())
     }
@@ -42,7 +54,16 @@ impl BlockIO for PageCacheBlockIO {
     fn sync(&self) -> Result<(), DeviceError> {
         let mut guard = page_cache::lock();
         let (cache, dev) = guard.cache_and_dev();
-        cache.sync(dev).map_err(|_| DeviceError)
+        cache.sync(dev).map_err(DeviceError::from)
+    }
+}
+
+/// A budget refusal is `WouldBlock` — the word every retry loop keys on — and
+/// only the device's own word is `Io`; `kernel/CLAUDE.md` states the rule.
+fn as_device_refusal(e: DeviceError) -> SyscallError {
+    match e {
+        DeviceError::Failed => SyscallError::Io,
+        DeviceError::Refused => SyscallError::WouldBlock,
     }
 }
 
@@ -52,7 +73,9 @@ fn as_syscall_error(err: &FsError) -> SyscallError {
         FsError::NotFound => SyscallError::NotFound,
         FsError::NoSpace { .. } | FsError::EntryTooLarge { .. } => SyscallError::ResourceExhausted,
         FsError::NameTooLong { .. } => SyscallError::InvalidArgument,
-        FsError::DeviceRead(_) | FsError::DeviceWrite(_) | FsError::DeviceSync => SyscallError::Io,
+        FsError::DeviceRead(_, e) | FsError::DeviceWrite(_, e) | FsError::DeviceSync(e) => {
+            as_device_refusal(*e)
+        }
         FsError::BadMagic { .. }
         | FsError::UnsupportedVersion(_)
         | FsError::ChecksumMismatch { .. }
@@ -274,9 +297,9 @@ impl FileSystem for BcacheFsAdapter {
             .with(|extents| self.fs.resolve_or_alloc_block(extents, page_idx))
             .ok_or(SyscallError::NotFound)?;
         let block = mapped("block allocation", &name, block)?;
-        page_cache::raw_block_write(block, data).map_err(|_| {
-            log!("bcachefs: write of block {block} for '{name}' failed");
-            SyscallError::Io
+        page_cache::raw_block_write(block, data).map_err(|e| {
+            log!("bcachefs: write of block {block} for '{name}' refused: {e:?}");
+            as_device_refusal(DeviceError::from(e))
         })
     }
 

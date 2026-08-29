@@ -6,6 +6,7 @@ use hashbrown::HashMap;
 
 use core::ops::{Deref, DerefMut};
 use toyos_abi::syscall::SyscallError;
+use crate::durability::Owed;
 use crate::file_cache::FileId;
 use crate::mm::PAGE_BYTES;
 use crate::sync::{Lock, LockGuard};
@@ -79,6 +80,9 @@ pub enum UserAccess {
 struct Mount {
     fs: Box<dyn FileSystem>,
     access: UserAccess,
+    /// The device commit this mount still owes: raised by every flush that may
+    /// have reached the device, settled only by a [`FileSystem::sync`] that returned `Ok`.
+    commit: Owed,
 }
 
 /// A path with every symlink followed, minted only by [`Vfs::resolve_for_open`]:
@@ -99,6 +103,7 @@ pub enum ResolveIntent {
 /// Virtual filesystem that dispatches to named mount points.
 pub struct Vfs {
     root: Option<Box<dyn FileSystem>>,
+    root_commit: Owed,
     mounts: HashMap<String, Mount>,
     created_dirs: hashbrown::HashSet<String>,
 }
@@ -145,6 +150,7 @@ impl Vfs {
     fn new() -> Self {
         Self {
             root: None,
+            root_commit: Owed::new(),
             mounts: HashMap::new(),
             created_dirs: hashbrown::HashSet::new(),
         }
@@ -155,7 +161,7 @@ impl Vfs {
     }
 
     pub fn mount(&mut self, name: &str, fs: Box<dyn FileSystem>, access: UserAccess) {
-        self.mounts.insert(String::from(name), Mount { fs, access });
+        self.mounts.insert(String::from(name), Mount { fs, access, commit: Owed::new() });
     }
 
     /// May a syscall acting for userland change what is at `path`?
@@ -377,44 +383,34 @@ impl Vfs {
     }
 
     /// No early return on an empty dirty set: `ftruncate` changes the size without dirtying a page.
+    /// A refused attempt restores nothing, because nothing was cleared: debt is
+    /// settled per page against what was copied, and for the file only past `update_metadata`.
     pub fn flush_file(&mut self, path: &str, file_id: FileId, mtime: u64) -> Result<(), SyscallError> {
-        // `take_dirty` takes the dirty set and clears `dirty_meta` together, so a write landing
-        // mid-flush re-sets the flag and is caught by the next flush rather than cleared by this one.
-        let dirty = crate::file_cache::take_dirty(file_id);
-        match self.flush_taken(path, file_id, mtime, &dirty) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                crate::file_cache::mark_dirty_meta(file_id);
-                Err(e)
-            }
-        }
-    }
-
-    fn flush_taken(
-        &mut self,
-        path: &str,
-        file_id: FileId,
-        mtime: u64,
-        dirty: &alloc::collections::BTreeSet<u32>,
-    ) -> Result<(), SyscallError> {
+        let plan = crate::file_cache::begin_flush(file_id);
         let (mount, file) = self.resolve_path("/", path);
         if mount.is_empty() { return Err(SyscallError::InvalidArgument); }
+        // Raised before the first write, not after the last: a flush that failed
+        // half-way may already have reached the device's cache.
+        self.commit_of(&mount).record_write();
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
         if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
 
         // On the heap: the idle loop's 16 KiB stack has no guard page.
         let mut heap = alloc::vec![0u8; PAGE_BYTES].into_boxed_slice();
-        let buf: &mut [u8; PAGE_BYTES] = (&mut heap[..]).try_into().expect("4096 bytes");
-        for &page_idx in dirty {
-            // The `?` runs before `clear_dirty`: a refused write-back leaves every page dirty for the retry.
-            if crate::file_cache::copy_page_out(file_id, page_idx, buf) {
+        let buf: &mut [u8; PAGE_BYTES] = (&mut heap[..]).try_into().expect("PAGE_BYTES bytes");
+        let mut flushed: Vec<(u32, crate::durability::Settlement)> =
+            Vec::with_capacity(plan.pages.len());
+        for &page_idx in &plan.pages {
+            if let Some(copied) = crate::file_cache::copy_page_out(file_id, page_idx, buf) {
                 fs.write_page(file_id, page_idx, buf)?;
+                flushed.push((page_idx, copied));
             }
         }
-        crate::file_cache::clear_dirty(file_id, dirty);
+        crate::file_cache::settle_pages(file_id, &flushed);
 
         let size = crate::file_cache::size(file_id);
         fs.update_metadata(file_id, size, mtime)?;
+        crate::file_cache::settle_file(file_id, plan.file);
 
         // A refusal is logged, not returned: the bytes are on the device; only evictability is lost.
         if !crate::file_cache::has_backing(file_id) {
@@ -533,9 +529,35 @@ impl Vfs {
         self.delete_file(path)
     }
 
+    /// The commit debt `mount` names — the named mount's, or the root's.
+    fn commit_of(&mut self, mount: &str) -> &mut Owed {
+        match self.mounts.get_mut(mount) {
+            Some(m) => &mut m.commit,
+            None => &mut self.root_commit,
+        }
+    }
+
+    /// Whether `SYS_FSYNC` still owes this file work: its own flush, or the
+    /// device commit its mount has raised and not settled — which is how a
+    /// failed `sync` keeps the next fsync honest with every page flushed.
+    pub fn durability_owed(&self, path: &str, file_id: FileId) -> bool {
+        if crate::file_cache::flush_owed(file_id) {
+            return true;
+        }
+        let (mount, _) = self.resolve_path("/", path);
+        match self.mounts.get(&mount) {
+            Some(m) => m.commit.is_owed(),
+            None => self.root_commit.is_owed(),
+        }
+    }
+
     /// Make one named mount's writes durable.
     pub fn sync_mount(&mut self, name: &str) -> Result<(), SyscallError> {
-        self.mounts.get_mut(name).ok_or(SyscallError::NotFound)?.fs.sync()
+        let mount = self.mounts.get_mut(name).ok_or(SyscallError::NotFound)?;
+        let upto = mount.commit.snapshot();
+        mount.fs.sync()?;
+        mount.commit.settle(upto);
+        Ok(())
     }
 
     /// Is there a filesystem mounted under `name`?
@@ -551,7 +573,12 @@ impl Vfs {
         }
         // No root is not an error: the write being made durable cannot have happened.
         match &mut self.root {
-            Some(root) => root.sync(),
+            Some(root) => {
+                let upto = self.root_commit.snapshot();
+                root.sync()?;
+                self.root_commit.settle(upto);
+                Ok(())
+            }
             None => Ok(()),
         }
     }
@@ -559,13 +586,17 @@ impl Vfs {
     /// A refusal is logged, not returned, so one mount failing does not stop the rest.
     pub fn sync_all(&mut self) {
         if let Some(root) = &mut self.root {
-            if let Err(e) = root.sync() {
-                log!("vfs: the root filesystem would not sync: {e}");
+            let upto = self.root_commit.snapshot();
+            match root.sync() {
+                Ok(()) => self.root_commit.settle(upto),
+                Err(e) => log!("vfs: the root filesystem would not sync: {e}"),
             }
         }
         for (name, mount) in self.mounts.iter_mut() {
-            if let Err(e) = mount.fs.sync() {
-                log!("vfs: /{name} would not sync: {e}");
+            let upto = mount.commit.snapshot();
+            match mount.fs.sync() {
+                Ok(()) => mount.commit.settle(upto),
+                Err(e) => log!("vfs: /{name} would not sync: {e}"),
             }
         }
     }

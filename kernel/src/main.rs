@@ -41,6 +41,7 @@ mod sched_gate;
 #[cfg(feature = "boot-actuators")]
 mod nmi_gate;
 mod block;
+mod durability;
 mod gpt;
 mod page_cache;
 mod rollback;
