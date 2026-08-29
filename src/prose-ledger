@@ -500,7 +500,7 @@ toyos-mixer/src/gain.rs 43 0
 toyos-mixer/src/lib.rs 43 0
 toyos-mixer/src/mix.rs 38 0
 toyos-mixer/src/shape.rs 102 0
-toyos-mixer/src/stats.rs 130 0
+toyos-mixer/src/stats.rs 127 0
 toyos-pci/src/bar.rs 97 0
 toyos-pci/src/caps.rs 13 0
 toyos-pci/src/lib.rs 20 0

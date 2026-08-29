@@ -106,11 +106,9 @@ pub struct WorstWake {
     pub batch: u32,
 }
 
-/// Whether a wake left soundd suspended: it began with no client, the device
-/// was already stopped at wake entry, and it ended with none — so no connect,
-/// no drain and no grid point asked for it. The idle discipline promises zero
-/// such wakes (`audio_idle_suspend` asserts zero CPU on that promise), so the
-/// caller names each one on the console instead of absorbing it.
+/// Whether a wake left soundd suspended: began with no client, the device
+/// already stopped at wake entry, ended with none — a wake the idle discipline
+/// promises away, so the caller names it on the console.
 pub fn wake_left_idle(was_streaming: bool, device_started: bool, have_clients: bool) -> bool {
     !was_streaming && !device_started && !have_clients
 }
@@ -301,9 +299,8 @@ mod tests {
         assert_eq!(stats.max_wake_lat_ns, 7_000);
     }
 
-    /// Every wake something legitimate asked for is exempt: a connect ends
-    /// with a client, a drain wake finds the device still started, a
-    /// streaming wake began with one. Only the wake nothing explains is named.
+    /// A connect ends with a client, a drain wake finds the device started, a
+    /// streaming wake began with one; only the wake nothing explains is named.
     #[test]
     fn only_the_wake_nothing_asked_for_is_named() {
         assert!(!wake_left_idle(false, false, true));
