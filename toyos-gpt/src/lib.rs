@@ -387,13 +387,11 @@ fn parse_header(lba1: &[u8], lba_bytes: u32, lba_count: u64, header_lba: u64) ->
         return Err(GptError::EntryArrayMisplaced { lba: entry_array_lba, lbas: array_lbas });
     }
     // The mirror of the backup arm's placement check above: the primary's
-    // usable range must stop below the backup GPT — the last block and the
-    // `array_lbas` blocks under it — or a partition may lawfully sit on the
-    // recovery copy. A caller adapting a coarser block ([`Sectors`]) reports
-    // `lba_count` floored by up to one of its blocks, and an honest table is
-    // laid out against the disk's true end, so the bound concedes that
-    // sliver — under one [`MAX_LBA_BYTES`] block — rather than refusing every
-    // device whose size is not a whole caller block.
+    // usable range must stop below the backup GPT, or a partition may
+    // lawfully sit on the recovery copy. A [`Sectors`] caller adapting a
+    // coarser block reports `lba_count` floored by up to one of its blocks
+    // while an honest table is laid out against the true end, so the bound
+    // concedes that sliver rather than refusing every unaligned device.
     let floor_slack = (MAX_LBA_BYTES / lba_bytes) as u64 - 1;
     let backup_array_lba =
         lba_count.saturating_add(floor_slack).saturating_sub(1 + array_lbas);

@@ -604,9 +604,8 @@ fn no_byte_of_the_table_can_panic_the_parser() {
 /// The blocks the backup GPT occupies — the device's last block and the entry
 /// array below it, 2015..=2047 on this disk — are not usable space: a primary
 /// whose usable range reaches them lets a partition lawfully sit on the
-/// recovery copy, and the caller's next move is to write to that partition.
-/// The refusal concedes one caller block of flooring (7 LBAs here), so the
-/// bound on this 512-byte disk is 2022, not 2015.
+/// recovery copy. With one caller block of flooring conceded, the bound on
+/// this 512-byte disk is 2022, not 2015.
 #[test]
 fn a_usable_range_reaching_the_backup_gpt_is_refused() {
     let mut b = Builder { last_usable: DISK_LBAS - 2, backup: true, ..Default::default() };
@@ -634,13 +633,10 @@ fn a_usable_range_reaching_the_backup_gpt_is_refused() {
     );
 }
 
-/// A caller adapting a coarser block reports `lba_count` floored by up to one
-/// of its blocks — the kernel's 4 KiB `DeviceSectors` over a 512-byte disk
-/// floors by up to 7 LBAs — while an honest table is laid out against the
-/// disk's true end. The exact CI shape: a 2055-LBA disk (2055 % 8 = 7) whose
-/// table reserves the standard 33 blocks, seen through a view floored to
-/// 2048; its last_usable 2021 sits at the conceded bound's edge and must
-/// parse, where the unconceded bound refused every such disk.
+/// The kernel's 4 KiB view floors a 512-byte disk's `lba_count` by up to 7
+/// LBAs while an honest table is laid out against the true end — a 2055-LBA
+/// disk (2055 % 8 = 7) seen as 2048, its last_usable 2021 at the conceded
+/// bound's edge, must parse. The unconceded bound refused every such disk.
 #[test]
 fn an_honest_table_on_a_floored_device_view_parses() {
     struct Floored(Image, u64);
@@ -680,7 +676,6 @@ fn two_entries_claiming_the_target_guid_are_refused() {
         img.locate(guid(0xC3)),
         Err(GptError::DuplicateUniqueGuid { first: 2, second: 3 })
     );
-    // A duplicate of a GUID nobody asked for does not refuse the answer: the
-    // question this crate exists for is whether *this* GUID names one partition.
+    // A duplicate of a GUID nobody asked for does not refuse the answer.
     assert_eq!(img.locate(guid(0xB2)).map(|f| f.partition.index), Ok(1));
 }
