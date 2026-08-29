@@ -19,10 +19,64 @@ const ACQUIRED: Ordering = Ordering::Acquire;
 #[cfg(feature = "lock-acquire-off")]
 const ACQUIRED: Ordering = Ordering::Relaxed;
 
+/// A ticket-protocol counter. Both counters wrap at `u32::MAX` — the atomic
+/// `fetch_add` RMWs never trap — and `Ticket` carries no `Add`, so the wrapping
+/// [`Ticket::succ`] is the only route to the next one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ticket(u32);
+
+impl Ticket {
+    pub(crate) const ZERO: Self = Self(0);
+    pub(crate) fn succ(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+    pub(crate) fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// A shared ticket counter whose only successor is the wrapping CAS below, so no
+/// caller hand-computes one.
+pub(crate) struct AtomicTicket(AtomicU32);
+
+impl AtomicTicket {
+    #[cfg(not(feature = "loom"))]
+    pub(crate) const fn new(t: Ticket) -> Self {
+        Self(AtomicU32::new(t.0))
+    }
+
+    #[cfg(feature = "loom")]
+    pub(crate) fn new(t: Ticket) -> Self {
+        Self(AtomicU32::new(t.0))
+    }
+
+    pub(crate) fn load(&self, order: Ordering) -> Ticket {
+        Ticket(self.0.load(order))
+    }
+
+    pub(crate) fn fetch_advance(&self, order: Ordering) -> Ticket {
+        Ticket(self.0.fetch_add(1, order))
+    }
+
+    /// Advance `current` to its wrapping successor, or fail untouched. The
+    /// successor is computed here, so `try_lock` cannot supply a checked add.
+    pub(crate) fn compare_advance(
+        &self,
+        current: Ticket,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<Ticket, Ticket> {
+        self.0
+            .compare_exchange(current.0, current.succ().0, success, failure)
+            .map(Ticket)
+            .map_err(Ticket)
+    }
+}
+
 /// Ticket spinlock. Provides mutual exclusion via `lock() -> LockGuard`.
 pub struct Lock<T> {
-    ticket: AtomicU32,
-    now: AtomicU32,
+    ticket: AtomicTicket,
+    now: AtomicTicket,
     data: UnsafeCell<T>,
 }
 
@@ -36,8 +90,8 @@ impl<T> Lock<T> {
     #[cfg(not(feature = "loom"))]
     pub const fn new(val: T) -> Self {
         Self {
-            ticket: AtomicU32::new(0),
-            now: AtomicU32::new(0),
+            ticket: AtomicTicket::new(Ticket::ZERO),
+            now: AtomicTicket::new(Ticket::ZERO),
             data: UnsafeCell::new(val),
         }
     }
@@ -45,8 +99,19 @@ impl<T> Lock<T> {
     #[cfg(feature = "loom")]
     pub fn new(val: T) -> Self {
         Self {
-            ticket: AtomicU32::new(0),
-            now: AtomicU32::new(0),
+            ticket: AtomicTicket::new(Ticket::ZERO),
+            now: AtomicTicket::new(Ticket::ZERO),
+            data: UnsafeCell::new(val),
+        }
+    }
+
+    /// A lock whose counters start at `at`, for the model driving the `u32::MAX`
+    /// wrap; only the loom build compiles it.
+    #[cfg(feature = "loom")]
+    pub fn seeded_at(val: T, at: u32) -> Self {
+        Self {
+            ticket: AtomicTicket::new(Ticket(at)),
+            now: AtomicTicket::new(Ticket(at)),
             data: UnsafeCell::new(val),
         }
     }
@@ -54,7 +119,7 @@ impl<T> Lock<T> {
     #[track_caller]
     pub fn lock(&self) -> LockGuard<'_, T> {
         crate::preempt::disable();
-        let my_ticket = self.ticket.fetch_add(1, Ordering::Relaxed);
+        let my_ticket = self.ticket.fetch_advance(Ordering::Relaxed);
         let mut spins = 0u64;
         let mut next_warn = 50_000_000u64;
         while self.now.load(ACQUIRED) != my_ticket {
@@ -66,13 +131,13 @@ impl<T> Lock<T> {
             if spins == next_warn {
                 let caller = core::panic::Location::caller();
                 crate::log!("LOCK CONTENTION: {}M spins at {}, ticket={} now={}",
-                    spins / 1_000_000, caller, my_ticket, self.now.load(Ordering::Relaxed));
+                    spins / 1_000_000, caller, my_ticket.raw(), self.now.load(Ordering::Relaxed).raw());
                 next_warn = (next_warn * 2).min(500_000_000);
             }
             if spins >= 500_000_000 {
                 let caller = core::panic::Location::caller();
                 panic!("DEADLOCK at {}: 500M spins, ticket={} now={}",
-                    caller, my_ticket, self.now.load(Ordering::Relaxed));
+                    caller, my_ticket.raw(), self.now.load(Ordering::Relaxed).raw());
             }
         }
         LockGuard { lock: self }
@@ -81,7 +146,7 @@ impl<T> Lock<T> {
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
         crate::preempt::disable();
         let current = self.now.load(ACQUIRED);
-        match self.ticket.compare_exchange(current, current + 1, Ordering::Relaxed, Ordering::Relaxed) {
+        match self.ticket.compare_advance(current, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => Some(LockGuard { lock: self }),
             Err(_) => {
                 crate::preempt::enable();
@@ -120,7 +185,7 @@ impl<T> DerefMut for LockGuard<'_, T> {
 
 impl<T> Drop for LockGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.now.fetch_add(1, Ordering::Release);
+        self.lock.now.fetch_advance(Ordering::Release);
         crate::preempt::enable();
     }
 }

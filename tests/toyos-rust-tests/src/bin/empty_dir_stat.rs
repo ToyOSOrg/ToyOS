@@ -96,5 +96,33 @@ fn main() {
         "a directory emptied by a delete stopped stat-ing as one"
     );
 
+    // `rmdir` reports the real outcome, not a blanket success (F20): a missing
+    // name, a non-empty directory, and a mount point are each refused.
+    assert_eq!(
+        syscall::rmdir(MISSING.as_bytes()),
+        Err(SyscallError::NotFound),
+        "rmdir of a name that never existed reported success",
+    );
+    fs::write(format!("{WITH_FILE}/g"), b"y").expect("refill the directory");
+    assert_eq!(
+        syscall::rmdir(WITH_FILE.as_bytes()),
+        Err(SyscallError::InvalidArgument),
+        "rmdir of a non-empty directory reported success",
+    );
+    fs::remove_file(format!("{WITH_FILE}/g")).expect("empty it again");
+    syscall::rmdir(WITH_FILE.as_bytes()).expect("rmdir of an empty directory must succeed");
+    assert_eq!(
+        readdir(WITH_FILE),
+        Err(SyscallError::NotFound),
+        "a directory reported as removed still listed",
+    );
+    syscall::rmdir(EMPTY.as_bytes()).expect("rmdir of the empty directory must succeed");
+    assert_eq!(
+        syscall::rmdir("/tmp".as_bytes()),
+        Err(SyscallError::InvalidArgument),
+        "rmdir of a mount point reported success, which erases the mount's directories",
+    );
+
     println!("empty dir stat: empty stats as a directory, missing refuses, emptied stays one");
+    println!("rmdir outcome: missing refuses, non-empty refuses, mount refuses, empty removed");
 }

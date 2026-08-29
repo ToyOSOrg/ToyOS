@@ -201,13 +201,48 @@ impl Watched {
     fn watches(&self, source: &Source) -> bool {
         self.iter().any(|s| s == source)
     }
+
+    /// Per-direction readiness, rechecked from object state under the INBOXES lock.
+    fn readiness(&self) -> Readiness {
+        Readiness {
+            readable: self.read.as_ref().is_some_and(Source::is_ready),
+            writable: self.write.as_ref().is_some_and(Source::is_ready),
+        }
+    }
+
+    /// [`Self::readiness`], but the direction `fired` names is asserted, not
+    /// rechecked: an edge source (`Source::Log`) or a concurrent drain rechecks
+    /// to false, yet the event that woke this poll proves that direction fired.
+    fn readiness_for(&self, fired: &Source) -> Readiness {
+        let mut r = self.readiness();
+        r.readable |= self.read.as_ref() == Some(fired);
+        r.writable |= self.write.as_ref() == Some(fired);
+        r
+    }
+}
+
+/// The readiness a watch completion reports — computed from object state, never
+/// from the request. [`Self::result_flags`] is the only source of a completion's
+/// positive result word, so no site can rebuild it from the interest mask.
+#[derive(Clone, Copy)]
+struct Readiness {
+    readable: bool,
+    writable: bool,
+}
+
+impl Readiness {
+    fn result_flags(self) -> u32 {
+        let mut flags = 0u32;
+        if self.readable { flags |= WatchFlags::READABLE.raw(); }
+        if self.writable { flags |= WatchFlags::WRITABLE.raw(); }
+        flags
+    }
 }
 
 struct PendingWatch {
     user_data: u64,
     /// The handle the poll was submitted against; the dedup key.
     handle: RawHandle,
-    flags: WatchFlags,
     sources: Watched,
 }
 
@@ -547,13 +582,15 @@ fn process_watch(inbox_id: InboxId, submission: &Submission) {
     // Readiness is checked on the process's table, not the thread's: a ring is process-wide.
     let resolved = process::with_process_data(|data| {
         let object = data.handles.get_ref(handle, Rights::WAIT)?;
-        let readable = flags.readable() && ops::has_data(object);
-        let writable = flags.writable() && ops::has_space(object);
+        let readiness = Readiness {
+            readable: flags.readable() && ops::has_data(object),
+            writable: flags.writable() && ops::has_space(object),
+        };
         let rsrc = if flags.readable() { ops::read_source(object) } else { None };
         let wsrc = if flags.writable() { ops::write_source(object) } else { None };
-        Ok::<_, crate::object::HandleError>((readable || writable, rsrc, wsrc))
+        Ok::<_, crate::object::HandleError>((readiness, rsrc, wsrc))
     });
-    let (ready, read_source, write_source) = match resolved {
+    let (readiness, read_source, write_source) = match resolved {
         Ok(seen) => seen,
         // Nothing is held here: `with_process_data` has given the guard up.
         Err(e) => {
@@ -563,12 +600,9 @@ fn process_watch(inbox_id: InboxId, submission: &Submission) {
         }
     };
 
-    if ready {
-        // Ready already: complete now, one-shot (consumed, not re-armed).
-        let mut result_flags = 0u32;
-        if flags.readable() { result_flags |= WatchFlags::READABLE.raw(); }
-        if flags.writable() { result_flags |= WatchFlags::WRITABLE.raw(); }
-        post_completion_locked(inbox_id, user_data, result_flags as i32, 0);
+    if readiness.readable || readiness.writable {
+        // Ready already: complete now, one-shot, with the directions that fired.
+        post_completion_locked(inbox_id, user_data, readiness.result_flags() as i32, 0);
         return;
     }
 
@@ -599,7 +633,7 @@ fn process_watch(inbox_id: InboxId, submission: &Submission) {
         for src in sources.iter() {
             src.add_watcher(inbox_id);
         }
-        instance.pending_watches.push(PendingWatch { user_data, handle, flags, sources });
+        instance.pending_watches.push(PendingWatch { user_data, handle, sources });
 
         // Recheck closes the TOCTOU window: a concurrent wake either ran already (caught here) or is blocked on INBOXES (finds the poll after release).
         let became_ready =
@@ -607,10 +641,7 @@ fn process_watch(inbox_id: InboxId, submission: &Submission) {
         if became_ready {
             if let Some(pos) = instance.pending_watches.iter().position(|pp| pp.handle == handle) {
                 let pp = take_poll(instance, pos);
-                let mut result_flags = 0u32;
-                if pp.flags.readable() { result_flags |= WatchFlags::READABLE.raw(); }
-                if pp.flags.writable() { result_flags |= WatchFlags::WRITABLE.raw(); }
-                instance.post_completion(pp.user_data, result_flags as i32, 0);
+                instance.post_completion(pp.user_data, pp.sources.readiness().result_flags() as i32, 0);
                 woken = Some(instance.watch.clone());
             }
         }
@@ -680,10 +711,6 @@ fn post_completion_locked(inbox_id: InboxId, user_data: u64, result: i32, flags:
 
 /// Completes pending polls registered on `event`; callers must have released source locks first.
 pub fn complete_pending_for_event(watchers: &[InboxId], event: Source) {
-    complete_pending_for_source(watchers, |pp| pp.watches(&event));
-}
-
-fn complete_pending_for_source(watchers: &[InboxId], matches: impl Fn(&PendingWatch) -> bool) {
     if watchers.is_empty() { return; }
 
     // Wake happens after the table lock releases: a wake may send an IPI, which doesn't need INBOXES.
@@ -696,12 +723,12 @@ fn complete_pending_for_source(watchers: &[InboxId], matches: impl Fn(&PendingWa
 
         let mut i = 0;
         while i < instance.pending_watches.len() {
-            if matches(&instance.pending_watches[i]) {
+            if instance.pending_watches[i].watches(&event) {
                 let pp = take_poll(instance, i);
-                let mut result_flags = 0u32;
-                if pp.flags.readable() { result_flags |= WatchFlags::READABLE.raw(); }
-                if pp.flags.writable() { result_flags |= WatchFlags::WRITABLE.raw(); }
-                instance.post_completion(pp.user_data, result_flags as i32, 0);
+                // The direction `event` proves fired, OR-ed with a recheck of the
+                // other registered direction — never the request mask.
+                let result = pp.sources.readiness_for(&event).result_flags();
+                instance.post_completion(pp.user_data, result as i32, 0);
             } else {
                 i += 1;
             }

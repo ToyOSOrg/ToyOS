@@ -94,3 +94,21 @@ fn two_try_locks_do_not_both_succeed() {
         );
     });
 }
+
+/// `try_lock` at the `u32::MAX` wrap boundary acquires rather than panicking:
+/// a checked successor traps here under `overflow-checks`, the wrapping one CASes
+/// `u32::MAX` to `0` and the lock stays reusable across the wrap.
+#[test]
+fn try_lock_at_the_wrap_boundary_does_not_panic() {
+    loom::model(|| {
+        let lock = Lock::seeded_at(0u32, u32::MAX);
+        {
+            let mut guard = lock
+                .try_lock()
+                .expect("an uncontended lock at the wrap boundary must acquire");
+            *guard = 7;
+        }
+        let guard = lock.try_lock().expect("the wrapped lock is still reusable");
+        assert_eq!(*guard, 7, "the value did not survive the wrap");
+    });
+}
