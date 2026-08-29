@@ -11,9 +11,13 @@ stop ("uses value v5 from non-dominating inst7") on a jump into a `({ … })`
 from outside it. Re-measured 2026-08-29 on both sides of the statement-
 expression tail fix: on the pre-fix tree,
 `int f(int c) { if (c) goto l; return ({ int i = 1; l: i + 2; }); }` and its
-label-mid-block variant both die in `define_function`; on the fixed tree all
-such shapes *compile silently*, because the construct's value now comes from
-the tail inside the label block, which dominates its own use.
+label-mid-block variant both die in `define_function`; on the fixed tree the
+expression-tail shapes *compile silently*, because the construct's value now
+comes from the tail inside the label block, which dominates its own use. A
+non-expression tail still dies in `define_function` on the fixed tree too
+(`x = ({ 1; lab: ; })` — "uses value v5 from non-dominating inst7"): the
+residual is both a silent acceptance and a loud stop, by shape, and the one
+fix below closes both.
 
 That is the wrong resting state, just quieter. Jumping into a statement
 expression is a constraint clang refuses outright ("cannot jump from this
