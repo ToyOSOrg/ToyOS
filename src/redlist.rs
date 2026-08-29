@@ -1214,11 +1214,12 @@ pub const KNOWN_RED: &[Red] = &[
         standing: Standing::Stands,
         what: "gate A's fast tier, failing its own two-boot rule — dropouts on the first boot *and* \
                on the confirming re-boot — four times in one session at smp=1, on two different \
-               trees. **The denominator is not readable**: the write-up says \"six runs in one \
-               session\" and its own listing is four reds, one green and \"twice more GREEN\", \
-               which is seven. smp=8 failed the same rule twice on 2026-08-07",
+               trees. **The denominator is not readable**: the closed sighting file said \"six \
+               runs in one session\" while its own listing is four reds, one green and \"twice \
+               more GREEN\", which is seven; its tables live in the commit that closed it into \
+               the source entry. smp=8 failed the same rule twice on 2026-08-07",
         evidence: "2026-08-04 session, 5408cfb with the bundle stashed and bundle D alternating",
-        source: "issues/audio/audio-tone-load-fast-tier-intermittent.md",
+        source: "issues/audio/thorough-tier-reds-on-unmodified-main.md",
         measured: "2026-08-04",
     },
     Red {
@@ -1230,7 +1231,7 @@ pub const KNOWN_RED: &[Red] = &[
                where every red carried 76–297 ms — soundd not being scheduled rather than a cost \
                per period",
         evidence: "task #58's A/B session, `main`'s tip against a branch, one host",
-        source: "issues/audio/audio-tone-load-fast-tier-intermittent.md",
+        source: "issues/audio/thorough-tier-reds-on-unmodified-main.md",
         measured: "2026-08-07",
     },
     // The contention class. Every one of these is a verdict that expires on the
@@ -2887,6 +2888,31 @@ pub const KNOWN_RED: &[Red] = &[
                    in the second passed the test itself in 8 s",
         source: "tests/common/logread.rs",
         measured: "2026-08-28",
+    },
+    // ---------------------------------------------------------------------
+    // This branch's own composition run: the tier batch put the whole nightly
+    // set on one PR's shards, and a fresh test's fixed drain window met a
+    // loaded one.
+    // ---------------------------------------------------------------------
+    Red {
+        test: "sysret_ss_reload",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Retired(
+            "this same landing: the probe line is waited for on a 10 s liveness ceiling \
+             (`drain_until`) instead of a fixed 500 ms drain, so iod running late costs \
+             patience, not the verdict",
+        ),
+        what: "`the SS-reload probe never reported — iod may not have run it` on the wide \
+               shard, then ALONE green with `the switch reloads SS from null before a \
+               sysretq can see it` — the harness's own verdict: `it failed once and passed \
+               once. That is a rate and not a classification`. The reload was never in \
+               question; the 500 ms fixed drain after boot was shorter than a loaded \
+               shard's path to iod's probe",
+        evidence: "`ci` run 33246638742, `guest (12)`, 2026-08-29, red then alone-green in \
+                   the same job",
+        source: "tests/toyos.rs",
+        measured: "2026-08-29",
     },
 ];
 

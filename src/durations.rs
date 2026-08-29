@@ -1149,7 +1149,7 @@ mod tests {
             parsed.len()
         );
         assert_eq!(
-            parsed.get("xhci_full_speed_device").map(String::as_str),
+            parsed.get("launcher_refusals").map(String::as_str),
             Some("MACHINE_TESTS(Sched::Parallel, Tier::Fast)")
         );
         assert_eq!(

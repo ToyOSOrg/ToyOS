@@ -106,6 +106,20 @@ pub struct WorstWake {
     pub batch: u32,
 }
 
+/// Whether a wake left soundd suspended: began with no client, the device
+/// already stopped at wake entry, no command byte to explain it, ended with
+/// none — a wake the idle discipline promises away, so the caller names it.
+/// The command exemption covers the control thread's expected stray — a
+/// RemoveClient or SetVolume for a stream the mix loop already departed.
+pub fn wake_left_idle(
+    was_streaming: bool,
+    device_started: bool,
+    have_clients: bool,
+    cmd_wake: bool,
+) -> bool {
+    !was_streaming && !device_started && !have_clients && !cmd_wake
+}
+
 impl MixStats {
     /// Account one wake that carried completions, `lateness_ns` past the grid
     /// point it armed on.
@@ -290,6 +304,27 @@ mod tests {
         assert_eq!(stats.worst.irq_late_ns, 0);
         assert_eq!(stats.worst.pickup_ns, 7_000);
         assert_eq!(stats.max_wake_lat_ns, 7_000);
+    }
+
+    /// A connect ends with a client, a drain wake finds the device started, a
+    /// streaming wake began with one, a command byte explains its own wake;
+    /// only the wake nothing explains is named. All sixteen rows are pinned,
+    /// so a misdecision in either direction on any row reds here.
+    #[test]
+    fn only_the_wake_nothing_asked_for_is_named() {
+        for streaming in [false, true] {
+            for started in [false, true] {
+                for clients in [false, true] {
+                    for cmd in [false, true] {
+                        assert_eq!(
+                            wake_left_idle(streaming, started, clients, cmd),
+                            !streaming && !started && !clients && !cmd,
+                            "streaming={streaming} started={started} clients={clients} cmd={cmd}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// A covered period ends a run, which is what makes the run a measure of

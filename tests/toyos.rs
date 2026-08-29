@@ -550,7 +550,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Fast on 2026-08-21: the 2026-08-17 drain fix took it from 52,822 ms to
     // a measured 5,049 ms on KVM (nightly run 32444411794), exactly the
     // crossing its relegation record said the next nightly would decide.
-    ("idle_stack_guard", Sched::Parallel, Tier::Fast),
+    ("idle_stack_guard", Sched::Parallel, Tier::Nightly),
     // Its own boot and its own feature, and it deafens one CPU for 400 ms —
     // but the deafening is a *window*, and the verdict is whether the NMI is
     // answered inside `NMI_BUDGET_NS`, which is one millisecond. That is a
@@ -562,7 +562,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // to Fast on 2026-08-21: the 2026-08-17 drain fix took it from 24,625 ms
     // to a measured 6,284 ms on KVM (nightly run 32444411794), the return its
     // relegation record called the likeliest in the table.
-    ("dump_nmi_probe", Sched::Serial, Tier::Fast),
+    ("dump_nmi_probe", Sched::Serial, Tier::Nightly),
     ("diskless_boot", Sched::Parallel, Tier::Fast),
     // Every verdict is a line of text or a device property, and no clock is in
     // any of them.
@@ -598,7 +598,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("nvme_large_device", Sched::Parallel, Tier::Fast),
     ("nvme_wide_sector", Sched::Parallel, Tier::Fast),
     ("iommu_discovery", Sched::Parallel, Tier::Nightly),
-    ("readdir_bound", Sched::Parallel, Tier::Fast),
+    ("readdir_bound", Sched::Parallel, Tier::Nightly),
     // Its own boot: it fills the VFS `created_dirs` cap and leaves it there.
     ("mkdir_cap", Sched::Parallel, Tier::Fast),
     // Two boots, and the verdict is that they answer differently. Nothing in it
@@ -763,8 +763,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // made for that whole family. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("swiss_german_layout", Sched::Parallel, Tier::Fast),
-    ("locale_detect", Sched::Parallel, Tier::Fast),
-    ("locale_detect_unrecognized", Sched::Parallel, Tier::Fast),
+    ("locale_detect", Sched::Parallel, Tier::Nightly),
+    ("locale_detect_unrecognized", Sched::Parallel, Tier::Nightly),
     // The wizard on the two surfaces the machine actually has, rather than on
     // the stand-in `locale_gate` is. Each costs a boot of a different image.
     ("console_locale_detect", Sched::Parallel, Tier::Fast),
@@ -818,7 +818,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // report is on the pin or on a timer.
     ("i8042_health_cadence", Sched::Parallel, Tier::Nightly),
     ("xhci_xecp_walk", Sched::Parallel, Tier::Fast),
-    ("xhci_slot_exhaustion", Sched::Parallel, Tier::Fast),
+    ("xhci_slot_exhaustion", Sched::Parallel, Tier::Nightly),
     ("usb_storage_gate", Sched::Parallel, Tier::Nightly),
     ("usb_storage_shapes", Sched::Parallel, Tier::Nightly),
     ("usb_refused_disk_first", Sched::Parallel, Tier::Nightly),
@@ -829,7 +829,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // eleven others answers those late for reasons that are not the defect.
     ("usb_boot_stick_pulled", Sched::Serial, Tier::Nightly),
     ("usb_pool_exhausted", Sched::Parallel, Tier::Fast),
-    ("usb_short_read", Sched::Parallel, Tier::Fast),
+    ("usb_short_read", Sched::Parallel, Tier::Nightly),
     // A plug over QMP and two host-side verdicts, neither of them a byte
     // comparison alone: the fixed 1.2 s wait against a 100 ms debounce is a
     // staged latency window the LATE_READY assertion is waited out before
@@ -859,7 +859,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // had — its own doc says one break under KVM and two under TCG off the
     // same tree, which is the race timer-anchored, not a margin, describes.
     ("usb_transport_break", Sched::Serial, Tier::Nightly),
-    ("xhci_full_speed_device", Sched::Parallel, Tier::Fast),
+    ("xhci_full_speed_device", Sched::Parallel, Tier::Nightly),
     ("xhci_superspeed_ports", Sched::Parallel, Tier::Fast),
     // Two of the three below stage plug and unplug with fixed waits, 600-800 ms
     // against a 100 ms debounce, plus 20-200 ms sleeps pacing the input pokes
@@ -876,7 +876,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("xhci_flap", Sched::Serial, Tier::Nightly),
     ("xhci_hid_break", Sched::Parallel, Tier::Nightly),
     ("xhci_descriptor_walk", Sched::Parallel, Tier::Fast),
-    ("esp_filesystem", Sched::Parallel, Tier::Fast),
+    ("esp_filesystem", Sched::Parallel, Tier::Nightly),
     // Three boots: a budget-refused flush retried and kept, the deadman's
     // declared death, and a hung device's failed reset escalation — the three
     // exits of `object/ops.rs`'s fsync loop. Every verdict is line presence
@@ -904,7 +904,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
-    ("log_partition_identity", Sched::Parallel, Tier::Fast),
+    ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
     // The write-back queue's three negative controls (wall 4 of
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
@@ -914,7 +914,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // does not. `writeback_durability` is a host-side volume oracle that shuts the
     // guest down and reads `/log` back with `toyos-fat32-check`.
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
-    ("writeback_spawn", Sched::Parallel, Tier::Fast),
+    ("writeback_spawn", Sched::Parallel, Tier::Nightly),
     ("writeback_durability", Sched::Parallel, Tier::Fast),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
@@ -924,7 +924,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the same reason `writeback_durability` is one: whether the clusters the
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
-    ("fat_backing_revoked", Sched::Parallel, Tier::Fast),
+    ("fat_backing_revoked", Sched::Parallel, Tier::Nightly),
     // F5 and F6's negative controls: an fsync that must keep refusing while the
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
@@ -933,7 +933,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     ("va_exhaustion", Sched::Parallel, Tier::Fast),
-    ("heap_ceiling_recovery", Sched::Parallel, Tier::Fast),
+    ("heap_ceiling_recovery", Sched::Parallel, Tier::Nightly),
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     // H4: soundd driving an Intel HDA controller itself, read back off the
@@ -7978,8 +7978,12 @@ fn run_machine_test(
             };
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let log =
-                qemu.boot_log().to_string() + &qemu.drain_serial(Duration::from_millis(500));
+            // A liveness ceiling, not a pace: a loaded shard once took past a
+            // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
+            let log = qemu.boot_log().to_string()
+                + &qemu.drain_until(Duration::from_secs(10), |l| {
+                    l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
+                });
             if log.contains("sysret-ss: NOT reloaded") {
                 return Err(format!(
                     "the switch did not reload SS — a sysretq here would hand userland an \
