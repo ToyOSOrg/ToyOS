@@ -47,9 +47,9 @@ PCI walk: `PCI: Enumerating devices...` at 0.065, last real function `0a:00.0` a
 that hold nothing, against 7 ms finding everything that is there.
 
 **What this entry is for.** Metal boot time has no owner of its own; the only
-accounting it ever had was written against the superseded 3422 ms boot, and
-`framebuffer-clients-pay-the-scanout-price` points at "#65
-(boot time)" as its owner. Whatever #65 says, its numbers should come from this table:
+accounting it ever had was written against the superseded 3422 ms boot and
+pointed at "#65 (boot time)" as its owner. Whatever #65 says, its numbers
+should come from this table:
 the two-thirds that motivated it were paints and are gone. Note also the NIC
 retry that looks like boot cost and is not — `toyos/src/net.rs:271`'s 100 retries
 at 10 ms run *after* `Boot: complete` (see *Every network client pays a second of
