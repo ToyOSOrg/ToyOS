@@ -79,12 +79,20 @@ pub fn try_claim(class: DeviceType) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
         DeviceType::Keyboard => {
+            // A claim is evidence: with no i8042 keyboard armed and no xHCI
+            // controller bound, nothing can ever feed the stream it names.
+            if !keyboard::source_exists() {
+                return Err(ClaimError::Absent);
+            }
             let claim = Claim::acquire(class)?;
             // Keystrokes queued before this claim belong to no one; delivering them would leak them to the new owner.
             keyboard::discard_queued();
             Ok(DeviceClaim::new(class, DeviceInfo::Events, claim))
         }
         DeviceType::Mouse => {
+            if !mouse::source_exists() {
+                return Err(ClaimError::Absent);
+            }
             let claim = Claim::acquire(class)?;
             mouse::discard_queued();
             Ok(DeviceClaim::new(class, DeviceInfo::Events, claim))

@@ -7,6 +7,19 @@ pub use toyos_abi::input::MouseEvent;
 
 static MOUSE_BUF: Lock<VecDeque<MouseEvent>> = Lock::new(VecDeque::new());
 
+/// [`crate::keyboard::source_exists`]'s twin: the aux port armed, or any
+/// xHCI controller bound.
+static SOURCE_EXISTS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn declare_source() {
+    SOURCE_EXISTS.store(true, Ordering::Relaxed);
+}
+
+pub fn source_exists() -> bool {
+    SOURCE_EXISTS.load(Ordering::Relaxed)
+}
+
 /// How many pointer updates the kernel holds for a reader that is not reading.
 pub const MAX_QUEUED_EVENTS: usize = 512;
 static LAST_X: AtomicU16 = AtomicU16::new(0);

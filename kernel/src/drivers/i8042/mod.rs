@@ -1322,6 +1322,10 @@ pub fn init(rsdp_addr: u64) {
     // TrackPoint silently dead on a boot that otherwise reads green.
     let aux_unmasked = aux_line.is_some_and(|l| ioapic::set_masked(l.gsi, false).is_ok());
     ACTIVE.store(true, Ordering::Relaxed);
+    crate::keyboard::declare_source();
+    if aux_line.is_some() {
+        crate::mouse::declare_source();
+    }
     ARMED_NS.store(crate::clock::nanos_since_boot(), Ordering::Relaxed);
     HEALTH.store(HEALTH_ARMED, Ordering::Relaxed);
     handler_poll();
