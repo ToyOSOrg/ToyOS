@@ -82,6 +82,16 @@ lock-acquire-off = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 reap-raise-relaxed = []
+# The negative control for the poison bank. It restores the erasing one-slot
+# swap `poison_tid` used to make, so a second death on one CPU before its idle
+# trip erases the first, and `poison_set.rs` must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features poison-overwrite \
+#     --test poison_set
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+poison-overwrite = []
 # The negative control for the shootdown acknowledgement. It makes
 # `shootdown.rs`'s `serve` read what it owes `Relaxed`, so the flush no longer
 # postdates the initiator's page-table write, and `tlb_shootdown.rs` must red:

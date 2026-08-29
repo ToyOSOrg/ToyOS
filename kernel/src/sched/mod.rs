@@ -6,6 +6,7 @@ pub mod driver;
 pub mod dump;
 pub mod kthread;
 pub mod payload;
+pub mod poison;
 pub mod reap_gate;
 pub mod waitqs;
 

@@ -166,6 +166,9 @@ pub mod log_registry;
 #[path = "../../kernel/src/sched/reap_gate.rs"]
 pub mod reap_gate;
 
+#[path = "../../kernel/src/sched/poison.rs"]
+pub mod poison;
+
 /// Durability debt as generations. Pure `core`, so it compiles here unshimmed;
 /// `tests/durability.rs` drives the kernel's flush protocol over it.
 #[path = "../../kernel/src/durability.rs"]

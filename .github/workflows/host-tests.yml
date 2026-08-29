@@ -336,6 +336,25 @@ jobs:
             exit 1
           fi
 
+      - name: kernel-loom poison bank has teeth
+        run: |
+          set -o pipefail
+          echo "=== kernel-loom --features poison-overwrite --test poison_set (must red)" \
+            | tee -a /tmp/host.log
+          if cargo test --manifest-path kernel-loom/Cargo.toml \
+               --features poison-overwrite --test poison_set 2>&1 \
+               | tee /tmp/poison-overwrite.log | tee -a /tmp/host.log; then
+            echo "poison_set passed with the erasing swap restored: the model has no teeth" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'a_second_death_banks_beside_the_first \.\.\. FAILED' \
+               /tmp/poison-overwrite.log; then
+            echo "the overwrite build failed without a_second_death_banks_beside_the_first reaching a verdict: this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
       - name: kernel-loom reap gate's enrolment edge has teeth
         run: |
           set -o pipefail

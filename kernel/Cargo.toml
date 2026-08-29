@@ -36,6 +36,9 @@ lock-acquire-off = []
 # `src/sched/reap_gate.rs`'s `raise` store goes `Relaxed`, and `reap_gate`
 # reds.
 reap-raise-relaxed = []
+# `src/sched/poison.rs`'s bank becomes the erasing one-slot swap, and
+# `poison_set` reds.
+poison-overwrite = []
 # `src/shootdown.rs`'s `serve` reads what it owes `Relaxed`, and
 # `tlb_shootdown` reds.
 shootdown-serve-relaxed = []
