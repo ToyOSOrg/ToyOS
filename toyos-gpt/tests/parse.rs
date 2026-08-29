@@ -605,6 +605,8 @@ fn no_byte_of_the_table_can_panic_the_parser() {
 /// array below it, 2015..=2047 on this disk — are not usable space: a primary
 /// whose usable range reaches them lets a partition lawfully sit on the
 /// recovery copy, and the caller's next move is to write to that partition.
+/// The refusal concedes one caller block of flooring (7 LBAs here), so the
+/// bound on this 512-byte disk is 2022, not 2015.
 #[test]
 fn a_usable_range_reaching_the_backup_gpt_is_refused() {
     let mut b = Builder { last_usable: DISK_LBAS - 2, backup: true, ..Default::default() };
@@ -614,20 +616,56 @@ fn a_usable_range_reaching_the_backup_gpt_is_refused() {
         img.locate(guid(0xD4)),
         Err(GptError::UsableRangeCoversBackup {
             last: DISK_LBAS - 2,
-            backup_array_lba: DISK_LBAS - 33,
+            backup_array_lba: DISK_LBAS + 7 - 33,
         })
     );
 
-    // The bound is exact: the default table's 2014 is every other test's
-    // green, and the backup array's own first block is the first refusal.
-    let mut img = Builder { last_usable: DISK_LBAS - 33, ..Default::default() }.build();
+    // The bound is exact: the last value inside the flooring concession
+    // passes, and the first past it is refused.
+    let mut img = Builder { last_usable: DISK_LBAS + 7 - 34, ..Default::default() }.build();
+    img.locate(guid(0xC3)).expect("the concession's edge parses");
+    let mut img = Builder { last_usable: DISK_LBAS + 7 - 33, ..Default::default() }.build();
     assert_eq!(
         img.locate(guid(0xC3)),
         Err(GptError::UsableRangeCoversBackup {
-            last: DISK_LBAS - 33,
-            backup_array_lba: DISK_LBAS - 33,
+            last: DISK_LBAS + 7 - 33,
+            backup_array_lba: DISK_LBAS + 7 - 33,
         })
     );
+}
+
+/// A caller adapting a coarser block reports `lba_count` floored by up to one
+/// of its blocks — the kernel's 4 KiB `DeviceSectors` over a 512-byte disk
+/// floors by up to 7 LBAs — while an honest table is laid out against the
+/// disk's true end. The exact CI shape: a 2055-LBA disk (2055 % 8 = 7) whose
+/// table reserves the standard 33 blocks, seen through a view floored to
+/// 2048; its last_usable 2021 sits at the conceded bound's edge and must
+/// parse, where the unconceded bound refused every such disk.
+#[test]
+fn an_honest_table_on_a_floored_device_view_parses() {
+    struct Floored(Image, u64);
+    impl Sectors for Floored {
+        fn lba_bytes(&self) -> u32 {
+            self.0.lba_bytes()
+        }
+        fn lba_count(&self) -> u64 {
+            self.1
+        }
+        fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
+            self.0.read_lba(lba, buf)
+        }
+    }
+
+    let img = Builder {
+        lba_count: 2055,
+        last_usable: 2055 - 34,
+        backup: true,
+        ..Default::default()
+    }
+    .build();
+    let mut floored = Floored(img, 2048);
+    let found = toyos_gpt::locate(&mut floored, guid(0xC3)).expect("an honest disk lost /boot");
+    assert_eq!(found.partition.index, 2);
 }
 
 /// UEFI gives every entry a `UniquePartitionGUID` that must be unique. Two
