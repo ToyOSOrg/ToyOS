@@ -178,7 +178,7 @@ fat_backing_revoked 8226
 fault_gates 31
 foreign_disk_untouched 4688
 fpu_isolation 14662
-fs_dirs_durable 18446744073709551615
+fs_dirs_durable 7893
 fs_large_file 94
 fs_rename_durable 9346
 fs_transactional 85
