@@ -83,17 +83,16 @@ impl HidDevice {
         }
     }
 
-    // Wakes both halves that nothing in the type system pairs: the blocked-`sys_read` queue and the poll watchers.
+    // A keyboard wakes both halves that nothing in the type system pairs — the blocked-`sys_read`
+    // queue and the poll watchers; a pointer has only the poll half, since an empty Mouse read
+    // answers `NotFound` and no reader ever parks.
     fn wake(&self) {
         let (watchers, source) = match self.role {
             HidRole::Keyboard => {
                 keyboard::wake_waiters();
                 (keyboard::inbox_watchers(), crate::inbox::Source::Keyboard)
             }
-            HidRole::Pointer(_) => {
-                mouse::wake_waiters();
-                (mouse::inbox_watchers(), crate::inbox::Source::Mouse)
-            }
+            HidRole::Pointer(_) => (mouse::inbox_watchers(), crate::inbox::Source::Mouse),
         };
         if !watchers.is_empty() {
             crate::inbox::complete_pending_for_event(&watchers, source);

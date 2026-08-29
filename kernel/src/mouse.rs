@@ -106,11 +106,6 @@ pub fn remove_inbox_watcher(id: InboxId) {
     INBOX_WATCHERS.lock().retain(|&x| x != id);
 }
 
-/// Wake every thread blocked on mouse input.
-pub fn wake_waiters() {
-    crate::sched::waitqs::wake_device(&crate::sched::waitqs::MOUSE_WATCH);
-}
-
 pub fn inbox_watchers() -> Vec<InboxId> {
     INBOX_WATCHERS.lock().clone()
 }

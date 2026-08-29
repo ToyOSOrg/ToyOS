@@ -40,11 +40,6 @@ pub fn remove_inbox_watcher(id: InboxId) {
     INBOX_WATCHERS.lock().retain(|&x| x != id);
 }
 
-/// Wake every thread blocked on an incoming frame.
-pub fn wake_waiters() {
-    crate::sched::waitqs::wake_device(&crate::sched::waitqs::NETWORK_WATCH);
-}
-
 pub fn inbox_watchers() -> Vec<InboxId> {
     INBOX_WATCHERS.lock().clone()
 }
