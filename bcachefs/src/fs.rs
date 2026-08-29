@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use crate::alloc_bitmap::BitmapAllocator;
-use crate::block_io::{BlockBuf, BlockNum, BlockIO, BlockIOExt, BLOCK_SIZE};
+use crate::block_io::{BlockBuf, BlockNum, BlockIO, BlockIOExt, DeviceError, BLOCK_SIZE};
 use crate::btree::{self, Entry, Key, KeyType, Node};
 use crate::superblock::Superblock;
 
@@ -78,10 +78,11 @@ pub enum FsError {
     /// CRC only says the bytes are the bytes somebody wrote.
     BadSuperblock { field: &'static str },
     /// The device refused a transfer. Distinct from every corruption variant
-    /// above: those say the bytes are wrong, these say there are no bytes.
-    DeviceRead(BlockNum),
-    DeviceWrite(BlockNum),
-    DeviceSync,
+    /// above: those say the bytes are wrong, these say there are no bytes —
+    /// and each carries the device's retry discriminant unchanged.
+    DeviceRead(BlockNum, DeviceError),
+    DeviceWrite(BlockNum, DeviceError),
+    DeviceSync(DeviceError),
     NotFound,
     NoSpace { requested: u32, available: u64 },
     NameTooLong { len: usize, max: usize },

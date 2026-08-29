@@ -175,3 +175,140 @@ pub fn first_difference(before: &[u8], after: &[u8]) -> Option<String> {
         None => format!("the region changed length: {} -> {}", before.len(), after.len()),
     })
 }
+
+/// F9's negative control: an fsync on `/home` whose first attempt is
+/// budget-refused (`fsync-budget-spent`) must be retried to durable — on the
+/// erasing adapter the `BudgetExpired` came back as `Io` and the guest's
+/// `sync_all` failed on attempt 1. The independent oracle is the NVMe image
+/// itself: after the shutdown the file's bytes are read off it on the host,
+/// through this crate's own build of the `bcachefs` reader over a plain
+/// seek-and-read device — nothing the guest kernel executed.
+pub fn home_budget_refusal_retried(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["fsync-budget-spent"];
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/home_fsync_budget.rs`.
+    const PATH: &str = "f9-budget.bin";
+    const LEN: usize = 3 * 4096 + 41;
+    fn pattern() -> Vec<u8> {
+        (0..LEN).map(|i| (i.wrapping_mul(151) ^ 0x3C) as u8).collect()
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::MetalDisk,
+            kernel_params: PARAMS,
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    if boot.contains("/home is a tmpfs") {
+        return Err(format!(
+            "/home fell back to tmpfs, so nothing below touches the NVMe path:\n{boot}"
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_home_fsync_budget", Duration::from_secs(30));
+    let log = format!("{boot}\n{}{}{}", result.before, result.stdout, result.serial);
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "home_fsync_budget guest failed — a budget-refused /home fsync was not retried \
+             to durable:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    // Both halves of the staging, or the arm proved nothing: the refusal at the
+    // shipped NVMe site, and the fsync loop's own retry verdict.
+    if !log.contains("not issued") {
+        return Err(format!(
+            "no `not issued` line, so `fsync-budget-spent` staged no NVMe refusal:\n{log}"
+        ));
+    }
+    let retried = log
+        .lines()
+        .find(|l| l.contains("fsync: /home/") && l.contains("durable on attempt"))
+        .ok_or_else(|| {
+            format!("no `fsync: /home/... durable on attempt` line — the retry never ran:\n{log}")
+        })?
+        .trim()
+        .to_string();
+
+    let image = qemu.nvme_image().to_path_buf();
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let io = FileBlocks::open(&image)?;
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
+        .map_err(|e| format!("the NVMe image does not mount on the host: {e:?}"))?;
+    let got = fs
+        .read_file(PATH)
+        .map_err(|e| format!("reading {PATH} off the image: {e:?}"))?;
+    if got != pattern() {
+        let at = got.iter().zip(pattern()).position(|(a, b)| *a != b);
+        return Err(format!(
+            "{PATH} on the device is {} bytes, first differing at {at:?} — the retried fsync \
+             reported durable over bytes the device does not hold",
+            got.len()
+        ));
+    }
+
+    eprintln!("  [f9] {retried}");
+    eprintln!(
+        "  [f9] {LEN} bytes byte-identical off the NVMe image via the host's own bcachefs reader"
+    );
+    Ok(())
+}
+
+/// A disk image as a bcachefs block device: plain seek-and-read, no cache and
+/// no kernel code.
+struct FileBlocks {
+    file: std::cell::RefCell<std::fs::File>,
+    blocks: u64,
+}
+
+impl FileBlocks {
+    fn open(path: &Path) -> Result<Self, String> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        let len = file.metadata().map_err(|e| format!("stat: {e}"))?.len();
+        Ok(Self { file: std::cell::RefCell::new(file), blocks: len / 4096 })
+    }
+}
+
+impl bcachefs::BlockIO for FileBlocks {
+    fn read_block(
+        &self,
+        block: bcachefs::BlockNum,
+        buf: &mut bcachefs::BlockBuf,
+    ) -> Result<(), bcachefs::DeviceError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = self.file.borrow_mut();
+        file.seek(SeekFrom::Start(block.raw() * 4096))
+            .map_err(|_| bcachefs::DeviceError::Failed)?;
+        file.read_exact(buf.as_bytes_mut()).map_err(|_| bcachefs::DeviceError::Failed)
+    }
+
+    fn write_block(
+        &self,
+        _block: bcachefs::BlockNum,
+        _buf: &bcachefs::BlockBuf,
+    ) -> Result<(), bcachefs::DeviceError> {
+        Err(bcachefs::DeviceError::Failed)
+    }
+
+    fn block_count(&self) -> u64 {
+        self.blocks
+    }
+}

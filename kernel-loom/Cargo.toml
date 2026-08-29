@@ -150,6 +150,15 @@ shard-publish-relaxed = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 sleeplock-acquire-off = []
+# The negative control for the durability generations. It turns `settle` back
+# into the pre-generation blind clear, and `durability.rs` must red under it —
+# a page marked clean whose bytes never reached the device:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features durability-settle-blind \
+#     --test durability
+#
+# Never on by default, and no kernel build can reach it.
+durability-settle-blind = []
 
 [dependencies]
 loom = "0.7"

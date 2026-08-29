@@ -1065,7 +1065,7 @@ impl bcachefs::BlockIO for Refuses {
         buf: &mut bcachefs::BlockBuf,
     ) -> Result<(), bcachefs::DeviceError> {
         if self.read == Some(block.raw()) {
-            return Err(bcachefs::DeviceError);
+            return Err(bcachefs::DeviceError::Failed);
         }
         self.inner.read_block(block, buf)
     }
@@ -1076,7 +1076,7 @@ impl bcachefs::BlockIO for Refuses {
         buf: &bcachefs::BlockBuf,
     ) -> Result<(), bcachefs::DeviceError> {
         if self.write == Some(block.raw()) {
-            return Err(bcachefs::DeviceError);
+            return Err(bcachefs::DeviceError::Failed);
         }
         self.inner.write_block(block, buf)
     }
@@ -1104,7 +1104,7 @@ fn a_data_block_the_device_refuses_is_not_a_page_of_zeros() {
 
     let fs = Mounted::<_, ReadOnly>::open(Refuses::read(raw, data_block)).expect("open");
     match fs.read_file("doc.bin") {
-        Err(FsError::DeviceRead(block)) => assert_eq!(block.raw(), data_block),
+        Err(FsError::DeviceRead(block, e)) => { assert_eq!(block.raw(), data_block); assert_eq!(e, bcachefs::DeviceError::Failed); }
         Ok(data) => panic!(
             "read_file returned {} bytes for a block the device refused; first is {:#x}",
             data.len(),
@@ -1121,7 +1121,7 @@ fn a_btree_node_the_device_refuses_is_not_a_node_of_zeros() {
 
     let fs = Mounted::<_, ReadOnly>::open(Refuses::read(raw, root)).expect("open");
     match fs.list() {
-        Err(FsError::DeviceRead(block)) => assert_eq!(block.raw(), root),
+        Err(FsError::DeviceRead(block, _)) => assert_eq!(block.raw(), root),
         other => panic!("expected DeviceRead, got {other:?}"),
     }
 }
@@ -1133,7 +1133,7 @@ fn a_block_zero_the_device_refuses_does_not_fall_through_to_the_backup() {
     // device that is not answering.
     let raw = volume_with("doc.bin", b"small");
     match Mounted::<_, ReadOnly>::open(Refuses::read(raw, 0)) {
-        Err(FsError::DeviceRead(block)) => assert_eq!(block.raw(), 0),
+        Err(FsError::DeviceRead(block, _)) => assert_eq!(block.raw(), 0),
         other => panic!("expected DeviceRead, got {:?}", other.map(|_| "a mount")),
     }
 }
@@ -1148,7 +1148,7 @@ fn a_write_the_device_refuses_is_reported_and_gives_its_blocks_back() {
 
     let mut fs = Mounted::<_, ReadWrite>::open(Refuses::write(raw, next_free)).expect("open");
     match fs.create("new.bin", &vec![0x11u8; 4096], 0) {
-        Err(FsError::DeviceWrite(block)) => assert_eq!(block.raw(), next_free),
+        Err(FsError::DeviceWrite(block, e)) => { assert_eq!(block.raw(), next_free); assert_eq!(e, bcachefs::DeviceError::Failed); }
         other => panic!("expected DeviceWrite, got {other:?}"),
     }
 
@@ -1163,4 +1163,52 @@ fn a_write_the_device_refuses_is_reported_and_gives_its_blocks_back() {
         .expect("file_extents")
         .expect("keep.bin");
     assert_eq!(extents[0].start_block + 1, next_free);
+}
+
+/// A device that answers every transfer but postpones its cache flush on the
+/// caller's budget — the NVMe reset-reclaimed silence, at this boundary.
+struct Postpones {
+    inner: VecBlockIO,
+}
+
+impl bcachefs::BlockIO for Postpones {
+    fn read_block(
+        &self,
+        block: bcachefs::BlockNum,
+        buf: &mut bcachefs::BlockBuf,
+    ) -> Result<(), bcachefs::DeviceError> {
+        self.inner.read_block(block, buf)
+    }
+
+    fn write_block(
+        &self,
+        block: bcachefs::BlockNum,
+        buf: &bcachefs::BlockBuf,
+    ) -> Result<(), bcachefs::DeviceError> {
+        self.inner.write_block(block, buf)
+    }
+
+    fn block_count(&self) -> u64 {
+        self.inner.block_count()
+    }
+
+    fn sync(&self) -> Result<(), bcachefs::DeviceError> {
+        Err(bcachefs::DeviceError::Refused)
+    }
+}
+
+/// The retry discriminant crosses this crate unchanged: a `Refused` sync comes
+/// out of `Mounted::sync` still `Refused`, never widened into the device's own
+/// word — the erasure `kernel/CLAUDE.md`'s BudgetExpired rule forbids.
+#[test]
+fn a_refused_sync_stays_refused_through_the_filesystem() {
+    let raw = volume_with("doc.bin", b"small");
+    let mut fs =
+        Mounted::<_, ReadWrite>::open(Postpones { inner: VecBlockIO::from_vec(raw) })
+            .expect("open");
+    fs.create("new.bin", b"new bytes", 0).expect("create");
+    match fs.sync() {
+        Err(FsError::DeviceSync(bcachefs::DeviceError::Refused)) => {}
+        other => panic!("expected DeviceSync(Refused), got {other:?}"),
+    }
 }

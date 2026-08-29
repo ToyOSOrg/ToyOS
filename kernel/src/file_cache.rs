@@ -5,6 +5,7 @@ use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 
 use crate::block;
+use crate::durability::{Owed, Settlement};
 use crate::file_backing::FileBacking;
 use crate::sync::Lock;
 use crate::user_ptr::{ByteSource, UserBytesMut};
@@ -16,9 +17,16 @@ const PAGE_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 
 struct CachedPage {
     data: Box<[u8; PAGE_SIZE]>,
-    dirty: bool,
+    /// Dirty state as generations, settled only against what a flush copied.
+    dirt: Owed,
     /// CLOCK's second-chance bit: set on every hit, cleared when the sweep passes it over.
     referenced: bool,
+}
+
+impl CachedPage {
+    fn is_dirty(&self) -> bool {
+        self.dirt.is_owed()
+    }
 }
 
 struct CachedFile {
@@ -31,8 +39,8 @@ struct CachedFile {
     deleted: bool,
     /// Pins the file alive at `ref_count == 0` for the write-back queue; cleared only by [`finish_writeback`].
     teardown_owed: bool,
-    /// The file, not any one handle, owes a metadata/data flush; cleared by [`take_dirty`].
-    dirty_meta: bool,
+    /// The file, not any one handle, owes a flush; settled only by [`settle_file`] on a flush that succeeded.
+    dirt: Owed,
 }
 
 impl CachedFile {
@@ -83,7 +91,7 @@ pub fn create_file(evictable: bool) -> FileId {
         ref_count: 1,
         deleted: false,
         teardown_owed: false,
-        dirty_meta: false,
+        dirt: Owed::new(),
     });
     id
 }
@@ -176,7 +184,7 @@ pub enum Teardown {
 /// What `iod`/shutdown needs to know before flushing a queued file, read in one lock.
 #[derive(Clone, Copy)]
 pub struct WritebackProbe {
-    pub dirty_meta: bool,
+    pub flush_owed: bool,
     /// A deleted file's drain skips the flush — its data is going away.
     pub deleted: bool,
 }
@@ -185,8 +193,8 @@ pub struct WritebackProbe {
 pub fn writeback_probe(file_id: FileId) -> WritebackProbe {
     let cache = FILE_CACHE.lock();
     match cache.files.get(&file_id) {
-        Some(file) => WritebackProbe { dirty_meta: file.dirty_meta, deleted: file.deleted },
-        None => WritebackProbe { dirty_meta: false, deleted: false },
+        Some(file) => WritebackProbe { flush_owed: file.dirt.is_owed(), deleted: file.deleted },
+        None => WritebackProbe { flush_owed: false, deleted: false },
     }
 }
 
@@ -332,10 +340,10 @@ fn apply_write<S: ByteSource + ?Sized>(
     let page = file.pages.get_mut(&page_idx).expect("write_page: page not resident");
     let end = (offset + data.len()).min(PAGE_SIZE);
     data.read_at(0, &mut page.data[offset..end]);
-    page.dirty = true;
+    page.dirt.record_write();
     page.referenced = true;
-    // Both set under the one FILE_CACHE lock, so a flush never observes one without the other.
-    file.dirty_meta = true;
+    // Both recorded under the one FILE_CACHE lock, so a flush never observes one without the other.
+    file.dirt.record_write();
 
     let write_end = page_idx as u64 * PAGE_SIZE as u64 + end as u64;
     if write_end > file.size {
@@ -343,47 +351,56 @@ fn apply_write<S: ByteSource + ?Sized>(
     }
 }
 
-/// Copy a resident page out; returns `false` with `buf` untouched when the page is not resident.
-/// A return value, not zero-fill: callers must tell an absent page from a page that really is zero.
+/// Copy a resident page out, with the settlement its flusher must present to
+/// mark it clean; `None` leaves `buf` untouched — an absent page is not zeros.
 #[must_use]
-pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) -> bool {
+pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) -> Option<Settlement> {
     let cache = FILE_CACHE.lock();
-    let Some(file) = cache.files.get(&file_id) else { return false };
-    let Some(page) = file.pages.get(&page_idx) else { return false };
+    let file = cache.files.get(&file_id)?;
+    let page = file.pages.get(&page_idx)?;
     *buf = *page.data;
-    true
+    Some(page.dirt.snapshot())
 }
 
-/// Take the dirty page set for a flush and clear `dirty_meta`, in one lock; page `dirty` bits are cleared separately by [`clear_dirty`].
-/// Clearing here, not after the flush, lets a write landing afterward re-set the flag and be caught by the next flush.
-pub fn take_dirty(file_id: FileId) -> BTreeSet<u32> {
-    let mut cache = FILE_CACHE.lock();
-    let Some(file) = cache.files.get_mut(&file_id) else { return BTreeSet::new() };
-    file.dirty_meta = false;
-    file.pages.iter().filter(|(_, p)| p.dirty).map(|(&i, _)| i).collect()
+/// What one flush attempt owes, snapshotted in one lock; nothing is cleared
+/// here — a write landing mid-flush outruns the settlement and stays owed.
+pub struct FlushPlan {
+    pub file: Settlement,
+    pub pages: BTreeSet<u32>,
 }
 
-/// Whether a file owes a write-back; `fsync` reads this so a handle that did not itself write still flushes a file another handle dirtied.
-pub fn dirty_meta(file_id: FileId) -> bool {
-    FILE_CACHE.lock().files.get(&file_id).is_some_and(|f| f.dirty_meta)
-}
-
-/// Re-mark a file as owing a write-back, to restore the flag when a flush fails.
-pub fn mark_dirty_meta(file_id: FileId) {
-    if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
-        file.dirty_meta = true;
+pub fn begin_flush(file_id: FileId) -> FlushPlan {
+    let cache = FILE_CACHE.lock();
+    match cache.files.get(&file_id) {
+        Some(file) => FlushPlan {
+            file: file.dirt.snapshot(),
+            pages: file.pages.iter().filter(|(_, p)| p.is_dirty()).map(|(&i, _)| i).collect(),
+        },
+        None => FlushPlan { file: Owed::new().snapshot(), pages: BTreeSet::new() },
     }
 }
 
-/// Mark only the pages a flush actually wrote as clean — a page dirtied while the flush's lock was dropped has not reached disk.
-pub fn clear_dirty(file_id: FileId, flushed: &BTreeSet<u32>) {
+/// Whether a file owes a write-back; `fsync` reads this so a handle that did not itself write still flushes a file another handle dirtied.
+pub fn flush_owed(file_id: FileId) -> bool {
+    FILE_CACHE.lock().files.get(&file_id).is_some_and(|f| f.dirt.is_owed())
+}
+
+/// Settle each page up to what its flush copied; a page written since keeps its debt and the next flush delivers it.
+pub fn settle_pages(file_id: FileId, flushed: &[(u32, Settlement)]) {
     let mut cache = FILE_CACHE.lock();
     if let Some(file) = cache.files.get_mut(&file_id) {
-        for page_idx in flushed {
+        for (page_idx, copied) in flushed {
             if let Some(page) = file.pages.get_mut(page_idx) {
-                page.dirty = false;
+                page.dirt.settle(*copied);
             }
         }
+    }
+}
+
+/// Settle the file's flush debt; only a flush that wrote its pages and its metadata calls this.
+pub fn settle_file(file_id: FileId, upto: Settlement) {
+    if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
+        file.dirt.settle(upto);
     }
 }
 
@@ -403,7 +420,7 @@ pub fn resize(file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
     set_size_locked(&mut cache, file_id, new_size);
     if let Some(file) = cache.files.get_mut(&file_id) {
-        file.dirty_meta = true;
+        file.dirt.record_write();
     }
 }
 
@@ -428,7 +445,8 @@ fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
                 let straddled = (new_size / PAGE_SIZE as u64) as u32;
                 if let Some(page) = file.pages.get_mut(&straddled) {
                     page.data[tail..].fill(0);
-                    page.dirty = true;
+                    page.dirt.record_write();
+                    file.dirt.record_write();
                 }
             }
             if is_cache { removed.len() } else { 0 }
@@ -465,7 +483,7 @@ pub fn mark_deleted(file_id: FileId) -> Residency {
 
 impl CachedPage {
     fn new(data: Box<[u8; PAGE_SIZE]>) -> Self {
-        Self { data, dirty: false, referenced: false }
+        Self { data, dirt: Owed::new(), referenced: false }
     }
 }
 
@@ -540,7 +558,7 @@ fn evict_one(cache: &mut FileCache) -> bool {
         {
             let Some(file) = cache.files.get_mut(&fid) else { continue };
             let Some(page) = file.pages.get_mut(&idx) else { continue };
-            if page.dirty {
+            if page.is_dirty() {
                 continue;
             }
             if page.referenced {

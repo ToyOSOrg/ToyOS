@@ -506,8 +506,9 @@ pub fn fsync(object: &KObjectRef) -> u64 {
     };
     let (path, file_id, mtime) =
         file.with(|state| (state.path.clone(), state.file_id, state.mtime));
-    // The file's dirty state, not the handle's: another handle's write still gets made durable here.
-    if !file_cache::dirty_meta(file_id) {
+    // The file's debt or its mount's, not the handle's: another handle's write, and a
+    // device commit an earlier attempt failed to deliver, are both still owed here.
+    if !crate::vfs::lock().durability_owed(&path, file_id) {
         return 0;
     }
     let began = crate::clock::now();
@@ -542,11 +543,11 @@ pub fn fsync(object: &KObjectRef) -> u64 {
                         crate::clock::now() - began,
                     );
                 }
-                // `flush_file` already cleared the file's own `dirty_meta`; there is no per-handle flag to clear.
+                // `flush_file` settled the file's debt and `sync_for_path` the mount's; there is no per-handle flag to clear.
                 return 0;
             }
             // A budget expired on a live device, never a device fact: retry on a fresh budget.
-            // A refused attempt discards nothing — `Vfs::flush_file` restores `dirty_meta` before returning.
+            // A refused attempt discards nothing — an unsettled debt needs no restoring.
             Err(SyscallError::WouldBlock) => {
                 // A killed caller stops retrying at the first safe point; the return value dies with the task.
                 if crate::sched::driver::current_kill_pending() {
