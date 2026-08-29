@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use crate::elf;
 use crate::object::{ops, HandleTable, KObjectRef};
 use crate::mm::paging::{CachePolicy, Prot};
-use crate::mm::PAGE_2M;
+use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
     ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Pid,
     ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserStack,
@@ -68,7 +68,7 @@ pub(crate) fn read_file_range(
     let mut result = Vec::with_capacity(len);
     let mut remaining = len;
     let mut file_off = offset;
-    let mut page_buf = [0u8; 4096];
+    let mut page_buf = [0u8; PAGE_BYTES];
 
     while remaining > 0 {
         let off_in_block = (file_off % 4096) as usize;
@@ -397,6 +397,23 @@ pub fn spawn(
 
     let exe = read_exe_tables(backing.as_ref(), &layout, path)?;
     let t1 = crate::clock::nanos_since_boot();
+
+    // The exe's relocations, validated like a library's but for the fill page:
+    // applied one demand-fault page at a time, a crossing write is refused, not
+    // silently dropped. The symbol bound is left to `exe.symbol`'s backing read.
+    let fill = toyos_elf::rela::FillLattice {
+        base: layout.vaddr_min,
+        granule: toyos_elf::rela::FILL_GRANULE,
+    };
+    if let Err(e) = toyos_elf::rela::validate(
+        exe.relas.as_relas(),
+        (layout.vaddr_min, layout.vaddr_max),
+        usize::MAX,
+        Some(fill),
+    ) {
+        log!("spawn: {}: {}", path, e.as_str());
+        return Err(SyscallError::InvalidArgument.into());
+    }
 
     // Reserved from the counts, not grown: these are exact upper bounds on `add_u64` calls.
     let u64_writes =
@@ -808,7 +825,7 @@ fn exe_tpoff(
     total_memsz: usize,
     tls_info: &elf::TlsModuleInfo,
 ) -> i64 {
-    let unnamed = exe_base_offset as i64 + r_addend - total_memsz as i64;
+    let unnamed = toyos_elf::tls::tpoff(exe_base_offset as u64, r_addend, total_memsz);
     if r_sym == 0 {
         return unnamed;
     }
@@ -816,7 +833,7 @@ fn exe_tpoff(
         return unnamed;
     };
     if sym.is_defined() {
-        return exe_base_offset as i64 + sym.value as i64 + r_addend - total_memsz as i64;
+        return toyos_elf::tls::tpoff(exe_base_offset as u64 + sym.value, r_addend, total_memsz);
     }
 
     let name = toyos_elf::cstr(&exe.dynstr, sym.name as u64);
@@ -825,7 +842,7 @@ fn exe_tpoff(
     // rather than guessed at with base_offset 0.
     match elf::defining_module(name, tls_info) {
         Some((module, sym_offset)) => {
-            module.base_offset as i64 + sym_offset as i64 - total_memsz as i64
+            toyos_elf::tls::tpoff(module.base_offset as u64 + sym_offset, r_addend, total_memsz)
         }
         None => {
             log!("tpoff: unresolved exe TLS symbol: {}", name);

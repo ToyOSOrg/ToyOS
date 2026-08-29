@@ -58,7 +58,7 @@ pub const MAX_LOG_PARTS: u32 = 9999;
 pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
 /// The rotate-fast bound, and it is an argument now rather than a kernel
-/// actuator (§5.5).
+/// actuator.
 ///
 /// It exists for the same reason `test-small-caches` does: filling megabytes by
 /// logging would take a boot far longer than a test should wait, and the code
@@ -242,7 +242,7 @@ impl Volume {
     }
 
     /// Get everything written so far onto the device, cache flush included —
-    /// which is what `SYS_FSYNC` means on this tree since L6 (§12.4).
+    /// which is what `SYS_FSYNC` means on this tree.
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file.sync_all()
     }

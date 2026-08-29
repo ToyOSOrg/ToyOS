@@ -40,8 +40,8 @@ const RATE_44100: u8 = 6;
 const RATE_48000: u8 = 7;
 
 /// The one stream this driver opens. A device with several is a decision this
-/// file has not been asked to make, and taking the first of them is what §2.3
-/// forbids one layer down — but virtio-sound numbers its streams and reports
+/// file has not been asked to make, and taking the first of them is the blind
+/// choice forbidden one layer down — but virtio-sound numbers its streams and reports
 /// only how many, so there is nothing here to choose *by*.
 const STREAM_ID: u32 = 0;
 

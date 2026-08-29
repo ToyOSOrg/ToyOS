@@ -145,15 +145,15 @@ fn main() {
 
     let mut volume = Volume::open(stem, rotate_at, |line| say!("{line}"));
     match &volume {
-        // §5.6's half, **in one line**: the kernel says whether it has a
-        // console, this program says whether it has a volume and what the name
-        // it chose was decided by, and the two lines are the four-way table
-        // split between the two things that know. One and not two, because
-        // every line a daemon writes on a shared console is a line that can land
-        // inside a test's window — the C family removes it by this program's
-        // own name now (`tests/common/console.rs`), which is a reason to write
-        // few rather than a licence to write any number — and because §5.6 says
-        // "once".
+        // This program's half of the startup report, **in one line**: the
+        // kernel says whether it has a console, this program says whether it
+        // has a volume and what the name it chose was decided by, and the two
+        // lines are the four-way table split between the two things that know.
+        // One and not two, because every line a daemon writes on a shared
+        // console is a line that can land inside a test's window — the C family
+        // removes it by this program's own name now (`tests/common/console.rs`),
+        // which is a reason to write few rather than a licence to write any
+        // number — and the report is written once.
         Some(v) => say!("logd: this boot's kernel log is {} ({zone})", v.path()),
         None => say!(
             "logd: no {DIR} on this machine - this boot's kernel log is on the console only \
@@ -164,8 +164,8 @@ fn main() {
     let mut tail = LogTail::new();
     let mut buf = vec![Record::EMPTY; BATCH];
     let poller = Poller::new(1);
-    // Armed before the first read, in the shape §3.2 requires of every reader:
-    // the readiness is an edge, so the window is closed by reading once more
+    // Armed before the first read, in the shape every reader on this readiness
+    // needs: the readiness is an edge, so the window is closed by reading once more
     // after arming rather than by asking the kernel a question about a cursor
     // it does not hold. `min_complete` 0 with no timeout submits the entry and
     // returns — one `wait` per `watch`, which is what the ring's own
@@ -269,7 +269,7 @@ fn main() {
                 let first = retrying_since.is_none();
                 let since = *retrying_since.get_or_insert(began);
                 match fate(step, kind, since.elapsed()) {
-                    // §5.4, in order: stop feeding the volume, say so once, and
+                    // The give-up policy, in order: stop feeding the volume, say so once, and
                     // keep running. It does not exit and does not queue for a
                     // device that is not answering — "I stop waiting for this
                     // stick and say so" is the whole policy for a device fact.
@@ -375,7 +375,7 @@ fn boot_stamp() -> (Option<String>, Option<u64>, String) {
 /// the record's own monotonic offset.
 ///
 /// **The record's `at_ns` stays in the line too** — `LogRecord`'s `Display`
-/// renders it, and §3.3 is why: this program writes a *prefix* and the body is
+/// renders it, and here is why: this program writes a *prefix* and the body is
 /// byte-identical to what the console and the panel carry. So `/log` holds both
 /// clocks, and a line in the file can be matched against the same line on the
 /// wire without arithmetic.

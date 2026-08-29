@@ -1,6 +1,6 @@
 //! What a refused batch does to this boot's log volume.
 //!
-//! **One pure function, because this is the whole of §5.4 and it used to be
+//! **One pure function, because this is the whole refused-batch policy and it used to be
 //! `if let Err(_) = … { volume = None }`.** Everything above [`fate`] is I/O
 //! and everything below it is what the console says; the decision itself is a
 //! function of three things a host test can hand it, which is why this file
@@ -51,7 +51,7 @@
 use std::time::Duration;
 
 /// The longest a run of refused batches may keep being retried, and the point
-/// past which a slow round is *announced* (§5.4) — no longer the point past
+/// past which a slow round is *announced* — no longer the point past
 /// which a volume is declared dead for slowness, which since the 2026-08-23
 /// ruling nothing in this program is: only a device fact ends a volume, and
 /// the kernel's `DEADMAN` is what turns a hung device into one.
@@ -76,9 +76,8 @@ use std::time::Duration;
 /// with.
 ///
 /// **What it bounds is slowness and not errors, and that split is measured
-/// rather than chosen.** §5.4 called it "a policy over repeated errors and a
-/// slow-but-answering device", and the first half of that does not survive this
-/// tree: a failing write is *itself* logged by the driver
+/// rather than chosen.** The "repeated errors" half of a slowness-and-errors
+/// policy does not survive this tree: a failing write is *itself* logged by the driver
 /// (`usb-storage: cache flush failed on disk 0`), which commits a kernel record,
 /// which is a record this program then tries to write, which fails. Retrying
 /// inside a budget therefore does not sample a device that might recover — it

@@ -8,7 +8,7 @@
 //! open. That is why the sizes are here and checked on the host.
 
 /// Of a pipeline's periods, how many soundd keeps in reserve rather than
-/// spending on a client that is still filling (§4).
+/// spending on a client that is still filling.
 ///
 /// Policy, not physics, with the same standing as the kernel's `MAX_USER_STR`:
 /// of the shipped pipeline's 8 periods, soundd waits on a client for at most 3
@@ -29,13 +29,13 @@ pub const MIN_CLIENT_RATE: u32 = 8_000;
 pub const MAX_CLIENT_RATE: u32 = 192_000;
 
 /// How much unplayed audio must still be on the wire before the mix loop may
-/// defer a buffer for a client that is mid-refill (§4), or `None` on a pipeline
+/// defer a buffer for a client that is mid-refill, or `None` on a pipeline
 /// with nothing to spend.
 ///
 /// **The `None` used to be a startup panic** — `assert!(num_buffers > 5)`, a
 /// device shape killing the daemon that serves every client on the machine, in
-/// the class of the NVMe and xHCI zero-device panics. §4 already says what to
-/// do instead and always did: *on a pipeline of five or fewer buffers the
+/// the class of the NVMe and xHCI zero-device panics. The shallow-pipeline rule
+/// says what to do instead: *on a pipeline of five or fewer buffers the
 /// deferral policy is disabled and every free buffer is mixed immediately*. A
 /// reserve that is the whole pipeline is not a reserve, and mixing at once is
 /// what soundd does when it cannot afford to wait.
@@ -47,18 +47,18 @@ pub fn deferral_floor_nanos(num_buffers: usize, period_nanos: u64) -> Option<u64
 ///
 /// Every arm is a constraint the mix loop's own arithmetic imposes, named where
 /// it is imposed. A shape that trips one is refused by name and the machine
-/// gets the null sink (§6): requirement 6 is that soundd always runs and always
+/// gets the null sink: soundd always runs and always
 /// accepts streams, and it does not except itself from that when the surprise
 /// is a device rather than an absence. Silence a client can play into beats a
 /// dead daemon whose every connect is refused for the machine's lifetime.
 pub enum Shape {
-    /// A pipeline of one has no depth: `min_drain_nanos` is zero, so §5.9's
+    /// A pipeline of one has no depth: `min_drain_nanos` is zero, so the
     /// drain count could not tell a stall from ordinary operation.
     Shallow(usize),
     /// Deeper than [`MAX_PIPELINE`].
     Deep(usize),
     /// `slot_count` is the pipeline depth and the client ring's indices are
-    /// free-running mod 2^32 (§3), so the depth has to divide that evenly.
+    /// free-running mod 2^32, so the depth has to divide that evenly.
     Uneven(usize),
     /// The mixer converts mono and stereo, and nothing else.
     Channels(u16),
@@ -168,10 +168,9 @@ mod tests {
     /// One period of the shipped 44100 Hz stereo device, in nanoseconds.
     const PERIOD_NS: u64 = 2_902_494;
 
-    /// §4's shallow-pipeline clause: *on a pipeline of five or fewer buffers
+    /// The shallow-pipeline clause: *on a pipeline of five or fewer buffers
     /// the deferral policy is disabled and every free buffer is mixed
-    /// immediately*. It was an `assert!(num_buffers > 5)` — a startup panic —
-    /// for as long as the spec said this.
+    /// immediately*. It was an `assert!(num_buffers > 5)` startup panic.
     #[test]
     fn a_pipeline_with_nothing_to_reserve_disables_deferral() {
         for shallow in 1..=DEFERRAL_RESERVE {

@@ -59,7 +59,7 @@ pub fn mode() -> Drain {
 static DRAINED: Published = Published::new();
 
 /// Start the thread. Called once, from `kernel_main`, before the scheduler starts.
-/// Placement matters: APs spin on `SMP_READY` until then, so an earlier spawn could not run while the machine has no console.
+/// Placement matters: APs spin until the machine is released, so an earlier spawn could not run while the machine has no console.
 pub fn start() {
     let sched = kthread::spawn(NAME, body, 0, OnPanic::Halt);
     // Leaked: `klogd` never exits, and a producer reading this pointer under lock may not touch a refcount.

@@ -9,12 +9,21 @@ extern "C" {
     fn tls_set_label(val: u64);
 }
 
-// TLS in the main executable
+// `LOCAL_VALUE` sits at offset 0 of the exe's TLS, so its address is the exe
+// module's base in the combined block.
 thread_local! {
     static LOCAL_VALUE: Cell<u64> = const { Cell::new(42) };
 }
 
 fn main() {
+    // Test 0: psABI variant II — the exe's TLS module begins on its declared
+    // 64-byte p_align behind libtls_lib.so; the constant-16 loader landed it 32 low.
+    LOCAL_VALUE.with(|v| {
+        let addr = v as *const Cell<u64> as usize;
+        assert_eq!(addr % 64, 0, "exe TLS module base off its declared 64-byte alignment: {addr:#x}");
+    });
+    println!("PASS: exe TLS honours its declared alignment");
+
     // Test 1: exe-local thread_local works
     LOCAL_VALUE.with(|v| {
         assert_eq!(v.get(), 42, "exe TLS initial value");

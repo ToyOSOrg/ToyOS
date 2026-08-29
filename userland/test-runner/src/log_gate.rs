@@ -719,7 +719,7 @@ fn verdict(tail: &LogTail, run: &Run) -> Result<(), String> {
     if let Some(burst) = run.producers.get(&NEST_PRODUCER) {
         // The burst's own `done` is read the same way a storm's is: a
         // cross-check where it survived, and the ledger's own floor where it
-        // did not. The burst laps its shard by construction (§9.2), so a reader
+        // did not. The burst laps its shard by construction, so a reader
         // that required that record would be requiring one the design says may
         // go.
         let declared = match (run.nest, burst.next) {
