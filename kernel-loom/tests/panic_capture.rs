@@ -107,7 +107,7 @@ fn a_recovered_panic_hands_the_snapshot_to_the_next_captor() {
         latch.release();
 
         let next = {
-            let (latch, snapshot) = (latch.clone(), snapshot.clone());
+            let snapshot = snapshot.clone();
             thread::spawn(move || {
                 assert!(latch.claim(3), "a released latch refused its next captor");
                 // SAFETY: the previous owner released before this thread was spawned.
