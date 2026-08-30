@@ -201,6 +201,9 @@ const RUST_SKIP: &[&str] = &[
     // other machine both claims succeed. `input_claim_absent` runs it.
     "input_absent",
     "va_exhaustion",
+    // Needs a NIC in front of netd; only `tests/netcase` has one.
+    // `netd_listener_forgery` runs it there.
+    "netd_listener_forgery",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -517,6 +520,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // not compute-bound: timer-anchored, and Nightly for that reason.
     ("doom_music", Sched::Parallel, Tier::Nightly),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
+    // The netcase boot again: netd must not abort a listener on a ring flag its
+    // own client forged. Its verdict is a kernel-reported EOF or its absence;
+    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    ("netd_listener_forgery", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
@@ -11991,6 +11998,49 @@ fn run_machine_test(
                 ));
             }
             eprintln!("  [netcase] netd cap {declared} piped connections, {granted} accepted then refused");
+            Ok(())
+        }
+        "netd_listener_forgery" => {
+            // The same netcase boot netd_connection_caps uses (the only one
+            // with a NIC under netd), and the same announce-then-run shape.
+            // The client binds a piped listener, forges the reader-closed flag
+            // on its own notify pipe with the reader still open, and the guest
+            // asserts the listener survived — netd asking the kernel, not
+            // reading the forgeable bit. Measured negative control: on the
+            // pre-fix netd the guest panics ("netd tore the listener down").
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+            let bins: Vec<(String, Vec<u8>)> = rust_bins
+                .iter()
+                .filter(|(name, _)| name == "netd_listener_forgery")
+                .cloned()
+                .collect();
+            if bins.is_empty() {
+                return Err("netd_listener_forgery was not built".to_string());
+            }
+            let options = BootOptions {
+                profile: qemu::Profile::Headless,
+                ..Default::default()
+            };
+            if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+                return Err("this test needs a NIC and the profile has none".to_string());
+            }
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+            let mut console = qemu.boot_log().to_string();
+            let _ = await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
+            let result = qemu.run_test("test_rs_netd_listener_forgery", Duration::from_secs(60));
+            if let Some(err) = &result.error {
+                return Err(format!("{err}\n{}", result.stdout));
+            }
+            if result.exit_code != Some(0) {
+                return Err(format!(
+                    "netd_listener_forgery exited {:?}:\n{}",
+                    result.exit_code, result.stdout
+                ));
+            }
+            if !result.stdout.contains("listener survived a forged reader-closed flag") {
+                return Err(format!("no survival line from the guest:\n{}", result.stdout));
+            }
+            eprintln!("  [netcase] a piped listener survived a forged reader-closed flag");
             Ok(())
         }
         "netd_hostile_peer" => {

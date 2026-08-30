@@ -197,8 +197,6 @@ struct PipedConnection {
     handle: SocketHandle,
     rx_write: Option<Pipe>,
     tx_read: Option<Pipe>,
-    rx_ring: *const toyos_abi::ring::RingHeader,
-    tx_ring: *const toyos_abi::ring::RingHeader,
 }
 
 impl PipedConnection {
@@ -224,7 +222,6 @@ impl PipedConnection {
 struct PipedListener {
     handle: SocketHandle,
     notify_write: Pipe,
-    notify_ring: *const toyos_abi::ring::RingHeader,
     notified: bool,
 }
 
@@ -238,11 +235,6 @@ struct PendingPipedConnect {
     /// already told smoltcp to connect.
     pipes: DataPipes,
     deadline: Option<Instant>,
-}
-
-fn map_pipe_ring(pipe: &Pipe) -> *const toyos_abi::ring::RingHeader {
-    pipe.pipe_map()
-        .expect("pipe_map failed") as *const toyos_abi::ring::RingHeader
 }
 
 /// The two ends of a client's data path, as the client's request handed them
@@ -269,14 +261,10 @@ impl DataPipes {
 }
 
 fn piped_connection(handle: SocketHandle, pipes: DataPipes) -> PipedConnection {
-    let rx_ring = map_pipe_ring(&pipes.to_client);
-    let tx_ring = map_pipe_ring(&pipes.from_client);
     PipedConnection {
         handle,
         rx_write: Some(pipes.to_client),
         tx_read: Some(pipes.from_client),
-        rx_ring,
-        tx_ring,
     }
 }
 
@@ -925,11 +913,9 @@ impl NetDaemon {
         let socket_id = self.alloc_id();
         self.sockets.insert(socket_id, SocketKind::TcpListener(handle));
 
-        let notify_ring = map_pipe_ring(&notify_write);
         self.piped_listeners.insert(socket_id, PipedListener {
             handle,
             notify_write,
-            notify_ring,
             notified: false,
         });
 
@@ -1012,8 +998,6 @@ impl NetDaemon {
         for i in 0..self.piped_connections.len() {
             let conn = &mut self.piped_connections[i];
             let socket = socket_set.get_mut::<tcp::Socket>(conn.handle);
-            let rx_ring = unsafe { &*conn.rx_ring };
-            let tx_ring = unsafe { &*conn.tx_ring };
 
             // smoltcp rx → pipe write via kernel (ensures reader notification)
             while socket.can_recv() {
@@ -1030,12 +1014,20 @@ impl NetDaemon {
                 }
             }
 
-            // pipe read → smoltcp tx (drain fully via kernel for proper notification)
+            // pipe read → smoltcp tx (drain fully via kernel for proper notification).
+            // Ok(0) is the kernel's own EOF — the ring drained and no writer left —
+            // which is what says the client stopped writing; never the ring's
+            // closed flags, which live in a page the client can forge.
             while socket.can_send() {
                 if let Some(ref pipe) = conn.tx_read {
                     let mut buf = [0u8; 4096];
                     match toyos_abi::syscall::read_nonblock(pipe.as_handle(), &mut buf) {
-                        Ok(n) if n > 0 => { let _ = socket.send_slice(&buf[..n]); }
+                        Ok(0) => {
+                            socket.close();
+                            conn.close_tx();
+                            break;
+                        }
+                        Ok(n) => { let _ = socket.send_slice(&buf[..n]); }
                         _ => break,
                     }
                 } else {
@@ -1048,15 +1040,14 @@ impl NetDaemon {
                 conn.close_rx();
             }
 
-            // Detect client death: client closed its read end of the RX pipe
-            if conn.rx_write.is_some() && rx_ring.is_reader_closed() {
-                conn.close_rx();
-            }
-
-            // Detect client stopped writing (or died)
-            if conn.tx_read.is_some() && tx_ring.is_writer_closed() {
-                socket.close();
-                conn.close_tx();
+            // Detect client death: a zero-byte write is refused by name once
+            // the pipe has no reader — the kernel's fact, not the client's.
+            if let Some(ref pipe) = conn.rx_write {
+                if toyos_abi::syscall::write_nonblock(pipe.as_handle(), &[])
+                    == Err(toyos_abi::syscall::SyscallError::NotFound)
+                {
+                    conn.close_rx();
+                }
             }
 
             // Fully clean up when both sides are done
@@ -1087,8 +1078,11 @@ impl NetDaemon {
     fn cleanup_dead_listeners(&mut self, socket_set: &mut SocketSet<'_>) {
         let mut dead = Vec::new();
         for (&socket_id, listener) in &self.piped_listeners {
-            let ring = unsafe { &*listener.notify_ring };
-            if ring.is_reader_closed() {
+            // As in `bridge_piped`: the kernel refuses a reader-less pipe by
+            // name, and a zero-byte probe moves nothing.
+            if toyos_abi::syscall::write_nonblock(listener.notify_write.as_handle(), &[])
+                == Err(toyos_abi::syscall::SyscallError::NotFound)
+            {
                 dead.push(socket_id);
             }
         }
