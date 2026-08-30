@@ -579,6 +579,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
     ("pci_capability_walk", Sched::Parallel, Tier::Fast),
+    // What QEMU was told to create against what the guest enumerated: two
+    // accounts of one bus from two independent readers. One boot, every
+    // verdict a set comparison. Carrying `UNMEASURED_MS` until the shards
+    // price it.
+    ("query_pci_agreement", Sched::Parallel, Tier::Fast),
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
@@ -1200,17 +1205,15 @@ enum Why {
     /// Considered and declined. Nothing is owed, which is why this list has no
     /// `task` field where `EXPECTED_FAILURES` requires one: an expected
     /// failure nobody is assigned to is a disabled test, and a *decline* is
-    /// not owed to anybody by construction.
+    /// not owed to anybody by construction. A case held open by a write-up
+    /// instead carries an `Open(path)` variant, revived when one needs it.
     Declined(&'static str),
-    /// Held open by a write-up, which is where the reason lives.
-    Open(&'static str),
 }
 
 impl Why {
     fn stated(&self) -> String {
         match self {
             Why::Declined(reason) => format!("declined: {reason}"),
-            Why::Open(path) => format!("held open by {path}"),
         }
     }
 }
@@ -4924,7 +4927,7 @@ fn metal_sim_argv_check(argv: &[String]) -> Result<(), String> {
     // isa-parallel that nothing declared — and the NIC is enough to make netd
     // claim a device on the machine whose whole point is that it has none.
     // None of them appears in argv, so this flag is the only observable form
-    // of their absence here; `query-pci` is the direct one.
+    // of their absence here; `query_pci_agreement` is the direct one.
     if !argv.iter().any(|a| a == "-nodefaults") {
         return Err("metal-sim did not pass -nodefaults; QEMU's default-device pass is back".to_string());
     }
@@ -11160,6 +11163,65 @@ fn run_machine_test(
             eprintln!("  [pci] {}", verdict.trim());
             Ok(())
         }
+        "query_pci_agreement" => {
+            // What QEMU was told to create against what the guest enumerated,
+            // as two whole sets: `info pci` is the device model's own account
+            // of the bus, the kernel's ECAM walk is the guest's, and every
+            // earlier profile claim was checked only against the harness's
+            // argv — the same source it would be verifying. Metal, because
+            // the machine whose device set is not the harness's choice is the
+            // shape this instrument exists for.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Metal,
+                    qmp: true,
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            let Some(complete) = log.lines().find(|l| l.contains("PCI: Enumeration complete"))
+            else {
+                return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
+            };
+            let guest = guest_pci_functions(&log)?;
+            // The census line guards the parse: a reworded device line would
+            // otherwise shrink the set this comparison reads.
+            if !complete.contains(&format!("{} functions", guest.len())) {
+                return Err(format!(
+                    "the guest declared {complete:?} and this parse found {} device lines",
+                    guest.len()
+                ));
+            }
+            let answer = {
+                let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+                monitor.human("info pci")
+            };
+            drop(qemu);
+            let host = qmp_pci_functions(&answer)?;
+            if guest != host {
+                let missing: Vec<String> =
+                    host.difference(&guest).map(describe_pci_function).collect();
+                let invented: Vec<String> =
+                    guest.difference(&host).map(describe_pci_function).collect();
+                return Err(format!(
+                    "the guest's enumeration and QEMU's own account of the bus disagree — \
+                     QEMU has {} function(s) the guest never decoded [{}] and the guest \
+                     decoded {} [{}] QEMU does not claim\ninfo pci:\n{answer}\n{log}",
+                    missing.len(),
+                    missing.join(", "),
+                    invented.len(),
+                    invented.join(", "),
+                ));
+            }
+            eprintln!(
+                "  [pci] the guest and QEMU agree on all {} functions of the Metal bus",
+                guest.len()
+            );
+            Ok(())
+        }
         "xhci_descriptor_walk" => {
             // A configuration descriptor is the device's, and a device is not
             // kernel code. Every device QEMU can attach describes itself
@@ -12921,6 +12983,81 @@ struct XhciLayout {
     scratchpad: usize,
     blocks: usize,
     stride: usize,
+}
+
+/// One PCI function as both readers name it: bus, device, function, vendor,
+/// device id.
+type PciFunction = (u8, u8, u8, u16, u16);
+
+fn describe_pci_function(f: &PciFunction) -> String {
+    let (bus, dev, func, vendor, device) = f;
+    format!("{bus:02x}:{dev:02x}.{func} {vendor:04x}:{device:04x}")
+}
+
+/// The guest's account: every `PCI bb:dd.f [cc..] vendor=vvvv device=dddd`
+/// line the kernel's ECAM walk printed.
+fn guest_pci_functions(log: &str) -> Result<BTreeSet<PciFunction>, String> {
+    let mut out = BTreeSet::new();
+    for line in log.lines() {
+        let Some(rest) = line.split("  PCI ").nth(1) else { continue };
+        let Some((bdf, rest)) = rest.split_once(" [") else { continue };
+        let parse = || -> Option<PciFunction> {
+            let (bus, df) = bdf.split_once(':')?;
+            let (dev, func) = df.split_once('.')?;
+            let vendor = rest.split("vendor=").nth(1)?.split_whitespace().next()?;
+            let device = rest.split("device=").nth(1)?.split_whitespace().next()?;
+            Some((
+                u8::from_str_radix(bus, 16).ok()?,
+                u8::from_str_radix(dev, 16).ok()?,
+                func.parse().ok()?,
+                u16::from_str_radix(vendor, 16).ok()?,
+                u16::from_str_radix(device, 16).ok()?,
+            ))
+        };
+        let f = parse().ok_or_else(|| format!("unparseable guest PCI line: {line:?}"))?;
+        if !out.insert(f) {
+            return Err(format!("the guest printed one function twice: {line:?}"));
+        }
+    }
+    Ok(out)
+}
+
+/// QEMU's account: `info pci`, whose entries are a `Bus N, device N,
+/// function N:` header followed by a `PCI device vvvv:dddd` id line.
+fn qmp_pci_functions(answer: &str) -> Result<BTreeSet<PciFunction>, String> {
+    let mut out = BTreeSet::new();
+    let mut at: Option<(u8, u8, u8)> = None;
+    for line in answer.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("Bus ") {
+            let parse = || -> Option<(u8, u8, u8)> {
+                let (bus, rest) = rest.split_once(", device ")?;
+                let (dev, rest) = rest.split_once(", function ")?;
+                let func = rest.split_once(':')?.0;
+                Some((bus.trim().parse().ok()?, dev.trim().parse().ok()?, func.trim().parse().ok()?))
+            };
+            at = Some(parse().ok_or_else(|| format!("unparseable info pci header: {line:?}"))?);
+        } else if let Some(ids) = l.split("PCI device ").nth(1) {
+            let (bus, dev, func) =
+                at.ok_or_else(|| format!("an id line before any Bus header: {line:?}"))?;
+            let parse = || -> Option<(u16, u16)> {
+                let mut it = ids.split_whitespace().next()?.split(':');
+                let vendor = u16::from_str_radix(it.next()?, 16).ok()?;
+                let device = u16::from_str_radix(it.next()?, 16).ok()?;
+                Some((vendor, device))
+            };
+            let (vendor, device) =
+                parse().ok_or_else(|| format!("unparseable info pci id line: {line:?}"))?;
+            if !out.insert((bus, dev, func, vendor, device)) {
+                return Err(format!("info pci listed one function twice: {line:?}"));
+            }
+            at = None;
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("info pci answered no functions at all:\n{answer}"));
+    }
+    Ok(out)
 }
 
 fn parse_xhci_layout(log: &str) -> Option<XhciLayout> {
