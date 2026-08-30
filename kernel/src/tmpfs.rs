@@ -14,8 +14,8 @@ use crate::vfs::FileSystem;
 
 struct TmpfsBacking {
     file_id: FileId,
-    /// Shared by every backing for the entry; cleared by [`retire`] — the same
-    /// revocation `FileBlocks::revoke` gives `/home`'s `NvmeBacking`.
+    /// Shared by every backing for the entry; cleared by [`retire`], as
+    /// `FileBlocks::revoke` clears `/home`'s.
     alive: Arc<AtomicBool>,
 }
 

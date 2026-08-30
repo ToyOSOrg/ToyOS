@@ -319,8 +319,7 @@ impl PageCache {
     }
 }
 
-/// Read-fault injection, behind `pc-unbind-selftest`: a device wrapper that
-/// refuses reads of one armed block and counts the ones it serves of another.
+/// Read-fault injection (`pc-unbind-selftest`): refuse one armed block, count served reads of another.
 #[cfg(feature = "boot-actuators")]
 mod read_fault {
     use core::sync::atomic::{AtomicU64, Ordering};
