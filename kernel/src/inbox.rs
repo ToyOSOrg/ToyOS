@@ -852,8 +852,8 @@ impl Source {
     }
 
     /// The subject a thread blocked in a plain syscall on this source parks on.
-    /// Exhaustive on purpose: a new source cannot be added without deciding it,
-    /// which is the half the 7a cutover deleted and nothing caught for months.
+    /// Exhaustive on purpose: a new source cannot be added without deciding it —
+    /// the half the 7a cutover deleted.
     fn wake_direct_blocker(&self) {
         match self {
             Self::Keyboard => crate::keyboard::wake_waiters(),
@@ -865,16 +865,14 @@ impl Source {
             Self::Port(p) => {
                 completion::post(completion::Subject::of(p.watch()), completion::Outcome::Ready)
             }
-            // No blocking-syscall queue: an empty read answers `NotFound` and never parks
-            // (mouse, network); the log is edge-triggered on the reader's own cursor.
+            // No blocking-syscall queue: mouse/network reads answer `NotFound`,
+            // the log is edge-triggered on the reader's own cursor.
             Self::Mouse | Self::Network | Self::Log => {}
         }
     }
 
-    /// Both wakes an event on this source owes, as one act: the thread blocked
-    /// directly in a syscall, and every io_uring ring that registered a
-    /// `POLL_ADD`. Neither half is reachable without the other — the pairing
-    /// that was a hand-kept invariant before this.
+    /// Both wakes an event owes as one act — the blocked syscall, and every
+    /// ring that armed a `POLL_ADD`; neither half is reachable without the other.
     pub fn wake(&self) {
         self.wake_direct_blocker();
         let watchers = self.watchers();

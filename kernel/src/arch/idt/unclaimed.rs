@@ -17,14 +17,13 @@ use crate::arch::apic;
 static TAKEN: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Deliveries that set no ISR bit, so there is no vector to blame.
 static NO_ISR: AtomicU64 = AtomicU64::new(0);
-/// Event count at the last print, so process exit logs once per batch.
+/// Event count at the last print; process exit logs once per batch.
 static REPORTED: AtomicU64 = AtomicU64::new(0);
 
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn unclaimed_entry() {
     naked_asm!(
-        // Not `ring3_naked_asm!`: this vector can interrupt any instruction,
-        // `memmove`'s `std` … `cld` window included, so it owes its own `cld`.
+        // This vector can interrupt `memmove`'s `std` … `cld` window, so it owes its own `cld`.
         "cld",
         "push rax",
         "push rcx",
@@ -55,8 +54,7 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
     );
 }
 
-/// Counts the delivery, remembers which vector it was, and acknowledges it
-/// only if the ISR shows it needs one.
+/// Counts the delivery, remembers the vector, and EOIs only if the ISR needs one.
 extern "sysv64" fn took() {
     crate::irq_census::irq_took!(Unclaimed);
     match apic::in_service_highest() {
@@ -76,8 +74,7 @@ pub fn was_taken(vector: u8) -> bool {
     TAKEN[(vector >> 6) as usize].load(Ordering::Relaxed) & (1 << (vector & 63)) != 0
 }
 
-/// Logs which vectors the gate absorbed, at process exit beside the censuses,
-/// once per batch of new events; a boot that staged nothing says nothing.
+/// Logs which vectors the gate absorbed, at process exit, once per batch.
 pub fn log_vectors() {
     let words = [
         TAKEN[0].load(Ordering::Relaxed),
@@ -104,8 +101,8 @@ pub fn log_vectors() {
     crate::log!("irq: unclaimed vectors{} no-isr={no_isr}", Vectors(words));
 }
 
-/// Raises a vector no row claims on this CPU and verifies the gate counted
-/// it, remembered it, acknowledged it, and left the CPU taking interrupts.
+/// Raises a vector no row claims and verifies the gate counted, remembered,
+/// acknowledged it, and left the CPU taking interrupts.
 #[cfg(feature = "boot-actuators")]
 pub fn selftest() {
     use crate::irq_census::Source;
