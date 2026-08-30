@@ -287,6 +287,14 @@ impl FileBlocks {
     }
 }
 
+/// A host file's I/O failure was attempted and failed; nothing here budgets.
+struct HostIoFailed;
+impl bcachefs::TransferError for HostIoFailed {
+    fn refused_before_attempt(&self) -> bool {
+        false
+    }
+}
+
 impl bcachefs::BlockIO for FileBlocks {
     fn read_block(
         &self,
@@ -296,8 +304,8 @@ impl bcachefs::BlockIO for FileBlocks {
         use std::io::{Read, Seek, SeekFrom};
         let mut file = self.file.borrow_mut();
         file.seek(SeekFrom::Start(block.raw() * 4096))
-            .map_err(|_| bcachefs::DeviceError::Failed)?;
-        file.read_exact(buf.as_bytes_mut()).map_err(|_| bcachefs::DeviceError::Failed)
+            .map_err(|_| bcachefs::DeviceError::classify(&HostIoFailed))?;
+        file.read_exact(buf.as_bytes_mut()).map_err(|_| bcachefs::DeviceError::classify(&HostIoFailed))
     }
 
     fn write_block(
@@ -305,7 +313,7 @@ impl bcachefs::BlockIO for FileBlocks {
         _block: bcachefs::BlockNum,
         _buf: &bcachefs::BlockBuf,
     ) -> Result<(), bcachefs::DeviceError> {
-        Err(bcachefs::DeviceError::Failed)
+        Err(bcachefs::DeviceError::classify(&HostIoFailed))
     }
 
     fn block_count(&self) -> u64 {

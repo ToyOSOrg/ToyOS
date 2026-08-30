@@ -162,6 +162,7 @@ desktop_window_child 40312
 device_claim_lifetime 21
 disk_backtrace 85
 diskless_boot 4475
+dlopen_dedup 24
 doom_music 7514
 doom_sound_flood 5888
 double_fault_stack 5139
@@ -257,6 +258,7 @@ nested_fault_is_recursive 5936
 netd_connection_caps 6538
 netd_gone_mid_bind 32
 netd_hostile_peer 4509
+netd_listener_forgery 2649
 nic_dma_isolation 21
 nightly_tier_is_announced 0
 null_sink_client_exits 2167
@@ -268,12 +270,14 @@ nvme_wide_sector 3500
 operation_nesting 5075
 panic_recovery 130
 pci_capability_walk 5775
+pipe_flag_forgery 12
 poller_capacity 36
 port_poll_churn 84
 pre_idle_wedge_speaks 3688
 process_lifecycle 225
 process_stats 221
 query_modules_size 12
+read_fault_selftests 4694
 readdir_bound 8578
 redirty_mid_flush 21262
 reentry_names_the_first_panic 5073

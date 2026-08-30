@@ -19,12 +19,17 @@ pub struct PageCacheBlockIO;
 /// The one conversion between the kernel's block verdict and the crate's;
 /// keeping the retry discriminant is the point — a `BudgetExpired` collapsed
 /// into the device's own word turned into permanent write loss once (F9).
+/// `classify` is the crate's only reachable constructor, so this answer *is*
+/// the discriminant and no site downstream holds a variant to collapse into.
+impl bcachefs::TransferError for crate::block::BlockError {
+    fn refused_before_attempt(&self) -> bool {
+        matches!(self, crate::block::BlockError::BudgetExpired)
+    }
+}
+
 impl From<crate::block::BlockError> for DeviceError {
     fn from(e: crate::block::BlockError) -> Self {
-        match e {
-            crate::block::BlockError::Device => DeviceError::Failed,
-            crate::block::BlockError::BudgetExpired => DeviceError::Refused,
-        }
+        DeviceError::classify(&e)
     }
 }
 
@@ -62,8 +67,8 @@ impl BlockIO for PageCacheBlockIO {
 /// only the device's own word is `Io`; `kernel/CLAUDE.md` states the rule.
 fn as_device_refusal(e: DeviceError) -> SyscallError {
     match e {
-        DeviceError::Failed => SyscallError::Io,
-        DeviceError::Refused => SyscallError::WouldBlock,
+        DeviceError::Failed(_) => SyscallError::Io,
+        DeviceError::Refused(_) => SyscallError::WouldBlock,
     }
 }
 
@@ -71,7 +76,9 @@ fn as_device_refusal(e: DeviceError) -> SyscallError {
 fn as_syscall_error(err: &FsError) -> SyscallError {
     match err {
         FsError::NotFound => SyscallError::NotFound,
-        FsError::NoSpace { .. } | FsError::EntryTooLarge { .. } => SyscallError::ResourceExhausted,
+        FsError::NoSpace { .. } | FsError::EntryTooLarge { .. } | FsError::ListTooLong { .. } => {
+            SyscallError::ResourceExhausted
+        }
         FsError::NameTooLong { .. } => SyscallError::InvalidArgument,
         FsError::DeviceRead(_, e) | FsError::DeviceWrite(_, e) | FsError::DeviceSync(e) => {
             as_device_refusal(*e)
@@ -208,14 +215,9 @@ impl ReplaceRename for BcacheFsAdapter {
 }
 
 impl FileSystem for BcacheFsAdapter {
-    /// Checked after the work, not before: `bcachefs::Mounted::list` exposes no count to check first.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         // An empty listing on error would be a lie indistinguishable from an empty directory.
-        let names = mapped("list", "/", self.fs.list())?;
-        if names.len() > limit {
-            return Err(SyscallError::ResourceExhausted);
-        }
-        Ok(names)
+        mapped("list", "/", self.fs.list(limit))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
@@ -370,13 +372,8 @@ impl ReadOnlyBcacheFsAdapter {
 }
 
 impl FileSystem for ReadOnlyBcacheFsAdapter {
-    /// Checked after the work, not before: `bcachefs::Mounted::list` exposes no count to check first.
     fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
-        let names = mapped("list", "/", self.fs.list())?;
-        if names.len() > limit {
-            return Err(SyscallError::ResourceExhausted);
-        }
-        Ok(names)
+        mapped("list", "/", self.fs.list(limit))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {

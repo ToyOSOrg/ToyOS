@@ -268,6 +268,12 @@ actuators! {
 
     /// Run the leak-rollback controls (device mint, FAT reopen) after mount.
     leak_rollback_selftest = "leak-rollback-selftest";
+
+    /// Run the revoked-backing controls (`/tmp` and `/home`) after mount.
+    revoked_backing_selftest = "revoked-backing-selftest";
+
+    /// Wrap the metadata cache's device in a read-fault injector and run the un-index control after mount.
+    pc_unbind_selftest = "pc-unbind-selftest";
 }
 
 #[cfg(feature = "boot-actuators")]

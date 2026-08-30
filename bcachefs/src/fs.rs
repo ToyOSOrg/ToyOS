@@ -96,6 +96,9 @@ pub enum FsError {
     /// A symlink target declaring more bytes than the caller's ceiling —
     /// refused before the one allocation the declared size drives.
     TargetTooLong { size: u64, max: u64 },
+    /// A tree with more live entries than the caller's ceiling — refused before
+    /// the over-bound entry materialises, as [`FsError::TargetTooLong`] is.
+    ListTooLong { limit: usize },
 }
 
 pub struct ReadOnly;
@@ -693,10 +696,10 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         }
     }
 
-    /// List all files. Returns (name, size) pairs.
-    pub fn list(&self) -> Result<Vec<(String, u64)>, FsError> {
-        let entries = btree::collect_all(&self.io, self.sb.root_node)?;
-        let mut result = Vec::new();
+    /// Up to `limit` files as (name, size); more is refused before any materialise.
+    pub fn list(&self, limit: usize) -> Result<Vec<(String, u64)>, FsError> {
+        let entries = btree::collect_up_to(&self.io, self.sb.root_node, limit)?;
+        let mut result = Vec::with_capacity(entries.len());
         for entry in &entries {
             if let Ok(leaf) = self.decode(&entry.value) {
                 result.push((String::from(leaf.name()), leaf.size()));
@@ -1187,14 +1190,14 @@ mod tests {
 
         let mut fs = mount_rw(raw).expect("mount");
         assert!(
-            fs.list().expect("list").iter().any(|(n, _)| n == "victim.txt"),
+            fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
             "the craft did not leave victim.txt on the volume",
         );
 
         assert!(!fs.delete("ghost").expect("delete"), "nothing on this volume is named ghost");
 
         assert!(
-            fs.list().expect("list").iter().any(|(n, _)| n == "victim.txt"),
+            fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
             "deleting a name that does not exist destroyed the entry it collided with",
         );
     }
@@ -1238,7 +1241,7 @@ mod tests {
 
         let mut fs = mount_rw(raw).expect("mount");
         assert!(
-            fs.list().expect("list").iter().any(|(n, _)| n == "victim.txt"),
+            fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
             "the craft did not leave victim.txt on the volume",
         );
         assert!(
@@ -1277,7 +1280,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("the volume still describes its device");
-        match fs.list() {
+        match fs.list(usize::MAX) {
             Err(FsError::TreeTooDeep(_)) => {}
             other => panic!("expected TreeTooDeep, got {other:?}"),
         }
@@ -1291,7 +1294,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("mount");
-        match fs.list() {
+        match fs.list(usize::MAX) {
             Err(FsError::CorruptedNode(_)) => {}
             other => panic!("expected CorruptedNode, got {other:?}"),
         }
@@ -1305,7 +1308,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("mount");
-        match fs.list() {
+        match fs.list(usize::MAX) {
             Err(FsError::BlockOffDevice { .. }) => {}
             other => panic!("expected BlockOffDevice, got {other:?}"),
         }
@@ -1493,6 +1496,47 @@ mod tests {
                 target.map_or(0, |t| t.len()),
             ),
         }
+    }
+
+    #[test]
+    fn a_tree_past_the_ceiling_is_refused_before_it_materialises() {
+        // 40,000 entries is past where the unbounded walk's `Vec` doubles to
+        // 65,536 elements — over the kernel heap ceiling where `GlobalAlloc`
+        // asserts, so materialise-then-check was a `sys_readdir` panic on
+        // `/home`. The peak allocation is the instrument, not the refusal alone.
+        let ceiling = 2 * 1024 * 1024 - 4096; // mm::MAX_HEAP_ALLOC
+        let limit = 16_384; // vfs::MAX_LIST_ENTRIES, what the kernel passes down
+        let count = 40_000usize;
+        let doubled = 65_536 * core::mem::size_of::<crate::btree::Entry>();
+        assert!(
+            doubled > ceiling,
+            "{doubled} bytes is under the ceiling — this test proves nothing",
+        );
+
+        let mut fs = Formatted::format(VecBlockIO::new(16_384)).expect("format");
+        for i in 0..count {
+            fs.create(&format!("f{i}"), &[], 0).expect("create");
+        }
+        let fs = fs.mount();
+
+        crate::alloc_probe::take_peak();
+        let listed = fs.list(limit);
+        let peak = crate::alloc_probe::take_peak();
+
+        // Asserted first: the allocation is the harm, before any return value.
+        assert!(
+            peak <= ceiling,
+            "listing a {count}-entry tree under a {limit} ceiling asked the allocator for {peak}",
+        );
+        match listed {
+            Err(FsError::ListTooLong { limit: said }) => assert_eq!(said, limit),
+            Err(other) => panic!("expected ListTooLong, got {other:?}"),
+            Ok(names) => panic!("a {count}-entry tree listed {} names past the ceiling", names.len()),
+        }
+
+        // The legal case the bound must not take with it.
+        let all = fs.list(count).expect("list with room");
+        assert_eq!(all.len(), count, "a listing with room came back short");
     }
 
     #[test]
