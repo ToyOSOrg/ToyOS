@@ -22,8 +22,10 @@ use std::sync::Mutex;
 /// and [`Census::parse`] refuses a line whose fields are not exactly these, so
 /// a source added on one side and not the other is a red rather than a silently
 /// dropped column.
-pub const SOURCES: [&str; 10] =
-    ["timer", "xhci", "net", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious"];
+pub const SOURCES: [&str; 11] = [
+    "timer", "xhci", "net", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
+    "unclaimed",
+];
 
 /// The sources whose delivery CPU is chosen by the interrupt controller rather
 /// than by the CPU that took the work — every device vector, in other words.

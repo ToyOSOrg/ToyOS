@@ -36,14 +36,19 @@ pub enum Source {
     /// Vector 0xFF, the local APIC's spurious vector.
     /// A non-zero count on a machine that staged nothing is an interrupt-routing defect.
     Spurious,
+    /// Every vector no `idt_vectors!` row claims — `arch::idt::unclaimed`.
+    /// A non-zero count a boot staged nothing for is a routing defect the gate kept off `#DF`.
+    Unclaimed,
 }
 
 impl Source {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 11;
 
     /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
-    pub const NAMES: [&'static str; Self::COUNT] =
-        ["timer", "xhci", "net", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious"];
+    pub const NAMES: [&'static str; Self::COUNT] = [
+        "timer", "xhci", "net", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
+        "unclaimed",
+    ];
 }
 
 /// One `u64` per source plus the total; `percpu::OFF_IRQ_COUNTS` is where the block starts.

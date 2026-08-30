@@ -9,6 +9,7 @@ mod nmi;
 pub(crate) mod spurious;
 mod timer;
 mod tlb;
+pub(crate) mod unclaimed;
 mod virtio_net;
 mod virtio_sound;
 mod xhci;
@@ -420,6 +421,13 @@ pub fn init() {
     install_gates(&mut IDT.lock());
     #[cfg(feature = "boot-actuators")]
     install_actuator_gates(&mut IDT.lock());
+    // Every slot no row filled: delivery through a P = 0 gate is a
+    // contributory fault, and the machine would halt as #DF with no name.
+    for entry in IDT.lock().entries.iter_mut() {
+        if entry.type_attr == 0 {
+            *entry = IdtEntry::ring0(Ring0Entry::declare(unclaimed::unclaimed_entry));
+        }
+    }
     // Negative control: clears only the IST byte on vector 2's gate, keeping the handler and ring intact.
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::nmi_without_ist() {

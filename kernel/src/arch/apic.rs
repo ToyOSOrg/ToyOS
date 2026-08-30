@@ -94,6 +94,19 @@ pub fn in_service(vector: u8) -> bool {
     (word >> (vector & 31)) & 1 != 0
 }
 
+/// The highest vector in service on this CPU — the one being handled now,
+/// since the LAPIC only delivers above the current ISR top (SDM Vol. 3A
+/// §12.8.4). `None` outside every LAPIC-delivered handler.
+pub fn in_service_highest() -> Option<u8> {
+    for word_index in (0..8u32).rev() {
+        let word = cpu::rdmsr(Reg::Isr0 as u32 + word_index) as u32;
+        if word != 0 {
+            return Some((word_index * 32 + (31 - word.leading_zeros())) as u8);
+        }
+    }
+    None
+}
+
 /// Send an IPI to this CPU (self shorthand).
 #[cfg(feature = "boot-actuators")]
 pub fn send_self(vector: u8) {
