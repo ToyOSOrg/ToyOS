@@ -125,6 +125,52 @@ impl core::fmt::Display for MissingCap {
     }
 }
 
+/// Why [`VirtioDevice::init`] refused the device; either way it keeps no DMA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitRefusal {
+    /// Its chain never produced a window for a required capability.
+    Cap(MissingCap),
+    /// It never acknowledged its reset: `DEVICE_STATUS` stayed non-zero.
+    ResetUnanswered,
+}
+
+impl From<MissingCap> for InitRefusal {
+    fn from(missing: MissingCap) -> Self {
+        Self::Cap(missing)
+    }
+}
+
+impl core::fmt::Display for InitRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Cap(missing) => missing.fmt(f),
+            Self::ResetUnanswered => {
+                write!(f, "did not zero DEVICE_STATUS for its reset within {RESET}")
+            }
+        }
+    }
+}
+
+/// Virtio names no reset bound (1.2 §3.1.1 only orders the handshake); a
+/// device that has not zeroed `DEVICE_STATUS` in this long is not answering.
+const RESET: crate::time::Budget = crate::time::Budget::of(
+    crate::time::Duration::from_secs(2),
+    "the device is refused, never waited on",
+);
+
+/// The reset handshake's answer as this boot can see it; the actuator blinds
+/// the read, so a device that never zeroes its status is stageable. The
+/// console is spared: it is the staged boot's own capture channel.
+fn reset_acknowledged(common: &Mmio, pci_dev: &PciDevice) -> bool {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::virtio_reset_stuck() && pci_dev.device_id() != 0x1043 {
+        return false;
+    }
+    #[cfg(not(feature = "boot-actuators"))]
+    let _ = pci_dev;
+    common.read_u32(COMMON_DEVICE_STATUS) == 0
+}
+
 /// The config sub-window a virtio PCI capability names, or why it names none:
 /// the device's index, offset and length checked before a subregion is taken.
 fn cap_subwindow(
@@ -572,12 +618,36 @@ impl<'pool> Virtqueue<'pool> {
         notify_multiplier: u32,
         queue_index: u16,
     ) -> DescSlot {
+        // Every virtio device this kernel drives is an emulator's, and one that
+        // answers no completion for this long never will; unbounded, a wedged
+        // device hangs whoever flushed with nothing on the log to name it.
+        const ANSWERS: crate::time::Tripwire = crate::time::Tripwire::absurd(
+            crate::time::Duration::from_secs(5),
+            "far above any completion a live device delivers",
+        );
+        // Deadline checks are spaced: `nanos_since_boot`'s 128-bit divide is
+        // too costly per iteration (`clock::settles`' own refusal reason).
+        const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
         self.submit(slot, bufs, notify_mmio, notify_multiplier, queue_index);
+        let mut spins = 0u32;
+        let mut deadline = None;
         loop {
             if let Some((slot, _)) = self.poll_used() {
                 return slot;
             }
             core::hint::spin_loop();
+            spins += 1;
+            if spins == SPINS_PER_DEADLINE_CHECK {
+                spins = 0;
+                let now = crate::clock::nanos_since_boot();
+                match deadline {
+                    None => deadline = Some(now.saturating_add(ANSWERS.nanos())),
+                    Some(at) if now >= at => {
+                        panic!("virtio: queue {queue_index} completed nothing in {ANSWERS}")
+                    }
+                    Some(_) => {}
+                }
+            }
         }
     }
 }
@@ -736,8 +806,8 @@ pub fn cap_selftest() {
     let refused = VirtioDevice::init(&device, 0);
     let command = cfg.read_u16(0x04);
     match refused {
-        Err(MissingCap::Common) if command & 0x4 == 0 => passed += 1,
-        Err(MissingCap::Common) => log!(
+        Err(InitRefusal::Cap(MissingCap::Common)) if command & 0x4 == 0 => passed += 1,
+        Err(InitRefusal::Cap(MissingCap::Common)) => log!(
             "virtio: pci cap selftest FAILED: a refused device keeps bus mastering (COMMAND={command:#x})"
         ),
         Err(why) => log!("virtio: pci cap selftest FAILED on the refused device's chain: {why}"),
@@ -770,15 +840,16 @@ pub struct VirtioDevice {
 
 impl VirtioDevice {
     /// Initialize a VirtIO PCI device: reset, negotiate features, prepare for queue setup.
-    /// `Err` names the required capability the device never published a usable window for.
-    pub fn init(pci_dev: &PciDevice, accepted_features: u64) -> Result<Self, MissingCap> {
+    /// `Err` says why the device was refused — a capability its chain never
+    /// published a usable window for, or a reset it never acknowledged.
+    pub fn init(pci_dev: &PciDevice, accepted_features: u64) -> Result<Self, InitRefusal> {
         // Bus mastering only after the chain parses: a refused device keeps no DMA,
         // and firmware may have armed the bit before the kernel ran.
         let config = match VirtioPciConfig::parse(pci_dev) {
             Ok(config) => config,
             Err(missing) => {
                 pci_dev.disable_bus_master();
-                return Err(missing);
+                return Err(missing.into());
             }
         };
         pci_dev.enable_bus_master();
@@ -786,8 +857,9 @@ impl VirtioDevice {
 
         // Order fixed by virtio 1.2 §3.1.1: reset, ACKNOWLEDGE, DRIVER, negotiate features, FEATURES_OK, verify.
         common.write_u32(COMMON_DEVICE_STATUS, 0);
-        while common.read_u32(COMMON_DEVICE_STATUS) != 0 {
-            core::hint::spin_loop();
+        if !crate::clock::settles(RESET.nanos(), || reset_acknowledged(&common, pci_dev)) {
+            pci_dev.disable_bus_master();
+            return Err(InitRefusal::ResetUnanswered);
         }
 
         common.write_u32(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE as u32);

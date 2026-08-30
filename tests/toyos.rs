@@ -587,6 +587,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
+    // One boot with both stuck-device actuators armed; carrying
+    // `UNMEASURED_MS` until the shards price it.
+    ("driver_wait_refused", Sched::Parallel, Tier::Fast),
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
@@ -11091,6 +11094,44 @@ fn run_machine_test(
                 }
                 eprintln!("  [leak] {}", verdict.trim());
             }
+            Ok(())
+        }
+        "driver_wait_refused" => {
+            // The boot-path MMIO polls are bounded and their expiry is a named
+            // refusal, never a hang: the two actuators blind the answering
+            // reads — CSTS.RDY for NVMe's init, DEVICE_STATUS for every
+            // virtio reset — so controllers that never answer are staged on
+            // devices that always do. The boot must come up anyway, saying
+            // which register refused; on the unbounded shape this boot never
+            // reaches its ready marker at all.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["nvme-rdy-stuck", "virtio-reset-stuck"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            let Some(nvme) = log.lines().find(|l| l.contains("NVMe: NOT INITIALISED")) else {
+                return Err(format!("the stuck NVMe was never refused by name:\n{log}"));
+            };
+            if !nvme.contains("CSTS.RDY would not set in") {
+                return Err(format!("the NVMe refusal does not name the register: {nvme}"));
+            }
+            let virtio = log
+                .lines()
+                .filter(|l| l.contains("did not zero DEVICE_STATUS for its reset"))
+                .count();
+            if virtio == 0 {
+                return Err(format!("no stuck virtio device was refused by name:\n{log}"));
+            }
+            eprintln!("  [waits] {}", nvme.trim());
+            eprintln!(
+                "  [waits] {virtio} virtio device(s) refused on the reset budget; the boot \
+                 came up without them"
+            );
             Ok(())
         }
         "lapic_spurious_vector" => {

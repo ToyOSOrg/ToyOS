@@ -176,6 +176,12 @@ actuators! {
     /// Deliver the i8042 vector once at arming with no byte behind it — the arming edge, staged.
     i8042_arm_edge = "i8042-arm-edge";
 
+    /// Blind init's read of CSTS.RDY, staging an NVMe controller that never answers.
+    nvme_rdy_stuck = "nvme-rdy-stuck";
+
+    /// Blind init's read of the reset handshake, staging virtio devices that never answer; the console — the staged boot's capture channel — is spared.
+    virtio_reset_stuck = "virtio-reset-stuck";
+
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
 

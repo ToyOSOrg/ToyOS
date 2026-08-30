@@ -166,6 +166,7 @@ doom_music 7514
 doom_sound_flood 5888
 double_fault_stack 5139
 double_panic_names_the_fault 9120
+driver_wait_refused 18446744073709551615
 dump_nmi_probe 8098
 empty_dir_stat 12
 endowment_denied 10

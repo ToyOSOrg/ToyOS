@@ -35,9 +35,8 @@ const QUEUE_DEPTH: usize = 16;
 /// chance (NVMe 2.0 §3.7.2), never by declaring the disk failed outright.
 ///
 /// A [`Budget`], not a [`crate::time::Bound`]: NVMe defines no per-command
-/// timeout, and `CAP.TO` bounds only [`NvmeController::reset`]'s waits —
-/// [`init`]'s `CSTS.RDY` spins are still unbounded
-/// (issues/kernel/driver-waits-without-a-deadline.md).
+/// timeout — `CAP.TO` bounds the `CSTS.RDY` waits in [`NvmeController::reset`]
+/// and [`init`], and nothing else.
 const COMMAND: Budget = Budget::of(
     Duration::from_secs(2),
     "the command is abandoned to a controller reset, and one post-reset silence \
@@ -698,6 +697,16 @@ impl BlockDevice for NvmeBlockDevice {
     }
 }
 
+/// `CSTS.RDY` as this boot can see it; the actuator blinds the read, so a
+/// controller that never answers is stageable on a device that always does.
+fn rdy_observed(bar: &crate::mm::Mmio) -> bool {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::nvme_rdy_stuck() {
+        return false;
+    }
+    bar.read_u32(REG_CSTS) & 1 != 0
+}
+
 /// Bring up the machine's first NVMe controller; a second is not served,
 /// since `page_cache::init` takes a single `BlockDevice`.
 pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
@@ -721,12 +730,22 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
 
     let cap = bar.read_u64(REG_CAP);
     let stride = ((cap >> 32) & 0xF) as u32;
+    // The same two `CSTS.RDY` transitions `reset` bounds, on the same
+    // published worst case — unbounded, a controller that never answers
+    // hangs the boot with nothing on the log to say which one.
+    let to = ((cap >> 24) & 0xFF).max(1);
+    let ready = crate::time::Bound::from_register(
+        Duration::from_millis(to * 500),
+        "NVMe CAP.TO, the controller's own worst case for a CSTS.RDY transition",
+    );
+    let rdy = || rdy_observed(&bar);
 
     let cc = bar.read_u32(REG_CC);
     if cc & 1 != 0 {
         bar.write_u32(REG_CC, cc & !1);
-        while bar.read_u32(REG_CSTS) & 1 != 0 {
-            core::hint::spin_loop();
+        if !crate::clock::settles(ready.nanos(), || !rdy()) {
+            log!("NVMe: NOT INITIALISED — CSTS.RDY would not clear in {ready}");
+            return None;
         }
     }
 
@@ -750,8 +769,9 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
 
     bar.write_u32(REG_CC, CC_ENABLED);
 
-    while bar.read_u32(REG_CSTS) & 1 == 0 {
-        core::hint::spin_loop();
+    if !crate::clock::settles(ready.nanos(), rdy) {
+        log!("NVMe: NOT INITIALISED — CSTS.RDY would not set in {ready}");
+        return None;
     }
     log!("NVMe: controller enabled");
 
