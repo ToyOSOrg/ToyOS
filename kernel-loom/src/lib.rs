@@ -339,3 +339,9 @@ pub mod sleeplock;
 /// instants that no guest test can express and that x86's TSO hides.
 #[path = "../../kernel/src/drivers/i8042/tally.rs"]
 pub mod i8042_tally;
+
+/// The panic snapshot's capture latch. Two CPUs panicking at once both reach
+/// `capture()` with `cli` taken, so nothing else serialises the snapshot write;
+/// the property is one writer per snapshot, which only a model can enumerate.
+#[path = "../../kernel/src/drivers/panic_console/latch.rs"]
+pub mod capture_latch;

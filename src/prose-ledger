@@ -9,7 +9,7 @@ bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 119 0
 bootloader/src/main.rs 198 0
 examples/imgstat.rs 16 0
-kernel-loom/src/lib.rs 147 0
+kernel-loom/src/lib.rs 150 0
 kernel-loom/tests/durability.rs 29 0
 kernel-loom/tests/i8042_tally.rs 95 0
 kernel-loom/tests/inbox.rs 126 3
@@ -18,6 +18,7 @@ kernel-loom/tests/log_publish.rs 35 1
 kernel-loom/tests/log_record.rs 162 1
 kernel-loom/tests/log_wake.rs 59 0
 kernel-loom/tests/log_zeroed_init.rs 24 1
+kernel-loom/tests/panic_capture.rs 47 0
 kernel-loom/tests/poison_set.rs 17 0
 kernel-loom/tests/reap_gate.rs 53 1
 kernel-loom/tests/sleep_lock.rs 80 1
@@ -76,7 +77,8 @@ kernel/src/drivers/i8042/tally.rs 16 0
 kernel/src/drivers/ioapic.rs 30 0
 kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 127 0
-kernel/src/drivers/panic_console/mod.rs 210 0
+kernel/src/drivers/panic_console/latch.rs 12 0
+kernel/src/drivers/panic_console/mod.rs 213 0
 kernel/src/drivers/pci.rs 19 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
