@@ -10534,6 +10534,7 @@ fn run_machine_test(
                     .and_then(|v| v.parse().ok())
                     .ok_or_else(|| format!("unreadable issuer census: {line}"))?;
                 issued.push(n);
+                eprintln!("  [tlb] {}", line.trim());
             }
             let Some(&last_issued) = issued.last() else {
                 return Err(format!(
