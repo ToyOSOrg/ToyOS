@@ -1,6 +1,6 @@
-//! Revoked-backing controls, behind `revoked-backing-selftest`: a `FileBacking`
-//! read after the file's deletion must fail rather than fault in zeros, on each
-//! writable mount. `/tmp`'s `TmpfsBacking` and `/home`'s `NvmeBacking` are
+//! Revoked-backing controls, behind `revoked-backing-selftest`: on each writable
+//! mount, a `FileBacking` read after the file's deletion must fail rather than
+//! fault in zeros. `/tmp`'s `TmpfsBacking` and `/home`'s `NvmeBacking` are
 //! separate implementations of the one contract, and must answer alike.
 
 use crate::file_cache;

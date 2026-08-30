@@ -27,8 +27,7 @@ impl FileBacking for TmpfsBacking {
         if file_offset >= file_cache::size(self.file_id)
             || file_cache::copy_page_out(self.file_id, (file_offset / 4096) as u32, buf).is_none()
         {
-            // After the miss, not before: `retire` clears the flag before the
-            // pages drop, so a miss caused by deletion cannot pass as a hole.
+            // After the miss: `retire` clears the flag before the pages drop.
             if !self.alive.load(Ordering::Acquire) {
                 log!("tmpfs: read through a backing whose file was deleted");
                 return Err(crate::block::BlockError::Device);

@@ -1014,10 +1014,9 @@ impl NetDaemon {
                 }
             }
 
-            // pipe read → smoltcp tx (drain fully via kernel for proper notification).
-            // Ok(0) is the kernel's own EOF — the ring drained and no writer left —
-            // which is what says the client stopped writing; never the ring's
-            // closed flags, which live in a page the client can forge.
+            // pipe read → smoltcp tx. Ok(0) is the kernel's EOF — ring drained,
+            // no writer — which says the client stopped writing; not the
+            // forgeable closed flags.
             while socket.can_send() {
                 if let Some(ref pipe) = conn.tx_read {
                     let mut buf = [0u8; 4096];
