@@ -162,6 +162,7 @@ desktop_window_child 40312
 device_claim_lifetime 21
 disk_backtrace 85
 diskless_boot 4475
+dlopen_dedup 18446744073709551615
 doom_music 7514
 doom_sound_flood 5888
 double_fault_stack 5139

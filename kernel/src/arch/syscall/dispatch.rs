@@ -318,6 +318,10 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };
             sys_dlsym(a1, &name)
         }
+        // A no-op by contract: a dlopen'd module is shared and lives for the
+        // process, so there is no per-open resource to release and success is
+        // the honest answer — a reload returns the same handle, never a second
+        // mapping (`sys_dlopen`), so there is nothing an unload would reclaim.
         SYS_DLCLOSE => 0,
         SYS_FTRUNCATE => {
             with_object(RawHandle(a1 as u32), Rights::WRITE, |o| ops::ftruncate(o, a2))
