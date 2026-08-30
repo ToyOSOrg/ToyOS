@@ -584,6 +584,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // verdict a set comparison. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("query_pci_agreement", Sched::Parallel, Tier::Fast),
+    // The root `system.toml`, booted rather than read: the shipped init list
+    // and program namespaces have no other gate a harness run can reach.
+    // Every verdict is a console line. Carrying `UNMEASURED_MS` until the
+    // shards price it.
+    ("shipped_config_boots", Sched::Parallel, Tier::Fast),
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
@@ -11161,6 +11166,57 @@ fn run_machine_test(
                 return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
             }
             eprintln!("  [pci] {}", verdict.trim());
+            Ok(())
+        }
+        "shipped_config_boots" => {
+            // The config the project ships, booted rather than read: `cargo
+            // run`'s machine is the owner's desktop, so nothing else
+            // exercises the shipped init list or its program namespaces — a
+            // change to `system.toml` alone could red no suite test in
+            // either direction. `Gop` is `cargo run -- --gop`'s shape, the
+            // GOP framebuffer plus the whole virtio block, so every daemon in
+            // `[boot] start` finds its device. No test binaries go into the
+            // initrd: the image booted here is the image shipped.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let mut qemu = QemuInstance::boot_with_options(
+                config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::Gop,
+                    ready_marker: "Boot: complete",
+                    ..Default::default()
+                },
+            );
+            let mut log = qemu.boot_log().to_string();
+            // Each daemon's own announcement, not only init's spawn line: a
+            // daemon that started and then failed its device claim would
+            // satisfy the spawn lines alone. filepicker is the one starter
+            // with no startup line — its `init: started` row is its whole
+            // witness here.
+            for marker in [
+                "compositor: ready",
+                "netd: ready",
+                "soundd: ready",
+                "logd: this boot's kernel log is",
+            ] {
+                qemu::await_marker(&mut qemu, &mut log, marker, marker)?;
+            }
+            let start = toyos_build::build::boot_start(&config.join("system.toml"));
+            for program in &start {
+                let line = format!("init: started {program}");
+                if !log.contains(&line) {
+                    return Err(format!(
+                        "the shipped `[boot] start` names {program} and init never said \
+                         {line:?}\n{log}"
+                    ));
+                }
+            }
+            serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+            eprintln!(
+                "  [shipped] the shipped system.toml boots: {} started, four daemons ready",
+                start.join(", ")
+            );
             Ok(())
         }
         "query_pci_agreement" => {
