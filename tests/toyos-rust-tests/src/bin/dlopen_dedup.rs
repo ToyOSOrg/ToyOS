@@ -3,8 +3,7 @@
 //!
 //! `SYS_DLOPEN` used to push a fresh module and a fresh mapping on every call,
 //! so a loop of `dlopen` on the same `.so` walked the process out of virtual
-//! address space (`issues/isolation/dlopen-never-dedups.md`). It now returns the
-//! handle the name already holds.
+//! address space. It now returns the handle the name already holds.
 //!
 //! Two independent readings of the one fix:
 //!
