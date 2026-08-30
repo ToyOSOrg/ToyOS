@@ -49,9 +49,8 @@ static MAX_NS: AtomicU64 = AtomicU64::new(0);
 /// Total at the last print, so process exit logs once per batch of new events.
 static REPORTED: AtomicU64 = AtomicU64::new(0);
 
-/// Logs one machine-wide `tlb:` line when the counts moved; called at process
-/// exit beside `irq_census::log_census`, after it — the conservation check
-/// reads deliveries first, issues second, so in-flight issues only widen it.
+/// One machine-wide `tlb:` line when the counts moved, at process exit after
+/// `irq_census::log_census`: the conservation check reads deliveries first.
 pub fn log_census() {
     let mut counts = [0u64; Origin::COUNT];
     let mut total = 0u64;

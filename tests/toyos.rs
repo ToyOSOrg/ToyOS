@@ -10893,11 +10893,10 @@ fn run_machine_test(
                 ));
             }
 
-            // Boot three: the arming edge, staged — the vector delivered once
-            // at arming with no byte behind it, because init consumed the byte
-            // itself. The quiet verdict must stand, saying so; a driver that
-            // reads the edge as the machine's never prints the marker this
-            // boot waits on, which is how the whole boot dies on the base shape.
+            // Boot three: the arming edge staged — the vector delivered once
+            // with no byte behind it, because init consumed the byte itself.
+            // The quiet verdict must stand saying so; a driver that reads the
+            // edge as the machine's never prints this boot's ready marker.
             drop(qemu);
             let staged_boot = QemuInstance::boot_with_options(
                 test_config,
@@ -11097,13 +11096,11 @@ fn run_machine_test(
             Ok(())
         }
         "driver_wait_refused" => {
-            // The boot-path MMIO polls are bounded and their expiry is a named
-            // refusal, never a hang: the two actuators blind the answering
-            // reads — CSTS.RDY for NVMe's init, DEVICE_STATUS for every
-            // virtio reset — so controllers that never answer are staged on
-            // devices that always do. The boot must come up anyway, saying
-            // which register refused; on the unbounded shape this boot never
-            // reaches its ready marker at all.
+            // The two actuators blind the answering reads — CSTS.RDY for NVMe
+            // init, DEVICE_STATUS for every virtio reset — so a controller that
+            // never answers is staged on a device that always does. The boot
+            // must come up saying which register refused; on the unbounded
+            // shape it never reaches its ready marker at all.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -11142,10 +11139,9 @@ fn run_machine_test(
             // itself — the SDM's classic condition needs a task-priority
             // register this kernel never writes, and every device here is MSI or
             // MSI-X — so the kernel raises it on purpose under this parameter.
-            // The second parameter stages the same fault class one gate over: a
-            // vector no `idt_vectors!` row claims, which the catch-all in every
-            // unfilled slot must count, remember and acknowledge — on the base
-            // that had no catch-all this boot dies as an unnamed `#DF`.
+            // The second parameter stages the same fault one gate over: a
+            // vector no row claims, which the catch-all must count, remember
+            // and acknowledge — on the base that had none the boot dies `#DF`.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,

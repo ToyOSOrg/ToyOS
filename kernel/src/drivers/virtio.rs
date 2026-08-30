@@ -158,9 +158,8 @@ const RESET: crate::time::Budget = crate::time::Budget::of(
     "the device is refused, never waited on",
 );
 
-/// The reset handshake's answer as this boot can see it; the actuator blinds
-/// the read, so a device that never zeroes its status is stageable. The
-/// console is spared: it is the staged boot's own capture channel.
+/// The reset handshake's answer; the actuator blinds it to stage a device that
+/// never answers, sparing the console — the staged boot's own capture channel.
 fn reset_acknowledged(common: &Mmio, pci_dev: &PciDevice) -> bool {
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::virtio_reset_stuck() && pci_dev.device_id() != 0x1043 {
@@ -618,15 +617,13 @@ impl<'pool> Virtqueue<'pool> {
         notify_multiplier: u32,
         queue_index: u16,
     ) -> DescSlot {
-        // Every virtio device this kernel drives is an emulator's, and one that
-        // answers no completion for this long never will; unbounded, a wedged
-        // device hangs whoever flushed with nothing on the log to name it.
+        // A completion this late from an emulated device never comes; the
+        // panic names the queue where an unbounded spin hung silently.
         const ANSWERS: crate::time::Tripwire = crate::time::Tripwire::absurd(
             crate::time::Duration::from_secs(5),
             "far above any completion a live device delivers",
         );
-        // Deadline checks are spaced: `nanos_since_boot`'s 128-bit divide is
-        // too costly per iteration (`clock::settles`' own refusal reason).
+        // Spaced: `nanos_since_boot`'s 128-bit divide is too costly per iteration.
         const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
         self.submit(slot, bufs, notify_mmio, notify_multiplier, queue_index);
         let mut spins = 0u32;

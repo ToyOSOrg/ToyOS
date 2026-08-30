@@ -33,8 +33,7 @@ pub fn lock() -> VfsGuard {
 }
 
 /// Holds one flush of the staged file inside its size-read/`update_metadata`
-/// pair, then says which way the race went. Under the VFS lock the window can
-/// only hold; 400ms, not more — a waiter's ticket spin panics at 500M spins.
+/// pair and says which way the race went; 400ms, under the ticket lock's tripwire.
 #[cfg(feature = "boot-actuators")]
 fn stalled_metadata_window(path: &str, file_id: FileId, size_read: u64) {
     if !crate::actuator::ftruncate_flush_stall() || !path.ends_with("truncate-race.bin") {
