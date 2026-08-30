@@ -408,25 +408,6 @@ pub const RELEGATED: &[Relegated] = &[
         guards: "The end-to-end durable witness: a rename staged on /log, the guest shut                  down, and the destination judged byte-for-byte off the raw FAT image by                  the in-tree toyos-fat32-check. Nightly because the boot-plus-shutdown                  costs a full cycle. What runs per pull request is the Fast                  `fs_transactional` control (a rename with an absent source keeps its                  destination, rename(p,p) is a no-op, a shrunk tail regrows as zeros) and                  the compile-time invariants that make the class unrepresentable: the                  `Committed` witness that forbids releasing a destination before the move                  commits, and `same_object`/`same_entry` that decides the no-op by backend                  identity so a FAT case-only rename cannot destroy the file.",
     },
     Relegated {
-        test: "klogd_hosted",
-        ci_ms: 11_805,
-        why: Why::Cost,
-        guards: "The kernel-thread machinery, now for all three of them: klogd, usbd \
-                 and iod spawn with process-table rows, `ps` and the census name them, \
-                 and a deliberate panic takes the row's own branch instead of being \
-                 decided by a stale `syscall_rip` — a verdict that depended on which \
-                 syscall ran last. Both branches, which is the only way two rows are \
-                 two rows: klogd's panic halts the machine, usbd's kills the thread and \
-                 the machine boots. Three boots, and the two actuator arms \
-                 (`klogd-panic`, `usbd-panic`) are the cost; the spawn half alone is \
-                 one cheap boot, and \
-                 issues/build/klogd-hosted-pays-two-boots-for-one-fast-verdict.md \
-                 is the split that puts it back in the fast tier. What still runs per \
-                 pull request: every boot's console output is klogd's drain, so the \
-                 thread starving or dying is visible in any test that reads a line, and \
-                 `blocked_dump` names all three in the fast tier.",
-    },
-    Relegated {
         test: "desktop_window_child",
         ci_ms: 65_217,
         why: Why::Cost,
@@ -517,14 +498,6 @@ pub const RELEGATED: &[Relegated] = &[
                  descriptors are pipes to a surface, which is the T14's. A second client \
                  connecting while the first streams, and the desktop still answering \
                  after both.",
-    },
-    Relegated {
-        test: "wall_clock_refusals",
-        ci_ms: 103_987,
-        why: Why::Cost,
-        guards: "Five boots gate the RTC update flag never clearing, four reads never \
-                 agreeing, absent-century fallback, explicit century-register decoding, \
-                 and firmware timezone conversion.",
     },
     Relegated {
         test: "screen_fatal_halt_composited",

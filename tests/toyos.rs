@@ -643,11 +643,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // offsets it chose itself.
     ("operation_nesting", Sched::Parallel, Tier::Fast),
     ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
-    // The kernel thread and the row that says what its panic means. Two
-    // boots, both headless: the second one halts on purpose — and the pair
-    // measured 11.8 s on CI KVM, over the fast line, so the whole verdict is
-    // nightly until the split the relegation row names.
-    ("klogd_hosted", Sched::Parallel, Tier::Nightly),
+    // The spawn half alone: one headless boot whose verdict is three kernel
+    // log lines. Carrying `UNMEASURED_MS` until the shards price it.
+    ("klogd_hosted", Sched::Parallel, Tier::Fast),
+    // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
+    // spawn half is per-PR again. Fast is the bootstrap tier: the measured
+    // price assigns the final tier.
+    ("klogd_panic_halts", Sched::Parallel, Tier::Fast),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
     // over two boots measured 12 s twelve-wide on the dev host**, against
@@ -901,7 +903,16 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // its log sink, against a bound five minutes wide. A host so loaded that
     // this failed would have failed every timed test in the phase first.
     ("wall_clock_file", Sched::Parallel, Tier::Fast),
-    ("wall_clock_refusals", Sched::Parallel, Tier::Nightly),
+    // The five RTC/firmware shapes, one kernel build and one boot each. Five
+    // registrations because the artifact memo builds one kernel per feature
+    // set anyway, so the split costs nothing and the parallel phase gets five
+    // jobs it can place instead of one serial five-boot job it cannot.
+    // Carrying `UNMEASURED_MS` until the shards price them.
+    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Fast),
+    ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Fast),
+    ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
+    ("wall_clock_century_register", Sched::Parallel, Tier::Fast),
+    ("wall_clock_zone", Sched::Parallel, Tier::Fast),
     // `xhci_slow_connect`'s shape against the disk's port, and serial for the
     // same reason and not by association: it shares `SLOW_CONNECT_NS`, so a boot
     // that outgrows the window binds the disk in the port scan and it reports
@@ -8374,8 +8385,28 @@ fn run_machine_test(
         }
         // Body in `tests/common/wallclock.rs`, same reason.
         "wall_clock_file" => common::wallclock::wall_clock_file(test_config, c_bins, rust_bins),
-        "wall_clock_refusals" => {
-            common::wallclock::wall_clock_refusals(test_config, c_bins, rust_bins)
+        "wall_clock_rtc_dead" => common::wallclock::undated(
+            test_config,
+            c_bins,
+            rust_bins,
+            "wall-clock-dead.img",
+            &["rtc-dead"],
+            "its update flag never cleared",
+        ),
+        "wall_clock_rtc_unstable" => common::wallclock::undated(
+            test_config,
+            c_bins,
+            rust_bins,
+            "wall-clock-unstable.img",
+            &["rtc-unstable"],
+            "no two of 4 reads agreed",
+        ),
+        "wall_clock_no_century" => common::wallclock::no_century(test_config, c_bins, rust_bins),
+        "wall_clock_century_register" => {
+            common::wallclock::century_from_the_register(test_config, c_bins, rust_bins)
+        }
+        "wall_clock_zone" => {
+            common::wallclock::zone_from_firmware(test_config, c_bins, rust_bins)
         }
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
         "log_partition_layout" => {
@@ -9657,23 +9688,15 @@ fn run_machine_test(
             Ok(())
         }
         "klogd_hosted" => {
-            // The machine's first kernel thread, and the two things about it
-            // no other test in the suite can see.
-            //
-            // **That it is hosted at all.** `klogd` runs on the ordinary
-            // scheduler with no address space of its own — `driver::spawn`
-            // names the kernel's `cr3` — through a trampoline that never
-            // issues an `iretq`. It gets a process-table entry rather than a
-            // bare task, and that is what makes it nameable: without one a
-            // crash report would print a pid nothing in the machine resolves.
-            //
-            // **That its panic is not recoverable, deterministically.** The
-            // ordinary predicate is `syscall_rip() != 0 &&
-            // current_tid().is_some()`, and `syscall_rip` is never cleared —
-            // so a kernel task reads whatever user thread last ran on *that*
-            // CPU left behind, and recovers or halts by accident of work
-            // stealing. The row in `sched::kthread` is what replaces the
-            // accident with an answer.
+            // The machine's first kernel thread, and the thing about it no
+            // other test in the suite can see: **that it is hosted at all.**
+            // `klogd` runs on the ordinary scheduler with no address space of
+            // its own — `driver::spawn` names the kernel's `cr3` — through a
+            // trampoline that never issues an `iretq`. It gets a process-table
+            // entry rather than a bare task, and that is what makes it
+            // nameable: without one a crash report would print a pid nothing
+            // in the machine resolves. What each row *means* when the panic
+            // really fires is `klogd_panic_halts`' two actuator boots.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -9705,8 +9728,16 @@ fn run_machine_test(
                 eprintln!("  [kthread] {}", line.trim());
             }
 
-            drop(qemu);
-
+            Ok(())
+        }
+        "klogd_panic_halts" => {
+            // **A kernel thread's panic is not recoverable by accident.**
+            // `syscall_rip` is never cleared, so the ordinary recovery
+            // predicate reads whatever user thread last ran on that CPU, and
+            // a kernel task would recover or halt by accident of work
+            // stealing. The row in `sched::kthread` replaces the accident
+            // with an answer; these two actuator boots walk both branches.
+            //
             // The marker is a line of the crash *report* rather than `PANIC:`
             // itself, because `boot_log` stops at the marker and the name is
             // printed after the header — a boot stopped at the header would

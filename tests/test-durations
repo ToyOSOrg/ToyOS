@@ -221,7 +221,8 @@ kernel_heartbeat 5634
 kernel_log_file 13152
 keyboard_claim_close_spares_stdin 4580
 kill_while_blocked 44
-klogd_hosted 17870
+klogd_hosted 18446744073709551615
+klogd_panic_halts 18446744073709551615
 lapic_spurious_vector 6829
 late_storage_connect 6455
 launcher_refusals 2106
@@ -341,9 +342,13 @@ va_exhaustion 6159
 virtio_net_no_msix 2039
 virtio_used_ring 4189
 wake_storm_cost 337
+wall_clock_century_register 18446744073709551615
 wall_clock_file 4642
+wall_clock_no_century 18446744073709551615
 wall_clock_now 13
-wall_clock_refusals 25658
+wall_clock_rtc_dead 18446744073709551615
+wall_clock_rtc_unstable 18446744073709551615
+wall_clock_zone 18446744073709551615
 window_refusal 16
 writeback_durability 5883
 writeback_reopen 4886

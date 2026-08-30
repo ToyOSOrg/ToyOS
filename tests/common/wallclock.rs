@@ -304,37 +304,6 @@ pub fn wall_clock_file(
     Ok(())
 }
 
-/// Five RTC/firmware shapes: two refusals, two century sources and one zone.
-///
-/// One boot per state because each is a different kernel build. They share this
-/// function so the five of them are one entry in the schedule and one line of
-/// output.
-pub fn wall_clock_refusals(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    undated(
-        test_config,
-        c_bins,
-        rust_bins,
-        "wall-clock-dead.img",
-        &["rtc-dead"],
-        "its update flag never cleared",
-    )?;
-    undated(
-        test_config,
-        c_bins,
-        rust_bins,
-        "wall-clock-unstable.img",
-        &["rtc-unstable"],
-        "no two of 4 reads agreed",
-    )?;
-    no_century(test_config, c_bins, rust_bins)?;
-    century_from_the_register(test_config, c_bins, rust_bins)?;
-    zone_from_firmware(test_config, c_bins, rust_bins)
-}
-
 /// A firmware-named zone separates local time from UTC, in the direction UEFI
 /// defines.
 ///
@@ -344,7 +313,7 @@ pub fn wall_clock_refusals(
 /// stages report -120 and UTC comes out *behind* the RTC — the sign that a
 /// reader of the field gets backwards, and the one that would put a dual-booted
 /// laptop four hours out rather than two.
-fn zone_from_firmware(
+pub fn zone_from_firmware(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -402,7 +371,7 @@ fn zone_from_firmware(
 
 /// A machine whose clock will not answer still boots, still logs, and says so
 /// in the name of the file it writes.
-fn undated(
+pub fn undated(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -464,7 +433,7 @@ fn undated(
 /// whatever the FADT said and took anything non-zero as a century — so the
 /// assertion is that the *table's* answer is what decides, and that answering
 /// "none" costs the machine its century rather than its clock.
-fn no_century(
+pub fn no_century(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -511,7 +480,7 @@ fn no_century(
 /// nothing else changes: same clock registers, same FADT, same decoder. A
 /// kernel that ignored the register — or read a fixed 2000 — puts this boot in
 /// 2033 like every other one here, and the file name is where that shows.
-fn century_from_the_register(
+pub fn century_from_the_register(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
