@@ -1279,14 +1279,11 @@ pub fn redirty_mid_flush(
     Ok(())
 }
 
-/// A truncate staged inside a flush's size-read/`update_metadata` window
-/// (`ftruncate-flush-stall` holds the pair open for 400ms), which
-/// `SYS_FTRUNCATE`'s lockless resize once landed in — recording the older
-/// size on a flush `iod`'s drain had already popped. The guest
-/// (`test_rs_ftruncate_flush_race`) makes the race happen and asserts its
-/// truncate serialised; the kernel says which way the window went; and the
-/// shut-down volume is judged by the independent FAT reader and the fatgen103
-/// checker — the oracle `fs_rename_durable` names below.
+/// A truncate staged inside a flush's `update_metadata` window
+/// (`ftruncate-flush-stall`), which `SYS_FTRUNCATE`'s lockless resize once
+/// landed in. The guest makes the race and asserts its truncate serialised;
+/// the shut-down volume is re-judged by the FAT reader and the fatgen103
+/// checker — `fs_rename_durable`'s oracle.
 pub fn ftruncate_flush_race(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

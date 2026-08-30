@@ -21,8 +21,7 @@ const FULL: usize = 3 * 4096;
 const SHORT: u64 = 5000;
 
 const INTO_WINDOW: Duration = Duration::from_millis(50);
-/// Waiting this long, the truncate can only have been serialised against a
-/// 400ms-stalled holder; a lockless resize returns in microseconds.
+/// Only a serialised truncate waits this long against the 400ms stall; a lockless one returns in microseconds.
 const CONTENDED: Duration = Duration::from_millis(150);
 const ATTEMPTS: u32 = 10;
 
@@ -56,8 +55,7 @@ fn main() {
         );
     };
 
-    // A settling fsync so the truncated size is durable before the host reads
-    // the volume behind the shut-down kernel.
+    // The truncated size durable before the host reads the shut-down volume.
     f.sync_all().expect("the settling fsync");
     println!("attempt {attempt}: the truncate waited {waited:?} for the stalled flush; {SHORT} bytes settled");
 }

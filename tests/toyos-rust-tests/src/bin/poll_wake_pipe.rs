@@ -16,15 +16,12 @@ use std::time::{Duration, Instant};
 use toyos::pipe_pair;
 use toyos::poller::{Poller, READABLE};
 
-/// Round trips. Enough that a wake lost at some rate shows, small enough to
-/// fit the harness's five seconds with room.
 const ROUNDS: u32 = 300;
 
-/// What the rounds must fit in — turns a lost wake into a number, not a stall.
+/// The whole run's bound — a lost wake becomes a short count, not a stall.
 const BOUND: Duration = Duration::from_secs(3);
 
-/// The watcher's per-round patience: far above a live wake's latency, so only
-/// a genuinely absent completion trips it. A tripped round is a short count.
+/// Per-round patience, far above a live wake's latency, so only an absent completion trips it.
 const WAIT_NANOS: u64 = 200_000_000;
 
 fn main() {
@@ -33,7 +30,6 @@ fn main() {
 
     let began = Instant::now();
     thread::scope(|s| {
-        // The watcher: arm a poll, block on it, count each completion.
         s.spawn(|| {
             let poller = Poller::new(1);
             let mut buf = [0u8; 1];
@@ -42,17 +38,14 @@ fn main() {
                 let mut got = false;
                 poller.wait(1, WAIT_NANOS, |_| got = true);
                 if !got {
-                    // The completion never arrived — the ring half was lost.
-                    return;
+                    return; // the completion never arrived — the ring half was lost
                 }
                 woken.fetch_add(1, Ordering::Relaxed);
-                // Drain the byte so the next round arms on an empty pipe.
-                let _ = reader.read(&mut buf);
+                let _ = reader.read(&mut buf); // drain so the next round arms empty
             }
         });
 
-        // The writer: one byte per round, paced behind the watcher's count so
-        // the pipe never fills and every write is a distinct readable edge.
+        // One byte per round, paced behind the watcher so every write is a distinct edge.
         s.spawn(|| {
             for round in 0..ROUNDS {
                 while woken.load(Ordering::Relaxed) < round

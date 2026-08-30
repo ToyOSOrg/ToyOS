@@ -10529,12 +10529,10 @@ fn run_machine_test(
                 newest.values().map(|c| c.total).sum::<u64>(),
             );
 
-            // 5. The issuer side (kernel/src/arch/tlb.rs). Same instants, other
-            //    end of the wire: every `tlb` delivery a CPU's census carries
-            //    must be accounted for by an issue the `tlb:` line counted —
-            //    a delivery in excess of the issues is a path that shoots down
-            //    uncounted. The lower bound is not asserted: an issued IPI can
-            //    still be pending on a target whose IF is clear at the print.
+            // 5. The issuer side: every `tlb` delivery a CPU's census carries
+            //    must be within the issues the `tlb:` line counted — an excess
+            //    is a path shooting down uncounted. The lower bound is not
+            //    asserted: an issued IPI can be pending on an IF-clear target.
             let mut issued: Vec<u64> = Vec::new();
             for line in capture.lines() {
                 let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };

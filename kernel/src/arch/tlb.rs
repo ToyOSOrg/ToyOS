@@ -15,22 +15,19 @@ use super::{apic, percpu, smp};
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
-/// Which path issued a shootdown; one variant per call-site family, so the
-/// census can say who pays before anyone proposes narrowing the entry set.
+/// Which path issued a shootdown, one variant per call-site family, so the
+/// census names who pays: `Dlopen` (a `Shared` window map or a rollback
+/// unmap), `Pcid` (the pool reclaim), `Mmio` (`map_mmio`'s memory-type
+/// change), `Unmap` (`Unmapped::drop`), `Pipe` (a mapping closed), `Staged`
+/// (the ack-delay actuator).
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub enum Origin {
-    /// A `Shared` module's window map, or a refused dlopen's rollback unmap.
     Dlopen,
-    /// The PCID pool's reclaim flush.
     Pcid,
-    /// `map_mmio`: a memory-type change under a sibling's possibly stale entry.
     Mmio,
-    /// `Unmapped::drop` — `munmap`, teardown, every deferred free.
     Unmap,
-    /// A pipe's mapping unmapped at close.
     Pipe,
-    /// The ack-delay actuator's own staged shootdown.
     #[cfg_attr(not(feature = "test-actuators"), allow(dead_code))]
     Staged,
 }
