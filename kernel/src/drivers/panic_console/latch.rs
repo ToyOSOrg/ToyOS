@@ -10,9 +10,8 @@ use loom::sync::atomic::{AtomicU32, Ordering};
 /// No CPU's token; a claimant's is never this (`cpu_id + 2`, or 1 pre-percpu).
 const UNCLAIMED: u32 = 0;
 
-/// `PAINTING`'s latch shape with an owner: the first claim wins and holds until
-/// [`release`](CaptureLatch::release), the owner re-enters (a refresh), any
-/// other token is turned away rather than interleaved into the snapshot.
+/// `PAINTING`'s shape with an owner: the first claim holds until
+/// [`release`](CaptureLatch::release), the owner re-enters, any other is refused.
 pub struct CaptureLatch {
     owner: AtomicU32,
 }
@@ -31,9 +30,8 @@ impl CaptureLatch {
         Self { owner: AtomicU32::new(UNCLAIMED) }
     }
 
-    /// Whether `token` may write the snapshot. The acquire on failure pairs
-    /// with [`release`](CaptureLatch::release)'s store, so a claimant that
-    /// takes over a released latch sees everything the last owner wrote.
+    /// Whether `token` may write the snapshot; the acquire on failure pairs
+    /// with [`release`](CaptureLatch::release)'s store for the next claimant.
     pub fn claim(&self, token: u32) -> bool {
         match self.owner.compare_exchange(UNCLAIMED, token, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => true,

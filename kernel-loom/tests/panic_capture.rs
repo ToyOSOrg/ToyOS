@@ -13,8 +13,7 @@ use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::Arc;
 use loom::thread;
 
-/// One writer per snapshot, from every interleaving of two panicking CPUs; the
-/// two-byte cell stands for `SNAPSHOT`, and a mixed pair is two reports on one screen.
+/// One writer per snapshot, every interleaving of two panicking CPUs.
 #[test]
 fn two_panicking_cpus_write_one_snapshot() {
     loom::model(|| {
@@ -45,8 +44,7 @@ fn two_panicking_cpus_write_one_snapshot() {
     });
 }
 
-/// The owner's `refresh_capture` re-enters while a second captor is turned
-/// away, and the refresh lands whole over the owner's first write.
+/// The owner's `refresh_capture` re-enters over its first write while a second captor is refused.
 #[test]
 fn the_owner_refreshes_and_a_second_captor_stays_out() {
     loom::model(|| {
@@ -78,8 +76,7 @@ fn the_owner_refreshes_and_a_second_captor_stays_out() {
     });
 }
 
-/// A recovered panic releases the latch, and the next captor's write is
-/// ordered after the last owner's — `claim`'s acquire against `release`'s store.
+/// A released latch hands the next captor a write ordered after the last owner's.
 #[test]
 fn a_recovered_panic_hands_the_snapshot_to_the_next_captor() {
     loom::model(|| {
@@ -106,10 +103,8 @@ fn a_recovered_panic_hands_the_snapshot_to_the_next_captor() {
     });
 }
 
-/// The negative control: the unlatched shape, transliterated onto two atomic
-/// words. Asserted by collecting a mixed pair rather than by failing, so it
-/// stays a passing test that reds the day loom stops reaching the interleaving
-/// the models above rest on.
+/// The negative control: the unlatched shape transliterated onto two words,
+/// collecting a mixed pair so it reds the day loom stops reaching the interleaving.
 #[test]
 fn the_unlatched_capture_this_replaced_interleaves_two_reports() {
     static MIXED: AtomicBool = AtomicBool::new(false);

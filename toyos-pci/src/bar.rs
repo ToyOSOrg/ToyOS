@@ -70,9 +70,8 @@ pub enum Unusable {
     /// Firmware assigned this BAR no address. Its registers would be mapped at
     /// physical zero.
     Unassigned,
-    /// The Type field says 64-bit in slot [`MAX_INDEX`], whose neighbour is
-    /// the CardBus CIS pointer, not a BAR — there is no high half to read or
-    /// to probe.
+    /// 64-bit in slot [`MAX_INDEX`], whose neighbour is the CardBus CIS
+    /// pointer and not a BAR: no high half to read or probe.
     WideAtLastIndex,
 }
 
@@ -314,19 +313,16 @@ mod tests {
         assert!(matches!(decode(0, 0xFEBD_0004), Ok(Width::Wide(_))));
     }
 
-    /// A Type 0 header has six BARs and the 64-bit encoding consumes two
-    /// consecutive ones (PCIe base spec §7.5.1.2.1), so it can begin only in
-    /// 0..=4: a 64-bit claim in slot 5 names the CardBus CIS pointer at 0x28
-    /// as its high half, and both the read and the sizing probe's write went
-    /// there before this refusal existed.
+    /// The 64-bit encoding consumes two consecutive BARs (PCIe §7.5.1.2.1), so
+    /// in slot 5 its high half is the CardBus CIS pointer at 0x28, which both
+    /// the read and the sizing probe's write reached before this refusal.
     #[test]
     fn a_wide_claim_in_the_last_slot_is_refused_by_name() {
         assert_eq!(decode(MAX_INDEX, 0xFEBD_0004), Err(Unusable::WideAtLastIndex));
         // Unassigned as well: the address plays no part in the refusal.
         assert_eq!(decode(MAX_INDEX, 0x0000_0004), Err(Unusable::WideAtLastIndex));
-        // The slot before it is the last legal start of a 64-bit BAR.
         assert!(matches!(decode(MAX_INDEX - 1, 0xFEBD_0004), Ok(Width::Wide(_))));
-        // And slot 5 still answers for everything one register wide.
+        // Slot 5 still answers for everything one register wide.
         assert_eq!(decode(MAX_INDEX, 0xFEBD_0000), Ok(Width::Narrow(Memory {
             address: 0xFEBD_0000,
             prefetchable: false,
