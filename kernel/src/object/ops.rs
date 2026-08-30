@@ -576,8 +576,7 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     };
     let file_id = file.with(|state| state.file_id);
     {
-        // `resize`, not `set_size`: marks the file dirty even when no page changed, so flush is not skipped.
-        // Its witness is this acquisition, outside `FileObject`'s lock — fsync's order.
+        // The VFS lock outside `FileObject`'s (fsync's order) is `resize`'s witness.
         let mut vfs = crate::vfs::lock();
         file_cache::resize(&mut vfs, file_id, size);
     }

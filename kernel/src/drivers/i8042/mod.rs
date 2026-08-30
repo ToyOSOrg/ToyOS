@@ -91,9 +91,7 @@ static RX_BYTES: AtomicU32 = AtomicU32::new(0);
 /// `handler_poll`, whose bytes came from a poll, not an assertion.
 static FIRST_IRQ_NS: AtomicU64 = AtomicU64::new(0);
 
-/// `init` consumed a byte with the IRQ bits live (the read-back's response, or
-/// a byte `handler_poll` took), so its edge can deliver empty; the first
-/// interrupt settles the debt.
+/// `init` consumed a byte with the IRQ bits live, so its edge can deliver empty; the first interrupt settles it.
 static ARM_EDGE_OWED: AtomicBool = AtomicBool::new(false);
 /// That first interrupt was the arming edge: empty, its byte already init's.
 static ARM_EDGE_CONSUMED: AtomicBool = AtomicBool::new(false);
