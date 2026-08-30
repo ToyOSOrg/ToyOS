@@ -103,3 +103,47 @@ fn va_arg_of_a_floating_type_is_refused_by_name() {
         None => panic!("va_arg(ap, double) compiled; the gp-slot read is live again"),
     }
 }
+
+/// A `goto` into a statement expression: clang refuses it outright ("jump
+/// enters a statement expression"), gcc documents it as erroneous (C11
+/// 6.8.6.1's note; the expression's lifetime model breaks on entry from
+/// outside) — and this compiler lowered it into a block whose objects were
+/// never initialised, deciding the read by nothing in the source.
+#[test]
+fn a_goto_into_a_statement_expression_is_refused_by_name() {
+    // The silent shape: an expression tail, which compiled and read `i` on a
+    // path where nothing initialised it.
+    refuses(
+        "int f(int c) { if (c) goto l; return ({ int i = 1; l: i + 2; }); }",
+        "goto into a statement expression",
+    );
+    // The label-mid-block variant of the same jump.
+    refuses(
+        "int f(int c) { if (c) goto l; return ({ int i = 1; l: i = 5; i; }); }",
+        "goto into a statement expression",
+    );
+    // The loud shape: a non-expression tail, which used to die in the
+    // Cranelift verifier instead of in a sentence.
+    refuses(
+        "int f(int c) { int x; if (c) goto lab; x = ({ 1; lab: ; 2; }); return x; }",
+        "goto into a statement expression",
+    );
+    // Two statement expressions are two scopes: a jump between them enters
+    // one it is not inside.
+    refuses(
+        "int f(void) { int a = ({ goto l; 1; }); int b = ({ l: 2; }); return a + b; }",
+        "goto into a statement expression",
+    );
+}
+
+/// The directions that stay legal: within one statement expression (forward
+/// and backward — 89_nocode_wanted's kb_wait_2/kb_wait_3 shapes), and out of
+/// one, which is the direction gcc permits.
+#[test]
+fn a_goto_within_or_out_of_a_statement_expression_still_compiles() {
+    accepts(
+        "int f(void) { int x = ({ int i = 1; goto l; i = i + 2; l: i = i + 3; i; }); return x; }",
+    );
+    accepts("int f(int c) { int x = ({ l: if (c--) goto l; 5; }); return x; }");
+    accepts("int f(int c) { int x = ({ if (c) goto out; 1; }); return x; out: return 0; }");
+}
