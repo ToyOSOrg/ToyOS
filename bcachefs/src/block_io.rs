@@ -54,31 +54,22 @@ impl Default for BlockBuf {
     }
 }
 
-/// The device did not do the transfer, and whether asking again can help —
-/// the two variants mean opposite give-up policies, so an implementation must
-/// choose and a conversion cannot erase the choice into a unit.
-///
-/// Which block it was stays the caller's, because the caller is what named it.
-/// [`BlockIOExt`] is where that gets attached, so an error a filesystem
-/// operation returns cannot name a block the operation never asked for.
-/// The variants carry a witness only this crate can mint, so a caller with an
-/// error in hand cannot name a variant into existence — rustc's own fix-it for
-/// the old erasure, `.map_err(|_| DeviceError::Failed)`, would re-collapse a
-/// still-durable `Refused` into `Failed` (the loss #327 removed), and now does
-/// not compile:
+/// The device did not do the transfer, and whether asking again can help — the
+/// two variants mean opposite give-up policies. Each carries a witness only
+/// this crate can mint, so a foreign error cannot name a variant into existence;
+/// rustc's fix-it for the old erasure re-collapses a still-durable `Refused`
+/// into `Failed` (the loss #327 removed) and now does not compile:
 ///
 /// ```compile_fail
 /// let r: Result<(), u32> = Err(7);
 /// let _: Result<(), bcachefs::DeviceError> = r.map_err(|_| bcachefs::DeviceError::Failed);
 /// ```
 ///
-/// The witness itself is unreachable from outside the crate:
+/// and the witness itself is unnameable outside the crate:
 ///
 /// ```compile_fail
 /// use bcachefs::Sealed;
 /// ```
-///
-/// The one door in from a foreign error type is [`DeviceError::classify`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceError {
     /// The device's own word: the transfer was attempted and failed.
@@ -88,17 +79,13 @@ pub enum DeviceError {
     Refused(Sealed),
 }
 
-/// The variants' witness: public in name (a public variant's field must be),
-/// unmintable outside the crate (the field is private), unnameable outside it
-/// (the module is private).
+/// The variants' witness: unmintable (private field) and unnameable (private module) outside the crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sealed(());
 
-/// What a foreign error must answer at [`DeviceError::classify`] — the answer
-/// is the discriminant, so no call site holds a variant it could collapse into.
+/// What a foreign error answers at [`DeviceError::classify`]; the answer is the discriminant.
 pub trait TransferError {
-    /// True when the transfer was never attempted: refused on the caller's own
-    /// budget, still durable, worth asking again.
+    /// True when the transfer was never attempted — refused on budget, still durable.
     fn refused_before_attempt(&self) -> bool;
 }
 

@@ -1,22 +1,10 @@
-//! A repeat `dlopen` of one library shares that module — it does not map a new
-//! copy each time.
-//!
-//! `SYS_DLOPEN` used to push a fresh module and a fresh mapping on every call,
-//! so a loop of `dlopen` on the same `.so` walked the process out of virtual
-//! address space. It now returns the handle the name already holds.
-//!
-//! Two independent readings of the one fix:
-//!
-//! - **Handle identity** (the mechanism): sixty-four loads of one path return
-//!   one handle, where the old loader returned 0, 1, 2, … .
-//! - **Object identity** (the ELF/POSIX guarantee that a repeat `dlopen`
-//!   resolves the *same object*): a module-global written through a symbol from
-//!   the first handle is read back through a symbol resolved from the last —
-//!   the same value, because there is one module and one TLS block, not two.
-//!   A loader that returned a fresh module would read the fresh module's zero.
-//!
-//! Uses the raw `dl_*` syscalls rather than `libloading` so the handle integer
-//! itself is observable.
+//! A repeat `dlopen` of one library shares that module rather than mapping a
+//! new copy — `SYS_DLOPEN` used to grow the address space without bound. Read
+//! two ways: handle identity (64 loads of one path return one handle, not
+//! 0, 1, 2, …), and the ELF/POSIX same-object guarantee (a TLS global written
+//! through the first handle's symbol is read back through the last's — one
+//! module, one TLS block; a fresh second module would read zero). Raw `dl_*`
+//! syscalls, not `libloading`, so the handle integer is observable.
 
 use toyos_abi::syscall;
 
@@ -44,11 +32,10 @@ fn handle_identity() -> Vec<u64> {
     handles
 }
 
-/// The ELF/POSIX guarantee: two handles to one name are one object, so they
-/// share the module's TLS. Written through `first`, read through `last`.
+/// The ELF/POSIX same-object guarantee: two handles to one name share the
+/// module's TLS. Written through `first`, read through `last`.
 fn object_identity(first: u64, last: u64) {
-    // The addresses come out equal too when there is one mapping — a second,
-    // cheaper witness of the same object before the state check below.
+    // Same symbol, same address: a second, cheaper witness of the one mapping.
     let get_via_first =
         unsafe { syscall::dl_sym(first, b"dl_tls_get_a") }.expect("dl_tls_get_a via first");
     let get_via_last =
@@ -63,13 +50,11 @@ fn object_identity(first: u64, last: u64) {
     let inc: extern "C" fn() -> u64 = unsafe { core::mem::transmute(inc as usize) };
     let get_last: extern "C" fn() -> u64 = unsafe { core::mem::transmute(get_via_last as usize) };
 
-    // Write the module's TLS counter through the first handle's symbol.
     inc();
     inc();
     inc();
 
-    // Read it through the last handle's symbol. One object, one TLS block on
-    // this thread, so this is 3 — a fresh second module would read 0.
+    // One object, one TLS block on this thread: 3, where a fresh module reads 0.
     let seen = get_last();
     assert_eq!(
         seen, 3,
