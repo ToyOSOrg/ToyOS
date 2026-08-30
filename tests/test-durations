@@ -108,6 +108,7 @@
 86_memory_model 11
 87_dead_code 12
 88_codeopt 11
+89_nocode_wanted 18446744073709551615
 90_static_vs_global 11
 90_stdio_buffering 11
 90_struct_init 13

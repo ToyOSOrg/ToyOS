@@ -1277,11 +1277,6 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("aarch64-specific, and this target is x86-64. Its myprintf pulls whole structs through va_arg, which toyos-cc refuses by name — the case used to reach the Cranelift verifier instead, through the one expression that yielded an aggregate as a scalar"),
     },
     NotRun {
-        case: "89_nocode_wanted",
-        stage: Stage::Built,
-        why: Why::Open("issues/build/89-nocode-wanted-runs-green-and-is-not-priced.md"),
-    },
-    NotRun {
         case: "83_utf8_in_identifiers",
         stage: Stage::Refused("unexpected character '\u{ef}' (0xef)"),
         why: Why::Declined("non-ASCII identifiers. UTF-8 in strings and comments works; the lexer stops on the byte it could not read, so nothing is dropped"),
