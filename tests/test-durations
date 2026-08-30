@@ -184,6 +184,7 @@ fs_rename_durable 9346
 fs_transactional 85
 fs_truncate_persist 17
 fsync_failed_commit 8386
+ftruncate_flush_race 18446744073709551615 shards=none
 futex_wake_counts 1007
 gsbase_locked 13091
 handle_basic 19

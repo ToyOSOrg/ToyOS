@@ -32,6 +32,30 @@ pub fn lock() -> VfsGuard {
     VfsGuard(VFS.lock())
 }
 
+/// Holds one flush of the staged file inside its size-read/`update_metadata`
+/// pair, then says which way the race went. Under the VFS lock the window can
+/// only hold; 400ms, not more — a waiter's ticket spin panics at 500M spins.
+#[cfg(feature = "boot-actuators")]
+fn stalled_metadata_window(path: &str, file_id: FileId, size_read: u64) {
+    if !crate::actuator::ftruncate_flush_stall() || !path.ends_with("truncate-race.bin") {
+        return;
+    }
+    const STALL_NS: u64 = 400_000_000;
+    let until = crate::clock::nanos_since_boot().saturating_add(STALL_NS);
+    while crate::clock::nanos_since_boot() < until {
+        core::hint::spin_loop();
+    }
+    let size_after = crate::file_cache::size(file_id);
+    if size_after == size_read {
+        crate::log!("vfs: STALLED WINDOW HELD — {path} still {size_read} bytes after 400ms");
+    } else {
+        crate::log!(
+            "vfs: STALLED WINDOW BROKEN — a truncate landed inside {path}'s metadata window \
+             ({size_read} -> {size_after})"
+        );
+    }
+}
+
 /// A device that would not answer is `Io`; `NotFound` means only that the name is absent.
 pub trait FileSystem: Send {
     /// Every name in the whole mount — not one directory — or `ResourceExhausted` above `limit`.
@@ -426,6 +450,8 @@ impl Vfs {
         crate::file_cache::settle_pages(file_id, &flushed);
 
         let size = crate::file_cache::size(file_id);
+        #[cfg(feature = "boot-actuators")]
+        stalled_metadata_window(path, file_id, size);
         fs.update_metadata(file_id, size, mtime)?;
         crate::file_cache::settle_file(file_id, plan.file);
 

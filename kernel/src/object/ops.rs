@@ -574,9 +574,14 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     let KObjectRef::File(file) = object else {
         return SyscallError::PermissionDenied.to_u64();
     };
-    file.with(|state| {
+    let file_id = file.with(|state| state.file_id);
+    {
         // `resize`, not `set_size`: marks the file dirty even when no page changed, so flush is not skipped.
-        file_cache::resize(state.file_id, size);
+        // Its witness is this acquisition, outside `FileObject`'s lock — fsync's order.
+        let mut vfs = crate::vfs::lock();
+        file_cache::resize(&mut vfs, file_id, size);
+    }
+    file.with(|state| {
         if state.position > size as usize {
             state.position = size as usize;
         }

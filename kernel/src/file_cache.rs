@@ -419,7 +419,10 @@ pub fn set_size(file_id: FileId, new_size: u64) {
 }
 
 /// A user truncate: [`set_size`], plus marks the file dirty even when no page changed.
-pub fn resize(file_id: FileId, new_size: u64) {
+/// The witness is the point: every flusher's size-read/`update_metadata` pair
+/// runs under the VFS lock, and a resize landing between the two records the
+/// older size on a flush `iod`'s drain has already popped.
+pub fn resize(_vfs: &mut crate::vfs::Vfs, file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
     set_size_locked(&mut cache, file_id, new_size);
     if let Some(file) = cache.files.get_mut(&file_id) {
