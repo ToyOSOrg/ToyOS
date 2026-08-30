@@ -1,13 +1,11 @@
-//! A truncate against a flush's size-read/`update_metadata` pair, staged inside it.
+//! A truncate raced against a flush's stalled `update_metadata` window.
 //!
-//! `SYS_FTRUNCATE`'s resize once took no VFS lock, so a truncate landing
-//! between a flush's two steps recorded the older size. `ftruncate-flush-stall`
+//! `SYS_FTRUNCATE`'s resize once took no VFS lock, so a truncate could land
+//! between a flush's two steps and record the older size. `ftruncate-flush-stall`
 //! holds every flush of this file open for 400ms; this binary races a truncate
-//! against it, and `tests/common/volumes.rs::ftruncate_flush_race` reads the
-//! kernel's verdict and re-judges the shut-down volume with the FAT reader and
-//! checker. Looped, not once: the stall spins preemption-off, so one sleep can
-//! overshoot into a lock-free gap — a lockless resize can never make a
-//! contended attempt, which keeps the loop one-sided.
+//! against it. Looped, since the stall spins preemption-off: one sleep can
+//! overshoot into a lock-free gap, and a lockless resize can never make a
+//! contended attempt — the loop is one-sided.
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};

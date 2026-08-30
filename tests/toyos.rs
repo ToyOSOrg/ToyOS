@@ -11094,11 +11094,9 @@ fn run_machine_test(
             Ok(())
         }
         "driver_wait_refused" => {
-            // The two actuators blind the answering reads — CSTS.RDY for NVMe
-            // init, DEVICE_STATUS for every virtio reset — so a controller that
-            // never answers is staged on a device that always does. The boot
-            // must come up saying which register refused; on the unbounded
-            // shape it never reaches its ready marker at all.
+            // The actuators blind CSTS.RDY and DEVICE_STATUS, staging a
+            // controller that never answers; the boot must come up naming the
+            // refused register — on the unbounded shape it never reaches ready.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -11130,16 +11128,12 @@ fn run_machine_test(
             Ok(())
         }
         "lapic_spurious_vector" => {
-            // `apic::enable_x2apic` writes 0xFF into the SVR on every CPU, so
-            // the platform names a vector the IDT has to gate: delivery through
-            // a `P = 0` slot is a contributory fault and the CPU escalates to
-            // `#DF`, which halts the machine. Nothing on this host raises one by
-            // itself — the SDM's classic condition needs a task-priority
-            // register this kernel never writes, and every device here is MSI or
-            // MSI-X — so the kernel raises it on purpose under this parameter.
-            // The second parameter stages the same fault one gate over: a
-            // vector no row claims, which the catch-all must count, remember
-            // and acknowledge — on the base that had none the boot dies `#DF`.
+            // `apic::enable_x2apic` writes 0xFF into the SVR, a vector the IDT
+            // must gate or the CPU escalates to `#DF`; the SDM's classic
+            // condition needs a TPR write this kernel never makes, so it raises
+            // the vector on purpose. The second parameter stages the same fault
+            // one gate over — a vector no row claims — which the catch-all must
+            // count, remember and acknowledge; the base without it dies `#DF`.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
