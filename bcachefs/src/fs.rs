@@ -1503,13 +1503,10 @@ mod tests {
 
     #[test]
     fn a_tree_past_the_ceiling_is_refused_before_it_materialises() {
-        // 40,000 live entries is past the point (32,769) where the unbounded
-        // walk's `Vec` doubles to 65,536 elements — an allocation over the
-        // kernel's whole heap ceiling (`mm::MAX_HEAP_ALLOC`, 2_093_056), where
-        // its `GlobalAlloc` asserts. Materialise-then-check was therefore a
-        // kernel panic from `sys_readdir` on `/home`, reachable by ordinary
-        // `create` calls; the peak allocation is the instrument here and the
-        // refusal alone is not.
+        // 40,000 entries is past where the unbounded walk's `Vec` doubles to
+        // 65,536 elements — over the kernel heap ceiling where `GlobalAlloc`
+        // asserts, so materialise-then-check was a `sys_readdir` panic on
+        // `/home`. The peak allocation is the instrument, not the refusal alone.
         let ceiling = 2 * 1024 * 1024 - 4096; // mm::MAX_HEAP_ALLOC
         let limit = 16_384; // vfs::MAX_LIST_ENTRIES, what the kernel passes down
         let count = 40_000usize;
@@ -1529,8 +1526,7 @@ mod tests {
         let listed = fs.list(limit);
         let peak = crate::alloc_probe::take_peak();
 
-        // The allocation is asserted first: it is the harm, and it happened
-        // before there was a return value to look at.
+        // Asserted first: the allocation is the harm, before any return value.
         assert!(
             peak <= ceiling,
             "listing a {count}-entry tree under a {limit} ceiling asked the allocator for {peak}",
@@ -1541,8 +1537,7 @@ mod tests {
             Ok(names) => panic!("a {count}-entry tree listed {} names past the ceiling", names.len()),
         }
 
-        // The bound must not take the legal case with it: the same tree,
-        // asked with room for it, comes back whole.
+        // The legal case the bound must not take with it.
         let all = fs.list(count).expect("list with room");
         assert_eq!(all.len(), count, "a listing with room came back short");
     }

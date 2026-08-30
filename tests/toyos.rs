@@ -11018,11 +11018,9 @@ fn run_machine_test(
             Ok(())
         }
         "read_fault_selftests" => {
-            // Three kernel-boot controls: a backing read after its file's
-            // deletion must be refused on both writable mounts (reverting the
-            // tmpfs revocation prints FAIL), and a page-cache slot whose fill
-            // the device refused must be unbound (reverting `PageCache::read`'s
-            // unbind prints FAIL — before this boot existed nothing could).
+            // Three kernel-boot controls: a backing read after deletion is
+            // refused on both writable mounts, and a page-cache slot whose fill
+            // the device refused is unbound. Reverting either prints FAIL.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -12001,13 +11999,10 @@ fn run_machine_test(
             Ok(())
         }
         "netd_listener_forgery" => {
-            // The same netcase boot netd_connection_caps uses (the only one
-            // with a NIC under netd), and the same announce-then-run shape.
-            // The client binds a piped listener, forges the reader-closed flag
-            // on its own notify pipe with the reader still open, and the guest
-            // asserts the listener survived — netd asking the kernel, not
-            // reading the forgeable bit. Measured negative control: on the
-            // pre-fix netd the guest panics ("netd tore the listener down").
+            // The netcase boot (the only NIC-under-netd one). The client binds
+            // a piped listener, forges the reader-closed flag with its reader
+            // open, and asserts the listener survived — netd asking the kernel,
+            // not the forgeable bit. On the pre-fix netd the guest panics.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
             let bins: Vec<(String, Vec<u8>)> = rust_bins
                 .iter()
