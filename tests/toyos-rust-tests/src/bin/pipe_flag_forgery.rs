@@ -36,14 +36,13 @@ fn reader_alive_but_flag_forged() {
 
     let page = syscall::pipe_map(write).expect("map the write end") as *mut u8;
     forge(page, RING_READER_CLOSED);
-    // The premise: the flag is forgeable and now lies.
+    // The premise: the forged flag now lies.
     assert!(
         reads_reader_closed(page),
         "the forged RING_READER_CLOSED bit did not take — this proves nothing"
     );
 
-    // netd's new probe: a zero-byte write moves nothing and, with the reader
-    // open, is `Ok(0)` rather than `NotFound`.
+    // netd's new probe: a zero-byte write is `Ok(0)` while the reader is open.
     let probe = syscall::write_nonblock(write, &[]);
     assert_eq!(
         probe,
@@ -55,8 +54,7 @@ fn reader_alive_but_flag_forged() {
     println!("  PASS: a forged reader-closed flag did not make the kernel report a live reader gone");
 }
 
-/// The other direction, so the probe is not merely blind: once the reader is
-/// really gone, the same zero-byte write is refused by name.
+/// The other direction: a really-gone reader refuses the same write by name.
 fn reader_gone_is_the_kernels_to_report() {
     let ends = syscall::pipe().expect("pipe");
     let (read, write) = (ends.read, ends.write);

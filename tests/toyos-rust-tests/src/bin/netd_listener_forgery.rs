@@ -45,8 +45,7 @@ fn main() {
         syscall::nanosleep(POKE_PAUSE_NANOS);
     }
 
-    // A believed flag aborts the listener and drops netd's notify writer, so
-    // this reads EOF; a survivor's writer is alive and there is nothing to read.
+    // A believed flag drops netd's notify writer (EOF here); a survivor keeps it.
     let mut buf = [0u8; 4];
     match syscall::read_nonblock(bound.notify.as_handle(), &mut buf) {
         Err(SyscallError::WouldBlock) => {

@@ -9,12 +9,9 @@
 //! success. A bound plus a silent truncation is a quieter version of the same
 //! defect, so both are asserted here.
 //!
-//! `/home` gets the same class third: its btree walk materialised the whole
-//! tree before the mount bound ran — past 32,768 live entries the doubling
-//! `Vec` crossed the kernel's allocation ceiling, a panic from ordinary
-//! `create` calls — and now refuses at the bound first.
-//!
-//! Everything below is an ordinary workload — no kernel feature, no injection.
+//! `/home` gets the same class third: its btree walk crossed the kernel's
+//! allocation ceiling past 32,768 entries (a panic from ordinary `create`s)
+//! and now refuses at the bound first. All below is an ordinary workload.
 
 use std::fs;
 use std::process::Command;

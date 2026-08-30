@@ -54,19 +54,15 @@ impl Default for BlockBuf {
     }
 }
 
-/// The device did not do the transfer, and whether asking again can help — the
-/// two variants mean opposite give-up policies. Each carries a witness only
-/// this crate can mint, so a foreign error cannot name a variant into existence;
-/// rustc's fix-it for the old erasure re-collapses a still-durable `Refused`
-/// into `Failed` (the loss #327 removed) and now does not compile:
+/// The two variants mean opposite give-up policies. Each carries a witness only
+/// this crate can mint, so rustc's fix-it for the old erasure — which
+/// re-collapses a still-durable `Refused` into `Failed`, the loss #327 removed
+/// — no longer compiles, nor can the witness be named outside the crate:
 ///
 /// ```compile_fail
 /// let r: Result<(), u32> = Err(7);
 /// let _: Result<(), bcachefs::DeviceError> = r.map_err(|_| bcachefs::DeviceError::Failed);
 /// ```
-///
-/// and the witness itself is unnameable outside the crate:
-///
 /// ```compile_fail
 /// use bcachefs::Sealed;
 /// ```
