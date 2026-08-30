@@ -7,7 +7,7 @@ fn format_and_mount_empty() {
     let io = VecBlockIO::new(128);
     let fs = Formatted::format(io).expect("format");
     let mounted = fs.mount_readonly();
-    let files = mounted.list().expect("list failed");
+    let files = mounted.list(usize::MAX).expect("list failed");
     assert!(files.is_empty(), "expected empty filesystem, got {:?}", files);
 }
 
@@ -18,7 +18,7 @@ fn create_single_small_file() {
     fs.create("hello.txt", b"Hello, world!", 42).expect("create failed");
     let mounted = fs.mount_readonly();
 
-    let files = mounted.list().expect("list failed");
+    let files = mounted.list(usize::MAX).expect("list failed");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0, "hello.txt");
     assert_eq!(files[0].1, 13);
@@ -40,7 +40,7 @@ fn create_multiple_files() {
 
     let mounted = fs.mount_readonly();
 
-    let files = mounted.list().expect("list failed");
+    let files = mounted.list(usize::MAX).expect("list failed");
     assert_eq!(files.len(), 3, "expected 3 files, got: {:?}", files);
 
     assert_eq!(mounted.read_file("bin/shell").unwrap(), b"shell-binary-data");
@@ -99,7 +99,7 @@ fn list_includes_symlinks() {
     fs.create_symlink("link.txt", "file.txt", 0).expect("create symlink");
 
     let mounted = fs.mount_readonly();
-    let files = mounted.list().expect("list");
+    let files = mounted.list(usize::MAX).expect("list");
     assert_eq!(files.len(), 2, "expected 2 entries (file + symlink), got: {:?}", files);
 
     let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
@@ -131,7 +131,7 @@ fn empty_file() {
     fs.create("empty", b"", 0).expect("create empty file");
 
     let mounted = fs.mount_readonly();
-    let files = mounted.list().expect("list");
+    let files = mounted.list(usize::MAX).expect("list");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0, "empty");
     assert_eq!(files[0].1, 0);
@@ -216,7 +216,7 @@ fn duplicate_filename_overwrites() {
     fs.create("test.txt", b"version 2", 20).expect("create v2");
 
     let mounted = fs.mount_readonly();
-    let files = mounted.list().expect("list");
+    let files = mounted.list(usize::MAX).expect("list");
     assert_eq!(files.len(), 1, "duplicate filename should overwrite, not create second entry");
     assert_eq!(mounted.read_file("test.txt").unwrap(), b"version 2");
     assert_eq!(mounted.file_mtime("test.txt").expect("mtime").unwrap_or(0), 20);
@@ -278,7 +278,7 @@ fn many_files_with_large_data() {
     }
 
     let mounted = fs.mount_readonly();
-    let files = mounted.list().expect("list");
+    let files = mounted.list(usize::MAX).expect("list");
     assert_eq!(files.len(), 50);
 
     for (name, data) in &expected {
@@ -312,10 +312,10 @@ fn mounted_readwrite_delete() {
 
     mounted.create("a.txt", b"aaa", 0).expect("create a");
     mounted.create("b.txt", b"bbb", 0).expect("create b");
-    assert_eq!(mounted.list().unwrap().len(), 2);
+    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 2);
 
     assert!(mounted.delete("a.txt").expect("delete"));
-    assert_eq!(mounted.list().unwrap().len(), 1);
+    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 1);
     assert!(mounted.read_file("a.txt").is_err());
     assert_eq!(mounted.read_file("b.txt").unwrap(), b"bbb");
 
@@ -344,10 +344,10 @@ fn mounted_readwrite_delete_prefix() {
     mounted.create("bin/editor", b"editor", 0).expect("create");
     mounted.create("bin/compositor", b"compositor", 0).expect("create");
 
-    assert_eq!(mounted.list().unwrap().len(), 203);
+    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 203);
 
     mounted.delete_prefix("bin/").expect("delete_prefix");
-    let files = mounted.list().unwrap();
+    let files = mounted.list(usize::MAX).unwrap();
     assert_eq!(files.len(), 200, "expected 200 files after deleting bin/, got {}", files.len());
     assert!(mounted.read_file("bin/shell").is_err());
     assert!(mounted.read_file("bin/editor").is_err());
@@ -386,7 +386,7 @@ fn mounted_readwrite_overwrite_file() {
     mounted.create("test.txt", b"version 2 is longer", 20).expect("create v2");
     assert_eq!(mounted.read_file("test.txt").unwrap(), b"version 2 is longer");
     assert_eq!(mounted.file_mtime("test.txt").expect("mtime").unwrap_or(0), 20);
-    assert_eq!(mounted.list().unwrap().len(), 1);
+    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 1);
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn mounted_readwrite_double_roundtrip() {
 
     // Final read-only verification
     let m = Mounted::<_, ReadOnly>::open(VecBlockIO::from_vec(raw)).expect("reopen ro");
-    assert_eq!(m.list().unwrap().len(), 2);
+    assert_eq!(m.list(usize::MAX).unwrap().len(), 2);
     assert_eq!(m.read_file("round1.txt").unwrap(), b"first round");
     assert_eq!(m.read_file("round2.txt").unwrap(), b"second round");
     assert_eq!(m.file_mtime("round1.txt").expect("mtime").unwrap_or(0), 10);
@@ -464,7 +464,7 @@ fn mounted_readwrite_overwrite_with_smaller_data() {
     // Overwrite with tiny data — should free the 10 blocks
     m.create("big.bin", b"tiny", 0).expect("overwrite with smaller");
     assert_eq!(m.read_file("big.bin").unwrap(), b"tiny");
-    assert_eq!(m.list().unwrap().len(), 1);
+    assert_eq!(m.list(usize::MAX).unwrap().len(), 1);
 
     // The freed blocks should be reusable — create another large file
     let big2 = vec![0xCCu8; 40 * 1024];
@@ -578,7 +578,7 @@ fn format_mount_unmount_create_mount_roundtrip() {
 
     // Mount readonly, verify, unmount back to Formatted
     let mounted = fs.mount_readonly();
-    assert_eq!(mounted.list().unwrap().len(), 1);
+    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 1);
     assert_eq!(mounted.read_file("phase1.txt").unwrap(), b"created during format");
     fs = mounted.into_formatted();
 
@@ -587,7 +587,7 @@ fn format_mount_unmount_create_mount_roundtrip() {
 
     // Mount readonly again, verify both files exist
     let mounted = fs.mount_readonly();
-    let files = mounted.list().unwrap();
+    let files = mounted.list(usize::MAX).unwrap();
     assert_eq!(files.len(), 2, "expected 2 files after round-trip, got: {:?}", files);
     assert_eq!(mounted.read_file("phase1.txt").unwrap(), b"created during format");
     assert_eq!(mounted.read_file("phase2.txt").unwrap(), b"created after round-trip");
@@ -689,7 +689,7 @@ fn runs(extents: &[bcachefs::Extent]) -> Vec<(u64, u32)> {
 
 /// Every name on the volume, sorted.
 fn names(fs: &Mounted<VecBlockIO, ReadWrite>) -> Vec<String> {
-    let mut names: Vec<String> = fs.list().expect("list").into_iter().map(|(n, _)| n).collect();
+    let mut names: Vec<String> = fs.list(usize::MAX).expect("list").into_iter().map(|(n, _)| n).collect();
     names.sort();
     names
 }
@@ -827,7 +827,7 @@ fn a_file_renamed_onto_a_symlink_leaves_one_entry() {
 fn a_rename_with_no_source_touches_nothing() {
     let mut empty = Formatted::format(VecBlockIO::new(128)).expect("format").mount();
     assert!(matches!(empty.rename("a", "b"), Err(bcachefs::FsError::NotFound)));
-    assert!(empty.list().expect("list").is_empty(), "a rename created an entry from nothing");
+    assert!(empty.list(usize::MAX).expect("list").is_empty(), "a rename created an entry from nothing");
 
     let mut fs = Formatted::format(VecBlockIO::new(128)).expect("format").mount();
     fs.create("bystander.bin", b"not part of this", 6).expect("create");
@@ -1048,6 +1048,22 @@ struct Refuses {
     write: Option<u64>,
 }
 
+/// The transfer was attempted and failed — the device's own word.
+struct Attempted;
+impl bcachefs::TransferError for Attempted {
+    fn refused_before_attempt(&self) -> bool {
+        false
+    }
+}
+
+/// Refused on the caller's budget before the attempt; still durable.
+struct OnBudget;
+impl bcachefs::TransferError for OnBudget {
+    fn refused_before_attempt(&self) -> bool {
+        true
+    }
+}
+
 impl Refuses {
     fn read(raw: Vec<u8>, block: u64) -> Self {
         Self { inner: VecBlockIO::from_vec(raw), read: Some(block), write: None }
@@ -1065,7 +1081,7 @@ impl bcachefs::BlockIO for Refuses {
         buf: &mut bcachefs::BlockBuf,
     ) -> Result<(), bcachefs::DeviceError> {
         if self.read == Some(block.raw()) {
-            return Err(bcachefs::DeviceError::Failed);
+            return Err(bcachefs::DeviceError::classify(&Attempted));
         }
         self.inner.read_block(block, buf)
     }
@@ -1076,7 +1092,7 @@ impl bcachefs::BlockIO for Refuses {
         buf: &bcachefs::BlockBuf,
     ) -> Result<(), bcachefs::DeviceError> {
         if self.write == Some(block.raw()) {
-            return Err(bcachefs::DeviceError::Failed);
+            return Err(bcachefs::DeviceError::classify(&Attempted));
         }
         self.inner.write_block(block, buf)
     }
@@ -1104,7 +1120,7 @@ fn a_data_block_the_device_refuses_is_not_a_page_of_zeros() {
 
     let fs = Mounted::<_, ReadOnly>::open(Refuses::read(raw, data_block)).expect("open");
     match fs.read_file("doc.bin") {
-        Err(FsError::DeviceRead(block, e)) => { assert_eq!(block.raw(), data_block); assert_eq!(e, bcachefs::DeviceError::Failed); }
+        Err(FsError::DeviceRead(block, e)) => { assert_eq!(block.raw(), data_block); assert!(matches!(e, bcachefs::DeviceError::Failed(_))); }
         Ok(data) => panic!(
             "read_file returned {} bytes for a block the device refused; first is {:#x}",
             data.len(),
@@ -1120,7 +1136,7 @@ fn a_btree_node_the_device_refuses_is_not_a_node_of_zeros() {
     let root = u64::from_le_bytes(raw[24..32].try_into().unwrap());
 
     let fs = Mounted::<_, ReadOnly>::open(Refuses::read(raw, root)).expect("open");
-    match fs.list() {
+    match fs.list(usize::MAX) {
         Err(FsError::DeviceRead(block, _)) => assert_eq!(block.raw(), root),
         other => panic!("expected DeviceRead, got {other:?}"),
     }
@@ -1148,7 +1164,7 @@ fn a_write_the_device_refuses_is_reported_and_gives_its_blocks_back() {
 
     let mut fs = Mounted::<_, ReadWrite>::open(Refuses::write(raw, next_free)).expect("open");
     match fs.create("new.bin", &vec![0x11u8; 4096], 0) {
-        Err(FsError::DeviceWrite(block, e)) => { assert_eq!(block.raw(), next_free); assert_eq!(e, bcachefs::DeviceError::Failed); }
+        Err(FsError::DeviceWrite(block, e)) => { assert_eq!(block.raw(), next_free); assert!(matches!(e, bcachefs::DeviceError::Failed(_))); }
         other => panic!("expected DeviceWrite, got {other:?}"),
     }
 
@@ -1193,7 +1209,7 @@ impl bcachefs::BlockIO for Postpones {
     }
 
     fn sync(&self) -> Result<(), bcachefs::DeviceError> {
-        Err(bcachefs::DeviceError::Refused)
+        Err(bcachefs::DeviceError::classify(&OnBudget))
     }
 }
 
@@ -1208,7 +1224,7 @@ fn a_refused_sync_stays_refused_through_the_filesystem() {
             .expect("open");
     fs.create("new.bin", b"new bytes", 0).expect("create");
     match fs.sync() {
-        Err(FsError::DeviceSync(bcachefs::DeviceError::Refused)) => {}
+        Err(FsError::DeviceSync(bcachefs::DeviceError::Refused(_))) => {}
         other => panic!("expected DeviceSync(Refused), got {other:?}"),
     }
 }

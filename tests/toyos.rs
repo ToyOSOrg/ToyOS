@@ -201,6 +201,9 @@ const RUST_SKIP: &[&str] = &[
     // other machine both claims succeed. `input_claim_absent` runs it.
     "input_absent",
     "va_exhaustion",
+    // Needs a NIC in front of netd; only `tests/netcase` has one.
+    // `netd_listener_forgery` runs it there.
+    "netd_listener_forgery",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_recovery` boots the `test-actuators` kernel on one CPU,
     // which is also what makes its claim about *the recovered CPU* precise.
@@ -520,6 +523,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // not compute-bound: timer-anchored, and Nightly for that reason.
     ("doom_music", Sched::Parallel, Tier::Nightly),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
+    // The netcase boot again: netd must not abort a listener on a ring flag its
+    // own client forged. Its verdict is a kernel-reported EOF or its absence;
+    // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
+    ("netd_listener_forgery", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
@@ -593,6 +600,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
+    // One boot; three read-fault control verdicts. Carrying `UNMEASURED_MS`
+    // until the shards price it.
+    ("read_fault_selftests", Sched::Parallel, Tier::Fast),
     ("xhci_many_devices", Sched::Parallel, Tier::Fast),
     // Its whole assertion is that a keystroke injected from the host crossed a
     // USB keyboard on the *second* controller, and `input_events_run` sends
@@ -9372,7 +9382,8 @@ fn run_machine_test(
             );
             serial::Serial::boot(&qemu).must_be_clean()?;
 
-            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(60));
+            // 120 s: the `/home` arm alone is 32,769 creates on bcachefs.
+            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(120));
             if let Some(err) = &result.error {
                 return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
             }
@@ -11127,6 +11138,35 @@ fn run_machine_test(
             );
             Ok(())
         }
+        "read_fault_selftests" => {
+            // Three kernel-boot controls: a backing read after deletion is
+            // refused on both writable mounts, and a page-cache slot whose fill
+            // the device refused is unbound. Reverting either prints FAIL.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["revoked-backing-selftest", "pc-unbind-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            for probe in [
+                "revoke-selftest: /tmp/revoke_probe",
+                "revoke-selftest: /home/revoke_probe",
+                "pc-unbind-selftest:",
+            ] {
+                let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+                    return Err(format!("{probe} never ran:\n{log}"));
+                };
+                if !verdict.contains("PASS") {
+                    return Err(format!("{}\n{log}", verdict.trim()));
+                }
+                eprintln!("  [read-fault] {}", verdict.trim());
+            }
+            Ok(())
+        }
         "lapic_spurious_vector" => {
             // `apic::enable_x2apic` writes 0xFF into the SVR, a vector the IDT
             // must gate or the CPU escalates to `#DF`; the SDM's classic
@@ -12080,6 +12120,46 @@ fn run_machine_test(
                 ));
             }
             eprintln!("  [netcase] netd cap {declared} piped connections, {granted} accepted then refused");
+            Ok(())
+        }
+        "netd_listener_forgery" => {
+            // The netcase boot (the only NIC-under-netd one). The client binds
+            // a piped listener, forges the reader-closed flag with its reader
+            // open, and asserts the listener survived — netd asking the kernel,
+            // not the forgeable bit. On the pre-fix netd the guest panics.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+            let bins: Vec<(String, Vec<u8>)> = rust_bins
+                .iter()
+                .filter(|(name, _)| name == "netd_listener_forgery")
+                .cloned()
+                .collect();
+            if bins.is_empty() {
+                return Err("netd_listener_forgery was not built".to_string());
+            }
+            let options = BootOptions {
+                profile: qemu::Profile::Headless,
+                ..Default::default()
+            };
+            if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+                return Err("this test needs a NIC and the profile has none".to_string());
+            }
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
+            let mut console = qemu.boot_log().to_string();
+            let _ = await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
+            let result = qemu.run_test("test_rs_netd_listener_forgery", Duration::from_secs(60));
+            if let Some(err) = &result.error {
+                return Err(format!("{err}\n{}", result.stdout));
+            }
+            if result.exit_code != Some(0) {
+                return Err(format!(
+                    "netd_listener_forgery exited {:?}:\n{}",
+                    result.exit_code, result.stdout
+                ));
+            }
+            if !result.stdout.contains("listener survived a forged reader-closed flag") {
+                return Err(format!("no survival line from the guest:\n{}", result.stdout));
+            }
+            eprintln!("  [netcase] a piped listener survived a forged reader-closed flag");
             Ok(())
         }
         "netd_hostile_peer" => {

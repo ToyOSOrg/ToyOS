@@ -177,6 +177,20 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     let cwd = process::with_process_data(|d| d.cwd.clone());
     let resolved = vfs::lock().resolve_absolute(&cwd, path);
 
+    // A repeat load of a name this process holds shares that module and maps
+    // nothing again — a `dlopen` loop used to grow the address space unbounded.
+    // POSIX-shaped: the shared module's initializers do not re-run, so empty init.
+    if let Some(idx) =
+        process::with_process_data(|d| d.elf.lib_paths.iter().position(|p| *p == resolved))
+    {
+        if let Some(out) = init_out {
+            if ctx.copy_out(out, &[0u64, 0]).is_err() {
+                return SyscallError::BadAddress.to_u64();
+            }
+        }
+        return idx as u64;
+    }
+
     let lib = crate::elf::try_clone_cached(&resolved);
     let mut lib = match lib {
         Some(lib) => lib,
