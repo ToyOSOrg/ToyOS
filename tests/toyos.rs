@@ -772,8 +772,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // made for that whole family. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("swiss_german_layout", Sched::Parallel, Tier::Fast),
-    ("locale_detect", Sched::Parallel, Tier::Nightly),
-    ("locale_detect_unrecognized", Sched::Parallel, Tier::Nightly),
+    // One `LOCALE_WIZARD` boot for the pair since the drainer was made
+    // runnable at commit — the boot-apiece and the injected drain keys it took
+    // to share one were both the closed log-ring lag. Adjacent because
+    // `group_of` makes adjacency load-bearing; Fast as the bootstrap tier,
+    // carrying `UNMEASURED_MS` until the shards price the shared shape.
+    ("locale_detect", Sched::Parallel, Tier::Fast),
+    ("locale_detect_unrecognized", Sched::Parallel, Tier::Fast),
     // The wizard on the two surfaces the machine actually has, rather than on
     // the stand-in `locale_gate` is. Each costs a boot of a different image.
     ("console_locale_detect", Sched::Parallel, Tier::Fast),
@@ -4759,6 +4764,7 @@ type Grouped = Option<Boot>;
 
 const METAL_SIM_DESKTOP: &str = "metal-sim desktop";
 const I8042_TRACE: &str = "i8042 trace";
+const LOCALE_WIZARD: &str = "locale wizard";
 
 /// The line `tests/toyos-rust-tests/src/bin/i8042_keyboard.rs` prints once it
 /// holds the keyboard claim, and the line every injection into that binary is
@@ -4800,6 +4806,10 @@ fn group_of(name: &str) -> Option<&'static str> {
         | "metal_sim_compositor_stall"
         | "metal_sim_client_death" => Some(METAL_SIM_DESKTOP),
         "i8042_keyboard" | "i8042_no_spurious_wake" | "i8042_mouse" => Some(I8042_TRACE),
+        // The positive wizard first: it applies a layout, and the negative
+        // member reads only its own window, so the order is the argument that
+        // no member reads state another left.
+        "locale_detect" | "locale_detect_unrecognized" => Some(LOCALE_WIZARD),
         _ => None,
     }
 }
@@ -5762,39 +5772,20 @@ fn swiss_german_layout(qemu: &mut QemuInstance) -> Result<(), String> {
     Ok(())
 }
 
-/// How many Escapes [`keep_the_ring_moving`] presses.
-const RING_ESCAPES: usize = 4;
-
 /// How many keys the wizard is answered with, at most — `y`, the `§` key, Enter.
 const WIZARD_ANSWERS: usize = 3;
 
 /// **The wizard gates are the one injection here a wall clock cannot cost
-/// anything**: answers and ring-drainers together are fewer bytes than
-/// [`QEMU_PS2_QUEUE`] holds and none of their qcodes is `0xE0`-prefixed, so a
-/// guest draining nothing for the whole hook still receives every transition.
-/// Anything added to either sequence is past that bound and has to be paced
-/// against the guest, the way [`SWISS_SCRIPT`] is.
+/// anything**: the answers are fewer bytes than [`QEMU_PS2_QUEUE`] holds and
+/// none of their qcodes is `0xE0`-prefixed, so a guest draining nothing for
+/// the whole hook still receives every transition. Anything added to the
+/// sequence past that bound has to be paced against the guest, the way
+/// [`SWISS_SCRIPT`] is.
 const _: () = assert!(
-    (WIZARD_ANSWERS + RING_ESCAPES) * 2 <= QEMU_PS2_QUEUE,
+    WIZARD_ANSWERS * 2 <= QEMU_PS2_QUEUE,
     "the wizard gates put more at QEMU's PS/2 queue than it holds, and it drops the excess \
      one byte at a time and says nothing — pace them against the guest"
 );
-
-/// Keys nothing is listening for, after the ones that are.
-///
-/// The wizard exits within milliseconds of its last answer, and on a machine
-/// that then has nothing to do the kernel's log ring sits one line behind — so
-/// the runner's `===TEST_END===` stays in it and the harness waits out its
-/// whole timeout for a test that finished. Escape presses after the wizard has
-/// gone are discarded by the next reader, and each one is an i8042 interrupt
-/// that keeps the ring draining. `i8042_no_spurious_wake` records the same
-/// property from the other side: a guest polling its handle keeps it moving.
-fn keep_the_ring_moving(input: &mut qemu::QmpInput) {
-    for _ in 0..RING_ESCAPES {
-        thread::sleep(Duration::from_millis(150));
-        input.keys(&[("esc", true), ("esc", false)]);
-    }
-}
 
 /// The wizard, answered as a Swiss keyboard's owner would answer it.
 fn locale_detect(qemu: &mut QemuInstance) -> Result<(), String> {
@@ -5813,7 +5804,6 @@ fn locale_detect(qemu: &mut QemuInstance) -> Result<(), String> {
                 input.keys(&[(key, true), (key, false)]);
                 thread::sleep(Duration::from_millis(60));
             }
-            keep_the_ring_moving(&mut input);
         },
     );
     if let Some(err) = &result.error {
@@ -5854,7 +5844,6 @@ fn locale_detect_unrecognized(qemu: &mut QemuInstance) -> Result<(), String> {
                 input.keys(&[(key, true), (key, false)]);
                 thread::sleep(Duration::from_millis(60));
             }
-            keep_the_ring_moving(&mut input);
         },
     );
     if let Some(err) = &result.error {
@@ -7229,11 +7218,8 @@ fn soundd_clients_since(log: &str, from: usize, verb: &str) -> usize {
 /// bytes and no events must produce no wake. Pause is that stimulus — six
 /// bytes, deliberately swallowed.
 ///
-/// It drives the same in-guest reader as [`i8042_keyboard`], and not only for
-/// the userland half of the assertion: on a fully idle machine the kernel's
-/// log ring flushes one line behind, so the last trace line would never reach
-/// the console (filed in `issues/`). A guest polling its handle keeps the ring
-/// moving.
+/// It drives the same in-guest reader as [`i8042_keyboard`], for the userland
+/// half of the assertion.
 ///
 /// **The zero-event drain is arranged, not hoped for.** What a drain carries is
 /// whatever the ISR found in the ring, so a host that injects on a wall clock
@@ -8530,9 +8516,17 @@ fn run_machine_test(
         "swiss_german_layout" => {
             swiss_german_layout(&mut boot_locale(test_config, c_bins, rust_bins))
         }
-        "locale_detect" => locale_detect(&mut boot_locale(test_config, c_bins, rust_bins)),
+        "locale_detect" => {
+            let boot = group_boot(held, LOCALE_WIZARD, || {
+                boot_locale(test_config, c_bins, rust_bins)
+            });
+            locale_detect(&mut boot.qemu)
+        }
         "locale_detect_unrecognized" => {
-            locale_detect_unrecognized(&mut boot_locale(test_config, c_bins, rust_bins))
+            let boot = group_boot(held, LOCALE_WIZARD, || {
+                boot_locale(test_config, c_bins, rust_bins)
+            });
+            locale_detect_unrecognized(&mut boot.qemu)
         }
         "console_locale_detect" => console_locale_detect(),
         "desktop_locale_detect" => desktop_locale_detect(),

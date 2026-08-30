@@ -227,8 +227,8 @@ lapic_spurious_vector 6829
 late_storage_connect 6455
 launcher_refusals 2106
 leak_rollback_selftest 5423
-locale_detect 8607
-locale_detect_unrecognized 8260
+locale_detect 18446744073709551615
+locale_detect_unrecognized 18446744073709551615
 log_backing_read_error 4887
 log_conservation_smp1 4686
 log_conservation_smp4 8248

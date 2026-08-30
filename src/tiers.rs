@@ -271,31 +271,6 @@ pub const RELEGATED: &[Relegated] = &[
                  doubled since its return.",
     },
     Relegated {
-        test: "locale_detect",
-        ci_ms: 8_607,
-        why: Why::Cost,
-        guards: "The wizard answered over QMP on the stand-in `locale_gate`, swiss-german \
-                 identified in two presses and the surface acting on the config it wrote. What \
-                 still runs per pull request: `console_locale_detect` and \
-                 `desktop_locale_detect` carry the same wizard to the same verdict on the two \
-                 surfaces the machine actually has — the console's own translator typing `ü` \
-                 off the re-read config, and the compositor forwarding transitions three \
-                 processes down — so the positive arm keeps both real-surface gates and only \
-                 the stand-in configuration moves.",
-    },
-    Relegated {
-        test: "locale_detect_unrecognized",
-        ci_ms: 8_260,
-        why: Why::Cost,
-        guards: "The wizard's negative control, in the guest: presses no layout agrees with \
-                 must end in `detect: Unrecognized` and never in a layout applied. What still \
-                 runs per pull request: `toyos-keymap`'s host suite (`tests/detect.rs`) drives \
-                 the same decision to `Step::Unrecognized`, so the verdict logic keeps a per-PR \
-                 gate; what moves is the in-guest half — the gate binary refusing rather than \
-                 applying — which no Fast test stages: both real-surface siblings answer the \
-                 wizard correctly.",
-    },
-    Relegated {
         test: "log_partition_identity",
         ci_ms: 9_516,
         why: Why::Cost,
