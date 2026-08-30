@@ -96,10 +96,8 @@ pub enum FsError {
     /// A symlink target declaring more bytes than the caller's ceiling —
     /// refused before the one allocation the declared size drives.
     TargetTooLong { size: u64, max: u64 },
-    /// A tree with more live entries than the caller's ceiling — refused
-    /// before the over-bound entry materialises, for the same reason as
-    /// [`FsError::TargetTooLong`]: the ceiling sizes the allocation, never
-    /// the disk's claim about itself.
+    /// A tree with more live entries than the caller's ceiling — refused before
+    /// the over-bound entry materialises, as [`FsError::TargetTooLong`] is.
     ListTooLong { limit: usize },
 }
 
@@ -698,8 +696,7 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         }
     }
 
-    /// List up to `limit` files as (name, size) pairs; a tree with more live
-    /// entries is refused (`ListTooLong`) before any of them materialises.
+    /// Up to `limit` files as (name, size); more is refused before any materialise.
     pub fn list(&self, limit: usize) -> Result<Vec<(String, u64)>, FsError> {
         let entries = btree::collect_up_to(&self.io, self.sb.root_node, limit)?;
         let mut result = Vec::with_capacity(entries.len());

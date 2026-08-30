@@ -43,8 +43,7 @@ impl FileBacking for TmpfsBacking {
     }
 }
 
-/// Ends a file entry's life: cleared first, so every backing minted for the
-/// entry fails from then on, and only then are the pages given up.
+/// Ends a file entry's life: cleared first (so every backing fails), pages after.
 fn retire(id: FileId, alive: &AtomicBool) {
     alive.store(false, Ordering::Release);
     let _ = file_cache::mark_deleted(id);

@@ -329,10 +329,9 @@ mod read_fault {
 
     use crate::block::{BlockDevice, BlockError, BlockResult, DeviceId};
 
-    /// `u64::MAX` is disarmed; no device reaches it (`NO_BLOCK`).
+    // `u64::MAX` disarms; no device reaches it.
     pub(super) static FAIL_BLOCK: AtomicU64 = AtomicU64::new(u64::MAX);
     pub(super) static WATCH_BLOCK: AtomicU64 = AtomicU64::new(u64::MAX);
-    /// Successful device reads that covered the watched block.
     pub(super) static SERVED: AtomicU64 = AtomicU64::new(0);
 
     pub(super) struct FaultDevice(pub Box<dyn BlockDevice>);
