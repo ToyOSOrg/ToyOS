@@ -866,6 +866,18 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     };
 
     // Phase 3: insert into table (brief table lock); threads share the parent's ProcessData Arc.
+    let mut guard = PROCESS_TABLE.lock();
+    let table = guard.as_mut().unwrap();
+    // Re-checked under the insert lock: a thread refused here would otherwise be invisible to a retire sweep already under way.
+    if !proclife_spawn::admit_thread_insert(table, parent_process).is_yes() {
+        // The unmap cannot run under the table lock (its shootdown is a wait a
+        // sibling can be spinning against with IF clear), so the mapping is
+        // still solely this scope's here — built into a ThreadData only past
+        // the admission, where the table owns its release.
+        drop(guard);
+        tls_alloc.release(&parent_addr_space);
+        return None;
+    }
     let thread_data = Arc::new(Lock::new(ThreadData {
         tls_pages: Some(tls_alloc),
         stack_pages: None,
@@ -875,13 +887,6 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         syscall_total: 0,
         syscall_total_ns: 0,
     }));
-
-    let mut guard = PROCESS_TABLE.lock();
-    let table = guard.as_mut().unwrap();
-    // Re-checked under the insert lock: a thread refused here would otherwise be invisible to a retire sweep already under way.
-    if !proclife_spawn::admit_thread_insert(table, parent_process).is_yes() {
-        return None;
-    }
     let proc = table.get_mut(parent_process)
         .expect("spawn_thread: the entry the insert admission just answered for");
     // Every thread names the same symbols, so a crash report never asks this table.

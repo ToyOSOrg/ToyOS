@@ -165,7 +165,7 @@ kernel/src/page_cache.rs 36 0
 kernel/src/panic.rs 55 0
 kernel/src/pipe.rs 34 0
 kernel/src/preempt.rs 10 0
-kernel/src/process.rs 216 0
+kernel/src/process.rs 220 0
 kernel/src/rollback.rs 4 0
 kernel/src/rtc.rs 42 0
 kernel/src/sched/driver.rs 204 0
@@ -516,10 +516,10 @@ toyos-pci/src/msi.rs 35 0
 toyos-pci/src/msix.rs 33 0
 toyos-pcid/src/lib.rs 29 0
 toyos-pcid/src/oracle.rs 35 0
-toyos-proclife/src/interleave.rs 150 0
+toyos-proclife/src/interleave.rs 160 0
 toyos-proclife/src/join.rs 23 0
 toyos-proclife/src/lib.rs 80 0
-toyos-proclife/src/model.rs 79 0
+toyos-proclife/src/model.rs 88 0
 toyos-proclife/src/poison.rs 35 0
 toyos-proclife/src/reap.rs 20 0
 toyos-proclife/src/spawn.rs 43 0
