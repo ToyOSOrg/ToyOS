@@ -211,7 +211,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         // `map_window`'s shootdown reached only this CPU, so the rest of the
         // machine is told here.
         if matches!(lib.memory, crate::elf::LibMemory::Shared { .. }) {
-            crate::arch::tlb::shootdown();
+            crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Dlopen);
         }
         let delta = vaddr.raw() as i64 - lib.user_base.raw() as i64;
         if delta != 0 {
@@ -235,7 +235,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         process::with_process_data(|_data| {
             pt.lock().free_and_unmap(base);
         });
-        crate::arch::tlb::shootdown();
+        crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Dlopen);
     });
 
     let lib_has_tls = lib.tls_memsz > 0;

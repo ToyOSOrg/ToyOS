@@ -10403,10 +10403,11 @@ fn run_machine_test(
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             let boot = qemu.boot_log().to_string();
             // Two processes, so the run carries at least two censuses per CPU
-            // and their monotonicity is checkable. `echo` because the subject is
-            // the machine's interrupt counters and not what the program did.
+            // and their monotonicity is checkable. The second munmaps a live
+            // mapping — the cheapest counted shootdown on a 4-CPU guest, which
+            // is what gives the issuer-side check below a non-zero subject.
             let first = qemu.run_test("echo one", Duration::from_secs(30));
-            let second = qemu.run_test("echo two", Duration::from_secs(30));
+            let second = qemu.run_test("test_rs_std_mmap", Duration::from_secs(30));
             let capture = format!(
                 "{boot}\n{}\n{}\n{}\n{}",
                 first.before, first.serial, second.before, second.serial
@@ -10516,6 +10517,47 @@ fn run_machine_test(
                  all on cpu0, which took {share:.1}% of everything",
                 newest.len(),
                 newest.values().map(|c| c.total).sum::<u64>(),
+            );
+
+            // 5. The issuer side (kernel/src/arch/tlb.rs). Same instants, other
+            //    end of the wire: every `tlb` delivery a CPU's census carries
+            //    must be accounted for by an issue the `tlb:` line counted —
+            //    a delivery in excess of the issues is a path that shoots down
+            //    uncounted. The lower bound is not asserted: an issued IPI can
+            //    still be pending on a target whose IF is clear at the print.
+            let mut issued: Vec<u64> = Vec::new();
+            for line in capture.lines() {
+                let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };
+                let n: u64 = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| format!("unreadable issuer census: {line}"))?;
+                issued.push(n);
+            }
+            let Some(&last_issued) = issued.last() else {
+                return Err(format!(
+                    "no `tlb: shootdowns=` census in the capture — two process exits on a \
+                     4-CPU guest and the issuer side said nothing:\n{capture}"
+                ));
+            };
+            if issued.windows(2).any(|w| w[1] < w[0]) {
+                return Err(format!("the issuer census went backwards: {issued:?}"));
+            }
+            for census in newest.values() {
+                if census.source("tlb") > last_issued {
+                    return Err(format!(
+                        "cpu{} took {} tlb IPI(s) against {last_issued} counted issue(s) — \
+                         some path shoots down without being counted: {census:?}",
+                        census.cpu,
+                        census.source("tlb"),
+                    ));
+                }
+            }
+            eprintln!(
+                "  [tlb] {last_issued} shootdown(s) issued, deliveries per CPU {:?} — every \
+                 delivery accounted for",
+                newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
             );
             Ok(())
         }

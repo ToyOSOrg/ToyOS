@@ -597,7 +597,7 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
         });
     }
     // Outside the block: it waits, and a sibling can be spinning on this lock with IF clear.
-    crate::arch::tlb::shootdown();
+    crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Pipe);
 }
 
 /// One live `mmap` and its physical pages; the range's registration in the address space's `regions` is separate (placement search, `munmap`).
@@ -948,6 +948,8 @@ fn teardown_resources(
 
     // Machine-wide, cumulative counters, printed here (not at shutdown) because process exit is the one recurring moment every boot reaches.
     crate::irq_census::log_census();
+    // After the irq lines: the tlb conservation check reads deliveries first, issues second.
+    crate::arch::tlb::log_census();
 
     ops::close_all(&mut data.handles);
     data.elf.elf_alloc.take();

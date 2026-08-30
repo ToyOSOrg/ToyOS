@@ -62,7 +62,7 @@ kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
 kernel/src/arch/syscall/vm.rs 78 0
-kernel/src/arch/tlb.rs 32 0
+kernel/src/arch/tlb.rs 50 0
 kernel/src/bcachefs_adapter.rs 74 0
 kernel/src/block.rs 33 0
 kernel/src/clock.rs 25 0
@@ -164,7 +164,7 @@ kernel/src/page_cache.rs 36 0
 kernel/src/panic.rs 55 0
 kernel/src/pipe.rs 34 0
 kernel/src/preempt.rs 10 0
-kernel/src/process.rs 215 0
+kernel/src/process.rs 216 0
 kernel/src/rollback.rs 4 0
 kernel/src/rtc.rs 42 0
 kernel/src/sched/driver.rs 204 0
@@ -373,7 +373,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4950 23
+tests/toyos.rs 4957 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
