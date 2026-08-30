@@ -4,7 +4,7 @@
 //! keeps the read end. netd used to poll `RingHeader::is_reader_closed()` on
 //! that pipe and abort the listener when it read set — but that bit lives in
 //! the page `SYS_PIPE_MAP` maps writable, so the client can set it while its
-//! reader is wide open (`issues/isolation/netd-trusts-ring-closed-flags.md`).
+//! reader is wide open — a peer forging a fact about itself.
 //! netd now asks the kernel instead: a zero-byte `write_nonblock` to the notify
 //! pipe is refused by name only when the reader is really gone.
 //!

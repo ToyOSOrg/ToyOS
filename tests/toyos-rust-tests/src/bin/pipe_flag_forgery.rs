@@ -4,7 +4,7 @@
 //! `RingHeader::flags` lives in the page `SYS_PIPE_MAP` maps writable, so a
 //! process holding either end can set `RING_READER_CLOSED`/`RING_WRITER_CLOSED`
 //! by hand. netd read those bits as facts about its peer and tore connections
-//! down on them (`issues/isolation/netd-trusts-ring-closed-flags.md`). The
+//! down on them, until the kernel stopped believing forgeable flags. The
 //! kernel answers "is the other end gone?" from its own reader/writer counts,
 //! surfaced as EOF on a read and `NotFound` (BrokenPipe) on a write — the two
 //! facts netd switched to.

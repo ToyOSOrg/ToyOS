@@ -6,7 +6,7 @@ opened: 2026-08-30
 
 # The listing bound is per mount, so a full mount cannot list an empty directory
 
-Carried out of the closed `untrusted-input-panics` entry, which its fix does
+Carried out of the closed tmpfs `SYS_READDIR` bound work, which its fix does
 not touch: `FileSystem::list` returns every name in the mount and `Vfs::list`
 filters, because no per-directory index exists anywhere in the VFS. The
 `vfs::MAX_LIST_ENTRIES` bound (16,384) therefore counts the *mount* — a tmpfs
