@@ -94,9 +94,8 @@ pub fn in_service(vector: u8) -> bool {
     (word >> (vector & 31)) & 1 != 0
 }
 
-/// The highest vector in service on this CPU — the one being handled now,
-/// since the LAPIC only delivers above the current ISR top (SDM Vol. 3A
-/// §12.8.4). `None` outside every LAPIC-delivered handler.
+/// The highest vector in service — the one being handled, since the LAPIC only
+/// delivers above the ISR top (SDM Vol. 3A §12.8.4). `None` outside a handler.
 pub fn in_service_highest() -> Option<u8> {
     for word_index in (0..8u32).rev() {
         let word = cpu::rdmsr(Reg::Isr0 as u32 + word_index) as u32;

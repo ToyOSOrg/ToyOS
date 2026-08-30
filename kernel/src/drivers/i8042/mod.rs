@@ -275,8 +275,7 @@ fn report_health(state: u8) {
     // The third case: the pin asserts but nothing has come over it — distinct
     // from "nothing decoded" (bytes exist) and "never asserted" below.
     if irqs > 0 {
-        // Except init's own echo — the arming edge, whose byte it consumed:
-        // the quiet verdict stands saying so, a second empty one goes below.
+        // Except init's own echo — the arming edge: the quiet verdict stands saying so.
         if irqs == 1 && counts.empty == 1 && ARM_EDGE_CONSUMED.load(Ordering::Relaxed) {
             if state == HEALTH_QUIET_DUE && claim_health(HEALTH_QUIET_DUE, HEALTH_QUIET_SAID) {
                 log!(
