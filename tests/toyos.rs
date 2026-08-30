@@ -10889,8 +10889,45 @@ fn run_machine_test(
                     "cpu{cpu}'s idle-trip counter moved by {delta} within the capture — spinning, not halting"
                 ));
             }
+
+            // Boot three: the arming edge, staged — the vector delivered once
+            // at arming with no byte behind it, because init consumed the byte
+            // itself. The quiet verdict must stand, saying so; a driver that
+            // reads the edge as the machine's never prints the marker this
+            // boot waits on, which is how the whole boot dies on the base shape.
+            drop(qemu);
+            let staged_boot = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Metal,
+                    kernel_params: &["i8042-arm-edge"],
+                    ready_marker: "the pin has never asserted",
+                    ..Default::default()
+                },
+            );
+            let staged_log = staged_boot.boot_log().to_string();
+            let Some(staged) =
+                staged_log.lines().find(|l| l.contains("the pin has never asserted"))
+            else {
+                return Err(format!("no staged quiet verdict:\n{staged_log}"));
+            };
+            if !staged.contains("the arming edge") {
+                return Err(format!(
+                    "the staged empty delivery was not attributed to the arming: {staged}"
+                ));
+            }
+            if let Some(wrong) =
+                staged_log.lines().find(|l| l.contains("no byte behind any of them"))
+            {
+                return Err(format!("the arming edge was read as the machine's: {wrong}"));
+            }
+            drop(staged_boot);
+
             eprintln!("  [i8042] {}", quiet.trim());
             eprintln!("  [i8042] {}", line.trim());
+            eprintln!("  [i8042] {}", staged.trim());
             Ok(())
         }
         "operation_nesting" => {
@@ -11540,10 +11577,8 @@ fn run_machine_test(
             // `nothing decoded` line from before the Pause was pressed is not a
             // report about the Pause. Reading the first one in the whole capture
             // is what made this test red on a line naming no byte, on the dev
-            // host and on CI
-            // (`issues/kernel/an-i8042-interrupt-arrives-with-no-byte-during-init.md`).
-            // The marker is the boundary the test knows, because the marker is
-            // what the injection was timed off.
+            // host and on CI. The marker is the boundary the test knows,
+            // because the marker is what the injection was timed off.
             let text = result.serial;
             let capture = serial::Serial::named("i8042 capture", text.as_str());
             let Some(at) = text.find(I8042_READY) else {

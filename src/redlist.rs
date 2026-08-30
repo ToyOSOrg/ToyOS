@@ -1663,8 +1663,9 @@ pub const KNOWN_RED: &[Red] = &[
                named, and that is the half worth keeping",
         evidence: "fourteen full `cargo test` suites in one session on `wt/toyos-logd`: 2 of the 9 \
                    with the window bounded and 1 of the 5 without; `main` (4d8c2e9) 0 of 7 and \
-                   this branch 0 of 5 before the byte ring went, both recorded in the source below",
-        source: "issues/kernel/an-i8042-interrupt-arrives-with-no-byte-during-init.md",
+                   this branch 0 of 5 before the byte ring went, both recorded in the tracker \
+                   entry this row was filed against, closed and kept by git history",
+        source: "kernel-loom/tests/i8042_tally.rs",
         measured: "2026-08-15",
     },
     Red {
@@ -1730,7 +1731,7 @@ pub const KNOWN_RED: &[Red] = &[
                which is the durable half of it",
         evidence: "ten consecutive full `cargo test` suites on `wt/toyos-logd`'s tip, loads \
                    6.4-9.7, immediately after the fourteen above",
-        source: "issues/kernel/an-i8042-interrupt-arrives-with-no-byte-during-init.md",
+        source: "kernel-loom/tests/i8042_tally.rs",
         measured: "2026-08-15",
     },
     Red {
