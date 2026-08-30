@@ -1,372 +1,372 @@
-00_assignment 12
-01_comment 11
-02_printf 12
-04_for 11
-05_array 11
-06_case 11
-07_function 11
-08_while 11
-09_do_while 11
-100_c99array_decls 11
-103_implicit_memmove 18
-105_local_extern 11
-107_stack_safe 11
-109_float_struct_calling 11
-10_pointer 11
-110_average 11
-111_conversion 11
-118_switch 12
-119_random_stuff 11
-11_precedence 11
-121_struct_return 11
-123_vla_bug 20
-129_scopes 11
-12_hashdefine 11
-130_large_argument 11
-131_return_struct_in_reg 11
-132_bound_test 25
-133_old_func 11
-134_double_to_signed 11
-135_func_arg_struct_compare 11
-137_funcall_struct_args 11
-138_offsetof 11
-13_integer_literals 11
-140_switch_hex 11
-141_tok_str 12
-142_pp_sizeof_ptr 11
-143_uint64_split 11
-144_sizeof_init 1
-145_self_ref_struct 11
-146_deref_assign 11
-147_sizeof_deref_array 11
-148_directive_in_args 11
-149_bitfield_write 11
-14_if 11
-150_union_short_store 11
-151_cast_truncate 11
-152_float_const_init 11
-153_sizeof_const_init 11
-154_funcptr_global_init 11
-155_addr_array_elem_init 11
-156_sizeof_array_count 11
-157_sizeof_member 11
-158_vla 11
-159_va_list 11
-15_recursion 11
-160_global_variadic 11
-16_nesting 11
-17_enum 11
-18_include 27
-19_pointer_arithmetic 11
-200_variadic_float 11
-201_packed_layout 11
-20_pointer_comparison 11
-21_char_array 11
-22_floating_point 12
-23_type_coercion 11
-24_math_library 11
-25_quicksort 11
-26_character_constants 11
-27_sizeof 11
-28_strings 11
-29_array_address 11
-30_hanoi 2
-32_led 18
-34_array_assignment 11
-35_sizeof 11
-36_array_initialisers 11
-37_sprintf 1
-38_multiple_array_index 11
-39_typedef 11
-41_hashif 11
-42_function_pointer 11
-43_void_param 11
-44_scoped_declarations 1
-45_empty_for 11
-47_switch_return 11
-48_nested_break 11
-49_bracket_evaluation 11
-50_logical_second_arg 11
-51_static 11
-52_unnamed_enum 11
-54_goto 11
-55_lshift_type 11
-61_integers 13
-64_macro_nesting 11
-67_macro_concat 1
-70_floating_point_literals 12
-71_macro_empty_arg 11
-72_long_long_constant 11
-75_array_in_struct_init 14
-76_dollars_in_identifiers 11
-77_push_pop_macro 11
-78_vla_label 20
-80_flexarray 11
-81_types 11
-82_attribs_position 11
-84_hex_float 11
-86_memory_model 11
-87_dead_code 12
-88_codeopt 11
-89_nocode_wanted 18446744073709551615
-90_static_vs_global 11
-90_stdio_buffering 11
-90_struct_init 13
-91_ptr_longlong_arith32 11
-92_enum_bitfield 11
-93_integer_promotion 12
-97_utf8_string_literal 11
-abuse_connect_flood 2726
-abuse_cwd_growth 14
-abuse_elf_loader 31
-abuse_elf_segments 25
-abuse_gpu_resolution 8
-abuse_handle_table 6
-abuse_inbox 11
-abuse_kernel_addr 734
-abuse_listener_hijack 6
-abuse_page_straddle 14
-abuse_pipe_map 16
-abuse_pipe_owner 12
-abuse_pipe_ring 5
-abuse_shared_grant 16
-abuse_spawn_argv 3
-abuse_thread_name 1
-abuse_tls_alloc 15
-allocator_stress 787
-alone_line_reports_the_alone_run 0
-audio_idle_suspend 1013
-audio_tone (smp=1) 8450
-audio_tone (smp=8) 8471
-audio_tone_load (smp=1) 18139
-audio_tone_load (smp=8) 16048
-blocked_dump 3400
-blocking_read_stress 41
-boot_partition_identity 5519
-boot_volume_metadata_error 4968
-c_capture_ignores_daemon_lines 4578
-cache_eviction 8165
-connect_before_serve 23
-console_line_atomicity 8925
-console_locale_detect 3922
-control_regs 7243
-control_regs_negative 3872
-control_regs_verdict 0
-debug_float 11
-debug_trap 25
-demand_paging_sse 12
-demand_window_race 54
-desktop_audio_client 13791
-desktop_locale_detect 4510
-desktop_typing_damage 14338
-desktop_window_child 40312
-device_claim_lifetime 21
-disk_backtrace 85
-diskless_boot 4475
-doom_music 7514
-doom_sound_flood 5888
-double_fault_stack 5139
-double_panic_names_the_fault 9120
-dump_nmi_probe 8098
-empty_dir_stat 12
-endowment_denied 10
-esp_filesystem 10123
-exit_wait_storm 178
-expected_failure_entries 0
-expected_failure_exit_status 0
-expected_failure_verdicts 0
-fat_backing_revoked 8226
-fault_gates 31
-foreign_disk_untouched 4688
-fpu_isolation 14662
-fs_dirs_durable 7893
-fs_large_file 94
-fs_rename_durable 9346
-fs_transactional 85
-fs_truncate_persist 17
-fsync_failed_commit 8386
-futex_wake_counts 1007
-gsbase_locked 13091
-handle_basic 19
-handle_kill_policy 515
-handle_lifetime 33
-handle_transfer 66
-hda_client_stall 19047
-hda_tone 13389
-hda_two_live_refused 4848
-heap_ceiling_recovery 10371
-home_backing_revoked 663
-home_budget_refusal_retried 18661
-i8042_absent 9221
-i8042_budget_expiry 3135
-i8042_fadt_denial 5736
-i8042_health 9509
-i8042_health_cadence 10236
-i8042_kbd_echo 4770
-i8042_keyboard 4550
-i8042_mouse 4310
-i8042_no_spurious_wake 146
-i8042_quarantine 10068
-i8042_quarantine_verdict 0
-i8042_undecoded_bytes 4960
-idle_stack_guard 9601
-inbox_cancel_wakes 543
-input_claim_absent 2565
-input_merge 3326
-ioapic_topology 3142
-iommu_context_absent 5731
-iommu_discovery 18600
-iommu_empty_domain 5691
-irq_census_conservation 5056
-kernel_heartbeat 5634
-kernel_log_file 13152
-keyboard_claim_close_spares_stdin 4580
-kill_while_blocked 44
-klogd_hosted 18446744073709551615
-klogd_panic_halts 18446744073709551615
-lapic_spurious_vector 6829
-late_storage_connect 6455
-launcher_refusals 2106
-leak_rollback_selftest 5423
-locale_detect 18446744073709551615
-locale_detect_unrecognized 18446744073709551615
-log_backing_read_error 4887
-log_conservation_smp1 4686
-log_conservation_smp4 8248
-log_conservation_smp8 5112
-log_flush_retry 20526
-log_nested_emit 5008
-log_partition_identity 9516
-log_partition_layout 477
-log_poll_outlives_a_close 4738
-log_reserve_window 7022
-log_reserve_window_negative 6791
-metal_sim_client_death 4126
-metal_sim_compositor 8986
-metal_sim_compositor_stall 11390
-metal_sim_input 5065
-metal_sim_ipc_hostile_peer 226
-metal_sim_null_audio 8311
-metal_sim_pointer_churn 16658
-metal_sim_scanout_wc 0
-metal_sim_window_caps 148
-metal_sim_window_drag 6256
-mkdir_cap 6878
-mmap_prot 32
-mmap_stress 45
-munmap_reissues_read_window 100
-nested_fault_is_recursive 5936
-netd_connection_caps 6538
-netd_gone_mid_bind 32
-netd_hostile_peer 4509
-nic_dma_isolation 21
-nightly_tier_is_announced 0
-null_sink_client_exits 2167
-null_sink_shipped_client 7095
-nvme_home_roundtrip 13
-nvme_image_is_held_by_one_guest 0
-nvme_large_device 6052
-nvme_wide_sector 3500
-operation_nesting 5075
-panic_recovery 130
-pci_capability_walk 5775
-poller_capacity 36
-port_poll_churn 84
-pre_idle_wedge_speaks 3688
-process_lifecycle 225
-process_stats 221
-query_modules_size 12
-readdir_bound 8578
-redirty_mid_flush 21262
-reentry_names_the_first_panic 5073
-sched_check_build 6833
-sched_stress 1292
-screen_blocked_dump 4700
-screen_console_clear 5756
-screen_console_panic 6788
-screen_console_scroll 12310
-screen_console_shell 2604
-screen_decoder 6
-screen_diag_boot 7330
-screen_early_panic 4441
-screen_fatal_halt 4970
-screen_fatal_halt_composited 6908
-screen_i8042_health 4495
-screen_late_panic 3926
-screen_log_absent 1823
-screen_paged_scrollback 7384
-screen_pager_keys 16152
-screen_panic_muted 4416
-screen_recoverable_untouched 5117
-serial_vocabulary 2
-shm_release_reclaims 29
-short_sleep_livelock 4823
-smp_failed_ap_leaves_no_hole 6672
-sshd_fail_closed 2307
-stall_is_not_a_verdict 0
-std_alloc 12
-std_fs 17
-std_fs_write 12
-std_io 11
-std_mmap 12
-std_process 29
-std_sync 79
-std_threading 17
-std_tls 14
-std_tls_cranelift 23
-std_tls_dlopen 18
-std_tls_multi_crate 13
-std_unwind 18
-std_unwind_so 20
-suite_split 1
-suspend_detector 20
-suspend_invalidates_a_verdict 0
-swiss_german_layout 5355
-syscall_cost 92
-syscall_window_nmi 6825
-syscall_window_nmi_controls 13090
-sysret_ss_reload 6453
-tlb_shootdown_waits 107
-toybox_cp_volume 18616
-toybox_file_tools 205
-usb_boot_stick_pulled 15650
-usb_disk_index_stable 6267
-usb_flush_optional 18056
-usb_pool_exhausted 5237
-usb_refused_disk_first 7260
-usb_short_read 8150
-usb_storage_gate 14200
-usb_storage_shapes 10215
-usb_storage_write_error 6092
-usb_transport_break 5408
-va_exhaustion 6159
-virtio_net_no_msix 2039
-virtio_used_ring 4189
-wake_storm_cost 337
-wall_clock_century_register 18446744073709551615
-wall_clock_file 4642
-wall_clock_no_century 18446744073709551615
-wall_clock_now 13
-wall_clock_rtc_dead 18446744073709551615
-wall_clock_rtc_unstable 18446744073709551615
-wall_clock_zone 18446744073709551615
-window_refusal 16
-writeback_durability 5883
-writeback_reopen 4886
-writeback_spawn 8820
-xhci_deaf_registers 21244
-xhci_descriptor_walk 5186
-xhci_flap 8220
-xhci_full_speed_device 8833
-xhci_hid_break 15290
-xhci_hotplug 7687
-xhci_many_devices 6247
-xhci_msi_only 5757
-xhci_no_interrupt 5114
-xhci_portsc_rw1c 5692
-xhci_second_controller 5825
-xhci_slot_exhaustion 8149
-xhci_slow_connect 5150
-xhci_superspeed_ports 5494
-xhci_two_controllers 6643
-xhci_xecp_walk 4635
+00_assignment 12 shards=12
+01_comment 11 shards=12
+02_printf 12 shards=12
+04_for 11 shards=12
+05_array 11 shards=12
+06_case 11 shards=12
+07_function 11 shards=12
+08_while 11 shards=12
+09_do_while 11 shards=12
+100_c99array_decls 11 shards=12
+103_implicit_memmove 18 shards=12
+105_local_extern 11 shards=12
+107_stack_safe 11 shards=12
+109_float_struct_calling 11 shards=12
+10_pointer 11 shards=12
+110_average 11 shards=12
+111_conversion 11 shards=12
+118_switch 12 shards=12
+119_random_stuff 11 shards=12
+11_precedence 11 shards=12
+121_struct_return 11 shards=12
+123_vla_bug 20 shards=12
+129_scopes 11 shards=12
+12_hashdefine 11 shards=12
+130_large_argument 11 shards=12
+131_return_struct_in_reg 11 shards=12
+132_bound_test 25 shards=12
+133_old_func 11 shards=12
+134_double_to_signed 11 shards=12
+135_func_arg_struct_compare 11 shards=12
+137_funcall_struct_args 11 shards=12
+138_offsetof 11 shards=12
+13_integer_literals 11 shards=12
+140_switch_hex 11 shards=12
+141_tok_str 12 shards=12
+142_pp_sizeof_ptr 11 shards=12
+143_uint64_split 11 shards=12
+144_sizeof_init 1 shards=12
+145_self_ref_struct 11 shards=12
+146_deref_assign 11 shards=12
+147_sizeof_deref_array 11 shards=12
+148_directive_in_args 11 shards=12
+149_bitfield_write 11 shards=12
+14_if 11 shards=12
+150_union_short_store 11 shards=12
+151_cast_truncate 11 shards=12
+152_float_const_init 11 shards=12
+153_sizeof_const_init 11 shards=12
+154_funcptr_global_init 11 shards=12
+155_addr_array_elem_init 11 shards=12
+156_sizeof_array_count 11 shards=12
+157_sizeof_member 11 shards=12
+158_vla 11 shards=12
+159_va_list 11 shards=12
+15_recursion 11 shards=12
+160_global_variadic 11 shards=12
+16_nesting 11 shards=12
+17_enum 11 shards=12
+18_include 27 shards=12
+19_pointer_arithmetic 11 shards=12
+200_variadic_float 11 shards=12
+201_packed_layout 11 shards=12
+20_pointer_comparison 11 shards=12
+21_char_array 11 shards=12
+22_floating_point 12 shards=12
+23_type_coercion 11 shards=12
+24_math_library 11 shards=12
+25_quicksort 11 shards=12
+26_character_constants 11 shards=12
+27_sizeof 11 shards=12
+28_strings 11 shards=12
+29_array_address 11 shards=12
+30_hanoi 2 shards=12
+32_led 18 shards=12
+34_array_assignment 11 shards=12
+35_sizeof 11 shards=12
+36_array_initialisers 11 shards=12
+37_sprintf 1 shards=12
+38_multiple_array_index 11 shards=12
+39_typedef 11 shards=12
+41_hashif 11 shards=12
+42_function_pointer 11 shards=12
+43_void_param 11 shards=12
+44_scoped_declarations 1 shards=12
+45_empty_for 11 shards=12
+47_switch_return 11 shards=12
+48_nested_break 11 shards=12
+49_bracket_evaluation 11 shards=12
+50_logical_second_arg 11 shards=12
+51_static 11 shards=12
+52_unnamed_enum 11 shards=12
+54_goto 11 shards=12
+55_lshift_type 11 shards=12
+61_integers 13 shards=12
+64_macro_nesting 11 shards=12
+67_macro_concat 1 shards=12
+70_floating_point_literals 12 shards=12
+71_macro_empty_arg 11 shards=12
+72_long_long_constant 11 shards=12
+75_array_in_struct_init 14 shards=12
+76_dollars_in_identifiers 11 shards=12
+77_push_pop_macro 11 shards=12
+78_vla_label 20 shards=12
+80_flexarray 11 shards=12
+81_types 11 shards=12
+82_attribs_position 11 shards=12
+84_hex_float 11 shards=12
+86_memory_model 11 shards=12
+87_dead_code 12 shards=12
+88_codeopt 11 shards=12
+89_nocode_wanted 18446744073709551615 shards=none
+90_static_vs_global 11 shards=12
+90_stdio_buffering 11 shards=12
+90_struct_init 13 shards=12
+91_ptr_longlong_arith32 11 shards=12
+92_enum_bitfield 11 shards=12
+93_integer_promotion 12 shards=12
+97_utf8_string_literal 11 shards=12
+abuse_connect_flood 2726 shards=12
+abuse_cwd_growth 14 shards=12
+abuse_elf_loader 31 shards=12
+abuse_elf_segments 25 shards=12
+abuse_gpu_resolution 8 shards=12
+abuse_handle_table 6 shards=12
+abuse_inbox 11 shards=12
+abuse_kernel_addr 734 shards=12
+abuse_listener_hijack 6 shards=12
+abuse_page_straddle 14 shards=12
+abuse_pipe_map 16 shards=12
+abuse_pipe_owner 12 shards=12
+abuse_pipe_ring 5 shards=12
+abuse_shared_grant 16 shards=12
+abuse_spawn_argv 3 shards=12
+abuse_thread_name 1 shards=12
+abuse_tls_alloc 15 shards=12
+allocator_stress 787 shards=12
+alone_line_reports_the_alone_run 0 shards=12
+audio_idle_suspend 1013 shards=12
+audio_tone (smp=1) 8450 shards=12
+audio_tone (smp=8) 8471 shards=12
+audio_tone_load (smp=1) 18139 shards=12
+audio_tone_load (smp=8) 16048 shards=12
+blocked_dump 3400 shards=12
+blocking_read_stress 41 shards=12
+boot_partition_identity 5519 shards=12
+boot_volume_metadata_error 4968 shards=12
+c_capture_ignores_daemon_lines 4578 shards=12
+cache_eviction 8165 shards=12
+connect_before_serve 23 shards=12
+console_line_atomicity 8925 shards=12
+console_locale_detect 3922 shards=12
+control_regs 7243 shards=12
+control_regs_negative 3872 shards=12
+control_regs_verdict 0 shards=12
+debug_float 11 shards=12
+debug_trap 25 shards=12
+demand_paging_sse 12 shards=12
+demand_window_race 54 shards=12
+desktop_audio_client 13791 shards=12
+desktop_locale_detect 4510 shards=12
+desktop_typing_damage 14338 shards=12
+desktop_window_child 40312 shards=12
+device_claim_lifetime 21 shards=12
+disk_backtrace 85 shards=12
+diskless_boot 4475 shards=12
+doom_music 7514 shards=12
+doom_sound_flood 5888 shards=12
+double_fault_stack 5139 shards=12
+double_panic_names_the_fault 9120 shards=12
+dump_nmi_probe 8098 shards=12
+empty_dir_stat 12 shards=12
+endowment_denied 10 shards=12
+esp_filesystem 10123 shards=12
+exit_wait_storm 178 shards=12
+expected_failure_entries 0 shards=12
+expected_failure_exit_status 0 shards=12
+expected_failure_verdicts 0 shards=12
+fat_backing_revoked 8226 shards=12
+fault_gates 31 shards=12
+foreign_disk_untouched 4688 shards=12
+fpu_isolation 14662 shards=12
+fs_dirs_durable 7893 shards=12
+fs_large_file 94 shards=12
+fs_rename_durable 9346 shards=12
+fs_transactional 85 shards=12
+fs_truncate_persist 17 shards=12
+fsync_failed_commit 8386 shards=12
+futex_wake_counts 1007 shards=12
+gsbase_locked 13091 shards=12
+handle_basic 19 shards=12
+handle_kill_policy 515 shards=12
+handle_lifetime 33 shards=12
+handle_transfer 66 shards=12
+hda_client_stall 19047 shards=12
+hda_tone 13389 shards=12
+hda_two_live_refused 4848 shards=12
+heap_ceiling_recovery 10371 shards=12
+home_backing_revoked 663 shards=12
+home_budget_refusal_retried 18661 shards=12
+i8042_absent 9221 shards=12
+i8042_budget_expiry 3135 shards=12
+i8042_fadt_denial 5736 shards=12
+i8042_health 9509 shards=12
+i8042_health_cadence 10236 shards=12
+i8042_kbd_echo 4770 shards=12
+i8042_keyboard 4550 shards=12
+i8042_mouse 4310 shards=12
+i8042_no_spurious_wake 146 shards=12
+i8042_quarantine 10068 shards=12
+i8042_quarantine_verdict 0 shards=12
+i8042_undecoded_bytes 4960 shards=12
+idle_stack_guard 9601 shards=12
+inbox_cancel_wakes 543 shards=12
+input_claim_absent 2565 shards=12
+input_merge 3326 shards=12
+ioapic_topology 3142 shards=12
+iommu_context_absent 5731 shards=12
+iommu_discovery 18600 shards=12
+iommu_empty_domain 5691 shards=12
+irq_census_conservation 5056 shards=12
+kernel_heartbeat 5634 shards=12
+kernel_log_file 13152 shards=12
+keyboard_claim_close_spares_stdin 4580 shards=12
+kill_while_blocked 44 shards=12
+klogd_hosted 18446744073709551615 shards=none
+klogd_panic_halts 18446744073709551615 shards=none
+lapic_spurious_vector 6829 shards=12
+late_storage_connect 6455 shards=12
+launcher_refusals 2106 shards=12
+leak_rollback_selftest 5423 shards=12
+locale_detect 18446744073709551615 shards=none
+locale_detect_unrecognized 18446744073709551615 shards=none
+log_backing_read_error 4887 shards=12
+log_conservation_smp1 4686 shards=12
+log_conservation_smp4 8248 shards=12
+log_conservation_smp8 5112 shards=12
+log_flush_retry 20526 shards=12
+log_nested_emit 5008 shards=12
+log_partition_identity 9516 shards=12
+log_partition_layout 477 shards=12
+log_poll_outlives_a_close 4738 shards=12
+log_reserve_window 7022 shards=12
+log_reserve_window_negative 6791 shards=12
+metal_sim_client_death 4126 shards=12
+metal_sim_compositor 8986 shards=12
+metal_sim_compositor_stall 11390 shards=12
+metal_sim_input 5065 shards=12
+metal_sim_ipc_hostile_peer 226 shards=12
+metal_sim_null_audio 8311 shards=12
+metal_sim_pointer_churn 16658 shards=12
+metal_sim_scanout_wc 0 shards=12
+metal_sim_window_caps 148 shards=12
+metal_sim_window_drag 6256 shards=12
+mkdir_cap 6878 shards=12
+mmap_prot 32 shards=12
+mmap_stress 45 shards=12
+munmap_reissues_read_window 100 shards=12
+nested_fault_is_recursive 5936 shards=12
+netd_connection_caps 6538 shards=12
+netd_gone_mid_bind 32 shards=12
+netd_hostile_peer 4509 shards=12
+nic_dma_isolation 21 shards=12
+nightly_tier_is_announced 0 shards=12
+null_sink_client_exits 2167 shards=12
+null_sink_shipped_client 7095 shards=12
+nvme_home_roundtrip 13 shards=12
+nvme_image_is_held_by_one_guest 0 shards=12
+nvme_large_device 6052 shards=12
+nvme_wide_sector 3500 shards=12
+operation_nesting 5075 shards=12
+panic_recovery 130 shards=12
+pci_capability_walk 5775 shards=12
+poller_capacity 36 shards=12
+port_poll_churn 84 shards=12
+pre_idle_wedge_speaks 3688 shards=12
+process_lifecycle 225 shards=12
+process_stats 221 shards=12
+query_modules_size 12 shards=12
+readdir_bound 8578 shards=12
+redirty_mid_flush 21262 shards=12
+reentry_names_the_first_panic 5073 shards=12
+sched_check_build 6833 shards=12
+sched_stress 1292 shards=12
+screen_blocked_dump 4700 shards=12
+screen_console_clear 5756 shards=12
+screen_console_panic 6788 shards=12
+screen_console_scroll 12310 shards=12
+screen_console_shell 2604 shards=12
+screen_decoder 6 shards=12
+screen_diag_boot 7330 shards=12
+screen_early_panic 4441 shards=12
+screen_fatal_halt 4970 shards=12
+screen_fatal_halt_composited 6908 shards=12
+screen_i8042_health 4495 shards=12
+screen_late_panic 3926 shards=12
+screen_log_absent 1823 shards=12
+screen_paged_scrollback 7384 shards=12
+screen_pager_keys 16152 shards=12
+screen_panic_muted 4416 shards=12
+screen_recoverable_untouched 5117 shards=12
+serial_vocabulary 2 shards=12
+shm_release_reclaims 29 shards=12
+short_sleep_livelock 4823 shards=12
+smp_failed_ap_leaves_no_hole 6672 shards=12
+sshd_fail_closed 2307 shards=12
+stall_is_not_a_verdict 0 shards=12
+std_alloc 12 shards=12
+std_fs 17 shards=12
+std_fs_write 12 shards=12
+std_io 11 shards=12
+std_mmap 12 shards=12
+std_process 29 shards=12
+std_sync 79 shards=12
+std_threading 17 shards=12
+std_tls 14 shards=12
+std_tls_cranelift 23 shards=12
+std_tls_dlopen 18 shards=12
+std_tls_multi_crate 13 shards=12
+std_unwind 18 shards=12
+std_unwind_so 20 shards=12
+suite_split 1 shards=12
+suspend_detector 20 shards=12
+suspend_invalidates_a_verdict 0 shards=12
+swiss_german_layout 5355 shards=12
+syscall_cost 92 shards=12
+syscall_window_nmi 6825 shards=12
+syscall_window_nmi_controls 13090 shards=12
+sysret_ss_reload 6453 shards=12
+tlb_shootdown_waits 107 shards=12
+toybox_cp_volume 18616 shards=12
+toybox_file_tools 205 shards=12
+usb_boot_stick_pulled 15650 shards=12
+usb_disk_index_stable 6267 shards=12
+usb_flush_optional 18056 shards=12
+usb_pool_exhausted 5237 shards=12
+usb_refused_disk_first 7260 shards=12
+usb_short_read 8150 shards=12
+usb_storage_gate 14200 shards=12
+usb_storage_shapes 10215 shards=12
+usb_storage_write_error 6092 shards=12
+usb_transport_break 5408 shards=12
+va_exhaustion 6159 shards=12
+virtio_net_no_msix 2039 shards=12
+virtio_used_ring 4189 shards=12
+wake_storm_cost 337 shards=12
+wall_clock_century_register 18446744073709551615 shards=none
+wall_clock_file 4642 shards=12
+wall_clock_no_century 18446744073709551615 shards=none
+wall_clock_now 13 shards=12
+wall_clock_rtc_dead 18446744073709551615 shards=none
+wall_clock_rtc_unstable 18446744073709551615 shards=none
+wall_clock_zone 18446744073709551615 shards=none
+window_refusal 16 shards=12
+writeback_durability 5883 shards=12
+writeback_reopen 4886 shards=12
+writeback_spawn 8820 shards=12
+xhci_deaf_registers 21244 shards=12
+xhci_descriptor_walk 5186 shards=12
+xhci_flap 8220 shards=12
+xhci_full_speed_device 8833 shards=12
+xhci_hid_break 15290 shards=12
+xhci_hotplug 7687 shards=12
+xhci_many_devices 6247 shards=12
+xhci_msi_only 5757 shards=12
+xhci_no_interrupt 5114 shards=12
+xhci_portsc_rw1c 5692 shards=12
+xhci_second_controller 5825 shards=12
+xhci_slot_exhaustion 8149 shards=12
+xhci_slow_connect 5150 shards=12
+xhci_superspeed_ports 5494 shards=12
+xhci_two_controllers 6643 shards=12
+xhci_xecp_walk 4635 shards=12

@@ -216,11 +216,30 @@ pub fn dispatch(root: &Path, args: &[String]) {
 
     let out = root.join("tests/test-durations");
     let before = read_profile(&out);
+    let carried = read_provenance(&out);
     report(&merged, &before, count);
     println!("{}", enforced.scope());
 
     let profile = merged_profile(&merged, &before);
-    let body: String = profile.iter().map(|(n, ms)| format!("{n} {ms}\n")).collect();
+    // A price this run took is this partition's; a retained row keeps the
+    // provenance it was committed with, and one without any is refused rather
+    // than stamped with a partition that never ran it.
+    let body: String = profile
+        .iter()
+        .map(|(n, ms)| {
+            let who = if merged.contains_key(n) {
+                format!("shards={count}")
+            } else {
+                carried.get(n).cloned().unwrap_or_else(|| {
+                    panic!(
+                        "{n} is retained from the committed profile and names no partition; \
+                         every committed price carries `shards=<n>`"
+                    )
+                })
+            };
+            format!("{n} {ms} {who}\n")
+        })
+        .collect();
     fs::write(&out, body).unwrap_or_else(|e| panic!("writing {}: {e}", out.display()));
 
     let rendered = render_verdict(&profile, &before, &enforced);
@@ -771,12 +790,46 @@ fn whole_run(files: &[std::path::PathBuf]) -> usize {
     count
 }
 
+/// One profile row: `<label> <ms>` or `<label> <ms> <provenance>`.
+///
+/// The label may contain spaces (`audio_tone_load (smp=1)`), so a row is read
+/// from the right. The two-token form is a shard file's and the worktree
+/// overlay's (`target/test-durations`); the committed profile also names the
+/// partition that took each price — `shards=<n>`, or `shards=none` on an
+/// `UNMEASURED` marker no run has priced — because the two machines that wear
+/// `Instrument::Ci` do not price alike and a bare number says nothing about
+/// which one took it.
+pub fn parse_profile_line(line: &str) -> Option<(&str, u64)> {
+    let (rest, last) = line.rsplit_once(' ')?;
+    if let Ok(ms) = last.parse::<u64>() {
+        return Some((rest, ms));
+    }
+    let (name, ms) = rest.rsplit_once(' ')?;
+    ms.parse().ok().map(|ms| (name, ms))
+}
+
 fn read_profile(path: &Path) -> BTreeMap<String, u64> {
     fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter_map(|l| l.rsplit_once(' '))
-        .filter_map(|(n, ms)| ms.parse().ok().map(|ms| (n.to_string(), ms)))
+        .filter_map(parse_profile_line)
+        .map(|(n, ms)| (n.to_string(), ms))
+        .collect()
+}
+
+/// The committed profile's provenance column, for the rows that carry one.
+fn read_provenance(path: &Path) -> BTreeMap<String, String> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (rest, last) = line.rsplit_once(' ')?;
+            if last.parse::<u64>().is_ok() {
+                return None;
+            }
+            let (name, _) = rest.rsplit_once(' ')?;
+            Some((name.to_string(), last.to_string()))
+        })
         .collect()
 }
 
@@ -870,6 +923,46 @@ mod tests {
 
     fn committed_profile() -> BTreeMap<String, u64> {
         read_profile(&root().join("tests/test-durations"))
+    }
+
+    /// The provenance column is whole or the commit is refused: every priced
+    /// row names the partition that took it, and only an `UNMEASURED` marker
+    /// may say none — a bare two-token row here is the formatless state this
+    /// column exists to end.
+    #[test]
+    fn every_committed_price_names_the_partition_that_took_it() {
+        let text = fs::read_to_string(root().join("tests/test-durations"))
+            .expect("the committed profile exists");
+        for line in text.lines() {
+            let (name, ms) = parse_profile_line(line)
+                .unwrap_or_else(|| panic!("unparseable committed profile row: {line:?}"));
+            let (_, last) = line.rsplit_once(' ').expect("parsed above");
+            if ms == crate::tiers::UNMEASURED_MS {
+                assert_eq!(
+                    last, "shards=none",
+                    "an UNMEASURED marker's provenance is `shards=none`: {line:?}"
+                );
+            } else {
+                let shards = last.strip_prefix("shards=").and_then(|n| n.parse::<u32>().ok());
+                assert!(
+                    shards.is_some_and(|n| n >= 1),
+                    "{name}'s committed price names no partition (`shards=<n>`): {line:?}"
+                );
+            }
+        }
+    }
+
+    /// Both row forms parse to the same `(label, ms)`, spaces in the label
+    /// included.
+    #[test]
+    fn a_profile_row_reads_the_same_with_and_without_provenance() {
+        assert_eq!(parse_profile_line("foo 123"), Some(("foo", 123)));
+        assert_eq!(parse_profile_line("foo 123 shards=12"), Some(("foo", 123)));
+        assert_eq!(
+            parse_profile_line("audio_tone_load (smp=1) 456 shards=12"),
+            Some(("audio_tone_load (smp=1)", 456))
+        );
+        assert_eq!(parse_profile_line("bare-name"), None);
     }
 
     /// The committed profile with every `UNMEASURED` marker replaced by an

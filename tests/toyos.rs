@@ -14878,10 +14878,8 @@ fn committed_durations_path() -> std::path::PathBuf {
 fn read_durations(path: &Path, out: &mut BTreeMap<String, Duration>) {
     let Ok(text) = fs::read_to_string(path) else { return };
     for line in text.lines() {
-        if let Some((name, ms)) = line.rsplit_once(' ') {
-            if let Ok(ms) = ms.parse::<u64>() {
-                out.insert(name.to_string(), Duration::from_millis(ms));
-            }
+        if let Some((name, ms)) = toyos_build::durations::parse_profile_line(line) {
+            out.insert(name.to_string(), Duration::from_millis(ms));
         }
     }
 }

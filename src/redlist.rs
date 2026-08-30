@@ -96,8 +96,9 @@ pub enum Instrument {
     /// T14's i5-1135G7. A row has to say which in its [`Red::evidence`],
     /// because the difference is not noise: one tip measured
     /// `xhci_full_speed_device` at 6,845 ms in the first and 12,156 ms in the
-    /// second on one day
-    /// (`issues/build/the-duration-profile-is-enforced-where-it-was-not-measured.md`).
+    /// second on one day (`src/durations.rs` carries the measurement, and the
+    /// committed profile's `shards=` column records which partition took each
+    /// price).
     /// Rows measured on a pull request or a push between 2026-08-21 and
     /// 2026-08-22 were taken on the T14 under the routing of those days — a
     /// fact about which machine that row's number came from, not a reason to
@@ -2614,7 +2615,7 @@ pub const KNOWN_RED: &[Red] = &[
                    (`main` 07f89c8b, 9 names over the ceiling), 32506479551 (`main` 13953023, \
                    5), 32513441183 (PR #199, 1) and 32524769419 (PR #201, 1, a different name) \
                    — whose lane totals were 548.8 s, 483.6 s, 429.2 s and 444.1 s of tests",
-        source: "issues/build/the-duration-profile-is-enforced-where-it-was-not-measured.md",
+        source: "src/durations.rs",
         measured: "2026-08-21",
     },
     // The same name on the instrument the profile *is* — twelve hosted shards —

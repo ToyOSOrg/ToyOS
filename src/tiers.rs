@@ -1250,8 +1250,8 @@ mod tests {
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
             .lines()
-            .filter_map(|l| l.rsplit_once(' '))
-            .filter_map(|(n, ms)| ms.parse().ok().map(|ms| (n.to_string(), ms)))
+            .filter_map(crate::durations::parse_profile_line)
+            .map(|(n, ms)| (n.to_string(), ms))
             .collect()
     }
 
