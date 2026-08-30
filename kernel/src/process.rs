@@ -1249,26 +1249,12 @@ pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
 
 /// Wake processes blocked on reading from a pipe that now has data.
 pub fn wake_pipe_readers(pipe_id: pipe::PipeId) {
-    scheduler::wake_pipe_readers(pipe_id);
-    let watchers = pipe::inbox_watchers(pipe_id);
-    if !watchers.is_empty() {
-        crate::inbox::complete_pending_for_event(
-            &watchers,
-            crate::inbox::Source::PipeReadable(pipe_id),
-        );
-    }
+    crate::inbox::Source::PipeReadable(pipe_id).wake();
 }
 
 /// Wake processes blocked on writing to a pipe that now has space.
 pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
-    scheduler::wake_pipe_writers(pipe_id);
-    let watchers = pipe::inbox_watchers(pipe_id);
-    if !watchers.is_empty() {
-        crate::inbox::complete_pending_for_event(
-            &watchers,
-            crate::inbox::Source::PipeWritable(pipe_id),
-        );
-    }
+    crate::inbox::Source::PipeWritable(pipe_id).wake();
 }
 
 /// Atomically validate the parent-thread relationship and collect a zombie thread; the table lock is the atomicity. `Err(())`: this caller may not join `tid`/`pid`.

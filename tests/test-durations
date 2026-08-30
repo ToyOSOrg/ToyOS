@@ -270,6 +270,7 @@ nvme_wide_sector 3500
 operation_nesting 5075
 panic_recovery 130
 pci_capability_walk 5775
+poll_wake_pipe 18446744073709551615
 poller_capacity 36
 port_poll_churn 84
 pre_idle_wedge_speaks 3688

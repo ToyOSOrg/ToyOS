@@ -657,24 +657,11 @@ fn service_bytes(recorded: bool) {
     // next reader until the following real event.
     let woke_kb = keys > 0;
     if woke_kb {
-        crate::keyboard::wake_waiters();
-        let watchers = crate::keyboard::inbox_watchers();
-        if !watchers.is_empty() {
-            crate::inbox::complete_pending_for_event(
-                &watchers,
-                crate::inbox::Source::Keyboard,
-            );
-        }
+        crate::inbox::Source::Keyboard.wake();
     }
     let woke_ms = motion > 0;
     if woke_ms {
-        let watchers = crate::mouse::inbox_watchers();
-        if !watchers.is_empty() {
-            crate::inbox::complete_pending_for_event(
-                &watchers,
-                crate::inbox::Source::Mouse,
-            );
-        }
+        crate::inbox::Source::Mouse.wake();
     }
     trace_drain(bytes, keys, motion, woke_kb, woke_ms);
 

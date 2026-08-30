@@ -58,7 +58,7 @@ kernel/src/arch/syscall/fs.rs 11 0
 kernel/src/arch/syscall/gate.rs 23 0
 kernel/src/arch/syscall/handles.rs 21 0
 kernel/src/arch/syscall/io.rs 24 0
-kernel/src/arch/syscall/ipc.rs 32 0
+kernel/src/arch/syscall/ipc.rs 34 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
@@ -110,7 +110,7 @@ kernel/src/gpu.rs 10 0
 kernel/src/heartbeat.rs 24 0
 kernel/src/hw.rs 83 0
 kernel/src/id_map.rs 5 0
-kernel/src/inbox.rs 85 0
+kernel/src/inbox.rs 96 0
 kernel/src/input_merge_test.rs 18 0
 kernel/src/iod.rs 10 0
 kernel/src/iommu/mod.rs 31 0
@@ -163,12 +163,12 @@ kernel/src/object/shm.rs 35 0
 kernel/src/object/syscap.rs 8 0
 kernel/src/page_cache.rs 36 0
 kernel/src/panic.rs 55 0
-kernel/src/pipe.rs 34 0
+kernel/src/pipe.rs 36 0
 kernel/src/preempt.rs 10 0
 kernel/src/process.rs 220 0
 kernel/src/rollback.rs 4 0
 kernel/src/rtc.rs 42 0
-kernel/src/sched/driver.rs 204 0
+kernel/src/sched/driver.rs 205 0
 kernel/src/sched/dump.rs 80 0
 kernel/src/sched/kthread.rs 35 0
 kernel/src/sched/mod.rs 3 0
@@ -328,6 +328,7 @@ tests/toyos-rust-tests/src/bin/nmi_window_spin.rs 32 0
 tests/toyos-rust-tests/src/bin/null_sink_client_exits.rs 18 0
 tests/toyos-rust-tests/src/bin/nvme_home_roundtrip.rs 7 0
 tests/toyos-rust-tests/src/bin/panic_recovery.rs 13 0
+tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs 24 0
 tests/toyos-rust-tests/src/bin/poller_capacity.rs 33 0
 tests/toyos-rust-tests/src/bin/port_poll_churn.rs 49 0
 tests/toyos-rust-tests/src/bin/process_lifecycle.rs 94 0

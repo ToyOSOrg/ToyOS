@@ -83,18 +83,13 @@ impl HidDevice {
         }
     }
 
-    // A keyboard wakes both unpaired halves — the blocked-`sys_read` queue and the poll watchers;
-    // a pointer has only the poll half: an empty Mouse read answers `NotFound`, never parks.
+    // A keyboard's `wake` posts both halves — the blocked-`sys_read` queue and
+    // the poll watchers; a pointer has only the poll half, and `Source::wake`
+    // knows which from the variant, so neither can be given one without the other.
     fn wake(&self) {
-        let (watchers, source) = match self.role {
-            HidRole::Keyboard => {
-                keyboard::wake_waiters();
-                (keyboard::inbox_watchers(), crate::inbox::Source::Keyboard)
-            }
-            HidRole::Pointer(_) => (mouse::inbox_watchers(), crate::inbox::Source::Mouse),
-        };
-        if !watchers.is_empty() {
-            crate::inbox::complete_pending_for_event(&watchers, source);
+        match self.role {
+            HidRole::Keyboard => crate::inbox::Source::Keyboard.wake(),
+            HidRole::Pointer(_) => crate::inbox::Source::Mouse.wake(),
         }
     }
 
