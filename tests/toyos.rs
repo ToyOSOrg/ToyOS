@@ -3916,8 +3916,8 @@ fn run_screen_test(
         "screen_early_panic" => {
             // The window the console exists for: percpu is not up, mm::init
             // has not run, and on a machine with no UART nothing else can
-            // report at all. render() runs before panic_flush, so the marker
-            // reaching the UART proves the paint already finished — no sleep.
+            // report at all. The alert! that is the ready marker precedes
+            // capture(), panic_flush() and render(), so the screen is polled.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -3930,7 +3930,7 @@ fn run_screen_test(
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump();
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
             for want in ["EARLY PANIC:", "test-early-panic: on-screen console check"] {
