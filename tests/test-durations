@@ -274,6 +274,7 @@ pre_idle_wedge_speaks 3688
 process_lifecycle 225
 process_stats 221
 query_modules_size 12
+read_fault_selftests 18446744073709551615
 readdir_bound 8578
 redirty_mid_flush 21262
 reentry_names_the_first_panic 5073

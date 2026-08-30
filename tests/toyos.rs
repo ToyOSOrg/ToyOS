@@ -587,6 +587,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
+    // One boot; three read-fault control verdicts. Carrying `UNMEASURED_MS`
+    // until the shards price it.
+    ("read_fault_selftests", Sched::Parallel, Tier::Fast),
     ("xhci_many_devices", Sched::Parallel, Tier::Fast),
     // Its whole assertion is that a keystroke injected from the host crossed a
     // USB keyboard on the *second* controller, and `input_events_run` sends
@@ -11003,6 +11006,37 @@ fn run_machine_test(
                     return Err(format!("{}\n{log}", verdict.trim()));
                 }
                 eprintln!("  [leak] {}", verdict.trim());
+            }
+            Ok(())
+        }
+        "read_fault_selftests" => {
+            // Three kernel-boot controls: a backing read after its file's
+            // deletion must be refused on both writable mounts (reverting the
+            // tmpfs revocation prints FAIL), and a page-cache slot whose fill
+            // the device refused must be unbound (reverting `PageCache::read`'s
+            // unbind prints FAIL — before this boot existed nothing could).
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["revoked-backing-selftest", "pc-unbind-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            for probe in [
+                "revoke-selftest: /tmp/revoke_probe",
+                "revoke-selftest: /home/revoke_probe",
+                "pc-unbind-selftest:",
+            ] {
+                let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+                    return Err(format!("{probe} never ran:\n{log}"));
+                };
+                if !verdict.contains("PASS") {
+                    return Err(format!("{}\n{log}", verdict.trim()));
+                }
+                eprintln!("  [read-fault] {}", verdict.trim());
             }
             Ok(())
         }

@@ -2,6 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::file_backing::FileBacking;
 use crate::file_cache::{self, FileId};
@@ -13,16 +14,25 @@ use crate::vfs::FileSystem;
 
 struct TmpfsBacking {
     file_id: FileId,
+    /// Shared by every backing for the entry; cleared by [`retire`] — the same
+    /// revocation `FileBlocks::revoke` gives `/home`'s `NvmeBacking`.
+    alive: Arc<AtomicBool>,
 }
 
 impl FileBacking for TmpfsBacking {
-    /// Never `Err`: the pages are the file, so there is no device to refuse.
+    /// `Err` once the file is deleted: a gone file is not a file of zeros.
     fn read_page(&self, file_offset: u64, buf: &mut [u8; PAGE_BYTES]) -> crate::block::BlockResult {
         // copy_page_out, not file_cache::read_page: reading through the miss path here would recurse.
         // A hole below the file size, left by a seek-and-write, reads as zero.
         if file_offset >= file_cache::size(self.file_id)
             || file_cache::copy_page_out(self.file_id, (file_offset / 4096) as u32, buf).is_none()
         {
+            // After the miss, not before: `retire` clears the flag before the
+            // pages drop, so a miss caused by deletion cannot pass as a hole.
+            if !self.alive.load(Ordering::Acquire) {
+                log!("tmpfs: read through a backing whose file was deleted");
+                return Err(crate::block::BlockError::Device);
+            }
             buf.fill(0);
         }
         Ok(())
@@ -33,11 +43,18 @@ impl FileBacking for TmpfsBacking {
     }
 }
 
+/// Ends a file entry's life: cleared first, so every backing minted for the
+/// entry fails from then on, and only then are the pages given up.
+fn retire(id: FileId, alive: &AtomicBool) {
+    alive.store(false, Ordering::Release);
+    let _ = file_cache::mark_deleted(id);
+}
+
 /// One name's one entry — a file or a symlink, never both. A single map keys
 /// every name once, so `create`, `create_symlink`, `rename` and `delete` cannot
 /// each see a different namespace.
 pub(crate) enum Entry {
-    File { id: FileId, mtime: u64 },
+    File { id: FileId, mtime: u64, alive: Arc<AtomicBool> },
     Symlink { target: String },
 }
 
@@ -72,8 +89,8 @@ impl ReplaceRename for TmpFs {
     }
 
     fn release(&mut self, _old: &str, _new: &str, committed: Committed<Option<Entry>>) {
-        if let Some(Entry::File { id, .. }) = committed.into_displaced() {
-            let _ = file_cache::mark_deleted(id);
+        if let Some(Entry::File { id, alive, .. }) = committed.into_displaced() {
+            retire(id, &alive);
         }
     }
 }
@@ -123,7 +140,8 @@ impl FileSystem for TmpFs {
         }
         // A dangling symlink of this name is displaced: one name, one entry.
         let id = file_cache::create_file(false); // non-evictable
-        self.entries.insert(String::from(name), Entry::File { id, mtime });
+        self.entries
+            .insert(String::from(name), Entry::File { id, mtime, alive: Arc::new(AtomicBool::new(true)) });
         Ok(id)
     }
 
@@ -133,8 +151,8 @@ impl FileSystem for TmpFs {
 
     fn delete(&mut self, name: &str) -> Result<(), SyscallError> {
         match self.entries.remove(name) {
-            Some(Entry::File { id, .. }) => {
-                let _ = file_cache::mark_deleted(id);
+            Some(Entry::File { id, alive, .. }) => {
+                retire(id, &alive);
                 Ok(())
             }
             Some(Entry::Symlink { .. }) => Ok(()),
@@ -162,7 +180,7 @@ impl FileSystem for TmpFs {
 
     fn update_metadata(&mut self, file_id: FileId, _size: u64, mtime: u64) -> Result<(), SyscallError> {
         for entry in self.entries.values_mut() {
-            if let Entry::File { id, mtime: mt } = entry {
+            if let Entry::File { id, mtime: mt, .. } = entry {
                 if *id == file_id {
                     *mt = mtime;
                     break;
@@ -174,10 +192,10 @@ impl FileSystem for TmpFs {
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
         // Displaces whatever answered to this name: one name, one entry.
-        if let Some(Entry::File { id, .. }) =
+        if let Some(Entry::File { id, alive, .. }) =
             self.entries.insert(String::from(name), Entry::Symlink { target: String::from(target) })
         {
-            let _ = file_cache::mark_deleted(id);
+            retire(id, &alive);
         }
         Ok(())
     }
@@ -188,7 +206,9 @@ impl FileSystem for TmpFs {
 
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         match self.entries.get(name) {
-            Some(Entry::File { id, .. }) => Ok(Arc::new(TmpfsBacking { file_id: *id })),
+            Some(Entry::File { id, alive, .. }) => {
+                Ok(Arc::new(TmpfsBacking { file_id: *id, alive: Arc::clone(alive) }))
+            }
             _ => Err(SyscallError::NotFound),
         }
     }

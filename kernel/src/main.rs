@@ -48,6 +48,8 @@ mod rollback;
 mod file_cache;
 #[cfg(feature = "boot-actuators")]
 mod leak_selftest;
+#[cfg(feature = "boot-actuators")]
+mod revoke_selftest;
 mod writeback;
 mod tmpfs;
 mod file_backing;
@@ -463,6 +465,14 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     #[cfg(feature = "boot-actuators")]
     if actuator::leak_rollback_selftest() {
         leak_selftest::run();
+    }
+    #[cfg(feature = "boot-actuators")]
+    if actuator::revoked_backing_selftest() {
+        revoke_selftest::run();
+    }
+    #[cfg(feature = "boot-actuators")]
+    if actuator::pc_unbind_selftest() {
+        page_cache::unbind_selftest();
     }
 
     let t_devices = clock::nanos_since_boot();
