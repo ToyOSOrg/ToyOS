@@ -11227,7 +11227,7 @@ fn run_machine_test(
             // argv — the same source it would be verifying. Metal, because
             // the machine whose device set is not the harness's choice is the
             // shape this instrument exists for.
-            let mut qemu = QemuInstance::boot_with_options(
+            let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,

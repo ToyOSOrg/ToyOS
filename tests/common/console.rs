@@ -104,7 +104,7 @@ pub fn console_line_atomicity(
         }
         let writer = usize::from(b > a);
         let bytes = line.as_bytes();
-        let tag_byte = [b'A', b'B'][writer];
+        let tag_byte = b"AB"[writer];
         let whole = bytes.len() == declared.width - 1
             && bytes[0] == tag_byte
             && bytes[1..1 + declared.seq].iter().all(u8::is_ascii_digit)
