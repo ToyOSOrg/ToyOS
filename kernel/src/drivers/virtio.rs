@@ -151,8 +151,7 @@ impl core::fmt::Display for InitRefusal {
     }
 }
 
-/// Virtio names no reset bound (1.2 §3.1.1 only orders the handshake); a
-/// device that has not zeroed `DEVICE_STATUS` in this long is not answering.
+/// Virtio names no reset bound (1.2 §3.1.1 only orders the handshake); this long unanswered is dead.
 const RESET: crate::time::Budget = crate::time::Budget::of(
     crate::time::Duration::from_secs(2),
     "the device is refused, never waited on",

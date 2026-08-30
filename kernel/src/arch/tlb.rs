@@ -15,11 +15,9 @@ use super::{apic, percpu, smp};
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
-/// Which path issued a shootdown, one variant per call-site family, so the
-/// census names who pays: `Dlopen` (a `Shared` window map or a rollback
-/// unmap), `Pcid` (the pool reclaim), `Mmio` (`map_mmio`'s memory-type
-/// change), `Unmap` (`Unmapped::drop`), `Pipe` (a mapping closed), `Staged`
-/// (the ack-delay actuator).
+/// Which path issued a shootdown, so the census names who pays: `Dlopen` (a
+/// `Shared` window or rollback unmap), `Pcid` (pool reclaim), `Mmio`, `Unmap`
+/// (`Unmapped::drop`), `Pipe`, `Staged` (the ack-delay actuator).
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub enum Origin {
@@ -38,12 +36,12 @@ impl Origin {
     const NAMES: [&'static str; Self::COUNT] = ["dlopen", "pcid", "mmio", "unmap", "pipe", "staged"];
 }
 
-/// Issuer-side census; the receiver side is `irq_census`'s `tlb` column, and
-/// a delivery the two disagree on is an uncounted issuing path.
+/// Issuer-side census; `irq_census`'s `tlb` column is the receiver side, and a
+/// delivery the two disagree on is an uncounted issuing path.
 static ISSUED: [AtomicU64; Origin::COUNT] = [const { AtomicU64::new(0) }; Origin::COUNT];
 static WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static MAX_NS: AtomicU64 = AtomicU64::new(0);
-/// Total at the last print, so process exit logs once per batch of new events.
+/// Total at the last print; process exit logs once per batch.
 static REPORTED: AtomicU64 = AtomicU64::new(0);
 
 /// One machine-wide `tlb:` line when the counts moved, at process exit after
@@ -86,9 +84,8 @@ const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
 /// costly to call on every iteration.
 const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
 
-/// Write the page table, then call this, then free — it returns only once
-/// every CPU has flushed. The local-flush early return is uncounted: no IPI,
-/// no machine-wide wait, nothing the census is about.
+/// Write the page table, then call this, then free — it returns only once every
+/// CPU has flushed. The local-flush early return is uncounted: no IPI, no wait.
 pub fn shootdown(origin: Origin) {
     let cpus = smp::cpu_count();
     if !smp::answering() || cpus <= 1 {
