@@ -2371,12 +2371,14 @@ pub const KNOWN_RED: &[Red] = &[
         finding: Finding::fires(1, 3),
         standing: Standing::Stands,
         what: "`writer A declared 1000 whole lines and the capture carries 798` — the \
-               non-vacuity count, not the atomicity assertion, and the filed reading of this \
-               message holds: **`0 mixed` means the mechanism held**. A second sighting of the \
-               2026-08-15 defect with the other writer and a different count, `ALONE … GREEN`",
+               non-vacuity count, not the atomicity assertion: **`0 mixed` means the \
+               mechanism held**. A second sighting of the 2026-08-15 capture loss with the \
+               other writer and a different count, `ALONE … GREEN`. The writers number \
+               their lines now, so a fresh red of this kind names the loss itself — a gap \
+               inside the numbered run, or a contiguous run missing its tail",
         evidence: "the same session's third run, twelve wide, `fastest boot 1381 ms against the \
                    reference 1320 ms`",
-        source: "issues/build/console-line-atomicity-reds-on-a-short-capture.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-18",
     },
     Red {

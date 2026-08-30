@@ -65,6 +65,10 @@ const MIDLINE: usize = 100;
 /// line contains.
 const MIDLINE_BYTE: u8 = b'C';
 
+/// Digits of the per-writer sequence number each line carries after its
+/// leading tag byte, zero-padded so every line stays exactly [`WIDTH`] bytes.
+const SEQ_DIGITS: usize = 6;
+
 /// Stdout, by the slot every process starts with.
 const STDOUT: RawHandle = RawHandle(1);
 
@@ -150,15 +154,30 @@ fn parent() {
     // run that finished rather than one still going. It follows the mid-line
     // writer's unterminated bytes on the wire, which is why the host finds this
     // declaration with a substring search rather than a whole-line one.
-    println!("console-atomicity: writers=2 lines={LINES} width={WIDTH} midline={MIDLINE}");
+    println!(
+        "console-atomicity: writers=2 lines={LINES} width={WIDTH} midline={MIDLINE} \
+         seq={SEQ_DIGITS}"
+    );
 }
 
-/// One writer: `LINES` lines of one repeated byte, each in two `write`s.
+/// One writer: `LINES` numbered lines of one repeated byte, each in two
+/// `write`s.
+///
+/// The sequence number after the leading tag byte is what lets the host tell
+/// a gap in a writer's own run from a capture that ends early — a count alone
+/// reads both as the same missing-lines number.
 fn write_lines(tag: u8) {
     let mut line = [tag; WIDTH];
     line[WIDTH - 1] = b'\n';
-    let (head, tail) = line.split_at(WIDTH / 2);
-    for _ in 0..LINES {
+    for seq in 0..LINES {
+        let mut digits = [0u8; SEQ_DIGITS];
+        let mut rest = seq;
+        for d in digits.iter_mut().rev() {
+            *d = b'0' + (rest % 10) as u8;
+            rest /= 10;
+        }
+        line[1..1 + SEQ_DIGITS].copy_from_slice(&digits);
+        let (head, tail) = line.split_at(WIDTH / 2);
         // Refused rather than retried: a short write here is the kernel taking
         // half a line, which is the defect and not an error to paper over.
         // `try_write`'s console arm accepts the whole buffer by construction.
