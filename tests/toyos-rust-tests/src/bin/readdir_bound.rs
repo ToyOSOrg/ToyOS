@@ -26,8 +26,7 @@ const MAX_LIST_ENTRIES: usize = 16_384;
 /// truncating kernel returns about 4,000 of them.
 const PLAIN_ENTRIES: usize = 6_000;
 
-/// One past the count where the unbounded `/home` walk's `Vec` doubled over the
-/// kernel's allocation ceiling — the count that was a panic, not a refusal.
+/// One past where the unbounded `/home` walk's `Vec` doubled over the kernel's allocation ceiling.
 const HOME_ENTRIES: usize = 32_769;
 
 fn main() {
