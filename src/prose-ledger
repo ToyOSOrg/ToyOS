@@ -80,7 +80,7 @@ kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 127 0
 kernel/src/drivers/panic_console/latch.rs 12 0
 kernel/src/drivers/panic_console/mod.rs 213 0
-kernel/src/drivers/pci.rs 19 0
+kernel/src/drivers/pci.rs 23 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
 kernel/src/drivers/virtio.rs 108 0
@@ -509,7 +509,7 @@ toyos-mixer/src/lib.rs 43 0
 toyos-mixer/src/mix.rs 38 0
 toyos-mixer/src/shape.rs 102 0
 toyos-mixer/src/stats.rs 131 0
-toyos-pci/src/bar.rs 109 0
+toyos-pci/src/bar.rs 123 0
 toyos-pci/src/caps.rs 13 0
 toyos-pci/src/lib.rs 20 0
 toyos-pci/src/msi.rs 35 0

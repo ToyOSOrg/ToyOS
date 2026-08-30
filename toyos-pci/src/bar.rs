@@ -70,6 +70,10 @@ pub enum Unusable {
     /// Firmware assigned this BAR no address. Its registers would be mapped at
     /// physical zero.
     Unassigned,
+    /// The Type field says 64-bit in slot [`MAX_INDEX`], whose neighbour is
+    /// the CardBus CIS pointer, not a BAR — there is no high half to read or
+    /// to probe.
+    WideAtLastIndex,
 }
 
 impl fmt::Display for Unusable {
@@ -82,6 +86,11 @@ impl fmt::Display for Unusable {
                 write!(f, "its Type field is {ty:#04b}, a reserved encoding")
             }
             Self::Unassigned => write!(f, "firmware assigned it no address"),
+            Self::WideAtLastIndex => write!(
+                f,
+                "it claims a 64-bit address in BAR {MAX_INDEX}, whose neighbour is the CardBus \
+                 CIS pointer and not a BAR"
+            ),
         }
     }
 }
@@ -146,26 +155,26 @@ pub enum Width {
     Wide(Wide),
 }
 
-/// Decode a BAR's low dword.
+/// Decode BAR `index`'s low dword.
 ///
 /// Bit 0 first, which is the whole point: a register that does not describe
 /// memory has no Type field to read, and the bits where one would be are part
-/// of a port number.
-pub fn decode(low: u32) -> Result<Width, Unusable> {
+/// of a port number. The index is part of the decode because a 64-bit claim
+/// is a claim about the *next* register too, and slot [`MAX_INDEX`] has none
+/// — [`Width::Wide`] is unreachable there, so no caller can be led to 0x28.
+pub fn decode(index: u8, low: u32) -> Result<Width, Unusable> {
+    // A bad index is a caller bug, not a device's claim, so this fails fast.
+    assert!(index <= MAX_INDEX, "BAR {index} — a Type 0 header has six");
     if low & IO_SPACE != 0 {
         return Err(Unusable::IoSpace { port: low & IO_PORT });
     }
     let prefetchable = low & PREFETCHABLE != 0;
     match low & TYPE {
         TYPE_32 => Memory::new((low & MEMORY_ADDRESS) as u64, prefetchable).map(Width::Narrow),
+        TYPE_64 if index == MAX_INDEX => Err(Unusable::WideAtLastIndex),
         TYPE_64 => Ok(Width::Wide(Wide { low, prefetchable })),
         _ => Err(Unusable::ReservedType(((low & TYPE) >> 1) as u8)),
     }
-}
-
-/// Whether a sizing probe must also probe the register after this one.
-pub fn is_wide(low: u32) -> bool {
-    low & IO_SPACE == 0 && low & TYPE == TYPE_64
 }
 
 /// Why a sizing probe's answer describes no window the kernel can bound by.
@@ -175,6 +184,8 @@ pub enum BadSize {
     Unimplemented,
     /// Not contiguous ones — the spec hardwires the low bits to zero, so this is no size.
     NotPowerOfTwo(u64),
+    /// [`decode`] refused the register, so there is no window to probe.
+    NotMemory(Unusable),
 }
 
 impl fmt::Display for BadSize {
@@ -184,6 +195,7 @@ impl fmt::Display for BadSize {
             Self::NotPowerOfTwo(size) => {
                 write!(f, "its sizing probe decodes to {size:#x}, not a power of two")
             }
+            Self::NotMemory(why) => write!(f, "it is not a probeable memory BAR: {why}"),
         }
     }
 }
@@ -209,14 +221,14 @@ mod tests {
     use super::*;
 
     fn narrow(low: u32) -> u64 {
-        match decode(low) {
+        match decode(0, low) {
             Ok(Width::Narrow(memory)) => memory.address(),
             other => panic!("wanted a 32-bit memory BAR, got {other:?}"),
         }
     }
 
     fn wide(low: u32, high: u32) -> u64 {
-        match decode(low) {
+        match decode(0, low) {
             Ok(Width::Wide(w)) => w.with_high(high).unwrap().address(),
             other => panic!("wanted a 64-bit memory BAR, got {other:?}"),
         }
@@ -241,7 +253,7 @@ mod tests {
     /// the upper half of a physical address.
     #[test]
     fn an_io_bar_whose_bit_2_is_set_is_not_a_64_bit_memory_bar() {
-        assert_eq!(decode(0x0000_C005), Err(Unusable::IoSpace { port: 0xC004 }));
+        assert_eq!(decode(0, 0x0000_C005), Err(Unusable::IoSpace { port: 0xC004 }));
     }
 
     /// The quieter half of the same defect: with bit 2 clear it decoded as a
@@ -249,7 +261,7 @@ mod tests {
     /// as a physical address to map.
     #[test]
     fn an_io_bar_whose_bit_2_is_clear_is_not_a_32_bit_memory_bar() {
-        assert_eq!(decode(0x0000_C001), Err(Unusable::IoSpace { port: 0xC000 }));
+        assert_eq!(decode(0, 0x0000_C001), Err(Unusable::IoSpace { port: 0xC000 }));
     }
 
     /// Every encoding of the bits above bit 0, so "there is no I/O BAR this
@@ -259,7 +271,7 @@ mod tests {
         for high_bits in 0u32..16 {
             let low = (high_bits << 1) | IO_SPACE;
             assert!(
-                matches!(decode(low), Err(Unusable::IoSpace { .. })),
+                matches!(decode(0, low), Err(Unusable::IoSpace { .. })),
                 "{low:#x} decoded as memory",
             );
         }
@@ -267,8 +279,8 @@ mod tests {
 
     #[test]
     fn the_reserved_type_encodings_are_refused_by_name() {
-        assert_eq!(decode(0xFEBD_0002), Err(Unusable::ReservedType(0b01)));
-        assert_eq!(decode(0xFEBD_0006), Err(Unusable::ReservedType(0b11)));
+        assert_eq!(decode(0, 0xFEBD_0002), Err(Unusable::ReservedType(0b01)));
+        assert_eq!(decode(0, 0xFEBD_0006), Err(Unusable::ReservedType(0b11)));
     }
 
     /// Firmware that assigned nothing leaves the register zero, and mapping
@@ -277,8 +289,8 @@ mod tests {
     /// after they are joined.
     #[test]
     fn an_unassigned_bar_is_refused_rather_than_mapped_at_zero() {
-        assert_eq!(decode(0), Err(Unusable::Unassigned));
-        let Ok(Width::Wide(w)) = decode(0x0000_0004) else { unreachable!() };
+        assert_eq!(decode(0, 0), Err(Unusable::Unassigned));
+        let Ok(Width::Wide(w)) = decode(0, 0x0000_0004) else { unreachable!() };
         assert_eq!(w.with_high(0), Err(Unusable::Unassigned));
         // ...and a 64-bit BAR whose *low* half is zero is still an address.
         assert_eq!(wide(0x0000_0004, 0x0000_0001), 0x1_0000_0000);
@@ -286,11 +298,11 @@ mod tests {
 
     #[test]
     fn prefetchable_is_read_and_is_not_part_of_the_address() {
-        let Ok(Width::Narrow(memory)) = decode(0xFEBD_0008) else { unreachable!() };
+        let Ok(Width::Narrow(memory)) = decode(0, 0xFEBD_0008) else { unreachable!() };
         assert!(memory.prefetchable());
         assert_eq!(memory.address(), 0xFEBD_0000);
 
-        let Ok(Width::Narrow(memory)) = decode(0xFEBD_0000) else { unreachable!() };
+        let Ok(Width::Narrow(memory)) = decode(0, 0xFEBD_0000) else { unreachable!() };
         assert!(!memory.prefetchable());
     }
 
@@ -299,7 +311,26 @@ mod tests {
     /// one.
     #[test]
     fn a_wide_bar_has_no_address_until_the_high_half_arrives() {
-        assert!(matches!(decode(0xFEBD_0004), Ok(Width::Wide(_))));
+        assert!(matches!(decode(0, 0xFEBD_0004), Ok(Width::Wide(_))));
+    }
+
+    /// A Type 0 header has six BARs and the 64-bit encoding consumes two
+    /// consecutive ones (PCIe base spec §7.5.1.2.1), so it can begin only in
+    /// 0..=4: a 64-bit claim in slot 5 names the CardBus CIS pointer at 0x28
+    /// as its high half, and both the read and the sizing probe's write went
+    /// there before this refusal existed.
+    #[test]
+    fn a_wide_claim_in_the_last_slot_is_refused_by_name() {
+        assert_eq!(decode(MAX_INDEX, 0xFEBD_0004), Err(Unusable::WideAtLastIndex));
+        // Unassigned as well: the address plays no part in the refusal.
+        assert_eq!(decode(MAX_INDEX, 0x0000_0004), Err(Unusable::WideAtLastIndex));
+        // The slot before it is the last legal start of a 64-bit BAR.
+        assert!(matches!(decode(MAX_INDEX - 1, 0xFEBD_0004), Ok(Width::Wide(_))));
+        // And slot 5 still answers for everything one register wide.
+        assert_eq!(decode(MAX_INDEX, 0xFEBD_0000), Ok(Width::Narrow(Memory {
+            address: 0xFEBD_0000,
+            prefetchable: false,
+        })));
     }
 
     /// The BARs of every device this kernel drives, as QEMU publishes them:

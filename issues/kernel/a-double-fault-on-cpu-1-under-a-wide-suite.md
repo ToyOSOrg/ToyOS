@@ -171,9 +171,12 @@ What survives of that class was audited here, in code:
   itself unestablished. It is recorded here because a `#DF` naming a live pid is
   precisely what it would have looked like, and because closing it removes one
   of the three readings the next sighting has to be weighed against.
-- **the other 235 `IdtEntry::EMPTY` slots are unchanged**, and each turns an
-  interrupt nobody expected into the same halt — filed as
-  `issues/kernel/an-unclaimed-vector-halts-the-machine-with-no-name.md`.
+- the other 235 slots were `IdtEntry::EMPTY`, and each turned an interrupt
+  nobody expected into the same halt. **Closed**: `arch/idt/unclaimed.rs` is a
+  counted, named catch-all in every unfilled slot, and `lapic_spurious_vector`
+  stages a delivery through it on every run — so this reading of the next
+  sighting would leave a census column and a vector set behind, not a bare
+  halt.
 
 ## Reproduction
 

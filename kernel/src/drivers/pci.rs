@@ -109,7 +109,7 @@ impl PciDevice {
         // A bad index is a caller bug, not a device's claim, so this fails fast instead of returning Err.
         assert!(index <= bar::MAX_INDEX, "PCI: BAR {index} — a Type 0 header has six");
         let offset = bar::BASE + index as u64 * 4;
-        match bar::decode(self.mmio.read_u32(offset))? {
+        match bar::decode(index, self.mmio.read_u32(offset))? {
             bar::Width::Narrow(memory) => Ok(memory),
             bar::Width::Wide(wide) => wide.with_high(self.mmio.read_u32(offset + 4)),
         }
@@ -121,13 +121,22 @@ impl PciDevice {
     pub fn bar_size(&self, index: u8) -> Result<u64, bar::BadSize> {
         assert!(index <= bar::MAX_INDEX, "PCI: BAR {index} — a Type 0 header has six");
         let offset = bar::BASE + index as u64 * 4;
+        let lo = self.mmio.read_u32(offset);
+        // The probe's width comes from the decode, which refuses what must
+        // not be probed — a Wide claim in slot 5 has no high half, so
+        // neither probe write can land on the CardBus CIS pointer at 0x28.
+        // An unassigned register still sizes: the spec's probe needs no address.
+        let wide = match bar::decode(index, lo) {
+            Ok(bar::Width::Wide(_)) => true,
+            Ok(bar::Width::Narrow(_)) | Err(bar::Unusable::Unassigned) => false,
+            Err(why) => return Err(bar::BadSize::NotMemory(why)),
+        };
         let cmd = self.mmio.read_u16(COMMAND);
         self.mmio.write_u16(COMMAND, cmd & !0x2);
-        let lo = self.mmio.read_u32(offset);
         self.mmio.write_u32(offset, u32::MAX);
         let mask_lo = self.mmio.read_u32(offset);
         self.mmio.write_u32(offset, lo);
-        let mask_hi = bar::is_wide(lo).then(|| {
+        let mask_hi = wide.then(|| {
             let hi = self.mmio.read_u32(offset + 4);
             self.mmio.write_u32(offset + 4, u32::MAX);
             let mask = self.mmio.read_u32(offset + 4);
