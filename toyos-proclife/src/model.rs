@@ -81,8 +81,7 @@ pub struct World {
     leaving: BTreeSet<(Pid, Tid)>,
     /// Entries an idle pass has taken out of the table.
     reaped: BTreeSet<Pid>,
-    /// TLS blocks a spawn's phase 2 mapped and no thread owns yet — the value
-    /// `spawn_thread` carries in a local across its second lock take.
+    /// TLS blocks a spawn's phase 2 mapped and no thread owns yet.
     tls_mapped: BTreeSet<u32>,
     next_tls: u32,
 }
@@ -122,8 +121,7 @@ impl World {
         }
     }
 
-    /// `spawn_thread`'s phase 2: a TLS block mapped into the parent's address
-    /// space, owned by no thread until the insert adopts it.
+    /// `spawn_thread`'s phase 2: a TLS block mapped, owned by no thread until the insert adopts it.
     pub fn map_tls(&mut self) -> u32 {
         let block = self.next_tls;
         self.next_tls += 1;
@@ -131,7 +129,7 @@ impl World {
         block
     }
 
-    /// The insert handing the block to the new thread, whose teardown owns it from here.
+    /// The insert handing the block to the new thread, whose teardown owns it.
     pub fn adopt_tls(&mut self, block: u32) {
         self.tls_mapped.remove(&block);
     }
@@ -312,9 +310,7 @@ impl World {
     /// named — which can only be judged once every scripted operation has run
     /// to its end. A join that has not been answered *yet* is the ordinary
     /// case, so checking it at every state would report every schedule.
-    /// And **L5** — every TLS block a spawn mapped ends owned or released; one
-    /// still unowned when every op has finished is a live mapping nothing will
-    /// ever unmap, judged at the end because a spawn mid-build is the ordinary case.
+    /// And **L5** — every TLS block a spawn mapped ends owned or released.
     pub fn final_faults(&self) -> Vec<String> {
         let mut out = self.faults();
         for &block in &self.tls_mapped {

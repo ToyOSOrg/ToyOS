@@ -183,10 +183,8 @@ impl Op {
                     *block = Some(world.map_tls());
                     *pc = 2;
                 }
-                // Phase 3: the same question under the lock that inserts, then
-                // the table insert and the scheduler enqueue together. A
-                // refusal releases the mapping the build carried — a block
-                // becomes a ThreadData's only past the admission.
+                // Phase 3: the insert question, then the table insert and
+                // enqueue; a refusal releases the mapping the build carried.
                 _ => {
                     let carried = block.expect("phase 2 mapped it");
                     if spawn::admit_thread_insert(world, *pid).is_yes() {
@@ -458,11 +456,9 @@ mod tests {
         }
     }
 
-    /// The teeth behind L5: the shape `spawn_thread` shipped with — a refused
-    /// insert dropping the built `ThreadData`, whose drop frees the pages and
-    /// unmaps nothing — really is the leak the law reports. Run by hand
-    /// because the shape is not the kernel's any more: phase 2 maps, the exit
-    /// claims the teardown, and the refusal *omits* the release.
+    /// The teeth behind L5: the shipped shape — a refused insert dropping the
+    /// built `ThreadData`, freeing the pages and unmapping nothing — is the leak
+    /// the law reports. Run by hand, since the shape is no longer the kernel's.
     #[test]
     fn the_refusal_that_dropped_without_unmapping_is_the_leak_l5_reports() {
         let mut world = World::new();
