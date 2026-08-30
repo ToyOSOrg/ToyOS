@@ -1,22 +1,12 @@
-//! Every vector no `idt_vectors!` row claims.
+//! Every vector no `idt_vectors!` row claims — one gate that counts and names
+//! it, since a `P = 0` slot escalates to `#DF` and halts the machine namelessly.
 //!
-//! A delivery through a `P = 0` gate is a contributory fault: the CPU
-//! escalates to `#DF` and the machine halts saying nothing — measured as the
-//! spurious gate's negative control, a boot whose console carried nothing at
-//! all. The reachable producers are real: a stale MSI-X table entry left by a
-//! driver reconfiguration, or a firmware I/O APIC entry `ioapic::init` masks
-//! for exactly this reason. So every unfilled slot takes this one gate, which
-//! counts the vector and remembers it — absorbing one silently would hide an
-//! interrupt-routing defect, so the census column and the vector set are the
-//! point, not the survival.
-//!
-//! The EOI is conditional, as the spurious handler's is (SDM Vol. 3A §11.9):
-//! an unexpected vector may or may not be in service — a genuinely spurious
-//! delivery sets no ISR bit — and the handler asks before it acknowledges.
-//! One gate serves every slot, so the vector's identity is the highest
-//! in-service bit (SDM Vol. 3A §12.8.4), and a no-ISR delivery is counted
-//! apart with no vector to blame. Does not log — this handler can run inside
-//! the log's own commit bracket.
+//! The EOI is conditional, as the spurious handler's is (SDM Vol. 3A §11.9): a
+//! genuinely spurious delivery sets no ISR bit, so the handler asks before it
+//! acknowledges. One gate serves every slot, so the vector's identity is the
+//! highest in-service bit (SDM Vol. 3A §12.8.4), and a no-ISR delivery is
+//! counted apart with no vector to blame. Does not log — this handler can run
+//! inside the log's own commit bracket.
 
 use core::arch::naked_asm;
 use core::sync::atomic::{AtomicU64, Ordering};

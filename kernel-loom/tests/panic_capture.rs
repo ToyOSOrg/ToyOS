@@ -1,17 +1,9 @@
-//! Loom: the panic snapshot's capture latch.
+//! Loom: the panic snapshot's capture latch — one writer per `SNAPSHOT`.
 //!
-//! Two CPUs panicking at once both take `cli` first, so neither takes the
-//! other's halt IPI, and both reach `panic_console::capture()` — which renders
-//! the log's tail into the one static `SNAPSHOT`. Nothing else serialises that
-//! write: `PAINTING` gates the painters, not the captors, and the screen could
-//! carry two interleaved reports. The latch makes the first captor the
-//! snapshot's only writer, re-entrant for the refresh `wait_for_log_file`
-//! owes, released only when a recovered panic gives the snapshot back.
-//!
-//! A rate is why this is a model: the window is one render on one CPU against
-//! another CPU entering its own panic, which no guest boot lands in on demand.
-//! The negative control is in this file — the unlatched shape, transliterated,
-//! whose interleaved snapshot loom must actually reach.
+//! Two CPUs panicking at once both hold `cli`, so nothing else serialises
+//! `capture()`'s render into the one static; the latch makes the first captor
+//! its only writer, re-entrant for `refresh_capture`, released on recovery.
+//! The negative control is in this file: the unlatched shape, transliterated.
 
 use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
 
@@ -21,11 +13,8 @@ use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::Arc;
 use loom::thread;
 
-/// The snapshot has one writer, from every interleaving of two panicking CPUs.
-///
-/// The two-byte cell stands for `SNAPSHOT`: a render is many writes, and two
-/// are enough for loom to observe an interleaving. The final content must be
-/// wholly one captor's — a mixed pair is two reports on one screen.
+/// One writer per snapshot, from every interleaving of two panicking CPUs; the
+/// two-byte cell stands for `SNAPSHOT`, and a mixed pair is two reports on one screen.
 #[test]
 fn two_panicking_cpus_write_one_snapshot() {
     loom::model(|| {
@@ -56,16 +45,14 @@ fn two_panicking_cpus_write_one_snapshot() {
     });
 }
 
-/// `refresh_capture` re-enters on the owning CPU while a second panicking CPU
-/// is turned away — the refresh is a second write by the same owner, and it
-/// must land, whole, over the owner's first.
+/// The owner's `refresh_capture` re-enters while a second captor is turned
+/// away, and the refresh lands whole over the owner's first write.
 #[test]
 fn the_owner_refreshes_and_a_second_captor_stays_out() {
     loom::model(|| {
         let latch = Arc::new(CaptureLatch::new());
         let snapshot = Arc::new(UnsafeCell::new(0u32));
 
-        // The first capture, before the second CPU panics.
         assert!(latch.claim(2), "an unclaimed latch refused its first captor");
         // SAFETY: claim(2) held; the loser thread below is refused before it writes.
         snapshot.with_mut(|p| unsafe { *p = 2 });
@@ -80,7 +67,6 @@ fn the_owner_refreshes_and_a_second_captor_stays_out() {
             })
         };
 
-        // The refresh: a line written after capture(), folded into the snapshot.
         assert!(latch.claim(2), "the owner was refused its own refresh");
         // SAFETY: same claim as the first write.
         snapshot.with_mut(|p| unsafe { *p = 22 });
@@ -93,8 +79,7 @@ fn the_owner_refreshes_and_a_second_captor_stays_out() {
 }
 
 /// A recovered panic releases the latch, and the next captor's write is
-/// ordered after everything the last owner wrote — the acquire on `claim`
-/// pairing with `release`'s store is what loom checks here.
+/// ordered after the last owner's — `claim`'s acquire against `release`'s store.
 #[test]
 fn a_recovered_panic_hands_the_snapshot_to_the_next_captor() {
     loom::model(|| {
@@ -121,16 +106,10 @@ fn a_recovered_panic_hands_the_snapshot_to_the_next_captor() {
     });
 }
 
-/// The unlatched shape this replaced, transliterated: both captors render into
-/// the same cells with nothing serialising them. Two atomic words stand in for
-/// `SNAPSHOT`'s bytes so the interleaving is a readable value rather than the
-/// causality panic loom raises over an `UnsafeCell`.
-///
-/// Asserted by collecting rather than by failing, so this stays a passing test
-/// that proves the failure is reachable: if a future loom, or an edit to the
-/// models above, stops exploring the window in which two renders interleave,
-/// **this reds** — at that point the models above pass on an exploration that
-/// is not happening.
+/// The negative control: the unlatched shape, transliterated onto two atomic
+/// words. Asserted by collecting a mixed pair rather than by failing, so it
+/// stays a passing test that reds the day loom stops reaching the interleaving
+/// the models above rest on.
 #[test]
 fn the_unlatched_capture_this_replaced_interleaves_two_reports() {
     static MIXED: AtomicBool = AtomicBool::new(false);

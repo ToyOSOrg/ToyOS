@@ -1,17 +1,13 @@
 //! The io_uring ring-watcher half of a source's wake, as a lost-wake canary.
 //!
-//! Every source owes two wakes at its event site — the thread blocked in a
-//! plain syscall, and every `io_uring` ring that armed a `POLL_ADD`. The 7a
-//! scheduler cutover once deleted the second half for two sources and nothing
-//! caught it for two months, because no test blocks on a poll and requires the
-//! completion from a real event. This does: a watcher thread arms `POLL_ADD`
-//! READABLE on a pipe read end and blocks in `wait`; a writer thread writes
-//! after a swept delay; the completion must arrive, [`ROUNDS`] times, inside a
-//! wall-clock bound. A dropped ring wake reds as a count short of `ROUNDS`,
-//! never as a hang — the writer's own progress is the timeout.
-//!
-//! `blocking_read_stress` is the same canary for the *other* half, the blocked
-//! `sys_read`; between them a wake that lost either half reds one of the two.
+//! Every source owes two wakes — the thread blocked in a plain syscall, and
+//! every ring that armed a `POLL_ADD`; the 7a cutover once deleted the second
+//! for two sources and nothing caught it, because no test blocked on a poll and
+//! required the completion. This does: a watcher arms `POLL_ADD` READABLE on a
+//! pipe read end and blocks in `wait`, a writer writes each round, and the
+//! completion must arrive [`ROUNDS`] times inside a bound — a dropped ring wake
+//! reds as a short count, never a hang. `blocking_read_stress` is the same
+//! canary for the other half, the blocked `sys_read`.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
