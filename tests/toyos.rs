@@ -9365,7 +9365,8 @@ fn run_machine_test(
             );
             serial::Serial::boot(&qemu).must_be_clean()?;
 
-            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(60));
+            // 120 s: the `/home` arm alone is 32,769 creates on bcachefs.
+            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(120));
             if let Some(err) = &result.error {
                 return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
             }
