@@ -353,7 +353,7 @@ tests/toyos-rust-tests/src/bin/syscall_cost.rs 25 0
 tests/toyos-rust-tests/src/bin/test_panic_child.rs 11 0
 tests/toyos-rust-tests/src/bin/test_screen_churn.rs 35 0
 tests/toyos-rust-tests/src/bin/test_screen_graffiti.rs 6 0
-tests/toyos-rust-tests/src/bin/tlb_shootdown_waits.rs 43 0
+tests/toyos-rust-tests/src/bin/tlb_shootdown_waits.rs 59 0
 tests/toyos-rust-tests/src/bin/toybox_file_tools.rs 74 0
 tests/toyos-rust-tests/src/bin/va_exhaustion.rs 32 0
 tests/toyos-rust-tests/src/bin/wake_storm_cost.rs 122 1
