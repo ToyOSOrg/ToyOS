@@ -177,10 +177,9 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     let cwd = process::with_process_data(|d| d.cwd.clone());
     let resolved = vfs::lock().resolve_absolute(&cwd, path);
 
-    // A repeat load of a name this process already holds shares that module and
-    // maps nothing again — a loop of `dlopen` on one library used to grow the
-    // address space without bound. POSIX-shaped: the shared module's
-    // initializers do not run a second time, so the init info reads empty.
+    // A repeat load of a name this process holds shares that module and maps
+    // nothing again — a `dlopen` loop used to grow the address space unbounded.
+    // POSIX-shaped: the shared module's initializers do not re-run, so empty init.
     if let Some(idx) =
         process::with_process_data(|d| d.elf.lib_paths.iter().position(|p| *p == resolved))
     {

@@ -9,11 +9,10 @@
 //! success. A bound plus a silent truncation is a quieter version of the same
 //! defect, so both are asserted here.
 //!
-//! `/home` gets the same class third: its filesystem walks a btree rather
-//! than a map, and the walk materialised the whole tree before the mount
-//! bound ran — past 32,768 live entries its doubling `Vec` crossed the
-//! kernel's allocation ceiling, a panic from ordinary `create` calls. The
-//! walk now refuses at the bound before anything materialises.
+//! `/home` gets the same class third: its btree walk materialised the whole
+//! tree before the mount bound ran — past 32,768 live entries the doubling
+//! `Vec` crossed the kernel's allocation ceiling, a panic from ordinary
+//! `create` calls — and now refuses at the bound first.
 //!
 //! Everything below is an ordinary workload — no kernel feature, no injection.
 
@@ -30,9 +29,8 @@ const MAX_LIST_ENTRIES: usize = 16_384;
 /// truncating kernel returns about 4,000 of them.
 const PLAIN_ENTRIES: usize = 6_000;
 
-/// One past the count where the unbounded `/home` walk's `Vec` doubled over
-/// the kernel's allocation ceiling. The `/tmp` limit arms stay at the exact
-/// bound; this arm's job is the count that was a panic, not a refusal.
+/// One past the count where the unbounded `/home` walk's `Vec` doubled over the
+/// kernel's allocation ceiling — the count that was a panic, not a refusal.
 const HOME_ENTRIES: usize = 32_769;
 
 fn main() {
@@ -44,10 +42,9 @@ fn main() {
     println!("all readdir bound tests passed");
 }
 
-/// First, while nothing else holds file-cache entries: the same listing bound
-/// on `/home`, at the count that used to be a kernel death rather than a
-/// refusal. The files stay — this boot is the test's own, and deleting them
-/// would double its price to assert nothing new.
+/// First, while nothing else holds file-cache entries: the listing bound on
+/// `/home` at the count that was a kernel death. The files stay — this boot is
+/// the test's own.
 fn home_tree_past_the_doubling_is_refused() {
     for i in 0..HOME_ENTRIES {
         fs::write(format!("/home/rb{i}"), b"").expect("create on /home failed");

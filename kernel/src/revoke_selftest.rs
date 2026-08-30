@@ -1,9 +1,7 @@
-//! Revoked-backing controls, behind `revoked-backing-selftest`: on each
-//! writable mount, a `FileBacking` read after the file's deletion must fail
-//! rather than fault in zeros. The two arms are a differential — `/tmp`'s
-//! `TmpfsBacking` and `/home`'s `NvmeBacking` are separate implementations of
-//! the one contract (`home_backing_revoked` gates the latter end-to-end from
-//! userland), and both must answer a read of a deleted file the same way.
+//! Revoked-backing controls, behind `revoked-backing-selftest`: a `FileBacking`
+//! read after the file's deletion must fail rather than fault in zeros, on each
+//! writable mount. `/tmp`'s `TmpfsBacking` and `/home`'s `NvmeBacking` are
+//! separate implementations of the one contract, and must answer alike.
 
 use crate::file_cache;
 use crate::mm::PAGE_BYTES;
@@ -30,8 +28,7 @@ fn probe(path: &str) {
     if file_cache::write_page(id, 0, 0, &[FILL; 64][..]).is_err() {
         return fail(path, "write");
     }
-    // The creator's reference, released the way `OpenFileState::drop` does —
-    // held, `mark_deleted` keeps the pages and a stale read never misses.
+    // Released the way `OpenFileState::drop` does, then drained.
     if let file_cache::Release::TeardownOwed = file_cache::release_to_writeback(id) {
         crate::writeback::enqueue(id, alloc::string::String::from(path), mtime);
     }
@@ -41,7 +38,6 @@ fn probe(path: &str) {
         Err(e) => return fail(path, &alloc::format!("open_backing: {e:?}")),
     };
 
-    // On the heap: this stack has no room for a page.
     let mut heap = alloc::vec![0u8; PAGE_BYTES].into_boxed_slice();
     let buf: &mut [u8; PAGE_BYTES] = (&mut heap[..]).try_into().expect("PAGE_BYTES bytes");
     match backing.read_page(0, buf) {
@@ -55,7 +51,6 @@ fn probe(path: &str) {
     }
 
     match backing.read_page(0, buf) {
-        // The verdict: a deleted file's backing has no bytes and must say so.
         Err(_) => crate::log!("revoke-selftest: {path} PASS (pre={FILL:#04x}, post refused)"),
         Ok(()) => fail(
             path,

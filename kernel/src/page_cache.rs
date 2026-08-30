@@ -371,16 +371,12 @@ mod read_fault {
     }
 }
 
-/// The un-index control, behind `pc-unbind-selftest`: `PageCache::read`'s
-/// unbind-on-failed-fill, which no test could kill before this (measured: with
-/// the `unbind` line deleted the whole suite stayed green). One guard held
-/// throughout, so nothing else can touch the armed block mid-sequence.
-///
-/// The count is the assertion: after a refused fill, the next read of the same
-/// block must reach the device exactly once — a slot left bound answers from
-/// whatever tenant it last held and reaches it zero times. The byte comparison
-/// against the device's own answer (read through the same guard, past the
-/// cache) is the differential half.
+/// The un-index control, behind `pc-unbind-selftest`, for `PageCache::read`'s
+/// unbind-on-failed-fill. The count is the assertion: after a refused fill, the
+/// next read of the same block reaches the device exactly once — a slot left
+/// bound answers from its last tenant and reaches it zero times. The byte
+/// comparison against the device (past the cache) is the differential half.
+/// One guard held throughout, so nothing touches the armed block mid-sequence.
 #[cfg(feature = "boot-actuators")]
 pub fn unbind_selftest() {
     use core::sync::atomic::Ordering;
