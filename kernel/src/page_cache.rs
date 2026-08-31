@@ -13,6 +13,12 @@ static BLOCK_DEV: Lock<Option<Box<dyn BlockDevice>>> = Lock::new(None);
 
 /// Initialize the page cache, taking ownership of the block device.
 pub fn init(dev: Box<dyn BlockDevice>) {
+    #[cfg(feature = "boot-actuators")]
+    let dev: Box<dyn BlockDevice> = if crate::actuator::pc_unbind_selftest() {
+        Box::new(read_fault::FaultDevice(dev))
+    } else {
+        dev
+    };
     let block_count = dev.block_count();
     let cache = PageCache::new(block_count, dev.device_id());
     log!("page cache: {} device blocks, index sized for {} cached blocks, cap {} slots",
@@ -310,5 +316,116 @@ impl PageCache {
             }
         }
         failed.map_or(Ok(()), Err)
+    }
+}
+
+/// Read-fault injection (`pc-unbind-selftest`): refuse one armed block, count served reads of another.
+#[cfg(feature = "boot-actuators")]
+mod read_fault {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use alloc::boxed::Box;
+
+    use crate::block::{BlockDevice, BlockError, BlockResult, DeviceId};
+
+    // `u64::MAX` disarms; no device reaches it.
+    pub(super) static FAIL_BLOCK: AtomicU64 = AtomicU64::new(u64::MAX);
+    pub(super) static WATCH_BLOCK: AtomicU64 = AtomicU64::new(u64::MAX);
+    pub(super) static SERVED: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) struct FaultDevice(pub Box<dyn BlockDevice>);
+
+    fn covers(lba: u64, count: u32, block: u64) -> bool {
+        lba <= block && block - lba < count as u64
+    }
+
+    impl BlockDevice for FaultDevice {
+        fn device_id(&self) -> DeviceId {
+            self.0.device_id()
+        }
+
+        fn block_count(&self) -> u64 {
+            self.0.block_count()
+        }
+
+        fn read_blocks(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
+            if covers(lba, count, FAIL_BLOCK.load(Ordering::Relaxed)) {
+                return Err(BlockError::Device);
+            }
+            let read = self.0.read_blocks(lba, count, buf);
+            if read.is_ok() && covers(lba, count, WATCH_BLOCK.load(Ordering::Relaxed)) {
+                SERVED.fetch_add(1, Ordering::Relaxed);
+            }
+            read
+        }
+
+        fn write_blocks(&mut self, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
+            self.0.write_blocks(lba, count, buf)
+        }
+
+        fn flush(&mut self) -> BlockResult {
+            self.0.flush()
+        }
+    }
+}
+
+/// The un-index control, behind `pc-unbind-selftest`, for `PageCache::read`'s
+/// unbind-on-failed-fill. The count is the assertion: after a refused fill, the
+/// next read of the same block reaches the device exactly once — a slot left
+/// bound answers from its last tenant and reaches it zero times. The byte
+/// comparison against the device (past the cache) is the differential half.
+/// One guard held throughout, so nothing touches the armed block mid-sequence.
+#[cfg(feature = "boot-actuators")]
+pub fn unbind_selftest() {
+    use core::sync::atomic::Ordering;
+
+    let mut guard = lock();
+    if guard.cache.is_none() {
+        log!("pc-unbind-selftest: FAIL (this boot has no metadata page cache)");
+        return;
+    }
+    let (cache, dev) = guard.cache_and_dev();
+    // The highest non-resident block: read by nothing so far, or long evicted.
+    let Some(block) = (0..cache.block_count).rev().find(|b| !cache.block_to_slot.contains_key(b))
+    else {
+        log!("pc-unbind-selftest: FAIL (every device block is resident)");
+        return;
+    };
+
+    read_fault::SERVED.store(0, Ordering::Relaxed);
+    read_fault::WATCH_BLOCK.store(block, Ordering::Relaxed);
+    read_fault::FAIL_BLOCK.store(block, Ordering::Relaxed);
+    let refused = cache.read(dev, block).is_err();
+    read_fault::FAIL_BLOCK.store(u64::MAX, Ordering::Relaxed);
+    if !refused {
+        log!("pc-unbind-selftest: FAIL (the injected read fault never fired)");
+        return;
+    }
+
+    let mut reread = vec![0u8; PAGE_BYTES].into_boxed_slice();
+    match cache.read(dev, block) {
+        Ok(data) => reread.copy_from_slice(data),
+        Err(_) => {
+            log!("pc-unbind-selftest: FAIL (the re-read after the failed fill was refused)");
+            return;
+        }
+    }
+    let served = read_fault::SERVED.load(Ordering::Relaxed);
+    read_fault::WATCH_BLOCK.store(u64::MAX, Ordering::Relaxed);
+
+    let mut raw = vec![0u8; PAGE_BYTES].into_boxed_slice();
+    if dev.read_blocks(block, 1, &mut raw).is_err() {
+        log!("pc-unbind-selftest: FAIL (the ground-truth device read was refused)");
+        return;
+    }
+
+    if served == 1 && reread[..] == raw[..] {
+        log!("pc-unbind-selftest: PASS (block {block}: 1 device read after the failed fill, bytes match the device)");
+    } else {
+        log!(
+            "pc-unbind-selftest: FAIL (block {block}: {served} device reads after the failed \
+             fill, bytes {}the device's — the slot stayed bound to a block it never read)",
+            if reread[..] == raw[..] { "match " } else { "differ from " }
+        );
     }
 }

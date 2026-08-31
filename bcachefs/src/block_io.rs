@@ -54,20 +54,49 @@ impl Default for BlockBuf {
     }
 }
 
-/// The device did not do the transfer, and whether asking again can help —
-/// the two variants mean opposite give-up policies, so an implementation must
-/// choose and a conversion cannot erase the choice into a unit.
+/// The two variants mean opposite give-up policies. Each carries a witness only
+/// this crate can mint, so rustc's fix-it for the old erasure — which
+/// re-collapses a still-durable `Refused` into `Failed`, the loss #327 removed
+/// — no longer compiles, nor can the witness be named outside the crate:
 ///
-/// Which block it was stays the caller's, because the caller is what named it.
-/// [`BlockIOExt`] is where that gets attached, so an error a filesystem
-/// operation returns cannot name a block the operation never asked for.
+/// ```compile_fail
+/// let r: Result<(), u32> = Err(7);
+/// let _: Result<(), bcachefs::DeviceError> = r.map_err(|_| bcachefs::DeviceError::Failed);
+/// ```
+/// ```compile_fail
+/// use bcachefs::Sealed;
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceError {
     /// The device's own word: the transfer was attempted and failed.
-    Failed,
+    Failed(Sealed),
     /// Refused before it was attempted, on the caller's time budget; safe to
     /// ask again.
-    Refused,
+    Refused(Sealed),
+}
+
+/// The variants' witness: unmintable (private field) and unnameable (private module) outside the crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sealed(());
+
+/// What a foreign error answers at [`DeviceError::classify`]; the answer is the discriminant.
+pub trait TransferError {
+    /// True when the transfer was never attempted — refused on budget, still durable.
+    fn refused_before_attempt(&self) -> bool;
+}
+
+impl DeviceError {
+    pub(crate) const FAILED: Self = Self::Failed(Sealed(()));
+    pub(crate) const REFUSED: Self = Self::Refused(Sealed(()));
+
+    /// The only constructor reachable outside the crate.
+    pub fn classify<E: TransferError>(err: &E) -> Self {
+        if err.refused_before_attempt() {
+            Self::REFUSED
+        } else {
+            Self::FAILED
+        }
+    }
 }
 
 /// The byte range block `block` occupies in an image, or `None` when that
@@ -169,15 +198,15 @@ impl VecBlockIO {
 impl BlockIO for VecBlockIO {
     fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
         let data = self.data.borrow();
-        let (off, end) = byte_range(block).ok_or(DeviceError::Failed)?;
-        buf.0.copy_from_slice(data.get(off..end).ok_or(DeviceError::Failed)?);
+        let (off, end) = byte_range(block).ok_or(DeviceError::FAILED)?;
+        buf.0.copy_from_slice(data.get(off..end).ok_or(DeviceError::FAILED)?);
         Ok(())
     }
 
     fn write_block(&self, block: BlockNum, buf: &BlockBuf) -> Result<(), DeviceError> {
         let mut data = self.data.borrow_mut();
-        let (off, end) = byte_range(block).ok_or(DeviceError::Failed)?;
-        data.get_mut(off..end).ok_or(DeviceError::Failed)?.copy_from_slice(&buf.0);
+        let (off, end) = byte_range(block).ok_or(DeviceError::FAILED)?;
+        data.get_mut(off..end).ok_or(DeviceError::FAILED)?.copy_from_slice(&buf.0);
         Ok(())
     }
 
@@ -237,7 +266,7 @@ impl SliceBlockIO {
 
 impl BlockIO for SliceBlockIO {
     fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
-        buf.0.copy_from_slice(self.block(block).ok_or(DeviceError::Failed)?);
+        buf.0.copy_from_slice(self.block(block).ok_or(DeviceError::FAILED)?);
         Ok(())
     }
 
@@ -246,7 +275,7 @@ impl BlockIO for SliceBlockIO {
     /// has no write operations — and a device that will not write is an answer
     /// either way.
     fn write_block(&self, _block: BlockNum, _buf: &BlockBuf) -> Result<(), DeviceError> {
-        Err(DeviceError::Failed)
+        Err(DeviceError::FAILED)
     }
 
     fn block_count(&self) -> u64 {
@@ -303,7 +332,7 @@ mod slice_bounds {
         assert!(io.block(BlockNum::new(4)).is_none());
         assert!(io.block(BlockNum::new(u64::MAX / BLOCK_SIZE as u64)).is_none());
         let mut buf = BlockBuf::zeroed();
-        assert_eq!(io.read_block(BlockNum::new(3), &mut buf), Err(DeviceError::Failed));
+        assert_eq!(io.read_block(BlockNum::new(3), &mut buf), Err(DeviceError::FAILED));
     }
 
     /// A block that *starts* inside the image and ends past it. `get(off..end)`

@@ -121,7 +121,7 @@ fn report_initrd(image: Vec<u8>) {
     let volume_bytes = image.len() as u64;
     let fs: Mounted<VecBlockIO, bcachefs::ReadOnly> =
         Mounted::open(VecBlockIO::from_vec(image)).expect("open the initrd's bcachefs");
-    let entries = fs.list().expect("list the initrd");
+    let entries = fs.list(usize::MAX).expect("list the initrd");
 
     let mut groups: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
     let mut content = 0u64;

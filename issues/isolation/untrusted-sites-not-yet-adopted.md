@@ -103,27 +103,24 @@ symbol**, so whoever takes this does not have to re-derive which value is meant.
   `Untrusted` on top would be ceremony over an already-safe abstraction, so
   nothing changed here. No longer belongs on this list.
 
-- **`bcachefs/src/btree.rs`'s `collect_all`.** The residual
-  `untrusted-input-panics` records. **This one is not a wrapper fix**: it
-  materialises every entry in the tree before anything counts them, so what it
-  needs is a count primitive that lets `BcacheFsAdapter::list` refuse *before* it
-  allocates, the way `TmpFs` already does. `/home` is writable by userland, so it
-  is a live path. It stays the bcachefs owner's.
+- **`bcachefs/src/btree.rs`'s `collect_all`.** Closed: it was not a wrapper
+  fix — it materialised every entry in the tree before anything counted them —
+  so it grew a count primitive of its own, `collect_up_to`, that lets
+  `BcacheFsAdapter::list` refuse *before* it allocates, the way `TmpFs` already
+  does. `/home` was writable by userland, so it was a live panic path.
 
 ## What this type does not answer
 
-Recorded so nobody tries to make it. One open entry in this area is **not**
-this class, and wrapping something would touch it:
+Recorded so nobody tries to make it. One entry in this area was **not** this
+class, and wrapping something would have touched it:
 
-- **`issues/isolation/netd-trusts-ring-closed-flags.md`** — a *predicate* a
-  peer writes, not an index. `RingHeader::flags` lives in the page `SYS_PIPE_MAP`
-  maps writable, and netd reads `is_reader_closed`/`is_writer_closed` as facts
-  about its peer. There is no bound to compare a bit against. The fix is to stop
-  reading a publication as a channel: the kernel's own `readers`/`writers` counts
-  are the side that knows, and they already surface as EOF on a read and
-  `BrokenPipe` on a write.
-
-It is still open in its own file, and it is not blocked on anything here.
+- **netd trusting the ring's closed flags** — a *predicate* a peer writes, not
+  an index. `RingHeader::flags` lives in the page `SYS_PIPE_MAP` maps writable,
+  and netd read `is_reader_closed`/`is_writer_closed` as facts about its peer.
+  There was no bound to compare a bit against, so the answer was not a wrapper
+  but to stop reading a publication as a channel: netd now asks the kernel's own
+  `readers`/`writers` counts, which surface as EOF on a read and `BrokenPipe` on
+  a write. Closed on its own file.
 
 A second entry used to stand beside it: virtio-net registering its whole
 `DmaPool` page, so that the claimant mapped the descriptor tables writable. That
