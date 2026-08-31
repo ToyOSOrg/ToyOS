@@ -485,9 +485,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
     ("input_claim_absent", Sched::Parallel, Tier::Fast),
     // One boot; every verdict is a PPM header field or a console line, and no
-    // clock is in any of them. Carrying `UNMEASURED_MS` until the shards price
-    // it.
-    ("gpu_set_resolution", Sched::Parallel, Tier::Fast),
+    // clock is in any of them, so its Nightly row is `Why::Cost` and nothing
+    // else. `src/tiers.rs` carries the price and what goes dark with it.
+    ("gpu_set_resolution", Sched::Parallel, Tier::Nightly),
     // One boot from here to `metal_sim_compositor_stall` (`METAL_SIM_DESKTOP`).
     ("metal_sim_compositor", Sched::Parallel, Tier::Nightly),
     // Reads the boot log this group already has, after the member above has
