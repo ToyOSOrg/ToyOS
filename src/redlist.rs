@@ -2474,6 +2474,28 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-19",
     },
+    // Sighting on `ci-qemu-pin`, whose whole delta is `.github` and
+    // `src/ci.rs`. Adjudicated here rather than re-run away.
+    Red {
+        test: "console_locale_detect",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(1, 2),
+        standing: Standing::Stands,
+        what: "`FAIL console_locale_detect: 10 typed lines and none of them came back`, green on \
+               the alone re-run: `ALONE: GREEN, and it was alone both times — nothing the harness \
+               controls differed, so it failed once and passed once. That is a rate and not a \
+               classification`. **The row below retired this name against `shell_type_line` \
+               (`7a033450`) and that fix is in the tree**: the message quoted here is that fix's \
+               own verdict, reporting that none of ten lines echoed back. A bounded burst losing \
+               bytes at a queue boundary explains a mangled line, not ten of ten each retried \
+               three times, so the retired mechanism does not account for this and the \
+               retirement is not evidence against it. Not about the diff it appeared on — no \
+               kernel, userland or harness byte, and the guest ran the declared QEMU.",
+        evidence: "pull-request `ci` run 33411831704, job 99553283770 (`guest (1)`), headSha \
+                   30918d0e, 2026-08-31",
+        source: "issues/build/console-locale-detect-loses-every-typed-line.md",
+        measured: "2026-08-31",
+    },
     // Found auditing the merge-health backfill
     // (`issues/build/the-eased-merge-law-carries-a-threshold.md`), not by
     // anyone working the diff it rode on.
