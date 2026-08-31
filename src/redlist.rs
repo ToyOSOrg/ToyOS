@@ -2295,7 +2295,7 @@ pub const KNOWN_RED: &[Red] = &[
                LIST. **Not about the diff it was found on**",
         evidence: "dev host, 2026-08-27, the `cargo test` run of the md2 defect-fix branch; \
                    `exit_wait_storm` reds in the same phase and is already on this list",
-        source: "issues/build/syscall-window-nmi-reds-under-a-shared-host.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-27",
     },
     Red {

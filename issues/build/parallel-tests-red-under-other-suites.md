@@ -333,6 +333,27 @@ changes.
   own echo of the whole line as the verdict, with three tries. The redlist row
   is retired against it.
 
+- **`syscall_window_nmi`** — added 2026-08-27, one sighting, dev host, a
+  288-name `cargo test` run at 92 guests with a second worktree's suite on the
+  same machine. `the storm never reported — is \`syscall-window-nmi\` on?` at
+  **1,505 s** against a committed price of 6,825 ms — a **220x** wall stretch,
+  which is what the guest's own message says when the storm line has not arrived
+  yet. `ALONE … GREEN` in **5 s** in the same session, reporting the storm in
+  full: `3000 sent, 3000 taken, 43 in the window, 140 in Ring 3, 663 syscalls
+  made under the storm`. `cargo run -- --known-red syscall_window_nmi` answered
+  `NOT ON THE LIST` when it was filed; `src/redlist.rs` carries a row now.
+
+  **Not the branch it was found on**: that branch changed the syscall entry's
+  displacement *spelling* — `const` operands for the same immediates,
+  byte-identical machine code — and added two per-CPU stores per syscall for the
+  panic path's `in_syscall` bracket. Neither moves a 6.8 s test to 1,505 s, and
+  the same tip runs it green alone in 5 s. Filed here rather than re-classified:
+  `ALONE: GREEN` is the harness naming a hypothesis, not a mechanism, and what is
+  measured is one red at 220x its price and one green at 1x. What would settle it
+  is a rate — the same suite run repeatedly with and without a second worktree's
+  build on the host, which is what turns this into either a contention class the
+  harness should schedule around or a defect in the storm's own pacing.
+
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
 twelve guests across every worktree. It recurred on 2026-08-07: **eight
