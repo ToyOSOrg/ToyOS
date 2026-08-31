@@ -449,12 +449,6 @@ pub fn delete(io: &dyn BlockIO, root: BlockNum, key: &Key) -> Result<Option<Vec<
     }
 }
 
-/// All leaf entries, for a caller whose walk is its own (`delete_prefix`); a
-/// boundary-crossing listing goes through [`collect_up_to`] and its ceiling.
-pub fn collect_all(io: &dyn BlockIO, root: BlockNum) -> Result<Vec<Entry>, FsError> {
-    collect_up_to(io, root, usize::MAX)
-}
-
 /// At most `limit` live leaf entries, refusing *before* the over-bound entry
 /// lands: the tree's claim about its size never reaches the allocator.
 pub fn collect_up_to(io: &dyn BlockIO, root: BlockNum, limit: usize) -> Result<Vec<Entry>, FsError> {

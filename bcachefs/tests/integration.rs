@@ -323,58 +323,6 @@ fn mounted_readwrite_delete() {
 }
 
 #[test]
-fn mounted_readwrite_delete_prefix() {
-    // 200 files, only 3 match the prefix. Verifies the full-tree scan
-    // doesn't accidentally delete non-matching entries (keys are hash-ordered,
-    // not name-ordered, so prefix matching must check every leaf).
-    let io = VecBlockIO::new(4096);
-    let fs = Formatted::format(io).expect("format");
-    let mut mounted = Mounted::<_, ReadWrite>::open(fs.into_io().expect("sync")).expect("open");
-
-    // Create 200 files across various prefixes
-    for i in 0..100 {
-        let name = format!("lib/lib_{:03}.so", i);
-        mounted.create(&name, format!("lib{}", i).as_bytes(), 0).expect("create lib");
-    }
-    for i in 0..100 {
-        let name = format!("share/asset_{:03}", i);
-        mounted.create(&name, format!("asset{}", i).as_bytes(), 0).expect("create share");
-    }
-    mounted.create("bin/shell", b"shell", 0).expect("create");
-    mounted.create("bin/editor", b"editor", 0).expect("create");
-    mounted.create("bin/compositor", b"compositor", 0).expect("create");
-
-    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 203);
-
-    mounted.delete_prefix("bin/").expect("delete_prefix");
-    let files = mounted.list(usize::MAX).unwrap();
-    assert_eq!(files.len(), 200, "expected 200 files after deleting bin/, got {}", files.len());
-    assert!(mounted.read_file("bin/shell").is_err());
-    assert!(mounted.read_file("bin/editor").is_err());
-    assert!(mounted.read_file("bin/compositor").is_err());
-
-    // Verify all non-matching files survived
-    for i in 0..100 {
-        let name = format!("lib/lib_{:03}.so", i);
-        assert_eq!(
-            mounted.read_file(&name).unwrap(),
-            format!("lib{}", i).as_bytes(),
-            "{} corrupted after delete_prefix",
-            name
-        );
-    }
-    for i in 0..100 {
-        let name = format!("share/asset_{:03}", i);
-        assert_eq!(
-            mounted.read_file(&name).unwrap(),
-            format!("asset{}", i).as_bytes(),
-            "{} corrupted after delete_prefix",
-            name
-        );
-    }
-}
-
-#[test]
 fn mounted_readwrite_overwrite_file() {
     let io = VecBlockIO::new(256);
     let fs = Formatted::format(io).expect("format");

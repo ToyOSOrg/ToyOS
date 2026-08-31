@@ -1,4 +1,4 @@
-//! The capture latch: the panic snapshot's one writer, ever — re-entrant for its owner.
+//! The capture latch: one writer CPU owns the panic snapshot until recovery and may re-enter.
 //! No `crate::` references: `kernel-loom` compiles this file under `feature = "loom"` to drive the real latch in its tests.
 
 #[cfg(not(feature = "loom"))]
@@ -16,6 +16,13 @@ pub struct CaptureLatch {
     owner: AtomicU32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claim {
+    Fresh,
+    Reentrant,
+    Refused,
+}
+
 impl CaptureLatch {
     // Must stay `const`: the latch is a kernel `static`, and loom's atomics have no const constructor.
     #[cfg(not(feature = "loom"))]
@@ -30,17 +37,23 @@ impl CaptureLatch {
         Self { owner: AtomicU32::new(UNCLAIMED) }
     }
 
-    /// Whether `token` may write the snapshot; the acquire on failure pairs
-    /// with [`release`](CaptureLatch::release)'s store for the next claimant.
-    pub fn claim(&self, token: u32) -> bool {
+    /// Whether `token` newly acquired, re-entered, or lost the latch.
+    pub fn claim(&self, token: u32) -> Claim {
         match self.owner.compare_exchange(UNCLAIMED, token, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => true,
-            Err(owner) => owner == token,
+            Ok(_) => Claim::Fresh,
+            Err(owner) if owner == token => Claim::Reentrant,
+            Err(_) => Claim::Refused,
         }
     }
 
-    /// Give the snapshot back: the panic was survived. The owner's call alone.
-    pub fn release(&self) {
-        self.owner.store(UNCLAIMED, Ordering::Release);
+    pub fn owned_by(&self, token: u32) -> bool {
+        self.owner.load(Ordering::Acquire) == token
+    }
+
+    /// Give the snapshot back only when `token` owns it.
+    pub fn release(&self, token: u32) -> bool {
+        self.owner
+            .compare_exchange(token, UNCLAIMED, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
     }
 }

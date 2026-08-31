@@ -30,6 +30,11 @@
 //! is why `try_lock`'s acquire edge sat on the wrong atomic through every green
 //! suite run until a model checker was pointed at it.
 //!
+//! **A model certifies only the transitions its threads exercise from both
+//! sides.** A guard that no thread in a model ever violates is unmeasured by
+//! it however green the run is, so a primitive whose refusal is enforced at
+//! its call site is certified by reading and not by loom.
+//!
 //! Every `loom::model` test file in this crate is gated `cfg(feature =
 //! "loom")`, so the crate's two supported invocations are `cargo test`
 //! (default features, every model) and `cargo test --no-default-features
@@ -340,8 +345,10 @@ pub mod sleeplock;
 #[path = "../../kernel/src/drivers/i8042/tally.rs"]
 pub mod i8042_tally;
 
-/// The panic snapshot's capture latch. Two CPUs panicking at once both reach
-/// `capture()` with `cli` taken, so nothing else serialises the snapshot write;
-/// the property is one writer per snapshot, which only a model can enumerate.
+/// The panic snapshot's owner and access state, driven together by
+/// `tests/panic_capture.rs`.
 #[path = "../../kernel/src/drivers/panic_console/latch.rs"]
 pub mod capture_latch;
+
+#[path = "../../kernel/src/drivers/panic_console/access.rs"]
+pub mod capture_access;
