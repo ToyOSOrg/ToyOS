@@ -78,9 +78,9 @@ kernel/src/drivers/i8042/tally.rs 16 0
 kernel/src/drivers/ioapic.rs 30 0
 kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 131 0
-kernel/src/drivers/panic_console/access.rs 1 0
+kernel/src/drivers/panic_console/access.rs 6 0
 kernel/src/drivers/panic_console/latch.rs 12 0
-kernel/src/drivers/panic_console/mod.rs 213 0
+kernel/src/drivers/panic_console/mod.rs 215 0
 kernel/src/drivers/pci.rs 23 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
@@ -465,7 +465,7 @@ toyos-fat32/src/device.rs 42 0
 toyos-fat32/src/dir.rs 72 0
 toyos-fat32/src/error.rs 33 0
 toyos-fat32/src/fat.rs 127 0
-toyos-fat32/src/fs.rs 200 0
+toyos-fat32/src/fs.rs 206 0
 toyos-fat32/src/lib.rs 59 0
 toyos-fat32/src/name.rs 104 0
 toyos-fat32/src/time.rs 40 0

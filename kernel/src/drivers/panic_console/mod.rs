@@ -510,6 +510,11 @@ fn captor_token() -> u32 {
 }
 
 /// Drop the captured report: this panic was survived. Called only on the recovery branch.
+///
+/// A refused discard leaves the latch owned and the report standing, so a
+/// survived panic can still be painted as the cause of death: `CAPTURE_ACCESS`
+/// refuses only under a fatal reader, and admitting a fresh captor beneath that
+/// reader's live borrow is the worse of the two.
 pub fn discard_capture() {
     let token = captor_token();
     if CAPTURE.owned_by(token) && CAPTURE_ACCESS.discard() {

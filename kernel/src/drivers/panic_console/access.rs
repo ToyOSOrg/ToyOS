@@ -1,4 +1,9 @@
-//! The panic snapshot's atomic reader/writer state; a terminal reader excludes every later refresh.
+//! The panic snapshot's atomic reader/writer state: `EMPTY` -> `WRITING` -> `READY`,
+//! and `READY` -> `READING` once and for good.
+//!
+//! **`READING` is terminal.** Every writer transition here demands `EMPTY` or
+//! `READY`, so once a fatal reader has entered, no capture, refresh or discard
+//! runs on this snapshot again and the reader's borrow of it cannot be aliased.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicU32, Ordering};

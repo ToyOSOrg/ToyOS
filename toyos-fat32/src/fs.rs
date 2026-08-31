@@ -306,7 +306,9 @@ impl<D: BlockAccess> Fat32<D> {
         }
     }
 
-    /// Whether two paths name the same entry; `false` when `b` is absent.
+    /// Whether two paths name the same directory entry — identity is the entry's
+    /// location, so case and 8.3/long variants of one name match. `false` when
+    /// `b` is absent.
     pub fn same_entry(&mut self, a: &str, b: &str) -> Result<bool, Error> {
         let a_loc = self.resolve(a)?.loc;
         let b_loc = match self.resolve(b) {
@@ -894,6 +896,10 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     /// Move an existing `to` aside until `from` commits, restoring it on error.
+    ///
+    /// The staged name costs four directory entries, claimed in `to`'s directory
+    /// before anything is freed: an overwrite refuses on a full directory or
+    /// volume where freeing the destination first would have made its own room.
     pub fn replace_rename(&mut self, from: &str, to: &str) -> Result<Replaced, Error> {
         if !self.exists(to)? {
             self.rename(from, to)?;
