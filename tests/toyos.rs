@@ -366,6 +366,7 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     "nvme_home_roundtrip",
     "sched_stress",
     "std_alloc",
+    "std_mmap",
     "wall_clock_now",
 ];
 
@@ -602,8 +603,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
-    // One boot with both stuck-device actuators armed; `UNMEASURED_MS` until the shards price it.
-    ("driver_wait_refused", Sched::Parallel, Tier::Fast),
+    // One boot with both stuck-device actuators armed.
+    ("driver_wait_refused", Sched::Parallel, Tier::Nightly),
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
@@ -979,8 +980,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("fsync_failed_commit", Sched::Parallel, Tier::Nightly),
     ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
     // A truncate staged inside a flush's metadata window, re-read off the image.
-    // Fast to bootstrap its one KVM measurement; the price verdict re-tiers it.
-    ("ftruncate_flush_race", Sched::Parallel, Tier::Fast),
+    ("ftruncate_flush_race", Sched::Parallel, Tier::Nightly),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
