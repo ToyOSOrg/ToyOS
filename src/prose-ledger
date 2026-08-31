@@ -9,7 +9,7 @@ bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 121 0
 bootloader/src/main.rs 198 0
 examples/imgstat.rs 16 0
-kernel-loom/src/lib.rs 150 0
+kernel-loom/src/lib.rs 154 0
 kernel-loom/tests/durability.rs 29 0
 kernel-loom/tests/i8042_tally.rs 96 0
 kernel-loom/tests/inbox.rs 126 3
