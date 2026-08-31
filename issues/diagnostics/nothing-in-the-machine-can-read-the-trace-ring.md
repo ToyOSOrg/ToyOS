@@ -19,7 +19,7 @@ time split five ways (io, futex, pipe, ipc, other), runqueue wait, peak memory,
 allocation count. `/bin/stats <command>` spawns, waits and prints it. Per-syscall
 counts exist too — `ProcessData::syscall_counts`, 128 bins — and nothing reads
 them out. What is still owed there is who may ask:
-`issues/diagnostics/process-stats-exited-child-only.md`, a policy gap now rather
+`issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md`, a policy gap now rather
 than an ABI one, because no diagnostic tool holds a handle to a daemon.
 
 **Event tracing is built, and only a debugger can read it.**

@@ -89,7 +89,7 @@ Three things it does **not** give, in the order they will bite:
   copies the shell's output to its own stdout and that is the ring `log_file`
   drains — a tail would feed itself; and it needs `/log`, which
   `fat32_adapter::mount` gives only to a machine that booted from USB
-  (`issues/boot-media/boot-exists-only-on-a-usb-boot.md`), so on anything
+  (`issues/build/page-cache-owns-one-device.md`), so on anything
   else the console starts with one line saying the log is not there.
 
   The one exception is deliberate and is the i8042's own health verdict
