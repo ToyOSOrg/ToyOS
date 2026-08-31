@@ -6,13 +6,13 @@ opened: 2026-08-31
 
 # `DeviceError::classify` still lets a foreign type mint `Failed` over a durable refusal
 
-`09250c97` closed `issues/design-debt/bcachefs-deviceerror-failed-still-collapses-a-refusal`
-by sealing `DeviceError`'s variants behind a private `Sealed` witness
-(`bcachefs/src/block_io.rs:69-100`) and stating the class was now
-"unrepresentable in safe code outside the crate rather than merely unused."
-Two `compile_fail` doctests back that — the old `.map_err(|_|
-DeviceError::Failed)` erasure, and naming `Sealed` directly — and both do
-fail to compile.
+Commit `09250c97` closed the design-debt entry over a hand-written
+`DeviceError::Failed` collapsing a refusal by sealing `DeviceError`'s
+variants behind a private `Sealed` witness (`bcachefs/src/block_io.rs:69-100`)
+and stating the class was now "unrepresentable in safe code outside the
+crate rather than merely unused." Two `compile_fail` doctests back that —
+the old `.map_err(|_| DeviceError::Failed)` erasure, and naming `Sealed`
+directly — and both do fail to compile.
 
 But `DeviceError::classify<E: TransferError>(err: &E) -> Self`
 (`block_io.rs:93-99`) is `pub`, and `TransferError` (`block_io.rs:83-86`) is
