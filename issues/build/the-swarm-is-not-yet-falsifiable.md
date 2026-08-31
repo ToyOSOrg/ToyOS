@@ -159,9 +159,8 @@ session's own edits — three files deleted and one filed, both below):
 | **total** | | **359** |
 
 By `kind` alone: defect 222, finding 95, track 33, rejected 8, and one file
-(`issues/diagnostics/a-console-tag-is-composed-by-replacing-a-bracket.md`)
-carrying `kind: design-debt` — one of the ten closed *area* names, not one of
-the five defined `kind` values. Filed as its own build entry rather than
+under `issues/diagnostics/` carrying `kind: design-debt` — one of the ten
+closed *area* names, not one of the five defined `kind` values. Filed as its own build entry rather than
 fixed, per this repository's own rule against fixing what a bookkeeping pass
 finds; `src/issuegate.rs` has since closed that entry by gating the two
 fields.<sup>3</sup>

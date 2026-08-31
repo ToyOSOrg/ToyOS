@@ -15,7 +15,7 @@ use core::num::NonZeroU8;
 use toyos_xhci::enumerate::{self, Enumeration, Learnt, Next, Request};
 use toyos_xhci::invariants::{self, Violation};
 use toyos_xhci::job::{Await, Outstanding, Stages, CC_SUCCESS};
-use toyos_xhci::port::{Flaw, GaveUp, Gone, Nanos, PortState, Reset, Step};
+use toyos_xhci::port::{self, Flaw, GaveUp, Gone, Nanos, PortState, Reset, Step};
 use toyos_xhci::recovery::{Act, EndpointState, NeedsConfigure, Recovery};
 use toyos_xhci::Protocol;
 
@@ -393,17 +393,13 @@ impl Driver {
                     if self.outstanding.busy() {
                         return Err(Stuck::Order(Broke::ActedWithAnAnswerOutstanding));
                     }
-                    // Mirrors `device::begin`'s acknowledge — without it a warm
-                    // reset's own connect edge cancels the enumeration it earned.
+                    // `port::enumeration_ack`, the function `device::begin`
+                    // writes: the flaw is the only thing composed here.
                     let fresh = port.read();
                     let ack = if self.state.has_flaw(Flaw::WriteBackWhatWasRead) {
                         toyos_xhci::portsc::Write::whole_word(fresh)
                     } else {
-                        let mut ack = fresh.neutral().acknowledging_reset(fresh);
-                        if after == Some(Reset::Warm) {
-                            ack = ack.acknowledging_connect(fresh);
-                        }
-                        ack
+                        port::enumeration_ack(after, fresh)
                     };
                     if let Some(bad) = invariants::check_write(ack, fresh) {
                         return Err(Stuck::Broke(bad));
