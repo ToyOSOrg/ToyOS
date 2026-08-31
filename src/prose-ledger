@@ -196,7 +196,7 @@ src/actuatorgate.rs 67 0
 src/assets.rs 123 0
 src/build.rs 676 3
 src/buildlock.rs 378 5
-src/ci.rs 105 1
+src/ci.rs 123 1
 src/clippy.rs 35 0
 src/day.rs 16 1
 src/durations.rs 384 6
