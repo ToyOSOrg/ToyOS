@@ -2237,7 +2237,18 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_console_clear",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the one mechanism that produces this sentence was named and closed. \
+             `screen_console_clear` types both its commands through `console_type_line` \
+             (`tests/toyos.rs`), which splits a line into bursts no wider than QEMU's PS/2 \
+             queue and waits for the console to echo each one, so a keystroke can no longer \
+             be dropped between the host and the shell; staged the other way — the whole \
+             command in one transmission — the test printed this verdict verbatim on 3 of 3 \
+             dev-host runs. `7a033450` is the change. What that does not settle is whether \
+             THIS sighting was that: its capture was not kept, and a lost pixel and a mangled \
+             command name print the same sentence. The next sighting is unambiguous, because \
+             the command reaching the shell is now checked before the panel is",
+        ),
         what: "`the graffiti actuator did not reach the panel: 0 of 2073600 pixels are \
                [0, 192, 0] and the 8px strip below the cells is not`, at 127 s against a \
                fast-tier price — a panel that never received the write inside a window two \
@@ -2250,7 +2261,7 @@ pub const KNOWN_RED: &[Red] = &[
                and it was alone both times`",
         evidence: "PR #135 run 32303408773, job 96231120463 (`guest (11)`), 2026-08-19; the \
                    isolated re-run in the same job was green",
-        source: "issues/diagnostics/the-panel-once-took-no-pixels-for-two-minutes-under-load.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-19",
     },
     Red {
