@@ -39,6 +39,30 @@ widens. `kernel/CLAUDE.md`'s block-layer rule names the shape — a
 the moment one copy's write outlives the other's budget — and a leaked cluster
 is the same family with one FAT rather than two.
 
+**A second sighting, 2026-08-27, and it left two chains rather than one.** Dev
+host, full fast tier twelve wide with a second worktree's suite on the machine,
+on `wt/toyos-md1` at `03af5421` — a branch touching no kernel byte and nothing
+under `toyos-fat32/`:
+
+```
+FAIL fat_backing_revoked: the unlink-and-reallocate cycle left the log volume
+breaking the format:
+1 cluster(s) from 44 are marked allocated and no directory entry reaches them
+1 cluster(s) from 137 are marked allocated and no directory entry reaches them
+```
+
+Alone on the same tree minutes later: green, 5 s. `cargo run -- --known-red
+fat_backing_revoked` answered `NOT ON THE LIST`. Two lost chains, each one
+cluster long, each from a different start — so the observation is one red beside
+eleven other guests and still no rate.
+
+**Two lost chains admit a second mechanism the first sighting did not.** A chain
+freed in the FAT and not in the directory, or a directory entry rewritten before
+its old chain was released: which of those it is nobody has looked at.
+
+**This one leaves bytes behind, unlike a timing red**, so a reproduction keeps
+its own artifact. The image is the evidence and the checker is the instrument.
+
 What is owed first is a reproduction that says which side leaks: the free-chain
 walk of the unlink, or the allocation the create takes out of it. The suite's
 own alone/loaded arms are the instrument, and
