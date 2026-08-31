@@ -1,0 +1,57 @@
+# The hosted guest image's publisher — the only workflow that may write it.
+#
+# `ci.yml`'s hosted `guest`, `tcg` and `cache-writer` jobs each open a bare
+# `debian:sid` and apt-get the same eight packages, 52-59 s on every job's
+# critical path (run 31896922288). `.github/ci-image/Dockerfile` bakes them
+# once; this publishes it to ghcr on a landing that moves the Dockerfile, the
+# declared QEMU, or this file — and prints the digest, because a consumer
+# pins the digest and never the tag, `route.yml`'s rule for the T14 image.
+#
+# Not a gate: nothing required runs here, and the cutover in `route.yml` is a
+# separate deliberate act taken against a printed digest.
+name: ci-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/ci-image/Dockerfile
+      - .github/qemu-version
+      - .github/workflows/ci-image.yml
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: login
+        run: >-
+          echo "${{ secrets.GITHUB_TOKEN }}"
+          | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # ghcr paths are lowercase; the repository name need not be.
+      - name: build, refusing a QEMU that is not the declared instrument
+        run: |
+          image="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')-ci-hosted"
+          echo "image=$image" >> "$GITHUB_ENV"
+          docker build -f .github/ci-image/Dockerfile -t "$image:latest" .github
+
+      - name: push, and say the digest a consumer pins
+        run: |
+          docker push "$image:latest"
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$image:latest")
+          echo "pin this, never the tag: $digest"
+          {
+            echo "### hosted guest image"
+            echo '```'
+            echo "$digest"
+            echo '```'
+            echo "Cut over by putting this digest in route.yml's HOSTED arm and"
+            echo "retiring the per-job deps step."
+          } >> "$GITHUB_STEP_SUMMARY"

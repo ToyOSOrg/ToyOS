@@ -192,14 +192,14 @@ kernel/src/user_ptr.rs 58 0
 kernel/src/vfs.rs 73 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
-src/actuatorgate.rs 27 0
+src/actuatorgate.rs 67 0
 src/assets.rs 123 0
-src/build.rs 674 3
+src/build.rs 676 3
 src/buildlock.rs 378 5
 src/ci.rs 105 1
 src/clippy.rs 35 0
 src/day.rs 16 1
-src/durations.rs 365 6
+src/durations.rs 384 6
 src/forkcheck.rs 160 1
 src/hostws.rs 187 2
 src/image.rs 186 1
@@ -211,7 +211,7 @@ src/mergehealth.rs 229 3
 src/pr.rs 177 5
 src/prosegate.rs 128 0
 src/qemu.rs 113 0
-src/redlist.rs 512 25
+src/redlist.rs 513 25
 src/soundfont.rs 133 0
 src/sourcegate.rs 207 1
 src/stamps.rs 3 0
@@ -224,8 +224,8 @@ src/writinglaw.rs 21 0
 tests/common/audio.rs 397 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
-tests/common/console.rs 249 2
-tests/common/faults.rs 345 0
+tests/common/console.rs 256 2
+tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 85 0
 tests/common/hostload.rs 48 1
@@ -272,7 +272,7 @@ tests/toyos-rust-tests/src/bin/cache_eviction.rs 42 0
 tests/toyos-rust-tests/src/bin/compositor_client_death.rs 103 0
 tests/toyos-rust-tests/src/bin/compositor_stall.rs 71 0
 tests/toyos-rust-tests/src/bin/connect_before_serve.rs 46 0
-tests/toyos-rust-tests/src/bin/console_line_atomicity.rs 73 0
+tests/toyos-rust-tests/src/bin/console_line_atomicity.rs 81 0
 tests/toyos-rust-tests/src/bin/debug_trap.rs 70 0
 tests/toyos-rust-tests/src/bin/demand_paging_sse.rs 13 0
 tests/toyos-rust-tests/src/bin/demand_window_race.rs 156 0
@@ -362,7 +362,7 @@ tests/toyos-rust-tests/src/bin/syscall_cost.rs 25 0
 tests/toyos-rust-tests/src/bin/test_panic_child.rs 11 0
 tests/toyos-rust-tests/src/bin/test_screen_churn.rs 35 0
 tests/toyos-rust-tests/src/bin/test_screen_graffiti.rs 6 0
-tests/toyos-rust-tests/src/bin/tlb_shootdown_waits.rs 43 0
+tests/toyos-rust-tests/src/bin/tlb_shootdown_waits.rs 59 0
 tests/toyos-rust-tests/src/bin/toybox_file_tools.rs 74 0
 tests/toyos-rust-tests/src/bin/va_exhaustion.rs 32 0
 tests/toyos-rust-tests/src/bin/wake_storm_cost.rs 122 1
@@ -380,7 +380,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 4980 23
+tests/toyos.rs 5016 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
@@ -402,7 +402,7 @@ toyos-cc/src/codegen/init.rs 67 0
 toyos-cc/src/codegen/mod.rs 106 0
 toyos-cc/src/codegen/ops.rs 19 0
 toyos-cc/src/codegen/resolve.rs 36 0
-toyos-cc/src/codegen/stmt.rs 52 0
+toyos-cc/src/codegen/stmt.rs 63 0
 toyos-cc/src/emit.rs 2 0
 toyos-cc/src/lex.rs 27 0
 toyos-cc/src/lib.rs 4 0
@@ -425,7 +425,7 @@ toyos-cc/tests/emission.rs 44 0
 toyos-cc/tests/pp_corpus.rs 43 1
 toyos-cc/tests/ppnumber.rs 24 0
 toyos-cc/tests/preprocessor.rs 10 0
-toyos-cc/tests/refusals.rs 25 0
+toyos-cc/tests/refusals.rs 40 0
 toyos-desktop/src/budget.rs 45 0
 toyos-desktop/src/damage.rs 47 0
 toyos-desktop/src/hit.rs 18 0

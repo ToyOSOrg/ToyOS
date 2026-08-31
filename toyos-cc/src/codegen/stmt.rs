@@ -5,6 +5,155 @@ fn extract_array_size_expr(d: &Declarator) -> Option<Expr> {
     extract_direct_array_size(&d.direct)
 }
 
+/// Every label's and every goto's statement-expression path in one body:
+/// `path` is the stack of statement-expression ids enclosing the walk's
+/// current position, and each label or goto records a snapshot of it. A jump
+/// is legal exactly when the label's path is a prefix of the goto's.
+#[derive(Default)]
+struct GotoScopes {
+    labels: HashMap<String, Vec<u32>>,
+    gotos: Vec<(String, Vec<u32>)>,
+    path: Vec<u32>,
+    next_id: u32,
+}
+
+impl GotoScopes {
+    fn stmt(&mut self, stmt: &Statement) {
+        match stmt {
+            Statement::Compound(items) => self.items(items),
+            Statement::Expr(Some(e)) => self.expr(e),
+            Statement::If(c, t, f) => {
+                self.expr(c);
+                self.stmt(t);
+                if let Some(f) = f {
+                    self.stmt(f);
+                }
+            }
+            Statement::While(c, b) => {
+                self.expr(c);
+                self.stmt(b);
+            }
+            Statement::DoWhile(b, c) => {
+                self.stmt(b);
+                self.expr(c);
+            }
+            Statement::For(init, cond, update, body) => {
+                match init.as_deref() {
+                    Some(ForInit::Expr(e)) => self.expr(e),
+                    Some(ForInit::Decl(d)) => self.decl(d),
+                    None => {}
+                }
+                if let Some(c) = cond {
+                    self.expr(c);
+                }
+                if let Some(u) = update {
+                    self.expr(u);
+                }
+                self.stmt(body);
+            }
+            Statement::Switch(e, s) | Statement::Case(e, s) => {
+                self.expr(e);
+                self.stmt(s);
+            }
+            Statement::CaseRange(a, b, s) => {
+                self.expr(a);
+                self.expr(b);
+                self.stmt(s);
+            }
+            Statement::Default(s) => self.stmt(s),
+            Statement::Return(Some(e)) => self.expr(e),
+            Statement::Goto(label) => self.gotos.push((label.clone(), self.path.clone())),
+            Statement::Label(label, s) => {
+                self.labels.insert(label.clone(), self.path.clone());
+                self.stmt(s);
+            }
+            Statement::Expr(None) | Statement::Return(None) | Statement::Break
+            | Statement::Continue | Statement::Asm(_) => {}
+        }
+    }
+
+    fn items(&mut self, items: &[BlockItem]) {
+        for item in items {
+            match item {
+                BlockItem::Stmt(s) => self.stmt(s),
+                BlockItem::Decl(d) => self.decl(d),
+            }
+        }
+    }
+
+    fn decl(&mut self, d: &Declaration) {
+        for id in &d.declarators {
+            if let Some(init) = &id.initializer {
+                self.init(init);
+            }
+        }
+    }
+
+    fn init(&mut self, init: &Initializer) {
+        match init {
+            Initializer::Expr(e) => self.expr(e),
+            Initializer::List(items) => {
+                for item in items {
+                    self.init(&item.initializer);
+                }
+            }
+        }
+    }
+
+    fn expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::StmtExpr(items) => {
+                self.next_id += 1;
+                self.path.push(self.next_id);
+                self.items(items);
+                self.path.pop();
+            }
+            Expr::Binary(_, l, r)
+            | Expr::Assign(_, l, r)
+            | Expr::Comma(l, r)
+            | Expr::Index(l, r) => {
+                self.expr(l);
+                self.expr(r);
+            }
+            Expr::Unary(_, e)
+            | Expr::PostUnary(_, e)
+            | Expr::Cast(_, e)
+            | Expr::Member(e, _)
+            | Expr::Arrow(e, _)
+            | Expr::VaArg(e, _) => self.expr(e),
+            Expr::Conditional(c, t, f) => {
+                self.expr(c);
+                self.expr(t);
+                self.expr(f);
+            }
+            Expr::Call(f, args) => {
+                self.expr(f);
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            Expr::CompoundLiteral(_, items) => {
+                for item in items {
+                    self.init(&item.initializer);
+                }
+            }
+            Expr::Sizeof(arg) => {
+                if let SizeofArg::Expr(e) = arg.as_ref() {
+                    self.expr(e);
+                }
+            }
+            Expr::Builtin(_, args) => {
+                for a in args {
+                    self.expr(a);
+                }
+            }
+            Expr::IntLit(_) | Expr::UIntLit(_) | Expr::FloatLit(..) | Expr::CharLit(_)
+            | Expr::StringLit(_) | Expr::WideStringLit(_) | Expr::Ident(_)
+            | Expr::Alignof(_) => {}
+        }
+    }
+}
+
 fn extract_direct_array_size(dd: &DirectDeclarator) -> Option<Expr> {
     match dd {
         DirectDeclarator::Array(_, Some(expr)) => Some(*expr.clone()),
@@ -184,6 +333,29 @@ impl Codegen {
             Expr::IntLit(_) | Expr::UIntLit(_) | Expr::FloatLit(..) | Expr::CharLit(_)
             | Expr::StringLit(_) | Expr::WideStringLit(_) | Expr::Ident(_)
             | Expr::Sizeof(_) | Expr::Alignof(_) | Expr::VaArg(..) | Expr::Builtin(..) => {}
+        }
+    }
+
+    /// A `goto` may move within a statement expression and may leave one; a
+    /// jump *into* one is refused by name. gcc documents that jump as
+    /// erroneous and clang refuses it (C11 6.8.6.1's function-wide label
+    /// scope is what lets the reference reach codegen at all), and this front
+    /// end lowered it into whatever value the SSA merge supplied — an
+    /// expression tail compiled silently, a non-expression tail stopped in
+    /// the Cranelift verifier.
+    pub(crate) fn refuse_goto_into_stmt_expr(body: &Statement, fname: &str) {
+        let mut scopes = GotoScopes::default();
+        scopes.stmt(body);
+        for (label, goto_path) in &scopes.gotos {
+            let Some(label_path) = scopes.labels.get(label) else { continue };
+            if !goto_path.starts_with(label_path) {
+                panic!(
+                    "goto into a statement expression is refused by toyos-cc: in '{fname}', \
+                     `goto {label};` targets `{label}:` inside a `({{ ... }})` the goto is \
+                     not inside. gcc documents the jump as erroneous and clang refuses it; \
+                     the expression's block would run with its objects uninitialised."
+                );
+            }
         }
     }
 

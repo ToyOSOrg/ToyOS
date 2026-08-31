@@ -26,7 +26,7 @@ line for that run: `fastest boot 1522 ms against the reference 1320 ms —
 liveness ceilings paid at 1.15x width`. The same name passed in 9 s in the full
 run before it and red in the full run after it on a different and already-filed
 defect (`writer A declared 1000 whole lines and the capture carries 798`,
-`issues/build/console-line-atomicity-reds-on-a-short-capture.md`), so
+`issues/build/parallel-tests-red-under-other-suites.md`), so
 what this name does under load is red in more than one way.
 
 **This is the sighting the panic discriminator was closed to catch.** The
