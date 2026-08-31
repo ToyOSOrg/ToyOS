@@ -61,6 +61,19 @@ pub fn reset_write(reset: Reset, portsc: Portsc) -> portsc::Write {
     }
 }
 
+/// The write an enumeration opens with: the reset flags it consumed, and for a
+/// warm completion the retrain's own connect edge (§4.19.5.1), which left set
+/// reads as a replug and cancels the enumeration it belongs to. Here rather
+/// than at either caller, because a simulator whose acknowledge is a second
+/// copy of the driver's certifies a driver nobody ships.
+pub fn enumeration_ack(after: Option<Reset>, portsc: Portsc) -> portsc::Write {
+    let ack = portsc.neutral().acknowledging_reset(portsc);
+    match after {
+        Some(Reset::Warm) => ack.acknowledging_connect(portsc),
+        _ => ack,
+    }
+}
+
 /// Why a port stopped being worked on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GaveUp {

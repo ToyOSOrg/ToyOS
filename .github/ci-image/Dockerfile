@@ -11,8 +11,18 @@ FROM debian:sid
 ARG DEBIAN_FRONTEND=noninteractive
 
 COPY qemu-version /toyos-qemu-version
+COPY apt-snapshot /toyos-apt-snapshot
+# The dated archive the workflows install from: an image built a day later
+# must not carry a different instrument.
 RUN apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends \
+    && apt-get install -y -qq --no-install-recommends ca-certificates > /dev/null \
+    && stamp=$(grep -v '^#' /toyos-apt-snapshot | tr -d '[:space:]') \
+    && echo "deb https://snapshot.debian.org/archive/debian/$stamp sid main" \
+        > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources \
+        /etc/apt/sources.list.d/debian.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update -qq \
+    && apt-get install -y -qq --no-install-recommends --allow-downgrades \
         build-essential \
         ca-certificates \
         curl \

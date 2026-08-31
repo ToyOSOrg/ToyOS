@@ -7,7 +7,7 @@
 //! and the bootloader (`--target x86_64-unknown-uefi`) — so a `clippy.toml` is
 //! no longer a wall with nothing behind it.
 //!
-//! What is behind it is still not these three scans. `disallowed-methods` could
+//! What is behind it is still not these four scans. `disallowed-methods` could
 //! take the first one, and would lose what makes it useful: the exceptions
 //! below are per file *and per line count*, so an added `mem::forget` beside a
 //! permitted one reds, which a name-based allow list cannot express. The second
@@ -34,6 +34,9 @@
 //! `SYS_DEBUG` action and inbox op code this project has deleted. Its
 //! *number* is what is retired, and a number is not a thing a scan can look
 //! for — the name that used to carry it is.
+//!
+//! The fourth names two files, the pipe ring and the user-copy windows, where a
+//! slice or an exclusive reference would claim what the mapping does not give.
 
 use std::path::{Path, PathBuf};
 
@@ -688,6 +691,43 @@ mod tests {
             !occurrences("mem::forget").is_empty(),
             "the permitted `mem::forget` call sites are not being found, so one \
              more would not be either",
+        );
+    }
+
+    /// A page a process can write while the kernel is inside it never becomes a
+    /// slice, and never an exclusive reference. Two files, named rather than
+    /// walked: both spellings are ordinary elsewhere.
+    ///
+    /// A *shared* reference is not banned: `Ring::header` soundly takes one over
+    /// the same page, its whole subject being an `AtomicU32`.
+    #[test]
+    fn no_slice_or_exclusive_reference_is_built_over_a_mapped_page() {
+        const OVER_A_MAPPING: &[&str] = &["toyos-abi/src/ring.rs", "kernel/src/user_ptr.rs"];
+        const SLICES: &[&str] =
+            &["from_raw_parts", "from_raw_parts_mut", "from_ptr_range", "from_ptr_range_mut"];
+        const EXCLUSIVE: &str = "&mut *";
+        let root = repo_root();
+        let mut complaints = Vec::new();
+        for file in OVER_A_MAPPING {
+            let text = std::fs::read_to_string(root.join(file))
+                .unwrap_or_else(|e| panic!("{file}: {e} — the scan is looking elsewhere"));
+            for (n, line) in text.lines().enumerate() {
+                let code = code_only(line);
+                for spelling in SLICES {
+                    if names(&code, spelling) {
+                        complaints.push(format!("{file}:{}: `{spelling}`", n + 1));
+                    }
+                }
+                if code.contains(EXCLUSIVE) {
+                    complaints.push(format!("{file}:{}: `{EXCLUSIVE}`", n + 1));
+                }
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "a slice or an exclusive reference over a page a process can write \
+             claims an exclusivity the mapping does not give:\n{}",
+            complaints.join("\n"),
         );
     }
 }
