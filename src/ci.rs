@@ -37,6 +37,22 @@ pub fn declared_qemu_version(root: &Path) -> Option<String> {
     (!version.is_empty()).then_some(version)
 }
 
+/// The dated Debian archive the hosted guests install from, so a rolling
+/// release cannot move the instrument between two runs of the same tree.
+///
+/// Stripped the same way [`declared_qemu_version`] strips its file.
+pub fn declared_apt_snapshot(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join(".github/apt-snapshot")).ok()?;
+    let stamp: String = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("")
+        .split_whitespace()
+        .collect();
+    (!stamp.is_empty()).then_some(stamp)
+}
+
 /// What `qemu-system-x86_64 --version` says, or `None` where it did not answer
 /// in the shape this reads.
 ///
@@ -159,6 +175,87 @@ mod tests {
             bad.is_empty(),
             "a job that boots a guest without declaring its QEMU is a third instrument, \
              and that is invisible in a diff:\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
+    /// Every `.github` file that reaches the snapshot archive names the one
+    /// date `.github/apt-snapshot` declares.
+    ///
+    /// The date cannot live in one place: `deps` runs before the checkout,
+    /// because `actions/checkout` wants git and the image has none, so each
+    /// step carries its own copy of the URL and there is nothing for them to
+    /// read it from. Copies of a date drift silently — two shards measuring
+    /// two instruments reads exactly like a flaky test — so the copies are
+    /// held here instead.
+    #[test]
+    fn every_snapshot_url_names_the_declared_date() {
+        let root = repo_root();
+        let want = declared_apt_snapshot(&root).expect(".github/apt-snapshot declares no date");
+        const MARK: &str = "snapshot.debian.org/archive/debian/";
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join(".github/workflows"))
+            .expect(".github/workflows is not readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        files.push(root.join(".github/ci-image/Dockerfile"));
+        files.sort();
+
+        let mut seen = 0usize;
+        let mut bad = Vec::new();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for line in text.lines() {
+                let Some(rest) = line.split(MARK).nth(1) else { continue };
+                // The Dockerfile builds the URL from a shell variable it read
+                // out of the declaration itself, so there is no literal date.
+                if rest.starts_with('$') {
+                    continue;
+                }
+                seen += 1;
+                let stamp: String =
+                    rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                if stamp != want {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    bad.push(format!("{name}: {stamp}"));
+                }
+            }
+        }
+        assert!(
+            seen > 0,
+            "no file reaches the snapshot archive, so either the pin is gone and the hosted \
+             guests are back on sid-as-it-stands, or this scan no longer finds it"
+        );
+        assert!(
+            bad.is_empty(),
+            "these install from a date .github/apt-snapshot does not declare ({want}):\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
+    /// A gate job that boots a guest installs QEMU from the pinned archive.
+    ///
+    /// Naming the instrument and then taking whatever the mirror shipped that
+    /// afternoon is the failure this pairs with: `instrument.sh` would refuse
+    /// the run, correctly, and the tree would be told nothing about why.
+    #[test]
+    fn every_gate_that_boots_a_guest_installs_from_the_snapshot() {
+        let root = repo_root();
+        let mut bad = Vec::new();
+        for file in GATES {
+            let path = root.join(".github/workflows").join(file);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} is a gate and is not readable: {e}", path.display()));
+            for (name, body) in jobs(&text) {
+                if body.contains("apt-get install") && body.contains("qemu-system-x86") {
+                    if !body.contains("snapshot.debian.org") {
+                        bad.push(format!("{file}: `{name}` installs QEMU from sid as it stands"));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "a rolling release decides what these measure with:\n  {}",
             bad.join("\n  ")
         );
     }
