@@ -244,10 +244,10 @@ mod tests {
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{} is a gate and is not readable: {e}", path.display()));
             for (name, body) in jobs(&text) {
-                if body.contains("apt-get install") && body.contains("qemu-system-x86") {
-                    if !body.contains("snapshot.debian.org") {
-                        bad.push(format!("{file}: `{name}` installs QEMU from sid as it stands"));
-                    }
+                let installs_qemu =
+                    body.contains("apt-get install") && body.contains("qemu-system-x86");
+                if installs_qemu && !body.contains("snapshot.debian.org") {
+                    bad.push(format!("{file}: `{name}` installs QEMU from sid as it stands"));
                 }
             }
         }
