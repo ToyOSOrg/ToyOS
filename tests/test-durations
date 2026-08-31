@@ -189,6 +189,7 @@ fs_truncate_persist 17 shards=12
 fsync_failed_commit 8386 shards=12
 ftruncate_flush_race 9452 shards=12
 futex_wake_counts 1007 shards=12
+gpu_set_resolution 18446744073709551615 shards=none
 gsbase_locked 13091 shards=12
 handle_basic 19 shards=12
 handle_kill_policy 515 shards=12

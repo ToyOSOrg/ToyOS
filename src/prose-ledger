@@ -127,7 +127,7 @@ kernel/src/loader/mod.rs 129 0
 kernel/src/loader/start.rs 45 0
 kernel/src/loader/symbols.rs 18 0
 kernel/src/loader/tls.rs 33 0
-kernel/src/log/console.rs 66 0
+kernel/src/log/console.rs 64 0
 kernel/src/log/mod.rs 62 0
 kernel/src/log/nested.rs 26 0
 kernel/src/log/read.rs 42 0
@@ -235,7 +235,7 @@ tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/qemu.rs 1612 11
+tests/common/qemu.rs 1622 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 260 1
 tests/common/stats.rs 44 0
@@ -298,6 +298,7 @@ tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
 tests/toyos-rust-tests/src/bin/fsync_flush_failed.rs 3 0
 tests/toyos-rust-tests/src/bin/ftruncate_flush_race.rs 24 0
 tests/toyos-rust-tests/src/bin/futex_wake_counts.rs 167 0
+tests/toyos-rust-tests/src/bin/gpu_set_resolution.rs 21 0
 tests/toyos-rust-tests/src/bin/gsbase_locked.rs 2 0
 tests/toyos-rust-tests/src/bin/gsbase_probe.rs 2 0
 tests/toyos-rust-tests/src/bin/handle_basic.rs 121 2
@@ -380,7 +381,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5014 23
+tests/toyos.rs 5026 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
@@ -582,19 +583,19 @@ toyos-userbound/src/span.rs 46 0
 toyos-userpin/src/lib.rs 36 0
 toyos-wallclock/src/lib.rs 131 2
 toyos-xhci/sim/src/driver.rs 162 0
-toyos-xhci/sim/src/hub.rs 48 0
+toyos-xhci/sim/src/hub.rs 55 0
 toyos-xhci/sim/src/lib.rs 5 0
 toyos-xhci/sim/tests/enumerate.rs 51 0
 toyos-xhci/sim/tests/explore.rs 26 0
 toyos-xhci/sim/tests/scenarios.rs 43 0
-toyos-xhci/sim/tests/superspeed.rs 40 0
+toyos-xhci/sim/tests/superspeed.rs 46 0
 toyos-xhci/sim/tests/teardown.rs 43 0
 toyos-xhci/sim/tests/teeth.rs 11 0
 toyos-xhci/src/enumerate.rs 126 0
 toyos-xhci/src/invariants.rs 28 0
 toyos-xhci/src/job.rs 166 1
 toyos-xhci/src/lib.rs 6 0
-toyos-xhci/src/port.rs 169 0
+toyos-xhci/src/port.rs 174 0
 toyos-xhci/src/portsc.rs 102 0
 toyos-xhci/src/protocol.rs 54 0
 toyos-xhci/src/recovery.rs 86 0
@@ -658,7 +659,7 @@ userland/libc/src/socket.rs 40 0
 userland/libc/src/stdio.rs 92 0
 userland/libc/src/string.rs 8 0
 userland/libc/src/time.rs 9 0
-userland/logd/src/main.rs 188 1
+userland/logd/src/main.rs 186 1
 userland/logd/src/policy.rs 150 5
 userland/logd/src/store.rs 109 0
 userland/logd/src/wall.rs 100 3

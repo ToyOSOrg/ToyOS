@@ -56,9 +56,7 @@ pub struct FakePort {
     warm: bool,
     /// Whether a device is physically in the port, which is not what CCS says:
     /// §4.19.5's completed failure clears CCS on a device that never left, and
-    /// §4.19.5.1's warm reset re-detects whatever is still there. Detection is
-    /// derived from this, so a device pulled while CCS reads zero is a state
-    /// the port can be put in.
+    /// §4.19.5.1's retrain re-detects whatever this holds.
     present: bool,
     /// A SuperSpeed port: it trains its own link and reads Enabled when it is
     /// up, with no reset from the driver at all.
@@ -118,10 +116,9 @@ impl FakePort {
         }
     }
 
-    /// The device leaves whatever the register says. Detection only *drops* if
-    /// the port had it: a port that already lost CCS to a failed bus reset
-    /// raises no second edge, and the reset in flight there is not one a device
-    /// was under.
+    /// The device leaves whatever the register says; detection drops only
+    /// where the port had it, so a port that already lost CCS raises no
+    /// second edge and its reset was not one a device was under.
     pub fn detach(&mut self) {
         self.present = false;
         if self.raw & CCS != 0 {

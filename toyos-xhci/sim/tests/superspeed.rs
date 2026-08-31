@@ -177,11 +177,9 @@ fn a_reset_that_completes_failed_is_warm_reset() {
 
 /// The same scenario with the device **pulled while the warm retrain runs**.
 ///
-/// §4.19.5.1's retrain re-detects what is in the port, and the port above is
-/// the one place CCS reads zero with a device still in it — so this is the only
-/// window where "pulled" and "not detected" are different facts, and it is the
-/// one the register model could not express until `present` was a field.
-/// The retrain then finds nothing, and nothing may be enumerated on it.
+/// The port above is the one place CCS reads zero with a device still in it, so
+/// this is the only window where "pulled" and "not detected" are different
+/// facts. §4.19.5.1's retrain then finds nothing, and nothing may come up on it.
 #[test]
 fn a_device_pulled_during_the_warm_retrain_is_not_enumerated() {
     let mut port = FakePort::occupied(ResetBehaviour::FailsTheBusReset { warm_works: true });

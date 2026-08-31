@@ -200,6 +200,10 @@ const RUST_SKIP: &[&str] = &[
     // Meaningful only on `MetalNoUsb`, where no input source exists; on every
     // other machine both claims succeed. `input_claim_absent` runs it.
     "input_absent",
+    // Needs a display whose mode can change, which is `Profile::VirtioGpu`
+    // alone; the shared boot has no display at all. `gpu_set_resolution` runs
+    // it there.
+    "gpu_set_resolution",
     "va_exhaustion",
     // Needs a NIC in front of netd; only `tests/netcase` has one.
     // `netd_listener_forgery` runs it there.
@@ -480,6 +484,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("input_merge", Sched::Parallel, Tier::Fast),
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
     ("input_claim_absent", Sched::Parallel, Tier::Fast),
+    // One boot; every verdict is a PPM header field or a console line, and no
+    // clock is in any of them. Carrying `UNMEASURED_MS` until the shards price
+    // it.
+    ("gpu_set_resolution", Sched::Parallel, Tier::Fast),
     // One boot from here to `metal_sim_compositor_stall` (`METAL_SIM_DESKTOP`).
     ("metal_sim_compositor", Sched::Parallel, Tier::Nightly),
     // Reads the boot log this group already has, after the member above has
@@ -12493,6 +12501,70 @@ fn run_machine_test(
                 }
             }
             eprintln!("  [input] no input source exists and both claims refused NotFound");
+            Ok(())
+        }
+        "gpu_set_resolution" => {
+            /// Mirrored in `tests/toyos-rust-tests/src/bin/gpu_set_resolution.rs`.
+            const WANT: (usize, usize) = (800, 600);
+
+            let options = BootOptions {
+                profile: qemu::Profile::VirtioGpu,
+                qmp: true,
+                ..Default::default()
+            };
+            let argv = qemu::profile_argv(&options);
+            if !argv.windows(2).any(|w| w[0] == "-device" && w[1] == "virtio-gpu-pci") {
+                return Err(format!("the profile stages no virtio-gpu: {argv:?}"));
+            }
+            // A `-vga` adapter beside it is a second display, and firmware
+            // would publish a GOP the kernel could take instead.
+            if argv.windows(2).any(|w| w[0] == "-vga" && w[1] != "none") {
+                return Err(format!("a second display is on the machine: {argv:?}"));
+            }
+
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let boot = qemu.boot_log().to_string();
+            for want in ["VirtIO GPU: display ", "GPU: using VirtIO"] {
+                if !boot.contains(want) {
+                    return Err(format!("the kernel never said {want:?}:\n{boot}"));
+                }
+            }
+
+            // **The verdict is QEMU's own scanout, not the guest's account of
+            // itself**: the device renders what the driver's SET_SCANOUT told
+            // it to, and the dump's header is that size.
+            let before = qemu.screendump();
+            let result = qemu.run_test("test_rs_gpu_set_resolution", Duration::from_secs(30));
+            if let Some(err) = &result.error {
+                return Err(format!("the guest stopped answering: {err}\n{}", result.stdout));
+            }
+            if !check_rust_result(&result) {
+                return Err(format!("gpu_set_resolution failed:\n{}", result.stdout));
+            }
+            if !result.stdout.contains("===GPU_RESOLUTION_OK===") {
+                return Err(format!("the guest never reached its marker:\n{}", result.stdout));
+            }
+            let after = qemu.screendump();
+
+            if (before.width, before.height) == (after.width, after.height) {
+                return Err(format!(
+                    "QEMU's scanout is {}x{} before and after, so nothing the guest did \
+                     reached the device",
+                    after.width, after.height
+                ));
+            }
+            if (after.width, after.height) != WANT {
+                return Err(format!(
+                    "the guest asked for {}x{} and QEMU's own scanout is {}x{}:\n{}",
+                    WANT.0, WANT.1, after.width, after.height, result.stdout
+                ));
+            }
+            eprintln!(
+                "  [gpu] QEMU's scanout went {}x{} to {}x{}, which is the mode the guest asked \
+                 for and the mode a second claim was told",
+                before.width, before.height, after.width, after.height
+            );
             Ok(())
         }
         "metal_sim_input" => {
