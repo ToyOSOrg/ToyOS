@@ -343,6 +343,9 @@ const RUST_SKIP: &[&str] = &[
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
     "redirty_mid_flush",
+    // Needs `ftruncate-flush-stall` and a boot of its own for the host-side
+    // re-read. `ftruncate_flush_race` runs it.
+    "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
 ];
@@ -363,6 +366,7 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     "nvme_home_roundtrip",
     "sched_stress",
     "std_alloc",
+    "std_mmap",
     "wall_clock_now",
 ];
 
@@ -599,6 +603,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
+    // One boot with both stuck-device actuators armed.
+    ("driver_wait_refused", Sched::Parallel, Tier::Nightly),
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
@@ -973,6 +979,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel, Tier::Nightly),
     ("redirty_mid_flush", Sched::Parallel, Tier::Nightly),
+    // A truncate staged inside a flush's metadata window, re-read off the image.
+    ("ftruncate_flush_race", Sched::Parallel, Tier::Nightly),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel, Tier::Nightly),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
@@ -3945,8 +3953,8 @@ fn run_screen_test(
         "screen_early_panic" => {
             // The window the console exists for: percpu is not up, mm::init
             // has not run, and on a machine with no UART nothing else can
-            // report at all. render() runs before panic_flush, so the marker
-            // reaching the UART proves the paint already finished — no sleep.
+            // report at all. The alert! that is the ready marker precedes
+            // capture(), panic_flush() and render(), so the screen is polled.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -3959,7 +3967,7 @@ fn run_screen_test(
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump();
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
             for want in ["EARLY PANIC:", "test-early-panic: on-screen console check"] {
@@ -8030,6 +8038,7 @@ fn run_machine_test(
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
+        "ftruncate_flush_race" => common::volumes::ftruncate_flush_race(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
         // The write-back queue's re-open control: `writeback-stall` parks `iod`
@@ -10442,10 +10451,11 @@ fn run_machine_test(
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             let boot = qemu.boot_log().to_string();
             // Two processes, so the run carries at least two censuses per CPU
-            // and their monotonicity is checkable. `echo` because the subject is
-            // the machine's interrupt counters and not what the program did.
+            // and their monotonicity is checkable. The second munmaps a live
+            // mapping — the cheapest counted shootdown on a 4-CPU guest, which
+            // is what gives the issuer-side check below a non-zero subject.
             let first = qemu.run_test("echo one", Duration::from_secs(30));
-            let second = qemu.run_test("echo two", Duration::from_secs(30));
+            let second = qemu.run_test("test_rs_std_mmap", Duration::from_secs(30));
             let capture = format!(
                 "{boot}\n{}\n{}\n{}\n{}",
                 first.before, first.serial, second.before, second.serial
@@ -10555,6 +10565,46 @@ fn run_machine_test(
                  all on cpu0, which took {share:.1}% of everything",
                 newest.len(),
                 newest.values().map(|c| c.total).sum::<u64>(),
+            );
+
+            // 5. The issuer side: every `tlb` delivery a CPU's census carries
+            //    must be within the issues the `tlb:` line counted — an excess
+            //    is a path shooting down uncounted. The lower bound is not
+            //    asserted: an issued IPI can be pending on an IF-clear target.
+            let mut issued: Vec<u64> = Vec::new();
+            for line in capture.lines() {
+                let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };
+                let n: u64 = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| format!("unreadable issuer census: {line}"))?;
+                issued.push(n);
+                eprintln!("  [tlb] {}", line.trim());
+            }
+            let Some(&last_issued) = issued.last() else {
+                return Err(format!(
+                    "no `tlb: shootdowns=` census in the capture — two process exits on a \
+                     4-CPU guest and the issuer side said nothing:\n{capture}"
+                ));
+            };
+            if issued.windows(2).any(|w| w[1] < w[0]) {
+                return Err(format!("the issuer census went backwards: {issued:?}"));
+            }
+            for census in newest.values() {
+                if census.source("tlb") > last_issued {
+                    return Err(format!(
+                        "cpu{} took {} tlb IPI(s) against {last_issued} counted issue(s) — \
+                         some path shoots down without being counted: {census:?}",
+                        census.cpu,
+                        census.source("tlb"),
+                    ));
+                }
+            }
+            eprintln!(
+                "  [tlb] {last_issued} shootdown(s) issued, deliveries per CPU {:?} — every \
+                 delivery accounted for",
+                newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
             );
             Ok(())
         }
@@ -10878,8 +10928,44 @@ fn run_machine_test(
                     "cpu{cpu}'s idle-trip counter moved by {delta} within the capture — spinning, not halting"
                 ));
             }
+
+            // Boot three: the arming edge staged — the vector delivered once
+            // with no byte behind it, because init consumed the byte itself.
+            // The quiet verdict must stand saying so; a driver that reads the
+            // edge as the machine's never prints this boot's ready marker.
+            drop(qemu);
+            let staged_boot = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Metal,
+                    kernel_params: &["i8042-arm-edge"],
+                    ready_marker: "the pin has never asserted",
+                    ..Default::default()
+                },
+            );
+            let staged_log = staged_boot.boot_log().to_string();
+            let Some(staged) =
+                staged_log.lines().find(|l| l.contains("the pin has never asserted"))
+            else {
+                return Err(format!("no staged quiet verdict:\n{staged_log}"));
+            };
+            if !staged.contains("the arming edge") {
+                return Err(format!(
+                    "the staged empty delivery was not attributed to the arming: {staged}"
+                ));
+            }
+            if let Some(wrong) =
+                staged_log.lines().find(|l| l.contains("no byte behind any of them"))
+            {
+                return Err(format!("the arming edge was read as the machine's: {wrong}"));
+            }
+            drop(staged_boot);
+
             eprintln!("  [i8042] {}", quiet.trim());
             eprintln!("  [i8042] {}", line.trim());
+            eprintln!("  [i8042] {}", staged.trim());
             Ok(())
         }
         "operation_nesting" => {
@@ -11045,6 +11131,40 @@ fn run_machine_test(
             }
             Ok(())
         }
+        "driver_wait_refused" => {
+            // The actuators blind CSTS.RDY and DEVICE_STATUS, staging a
+            // controller that never answers; the boot must come up naming the
+            // refused register — on the unbounded shape it never reaches ready.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["nvme-rdy-stuck", "virtio-reset-stuck"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            let Some(nvme) = log.lines().find(|l| l.contains("NVMe: NOT INITIALISED")) else {
+                return Err(format!("the stuck NVMe was never refused by name:\n{log}"));
+            };
+            if !nvme.contains("CSTS.RDY would not set in") {
+                return Err(format!("the NVMe refusal does not name the register: {nvme}"));
+            }
+            let virtio = log
+                .lines()
+                .filter(|l| l.contains("did not zero DEVICE_STATUS for its reset"))
+                .count();
+            if virtio == 0 {
+                return Err(format!("no stuck virtio device was refused by name:\n{log}"));
+            }
+            eprintln!("  [waits] {}", nvme.trim());
+            eprintln!(
+                "  [waits] {virtio} virtio device(s) refused on the reset budget; the boot \
+                 came up without them"
+            );
+            Ok(())
+        }
         "read_fault_selftests" => {
             // Three kernel-boot controls: a backing read after deletion is
             // refused on both writable mounts, and a page-cache slot whose fill
@@ -11075,44 +11195,49 @@ fn run_machine_test(
             Ok(())
         }
         "lapic_spurious_vector" => {
-            // `apic::enable_x2apic` writes 0xFF into the SVR on every CPU, so
-            // the platform names a vector the IDT has to gate: delivery through
-            // a `P = 0` slot is a contributory fault and the CPU escalates to
-            // `#DF`, which halts the machine. Nothing on this host raises one by
-            // itself — the SDM's classic condition needs a task-priority
-            // register this kernel never writes, and every device here is MSI or
-            // MSI-X — so the kernel raises it on purpose under this parameter.
+            // `apic::enable_x2apic` writes 0xFF into the SVR, a vector the IDT
+            // must gate or the CPU escalates to `#DF`; the SDM's classic
+            // condition needs a TPR write this kernel never makes, so it raises
+            // the vector on purpose. The second parameter stages the same fault
+            // one gate over — a vector no row claims — which the catch-all must
+            // count, remember and acknowledge; the base without it dies `#DF`.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    kernel_params: &["lapic-spurious-selftest"],
+                    kernel_params: &["lapic-spurious-selftest", "unclaimed-vector-selftest"],
                     ..Default::default()
                 },
             );
             let log = qemu.boot_log().to_string();
-            if let Some(bad) = log.lines().find(|l| l.contains("spurious selftest FAILED")) {
-                return Err(format!("{bad}\n{log}"));
+            for kind in ["spurious", "unclaimed"] {
+                if let Some(bad) =
+                    log.lines().find(|l| l.contains(&format!("{kind} selftest FAILED")))
+                {
+                    return Err(format!("{bad}\n{log}"));
+                }
+                let Some(verdict) =
+                    log.lines().find(|l| l.contains(&format!("{kind} selftest")))
+                else {
+                    return Err(format!("the {kind} vector was never raised:\n{log}"));
+                };
+                // `3/3`, not the absence of a FAILED line: a self-test that never
+                // ran satisfies that absence just as well.
+                if !verdict.contains("3/3") {
+                    return Err(format!("the self-test did not reach its verdict: {verdict}"));
+                }
+                // The two numbers are the interrupt census's own column — the
+                // handler may not log, so that column is the only report a
+                // delivery has — and both are asserted: nothing raised this
+                // vector before the staged one, and exactly one arrived.
+                if !verdict.contains("(0 -> 1)") {
+                    return Err(format!(
+                        "the census did not count exactly the staged delivery: {verdict}"
+                    ));
+                }
+                eprintln!("  [lapic] {}", verdict.trim());
             }
-            let Some(verdict) = log.lines().find(|l| l.contains("spurious selftest")) else {
-                return Err(format!("the spurious vector was never raised:\n{log}"));
-            };
-            // `3/3`, not the absence of a FAILED line: a self-test that never
-            // ran satisfies that absence just as well.
-            if !verdict.contains("3/3") {
-                return Err(format!("the self-test did not reach its verdict: {verdict}"));
-            }
-            // The two numbers are the interrupt census's own column — the
-            // handler may not log, so that column is the only report a delivery
-            // has — and both are asserted: nothing raised this vector before the
-            // staged one, and exactly one arrived.
-            if !verdict.contains("(0 -> 1)") {
-                return Err(format!(
-                    "the census did not count exactly the staged delivery: {verdict}"
-                ));
-            }
-            eprintln!("  [lapic] {}", verdict.trim());
             Ok(())
         }
         "virtio_used_ring" => {
@@ -11658,10 +11783,8 @@ fn run_machine_test(
             // `nothing decoded` line from before the Pause was pressed is not a
             // report about the Pause. Reading the first one in the whole capture
             // is what made this test red on a line naming no byte, on the dev
-            // host and on CI
-            // (`issues/kernel/an-i8042-interrupt-arrives-with-no-byte-during-init.md`).
-            // The marker is the boundary the test knows, because the marker is
-            // what the injection was timed off.
+            // host and on CI. The marker is the boundary the test knows,
+            // because the marker is what the injection was timed off.
             let text = result.serial;
             let capture = serial::Serial::named("i8042 capture", text.as_str());
             let Some(at) = text.find(I8042_READY) else {

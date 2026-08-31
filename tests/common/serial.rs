@@ -297,9 +297,8 @@ impl Serial {
     /// on the machine can produce the same shape. `i8042_undecoded_bytes`
     /// injects an undecodable key once the guest prints `===I8042_READY===` and
     /// then read the first `nothing decoded` line in its capture as the answer;
-    /// the driver's own bring-up produces one before that marker, and on a
-    /// laptop a real spurious interrupt can too
-    /// (`issues/kernel/an-i8042-interrupt-arrives-with-no-byte-during-init.md`).
+    /// the driver's own bring-up can produce one before that marker, and on a
+    /// laptop a real spurious interrupt can too.
     ///
     /// The marker is what the injection was timed off, so it is the boundary the
     /// test actually knows — no host clock is involved, and a stranger line

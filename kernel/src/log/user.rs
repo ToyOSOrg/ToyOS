@@ -34,11 +34,7 @@ pub fn inbox_watchers() -> Vec<InboxId> {
 // Posted only by `klogd` after a drain batch — `emit` runs under sync.rs/IRQ/scheduler locks and may not lock.
 // Edge, not level: whether a caller has unread records is a property of its cursor, which the kernel does not hold.
 pub fn post_readiness() {
-    let watchers = inbox_watchers();
-    if watchers.is_empty() {
-        return;
-    }
-    crate::inbox::complete_pending_for_event(&watchers, crate::inbox::Source::Log);
+    crate::inbox::Source::Log.wake();
 }
 
 // Fixed `RECORD_BYTES` stride, never packed: the caller indexes by shift, so the kernel does no length arithmetic.

@@ -6,12 +6,72 @@
 //! memory-type translation surviving an early return is undefined per SDM
 //! Vol. 3A §11.12.4.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::shootdown::{Generation, Shootdown};
 use crate::time::{Duration, Tripwire};
 
 use super::{apic, percpu, smp};
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
+
+/// Which path issued a shootdown, so the census names who pays: `Dlopen` (a
+/// `Shared` window or rollback unmap), `Pcid` (pool reclaim), `Mmio`, `Unmap`
+/// (`Unmapped::drop`), `Pipe`, `Staged` (the ack-delay actuator).
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum Origin {
+    Dlopen,
+    Pcid,
+    Mmio,
+    Unmap,
+    Pipe,
+    #[cfg_attr(not(feature = "test-actuators"), allow(dead_code))]
+    Staged,
+}
+
+impl Origin {
+    const COUNT: usize = 6;
+    /// Order matches the variants; `tests/toyos.rs`'s `irq_census_conservation` reads the line back.
+    const NAMES: [&'static str; Self::COUNT] = ["dlopen", "pcid", "mmio", "unmap", "pipe", "staged"];
+}
+
+/// Issuer-side census; `irq_census`'s `tlb` column is the receiver side, and a
+/// delivery the two disagree on is an uncounted issuing path.
+static ISSUED: [AtomicU64; Origin::COUNT] = [const { AtomicU64::new(0) }; Origin::COUNT];
+static WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static MAX_NS: AtomicU64 = AtomicU64::new(0);
+/// Total at the last print; process exit logs once per batch.
+static REPORTED: AtomicU64 = AtomicU64::new(0);
+
+/// One machine-wide `tlb:` line when the counts moved, at process exit after
+/// `irq_census::log_census`: the conservation check reads deliveries first.
+pub fn log_census() {
+    let mut counts = [0u64; Origin::COUNT];
+    let mut total = 0u64;
+    for (slot, count) in ISSUED.iter().zip(counts.iter_mut()) {
+        *count = slot.load(Ordering::Relaxed);
+        total += *count;
+    }
+    if total == 0 || REPORTED.swap(total, Ordering::Relaxed) == total {
+        return;
+    }
+    struct Fields<'a>(&'a [u64; Origin::COUNT]);
+    impl core::fmt::Display for Fields<'_> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            for (name, count) in Origin::NAMES.iter().zip(self.0) {
+                write!(f, " {name}={count}")?;
+            }
+            Ok(())
+        }
+    }
+    crate::log!(
+        "tlb: shootdowns={total} wait={}us max={}us{}",
+        WAIT_NS.load(Ordering::Relaxed) / 1_000,
+        MAX_NS.load(Ordering::Relaxed) / 1_000,
+        Fields(&counts)
+    );
+}
 
 /// Set above `USB_TIMEOUT_NS`, xHCI's longest `IF`-clear device spin, so no
 /// legitimate wait trips it.
@@ -24,14 +84,17 @@ const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
 /// costly to call on every iteration.
 const SPINS_PER_DEADLINE_CHECK: u32 = 1024;
 
-/// Write the page table, then call this, then free — it returns only once
-/// every CPU has flushed.
-pub fn shootdown() {
+/// Write the page table, then call this, then free — it returns only once every
+/// CPU has flushed. The local-flush early return is uncounted: no IPI, no wait.
+pub fn shootdown(origin: Origin) {
     let cpus = smp::cpu_count();
     if !smp::answering() || cpus <= 1 {
         crate::mm::paging::flush_tlb_all();
         return;
     }
+    // Counted before the IPI, so a delivery can never precede its issue's count.
+    ISSUED[origin as usize].fetch_add(1, Ordering::Relaxed);
+    let began = crate::clock::nanos_since_boot();
     let me = percpu::cpu_id() as usize;
     let generation = SHOOTDOWN.issue();
     // This CPU answers itself locally instead of by self-IPI.
@@ -42,6 +105,9 @@ pub fn shootdown() {
             wait_for(me, cpu, generation);
         }
     }
+    let took = crate::clock::nanos_since_boot().saturating_sub(began);
+    WAIT_NS.fetch_add(took, Ordering::Relaxed);
+    MAX_NS.fetch_max(took, Ordering::Relaxed);
 }
 
 /// Never logs: `drivers::serial`'s lock under `save_and_cli` would deadlock a
@@ -156,7 +222,7 @@ pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
         Ordering::Relaxed,
     );
     let start = crate::clock::nanos_since_boot();
-    shootdown();
+    shootdown(Origin::Staged);
     crate::clock::nanos_since_boot() - start
 }
 

@@ -9,8 +9,9 @@
 //! **That torn read is not what produced the rate the write-up records.**
 //! `i8042_undecoded_bytes` at about one full suite in three under load came from
 //! the same handler counting on the way *in*, ahead of any byte reaching the
-//! ring, which needs no subtraction at all; the boot-order argument is in
-//! `issues/kernel/an-i8042-interrupt-arrives-with-no-byte-during-init.md`.
+//! ring, which needs no subtraction at all — no reader could have been inside
+//! the bring-up ISR's window: the reporting CPU was an AP, and `i8042::init`
+//! runs on the BSP before `smp::boot_aps`.
 //! One word closes both. The distinction is written here because blaming a
 //! proved race for an observed line, without checking that a reader could have
 //! been there, is the mistake this file exists downstream of.

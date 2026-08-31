@@ -7,6 +7,8 @@
 //! recovered panic must call [`discard_capture`]. virtio-gpu is
 //! unsupported: its scanout needs the unbounded-poll wedge this module avoids.
 
+mod latch;
+
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -198,7 +200,7 @@ impl core::fmt::Write for Into<'_> {
 
 struct RenderedCell(UnsafeCell<Rendered>);
 // SAFETY: the panic path may take no lock; `Rendered` is too large to copy
-// or swap atomically. `PAINTING` plus `SNAPSHOT` written once by `capture` serialise the three cells.
+// or swap atomically. `PAINTING`, and `CAPTURE_OWNER` over `SNAPSHOT`, serialise the three cells.
 unsafe impl Sync for RenderedCell {}
 
 /// Seqlock over `FB`; even means stable, odd means a publisher is inside.
@@ -214,6 +216,12 @@ static FB: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 static PAINTING: AtomicBool = AtomicBool::new(false);
 
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
+
+/// `SNAPSHOT`'s one writer, ever; released only by [`discard_capture`], on recovery.
+static CAPTURE: latch::CaptureLatch = latch::CaptureLatch::new();
+
+/// The early branch's token: percpu is not up there, and exactly one CPU exists.
+const EARLY_CAPTOR: u32 = 1;
 
 /// True means an unrecovered panic captured this report; [`discard_capture`]
 /// clears it on recovery, so a survived panic is not later painted as the cause of death.
@@ -466,18 +474,31 @@ pub fn capture() {
     if snapshot().is_none() {
         return;
     }
+    // A loser's report went to serial on its own flush; the winner's is the one painted.
+    if !CAPTURE.claim(captor_token()) {
+        return;
+    }
     // SAFETY: `Rendered` must be a `static` (too large to return), and the
-    // panic path may take no lock. `SNAPSHOT` is written only here; readers
-    // run after, gated by `PAINTING`. Writers are not serialised — two
-    // panicking CPUs can both be inside this — but indices stay in bounds
-    // regardless; `issues/panic-path/panic-capture-unlatched.md` tracks that gap.
+    // panic path may take no lock. `SNAPSHOT` is written only here, under
+    // `CAPTURE`, held past this line; readers run after, gated by `PAINTING`.
     let into = unsafe { &mut *SNAPSHOT.0.get() };
     CAPTURED.store(into.render(0, u64::MAX) > 0, Ordering::Relaxed);
 }
 
+/// This CPU's claim on `SNAPSHOT`; tokens never collide, unclaimed-0 and `EARLY_CAPTOR` included.
+fn captor_token() -> u32 {
+    if log::PERCPU_READY.load(Ordering::Relaxed) {
+        crate::arch::percpu::cpu_id().wrapping_add(2)
+    } else {
+        EARLY_CAPTOR
+    }
+}
+
 /// Drop the captured report: this panic was survived. Called only on the recovery branch.
 pub fn discard_capture() {
+    // `CAPTURED` first: a next captor's fresh report must not be clobbered by this clear.
     CAPTURED.store(false, Ordering::Relaxed);
+    CAPTURE.release();
 }
 
 /// Re-freeze the captured report so a line written *after* [`capture`] is

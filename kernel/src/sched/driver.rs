@@ -667,29 +667,14 @@ fn drain_irqs() {
     crate::drivers::panic_console::hold_report();
 
     if crate::irq_ring::take(crate::irq_ring::IrqSource::Net).is_some() {
-        let watchers = crate::net::inbox_watchers();
-        if !watchers.is_empty() {
-            crate::inbox::complete_pending_for_event(
-                &watchers,
-                crate::inbox::Source::Network,
-            );
-        }
+        crate::inbox::Source::Network.wake();
     }
     if crate::irq_ring::take(crate::irq_ring::IrqSource::Audio).is_some() {
-        // One wait queue for both backends: a second queue would need
-        // the parking side to know which driver bound, which it doesn't.
-        crate::sched::waitqs::wake_device(&crate::sched::waitqs::AUDIO_WATCH);
-        for (watchers, source) in [
-            (
-                crate::drivers::virtio_sound::inbox_watchers(),
-                crate::inbox::Source::VirtioSound,
-            ),
-            (crate::drivers::hda::inbox_watchers(), crate::inbox::Source::Hda),
-        ] {
-            if !watchers.is_empty() {
-                crate::inbox::complete_pending_for_event(&watchers, source);
-            }
-        }
+        // Both backends share one wait queue — `Source::wake` posts `AUDIO_WATCH`
+        // for either — so a second would need the parking side to know which
+        // driver bound, which it doesn't.
+        crate::inbox::Source::VirtioSound.wake();
+        crate::inbox::Source::Hda.wake();
     }
 }
 

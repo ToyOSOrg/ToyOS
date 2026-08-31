@@ -1279,6 +1279,109 @@ pub fn redirty_mid_flush(
     Ok(())
 }
 
+/// A truncate staged inside a flush's `update_metadata` window
+/// (`ftruncate-flush-stall`), which `SYS_FTRUNCATE`'s lockless resize once
+/// landed in. The guest makes the race and asserts its truncate serialised;
+/// the shut-down volume is re-judged by the FAT reader and the fatgen103
+/// checker — `fs_rename_durable`'s oracle.
+pub fn ftruncate_flush_race(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["ftruncate-flush-stall"];
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/ftruncate_flush_race.rs`.
+    const TARGET: &str = "truncate-race.bin";
+    const SHORT: usize = 5000;
+
+    let image_path = test_dir().join("ftruncate-flush-race.img");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = log_extent(&image, &image_path)?;
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            boot_image: Some(image_path.clone()),
+            kernel_params: PARAMS,
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    if !boot.contains("log-volume: partition mounted") {
+        return Err(format!(
+            "the log partition did not mount, so the race had nowhere to run:\n{}",
+            volume_lines(&boot)
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_ftruncate_flush_race", Duration::from_secs(120));
+    if let Some(err) = &result.error {
+        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "ftruncate_flush_race guest failed — the truncate did not serialise with the \
+             stalled flush:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    let kernel_log = format!("{}{}", result.before, result.serial);
+    if kernel_log.contains("STALLED WINDOW BROKEN") {
+        return Err(format!(
+            "a truncate landed inside the flush's metadata pair — the resize is not under \
+             the VFS lock:\n{kernel_log}"
+        ));
+    }
+    if !kernel_log.contains("STALLED WINDOW HELD") {
+        return Err(format!(
+            "the stalled window never reported, so nothing was staged and this gate judged \
+             nothing:\n{kernel_log}"
+        ));
+    }
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
+    let volume = &after[start..start + len];
+    let complaints = check(volume);
+    if !complaints.is_empty() {
+        return Err(format!(
+            "the staged race left the log volume breaking the format:\n{}",
+            describe(&complaints)
+        ));
+    }
+    let got = need(read_files(volume, &[TARGET])?.pop().flatten(), TARGET)?;
+    if got.len() != SHORT {
+        return Err(format!(
+            "{TARGET} is {} bytes on the device, not the {SHORT} the truncate settled — \
+             the flush's metadata pair recorded a size the file no longer has",
+            got.len()
+        ));
+    }
+    if let Some(at) = got.iter().position(|&b| b != 0xB6) {
+        return Err(format!("{TARGET} byte {at} is {:#04x}, not the 0xB6 the guest wrote", got[at]));
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!(
+        "  [ftruncate] the truncate waited out the stalled window in-guest; {SHORT} bytes on \
+         the device by the host's own reader, checker silent"
+    );
+    Ok(())
+}
+
 /// A rename whose source is absent leaves the destination on the FAT `/log`
 /// volume, and `rename(p, p)` leaves the file — the **independent oracle** for
 /// the same reason `fat_backing_revoked` is one. The guest

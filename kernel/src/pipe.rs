@@ -280,6 +280,7 @@ pub fn set_rt_boost_pending(pipe_id: PipeId) {
 }
 
 fn close_read(pipe_id: PipeId) {
+    // `true` when the pipe still lives and its write end is now the one to wake.
     let wake_writers = with_pipes_mut(|pipes| {
         let pipe = pipes.get_mut(pipe_id).expect("close_read: pipe not found");
         pipe.readers = pipe.readers.checked_sub(1).expect("pipe reader underflow");
@@ -287,25 +288,18 @@ fn close_read(pipe_id: PipeId) {
         if pipe.readers == 0 && pipe.writers == 0 {
             let pipe = pipes.remove(pipe_id).unwrap();
             free_pipe(pipe);
-            None // pipe freed, no one to wake
-        } else if pipe.readers == 0 {
-            Some(pipe.inbox_watchers.clone())
+            false // pipe freed, no one to wake
         } else {
-            None
+            pipe.readers == 0
         }
     });
-    if let Some(watchers) = wake_writers {
-        crate::scheduler::wake_pipe_writers(pipe_id);
-        if !watchers.is_empty() {
-            crate::inbox::complete_pending_for_event(
-                &watchers,
-                crate::inbox::Source::PipeWritable(pipe_id),
-            );
-        }
+    if wake_writers {
+        crate::inbox::Source::PipeWritable(pipe_id).wake();
     }
 }
 
 fn close_write(pipe_id: PipeId) {
+    // `true` when the pipe still lives and its read end is now the one to wake.
     let wake_readers = with_pipes_mut(|pipes| {
         let pipe = pipes.get_mut(pipe_id).expect("close_write: pipe not found");
         pipe.writers = pipe.writers.checked_sub(1).expect("pipe writer underflow");
@@ -313,21 +307,13 @@ fn close_write(pipe_id: PipeId) {
         if pipe.readers == 0 && pipe.writers == 0 {
             let pipe = pipes.remove(pipe_id).unwrap();
             free_pipe(pipe);
-            None // pipe freed, no one to wake
-        } else if pipe.writers == 0 {
-            Some(pipe.inbox_watchers.clone())
+            false // pipe freed, no one to wake
         } else {
-            None
+            pipe.writers == 0
         }
     });
-    if let Some(watchers) = wake_readers {
-        crate::scheduler::wake_pipe_readers(pipe_id);
-        if !watchers.is_empty() {
-            crate::inbox::complete_pending_for_event(
-                &watchers,
-                crate::inbox::Source::PipeReadable(pipe_id),
-            );
-        }
+    if wake_readers {
+        crate::inbox::Source::PipeReadable(pipe_id).wake();
     }
 }
 

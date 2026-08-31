@@ -1107,6 +1107,31 @@ pub const RELEGATED: &[Relegated] = &[
                  three; none of them asserts one. Relegated for margin: 8,925 ms committed, \
                  within 11% of the line.",
     },
+    Relegated {
+        test: "driver_wait_refused",
+        ci_ms: 17_739,
+        why: Why::Cost,
+        guards: "Both stuck-device refusals by name: an NVMe whose CSTS.RDY never sets is \
+                 refused naming the register against its CAP.TO budget, every virtio device that \
+                 never zeroes DEVICE_STATUS is refused on the 2 s reset budget, and the boot \
+                 comes up without them — on the unbounded shape it never reaches ready. What \
+                 still gates the deadlines per pull request: every fast boot takes the same \
+                 bounded waits, under the same budgets, on devices that answer, so a budget that \
+                 stopped compiling or started refusing live hardware reds wide; the stuck arms \
+                 and the refusal lines themselves have no other gate.",
+    },
+    Relegated {
+        test: "ftruncate_flush_race",
+        ci_ms: 9_452,
+        why: Why::Cost,
+        guards: "A truncate raced into a flush's stalled size-read/`update_metadata` window \
+                 (`ftruncate-flush-stall`, 400 ms) and required to serialise — the lockless \
+                 resize's regression shape — with the shut-down volume re-judged off the image \
+                 by the FAT reader and `toyos-fat32-check`. What still runs per pull request: \
+                 the `&mut Vfs` witness that keeps every flusher's metadata pair under the VFS \
+                 lock, and the Fast `fs_truncate_persist` for an ordinary truncate's durable \
+                 size; the staged race and the host-side re-judgment are gated only here.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own

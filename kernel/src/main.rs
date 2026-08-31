@@ -489,6 +489,11 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         arch::idt::spurious::selftest();
     }
 
+    #[cfg(feature = "boot-actuators")]
+    if actuator::unclaimed_vector_selftest() {
+        arch::idt::unclaimed::selftest();
+    }
+
     virtio_console::init(&pci_devices);
     virtio_net::init(&pci_devices);
 

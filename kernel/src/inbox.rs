@@ -709,8 +709,10 @@ fn post_completion_locked(inbox_id: InboxId, user_data: u64, result: i32, flags:
 }
 
 
-/// Completes pending polls registered on `event`; callers must have released source locks first.
-pub fn complete_pending_for_event(watchers: &[InboxId], event: Source) {
+/// Completes pending polls registered on `event`; callers must have released
+/// source locks first. Private: every event reaches it through [`Source::wake`],
+/// which cannot fire it without also waking the direct blocker.
+fn complete_pending_for_event(watchers: &[InboxId], event: &Source) {
     if watchers.is_empty() { return; }
 
     // Wake happens after the table lock releases: a wake may send an IPI, which doesn't need INBOXES.
@@ -723,11 +725,11 @@ pub fn complete_pending_for_event(watchers: &[InboxId], event: Source) {
 
         let mut i = 0;
         while i < instance.pending_watches.len() {
-            if instance.pending_watches[i].watches(&event) {
+            if instance.pending_watches[i].watches(event) {
                 let pp = take_poll(instance, i);
                 // The direction `event` proves fired, OR-ed with a recheck of the
                 // other registered direction — never the request mask.
-                let result = pp.sources.readiness_for(&event).result_flags();
+                let result = pp.sources.readiness_for(event).result_flags();
                 instance.post_completion(pp.user_data, result as i32, 0);
             } else {
                 i += 1;
@@ -846,6 +848,36 @@ impl Source {
             Self::Hda => crate::drivers::hda::inbox_watchers(),
             Self::Log => crate::log::user::inbox_watchers(),
             Self::Port(p) => p.watchers(),
+        }
+    }
+
+    /// The subject a thread blocked in a plain syscall on this source parks on.
+    /// Exhaustive on purpose: a new source cannot be added without deciding it —
+    /// the half the 7a cutover deleted.
+    fn wake_direct_blocker(&self) {
+        match self {
+            Self::Keyboard => crate::keyboard::wake_waiters(),
+            Self::VirtioSound | Self::Hda => {
+                crate::sched::waitqs::wake_device(&crate::sched::waitqs::AUDIO_WATCH)
+            }
+            Self::PipeReadable(id) => scheduler::wake_pipe_readers(*id),
+            Self::PipeWritable(id) => scheduler::wake_pipe_writers(*id),
+            Self::Port(p) => {
+                completion::post(completion::Subject::of(p.watch()), completion::Outcome::Ready)
+            }
+            // No blocking-syscall queue: mouse/network reads answer `NotFound`,
+            // the log is edge-triggered on the reader's own cursor.
+            Self::Mouse | Self::Network | Self::Log => {}
+        }
+    }
+
+    /// Both wakes an event owes as one act — the blocked syscall, and every
+    /// ring that armed a `POLL_ADD`; neither half is reachable without the other.
+    pub fn wake(&self) {
+        self.wake_direct_blocker();
+        let watchers = self.watchers();
+        if !watchers.is_empty() {
+            complete_pending_for_event(&watchers, self);
         }
     }
 }

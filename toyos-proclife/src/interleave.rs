@@ -38,8 +38,8 @@ pub enum Op {
     /// `process::kill_process`: a handle holder ending somebody else's.
     Kill { pid: Pid, code: i32, pc: u32, tids: Vec<Tid>, next: usize },
     /// `process::spawn_thread`: two lock sections with the whole of a thread
-    /// built between them.
-    Spawn { pid: Pid, pc: u32 },
+    /// built between them; `block` is the mapped TLS the build carries across.
+    Spawn { pid: Pid, pc: u32, block: Option<u32> },
     /// `process::thread_exit` on a thread that is not the main one.
     ThreadExit { pid: Pid, tid: Tid, code: i32, pc: u32, post: Option<Watch> },
     /// `sys_thread_join`: collect or arm, then re-check.
@@ -56,7 +56,7 @@ impl Op {
         Op::Kill { pid, code, pc: 0, tids: Vec::new(), next: 0 }
     }
     pub fn spawn(pid: Pid) -> Self {
-        Op::Spawn { pid, pc: 0 }
+        Op::Spawn { pid, pc: 0, block: None }
     }
     pub fn thread_exit(pid: Pid, tid: Tid, code: i32) -> Self {
         Op::ThreadExit { pid, tid, code, pc: 0, post: None }
@@ -171,7 +171,7 @@ impl Op {
                     *pc = DONE;
                 }
             },
-            Op::Spawn { pid, pc } => match *pc {
+            Op::Spawn { pid, pc, block } => match *pc {
                 // Phase 1, under the table lock.
                 0 => {
                     *pc = if spawn::admit_thread_start(world, *pid).is_yes() { 1 } else { DONE };
@@ -179,12 +179,19 @@ impl Op {
                 // Phase 2: the TLS block, the mapping, the rebase and the
                 // kernel stack — every lock given up, and the whole of the
                 // window this op exists to open.
-                1 => *pc = 2,
-                // Phase 3: the same question under the lock that inserts, then
-                // the table insert and the scheduler enqueue together.
+                1 => {
+                    *block = Some(world.map_tls());
+                    *pc = 2;
+                }
+                // Phase 3: the insert question, then the table insert and
+                // enqueue; a refusal releases the mapping the build carried.
                 _ => {
+                    let carried = block.expect("phase 2 mapped it");
                     if spawn::admit_thread_insert(world, *pid).is_yes() {
                         world.spawn_thread(*pid);
+                        world.adopt_tls(carried);
+                    } else {
+                        world.release_tls(carried);
                     }
                     *pc = DONE;
                 }
@@ -447,6 +454,36 @@ mod tests {
         if let Some(found) = explore(&world, &ops) {
             panic!("a lifecycle law broke:\n{found}");
         }
+    }
+
+    /// The teeth behind L5: the shipped shape — a refused insert dropping the
+    /// built `ThreadData`, freeing the pages and unmapping nothing — is the leak
+    /// the law reports. Run by hand, since the shape is no longer the kernel's.
+    #[test]
+    fn the_refusal_that_dropped_without_unmapping_is_the_leak_l5_reports() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let main = world.main_tid(pid);
+
+        let mut spawning = Op::spawn(pid);
+        spawning.step(&mut world); // phase 1: admitted
+        spawning.step(&mut world); // phase 2: the block is mapped
+
+        let mut exit = Op::exit(pid, main, 0);
+        while !exit.done() {
+            exit.step(&mut world);
+        }
+        assert!(
+            !spawn::admit_thread_insert(&world, pid).is_yes(),
+            "the claimed teardown must refuse the insert, or this stages nothing",
+        );
+        // The old shape: return None with the mapping still in the local.
+
+        let faults = world.final_faults();
+        assert!(
+            faults.iter().any(|f| f.contains("without unmapping")),
+            "L5 cannot see the dropped mapping, so the schedules above pass vacuously: {faults:?}",
+        );
     }
 
     /// A `SYS_THREAD_JOIN` armed on a thread the killer is about to retire, in

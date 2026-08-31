@@ -252,18 +252,9 @@ fn connect_through(connector: &port::Connector) -> u64 {
             port::PushError::QueueFull => SyscallError::ResourceExhausted.to_u64(),
         };
     }
-    let port = connector.port();
-    completion::post(
-        completion::Subject::of(port.watch()),
-        completion::Outcome::Ready,
-    );
-    let watchers = port.watchers();
-    if !watchers.is_empty() {
-        crate::inbox::complete_pending_for_event(
-            &watchers,
-            crate::inbox::Source::Port(port),
-        );
-    }
+    // Both halves: the server's blocked `Acceptor` (the port's own watch) and
+    // every ring polling it — `Source::wake` cannot do one without the other.
+    crate::inbox::Source::Port(connector.port()).wake();
     h.0 as u64
 }
 

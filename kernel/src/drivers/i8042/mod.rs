@@ -91,6 +91,11 @@ static RX_BYTES: AtomicU32 = AtomicU32::new(0);
 /// `handler_poll`, whose bytes came from a poll, not an assertion.
 static FIRST_IRQ_NS: AtomicU64 = AtomicU64::new(0);
 
+/// `init` consumed a byte with the IRQ bits live, so its edge can deliver empty; the first interrupt settles it.
+static ARM_EDGE_OWED: AtomicBool = AtomicBool::new(false);
+/// That first interrupt was the arming edge: empty, its byte already init's.
+static ARM_EDGE_CONSUMED: AtomicBool = AtomicBool::new(false);
+
 /// When the pin last asserted.
 static LAST_IRQ_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -270,6 +275,22 @@ fn report_health(state: u8) {
     // The third case: the pin asserts but nothing has come over it — distinct
     // from "nothing decoded" (bytes exist) and "never asserted" below.
     if irqs > 0 {
+        // Except init's own echo — the arming edge: the quiet verdict stands saying so.
+        if irqs == 1 && counts.empty == 1 && ARM_EDGE_CONSUMED.load(Ordering::Relaxed) {
+            if state == HEALTH_QUIET_DUE && claim_health(HEALTH_QUIET_DUE, HEALTH_QUIET_SAID) {
+                log!(
+                    "i8042: armed at {}ms, idle at {}ms, 1 interrupt, the arming edge (its byte \
+                     was init's own read-back) — the pin has never asserted for input (kbd GSI \
+                     {}, aux GSI {})",
+                    ARMED_NS.load(Ordering::Relaxed) / 1_000_000,
+                    millis_since_boot(),
+                    KEYBOARD_GSI.load(Ordering::Relaxed) as i64,
+                    AUX_GSI.load(Ordering::Relaxed) as i64
+                );
+                to_screen();
+            }
+            return;
+        }
         if state != HEALTH_EMPTY_SAID && claim_health(state, HEALTH_EMPTY_SAID) {
             log!(
                 "i8042: {} interrupts and no byte behind any of them — the output buffer was empty when the ISR read it, first seen at {}ms",
@@ -470,7 +491,8 @@ pub extern "sysv64" fn handler() {
     crate::irq_census::irq_took!(I8042);
     let timestamp = crate::clock::nanos_since_boot();
     // No compare-exchange: this handler cannot nest, so there's no second writer.
-    if FIRST_IRQ_NS.load(Ordering::Relaxed) == 0 {
+    let first = FIRST_IRQ_NS.load(Ordering::Relaxed) == 0;
+    if first {
         FIRST_IRQ_NS.store(timestamp, Ordering::Relaxed);
     }
     LAST_IRQ_NS.store(timestamp, Ordering::Relaxed);
@@ -491,6 +513,11 @@ pub extern "sysv64" fn handler() {
     if n == ISR_BURST && buffer_full(inb(STATUS)) {
         // It cannot mask the line itself — that needs the I/O APIC lock.
         QUARANTINE.store(true, Ordering::Relaxed);
+    }
+    // Only the first interrupt can be the arming edge (IRR delivers it before
+    // any later assertion), and it settles the debt either way.
+    if first && ARM_EDGE_OWED.swap(false, Ordering::Relaxed) && n == 0 {
+        ARM_EDGE_CONSUMED.store(true, Ordering::Relaxed);
     }
     // Recorded after the burst, not before: the Release here also publishes
     // the bytes above it, so no reader sees the count without the bytes.
@@ -626,24 +653,11 @@ fn service_bytes(recorded: bool) {
     // next reader until the following real event.
     let woke_kb = keys > 0;
     if woke_kb {
-        crate::keyboard::wake_waiters();
-        let watchers = crate::keyboard::inbox_watchers();
-        if !watchers.is_empty() {
-            crate::inbox::complete_pending_for_event(
-                &watchers,
-                crate::inbox::Source::Keyboard,
-            );
-        }
+        crate::inbox::Source::Keyboard.wake();
     }
     let woke_ms = motion > 0;
     if woke_ms {
-        let watchers = crate::mouse::inbox_watchers();
-        if !watchers.is_empty() {
-            crate::inbox::complete_pending_for_event(
-                &watchers,
-                crate::inbox::Source::Mouse,
-            );
-        }
+        crate::inbox::Source::Mouse.wake();
     }
     trace_drain(bytes, keys, motion, woke_kb, woke_ms);
 
@@ -1317,6 +1331,8 @@ pub fn init(rsdp_addr: u64) {
         }
         return;
     }
+    // The read-back consumed its response with the IRQ bits live, so its edge is owed.
+    ARM_EDGE_OWED.store(true, Ordering::Relaxed);
     let unmasked = ioapic::set_masked(kbd_line.gsi, false).is_ok();
     // Captured, not discarded: an aux GSI that won't unmask is the
     // TrackPoint silently dead on a boot that otherwise reads green.
@@ -1330,6 +1346,12 @@ pub fn init(rsdp_addr: u64) {
     HEALTH.store(HEALTH_ARMED, Ordering::Relaxed);
     handler_poll();
     crate::arch::cpu::enable_interrupts();
+
+    // Stages this boot's own arming edge: the vector, first, with no byte behind it.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::i8042_arm_edge() {
+        crate::arch::apic::send_self(I8042_VECTOR);
+    }
 
     log!(
         "i8042: kbd {} ({}) scanning on, GSI {} -> vec {:#04x} apic {} {}",

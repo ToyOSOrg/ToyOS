@@ -413,7 +413,7 @@ fn alloc_pcid() -> Option<PcidGuard> {
         match pool.alloc() {
             Alloc::Ready(p) => return Some(PcidGuard(p)),
             Alloc::NeedsFlush => {
-                crate::arch::tlb::shootdown();
+                crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Pcid);
                 pool.reclaim();
             }
             Alloc::Exhausted => return None,
@@ -967,7 +967,7 @@ pub fn load_kernel_flush() {
 /// sibling's stale entry, which is SDM Vol. 3A §11.12.4 undefined behaviour.
 pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> super::Mmio {
     let mmio = kernel().lock().map_mmio(phys, size, policy.cache());
-    crate::arch::tlb::shootdown();
+    crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Mmio);
     // Read back off the table and logged beside firmware's MTRR verdict: the
     // boot's own evidence that no register window trusts firmware.
     let installed =

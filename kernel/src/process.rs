@@ -597,7 +597,7 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
         });
     }
     // Outside the block: it waits, and a sibling can be spinning on this lock with IF clear.
-    crate::arch::tlb::shootdown();
+    crate::arch::tlb::shootdown(crate::arch::tlb::Origin::Pipe);
 }
 
 /// One live `mmap` and its physical pages; the range's registration in the address space's `regions` is separate (placement search, `munmap`).
@@ -866,6 +866,18 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     };
 
     // Phase 3: insert into table (brief table lock); threads share the parent's ProcessData Arc.
+    let mut guard = PROCESS_TABLE.lock();
+    let table = guard.as_mut().unwrap();
+    // Re-checked under the insert lock: a thread refused here would otherwise be invisible to a retire sweep already under way.
+    if !proclife_spawn::admit_thread_insert(table, parent_process).is_yes() {
+        // The unmap cannot run under the table lock (its shootdown is a wait a
+        // sibling can be spinning against with IF clear), so the mapping is
+        // still solely this scope's here — built into a ThreadData only past
+        // the admission, where the table owns its release.
+        drop(guard);
+        tls_alloc.release(&parent_addr_space);
+        return None;
+    }
     let thread_data = Arc::new(Lock::new(ThreadData {
         tls_pages: Some(tls_alloc),
         stack_pages: None,
@@ -875,13 +887,6 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         syscall_total: 0,
         syscall_total_ns: 0,
     }));
-
-    let mut guard = PROCESS_TABLE.lock();
-    let table = guard.as_mut().unwrap();
-    // Re-checked under the insert lock: a thread refused here would otherwise be invisible to a retire sweep already under way.
-    if !proclife_spawn::admit_thread_insert(table, parent_process).is_yes() {
-        return None;
-    }
     let proc = table.get_mut(parent_process)
         .expect("spawn_thread: the entry the insert admission just answered for");
     // Every thread names the same symbols, so a crash report never asks this table.
@@ -948,6 +953,9 @@ fn teardown_resources(
 
     // Machine-wide, cumulative counters, printed here (not at shutdown) because process exit is the one recurring moment every boot reaches.
     crate::irq_census::log_census();
+    // After the irq lines: the tlb conservation check reads deliveries first, issues second.
+    crate::arch::tlb::log_census();
+    crate::arch::idt::unclaimed::log_vectors();
 
     ops::close_all(&mut data.handles);
     data.elf.elf_alloc.take();
@@ -1241,26 +1249,12 @@ pub fn futex_wake(addr: UserAddr, count: u64) -> u64 {
 
 /// Wake processes blocked on reading from a pipe that now has data.
 pub fn wake_pipe_readers(pipe_id: pipe::PipeId) {
-    scheduler::wake_pipe_readers(pipe_id);
-    let watchers = pipe::inbox_watchers(pipe_id);
-    if !watchers.is_empty() {
-        crate::inbox::complete_pending_for_event(
-            &watchers,
-            crate::inbox::Source::PipeReadable(pipe_id),
-        );
-    }
+    crate::inbox::Source::PipeReadable(pipe_id).wake();
 }
 
 /// Wake processes blocked on writing to a pipe that now has space.
 pub fn wake_pipe_writers(pipe_id: pipe::PipeId) {
-    scheduler::wake_pipe_writers(pipe_id);
-    let watchers = pipe::inbox_watchers(pipe_id);
-    if !watchers.is_empty() {
-        crate::inbox::complete_pending_for_event(
-            &watchers,
-            crate::inbox::Source::PipeWritable(pipe_id),
-        );
-    }
+    crate::inbox::Source::PipeWritable(pipe_id).wake();
 }
 
 /// Atomically validate the parent-thread relationship and collect a zombie thread; the table lock is the atomicity. `Err(())`: this caller may not join `tid`/`pid`.
