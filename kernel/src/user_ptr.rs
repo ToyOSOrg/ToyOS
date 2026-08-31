@@ -185,6 +185,22 @@ impl UserBytes<'_> {
         }
     }
 
+    /// Copy the window at `off` into one ring run; panics if out of bounds, as
+    /// [`read_at`](Self::read_at) does. `copy` for [`UserBytesMut::write_run`]'s
+    /// reason.
+    pub fn read_run(&self, off: usize, dst: &mut toyos_abi::ring::Dst<'_>) {
+        assert!(
+            off.checked_add(dst.len()).is_some_and(|end| end <= self.len),
+            "UserBytes::read_run {off}+{} past a {}-byte window",
+            dst.len(),
+            self.len
+        );
+        // SAFETY: as `UserBytesMut::write_run`, mirrored.
+        unsafe {
+            core::ptr::copy(self.kptr.add(off), dst.as_mut_ptr(), dst.len());
+        }
+    }
+
     /// The `len`-byte window at `off` inside this one.
     pub fn sub(&self, off: usize, len: usize) -> UserBytes<'_> {
         assert!(
@@ -226,6 +242,24 @@ impl UserBytesMut<'_> {
         // SAFETY: the assert proves `off + src.len() <= self.len`, and `window` proved the range is one physically contiguous mapping.
         unsafe {
             core::ptr::copy_nonoverlapping(src.as_ptr(), self.kptr.add(off), src.len());
+        }
+    }
+
+    /// Copy one ring run into the window at `off`; panics if out of bounds, as
+    /// [`write_at`](Self::write_at) does.
+    ///
+    /// **`copy` and not `copy_nonoverlapping`**: `SYS_PIPE_MAP` maps the ring's
+    /// page into the caller, which may then name it as this window.
+    pub fn write_run(&mut self, off: usize, src: &toyos_abi::ring::Src<'_>) {
+        assert!(
+            off.checked_add(src.len()).is_some_and(|end| end <= self.len),
+            "UserBytesMut::write_run {off}+{} past a {}-byte window",
+            src.len(),
+            self.len
+        );
+        // SAFETY: the assert proves `off + src.len() <= self.len`, `window` proved the range is one physically contiguous mapping, and `Ring::read` proved the run is inside its own data region. Neither side is a reference, so nothing here claims either range is exclusive.
+        unsafe {
+            core::ptr::copy(src.as_ptr(), self.kptr.add(off), src.len());
         }
     }
 
