@@ -54,6 +54,12 @@ pub struct FakePort {
     resetting_since: Option<Nanos>,
     /// Whether the reset in flight is a warm one.
     warm: bool,
+    /// Whether a device is physically in the port, which is not what CCS says:
+    /// §4.19.5's completed failure clears CCS on a device that never left, and
+    /// §4.19.5.1's warm reset re-detects whatever is still there. Detection is
+    /// derived from this, so a device pulled while CCS reads zero is a state
+    /// the port can be put in.
+    present: bool,
     /// A SuperSpeed port: it trains its own link and reads Enabled when it is
     /// up, with no reset from the driver at all.
     superspeed: bool,
@@ -70,6 +76,7 @@ impl FakePort {
             behaviour,
             resetting_since: None,
             warm: false,
+            present: false,
             superspeed: false,
             writes: Vec::new(),
         }
@@ -100,16 +107,23 @@ impl FakePort {
     }
 
     pub fn attach(&mut self) {
-        if self.raw & CCS == 0 {
-            self.raw |= CCS | CSC;
-            if self.superspeed {
-                self.raw |= PED | ((self.speed as u32) << SPEED_SHIFT);
-                self.set_link(PLS_U0);
-            }
+        if self.present {
+            return;
+        }
+        self.present = true;
+        self.raw |= CCS | CSC;
+        if self.superspeed {
+            self.raw |= PED | ((self.speed as u32) << SPEED_SHIFT);
+            self.set_link(PLS_U0);
         }
     }
 
+    /// The device leaves whatever the register says. Detection only *drops* if
+    /// the port had it: a port that already lost CCS to a failed bus reset
+    /// raises no second edge, and the reset in flight there is not one a device
+    /// was under.
     pub fn detach(&mut self) {
+        self.present = false;
         if self.raw & CCS != 0 {
             self.raw = (self.raw & !(CCS | PED | PR)) | CSC;
             self.resetting_since = None;
@@ -202,11 +216,10 @@ impl FakePort {
         self.raw |= PRC;
         if warm {
             self.raw |= WRC;
-            // §4.19.5's failure only lost *detection* of a device that never
-            // left; the warm retrain finds it again, connect edge and all.
-            if matches!(self.behaviour, ResetBehaviour::FailsTheBusReset { .. })
-                && self.raw & CCS == 0
-            {
+            // §4.19.5's failure only lost *detection*; the warm retrain finds
+            // whatever is physically there, connect edge and all — so a device
+            // pulled while the retrain ran is not found.
+            if self.present && self.raw & CCS == 0 {
                 self.raw |= CCS | CSC;
             }
         }

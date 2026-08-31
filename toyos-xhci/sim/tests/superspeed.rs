@@ -7,7 +7,7 @@
 //! paths lives here — which is why the negative gates beside them matter more
 //! than usual.
 
-use toyos_xhci::port::{GaveUp, Reset, DEBOUNCE_NS, RESET_DEADLINE_NS};
+use toyos_xhci::port::{GaveUp, Gone, Reset, DEBOUNCE_NS, RESET_DEADLINE_NS};
 use toyos_xhci::Protocol;
 use toyos_xhci_sim::driver::{Did, Driver};
 use toyos_xhci_sim::hub::{FakePort, ResetBehaviour};
@@ -173,6 +173,50 @@ fn a_reset_that_completes_failed_is_warm_reset() {
         "the warm reset's own connect edge was read as a replug: {:?}",
         driver.did
     );
+}
+
+/// The same scenario with the device **pulled while the warm retrain runs**.
+///
+/// §4.19.5.1's retrain re-detects what is in the port, and the port above is
+/// the one place CCS reads zero with a device still in it — so this is the only
+/// window where "pulled" and "not detected" are different facts, and it is the
+/// one the register model could not express until `present` was a field.
+/// The retrain then finds nothing, and nothing may be enumerated on it.
+#[test]
+fn a_device_pulled_during_the_warm_retrain_is_not_enumerated() {
+    let mut port = FakePort::occupied(ResetBehaviour::FailsTheBusReset { warm_works: true });
+    let mut driver = Driver::new().speaking(Protocol::Usb3);
+    let mut pulled_at = None;
+    let mut now = 0;
+    while now < 4 * DEBOUNCE_NS + RESET_DEADLINE_NS {
+        driver.pump(&mut port, now).unwrap();
+        // In the pump that wrote WPR, before the port's own clock completes it.
+        if pulled_at.is_none() && driver.resets() == [Reset::Hot, Reset::Warm] {
+            port.detach();
+            pulled_at = Some(now);
+        }
+        now += PASS;
+    }
+
+    assert!(pulled_at.is_some(), "the warm reset was never reached: {:?}", driver.did);
+    assert!(
+        !port.read().connected(),
+        "the pull left the port reading connected: PORTSC {:#010x}",
+        port.raw()
+    );
+    assert_eq!(
+        driver.enumerations(),
+        0,
+        "a device that was pulled mid-retrain was enumerated: {:?}",
+        driver.did
+    );
+    assert_eq!(
+        driver.did.last(),
+        Some(&Did::ToreDown(Gone::Disconnected)),
+        "the pull did not end in a disconnect teardown: {:?}",
+        driver.did
+    );
+    assert!(!driver.attached(), "the port is attached with nothing in it: {:?}", driver.did);
 }
 
 /// The same failure on a link that will not come back warm either: refused by
