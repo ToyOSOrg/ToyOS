@@ -2263,6 +2263,12 @@ pub struct QemuInstance {
     /// and is often read back after the guest is gone.
     own_boot_image: Option<PathBuf>,
     boot_log: String,
+    /// Whether this boot armed `i8042-trace`, which is the only channel a
+    /// windowed shell has for saying it took a burst out of the device.
+    /// Kept so a caller that paces on it refuses a boot that cannot answer,
+    /// rather than waiting out a ceiling against a guest that was never asked
+    /// to speak.
+    i8042_trace: bool,
     /// This guest's vCPU count, kept so its liveness ceilings can be widened by
     /// its own oversubscription on a host with fewer cores than vCPUs — see
     /// [`oversubscription`] and [`QemuInstance::budget`]. Boot-derived
@@ -2777,6 +2783,11 @@ impl QemuInstance {
     /// [`ConsoleStream`].
     pub fn console_stream(&self) -> &ConsoleStream {
         &self.console
+    }
+
+    /// Whether the kernel will report every i8042 drain on this boot.
+    pub fn i8042_trace_armed(&self) -> bool {
+        self.i8042_trace
     }
 
     /// The wav file the virtio-sound device records into for this boot.
@@ -3893,6 +3904,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         own_boot_image,
         boot_log,
         console,
+        i8042_trace: options.kernel_params.contains(&"i8042-trace"),
         smp: options.smp,
     }
 }

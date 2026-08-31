@@ -270,6 +270,16 @@ const PAGER_ARITHMETIC: &str = "the verdict was the defect. It injected all thir
     2026-08-24: PASS 6 of 6 alone on the dev host at 2.00x-8.00x width, 16-31 s each, against \
     every recorded red's 6-10 s";
 
+/// What retired the two `locale_detect` rows below: a line's bursts stopped
+/// going out unacknowledged.
+///
+/// **A differential, not the test agreeing with itself.** The two signals below
+/// share no code — one is the kernel's own device path, the other is the
+/// console's echo drawn on glass — and they agree on the same shortfall. That is
+/// what separates "the bytes were not delivered" from "the guest was not
+/// reading", which is the reading a CI capture alone could never settle.
+const TYPING_PACED: &str = "the unacknowledged burst, closed at `shell_type_once`. `ps2_bursts`     always bounded each batch, but every batch of a line went out inside one QMP session with no     guest-side wait — and the Enter went out last, behind all of them. Staged on the dev host     with the pacing reverted and nothing else changed: `echo surface-up-zqjxk`, the handshake     nonce, is 44 set-1 bytes against the device's 16, and the guest took 32 of them     (`injected 44, kernel drained 32`, refused at the burst `\"zqjxk\"`), with the panel     independently truncated to `/home/root> echo surface-up-` — sixteen characters, which is     those same 32 bytes. Whole-line echo false, because the dropped Enter is the byte whose     absence leaves nothing to echo at all. The same code with a 14-byte line, `echo z`, is     `injected 14, kernel drained 14` and green: the loss is the queue bound and not the wire.     Paced, both lines are whole — `injected 44, kernel drained 44` with the input row carrying     the line, and 14 of 14. Each burst now waits for the guest's own report of taking the last     one: the decoded input row where there is a panel, the kernel's `i8042: drain bytes=` where     the shell is behind a compositor and there is none. Green afterwards on the dev host:     `console_locale_detect` PASS (4s), `desktop_locale_detect` PASS (4s), `desktop_typing_damage`     PASS (11s) at 16 of its 16 appearances, `desktop_audio_client` PASS (13s), `blocked_dump`     PASS (3s)";
+
 /// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
 ///
 /// The number in the second row was the whole finding, and it no longer holds.
@@ -2491,7 +2501,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "console_locale_detect",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Stands,
+        standing: Standing::Retired(TYPING_PACED),
         what: "`FAIL console_locale_detect: 10 typed lines and none of them came back`, green on \
                the alone re-run: `ALONE: GREEN, and it was alone both times — nothing the harness \
                controls differed, so it failed once and passed once. That is a rate and not a \
@@ -2504,7 +2514,7 @@ pub const KNOWN_RED: &[Red] = &[
                kernel, userland or harness byte, and the guest ran the declared QEMU.",
         evidence: "pull-request `ci` run 33411831704, job 99553283770 (`guest (1)`), headSha \
                    30918d0e, 2026-08-31",
-        source: "issues/build/console-locale-detect-loses-every-typed-line.md",
+        source: "tests/toyos.rs shell_type_once",
         measured: "2026-08-31",
     },
     // The same sentence under the same call site, on another branch the same
@@ -2515,7 +2525,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_locale_detect",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Stands,
+        standing: Standing::Retired(TYPING_PACED),
         what: "`FAIL desktop_locale_detect: 10 typed lines and none of them came back`, the \
                sentence `console_locale_detect` failed with hours earlier, and green on the \
                alone re-run: `ALONE: GREEN, and it was alone both times — nothing the harness \
@@ -2532,7 +2542,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "pull-request `ci` run 33426887418, job 99613902394 (`guest (9)`), headSha \
                    28be5a85, 2026-08-31; the failure body carries two `compositor: frames=` \
                    lines and nothing from the shell",
-        source: "issues/build/console-locale-detect-loses-every-typed-line.md",
+        source: "tests/toyos.rs shell_type_once",
         measured: "2026-08-31",
     },
     // A rate on a shared shard, adjudicated here rather than re-run away. Not
