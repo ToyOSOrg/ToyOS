@@ -217,7 +217,7 @@ pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
                 .as_mut()
                 .expect("available() > 0 implies a ring")
                 .ring
-                .read(len, |off, src| buf.write_at(off, src));
+                .read(len, |off, src| buf.write_run(off, &src));
             let boost = pipe.rt_boost_pending;
             pipe.rt_boost_pending = false;
             (Some(n), boost)
@@ -251,7 +251,7 @@ pub fn try_write(pipe_id: PipeId, buf: &UserBytes) -> Option<PipeWrite> {
             return Some(PipeWrite::NoMemory);
         };
         if backing.ring.space() > 0 {
-            Some(PipeWrite::Wrote(backing.ring.write(buf.len(), |off, dst| buf.read_at(off, dst))))
+            Some(PipeWrite::Wrote(backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst))))
         } else {
             None
         }

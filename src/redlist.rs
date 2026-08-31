@@ -2237,7 +2237,18 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_console_clear",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the one mechanism that produces this sentence was named and closed. \
+             `screen_console_clear` types both its commands through `console_type_line` \
+             (`tests/toyos.rs`), which splits a line into bursts no wider than QEMU's PS/2 \
+             queue and waits for the console to echo each one, so a keystroke can no longer \
+             be dropped between the host and the shell; staged the other way — the whole \
+             command in one transmission — the test printed this verdict verbatim on 3 of 3 \
+             dev-host runs. `7a033450` is the change. What that does not settle is whether \
+             THIS sighting was that: its capture was not kept, and a lost pixel and a mangled \
+             command name print the same sentence. The next sighting is unambiguous, because \
+             the command reaching the shell is now checked before the panel is",
+        ),
         what: "`the graffiti actuator did not reach the panel: 0 of 2073600 pixels are \
                [0, 192, 0] and the 8px strip below the cells is not`, at 127 s against a \
                fast-tier price — a panel that never received the write inside a window two \
@@ -2250,7 +2261,7 @@ pub const KNOWN_RED: &[Red] = &[
                and it was alone both times`",
         evidence: "PR #135 run 32303408773, job 96231120463 (`guest (11)`), 2026-08-19; the \
                    isolated re-run in the same job was green",
-        source: "issues/diagnostics/the-panel-once-took-no-pixels-for-two-minutes-under-load.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-19",
     },
     Red {
@@ -2284,7 +2295,7 @@ pub const KNOWN_RED: &[Red] = &[
                LIST. **Not about the diff it was found on**",
         evidence: "dev host, 2026-08-27, the `cargo test` run of the md2 defect-fix branch; \
                    `exit_wait_storm` reds in the same phase and is already on this list",
-        source: "issues/build/syscall-window-nmi-reds-under-a-shared-host.md",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-27",
     },
     Red {
@@ -2624,7 +2635,7 @@ pub const KNOWN_RED: &[Red] = &[
     // ---------------------------------------------------------------------
     // `wt/toyos-killwrite`, dev host, 2026-08-20, on `e4c2c8ff` — `main`'s own
     // tip, unmodified. The row
-    // `issues/kernel/a-killed-peer-still-takes-a-write.md` said was owed: the
+    // `issues/kernel/deferred-release-outlives-its-syscall.md` said was owed: the
     // name answered `NOT ON THE LIST` when that file was written, so a landing
     // gate that hit it had nothing to check the red against. Two rows, because
     // one name measured on two instruments in one session is two measurements.
@@ -2645,7 +2656,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "53 × `cargo test --test toyos-build -- kill_while_blocked` in one session, the \
                    host reporting 1.68x–2.70x width throughout; the same session staged the \
                    mechanism at 4 of 5 by removing the syscall-exit drain",
-        source: "issues/kernel/a-killed-peer-still-takes-a-write.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-20",
     },
     Red {
@@ -2659,7 +2670,7 @@ pub const KNOWN_RED: &[Red] = &[
                runs is not a denominator that reaches a rate of two in fifty-three",
         evidence: "4 × `cargo test --test toyos-build`, same tree and session as this name's \
                    dev-host-alone rate",
-        source: "issues/kernel/a-killed-peer-still-takes-a-write.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-20",
     },
     // ---------------------------------------------------------------------

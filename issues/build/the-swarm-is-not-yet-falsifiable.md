@@ -172,8 +172,8 @@ closed issue is a deletion, verified against this week's own history: the
 two i8042 issue files the ledger's seed rows name as closed by PR #149 and PR
 #143, confirming the convention holds in practice as well as in the README's
 prose. Since `2026-08-15` (a rolling week ending today): **375 `A` (added)
-events, 374 unique file paths (one path, `a-killed-peer-still-takes-a-write.md`,
-added twice in the window — filed, closed, refiled), across 45 commits; 29
+events, 374 unique file paths (one kernel path added twice in the window —
+filed, closed, refiled; it has since closed again), across 45 commits; 29
 `D` (deleted) events, 29 unique paths, across 18 commits** — plus this
 session's own 3 deletions and 1 addition, not yet reflected in the numbers
 below since they land in the commit this reading is part of.<sup>4</sup> The
