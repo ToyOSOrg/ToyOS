@@ -810,35 +810,6 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         self.delete_by_name(name)
     }
 
-    /// Delete all entries whose name starts with the given prefix.
-    pub fn delete_prefix(&mut self, prefix: &str) -> Result<(), FsError> {
-        let entries = btree::collect_all(&self.io, self.sb.root_node)?;
-
-        for entry in &entries {
-            // An entry that does not decode cannot be matched against the
-            // prefix, so it is not one of the entries this was asked to remove.
-            let Ok(leaf) = self.decode(&entry.value) else { continue };
-            if !leaf.name().starts_with(prefix) {
-                continue;
-            }
-            // Remove first, free second, and free nothing when the removal did
-            // not happen: an entry that survives still names its blocks, and
-            // handing them to the next file gives two entries one block.
-            //
-            // `collect_all` visits every child; a descent takes the one path
-            // `find_child` chooses. In a tree whose child keys agree with the
-            // keys beneath them those two find the same entries, so a removal
-            // that comes back empty is the disk contradicting itself.
-            if btree::delete(&self.io, self.sb.root_node, &entry.key)?.is_none() {
-                return Err(FsError::CorruptedNode(self.sb.root_node));
-            }
-            for ext in leaf.extents() {
-                self.alloc.free_range(&self.io, BlockNum::new(ext.start_block), ext.block_count)?;
-            }
-        }
-        Ok(())
-    }
-
     /// Sync filesystem state to disk.
     pub fn sync(&mut self) -> Result<(), FsError> {
         self.sb.free_blocks = self.alloc.free_blocks;
@@ -1098,40 +1069,6 @@ mod tests {
         u64::from_le_bytes(raw[off..off + 8].try_into().unwrap())
     }
 
-    /// A leaf with no entries. Legal, and a descent that reaches it answers
-    /// "not here" for every key there is.
-    fn craft_empty_leaf(raw: &mut [u8], block: u64) {
-        let at = block as usize * BLOCK_SIZE;
-        raw[at..at + BLOCK_SIZE].fill(0);
-        raw[at..at + 4].copy_from_slice(&NODE_MAGIC);
-        seal_node(raw, block);
-    }
-
-    /// An interior node at `block` whose children are `(key, block)` in order.
-    fn craft_children(raw: &mut [u8], block: u64, children: &[(Key, u64)]) {
-        let at = block as usize * BLOCK_SIZE;
-        raw[at..at + BLOCK_SIZE].fill(0);
-        raw[at..at + 4].copy_from_slice(&NODE_MAGIC);
-        raw[at + 8..at + 10].copy_from_slice(&1u16.to_le_bytes());
-        raw[at + 10..at + 12].copy_from_slice(&(children.len() as u16).to_le_bytes());
-        for (i, (key, child)) in children.iter().enumerate() {
-            let entry = at + 32 + i * 32;
-            raw[entry..entry + 8].copy_from_slice(&key.name_hash.to_le_bytes());
-            raw[entry + 8..entry + 16].copy_from_slice(&key.name_hash_hi.to_le_bytes());
-            raw[entry + 16..entry + 18].copy_from_slice(&(key.key_type as u16).to_le_bytes());
-            raw[entry + 18..entry + 22].copy_from_slice(&8u32.to_le_bytes());
-            raw[entry + 24..entry + 32].copy_from_slice(&child.to_le_bytes());
-        }
-        seal_node(raw, block);
-    }
-
-    fn mark_used(raw: &mut [u8], bitmap_block: u64, blocks: &[u64]) {
-        let at = bitmap_block as usize * BLOCK_SIZE;
-        for &b in blocks {
-            raw[at + (b / 8) as usize] |= 1 << (b % 8);
-        }
-    }
-
     /// Rewrite the root leaf as one `victim.txt` entry with the type, size and
     /// extents given, and reseal it.
     ///
@@ -1200,76 +1137,6 @@ mod tests {
             fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
             "deleting a name that does not exist destroyed the entry it collided with",
         );
-    }
-
-    #[test]
-    fn a_delete_prefix_that_removed_nothing_frees_nothing() {
-        // The tree's shape is on the disk, so a child key can disagree with
-        // the keys below it. `collect_all` visits every child and finds the
-        // entry; a descent takes one path and does not. The entry survives —
-        // and must keep its blocks, or the allocator hands them to the next
-        // file while something still points at them.
-        let blocks = 128;
-        let raw = image(blocks);
-        let victim: Vec<u64> = mount(raw.clone())
-            .expect("mount")
-            .file_extents("victim.txt")
-            .expect("file_extents")
-            .expect("victim.txt is on the volume")
-            .0
-            .iter()
-            .map(|e| e.start_block)
-            .collect();
-
-        let mut raw = raw;
-        let leaf = read_u64_at(&raw, 24);
-        let (empty_leaf, new_root) = (leaf + 2, leaf + 3);
-        craft_empty_leaf(&mut raw, empty_leaf);
-        craft_children(
-            &mut raw,
-            new_root,
-            &[
-                (Key::ZERO, empty_leaf),
-                (Key { name_hash: u64::MAX, name_hash_hi: u64::MAX, key_type: KeyType::Symlink }, leaf),
-            ],
-        );
-        mark_used(&mut raw, 1, &[empty_leaf, new_root]);
-        let free = read_u64_at(&raw, 44) - 2;
-        patch_superblock(&mut raw, blocks, 44, free);
-        patch_superblock(&mut raw, blocks, 36, new_root + 1);
-        patch_superblock(&mut raw, blocks, 24, new_root);
-
-        let mut fs = mount_rw(raw).expect("mount");
-        assert!(
-            fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
-            "the craft did not leave victim.txt on the volume",
-        );
-        assert!(
-            fs.find_by_name("victim.txt").expect("search").is_none(),
-            "the craft is not the shape under test: a descent still reaches victim.txt",
-        );
-
-        let free_before = fs.alloc.free_blocks;
-        match fs.delete_prefix("victim") {
-            Err(FsError::CorruptedNode(_)) => {}
-            other => panic!("expected CorruptedNode, got {other:?}"),
-        }
-        assert_eq!(
-            fs.alloc.free_blocks, free_before,
-            "delete_prefix freed the blocks of an entry it did not remove",
-        );
-
-        fs.create("other.bin", &[0xAA; BLOCK_SIZE], 0).expect("create");
-        let (other, _) = fs.file_extents("other.bin").expect("file_extents").expect("other.bin");
-        for ext in &other {
-            for i in 0..ext.block_count as u64 {
-                assert!(
-                    !victim.contains(&(ext.start_block + i)),
-                    "other.bin was given block {} — victim.txt still names it",
-                    ext.start_block + i,
-                );
-            }
-        }
     }
 
     #[test]
