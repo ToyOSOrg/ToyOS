@@ -98,8 +98,7 @@ paragraph.
 **The three witnesses above are quantities that settle. This one is not.**
 `kill_while_blocked` kills a child parked in a blocking read and asks the peer
 end whether it knows; the answer must be `NotFound` and is `Ok(22)`.
-`issues/kernel/a-killed-peer-still-takes-a-write.md` carries the reproduction,
-and the chain is this queue end to end: the victim's handle goes at
+The chain is this queue end to end: the victim's handle goes at
 `ops::close_all`, `HandleEntry`'s drop queues the object, and the object's
 `on_zero_handles` — `PipeReadEnd`'s or `ConnectionEnd`'s — is the only thing
 that calls `Held::release` and gives the `PipeReader` back. `pipe.readers` is
@@ -111,6 +110,43 @@ the two arms that ask a peer; **4 of 5** with
 the syscall-exit drain removed, which stages the same state a stolen batch
 leaves. The trace is a kill returning on cpu0 at 0.542 s and the victim's read
 end being released on cpu1 at 0.544 s.
+
+**The two arms are one mechanism, and the session that measured it says so.**
+`kill_while_blocked` asks the question twice — `kill_while_blocked.rs:152`, *a
+pipe whose only reader was killed mid-read still took a write*, and `:178`, *a
+connection whose peer was killed mid-read still took a write*, `left: Ok(22)`
+`right: Err(NotFound)`. The two reds in 53 were **one on each arm**, and on the
+second boot arm 1 had already printed `pipe: the write end learned its reader had
+gone` before arm 2 failed: which end the steal catches is luck, not which path is
+faster. Arms 1 and 2 are separate children and separate kills, so one passing
+beside the other says nothing about either path.
+
+**The whole session, in order, because no one row of it is the rate.** On
+`e4c2c8ff` (`main`'s tip, unmodified): 5 one-name runs → 1 red; the `toyos-mixer`
+branch at `47892284` with main merged in, 5 runs → 0; then 53 one-name runs → 2;
+4 full fast tiers of 272 tests → 0; and **20 one-name runs on a kernel carrying
+one `log!` per release → 0**. That last row is worth as much as the first two:
+one log line per release closes the window, so the residual between the kill
+returning and the peer's write is of the order of a few log lines' work. No count
+here is its real rate — a race shows up more often beside 271 other guests than
+in a one-test run, and the four quiet full tiers are four, against a first
+sighting that was inside one.
+
+**Two things the first filing guessed, and neither survived.** It is not that
+"the pipe path publishes the death before the connection path does" — both arms
+reded. And it is not new: `git diff 625afce1 e4c2c8ff -- kernel/` is comments,
+doc comments and one `#![warn(clippy::undocumented_unsafe_blocks)]` attribute,
+no behaviour change anywhere; `ZERO_QUEUE` and `ZERO_PENDING` arrived with
+`6c39b1b4` and this test with `8f74272d`, so the shape has been reachable since
+the queue existed and no landing is a suspect.
+
+**`kill_while_blocked`'s `ALONE … GREEN` must not be read as the harness reads
+it.** That line says the name's `Sched::Parallel` is wrong, which is the wrong
+conclusion for this defect and is already ruled out for its sibling:
+`src/redlist.rs`'s `handle_lifetime` row records that `Sched::Serial` would have
+retired nothing. What is owed at the name is that its rows stay, so a landing
+gate that hits it has a rate to check the red against and nobody re-runs it away
+or re-classifies its `Sched`.
 
 So the sentence below is no longer the whole of it: this is a *semantic* event
 riding a release the caller cannot wait for, which is what

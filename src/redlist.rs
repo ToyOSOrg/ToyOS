@@ -2582,7 +2582,7 @@ pub const KNOWN_RED: &[Red] = &[
     // ---------------------------------------------------------------------
     // `wt/toyos-killwrite`, dev host, 2026-08-20, on `e4c2c8ff` — `main`'s own
     // tip, unmodified. The row
-    // `issues/kernel/a-killed-peer-still-takes-a-write.md` said was owed: the
+    // `issues/kernel/deferred-release-outlives-its-syscall.md` said was owed: the
     // name answered `NOT ON THE LIST` when that file was written, so a landing
     // gate that hit it had nothing to check the red against. Two rows, because
     // one name measured on two instruments in one session is two measurements.
@@ -2603,7 +2603,7 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "53 × `cargo test --test toyos-build -- kill_while_blocked` in one session, the \
                    host reporting 1.68x–2.70x width throughout; the same session staged the \
                    mechanism at 4 of 5 by removing the syscall-exit drain",
-        source: "issues/kernel/a-killed-peer-still-takes-a-write.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-20",
     },
     Red {
@@ -2617,7 +2617,7 @@ pub const KNOWN_RED: &[Red] = &[
                runs is not a denominator that reaches a rate of two in fifty-three",
         evidence: "4 × `cargo test --test toyos-build`, same tree and session as this name's \
                    dev-host-alone rate",
-        source: "issues/kernel/a-killed-peer-still-takes-a-write.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-20",
     },
     // ---------------------------------------------------------------------
