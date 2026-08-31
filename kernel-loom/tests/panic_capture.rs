@@ -127,7 +127,6 @@ fn a_reader_and_refresh_never_overlap_on_the_snapshot() {
             })
         };
         let refresh = {
-            let (latch, access, snapshot) = (latch.clone(), access.clone(), snapshot.clone());
             thread::spawn(move || {
                 assert_eq!(latch.claim(2), Claim::Reentrant);
                 if access.begin_refresh() {
@@ -175,7 +174,6 @@ fn discard_cannot_admit_a_writer_under_a_fatal_reader() {
             })
         };
         let next = {
-            let (latch, access, snapshot) = (latch.clone(), access.clone(), snapshot.clone());
             thread::spawn(move || {
                 if latch.claim(3) == Claim::Fresh && access.begin_capture() {
                     snapshot.with_mut(|p| unsafe { (*p)[0] = 3 });
