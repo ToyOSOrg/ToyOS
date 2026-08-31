@@ -49,6 +49,7 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
         "pop rdx",
         "pop rcx",
         "pop rax",
+        // #VC/#SX (0x1D/0x1E) iretq into their unpopped error code — unreachable without SEV-ES.
         "iretq",
         took = sym took,
     );

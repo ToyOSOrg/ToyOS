@@ -602,8 +602,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("lapic_spurious_vector", Sched::Parallel, Tier::Fast),
-    // One boot with both stuck-device actuators armed; carrying
-    // `UNMEASURED_MS` until the shards price it.
+    // One boot with both stuck-device actuators armed; `UNMEASURED_MS` until the shards price it.
     ("driver_wait_refused", Sched::Parallel, Tier::Fast),
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
