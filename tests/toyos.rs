@@ -12532,8 +12532,7 @@ fn run_machine_test(
             }
 
             // **The verdict is QEMU's own scanout, not the guest's account of
-            // itself**: the device renders what the driver's SET_SCANOUT told
-            // it to, and the dump's header is that size.
+            // itself**: the dump's header is the size SET_SCANOUT named.
             let before = qemu.screendump();
             let result = qemu.run_test("test_rs_gpu_set_resolution", Duration::from_secs(30));
             if let Some(err) = &result.error {

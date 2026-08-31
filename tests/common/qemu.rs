@@ -1085,9 +1085,8 @@ pub enum Profile {
     VirtioNetNoMsix,
     Gop,
     /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
-    /// machine where a mode change can succeed. Everywhere else the new
-    /// framebuffer's allocation, the old one's release, the registry update
-    /// and the fresh scanout handles are behind a `NotSupported`.
+    /// machine where a mode change can succeed rather than answering
+    /// `NotSupported` ahead of everything a resize does.
     VirtioGpu,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the

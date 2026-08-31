@@ -117,8 +117,7 @@ impl FakePort {
     }
 
     /// The device leaves whatever the register says; detection drops only
-    /// where the port had it, so a port that already lost CCS raises no
-    /// second edge and its reset was not one a device was under.
+    /// where the port had it, so one that already lost CCS raises no edge.
     pub fn detach(&mut self) {
         self.present = false;
         if self.raw & CCS != 0 {
@@ -213,9 +212,8 @@ impl FakePort {
         self.raw |= PRC;
         if warm {
             self.raw |= WRC;
-            // §4.19.5's failure only lost *detection*; the warm retrain finds
-            // whatever is physically there, connect edge and all — so a device
-            // pulled while the retrain ran is not found.
+            // §4.19.5's failure lost *detection* only; the retrain finds
+            // whatever is physically there, connect edge and all.
             if self.present && self.raw & CCS == 0 {
                 self.raw |= CCS | CSC;
             }

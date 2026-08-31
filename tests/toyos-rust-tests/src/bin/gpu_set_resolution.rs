@@ -1,11 +1,9 @@
 //! A mode change that *succeeds*, which needs a display GOP is not: the new
-//! framebuffer's allocation, the old one's release, the fresh scanout objects
-//! and `device::set_framebuffer_info`'s update all live past the
-//! `NotSupported` every other machine in this suite answers with.
-//!
-//! The second claim is the point: what the call returned is the driver talking
-//! about itself, and what a fresh claim is told comes out of the registry the
-//! mode change had to update.
+//! framebuffer, the old one's release, the fresh scanout objects and
+//! `device::set_framebuffer_info`'s update all live past the `NotSupported`
+//! every other machine here answers with. The second claim is the point — what
+//! the call returned is the driver talking about itself, and what a fresh
+//! claim is told comes out of the registry the mode change had to update.
 
 use std::time::Duration;
 
@@ -14,9 +12,8 @@ use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
 use toyos_abi::syscall::{DeviceType, SyscallError, SYSCAP_LABEL};
 
-/// Smaller than the 1280x800 a virtio-gpu boots at, so the driver's
-/// "already this size" early return cannot answer for it, and small enough
-/// that the new framebuffer is a fresh allocation rather than the old one.
+/// Not the 1280x800 a virtio-gpu boots at, so the driver's "already this size"
+/// early return cannot answer for the call.
 const WANT: (u32, u32) = (800, 600);
 
 fn main() {
@@ -44,8 +41,7 @@ fn main() {
     // The new buffer reaches the device, which is what the host then reads.
     fb.present(0, 0, 0, 0).expect("present the new scanout");
 
-    // Released, so the next claim is a fresh one and its description comes out
-    // of the registry rather than out of this handle.
+    // Released, so the next description comes out of the registry.
     drop(fb);
     let again: FramebufferDev = reclaim(&cap);
     let told = again.info().expect("the second claim describes the display");
@@ -68,11 +64,9 @@ fn main() {
     println!("===GPU_RESOLUTION_OK===");
 }
 
-/// The claim again, once the release the last close *queued* has run.
-///
+/// The claim again, once the release the last close *queued* has run:
 /// `object::drain_zero_handles` says a syscall may return to userland before
-/// its own releases finish, so `AlreadyExists` here is that queue and not
-/// another holder.
+/// its own releases finish, so `AlreadyExists` is that queue, not a holder.
 fn reclaim(cap: &SysCap) -> FramebufferDev {
     for _ in 0..RECLAIM_TRIES {
         match cap.claim(DeviceType::Framebuffer) {
@@ -87,7 +81,7 @@ fn reclaim(cap: &SysCap) -> FramebufferDev {
     );
 }
 
-/// Five seconds in 10 ms steps, over a queue drained at every syscall exit and
-/// every scheduler pass: exhausting it is a defect, not a slow host.
+/// Five seconds over a queue drained at every syscall exit: exhausting it is a
+/// defect, not a slow host.
 const RECLAIM_TRIES: u32 = 500;
 const RECLAIM_STEP: Duration = Duration::from_millis(10);
