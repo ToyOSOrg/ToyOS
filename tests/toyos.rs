@@ -6149,31 +6149,23 @@ const SHELL_TYPE_TRIES: usize = 3;
 /// What the guest offers as proof it took the last burst out of the device
 /// before the next one goes in.
 ///
-/// **The two surfaces cannot answer the same question, which is why this is a
-/// choice and not a flag.** `/bin/console` draws every echoed character onto
-/// glass this harness decodes, so the row under its prompt *is* the guest
-/// having read those bytes out of port 0x60 — the evidence
-/// [`console_type_line`] has always paced on. A windowed shell has no such row:
-/// `/bin/terminal` renders into a window at an offset the compositor picks, and
-/// the mirror both surface owners keep to their own stdout is line-buffered by
-/// std, so nothing of a line under construction reaches the console at all.
-/// What it can answer with instead is the kernel's own drain accounting, which
-/// is the device path rather than the surface — and which counts the *bytes*
-/// the queue is measured in, where an echoed character stands for two of them
-/// or for four.
+/// **A choice with no default, because the two surfaces cannot answer the same
+/// question.** `/bin/console` draws each echoed character onto glass this
+/// harness decodes; a windowed shell renders into a window the compositor
+/// places and mirrors to a line-buffered stdout, so nothing of a line under
+/// construction reaches the console at all.
 enum Drained {
     /// The decoded input row, for a shell behind `/bin/console`.
     Panel(screen::ConsoleFont),
-    /// The kernel's drain report, for a shell behind a compositor. Needs the
-    /// boot to arm `i8042-trace`, and [`shell_type_once`] refuses one that did
-    /// not rather than pacing on nothing.
+    /// The kernel's drain report, for a shell behind a compositor: the device
+    /// path rather than the surface, counting the bytes the queue is measured
+    /// in. Needs `i8042-trace`, and [`shell_type_once`] refuses a boot without
+    /// it rather than pacing on nothing.
     Bytes,
 }
 
 /// Set-1 bytes the kernel reports having taken off the i8042 in `said`.
-///
-/// `bytes=` and not `keys=`: the queue this paces against holds bytes, and the
-/// two disagree by the shift transitions that bracket a capital.
+/// `bytes=` and not `keys=`: the queue this paces against holds bytes.
 fn i8042_drained(said: &str) -> usize {
     said.lines()
         .filter_map(|line| line.split("i8042: drain bytes=").nth(1))
@@ -6182,26 +6174,19 @@ fn i8042_drained(said: &str) -> usize {
         .sum()
 }
 
-/// Wait until the guest has taken everything sent so far on this line out of
-/// the device, and say which burst it never accounted for if it has not.
-///
-/// `base` is whatever a previous attempt left in the shell's line editor: the
-/// next burst lands after it, so the echo has to begin with both. Reading it
-/// per attempt is what lets the retype be checked with `starts_with` — a
-/// panel something painted behind the console's back owns the rest of the row,
-/// so what is *after* the input may never be compared against.
+/// What has gone out on this line so far, which is what an acknowledgement is
+/// checked against. `base` is whatever a previous attempt left in the shell's
+/// editor: the next burst lands after it, so the echo has to begin with both.
 struct Sent<'a> {
-    /// Where on the console stream this attempt began.
     mark: usize,
-    /// Set-1 bytes of this line put on the wire so far.
     bytes: usize,
-    /// What the shell's editor already held when the attempt began.
     base: &'a str,
-    /// This line's characters sent so far.
     typed: &'a str,
-    /// The burst just sent, which is what a refusal names.
     burst: &'a str,
 }
+
+/// Wait until the guest has taken everything sent so far out of the device, and
+/// name the burst it never accounted for if it has not.
 
 fn await_drained(
     qemu: &mut QemuInstance,
@@ -6251,28 +6236,16 @@ fn await_drained(
 /// **make the guest say what it received before the caller asserts on what it
 /// did**.
 ///
-/// **Delivery is paced by the guest and by nothing else.** [`QEMU_PS2_QUEUE`]
-/// holds sixteen set-1 bytes and drops the seventeenth silently, one byte at a
-/// time, and this used to put a whole line in flight against it: three bursts
-/// and an Enter, 44 bytes for the handshake nonce alone, sent back to back
-/// inside one QMP session. A QMP reply proves QEMU's main loop ran; it never
-/// proves a vCPU read port 0x60, which is the only thing that empties the
-/// queue. So the bound was a bet on the guest being scheduled, which on a
-/// twelve-wide shard it is not.
+/// **Bounding each batch is not bounding what is in flight.** Every burst waits
+/// for [`Drained`] before the next goes out, so each starts against a queue the
+/// guest has emptied. A QMP reply proves QEMU's main loop ran and never that a
+/// vCPU read port 0x60, which is the only thing that empties it.
 ///
-/// **Enter is the byte the arithmetic condemned.** It goes out last, behind
-/// every one of the line's bytes, and the verdict below is the shell's echo —
-/// which reaches the console only when a newline flushes the surface owner's
-/// line-buffered stdout. A line whose Enter was dropped therefore echoes
-/// *nothing at all* rather than something mangled, and the next attempt types
-/// into a shell whose editor still holds the fragment. That is the shape of
-/// `10 typed lines and none of them came back`, and it is why a byte-level
-/// truncation never explained it.
-///
-/// Now every burst waits for [`Drained`] before the next one goes out, so each
-/// starts against a queue the guest has emptied and the Enter is behind at most
-/// one queue's worth. The **verdict** is still the guest's own echo of the
-/// whole line, read back before anything below asserts on what the command did.
+/// Enter goes out last, behind all of the line's bytes, and the verdict is the
+/// shell's echo — which reaches the console only when a newline flushes the
+/// surface owner's line-buffered stdout. So a dropped Enter echoes *nothing*
+/// rather than something mangled, and the retype lands after the fragment the
+/// last attempt left in the editor.
 ///
 /// Read through [`qemu::ConsoleStream`] rather than by draining, because the
 /// caller owns the capture: a wait that consumed lines here would take the
@@ -6627,9 +6600,8 @@ fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         // pipes back to each other, and on two cores most of that is ordered
         // by having nowhere else to run.
         smp: 8,
-        // The one channel a windowed shell has for saying it took a burst out
-        // of the device: `shell_type_once` paces on the kernel's drain report
-        // here, and refuses a boot that did not arm it.
+        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
+        // without it.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
@@ -6820,18 +6792,15 @@ fn desktop_typing_damage() -> Result<(), String> {
         profile: qemu::Profile::Metal,
         qmp: true,
         ready_marker: "compositor: ready",
-        // The one channel a windowed shell has for saying it took a burst out
-        // of the device: `shell_type_once` paces on the kernel's drain report
-        // here, and refuses a boot that did not arm it.
+        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
+        // without it.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    // No panel row to read: the terminal renders into a window the compositor
-    // places and mirrors to a line-buffered stdout, so the kernel's own drain
-    // report is the only per-burst answer this surface can give.
+    // No panel row under a compositor; the kernel's drain report is the answer.
     let ack = Drained::Bytes;
     if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!(
@@ -6931,9 +6900,7 @@ fn console_locale_detect() -> Result<(), String> {
     };
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    // The panel, because this is the surface that has one: every character the
-    // shell echoes is drawn on glass this harness decodes, and a drawn one is a
-    // byte the guest has already read out of port 0x60.
+    // The panel, because this is the surface that has one.
     let ack = Drained::Panel(screen::ConsoleFont::load());
     if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!("{why}\nnothing typed at /bin/console reached a shell:\n{log}"));
@@ -7013,18 +6980,15 @@ fn desktop_locale_detect() -> Result<(), String> {
         profile: qemu::Profile::Metal,
         qmp: true,
         ready_marker: "compositor: ready",
-        // The one channel a windowed shell has for saying it took a burst out
-        // of the device: `shell_type_once` paces on the kernel's drain report
-        // here, and refuses a boot that did not arm it.
+        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
+        // without it.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    // No panel row to read: the terminal renders into a window the compositor
-    // places and mirrors to a line-buffered stdout, so the kernel's own drain
-    // report is the only per-burst answer this surface can give.
+    // No panel row under a compositor; the kernel's drain report is the answer.
     let ack = Drained::Bytes;
     if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!(
@@ -7107,9 +7071,8 @@ fn desktop_audio_client() -> Result<(), String> {
         smp: 8,
         qmp: true,
         ready_marker: "compositor: ready",
-        // The one channel a windowed shell has for saying it took a burst out
-        // of the device: `shell_type_once` paces on the kernel's drain report
-        // here, and refuses a boot that did not arm it.
+        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
+        // without it.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
@@ -7120,9 +7083,7 @@ fn desktop_audio_client() -> Result<(), String> {
     const NULL_LINE: &str = "soundd: no audio device, presenting a null sink";
     await_marker(&mut qemu, &mut log, NULL_LINE, "soundd to present a null sink")
         .map_err(|why| format!("{why}\n{log}"))?;
-    // No panel row to read: the terminal renders into a window the compositor
-    // places and mirrors to a line-buffered stdout, so the kernel's own drain
-    // report is the only per-burst answer this surface can give.
+    // No panel row under a compositor; the kernel's drain report is the answer.
     let ack = Drained::Bytes;
     if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!(
@@ -7268,18 +7229,15 @@ fn blocked_dump() -> Result<(), String> {
         smp: 8,
         qmp: true,
         ready_marker: "compositor: ready",
-        // The one channel a windowed shell has for saying it took a burst out
-        // of the device: `shell_type_once` paces on the kernel's drain report
-        // here, and refuses a boot that did not arm it.
+        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
+        // without it.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    // No panel row to read: the terminal renders into a window the compositor
-    // places and mirrors to a line-buffered stdout, so the kernel's own drain
-    // report is the only per-burst answer this surface can give.
+    // No panel row under a compositor; the kernel's drain report is the answer.
     let ack = Drained::Bytes;
     if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!(
