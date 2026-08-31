@@ -37,3 +37,21 @@ where its refusals are behind it — and `disable_bus_master` on the bind
 refusal paths that currently walk away armed. Each driver's trust point is
 its own design decision; none of the three has a crafted-config selftest the
 way virtio does, so the checks owe their own instruments.
+
+The tree already states the standard this violates: `virtio.rs:775-776`
+arms bus mastering "only after the chain parses: a refused device keeps no
+DMA," and disables it (`:780`) on its one config-parse refusal path before
+ever arming it. `nvme.rs` has no `disable_bus_master` call anywhere (`rg -n
+disable_bus_master kernel/src/` finds the definition in `pci.rs:156` and its
+one call in `virtio.rs:780`, nothing in `nvme.rs`) — so its later bind
+refusals (`nvme.rs:772-778`) walk away armed exactly as this file already
+says. Exposure is minimal today: no doorbell is rung and the queues sit in
+leaked-thus-live memory, not reissued.
+
+**Exit path, per the #343 landing that declined this fix (`2bceaadb`,
+"NOT LANDED"):** the mandated per-device negative control needs three
+distinct instruments this tree does not yet have — xHCI already has a ready
+refusal boot (`MetalXhciNoIrq`), but hda needs an arm-interrupt-fail actuator
+and nvme an identify-fail actuator, plus a COMMAND-register / QMP `info pci`
+oracle to observe the bit. A boot-critical three-driver change was not worth
+landing without them.

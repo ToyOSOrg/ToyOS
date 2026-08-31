@@ -42,3 +42,14 @@ a rule for the processes that already have it mapped. Both belong to whoever
 owns the loader. The measurement above was taken while scoping the move of the
 loader out to Ring 3, 2026-08-17, which would delete this cache rather than
 bound it.
+
+**The path-as-key also double-caches across a spelling the loader itself
+introduces.** `load_needed_libs` (`kernel/src/loader/mod.rs:679-752`) tries
+the executable's own directory first and `/lib` second (`:684`, `:705`,
+`:721`). On the `/lib` fallback it loads through the fallback path (`:722`)
+but caches the result under the exe-dir spelling it never found (`:742`,
+`cache_loaded_lib(&lib_path, ..)` where `lib_path` is still the `:705`
+exe-dir string). A later `dlopen("/lib/<name>")` of the same library misses
+`try_clone_cached` under that spelling, loads and caches a second physical
+mapping, and only then does the `/lib` spelling itself dedup. Provenance:
+adversarial review of PR #343.
