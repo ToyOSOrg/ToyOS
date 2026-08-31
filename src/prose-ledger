@@ -472,6 +472,7 @@ toyos-fat32/tests/common/mod.rs 105 0
 toyos-fat32/tests/host_read.rs 26 0
 toyos-fat32/tests/host_write.rs 86 1
 toyos-fat32/tests/hostile.rs 193 3
+toyos-fat32/tests/replace_rename.rs 2 0
 toyos-gpt/src/crc32.rs 13 0
 toyos-gpt/src/guid.rs 19 0
 toyos-gpt/src/lib.rs 168 0
