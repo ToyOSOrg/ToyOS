@@ -218,7 +218,7 @@ fn main() {
         let began = Instant::now();
         let mut refused: Option<(Step, std::io::ErrorKind, String)> = None;
         for record in batch.iter() {
-            let line = format!("{} {record}\n", stamp(boot_local, record.at_ns));
+            let line = format!("{}\n", record.tagged(&stamp(boot_local, record.at_ns)));
             if let Err(e) = v.write(line.as_bytes()) {
                 refused = Some((Step::Append, e.kind(), e.to_string()));
                 break;
@@ -374,11 +374,9 @@ fn boot_stamp() -> (Option<String>, Option<u64>, String) {
 /// A record's wall-clock stamp: the local second the machine booted at, plus
 /// the record's own monotonic offset.
 ///
-/// **The record's `at_ns` stays in the line too** — `LogRecord`'s `Display`
-/// renders it, and here is why: this program writes a *prefix* and the body is
-/// byte-identical to what the console and the panel carry. So `/log` holds both
-/// clocks, and a line in the file can be matched against the same line on the
-/// wire without arithmetic.
+/// **The record's `at_ns` stays in the line too** — the stamp goes through
+/// `LogRecord::tagged`, the one formatter, so `/log` holds both clocks and a
+/// line in the file matches the same record on the wire without arithmetic.
 fn stamp(boot_local: Option<u64>, at_ns: u64) -> String {
     match boot_local {
         Some(base) => format!("{}", Civil::from_unix_secs(base + at_ns / 1_000_000_000)),
