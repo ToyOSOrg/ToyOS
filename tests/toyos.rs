@@ -793,10 +793,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One `LOCALE_WIZARD` boot for the pair since the drainer was made
     // runnable at commit — the boot-apiece and the injected drain keys it took
     // to share one were both the closed log-ring lag. Adjacent because
-    // `group_of` makes adjacency load-bearing; the carrier priced 7,055 ms
-    // and the rider 149 ms on the shared boot, so both stay Fast.
-    ("locale_detect", Sched::Parallel, Tier::Fast),
-    ("locale_detect_unrecognized", Sched::Parallel, Tier::Fast),
+    // `group_of` makes adjacency load-bearing; the carrier straddles the
+    // fast line run to run, so the pair is Nightly — the rider by its
+    // `RidesTheBootOf` row, the collateral that record exists to name.
+    ("locale_detect", Sched::Parallel, Tier::Nightly),
+    ("locale_detect_unrecognized", Sched::Parallel, Tier::Nightly),
     // The wizard on the two surfaces the machine actually has, rather than on
     // the stand-in `locale_gate` is. Each costs a boot of a different image.
     ("console_locale_detect", Sched::Parallel, Tier::Fast),
@@ -929,10 +930,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The five RTC/firmware shapes, one kernel build and one boot each. Five
     // registrations because the artifact memo builds one kernel per feature
     // set anyway, so the split costs nothing and the parallel phase gets five
-    // jobs it can place instead of one serial five-boot job it cannot. The
-    // last two priced inside the margin band, so they sit Nightly by the
+    // jobs it can place instead of one serial five-boot job it cannot. Three
+    // priced inside the margin band across two runs and sit Nightly by the
     // straddler rule; their relegation rows carry the prices.
-    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Fast),
+    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Nightly),
     ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Fast),
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
     ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),

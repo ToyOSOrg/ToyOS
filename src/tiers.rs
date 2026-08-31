@@ -271,6 +271,31 @@ pub const RELEGATED: &[Relegated] = &[
                  doubled since its return.",
     },
     Relegated {
+        test: "locale_detect",
+        ci_ms: 9_959,
+        why: Why::Cost,
+        guards: "The wizard answered over QMP on the stand-in `locale_gate`, swiss-german \
+                 identified in two presses and the surface acting on the config it wrote — \
+                 the `LOCALE_WIZARD` shared boot's carrier, priced 7,055 and 9,959 ms on \
+                 two consecutive hosted runs, which is the straddle this variant exists to \
+                 hold. What still runs per pull request: `console_locale_detect` and \
+                 `desktop_locale_detect` carry the same wizard to the same verdict on the \
+                 two surfaces the machine actually has, so only the stand-in configuration \
+                 moves — and its rider goes with the boot, the row below.",
+    },
+    Relegated {
+        test: "locale_detect_unrecognized",
+        ci_ms: 160,
+        why: Why::RidesTheBootOf("locale_detect"),
+        guards: "The wizard's negative control in the guest — presses no layout agrees \
+                 with must end in `detect: Unrecognized` and never in a layout applied — \
+                 160 ms riding the `LOCALE_WIZARD` boot, relegated only because its \
+                 carrier is. What still runs per pull request: `toyos-keymap`'s host suite \
+                 (`tests/detect.rs`) drives the same decision to `Step::Unrecognized`, so \
+                 the verdict logic keeps a per-PR gate and only the in-guest refusal \
+                 moves.",
+    },
+    Relegated {
         test: "log_partition_identity",
         ci_ms: 9_516,
         why: Why::Cost,
@@ -391,10 +416,21 @@ pub const RELEGATED: &[Relegated] = &[
                  stale `syscall_rip`, and usbd's kills the thread and the machine boots — \
                  both branches of `sched::kthread`'s table, each a boot that dies or \
                  recovers on purpose, which is the pair's whole cost. What still runs per \
-                 pull request: `klogd_hosted` keeps the spawn half Fast at 4,941 ms — all \
+                 pull request: `klogd_hosted` keeps the spawn half Fast at 5,674 ms — all \
                  three rows on the wire with the process table naming them — and every \
                  boot's console output is klogd's drain, so the thread starving or dying \
                  is visible in any test that reads a line.",
+    },
+    Relegated {
+        test: "wall_clock_rtc_dead",
+        ci_ms: 8_070,
+        why: Why::Cost,
+        guards: "A dead RTC — the update flag never clearing — still boots, still logs, \
+                 names its file `unknown-00.log`, and refuses userland with `wall-clock: \
+                 no epoch` instead of serving 1970. What still runs per pull request: \
+                 `wall_clock_rtc_unstable` (7,805 ms, Fast) walks the same refusal path \
+                 for the no-two-reads-agree cause, so the refusal machinery keeps a per-PR \
+                 gate and only the dead-flag cause moves.",
     },
     Relegated {
         test: "wall_clock_century_register",
@@ -403,7 +439,7 @@ pub const RELEGATED: &[Relegated] = &[
         guards: "The century register's *contents* widening the year: staged 0x21, this \
                  boot's log file must be named in 2133, so a kernel reading a fixed 2000 \
                  shows up in the one digit pair nothing else moves. What still runs per \
-                 pull request: `wall_clock_no_century` (7,187 ms, Fast) gates that the \
+                 pull request: `wall_clock_no_century` (6,987 ms, Fast) gates that the \
                  FADT's answer is what decides, and `wall_clock_file` names its file off \
                  the same decoder every run.",
     },
