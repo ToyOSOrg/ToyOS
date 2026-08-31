@@ -6187,7 +6187,6 @@ struct Sent<'a> {
 
 /// Wait until the guest has taken everything sent so far out of the device, and
 /// name the burst it never accounted for if it has not.
-
 fn await_drained(
     qemu: &mut QemuInstance,
     ack: &Drained,
