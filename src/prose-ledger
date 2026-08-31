@@ -188,7 +188,7 @@ kernel/src/time.rs 47 0
 kernel/src/tmpfs.rs 21 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
-kernel/src/user_ptr.rs 58 0
+kernel/src/user_ptr.rs 67 0
 kernel/src/vfs.rs 73 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
@@ -213,7 +213,7 @@ src/prosegate.rs 128 0
 src/qemu.rs 113 0
 src/redlist.rs 515 25
 src/soundfont.rs 133 0
-src/sourcegate.rs 207 1
+src/sourcegate.rs 216 1
 src/stamps.rs 3 0
 src/testargs.rs 97 0
 src/tiers.rs 338 26
@@ -391,7 +391,7 @@ toyos-abi/src/input.rs 29 0
 toyos-abi/src/lib.rs 31 0
 toyos-abi/src/log.rs 143 0
 toyos-abi/src/net.rs 11 0
-toyos-abi/src/ring.rs 124 0
+toyos-abi/src/ring.rs 128 0
 toyos-abi/src/syscall.rs 841 0
 toyos-abi/src/virtio_sound.rs 71 0
 toyos-cc/src/ast.rs 8 0

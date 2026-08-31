@@ -8,7 +8,12 @@
 //! copies are bounded by, in kernel memory; `RingHeader` holds only what
 //! userland reads. Nothing in the header is read back by the kernel — same
 //! rule `kernel/src/inbox.rs` states for its own tail.
+//!
+//! **The data region is never a `&[u8]` or `&mut [u8]`** — plain bytes in that
+//! mapping — so [`Src`] and [`Dst`] describe the copies instead. A reference
+//! over the *header* is sound and `header` takes one: one `AtomicU32`, atomics.
 
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const RING_WRITER_CLOSED: u32 = 1;
@@ -33,6 +38,68 @@ impl RingHeader {
 
     pub fn is_reader_closed(&self) -> bool {
         self.flags.load(Ordering::Acquire) & RING_READER_CLOSED != 0
+    }
+}
+
+/// One contiguous run of a ring's data region, handed to [`Ring::read`]'s sink:
+/// a pointer and a length, and no reference at all — the rule
+/// `kernel::user_ptr` already states for a user buffer, for the same reason.
+pub struct Src<'a> {
+    ptr: *const u8,
+    len: usize,
+    _scope: PhantomData<&'a ()>,
+}
+
+impl Src<'_> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The run's first byte. Raw, and it stays raw: see this type's doc.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Copy the whole run into `dst`, which must be exactly as long.
+    pub fn copy_to(&self, dst: &mut [u8]) {
+        assert_eq!(dst.len(), self.len, "a ring run copied into a {}-byte destination", dst.len());
+        // SAFETY: `Ring::read` built this run inside its own data region, and
+        // `dst` is an owned `&mut [u8]` of the same length — a reference, so it
+        // cannot alias the run.
+        unsafe { core::ptr::copy_nonoverlapping(self.ptr, dst.as_mut_ptr(), self.len) };
+    }
+}
+
+/// [`Src`] for [`Ring::write`]'s fill: the same pointer and length, in the
+/// other direction, and never a `&mut [u8]` for the same reason.
+pub struct Dst<'a> {
+    ptr: *mut u8,
+    len: usize,
+    _scope: PhantomData<&'a mut ()>,
+}
+
+impl Dst<'_> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.ptr
+    }
+
+    /// Copy `src`, which must be exactly as long, over the whole run.
+    pub fn copy_from(&mut self, src: &[u8]) {
+        assert_eq!(src.len(), self.len, "a {}-byte source copied into a ring run", src.len());
+        // SAFETY: as [`Src::copy_to`], mirrored.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr, self.len) };
     }
 }
 
@@ -134,11 +201,10 @@ impl Ring {
     /// Read up to `want` bytes, handing `sink` each contiguous run of them with
     /// its offset in the destination. Returns the number of bytes read.
     ///
-    /// The destination is described rather than passed because the kernel's is
-    /// user memory, and a `&mut [u8]` over a page userland can write is the
-    /// aliasing claim `kernel::user_ptr` exists to stop making. One or two runs,
-    /// never more: the second is the ring's own wrap.
-    pub fn read(&mut self, want: usize, mut sink: impl FnMut(usize, &[u8])) -> usize {
+    /// The run is a [`Src`] and not a `&[u8]`: the page is mapped into a
+    /// process writable. One or two runs, never more: the second is the ring's
+    /// own wrap.
+    pub fn read(&mut self, want: usize, mut sink: impl FnMut(usize, Src<'_>)) -> usize {
         let avail = self.available() as usize;
         if avail == 0 {
             return 0;
@@ -150,21 +216,13 @@ impl Ring {
 
         let first = count.min(cap - offset);
         // SAFETY: `offset < cap` and `first = count.min(cap - offset)`, so
-        // `data.add(offset)..+first` stays inside the `cap`-byte data
-        // region `data_ptr` computed, and the wrap slice `data..+(count -
-        // first)` does too since `count - first <= cap`. Handing `sink` a
-        // shared view of memory this same page's mapping lets another
-        // process write is this module's stated trust boundary (top-of-file
-        // doc comment): only `RingHeader.flags` is meant to race, and this
-        // struct's own cursors — kernel-side, never derived from the shared
-        // page — are what keep an adversarial write from becoming an
-        // out-of-bounds *kernel* access, not a claim that the data region
-        // itself is exclusive.
-        unsafe {
-            sink(0, core::slice::from_raw_parts(data.add(offset), first));
-            if first < count {
-                sink(first, core::slice::from_raw_parts(data, count - first));
-            }
+        // `data.add(offset)..+first` stays inside the `cap`-byte data region
+        // `data_ptr` computed, and the wrap run `data..+(count - first)` does
+        // too since `count - first <= cap`.
+        let (head, tail) = unsafe { (data.add(offset), data) };
+        sink(0, Src { ptr: head, len: first, _scope: PhantomData });
+        if first < count {
+            sink(first, Src { ptr: tail, len: count - first, _scope: PhantomData });
         }
 
         self.read_cursor = self.advance(self.read_cursor, count);
@@ -174,8 +232,8 @@ impl Ring {
     /// Write up to `want` bytes, asking `fill` for each contiguous run of them
     /// by its offset in the source. Returns the number of bytes written.
     ///
-    /// The mirror of [`Self::read`], and the same reason.
-    pub fn write(&mut self, want: usize, mut fill: impl FnMut(usize, &mut [u8])) -> usize {
+    /// The mirror of [`Self::read`], and the same reason for [`Dst`].
+    pub fn write(&mut self, want: usize, mut fill: impl FnMut(usize, Dst<'_>)) -> usize {
         let free = self.space() as usize;
         if free == 0 {
             return 0;
@@ -186,16 +244,11 @@ impl Ring {
         let data = self.data_ptr();
 
         let first = count.min(cap - offset);
-        // SAFETY: same bounds argument as `read`'s matching block — `offset
-        // < cap` and `first = count.min(cap - offset)` keep both slices
-        // inside the `cap`-byte data region. `_mut` over a page this
-        // process's own pipe peer can also write is the same documented
-        // trust boundary `read` relies on, not re-derived here.
-        unsafe {
-            fill(0, core::slice::from_raw_parts_mut(data.add(offset), first));
-            if first < count {
-                fill(first, core::slice::from_raw_parts_mut(data, count - first));
-            }
+        // SAFETY: the same bounds argument as `read`'s matching block.
+        let (head, tail) = unsafe { (data.add(offset), data) };
+        fill(0, Dst { ptr: head, len: first, _scope: PhantomData });
+        if first < count {
+            fill(first, Dst { ptr: tail, len: count - first, _scope: PhantomData });
         }
 
         self.write_cursor = self.advance(self.write_cursor, count);
@@ -265,11 +318,11 @@ mod tests {
     /// ordinary allocation, so describing it buys nothing.
     fn read_slice(ring: &mut Ring, buf: &mut [u8]) -> usize {
         let want = buf.len();
-        ring.read(want, |off, src| buf[off..off + src.len()].copy_from_slice(src))
+        ring.read(want, |off, src| src.copy_to(&mut buf[off..off + src.len()]))
     }
 
     fn write_slice(ring: &mut Ring, buf: &[u8]) -> usize {
-        ring.write(buf.len(), |off, dst| dst.copy_from_slice(&buf[off..off + dst.len()]))
+        ring.write(buf.len(), |off, mut dst| dst.copy_from(&buf[off..off + dst.len()]))
     }
 
     /// Byte at absolute stream position `pos`. Every aligned 16-byte group

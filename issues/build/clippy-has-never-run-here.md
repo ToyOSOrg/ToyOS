@@ -411,11 +411,11 @@ comparison's result live across a preempt-count change. No other `lock`-prefixed
 `asm!` in the kernel makes that claim — `arch/`'s entry stubs are `naked_asm!`
 with no options at all.
 
-Documenting `toyos-abi/src/ring.rs`'s nine unsafe blocks surfaced a real
+Documenting `toyos-abi/src/ring.rs`'s unsafe blocks surfaced a real
 open question about whether its `&[u8]`/`&mut [u8]` views alias a page
-userland can also write — filed as
-`issues/build/ring-rs-shared-slice-over-a-userland-writable-page.md` rather
-than guessed at here. Measuring `volatile_composites` (a `restriction` lint,
+userland can also write — filed rather than guessed at here, and since closed:
+they did, and `Ring::read`/`Ring::write` hand out a pointer and a length now.
+Measuring `volatile_composites` (a `restriction` lint,
 cherry-picked, not part of this pass's scope but caught while reading kernel
 driver code) found 10 genuine sites — filed as
 `issues/kernel/volatile-composites-on-mmio-dma-structs.md`, not fixed, because
