@@ -1084,6 +1084,10 @@ pub enum Profile {
     /// on a machine whose other devices were all fine.
     VirtioNetNoMsix,
     Gop,
+    /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
+    /// machine where a mode change can succeed rather than answering
+    /// `NotSupported` ahead of everything a resize does.
+    VirtioGpu,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -1455,6 +1459,11 @@ struct Shape {
     /// shape dimension exactly as a disk's is, and the tests that read pixels
     /// were all blind to the remainder until one profile had one.
     vgamem_mb: Option<u32>,
+    /// A display adapter of its own, beside `vga`. `None` is firmware's GOP,
+    /// which cannot change mode once boot services have exited — so there
+    /// `SYS_GPU_SET_RESOLUTION` answers `NotSupported` and everything past the
+    /// refusal is unexecuted.
+    gpu: Option<&'static str>,
     /// virtio-net, virtio-sound, and the console on virtio-serial.
     virtio: Virtio,
     /// The `-device` argument for each xHCI controller, port and slot counts
@@ -1601,6 +1610,7 @@ impl Profile {
             Self::Headless => Shape {
                 vga: "none",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Present,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1614,6 +1624,7 @@ impl Profile {
             Self::VirtioNetNoMsix => Shape {
                 vga: "none",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::NicWithoutMsix,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1627,6 +1638,23 @@ impl Profile {
             Self::Gop => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
+                virtio: Virtio::Present,
+                xhci: &[XHCI_DEFAULT],
+                storage_bus: "xhci.0",
+                usb: &["usb-kbd,bus=xhci.0"],
+                nvme_bytes: NVME_SMALL,
+                nvme_lba_bytes: NVME_LBA_DEFAULT,
+                usb_disks: &[],
+                hda: &[],
+                iommu: Some(IOMMU_DEFAULT),
+            },
+            Self::VirtioGpu => Shape {
+                // No VGA at all: firmware then publishes no GOP, and the one
+                // display the guest has is the one whose mode it can set.
+                vga: "none",
+                vgamem_mb: None,
+                gpu: Some("virtio-gpu-pci"),
                 virtio: Virtio::Present,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1640,6 +1668,7 @@ impl Profile {
             Self::Diskless => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1662,6 +1691,7 @@ impl Profile {
                 // which is the geometry the machine actually has and the one
                 // the 2048x2048 default could not express.
                 vgamem_mb: Some(8),
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1675,6 +1705,7 @@ impl Profile {
             Self::MetalNoUsb => Shape {
                 vga: "none",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[],
                 storage_bus: "",
@@ -1692,6 +1723,7 @@ impl Profile {
             Self::MetalUsb => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_WIDE],
                 storage_bus: "xhci.0",
@@ -1711,6 +1743,7 @@ impl Profile {
             Self::MetalDisk => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1724,6 +1757,7 @@ impl Profile {
             Self::NvmeWideSector => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1737,6 +1771,7 @@ impl Profile {
             Self::UsbDisk => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1750,6 +1785,7 @@ impl Profile {
             Self::UsbDisk4k => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1763,6 +1799,7 @@ impl Profile {
             Self::UsbDiskHuge => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1776,6 +1813,7 @@ impl Profile {
             Self::UsbDiskRefusedFirst => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1789,6 +1827,7 @@ impl Profile {
             Self::UsbDiskReadOnly => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1802,6 +1841,7 @@ impl Profile {
             Self::UsbDiskCrowd => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1821,6 +1861,7 @@ impl Profile {
             Self::MetalFullSpeed => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1834,6 +1875,7 @@ impl Profile {
             Self::MetalXhciSecond => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
                 storage_bus: "xhci1.0",
@@ -1853,6 +1895,7 @@ impl Profile {
             Self::MetalXhciBoth => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
                 storage_bus: "xhci.0",
@@ -1882,6 +1925,7 @@ impl Profile {
             Self::MetalXhciMsi => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_NO_IRQ_FIRST, XHCI_MSI_ONLY],
                 storage_bus: "xhci.0",
@@ -1898,6 +1942,7 @@ impl Profile {
             Self::MetalXhciNoIrq => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_NO_IRQ_SECOND],
                 storage_bus: "xhci.0",
@@ -1911,6 +1956,7 @@ impl Profile {
             Self::MetalHotplug => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
                 storage_bus: "xhci.0",
@@ -1927,6 +1973,7 @@ impl Profile {
             Self::NoIommu => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1940,6 +1987,7 @@ impl Profile {
             Self::IommuNarrow => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -1953,6 +2001,7 @@ impl Profile {
             Self::IommuNoIntremap => Shape {
                 vga: "std",
                 vgamem_mb: None,
+                gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
@@ -3606,6 +3655,13 @@ fn qemu_command(
             "usb-storage,bus={},drive=stick,id={BOOT_STICK_ID},bootindex=0",
             shape.storage_bus
         ));
+    }
+    if let Some(gpu) = shape.gpu {
+        assert_eq!(
+            shape.vga, "none",
+            "a declared adapter beside a `-vga` one gives the guest two displays"
+        );
+        qemu.arg("-device").arg(gpu);
     }
     qemu.arg("-vga")
         .arg(shape.vga)
