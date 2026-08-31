@@ -44,6 +44,26 @@ Not done because doing it on the send path alone would make the two move
 verbs disagree, and doing it on both is an ABI change to a struct already
 shipped.
 
+## Revocation is the other answer, and the design already refused it
+
+The shared-memory grant's old argument for having no revocation named its own
+trigger: *"with `grant` owner-only, the set that can ever map is exactly the set
+the owner named, so revocation has no caller today … It stops being sound the
+moment the reachable set is no longer exactly what the owner named — if
+delegation or re-grant is reintroduced, or when `SYS_HANDLE_SEND` makes a grant
+transferable."* `SYS_HANDLE_SEND` exists, so the trigger has fired: the reachable
+set is no longer what the owner named.
+
+That leaves two answers and the rights word above is the cheaper one. **Revocation
+proper is rejected by name** in the capability-handle design — shm revoke,
+unmap-others and the TLB-shootdown machinery under them are scoped out, forced
+reclaim is defined as killing the holder, and the exclusion is to be revisited
+only if an arbitration case appears that killing cannot serve. The reason is the
+`gpu::set_resolution` hazard: freeing memory a consumer may hold pointers into. A
+capability system may refuse to hand out a new mapping; taking one back from a
+running process is a different thing. So a `MAP`-without-`TRANSFER` handle is not
+merely the cheaper fix, it is the only one on the table.
+
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling: an isolation
 finding recording an unproven-but-plausible boundary weakness is promoted, not
 folded). The rights model cannot spell "you may map this and nobody else may",
