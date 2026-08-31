@@ -864,6 +864,12 @@ pub fn console_speakers(config: &Path) -> std::collections::BTreeSet<String> {
     names
 }
 
+/// What `/bin/init` starts on the boot `config` describes, in the manifest's
+/// order. `config` is the `system.toml` itself, not its directory.
+pub fn boot_start(config: &Path) -> Vec<String> {
+    parse_config(config).boot.start
+}
+
 /// Every actuator `kernel/src/actuator.rs` declares, read out of the file that
 /// declares them.
 ///

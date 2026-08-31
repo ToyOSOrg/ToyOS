@@ -131,10 +131,11 @@ renormalize.
 
 ## What is still true and is not this
 
-`issues/build/the-duration-profile-is-enforced-where-it-was-not-measured.md` is
-untouched by any of the above: it is about two *machines* — twelve hosted EPYC
-shards against one T14 lane — and its measurement is a 1.35–1.37x gap between
-them on an idle host, not a within-lane shard factor. This file says only that
-the boot-width number cannot stand in for that, or for anything else in a price.
+The two-*machine* gap — twelve hosted EPYC shards against one T14 lane,
+1.35–1.37x apart on an idle host, recorded in `src/durations.rs`'s header with
+the committed profile's `shards=` column naming which partition took each
+price — is untouched by any of the above: that measurement is a gap between
+machines, not a within-lane shard factor. This file says only that the
+boot-width number cannot stand in for that, or for anything else in a price.
 
 Rejected on measurement, 2026-08-22, by the task that was sent to build it.

@@ -33,8 +33,8 @@ name: route
 # is neither fresh nor three OSes. So the T14 carries one scheduled job a night.
 # `ci.yml`'s nightly `schedule` is hosted because it is the run that has to
 # refresh `tests/test-durations`, and that profile has one instrument — twelve
-# GitHub-hosted shards, never the T14's 1/1 lane
-# (issues/build/the-duration-profile-is-enforced-where-it-was-not-measured.md).
+# GitHub-hosted shards, never the T14's 1/1 lane (the rule and the two-machine
+# measurement behind it: src/durations.rs).
 # `github.workflow` is the caller's name even from inside this reusable
 # workflow, which is the one signal that tells `ci.yml`'s `schedule` apart from
 # gate A's — that one stays trusted, because its own baseline has no attested

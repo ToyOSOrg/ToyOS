@@ -494,6 +494,7 @@ impl Codegen {
         // Scan the body for variables whose address is taken
         let mut addr_taken = BTreeSet::new();
         Self::collect_addr_taken(&fdef.body, &mut addr_taken);
+        Self::refuse_goto_into_stmt_expr(&fdef.body, &name);
 
         let mut ctx = FuncCtx {
             builder,

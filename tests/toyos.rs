@@ -586,6 +586,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("virtio_used_ring", Sched::Parallel, Tier::Fast),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
     ("pci_capability_walk", Sched::Parallel, Tier::Fast),
+    // What QEMU was told to create against what the guest enumerated: two
+    // accounts of one bus from two independent readers. One boot, every
+    // verdict a set comparison.
+    ("query_pci_agreement", Sched::Parallel, Tier::Fast),
+    // The root `system.toml`, booted rather than read: the shipped init list
+    // and program namespaces have no other gate a harness run can reach.
+    // Every verdict is a console line.
+    ("shipped_config_boots", Sched::Parallel, Tier::Fast),
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
     // no host clock decides anything. Carrying `UNMEASURED_MS` until the shards
@@ -653,11 +661,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // offsets it chose itself.
     ("operation_nesting", Sched::Parallel, Tier::Fast),
     ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
-    // The kernel thread and the row that says what its panic means. Two
-    // boots, both headless: the second one halts on purpose — and the pair
-    // measured 11.8 s on CI KVM, over the fast line, so the whole verdict is
-    // nightly until the split the relegation row names.
-    ("klogd_hosted", Sched::Parallel, Tier::Nightly),
+    // The spawn half alone: one headless boot whose verdict is three kernel
+    // log lines.
+    ("klogd_hosted", Sched::Parallel, Tier::Fast),
+    // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
+    // spawn half is per-PR again; alone they still price over the ceiling,
+    // which is what the relegation row carries.
+    ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
     // over two boots measured 12 s twelve-wide on the dev host**, against
@@ -780,6 +790,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // made for that whole family. Carrying `UNMEASURED_MS` until the shards
     // price it.
     ("swiss_german_layout", Sched::Parallel, Tier::Fast),
+    // One `LOCALE_WIZARD` boot for the pair since the drainer was made
+    // runnable at commit — the boot-apiece and the injected drain keys it took
+    // to share one were both the closed log-ring lag. Adjacent because
+    // `group_of` makes adjacency load-bearing; the carrier straddles the
+    // fast line run to run, so the pair is Nightly — the rider by its
+    // `RidesTheBootOf` row, the collateral that record exists to name.
     ("locale_detect", Sched::Parallel, Tier::Nightly),
     ("locale_detect_unrecognized", Sched::Parallel, Tier::Nightly),
     // The wizard on the two surfaces the machine actually has, rather than on
@@ -911,7 +927,17 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // its log sink, against a bound five minutes wide. A host so loaded that
     // this failed would have failed every timed test in the phase first.
     ("wall_clock_file", Sched::Parallel, Tier::Fast),
-    ("wall_clock_refusals", Sched::Parallel, Tier::Nightly),
+    // The five RTC/firmware shapes, one kernel build and one boot each. Five
+    // registrations because the artifact memo builds one kernel per feature
+    // set anyway, so the split costs nothing and the parallel phase gets five
+    // jobs it can place instead of one serial five-boot job it cannot. Three
+    // priced inside the margin band across two runs and sit Nightly by the
+    // straddler rule; their relegation rows carry the prices.
+    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Nightly),
+    ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Fast),
+    ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
+    ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
+    ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
     // `xhci_slow_connect`'s shape against the disk's port, and serial for the
     // same reason and not by association: it shares `SLOW_CONNECT_NS`, so a boot
     // that outgrows the window binds the disk in the port scan and it reports
@@ -1194,17 +1220,15 @@ enum Why {
     /// Considered and declined. Nothing is owed, which is why this list has no
     /// `task` field where `EXPECTED_FAILURES` requires one: an expected
     /// failure nobody is assigned to is a disabled test, and a *decline* is
-    /// not owed to anybody by construction.
+    /// not owed to anybody by construction. A case held open by a write-up
+    /// instead carries an `Open(path)` variant, revived when one needs it.
     Declined(&'static str),
-    /// Held open by a write-up, which is where the reason lives.
-    Open(&'static str),
 }
 
 impl Why {
     fn stated(&self) -> String {
         match self {
             Why::Declined(reason) => format!("declined: {reason}"),
-            Why::Open(path) => format!("held open by {path}"),
         }
     }
 }
@@ -1269,11 +1293,6 @@ const NOT_RUN: &[NotRun] = &[
         case: "73_arm64",
         stage: Stage::Refused("va_arg of a struct or union"),
         why: Why::Declined("aarch64-specific, and this target is x86-64. Its myprintf pulls whole structs through va_arg, which toyos-cc refuses by name — the case used to reach the Cranelift verifier instead, through the one expression that yielded an aggregate as a scalar"),
-    },
-    NotRun {
-        case: "89_nocode_wanted",
-        stage: Stage::Built,
-        why: Why::Open("issues/build/89-nocode-wanted-runs-green-and-is-not-priced.md"),
     },
     NotRun {
         case: "83_utf8_in_identifiers",
@@ -4758,6 +4777,7 @@ type Grouped = Option<Boot>;
 
 const METAL_SIM_DESKTOP: &str = "metal-sim desktop";
 const I8042_TRACE: &str = "i8042 trace";
+const LOCALE_WIZARD: &str = "locale wizard";
 
 /// The line `tests/toyos-rust-tests/src/bin/i8042_keyboard.rs` prints once it
 /// holds the keyboard claim, and the line every injection into that binary is
@@ -4799,6 +4819,10 @@ fn group_of(name: &str) -> Option<&'static str> {
         | "metal_sim_compositor_stall"
         | "metal_sim_client_death" => Some(METAL_SIM_DESKTOP),
         "i8042_keyboard" | "i8042_no_spurious_wake" | "i8042_mouse" => Some(I8042_TRACE),
+        // The positive wizard first: it applies a layout, and the negative
+        // member reads only its own window, so the order is the argument that
+        // no member reads state another left.
+        "locale_detect" | "locale_detect_unrecognized" => Some(LOCALE_WIZARD),
         _ => None,
     }
 }
@@ -4918,7 +4942,7 @@ fn metal_sim_argv_check(argv: &[String]) -> Result<(), String> {
     // isa-parallel that nothing declared — and the NIC is enough to make netd
     // claim a device on the machine whose whole point is that it has none.
     // None of them appears in argv, so this flag is the only observable form
-    // of their absence here; `query-pci` is the direct one.
+    // of their absence here; `query_pci_agreement` is the direct one.
     if !argv.iter().any(|a| a == "-nodefaults") {
         return Err("metal-sim did not pass -nodefaults; QEMU's default-device pass is back".to_string());
     }
@@ -5761,39 +5785,20 @@ fn swiss_german_layout(qemu: &mut QemuInstance) -> Result<(), String> {
     Ok(())
 }
 
-/// How many Escapes [`keep_the_ring_moving`] presses.
-const RING_ESCAPES: usize = 4;
-
 /// How many keys the wizard is answered with, at most — `y`, the `§` key, Enter.
 const WIZARD_ANSWERS: usize = 3;
 
 /// **The wizard gates are the one injection here a wall clock cannot cost
-/// anything**: answers and ring-drainers together are fewer bytes than
-/// [`QEMU_PS2_QUEUE`] holds and none of their qcodes is `0xE0`-prefixed, so a
-/// guest draining nothing for the whole hook still receives every transition.
-/// Anything added to either sequence is past that bound and has to be paced
-/// against the guest, the way [`SWISS_SCRIPT`] is.
+/// anything**: the answers are fewer bytes than [`QEMU_PS2_QUEUE`] holds and
+/// none of their qcodes is `0xE0`-prefixed, so a guest draining nothing for
+/// the whole hook still receives every transition. Anything added to the
+/// sequence past that bound has to be paced against the guest, the way
+/// [`SWISS_SCRIPT`] is.
 const _: () = assert!(
-    (WIZARD_ANSWERS + RING_ESCAPES) * 2 <= QEMU_PS2_QUEUE,
+    WIZARD_ANSWERS * 2 <= QEMU_PS2_QUEUE,
     "the wizard gates put more at QEMU's PS/2 queue than it holds, and it drops the excess \
      one byte at a time and says nothing — pace them against the guest"
 );
-
-/// Keys nothing is listening for, after the ones that are.
-///
-/// The wizard exits within milliseconds of its last answer, and on a machine
-/// that then has nothing to do the kernel's log ring sits one line behind — so
-/// the runner's `===TEST_END===` stays in it and the harness waits out its
-/// whole timeout for a test that finished. Escape presses after the wizard has
-/// gone are discarded by the next reader, and each one is an i8042 interrupt
-/// that keeps the ring draining. `i8042_no_spurious_wake` records the same
-/// property from the other side: a guest polling its handle keeps it moving.
-fn keep_the_ring_moving(input: &mut qemu::QmpInput) {
-    for _ in 0..RING_ESCAPES {
-        thread::sleep(Duration::from_millis(150));
-        input.keys(&[("esc", true), ("esc", false)]);
-    }
-}
 
 /// The wizard, answered as a Swiss keyboard's owner would answer it.
 fn locale_detect(qemu: &mut QemuInstance) -> Result<(), String> {
@@ -5812,7 +5817,6 @@ fn locale_detect(qemu: &mut QemuInstance) -> Result<(), String> {
                 input.keys(&[(key, true), (key, false)]);
                 thread::sleep(Duration::from_millis(60));
             }
-            keep_the_ring_moving(&mut input);
         },
     );
     if let Some(err) = &result.error {
@@ -5853,7 +5857,6 @@ fn locale_detect_unrecognized(qemu: &mut QemuInstance) -> Result<(), String> {
                 input.keys(&[(key, true), (key, false)]);
                 thread::sleep(Duration::from_millis(60));
             }
-            keep_the_ring_moving(&mut input);
         },
     );
     if let Some(err) = &result.error {
@@ -7228,11 +7231,8 @@ fn soundd_clients_since(log: &str, from: usize, verb: &str) -> usize {
 /// bytes and no events must produce no wake. Pause is that stimulus — six
 /// bytes, deliberately swallowed.
 ///
-/// It drives the same in-guest reader as [`i8042_keyboard`], and not only for
-/// the userland half of the assertion: on a fully idle machine the kernel's
-/// log ring flushes one line behind, so the last trace line would never reach
-/// the console (filed in `issues/`). A guest polling its handle keeps the ring
-/// moving.
+/// It drives the same in-guest reader as [`i8042_keyboard`], for the userland
+/// half of the assertion.
 ///
 /// **The zero-event drain is arranged, not hoped for.** What a drain carries is
 /// whatever the ISR found in the ring, so a host that injects on a wall clock
@@ -8384,8 +8384,28 @@ fn run_machine_test(
         }
         // Body in `tests/common/wallclock.rs`, same reason.
         "wall_clock_file" => common::wallclock::wall_clock_file(test_config, c_bins, rust_bins),
-        "wall_clock_refusals" => {
-            common::wallclock::wall_clock_refusals(test_config, c_bins, rust_bins)
+        "wall_clock_rtc_dead" => common::wallclock::undated(
+            test_config,
+            c_bins,
+            rust_bins,
+            "wall-clock-dead.img",
+            &["rtc-dead"],
+            "its update flag never cleared",
+        ),
+        "wall_clock_rtc_unstable" => common::wallclock::undated(
+            test_config,
+            c_bins,
+            rust_bins,
+            "wall-clock-unstable.img",
+            &["rtc-unstable"],
+            "no two of 4 reads agreed",
+        ),
+        "wall_clock_no_century" => common::wallclock::no_century(test_config, c_bins, rust_bins),
+        "wall_clock_century_register" => {
+            common::wallclock::century_from_the_register(test_config, c_bins, rust_bins)
+        }
+        "wall_clock_zone" => {
+            common::wallclock::zone_from_firmware(test_config, c_bins, rust_bins)
         }
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
         "log_partition_layout" => {
@@ -8509,9 +8529,17 @@ fn run_machine_test(
         "swiss_german_layout" => {
             swiss_german_layout(&mut boot_locale(test_config, c_bins, rust_bins))
         }
-        "locale_detect" => locale_detect(&mut boot_locale(test_config, c_bins, rust_bins)),
+        "locale_detect" => {
+            let boot = group_boot(held, LOCALE_WIZARD, || {
+                boot_locale(test_config, c_bins, rust_bins)
+            });
+            locale_detect(&mut boot.qemu)
+        }
         "locale_detect_unrecognized" => {
-            locale_detect_unrecognized(&mut boot_locale(test_config, c_bins, rust_bins))
+            let boot = group_boot(held, LOCALE_WIZARD, || {
+                boot_locale(test_config, c_bins, rust_bins)
+            });
+            locale_detect_unrecognized(&mut boot.qemu)
         }
         "console_locale_detect" => console_locale_detect(),
         "desktop_locale_detect" => desktop_locale_detect(),
@@ -9668,23 +9696,15 @@ fn run_machine_test(
             Ok(())
         }
         "klogd_hosted" => {
-            // The machine's first kernel thread, and the two things about it
-            // no other test in the suite can see.
-            //
-            // **That it is hosted at all.** `klogd` runs on the ordinary
-            // scheduler with no address space of its own — `driver::spawn`
-            // names the kernel's `cr3` — through a trampoline that never
-            // issues an `iretq`. It gets a process-table entry rather than a
-            // bare task, and that is what makes it nameable: without one a
-            // crash report would print a pid nothing in the machine resolves.
-            //
-            // **That its panic is not recoverable, deterministically.** The
-            // ordinary predicate is `syscall_rip() != 0 &&
-            // current_tid().is_some()`, and `syscall_rip` is never cleared —
-            // so a kernel task reads whatever user thread last ran on *that*
-            // CPU left behind, and recovers or halts by accident of work
-            // stealing. The row in `sched::kthread` is what replaces the
-            // accident with an answer.
+            // The machine's first kernel thread, and the thing about it no
+            // other test in the suite can see: **that it is hosted at all.**
+            // `klogd` runs on the ordinary scheduler with no address space of
+            // its own — `driver::spawn` names the kernel's `cr3` — through a
+            // trampoline that never issues an `iretq`. It gets a process-table
+            // entry rather than a bare task, and that is what makes it
+            // nameable: without one a crash report would print a pid nothing
+            // in the machine resolves. What each row *means* when the panic
+            // really fires is `klogd_panic_halts`' two actuator boots.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -9716,8 +9736,16 @@ fn run_machine_test(
                 eprintln!("  [kthread] {}", line.trim());
             }
 
-            drop(qemu);
-
+            Ok(())
+        }
+        "klogd_panic_halts" => {
+            // **A kernel thread's panic is not recoverable by accident.**
+            // `syscall_rip` is never cleared, so the ordinary recovery
+            // predicate reads whatever user thread last ran on that CPU, and
+            // a kernel task would recover or halt by accident of work
+            // stealing. The row in `sched::kthread` replaces the accident
+            // with an answer; these two actuator boots walk both branches.
+            //
             // The marker is a line of the crash *report* rather than `PANIC:`
             // itself, because `boot_log` stops at the marker and the name is
             // printed after the header — a boot stopped at the header would
@@ -11178,6 +11206,116 @@ fn run_machine_test(
                 return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
             }
             eprintln!("  [pci] {}", verdict.trim());
+            Ok(())
+        }
+        "shipped_config_boots" => {
+            // The config the project ships, booted rather than read: `cargo
+            // run`'s machine is the owner's desktop, so nothing else
+            // exercises the shipped init list or its program namespaces — a
+            // change to `system.toml` alone could red no suite test in
+            // either direction. `Gop` is `cargo run -- --gop`'s shape, the
+            // GOP framebuffer plus the whole virtio block, so every daemon in
+            // `[boot] start` finds its device. No test binaries go into the
+            // initrd: the image booted here is the image shipped.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let mut qemu = QemuInstance::boot_with_options(
+                config,
+                &[],
+                &[],
+                BootOptions {
+                    profile: qemu::Profile::Gop,
+                    ready_marker: "Boot: complete",
+                    ..Default::default()
+                },
+            );
+            let mut log = qemu.boot_log().to_string();
+            // Each daemon's own announcement, not only init's spawn line: a
+            // daemon that started and then failed its device claim would
+            // satisfy the spawn lines alone. filepicker is the one starter
+            // with no startup line — its `init: started` row is its whole
+            // witness here.
+            for marker in [
+                "compositor: ready",
+                "netd: ready",
+                "soundd: ready",
+                "logd: this boot's kernel log is",
+            ] {
+                qemu::await_marker(&mut qemu, &mut log, marker, marker)?;
+            }
+            let start = toyos_build::build::boot_start(&config.join("system.toml"));
+            for program in &start {
+                let line = format!("init: started {program}");
+                if !log.contains(&line) {
+                    return Err(format!(
+                        "the shipped `[boot] start` names {program} and init never said \
+                         {line:?}\n{log}"
+                    ));
+                }
+            }
+            serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
+            eprintln!(
+                "  [shipped] the shipped system.toml boots: {} started, four daemons ready",
+                start.join(", ")
+            );
+            Ok(())
+        }
+        "query_pci_agreement" => {
+            // What QEMU was told to create against what the guest enumerated,
+            // as two whole sets: `info pci` is the device model's own account
+            // of the bus, the kernel's ECAM walk is the guest's, and every
+            // earlier profile claim was checked only against the harness's
+            // argv — the same source it would be verifying. Metal, because
+            // the machine whose device set is not the harness's choice is the
+            // shape this instrument exists for.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Metal,
+                    qmp: true,
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            let Some(complete) = log.lines().find(|l| l.contains("PCI: Enumeration complete"))
+            else {
+                return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
+            };
+            let guest = guest_pci_functions(&log)?;
+            // The census line guards the parse: a reworded device line would
+            // otherwise shrink the set this comparison reads.
+            if !complete.contains(&format!("{} functions", guest.len())) {
+                return Err(format!(
+                    "the guest declared {complete:?} and this parse found {} device lines",
+                    guest.len()
+                ));
+            }
+            let answer = {
+                let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+                monitor.human("info pci")
+            };
+            drop(qemu);
+            let host = qmp_pci_functions(&answer)?;
+            if guest != host {
+                let missing: Vec<String> =
+                    host.difference(&guest).map(describe_pci_function).collect();
+                let invented: Vec<String> =
+                    guest.difference(&host).map(describe_pci_function).collect();
+                return Err(format!(
+                    "the guest's enumeration and QEMU's own account of the bus disagree — \
+                     QEMU has {} function(s) the guest never decoded [{}] and the guest \
+                     decoded {} [{}] QEMU does not claim\ninfo pci:\n{answer}\n{log}",
+                    missing.len(),
+                    missing.join(", "),
+                    invented.len(),
+                    invented.join(", "),
+                ));
+            }
+            eprintln!(
+                "  [pci] the guest and QEMU agree on all {} functions of the Metal bus",
+                guest.len()
+            );
             Ok(())
         }
         "xhci_descriptor_walk" => {
@@ -12981,6 +13119,81 @@ struct XhciLayout {
     scratchpad: usize,
     blocks: usize,
     stride: usize,
+}
+
+/// One PCI function as both readers name it: bus, device, function, vendor,
+/// device id.
+type PciFunction = (u8, u8, u8, u16, u16);
+
+fn describe_pci_function(f: &PciFunction) -> String {
+    let (bus, dev, func, vendor, device) = f;
+    format!("{bus:02x}:{dev:02x}.{func} {vendor:04x}:{device:04x}")
+}
+
+/// The guest's account: every `PCI bb:dd.f [cc..] vendor=vvvv device=dddd`
+/// line the kernel's ECAM walk printed.
+fn guest_pci_functions(log: &str) -> Result<BTreeSet<PciFunction>, String> {
+    let mut out = BTreeSet::new();
+    for line in log.lines() {
+        let Some(rest) = line.split("  PCI ").nth(1) else { continue };
+        let Some((bdf, rest)) = rest.split_once(" [") else { continue };
+        let parse = || -> Option<PciFunction> {
+            let (bus, df) = bdf.split_once(':')?;
+            let (dev, func) = df.split_once('.')?;
+            let vendor = rest.split("vendor=").nth(1)?.split_whitespace().next()?;
+            let device = rest.split("device=").nth(1)?.split_whitespace().next()?;
+            Some((
+                u8::from_str_radix(bus, 16).ok()?,
+                u8::from_str_radix(dev, 16).ok()?,
+                func.parse().ok()?,
+                u16::from_str_radix(vendor, 16).ok()?,
+                u16::from_str_radix(device, 16).ok()?,
+            ))
+        };
+        let f = parse().ok_or_else(|| format!("unparseable guest PCI line: {line:?}"))?;
+        if !out.insert(f) {
+            return Err(format!("the guest printed one function twice: {line:?}"));
+        }
+    }
+    Ok(out)
+}
+
+/// QEMU's account: `info pci`, whose entries are a `Bus N, device N,
+/// function N:` header followed by a `PCI device vvvv:dddd` id line.
+fn qmp_pci_functions(answer: &str) -> Result<BTreeSet<PciFunction>, String> {
+    let mut out = BTreeSet::new();
+    let mut at: Option<(u8, u8, u8)> = None;
+    for line in answer.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("Bus ") {
+            let parse = || -> Option<(u8, u8, u8)> {
+                let (bus, rest) = rest.split_once(", device ")?;
+                let (dev, rest) = rest.split_once(", function ")?;
+                let func = rest.split_once(':')?.0;
+                Some((bus.trim().parse().ok()?, dev.trim().parse().ok()?, func.trim().parse().ok()?))
+            };
+            at = Some(parse().ok_or_else(|| format!("unparseable info pci header: {line:?}"))?);
+        } else if let Some(ids) = l.split("PCI device ").nth(1) {
+            let (bus, dev, func) =
+                at.ok_or_else(|| format!("an id line before any Bus header: {line:?}"))?;
+            let parse = || -> Option<(u16, u16)> {
+                let mut it = ids.split_whitespace().next()?.split(':');
+                let vendor = u16::from_str_radix(it.next()?, 16).ok()?;
+                let device = u16::from_str_radix(it.next()?, 16).ok()?;
+                Some((vendor, device))
+            };
+            let (vendor, device) =
+                parse().ok_or_else(|| format!("unparseable info pci id line: {line:?}"))?;
+            if !out.insert((bus, dev, func, vendor, device)) {
+                return Err(format!("info pci listed one function twice: {line:?}"));
+            }
+            at = None;
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("info pci answered no functions at all:\n{answer}"));
+    }
+    Ok(out)
 }
 
 fn parse_xhci_layout(log: &str) -> Option<XhciLayout> {
@@ -14938,10 +15151,8 @@ fn committed_durations_path() -> std::path::PathBuf {
 fn read_durations(path: &Path, out: &mut BTreeMap<String, Duration>) {
     let Ok(text) = fs::read_to_string(path) else { return };
     for line in text.lines() {
-        if let Some((name, ms)) = line.rsplit_once(' ') {
-            if let Ok(ms) = ms.parse::<u64>() {
-                out.insert(name.to_string(), Duration::from_millis(ms));
-            }
+        if let Some((name, ms)) = toyos_build::durations::parse_profile_line(line) {
+            out.insert(name.to_string(), Duration::from_millis(ms));
         }
     }
 }

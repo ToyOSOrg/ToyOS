@@ -272,28 +272,28 @@ pub const RELEGATED: &[Relegated] = &[
     },
     Relegated {
         test: "locale_detect",
-        ci_ms: 8_607,
+        ci_ms: 9_959,
         why: Why::Cost,
         guards: "The wizard answered over QMP on the stand-in `locale_gate`, swiss-german \
-                 identified in two presses and the surface acting on the config it wrote. What \
-                 still runs per pull request: `console_locale_detect` and \
-                 `desktop_locale_detect` carry the same wizard to the same verdict on the two \
-                 surfaces the machine actually has — the console's own translator typing `ü` \
-                 off the re-read config, and the compositor forwarding transitions three \
-                 processes down — so the positive arm keeps both real-surface gates and only \
-                 the stand-in configuration moves.",
+                 identified in two presses and the surface acting on the config it wrote — \
+                 the `LOCALE_WIZARD` shared boot's carrier, priced 7,055 and 9,959 ms on \
+                 two consecutive hosted runs, which is the straddle this variant exists to \
+                 hold. What still runs per pull request: `console_locale_detect` and \
+                 `desktop_locale_detect` carry the same wizard to the same verdict on the \
+                 two surfaces the machine actually has, so only the stand-in configuration \
+                 moves — and its rider goes with the boot, the row below.",
     },
     Relegated {
         test: "locale_detect_unrecognized",
-        ci_ms: 8_260,
-        why: Why::Cost,
-        guards: "The wizard's negative control, in the guest: presses no layout agrees with \
-                 must end in `detect: Unrecognized` and never in a layout applied. What still \
-                 runs per pull request: `toyos-keymap`'s host suite (`tests/detect.rs`) drives \
-                 the same decision to `Step::Unrecognized`, so the verdict logic keeps a per-PR \
-                 gate; what moves is the in-guest half — the gate binary refusing rather than \
-                 applying — which no Fast test stages: both real-surface siblings answer the \
-                 wizard correctly.",
+        ci_ms: 160,
+        why: Why::RidesTheBootOf("locale_detect"),
+        guards: "The wizard's negative control in the guest — presses no layout agrees \
+                 with must end in `detect: Unrecognized` and never in a layout applied — \
+                 160 ms riding the `LOCALE_WIZARD` boot, relegated only because its \
+                 carrier is. What still runs per pull request: `toyos-keymap`'s host suite \
+                 (`tests/detect.rs`) drives the same decision to `Step::Unrecognized`, so \
+                 the verdict logic keeps a per-PR gate and only the in-guest refusal \
+                 moves.",
     },
     Relegated {
         test: "log_partition_identity",
@@ -408,23 +408,51 @@ pub const RELEGATED: &[Relegated] = &[
         guards: "The end-to-end durable witness: a rename staged on /log, the guest shut                  down, and the destination judged byte-for-byte off the raw FAT image by                  the in-tree toyos-fat32-check. Nightly because the boot-plus-shutdown                  costs a full cycle. What runs per pull request is the Fast                  `fs_transactional` control (a rename with an absent source keeps its                  destination, rename(p,p) is a no-op, a shrunk tail regrows as zeros) and                  the compile-time invariants that make the class unrepresentable: the                  `Committed` witness that forbids releasing a destination before the move                  commits, and `same_object`/`same_entry` that decides the no-op by backend                  identity so a FAT case-only rename cannot destroy the file.",
     },
     Relegated {
-        test: "klogd_hosted",
-        ci_ms: 11_805,
+        test: "klogd_panic_halts",
+        ci_ms: 16_658,
         why: Why::Cost,
-        guards: "The kernel-thread machinery, now for all three of them: klogd, usbd \
-                 and iod spawn with process-table rows, `ps` and the census name them, \
-                 and a deliberate panic takes the row's own branch instead of being \
-                 decided by a stale `syscall_rip` — a verdict that depended on which \
-                 syscall ran last. Both branches, which is the only way two rows are \
-                 two rows: klogd's panic halts the machine, usbd's kills the thread and \
-                 the machine boots. Three boots, and the two actuator arms \
-                 (`klogd-panic`, `usbd-panic`) are the cost; the spawn half alone is \
-                 one cheap boot, and \
-                 issues/build/klogd-hosted-pays-two-boots-for-one-fast-verdict.md \
-                 is the split that puts it back in the fast tier. What still runs per \
-                 pull request: every boot's console output is klogd's drain, so the \
-                 thread starving or dying is visible in any test that reads a line, and \
-                 `blocked_dump` names all three in the fast tier.",
+        guards: "The two actuator arms of the kernel-thread panic rows, walked for real: \
+                 klogd's deliberate panic halts the machine instead of recovering off a \
+                 stale `syscall_rip`, and usbd's kills the thread and the machine boots — \
+                 both branches of `sched::kthread`'s table, each a boot that dies or \
+                 recovers on purpose, which is the pair's whole cost. What still runs per \
+                 pull request: `klogd_hosted` keeps the spawn half Fast at 5,674 ms — all \
+                 three rows on the wire with the process table naming them — and every \
+                 boot's console output is klogd's drain, so the thread starving or dying \
+                 is visible in any test that reads a line.",
+    },
+    Relegated {
+        test: "wall_clock_rtc_dead",
+        ci_ms: 8_070,
+        why: Why::Cost,
+        guards: "A dead RTC — the update flag never clearing — still boots, still logs, \
+                 names its file `unknown-00.log`, and refuses userland with `wall-clock: \
+                 no epoch` instead of serving 1970. What still runs per pull request: \
+                 `wall_clock_rtc_unstable` (7,805 ms, Fast) walks the same refusal path \
+                 for the no-two-reads-agree cause, so the refusal machinery keeps a per-PR \
+                 gate and only the dead-flag cause moves.",
+    },
+    Relegated {
+        test: "wall_clock_century_register",
+        ci_ms: 9_030,
+        why: Why::Cost,
+        guards: "The century register's *contents* widening the year: staged 0x21, this \
+                 boot's log file must be named in 2133, so a kernel reading a fixed 2000 \
+                 shows up in the one digit pair nothing else moves. What still runs per \
+                 pull request: `wall_clock_no_century` (6,987 ms, Fast) gates that the \
+                 FADT's answer is what decides, and `wall_clock_file` names its file off \
+                 the same decoder every run.",
+    },
+    Relegated {
+        test: "wall_clock_zone",
+        ci_ms: 9_347,
+        why: Why::Cost,
+        guards: "A firmware-named zone separating local time from UTC in the direction \
+                 UEFI defines: the -120-minute stage must leave the FAT name and stamps \
+                 on local time and move only `SYS_CLOCK_EPOCH`, the sign a dual-booted \
+                 laptop gets four hours wrong instead of two. What still runs per pull \
+                 request: `wall_clock_file` gates the epoch syscall against an unzoned \
+                 staged instant, so only the offset's application and sign move nightly.",
     },
     Relegated {
         test: "desktop_window_child",
@@ -517,14 +545,6 @@ pub const RELEGATED: &[Relegated] = &[
                  descriptors are pipes to a surface, which is the T14's. A second client \
                  connecting while the first streams, and the desktop still answering \
                  after both.",
-    },
-    Relegated {
-        test: "wall_clock_refusals",
-        ci_ms: 103_987,
-        why: Why::Cost,
-        guards: "Five boots gate the RTC update flag never clearing, four reads never \
-                 agreeing, absent-century fallback, explicit century-register decoding, \
-                 and firmware timezone conversion.",
     },
     Relegated {
         test: "screen_fatal_halt_composited",
@@ -1302,8 +1322,8 @@ mod tests {
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
             .lines()
-            .filter_map(|l| l.rsplit_once(' '))
-            .filter_map(|(n, ms)| ms.parse().ok().map(|ms| (n.to_string(), ms)))
+            .filter_map(crate::durations::parse_profile_line)
+            .map(|(n, ms)| (n.to_string(), ms))
             .collect()
     }
 

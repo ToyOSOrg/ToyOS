@@ -50,6 +50,9 @@ struct Declared {
     /// Bytes the third writer said in two `write`s and never ended with a
     /// newline, which only its own exit can put on the wire.
     midline: usize,
+    /// Digits of the sequence number after each line's leading tag byte —
+    /// what tells a gap in a writer's own run from a capture that ends early.
+    seq: usize,
 }
 
 pub fn console_line_atomicity(
@@ -81,14 +84,16 @@ pub fn console_line_atomicity(
     }
     let declared = declared(&result.stdout)?;
 
-    let mut pure = [0usize; 2];
+    let mut pure: [BTreeSet<usize>; 2] = [BTreeSet::new(), BTreeSet::new()];
+    let mut duplicated: usize = 0;
     let mut mixed: Vec<&str> = Vec::new();
     let mut short: usize = 0;
     for line in result.stdout.lines() {
         let a = line.bytes().filter(|b| *b == b'A').count();
         let b = line.bytes().filter(|b| *b == b'B').count();
-        // A writer's line is one repeated byte and nothing else, so a line that
-        // is mostly one tag is one of its lines however it ended up.
+        // A writer's line is one tag byte, its sequence digits, and the tag
+        // repeated to the width — so a line that is mostly one tag is one of
+        // its lines however it ended up.
         let (tag, other) = if a >= b { (a, b) } else { (b, a) };
         if tag * 2 < declared.width - 1 {
             continue; // not a writer's line at all
@@ -97,11 +102,24 @@ pub fn console_line_atomicity(
             mixed.push(line);
             continue;
         }
-        if tag != declared.width - 1 {
+        let writer = usize::from(b > a);
+        let bytes = line.as_bytes();
+        let tag_byte = b"AB"[writer];
+        let whole = bytes.len() == declared.width - 1
+            && bytes[0] == tag_byte
+            && bytes[1..1 + declared.seq].iter().all(u8::is_ascii_digit)
+            && bytes[1 + declared.seq..].iter().all(|c| *c == tag_byte);
+        let seq = whole
+            .then(|| std::str::from_utf8(&bytes[1..1 + declared.seq]).expect("ascii digits"))
+            .and_then(|digits| digits.parse::<usize>().ok())
+            .filter(|seq| *seq < declared.lines);
+        let Some(seq) = seq else {
             short += 1;
             continue;
+        };
+        if !pure[writer].insert(seq) {
+            duplicated += 1;
         }
-        pure[usize::from(b > a)] += 1;
     }
 
     if !mixed.is_empty() {
@@ -125,15 +143,45 @@ pub fn console_line_atomicity(
              unit and these were cut"
         ));
     }
+    if duplicated != 0 {
+        return Err(format!(
+            "{duplicated} console lines repeat a sequence number a writer used once — the \
+             capture duplicated lines, which no writer and no buffer can do"
+        ));
+    }
     // Non-vacuity: a capture that lost the writers' output entirely would count
-    // zero mixed lines and prove nothing.
+    // zero mixed lines and prove nothing. The sequence numbers say what *kind*
+    // of loss it was, so a red here is not misread as the line buffer breaking:
+    // a gap inside a writer's own run is lines lost mid-stream, a contiguous
+    // run that stops early is a capture missing its tail, and neither is a
+    // mixed or short line — the mechanism's own verdicts are above.
     for (i, tag) in ["A", "B"].iter().enumerate() {
-        if pure[i] != declared.lines {
+        let seen = &pure[i];
+        if seen.len() == declared.lines {
+            continue;
+        }
+        let top = seen.iter().next_back().map_or(0, |s| s + 1);
+        let gaps = top - seen.len();
+        if gaps > 0 {
+            let first_gap = (0..top).find(|s| !seen.contains(s)).unwrap_or(0);
             return Err(format!(
-                "writer {tag} declared {} whole lines and the capture carries {}",
-                declared.lines, pure[i]
+                "writer {tag} declared {} whole lines and the capture carries {}: {gaps} gap(s) \
+                 inside the writer's own numbered run (first at #{first_gap}, run ends at \
+                 #{}) — lines were lost mid-stream, between the guest's console and this \
+                 capture, not by the line buffer",
+                declared.lines,
+                seen.len(),
+                top - 1,
             ));
         }
+        return Err(format!(
+            "writer {tag} declared {} whole lines and the capture carries {}: the numbered run \
+             is contiguous and simply stops at #{} — a short capture missing its tail, not a \
+             line lost by the buffer",
+            declared.lines,
+            seen.len(),
+            top.saturating_sub(1),
+        ));
     }
     // **The buffer's other half: a process that exits mid-line.** The third
     // writer says `midline` bytes in two `write`s, ends them with nothing and
@@ -193,6 +241,7 @@ fn declared(stdout: &str) -> Result<Declared, String> {
         lines: field("lines=")?,
         width: field("width=")?,
         midline: field("midline=")?,
+        seq: field("seq=")?,
     })
 }
 
