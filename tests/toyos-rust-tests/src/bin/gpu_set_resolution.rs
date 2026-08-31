@@ -64,9 +64,9 @@ fn main() {
     println!("===GPU_RESOLUTION_OK===");
 }
 
-/// The claim again, once the release the last close *queued* has run:
-/// `object::drain_zero_handles` says a syscall may return to userland before
-/// its own releases finish, so `AlreadyExists` is that queue, not a holder.
+/// The claim again, once the release the last close *queued* has run.
+/// `issues/kernel/deferred-release-outlives-its-syscall.md` is the kernel half:
+/// `AlreadyExists` here is that tracked defect, not another holder.
 fn reclaim(cap: &SysCap) -> FramebufferDev {
     for _ in 0..RECLAIM_TRIES {
         match cap.claim(DeviceType::Framebuffer) {

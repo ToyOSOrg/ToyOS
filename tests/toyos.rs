@@ -3320,8 +3320,7 @@ fn run_screen_test(
                 ));
             }
             let rows = dump.console_rows(&font);
-            // The panel carries logd's file format — a wall-clock stamp, then
-            // `[secs cpuN]` — not the serial's `[kernel …]` prefix.
+            // The panel carries logd's file format — `[<wall clock> secs cpuN]`, where the serial's bracket names `kernel`.
             let log_rows =
                 rows.iter().filter(|r| r.contains(" cpu") && r.contains("] ")).count();
             if log_rows == 0 {
