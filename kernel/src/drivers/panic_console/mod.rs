@@ -7,6 +7,7 @@
 //! recovered panic must call [`discard_capture`]. virtio-gpu is
 //! unsupported: its scanout needs the unbounded-poll wedge this module avoids.
 
+mod access;
 mod latch;
 
 use core::cell::UnsafeCell;
@@ -200,7 +201,7 @@ impl core::fmt::Write for Into<'_> {
 
 struct RenderedCell(UnsafeCell<Rendered>);
 // SAFETY: the panic path may take no lock; `Rendered` is too large to copy
-// or swap atomically. `PAINTING`, and `CAPTURE_OWNER` over `SNAPSHOT`, serialise the three cells.
+// or swap atomically. `PAINTING`, `CAPTURE`, and `CAPTURE_ACCESS` serialise the three cells.
 unsafe impl Sync for RenderedCell {}
 
 /// Seqlock over `FB`; even means stable, odd means a publisher is inside.
@@ -216,16 +217,13 @@ static FB: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 static PAINTING: AtomicBool = AtomicBool::new(false);
 
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
+static CAPTURE_ACCESS: access::CaptureAccess = access::CaptureAccess::new();
 
-/// `SNAPSHOT`'s one writer, ever; released only by [`discard_capture`], on recovery.
+/// `SNAPSHOT`'s writer owner until recovery; the owner may refresh and every other CPU is refused.
 static CAPTURE: latch::CaptureLatch = latch::CaptureLatch::new();
 
 /// The early branch's token: percpu is not up there, and exactly one CPU exists.
 const EARLY_CAPTOR: u32 = 1;
-
-/// True means an unrecovered panic captured this report; [`discard_capture`]
-/// clears it on recovery, so a survived panic is not later painted as the cause of death.
-static CAPTURED: AtomicBool = AtomicBool::new(false);
 
 /// Scratch for readers of the live shards (a boot checkpoint, or a fatal
 /// path with no panic handler run) — separate from `SNAPSHOT` so a checkpoint cannot erase a captured, unpainted report.
@@ -471,18 +469,35 @@ pub fn remap() {
 /// this even though no test distinguishes its absence: a sibling still
 /// logging between panic and paint could otherwise push the report off `live_tail`'s window.
 pub fn capture() {
+    capture_into(false);
+}
+
+fn capture_into(refresh: bool) {
     if snapshot().is_none() {
         return;
     }
+    let token = captor_token();
     // A loser's report went to serial on its own flush; the winner's is the one painted.
-    if !CAPTURE.claim(captor_token()) {
+    let claim = CAPTURE.claim(token);
+    if claim == latch::Claim::Refused {
+        return;
+    }
+    let may_write = if refresh {
+        CAPTURE_ACCESS.begin_refresh()
+    } else {
+        CAPTURE_ACCESS.begin_capture()
+    };
+    if !may_write {
+        if claim == latch::Claim::Fresh {
+            let _ = CAPTURE.release(token);
+        }
         return;
     }
     // SAFETY: `Rendered` must be a `static` (too large to return), and the
     // panic path may take no lock. `SNAPSHOT` is written only here, under
-    // `CAPTURE`, held past this line; readers run after, gated by `PAINTING`.
+    // `CAPTURE`, after `CAPTURE_ACCESS` admitted a writer and before publication.
     let into = unsafe { &mut *SNAPSHOT.0.get() };
-    CAPTURED.store(into.render(0, u64::MAX) > 0, Ordering::Relaxed);
+    CAPTURE_ACCESS.publish(into.render(0, u64::MAX) > 0);
 }
 
 /// This CPU's claim on `SNAPSHOT`; tokens never collide, unclaimed-0 and `EARLY_CAPTOR` included.
@@ -496,19 +511,17 @@ fn captor_token() -> u32 {
 
 /// Drop the captured report: this panic was survived. Called only on the recovery branch.
 pub fn discard_capture() {
-    // `CAPTURED` first: a next captor's fresh report must not be clobbered by this clear.
-    CAPTURED.store(false, Ordering::Relaxed);
-    CAPTURE.release();
+    let token = captor_token();
+    if CAPTURE.owned_by(token) && CAPTURE_ACCESS.discard() {
+        let _ = CAPTURE.release(token);
+    }
 }
 
 /// Re-freeze the captured report so a line written *after* [`capture`] is
 /// painted; only refreshes a capture that already exists — [`live_tail`] already reads live otherwise.
 /// One caller: `apic::wait_for_log_file` logs this after `capture` already ran, on the machine with no serial fallback.
 pub fn refresh_capture() {
-    if !CAPTURED.load(Ordering::Relaxed) {
-        return;
-    }
-    capture();
+    capture_into(true);
 }
 
 /// The tail of the live shards, for callers with nothing captured; consumes nothing, so `panic_flush` reports it again identically.
@@ -531,8 +544,8 @@ fn live_tail() -> View<'static> {
 /// path that reached `halt_all_cpus` without the panic handler. Idempotent
 /// for the captured case, which [`page_forever`] walks repeatedly.
 fn fatal_text() -> View<'static> {
-    if CAPTURED.load(Ordering::Relaxed) {
-        // SAFETY: sound as `capture`'s write — `CAPTURED` true means `SNAPSHOT` is written and never written again, so this branch is idempotent.
+    if CAPTURE_ACCESS.read() {
+        // SAFETY: `read` changed the state to `READING` before access; every writer refuses that state.
         unsafe { &*SNAPSHOT.0.get() }.view()
     } else {
         live_tail()

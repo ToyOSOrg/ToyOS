@@ -340,8 +340,10 @@ pub mod sleeplock;
 #[path = "../../kernel/src/drivers/i8042/tally.rs"]
 pub mod i8042_tally;
 
-/// The panic snapshot's capture latch. Two CPUs panicking at once both reach
-/// `capture()` with `cli` taken, so nothing else serialises the snapshot write;
-/// the property is one writer per snapshot, which only a model can enumerate.
+/// The panic snapshot's owner and access state, driven together by
+/// `tests/panic_capture.rs`.
 #[path = "../../kernel/src/drivers/panic_console/latch.rs"]
 pub mod capture_latch;
+
+#[path = "../../kernel/src/drivers/panic_console/access.rs"]
+pub mod capture_access;

@@ -1,13 +1,14 @@
-//! Loom: the panic snapshot's capture latch — one writer per `SNAPSHOT`.
+//! Loom: the panic snapshot excludes competing writers and terminal readers.
 //!
 //! Two CPUs panicking at once both hold `cli`, so nothing else serialises
 //! `capture()`'s render into the one static; the latch makes the first captor
-//! its only writer, re-entrant for `refresh_capture`, released on recovery.
+//! its writer, while the access word makes refresh yield to a fatal reader.
 //! The negative control is in this file: the unlatched shape, transliterated.
 
 use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
 
-use kernel_loom::capture_latch::CaptureLatch;
+use kernel_loom::capture_access::CaptureAccess;
+use kernel_loom::capture_latch::{CaptureLatch, Claim};
 use loom::cell::UnsafeCell;
 use loom::sync::atomic::{AtomicU32, Ordering};
 use loom::sync::Arc;
@@ -24,7 +25,7 @@ fn two_panicking_cpus_write_one_snapshot() {
         for token in [2u32, 3u32] {
             let (latch, snapshot) = (latch.clone(), snapshot.clone());
             captors.push(thread::spawn(move || {
-                if latch.claim(token) {
+                if latch.claim(token) != Claim::Refused {
                     // SAFETY: loom instruments the cell; a second writer is the defect under test.
                     snapshot.with_mut(|p| unsafe { (*p)[0] = token as u8 });
                     snapshot.with_mut(|p| unsafe { (*p)[1] = token as u8 });
@@ -51,21 +52,21 @@ fn the_owner_refreshes_and_a_second_captor_stays_out() {
         let latch = Arc::new(CaptureLatch::new());
         let snapshot = Arc::new(UnsafeCell::new(0u32));
 
-        assert!(latch.claim(2), "an unclaimed latch refused its first captor");
+        assert_eq!(latch.claim(2), Claim::Fresh, "an unclaimed latch refused its first captor");
         // SAFETY: claim(2) held; the loser thread below is refused before it writes.
         snapshot.with_mut(|p| unsafe { *p = 2 });
 
         let loser = {
             let (latch, snapshot) = (latch.clone(), snapshot.clone());
             thread::spawn(move || {
-                if latch.claim(3) {
+                if latch.claim(3) != Claim::Refused {
                     // SAFETY: reachable only when the latch wrongly admits a second captor.
                     snapshot.with_mut(|p| unsafe { *p = 3 });
                 }
             })
         };
 
-        assert!(latch.claim(2), "the owner was refused its own refresh");
+        assert_eq!(latch.claim(2), Claim::Reentrant, "the owner was refused its own refresh");
         // SAFETY: same claim as the first write.
         snapshot.with_mut(|p| unsafe { *p = 22 });
 
@@ -83,15 +84,15 @@ fn a_recovered_panic_hands_the_snapshot_to_the_next_captor() {
         let latch = Arc::new(CaptureLatch::new());
         let snapshot = Arc::new(UnsafeCell::new(0u32));
 
-        assert!(latch.claim(2), "an unclaimed latch refused its first captor");
+        assert_eq!(latch.claim(2), Claim::Fresh, "an unclaimed latch refused its first captor");
         // SAFETY: claim(2) held until the release below.
         snapshot.with_mut(|p| unsafe { *p = 2 });
-        latch.release();
+        assert!(latch.release(2));
 
         let next = {
             let snapshot = snapshot.clone();
             thread::spawn(move || {
-                assert!(latch.claim(3), "a released latch refused its next captor");
+                assert_eq!(latch.claim(3), Claim::Fresh, "a released latch refused its next captor");
                 // SAFETY: the previous owner released before this thread was spawned.
                 snapshot.with_mut(|p| unsafe { *p = 3 });
             })
@@ -100,6 +101,94 @@ fn a_recovered_panic_hands_the_snapshot_to_the_next_captor() {
 
         // SAFETY: the next captor joined; this read races nothing.
         assert_eq!(snapshot.with(|p| unsafe { *p }), 3);
+    });
+}
+
+#[test]
+fn a_reader_and_refresh_never_overlap_on_the_snapshot() {
+    loom::model(|| {
+        let latch = Arc::new(CaptureLatch::new());
+        let access = Arc::new(CaptureAccess::new());
+        let snapshot = Arc::new(UnsafeCell::new([0u8; 2]));
+
+        assert_eq!(latch.claim(2), Claim::Fresh);
+        assert!(access.begin_capture());
+        snapshot.with_mut(|p| unsafe { *p = [2, 2] });
+        access.publish(true);
+
+        let reader = {
+            let (access, snapshot) = (access.clone(), snapshot.clone());
+            thread::spawn(move || {
+                if access.read() {
+                    snapshot.with(|p| unsafe { *p })
+                } else {
+                    [9, 9]
+                }
+            })
+        };
+        let refresh = {
+            let (latch, access, snapshot) = (latch.clone(), access.clone(), snapshot.clone());
+            thread::spawn(move || {
+                assert_eq!(latch.claim(2), Claim::Reentrant);
+                if access.begin_refresh() {
+                    snapshot.with_mut(|p| unsafe { (*p)[0] = 22 });
+                    snapshot.with_mut(|p| unsafe { (*p)[1] = 22 });
+                    access.publish(true);
+                }
+            })
+        };
+
+        let read = reader.join().unwrap();
+        refresh.join().unwrap();
+        assert!(read == [2, 2] || read == [22, 22] || read == [9, 9]);
+    });
+}
+
+#[test]
+fn discard_cannot_admit_a_writer_under_a_fatal_reader() {
+    loom::model(|| {
+        let latch = Arc::new(CaptureLatch::new());
+        let access = Arc::new(CaptureAccess::new());
+        let snapshot = Arc::new(UnsafeCell::new([0u8; 2]));
+
+        assert_eq!(latch.claim(2), Claim::Fresh);
+        assert!(access.begin_capture());
+        snapshot.with_mut(|p| unsafe { *p = [2, 2] });
+        access.publish(true);
+
+        let reader = {
+            let (access, snapshot) = (access.clone(), snapshot.clone());
+            thread::spawn(move || {
+                if access.read() {
+                    snapshot.with(|p| unsafe { *p })
+                } else {
+                    [9, 9]
+                }
+            })
+        };
+        let discard = {
+            let (latch, access) = (latch.clone(), access.clone());
+            thread::spawn(move || {
+                if latch.owned_by(2) && access.discard() {
+                    assert!(latch.release(2));
+                }
+            })
+        };
+        let next = {
+            let (latch, access, snapshot) = (latch.clone(), access.clone(), snapshot.clone());
+            thread::spawn(move || {
+                if latch.claim(3) == Claim::Fresh && access.begin_capture() {
+                    snapshot.with_mut(|p| unsafe { (*p)[0] = 3 });
+                    snapshot.with_mut(|p| unsafe { (*p)[1] = 3 });
+                    access.publish(true);
+                }
+            })
+        };
+
+        let read = reader.join().unwrap();
+        discard.join().unwrap();
+        next.join().unwrap();
+        assert!(read == [2, 2] || read == [3, 3] || read == [9, 9]);
     });
 }
 
