@@ -39,8 +39,6 @@ pub fn declared_qemu_version(root: &Path) -> Option<String> {
 
 /// The dated Debian archive the hosted guests install from, so a rolling
 /// release cannot move the instrument between two runs of the same tree.
-///
-/// Stripped the same way [`declared_qemu_version`] strips its file.
 pub fn declared_apt_snapshot(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join(".github/apt-snapshot")).ok()?;
     let stamp: String = text
