@@ -610,13 +610,11 @@ impl FatFs {
     }
 }
 
-/// FAT cannot replace an entry in one step, so a replacing rename deletes the
-/// destination and then moves the source. The source is validated present and
-/// distinct first, so the delete never runs for a rename that would not find its
-/// source or would name its own entry. One residual device-error window is
-/// tracked in `issues/filesystem/fat-overwrite-rename-frees-the-destination-first.md`.
+/// FAT cannot replace an entry in one step. The backend renames the destination
+/// aside, moves the source, and returns the still-live displaced entry; only
+/// `release` may retire its in-memory state and free its clusters.
 impl ReplaceRename for FatFs {
-    type Displaced = ();
+    type Displaced = (toyos_fat32::Replaced, Option<FileId>);
 
     fn source_present(&mut self, old: &str) -> Result<bool, SyscallError> {
         let role = self.role;
@@ -629,18 +627,44 @@ impl ReplaceRename for FatFs {
         self.fs.same_entry(old, new).map_err(|e| refused(role, "same_entry", old, e))
     }
 
-    fn commit(&mut self, old: &str, new: &str) -> Result<Committed<()>, SyscallError> {
+    fn commit(
+        &mut self,
+        old: &str,
+        new: &str,
+    ) -> Result<Committed<Self::Displaced>, SyscallError> {
         let role = self.role;
-        // The destination goes first, but the source is already known present and
-        // distinct, so a rename onto its own entry never reaches this delete.
-        if self.fs.exists(new).map_err(|e| refused(role, "exists", new, e))? {
-            self.delete(new)?;
-        }
-        self.fs.rename(old, new).map_err(|e| refused(role, "rename", old, e))?;
-        Ok(Committed::new(()))
+        let displaced = self.by_name.get(new).copied();
+        let replaced = self
+            .fs
+            .replace_rename(old, new)
+            .map_err(|e| refused(role, "replace rename", old, e))?;
+        Ok(Committed::new((replaced, displaced)))
     }
 
-    fn release(&mut self, old: &str, new: &str, _committed: Committed<()>) {
+    fn release(
+        &mut self,
+        old: &str,
+        new: &str,
+        committed: Committed<Self::Displaced>,
+    ) -> Result<(), SyscallError> {
+        let (replaced, displaced) = committed.into_displaced();
+        let had_destination = replaced.displaced();
+        if let Some(file_id) = displaced {
+            let _ = file_cache::mark_deleted(file_id);
+            self.open.remove(&file_id);
+            self.by_name.remove(new);
+        }
+        if had_destination {
+            // Backings under `new` still read the displaced file's clusters.
+            self.revoke(new);
+        }
+
+        let role = self.role;
+        let released = self
+            .fs
+            .release_replaced(replaced)
+            .map_err(|e| refused(role, "release replaced", new, e));
+
         // Re-key, not revoke: the source's data did not move, so backings under
         // the old name still read it.
         if let Some(file_id) = self.by_name.remove(old) {
@@ -652,6 +676,7 @@ impl ReplaceRename for FatFs {
         if let Some(cell) = self.extents.remove(old) {
             self.extents.insert(String::from(new), cell);
         }
+        released
     }
 }
 

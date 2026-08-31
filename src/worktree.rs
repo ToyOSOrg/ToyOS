@@ -33,13 +33,22 @@ pub fn dispatch(root: &Path, args: &[String]) {
     let verb = rest.next().map(String::as_str);
     let operand = rest.next().cloned();
     match verb {
-        Some("add") => add(root, &operand.expect("--worktree add needs a path")),
+        Some("add") => add(root, &path_operand("add", operand)),
         Some("list") => list(root),
-        Some("remove") => remove(root, &operand.expect("--worktree remove needs a path")),
+        Some("remove") => remove(root, &path_operand("remove", operand)),
         other => panic!(
             "--worktree takes add <path>, list, or remove <path>; got {other:?}"
         ),
     }
+}
+
+fn path_operand(verb: &str, operand: Option<String>) -> String {
+    let path = operand.unwrap_or_else(|| panic!("--worktree {verb} needs a path"));
+    assert!(
+        !path.starts_with('-'),
+        "--worktree {verb} needs a path, got flag {path:?}"
+    );
+    path
 }
 
 /// Create a worktree and leave it in a state where `cargo run -- --build-only`
@@ -336,6 +345,15 @@ fn ok(dir: &Path, args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flag_is_refused_as_a_worktree_path_by_name() {
+        let args = ["toyos-build", "--worktree", "add", "--help"].map(String::from);
+        let panic = std::panic::catch_unwind(|| dispatch(Path::new("/not-used"), &args))
+            .expect_err("a flag is not a worktree path");
+        let message = panic.downcast::<String>().expect("the refusal is formatted");
+        assert!(message.contains("--help"), "the refusal must name the bad argument: {message}");
+    }
 
     fn tree(path: &str, primary: bool, landed: bool, bytes: u64) -> Tree {
         Tree {

@@ -1,4 +1,5 @@
 use alloc::collections::BTreeSet;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -136,6 +137,19 @@ pub struct DirEntry {
 pub struct Extent {
     pub offset: u64,
     pub len: u64,
+}
+
+/// A still-live destination displaced by [`Fat32::replace_rename`].
+#[derive(Debug)]
+#[must_use]
+pub struct Replaced {
+    temporary: Option<String>,
+}
+
+impl Replaced {
+    pub fn displaced(&self) -> bool {
+        self.temporary.is_some()
+    }
 }
 
 fn components(path: &str) -> impl Iterator<Item = &str> {
@@ -879,6 +893,45 @@ impl<D: BlockAccess> Fat32<D> {
             }
         }
         Ok(())
+    }
+
+    /// Move an existing `to` aside until `from` commits, restoring it on error.
+    ///
+    /// The staged name costs four directory entries, claimed in `to`'s directory
+    /// before anything is freed: an overwrite refuses on a full directory or
+    /// volume where freeing the destination first would have made its own room.
+    pub fn replace_rename(&mut self, from: &str, to: &str) -> Result<Replaced, Error> {
+        if !self.exists(to)? {
+            self.rename(from, to)?;
+            return Ok(Replaced { temporary: None });
+        }
+
+        let temporary = self.replacement_temporary(to)?;
+        self.rename(to, &temporary)?;
+        if let Err(cause) = self.rename(from, to) {
+            let _ = self.rename(&temporary, to);
+            return Err(cause);
+        }
+        Ok(Replaced { temporary: Some(temporary) })
+    }
+
+    pub fn release_replaced(&mut self, replaced: Replaced) -> Result<(), Error> {
+        match replaced.temporary {
+            Some(temporary) => self.remove(&temporary),
+            None => Ok(()),
+        }
+    }
+
+    fn replacement_temporary(&mut self, path: &str) -> Result<String, Error> {
+        let (parent, _) = split_parent(path);
+        for sequence in 0..=MAX_DIR_ENTRIES {
+            let leaf = format!(".toyos-replaced-{sequence:08x}.tmp");
+            let candidate = if parent.is_empty() { leaf } else { format!("{parent}/{leaf}") };
+            if !self.exists(&candidate)? {
+                return Ok(candidate);
+            }
+        }
+        Err(Error::NoSpace)
     }
 
     /// Whether `dir` is `ancestor` or lives beneath it.

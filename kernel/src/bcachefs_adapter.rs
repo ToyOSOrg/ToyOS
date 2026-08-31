@@ -193,7 +193,12 @@ impl ReplaceRename for BcacheFsAdapter {
         Ok(Committed::new(displaced))
     }
 
-    fn release(&mut self, old: &str, new: &str, committed: Committed<Option<FileId>>) {
+    fn release(
+        &mut self,
+        old: &str,
+        new: &str,
+        committed: Committed<Option<FileId>>,
+    ) -> Result<(), SyscallError> {
         if let Some(target_id) = committed.into_displaced() {
             if file_cache::mark_deleted(target_id) == Residency::Gone {
                 self.open_files.remove(&target_id);
@@ -211,6 +216,7 @@ impl ReplaceRename for BcacheFsAdapter {
         if let Some(blocks) = self.blocks.remove(old) {
             self.blocks.insert(String::from(new), blocks);
         }
+        Ok(())
     }
 }
 
