@@ -173,13 +173,11 @@ struct Line<F: FnMut(&[u8])> {
     emit: F,
     buf: [u8; LINE_BYTES],
     len: usize,
-    /// Set once the ABI's leading bracket has been consumed by the tag.
-    tagged: bool,
 }
 
 impl<F: FnMut(&[u8])> Line<F> {
     fn new(emit: F) -> Self {
-        Self { emit, buf: [0; LINE_BYTES], len: 0, tagged: false }
+        Self { emit, buf: [0; LINE_BYTES], len: 0 }
     }
 
     fn flush(&mut self) {
@@ -207,13 +205,6 @@ impl<F: FnMut(&[u8])> Line<F> {
 
 impl<F: FnMut(&[u8])> core::fmt::Write for Line<F> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        if !self.tagged {
-            self.tagged = true;
-            // The tag replaces `LogRecord`'s leading bracket instead of duplicating its fields; if the bracket goes, the raw fragment passes through whole.
-            let rest = s.strip_prefix('[').unwrap_or(s);
-            self.push(rest.as_bytes());
-            return Ok(());
-        }
         self.push(s.as_bytes());
         Ok(())
     }
@@ -223,8 +214,7 @@ impl<F: FnMut(&[u8])> core::fmt::Write for Line<F> {
 pub fn write_line(record: &LogRecord, emit: impl FnMut(&[u8])) {
     use core::fmt::Write;
     let mut line = Line::new(emit);
-    line.push(b"[kernel ");
-    let _ = write!(line, "{record}");
+    let _ = write!(line, "{}", record.tagged("kernel"));
     line.finish();
 }
 
