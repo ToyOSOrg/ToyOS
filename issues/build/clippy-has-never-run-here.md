@@ -1,6 +1,6 @@
 ---
 status: open
-kind: defect
+kind: track
 opened: 2026-08-19
 ---
 
