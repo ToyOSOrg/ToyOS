@@ -194,7 +194,7 @@ kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
 src/assets.rs 123 0
-src/build.rs 676 3
+src/build.rs 682 3
 src/buildlock.rs 378 5
 src/ci.rs 105 1
 src/clippy.rs 35 0
