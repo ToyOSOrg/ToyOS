@@ -1,0 +1,11 @@
+# The dated Debian archive every hosted guest job installs from. `sid` is a
+# rolling release and its QEMU is the instrument this project's numbers are
+# taken on: on 2026-08-31 it moved 11.1.0 to 11.1.1 mid-afternoon and every
+# guest job refused at `instrument.sh`, correctly, because a number taken on
+# one QEMU is not a number about the other. Installing from a snapshot makes
+# the instrument a decision rather than a delivery date.
+#
+# This date and `.github/qemu-version` are one fact in two files: the date is
+# one on which `sid` carried that QEMU. Moving either alone is a mistake, and
+# `src/ci.rs` holds every workflow's copy of this string against this file.
+20260831T000000Z
