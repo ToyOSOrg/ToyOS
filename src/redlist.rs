@@ -2496,6 +2496,59 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/build/console-locale-detect-loses-every-typed-line.md",
         measured: "2026-08-31",
     },
+    // The same sentence under the same call site, on another branch the same
+    // day. Filed beside the row above rather than folded into it: one name is
+    // one row's subject, and whether these are one defect is what the drain
+    // counter has still not been asked.
+    Red {
+        test: "desktop_locale_detect",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(1, 2),
+        standing: Standing::Stands,
+        what: "`FAIL desktop_locale_detect: 10 typed lines and none of them came back`, the \
+               sentence `console_locale_detect` failed with hours earlier, and green on the \
+               alone re-run: `ALONE: GREEN, and it was alone both times — nothing the harness \
+               controls differed, so it failed once and passed once. That is a rate and not a \
+               classification`. **One call site, one string**: `shell_answers` types `echo \
+               surface-up-zqjxk` and `shell_echoes` says this after ten attempts, so the two \
+               names differ only in which surface owner is behind the shell. `shell_type_once` \
+               sends all three of that line's bursts and its Enter back to back with no \
+               guest-side wait — 44 set-1 bytes against the 16 the device holds — which is a \
+               defect in the code whether or not it is this sighting's cause; the counter that \
+               separates dropped bytes from a shell that was not reading was recorded by \
+               neither sighting. Not about the diff it appeared on, a pipe-`Gone` rename \
+               touching neither typing nor the terminal.",
+        evidence: "pull-request `ci` run 33426887418, job 99613902394 (`guest (9)`), headSha \
+                   28be5a85, 2026-08-31; the failure body carries two `compositor: frames=` \
+                   lines and nothing from the shell",
+        source: "issues/build/console-locale-detect-loses-every-typed-line.md",
+        measured: "2026-08-31",
+    },
+    // A rate on a shared shard, adjudicated here rather than re-run away. Not
+    // the typing family: it shares a day and an `ALONE: GREEN` with the two
+    // rows above and nothing else.
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(1, 2),
+        standing: Standing::Stands,
+        what: "`the 300 rounds took 3.007165755s, past the 3s bound — a wake was slow enough to \
+               be a lost one recovered by a later edge`, then `PASS poll_wake_pipe (1s)` alone \
+               in the same job. **No wake was lost.** The test owes two assertions and the \
+               lost-wake one passed: all 300 edges woke the armed ring, and what failed is a \
+               `const BOUND: Duration = Duration::from_secs(3)` inside the guest binary, missed \
+               by 7.2 ms — 0.24%. Nothing widens it: the same job priced its host at `fastest \
+               boot 1890 ms against the reference 1320 ms — liveness ceilings paid at 1.43x \
+               width` over `4 core(s)`, and that factor reaches every host-side ceiling and not \
+               this one. First sighting: `--known-red` answered `NOT ON THE LIST`. Not about \
+               the diff it appeared on, a `NamespaceBuild` flags word touching neither the pipe \
+               nor the poller.",
+        evidence: "pull-request `ci` run 33429908117, job 99613928630 (`guest (1)`), headSha \
+                   bd533bd0, 2026-08-31; the shard was otherwise green at 196 passed, 1 failed, \
+                   197 total (104.2s)",
+        source: "issues/build/poll-wake-pipe-bound-is-a-host-of-the-day-number.md",
+        measured: "2026-08-31",
+    },
     // Found auditing the merge-health backfill
     // (`issues/build/the-eased-merge-law-carries-a-threshold.md`), not by
     // anyone working the diff it rode on.
