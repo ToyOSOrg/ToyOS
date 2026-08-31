@@ -1132,6 +1132,27 @@ pub const RELEGATED: &[Relegated] = &[
                  lock, and the Fast `fs_truncate_persist` for an ordinary truncate's durable \
                  size; the staged race and the host-side re-judgment are gated only here.",
     },
+    Relegated {
+        test: "gpu_set_resolution",
+        ci_ms: 8_610,
+        why: Why::Cost,
+        guards: "A mode change that succeeds, and no pull request runs one at all: the new \
+                 framebuffer, the old one's release, the fresh scanout objects and the registry \
+                 update the *next* claim reads — judged against QEMU's own scanout over QMP, \
+                 the oracle that catches a driver whose account of itself is entirely correct \
+                 and whose SET_SCANOUT never reached the device. What still runs per pull \
+                 request: `abuse_gpu_resolution` (198 ms, shared boot) gates who may make the \
+                 call — four arms killed at it, one refused `PermissionDenied` — which is the \
+                 claim gate and not the resize. There is no cheaper gate to build: \
+                 `Profile::VirtioGpu` is the one shape in `tests/common/qemu.rs` with a GPU at \
+                 all, every other profile takes firmware's GOP whose `set_resolution` is an \
+                 unconditional `NotSupported`, so a Fast companion for either half of the \
+                 verdict would be a second boot of this same machine at this same price. \
+                 Relegated for margin rather than for a crossing — 8,610 ms against the \
+                 8,000 ms line — and the boot is 87% of it on the dev host, 3,764 ms of 4,329 \
+                 with 565 ms of test, so what would return this name is the boot's cost and \
+                 nothing in the test.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own
