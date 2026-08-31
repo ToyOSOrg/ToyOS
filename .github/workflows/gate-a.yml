@@ -81,10 +81,16 @@ jobs:
       - name: deps
         if: steps.local.outputs.cache != 'yes'
         run: |
+          # From a dated snapshot, not sid-as-it-stands: .github/apt-snapshot says why.
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y -qq ca-certificates > /dev/null
+          echo 'deb https://snapshot.debian.org/archive/debian/20260831T000000Z sid main' \
+            > /etc/apt/sources.list
+          rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.list
           got=no
           for attempt in 1 2 3; do
-            if apt-get update -qq \
-               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            if apt-get -o Acquire::Check-Valid-Until=false update -qq \
+               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --allow-downgrades \
                     git curl ca-certificates jq zstd xz-utils build-essential \
                     qemu-system-x86 > /dev/null; then
               got=yes
