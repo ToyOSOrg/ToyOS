@@ -271,14 +271,24 @@ const PAGER_ARITHMETIC: &str = "the verdict was the defect. It injected all thir
     every recorded red's 6-10 s";
 
 /// What retired the two `locale_detect` rows below: a line's bursts stopped
-/// going out unacknowledged.
-///
-/// **A differential, not the test agreeing with itself.** The two signals below
-/// share no code — one is the kernel's own device path, the other is the
-/// console's echo drawn on glass — and they agree on the same shortfall. That is
-/// what separates "the bytes were not delivered" from "the guest was not
-/// reading", which is the reading a CI capture alone could never settle.
-const TYPING_PACED: &str = "the unacknowledged burst, closed at `shell_type_once`. `ps2_bursts`     always bounded each batch, but every batch of a line went out inside one QMP session with no     guest-side wait — and the Enter went out last, behind all of them. Staged on the dev host     with the pacing reverted and nothing else changed: `echo surface-up-zqjxk`, the handshake     nonce, is 44 set-1 bytes against the device's 16, and the guest took 32 of them     (`injected 44, kernel drained 32`, refused at the burst `\"zqjxk\"`), with the panel     independently truncated to `/home/root> echo surface-up-` — sixteen characters, which is     those same 32 bytes. Whole-line echo false, because the dropped Enter is the byte whose     absence leaves nothing to echo at all. The same code with a 14-byte line, `echo z`, is     `injected 14, kernel drained 14` and green: the loss is the queue bound and not the wire.     Paced, both lines are whole — `injected 44, kernel drained 44` with the input row carrying     the line, and 14 of 14. Each burst now waits for the guest's own report of taking the last     one: the decoded input row where there is a panel, the kernel's `i8042: drain bytes=` where     the shell is behind a compositor and there is none. Green afterwards on the dev host:     `console_locale_detect` PASS (4s), `desktop_locale_detect` PASS (4s), `desktop_typing_damage`     PASS (11s) at 16 of its 16 appearances, `desktop_audio_client` PASS (13s), `blocked_dump`     PASS (3s)";
+/// going out unacknowledged. **A differential, not the test agreeing with
+/// itself** — the two counts below share no code, and they agree.
+const TYPING_PACED: &str = "the unacknowledged burst, closed at `shell_type_once`. `ps2_bursts` \
+    always bounded each batch, but every batch of a line went out inside one QMP session with \
+    no guest-side wait, and the Enter went out last behind all of them. Staged on the dev host \
+    with the pacing reverted and nothing else changed: `echo surface-up-zqjxk` is 44 set-1 \
+    bytes against the device's 16, and the guest took 32 of them (`injected 44, kernel drained \
+    32`, refused at the burst `\"zqjxk\"`), with the panel independently truncated to \
+    `/home/root> echo surface-up-` — sixteen characters, which is those same 32 bytes. \
+    Whole-line echo false, because the dropped Enter is the byte whose absence leaves nothing \
+    to echo at all. The same code with a 14-byte line, `echo z`, is `injected 14, kernel \
+    drained 14` and green: the loss is the queue bound and not the wire. Paced, both are whole \
+    — `injected 44, kernel drained 44` with the input row carrying the line, and 14 of 14. \
+    Each burst now waits for the guest's own report of taking the last: the decoded input row \
+    where there is a panel, the kernel's `i8042: drain bytes=` where the shell is behind a \
+    compositor and there is none. Green after, on the dev host: `console_locale_detect` PASS \
+    (4s), `desktop_locale_detect` PASS (4s), `desktop_typing_damage` PASS (12s) at 16 of its \
+    16 appearances, `desktop_audio_client` PASS (13s), `blocked_dump` PASS (3s)";
 
 /// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
 ///
@@ -2517,10 +2527,8 @@ pub const KNOWN_RED: &[Red] = &[
         source: "tests/toyos.rs shell_type_once",
         measured: "2026-08-31",
     },
-    // The same sentence under the same call site, on another branch the same
-    // day. Filed beside the row above rather than folded into it: one name is
-    // one row's subject, and whether these are one defect is what the drain
-    // counter has still not been asked.
+    // The same sentence under the same call site, on another branch. Its own
+    // row and not a fold: one name is one row's subject.
     Red {
         test: "desktop_locale_detect",
         instrument: Instrument::Ci,
