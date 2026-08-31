@@ -383,6 +383,42 @@ pub const RELEGATED: &[Relegated] = &[
         guards: "The end-to-end durable witness: a rename staged on /log, the guest shut                  down, and the destination judged byte-for-byte off the raw FAT image by                  the in-tree toyos-fat32-check. Nightly because the boot-plus-shutdown                  costs a full cycle. What runs per pull request is the Fast                  `fs_transactional` control (a rename with an absent source keeps its                  destination, rename(p,p) is a no-op, a shrunk tail regrows as zeros) and                  the compile-time invariants that make the class unrepresentable: the                  `Committed` witness that forbids releasing a destination before the move                  commits, and `same_object`/`same_entry` that decides the no-op by backend                  identity so a FAT case-only rename cannot destroy the file.",
     },
     Relegated {
+        test: "klogd_panic_halts",
+        ci_ms: 16_658,
+        why: Why::Cost,
+        guards: "The two actuator arms of the kernel-thread panic rows, walked for real: \
+                 klogd's deliberate panic halts the machine instead of recovering off a \
+                 stale `syscall_rip`, and usbd's kills the thread and the machine boots — \
+                 both branches of `sched::kthread`'s table, each a boot that dies or \
+                 recovers on purpose, which is the pair's whole cost. What still runs per \
+                 pull request: `klogd_hosted` keeps the spawn half Fast at 4,941 ms — all \
+                 three rows on the wire with the process table naming them — and every \
+                 boot's console output is klogd's drain, so the thread starving or dying \
+                 is visible in any test that reads a line.",
+    },
+    Relegated {
+        test: "wall_clock_century_register",
+        ci_ms: 9_030,
+        why: Why::Cost,
+        guards: "The century register's *contents* widening the year: staged 0x21, this \
+                 boot's log file must be named in 2133, so a kernel reading a fixed 2000 \
+                 shows up in the one digit pair nothing else moves. What still runs per \
+                 pull request: `wall_clock_no_century` (7,187 ms, Fast) gates that the \
+                 FADT's answer is what decides, and `wall_clock_file` names its file off \
+                 the same decoder every run.",
+    },
+    Relegated {
+        test: "wall_clock_zone",
+        ci_ms: 9_347,
+        why: Why::Cost,
+        guards: "A firmware-named zone separating local time from UTC in the direction \
+                 UEFI defines: the -120-minute stage must leave the FAT name and stamps \
+                 on local time and move only `SYS_CLOCK_EPOCH`, the sign a dual-booted \
+                 laptop gets four hours wrong instead of two. What still runs per pull \
+                 request: `wall_clock_file` gates the epoch syscall against an unzoned \
+                 staged instant, so only the offset's application and sign move nightly.",
+    },
+    Relegated {
         test: "desktop_window_child",
         ci_ms: 65_217,
         why: Why::Cost,

@@ -588,13 +588,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("pci_capability_walk", Sched::Parallel, Tier::Fast),
     // What QEMU was told to create against what the guest enumerated: two
     // accounts of one bus from two independent readers. One boot, every
-    // verdict a set comparison. Carrying `UNMEASURED_MS` until the shards
-    // price it.
+    // verdict a set comparison.
     ("query_pci_agreement", Sched::Parallel, Tier::Fast),
     // The root `system.toml`, booted rather than read: the shipped init list
     // and program namespaces have no other gate a harness run can reach.
-    // Every verdict is a console line. Carrying `UNMEASURED_MS` until the
-    // shards price it.
+    // Every verdict is a console line.
     ("shipped_config_boots", Sched::Parallel, Tier::Fast),
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
@@ -664,12 +662,12 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("operation_nesting", Sched::Parallel, Tier::Fast),
     ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
     // The spawn half alone: one headless boot whose verdict is three kernel
-    // log lines. Carrying `UNMEASURED_MS` until the shards price it.
+    // log lines.
     ("klogd_hosted", Sched::Parallel, Tier::Fast),
     // The two actuator boots (`klogd-panic`, `usbd-panic`), split off so the
-    // spawn half is per-PR again. Fast is the bootstrap tier: the measured
-    // price assigns the final tier.
-    ("klogd_panic_halts", Sched::Parallel, Tier::Fast),
+    // spawn half is per-PR again; alone they still price over the ceiling,
+    // which is what the relegation row carries.
+    ("klogd_panic_halts", Sched::Parallel, Tier::Nightly),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. **Two names because one
     // over two boots measured 12 s twelve-wide on the dev host**, against
@@ -795,8 +793,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One `LOCALE_WIZARD` boot for the pair since the drainer was made
     // runnable at commit — the boot-apiece and the injected drain keys it took
     // to share one were both the closed log-ring lag. Adjacent because
-    // `group_of` makes adjacency load-bearing; Fast as the bootstrap tier,
-    // carrying `UNMEASURED_MS` until the shards price the shared shape.
+    // `group_of` makes adjacency load-bearing; the carrier priced 7,055 ms
+    // and the rider 149 ms on the shared boot, so both stay Fast.
     ("locale_detect", Sched::Parallel, Tier::Fast),
     ("locale_detect_unrecognized", Sched::Parallel, Tier::Fast),
     // The wizard on the two surfaces the machine actually has, rather than on
@@ -931,13 +929,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The five RTC/firmware shapes, one kernel build and one boot each. Five
     // registrations because the artifact memo builds one kernel per feature
     // set anyway, so the split costs nothing and the parallel phase gets five
-    // jobs it can place instead of one serial five-boot job it cannot.
-    // Carrying `UNMEASURED_MS` until the shards price them.
+    // jobs it can place instead of one serial five-boot job it cannot. The
+    // last two priced inside the margin band, so they sit Nightly by the
+    // straddler rule; their relegation rows carry the prices.
     ("wall_clock_rtc_dead", Sched::Parallel, Tier::Fast),
     ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Fast),
     ("wall_clock_no_century", Sched::Parallel, Tier::Fast),
-    ("wall_clock_century_register", Sched::Parallel, Tier::Fast),
-    ("wall_clock_zone", Sched::Parallel, Tier::Fast),
+    ("wall_clock_century_register", Sched::Parallel, Tier::Nightly),
+    ("wall_clock_zone", Sched::Parallel, Tier::Nightly),
     // `xhci_slow_connect`'s shape against the disk's port, and serial for the
     // same reason and not by association: it shares `SLOW_CONNECT_NS`, so a boot
     // that outgrows the window binds the disk in the port scan and it reports

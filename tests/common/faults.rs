@@ -538,7 +538,7 @@ pub fn syscall_window_nmi(
     // **A starved victim voids the sampling the window verdicts rest on, and
     // that is the declared degradation rather than a red.** The derivation
     // samples a *running* spinner's loop, and a running victim collects fewer
-    // victim-located arrivals than traversals of its own (55+178 against 830
+    // victim-located arrivals than traversals of its own (64+155 against 794
     // alone on this host); a victim the host mostly keeps parked collects
     // them piled at one point — the recorded red is `window=0 ring3=77` on 18
     // traversals, twelve wide beside a second suite. What such a run still
