@@ -188,7 +188,7 @@ kernel/src/time.rs 47 0
 kernel/src/tmpfs.rs 21 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
-kernel/src/user_ptr.rs 68 0
+kernel/src/user_ptr.rs 67 0
 kernel/src/vfs.rs 73 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0

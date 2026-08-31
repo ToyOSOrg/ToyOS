@@ -246,10 +246,9 @@ impl UserBytesMut<'_> {
     }
 
     /// Copy one ring run into the window at `off`; panics if out of bounds, as
-    /// [`write_at`](Self::write_at) does.
-    ///
-    /// **`copy` and not `copy_nonoverlapping`**: `SYS_PIPE_MAP` maps the ring's
-    /// page into the caller, which may then name it as this window.
+    /// [`write_at`](Self::write_at) does. **`copy` and not
+    /// `copy_nonoverlapping`**: `SYS_PIPE_MAP` maps the ring's page into the
+    /// caller, which may then name it as this window.
     pub fn write_run(&mut self, off: usize, src: &toyos_abi::ring::Src<'_>) {
         assert!(
             off.checked_add(src.len()).is_some_and(|end| end <= self.len),
