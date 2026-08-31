@@ -2225,6 +2225,10 @@ impl toyos_gpt::Sectors for ImageSectors<'_> {
         (self.bytes.len() / 512) as u64
     }
 
+    fn lba_count_granularity(&self) -> core::num::NonZeroU64 {
+        core::num::NonZeroU64::MIN
+    }
+
     fn read_lba(&mut self, lba: u64, out: &mut [u8]) -> bool {
         let at = lba as usize * 512;
         match self.bytes.get(at..at + out.len()) {
