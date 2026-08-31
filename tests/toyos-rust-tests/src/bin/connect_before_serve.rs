@@ -158,13 +158,11 @@ fn client() -> ! {
         }
         "gone" => {
             assert_eq!(n, 0, "a connection whose server left returned {n} bytes");
-            // **`NotFound` and not `Gone`, which
-            // `issues/isolation/a-broken-pipe-answers-not-found.md`
-            // is about.** What this arm is for is that the client is *told*, by
-            // the kernel, without a timer — which either word does.
+            // The word this arm was specified for: the peer end has closed, and
+            // the client is told so by the kernel without a timer.
             assert_eq!(
                 conn.write_nonblock(QUESTION),
-                Err(SyscallError::NotFound),
+                Err(SyscallError::Gone),
                 "a write into a port whose acceptor is gone was taken",
             );
             say("read 0 then refused");

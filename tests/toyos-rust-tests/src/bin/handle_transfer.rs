@@ -226,15 +226,13 @@ fn a_senders_exit_does_not_retract_what_it_sent() {
     assert_eq!(n, 1, "a batch a dead sender left behind arrived {n} wide");
 
     // **The handle resolves, which is the whole assertion.** The child made both
-    // ends of the pipe and both went with it, so the write itself is refused for
-    // the reader rather than for the handle — `NotFound`, which
-    // `issues/isolation/a-broken-pipe-answers-not-found.md` is about and
-    // which `connect_before_serve` asserts too. A handle a dead sender's batch
+    // ends of the pipe and both went with it, so the write is refused for the
+    // reader rather than for the handle — `Gone`. A handle a dead sender's batch
     // no longer backed would instead end this process on `Stale`, so reaching
     // the next statement at all is the verdict.
     assert_eq!(
         syscall::write_nonblock(batch[0], b"still here"),
-        Err(SyscallError::NotFound),
+        Err(SyscallError::Gone),
         "a handle its sender no longer holds answered something other than its dead reader",
     );
     syscall::close(batch[0]);

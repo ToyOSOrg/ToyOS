@@ -54,7 +54,7 @@ fn report(stats: &MixStats, clients: usize) {
 /// A broken pipe here is the client's departure, caught here rather
 /// than left to the control connection — a client that goes mid-stream would
 /// otherwise stay `is_streaming()` and keep the loop deferring buffers for a
-/// producer that no longer exists. Departure is exactly `Err(NotFound)`, the
+/// producer that no longer exists. Departure is exactly `Err(Gone)`, the
 /// kernel's broken-pipe error; a full pipe is `Err(WouldBlock)` and means the
 /// client is merely behind on consuming signals, which must leave it untouched
 /// — a paused client stops reading its pipe indefinitely and is alive.
@@ -66,7 +66,7 @@ fn signal_clients(streams: &mut [ClientStream], ramp_frames: u32) {
     for stream in streams.iter_mut() {
         let gone = matches!(
             syscall::write_nonblock(stream.signal_write, &[1]),
-            Err(syscall::SyscallError::NotFound)
+            Err(syscall::SyscallError::Gone)
         );
         if gone {
             stream.depart(Departure::SignalPipeGone, ramp_frames);

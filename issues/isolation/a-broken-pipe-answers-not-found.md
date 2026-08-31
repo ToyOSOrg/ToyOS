@@ -4,40 +4,35 @@ kind: defect
 opened: 2026-08-10
 ---
 
-# A write into a pipe whose reader is gone answers `NotFound`
+# A broken pipe reaches a Rust caller as `ErrorKind::Other`
 
-`ops::write_pipe` maps `pipe::PipeWrite::BrokenPipe` to `SyscallError::NotFound`
-(`kernel/src/object/ops.rs`). The handle resolved, the object is there, and the
-fact being reported is that the *other end* has closed.
+**The kernel half is closed.** `ops::write_pipe` answers `SyscallError::Gone`
+for a pipe whose readers are all gone (`kernel/src/object/ops.rs`), soundd's and
+netd's death detectors key on that word, `userland/libc`'s `set_errno` maps it
+to `EPIPE`, and `connect_before_serve`, `kill_while_blocked`, `handle_transfer`,
+`compositor_stall` and `pipe_flag_forgery` all assert it.
 
-That is the one thing `NotFound` is not allowed to mean. The rule is stated in
-the root `CLAUDE.md`, about the same error word on the same syscall family:
-*"`NotFound` means the name is not there and nothing else may say so, which is
-why `open` with `CREATE` acts on `NotFound` alone."*
+**What is left is the std fork, and only the std lane can do it.**
+`rust/library/std/src/sys/pipe/toyos.rs`'s `to_io_error` names `NotFound`,
+`PermissionDenied` and `WouldBlock` and sends everything else — `Gone` included
+— to `io::ErrorKind::Other`. `rust/library/std/src/sys/stdio/toyos.rs`'s
+`to_io_error` is worse: it ignores its argument entirely and answers `Other` for
+every error there is.
 
-And there is already a word for it. `SyscallError::Gone` was added by the
-endowment branch's chunk 3 and its `Display` is literally *"the other end is
-gone"*. `SYS_NAMESPACE_OPEN` answers it for a port whose acceptor has been
-dropped; a connection whose peer end has been dropped answers `NotFound` for the
-same fact.
+So a Rust program writing into a pipe whose reader has exited gets
+`ErrorKind::Other`, where POSIX gives `EPIPE` and every other Rust target gives
+`ErrorKind::BrokenPipe`. That is uninformative rather than false — the word it
+replaced said the pipe did not exist, which is a different fact with different
+remedies — but it is still not an answer a caller can act on.
 
-The second arm of `connect_before_serve` is specified as *"the client's write
-must return `Gone`"*. It returns `NotFound`, and the test asserts what the kernel
-says rather than what was asked for.
+## What closing it takes
 
-## What changing it touches
+`Gone => io::ErrorKind::BrokenPipe` in `sys/pipe/toyos.rs`, and a `to_io_error`
+in `sys/stdio/toyos.rs` that reads its argument at all. Both are in the rust
+submodule, which needs an exclusive machine window, so this is owed to the std
+lane and to nothing else.
 
-Small and not zero, which is why the endowment branch filed it rather than doing
-it on its last verification cycle:
-
-- `kernel/src/object/ops.rs`, one arm.
-- `userland/soundd/src/main.rs`'s `signal_clients`, whose client-death detector
-  is `matches!(write_nonblock(..), Err(SyscallError::NotFound))` and whose doc
-  comment names the word. **This is the risky one**: it is gate A's path.
-- `rust/library/std/src/sys/pipe/toyos.rs` and `sys/stdio/toyos.rs` need
-  `Gone => io::ErrorKind::BrokenPipe`, which is what POSIX callers expect and
-  what `NotFound` is not. `stdio/toyos.rs` already has that arm.
-- `userland/libc/src/posix_io.rs` maps `NotFound` to `ENOENT`; a broken pipe
-  should be `EPIPE`.
-
-Nothing outside those reads the word off a write.
+The instrument is a guest arm: a `std::process::Child` whose stdin write must
+answer `ErrorKind::BrokenPipe` after the child has exited, measured against
+libc's `write(2)` into the same shape setting `errno` to `EPIPE` — which it
+already does, so libc is the differential the std arm is judged by.

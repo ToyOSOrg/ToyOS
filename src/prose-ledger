@@ -391,7 +391,7 @@ toyos-abi/src/lib.rs 31 0
 toyos-abi/src/log.rs 143 0
 toyos-abi/src/net.rs 11 0
 toyos-abi/src/ring.rs 124 0
-toyos-abi/src/syscall.rs 841 0
+toyos-abi/src/syscall.rs 843 0
 toyos-abi/src/virtio_sound.rs 71 0
 toyos-cc/src/ast.rs 8 0
 toyos-cc/src/codegen/addr.rs 12 0
@@ -651,7 +651,7 @@ userland/libc/src/lib.rs 14 0
 userland/libc/src/math.rs 13 0
 userland/libc/src/memory.rs 8 0
 userland/libc/src/misc.rs 38 0
-userland/libc/src/posix_io.rs 49 0
+userland/libc/src/posix_io.rs 51 0
 userland/libc/src/printf.rs 22 0
 userland/libc/src/pthread.rs 40 0
 userland/libc/src/socket.rs 40 0

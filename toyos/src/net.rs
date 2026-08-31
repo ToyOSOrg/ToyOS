@@ -337,33 +337,21 @@ impl NetdConn {
 /// raised in one place — `ipc::read_exact`, on a `read` that answered zero — so
 /// it is what a peer that left while this endpoint was waiting for the response
 /// looks like. A peer that left *before* the request went out is refused by the
-/// kernel at one of the two writes instead, and the kernel has two words for it
-/// on a connection whose handle is still live and still this process's:
+/// kernel at one of the two writes instead, and both answer `Gone` on a
+/// connection whose handle is still live and still this process's: when the
+/// server end's last handle goes, `port::Acceptor::on_zero_handles` closes
+/// every queued connection's inbox — this end's *outbox*, so `HandleQueue::push`
+/// refuses `SYS_HANDLE_SEND` rather than filling a queue nobody will drain —
+/// and drops the connection, which drops the server's read end, so `SYS_WRITE`
+/// is a pipe with no readers.
 ///
-/// - `Gone`, from `SYS_HANDLE_SEND`. When the server end's last handle goes,
-///   `port::Acceptor::on_zero_handles` calls `close_now` on every queued
-///   connection's inbox — which is this end's *outbox* — and `HandleQueue::push`
-///   then answers `Gone` rather than filling a queue nobody will drain. Every
-///   request that hands netd pipe ends sends the handles first, so this is the
-///   first refusal a bind can meet.
-/// - `NotFound`, from `SYS_WRITE`. The same hook drops the queued connection,
-///   which drops the server's read end, and `ops::write_pipe` maps a pipe with
-///   no readers to `NotFound`. That the word is `NotFound` and not `Gone` is a
-///   tracked kernel defect of its own —
-///   `issues/isolation/a-broken-pipe-answers-not-found.md`; when it is fixed
-///   this arm is subsumed by the one above rather than being wrong.
-///
-/// Neither word can mean anything else here. This is applied only to `read`,
+/// `Gone` cannot mean anything else here. This is applied only to `read`,
 /// `write` and `handle_send` on a connection this process holds, and a handle a
-/// process does not hold ends it at the kernel rather than answering a word —
-/// so "not found" on a live connection is its peer and nothing else.
+/// process does not hold ends it at the kernel rather than answering a word.
 fn hangup(e: IpcError) -> NetError {
     match e {
         IpcError::Disconnected
-        | IpcError::Syscall(
-            toyos_abi::syscall::SyscallError::Gone
-            | toyos_abi::syscall::SyscallError::NotFound,
-        ) => NetError::NetdNotFound,
+        | IpcError::Syscall(toyos_abi::syscall::SyscallError::Gone) => NetError::NetdNotFound,
         _ => NetError::Io,
     }
 }
@@ -599,13 +587,11 @@ mod tests {
         assert_eq!(hangup(IpcError::Syscall(SyscallError::Gone)), NetError::NetdNotFound);
     }
 
-    /// `SYS_WRITE` into the same connection a moment later: the queued
-    /// connection has been dropped, so the pipe has no reader and the kernel
-    /// says `NotFound`. See `issues/isolation/a-broken-pipe-answers-not-found.md`
-    /// for why that word and not `Gone`.
+    /// `SYS_WRITE` into the same connection a moment later reaches the same
+    /// word, so `NotFound` is not this fact and no longer reaches it.
     #[test]
-    fn a_write_with_no_reader_left_is_a_netd_that_is_not_there() {
-        assert_eq!(hangup(IpcError::Syscall(SyscallError::NotFound)), NetError::NetdNotFound);
+    fn a_not_found_is_not_a_netd_that_is_not_there() {
+        assert_eq!(hangup(IpcError::Syscall(SyscallError::NotFound)), NetError::Io);
     }
 
     /// The case that already worked: netd was still there for the request and

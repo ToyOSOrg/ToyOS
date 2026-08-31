@@ -32,9 +32,8 @@
 //!    frame — so `SYS_HANDLE_SEND` is the first thing it can be refused at, and
 //!    it answers `SyscallError::Gone`.
 //! 3. **The same, for a request that carries no handles**, which reaches the
-//!    frame write instead. A pipe with no reader is `SyscallError::NotFound`
-//!    (`issues/isolation/a-broken-pipe-answers-not-found.md` is about that word
-//!    being `NotFound` rather than `Gone`; either way it is the peer).
+//!    frame write instead, where a pipe with no reader is the same
+//!    `SyscallError::Gone`.
 //!
 //! Arms 2 and 3 are the ones that produced the panic. They are red on a tree
 //! where `toyos::net::hangup` maps anything but `IpcError::Disconnected` to

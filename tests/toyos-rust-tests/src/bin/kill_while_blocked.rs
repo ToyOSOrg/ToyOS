@@ -169,15 +169,11 @@ fn a_connection_peer_killed_in_the_read() {
     child.kill().expect("kill the parked child");
     let _ = child.wait();
 
-    // **`NotFound` and not `Gone`**, which
-    // `issues/isolation/a-broken-pipe-answers-not-found.md` is about;
-    // `connect_before_serve` asserts the same word for the same reason. What
-    // this arm is for is the *release* — on a kernel where the killed thread's
-    // stranded `Arc` kept the read end alive, this write succeeds — and either
-    // word says the peer went.
+    // What this arm is for is the *release*: on a kernel where the killed
+    // thread's stranded `Arc` kept the read end alive, this write succeeds.
     assert_eq!(
         conn.write_nonblock(b"nobody is reading this"),
-        Err(SyscallError::NotFound),
+        Err(SyscallError::Gone),
         "a connection whose peer was killed mid-read still took a write",
     );
     println!("  connection: the write answered Gone");
