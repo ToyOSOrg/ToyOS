@@ -19,8 +19,7 @@ whole life.
 
 **Blocked on the page cache owning exactly one device**
 (`issues/build/page-cache-owns-one-device.md`), which is also why a machine
-booting off an internal disk gets neither `/boot` nor `/log`
-(`issues/kernel/internal-disk-boot-has-no-boot-mount.md`). The work is therefore
+booting off an internal disk gets neither `/boot` nor `/log`. The work is therefore
 a page-cache change first: a `BlockIO` over an arbitrary `BlockDevice` at a
 partition offset with a cache of its own. Only then the third GPT partition, the
 root GUID in the kernel arguments, and the deletion of the initrd adapter and

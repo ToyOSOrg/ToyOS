@@ -50,6 +50,36 @@ H3 itself — cannot presently tell its own change from this. H3 therefore
 compared its two arms against *each other* rather than against the recorded
 sample, and said so.
 
+**Three arms, all of them red, and `main` red hardest.** Measured 2026-08-07 on
+`main` at `c0365ea`, one session:
+
+| tree | dropout runs | measured runs | verdict |
+|---|---|---|---|
+| `main` | 7 | 28 | `pooled dropout rate: 7 of 40 vs recorded 0 of 120 (Fisher p=4.00e-5)` |
+| `wt/toyos-m3` | 5 | 12 | `5 of 40 … (p=8.02e-4)` |
+| the same branch with its one new wait deleted | 5 | 40 | `5 of 40 … (p=8.02e-4)` |
+
+The denominators differ because the gate stops as soon as the remaining runs
+cannot change the verdict. The gate's own documentation says it cannot detect a
+doubling of the dropout rate at any N a human waits for, so it cannot separate
+these three from each other either — what it says unambiguously is that every one
+of them is far from the recorded `0 of 120`. Every gap is small and none is a
+silence anyone would hear as a break: the largest is 51 periods, most are one or
+two, and the fast tier — whose verdict is harm — is green on all three arms, 7 of
+7 each. So this is a *rate* finding against a recorded sample, not a report that
+the machine sounds wrong. Host load was 6-20 throughout and is not offered as the
+explanation; the three arms ran back to back on the same host, which is what makes
+them comparable to each other. **Consequence while this is open:** the thorough
+tier cannot serve as a pass/fail gate — an A/B between two arms is what it can
+still answer.
+
+**The next step is named and is still nobody's: the thorough tier on the commit
+the sample was recorded against, on the dev host, in one session.** That is the
+one testable half of the two readings below. Do not re-record the baseline first:
+a sample re-taken now would make the disagreement disappear without anyone
+learning which of the two it was, and the recorded zero is the only reason the
+question is visible at all.
+
 The recorded sample in `tests/audio-baseline.toml` is 0/120 and was taken in a
 session this host no longer resembles. **Re-recording it is not licensed by this
 entry** — a baseline widened to accept the defect is the defect made permanent.
