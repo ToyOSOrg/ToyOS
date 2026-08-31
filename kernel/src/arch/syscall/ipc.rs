@@ -107,6 +107,14 @@ pub(super) fn sys_port_create() -> u64 {
 
 /// Build a namespace from a base's kept names plus new bindings; a refusal leaves the caller's table unchanged (every name resolved and connector checked first).
 pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -> u64 {
+    // A bit this kernel does not define is a caller asking for something it will not get, so it is refused rather than skipped.
+    if args.flags & !NAMESPACE_FLAGS_KNOWN != 0 {
+        return SyscallError::InvalidArgument.to_u64();
+    }
+    let keep_all = args.flags & NAMESPACE_KEEP_ALL != 0;
+    if keep_all && args.keep_n > 0 {
+        return SyscallError::InvalidArgument.to_u64();
+    }
     let total = args.keep_n.saturating_add(args.add_n);
     if total > MAX_NAMESPACE_ENTRIES as u64 {
         return SyscallError::InvalidArgument.to_u64();
@@ -126,6 +134,18 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
 
     let mut entries: Vec<(alloc::boxed::Box<str>, alloc::sync::Arc<port::Connector>)> =
         Vec::new();
+
+    if keep_all {
+        let base = match process::with_process_data(|data| {
+            data.handles.get::<crate::object::namespace::Namespace>(args.base, Rights::READ)
+        }) {
+            Ok(base) => base,
+            Err(e) => return e.refuse(),
+        };
+        for (name, connector) in base.entries() {
+            entries.push((name.clone(), connector.clone()));
+        }
+    }
 
     if args.keep_n > 0 {
         let Some(keep) = (args.keep_n as usize)
