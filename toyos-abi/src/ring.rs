@@ -9,9 +9,9 @@
 //! userland reads. Nothing in the header is read back by the kernel — same
 //! rule `kernel/src/inbox.rs` states for its own tail.
 //!
-//! **Nothing here is ever a `&[u8]` or `&mut [u8]` either**, header or data:
-//! the whole page is in that mapping, so a reference over any of it claims an
-//! exclusivity the mapping does not give. [`Src`] and [`Dst`] say so instead.
+//! **The data region is never a `&[u8]` or `&mut [u8]`** — plain bytes in that
+//! mapping — so [`Src`] and [`Dst`] describe the copies instead. A reference
+//! over the *header* is sound and `header` takes one: one `AtomicU32`, atomics.
 
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};

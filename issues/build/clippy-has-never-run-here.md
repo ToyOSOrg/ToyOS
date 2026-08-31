@@ -411,7 +411,7 @@ comparison's result live across a preempt-count change. No other `lock`-prefixed
 `asm!` in the kernel makes that claim — `arch/`'s entry stubs are `naked_asm!`
 with no options at all.
 
-Documenting `toyos-abi/src/ring.rs`'s nine unsafe blocks surfaced a real
+Documenting `toyos-abi/src/ring.rs`'s unsafe blocks surfaced a real
 open question about whether its `&[u8]`/`&mut [u8]` views alias a page
 userland can also write — filed rather than guessed at here, and since closed:
 they did, and `Ring::read`/`Ring::write` hand out a pointer and a length now.

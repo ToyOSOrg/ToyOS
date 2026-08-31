@@ -35,9 +35,8 @@
 //! *number* is what is retired, and a number is not a thing a scan can look
 //! for — the name that used to carry it is.
 //!
-//! The fourth names two files rather than walking a tree: the pipe ring and the
-//! user-copy windows, where a Rust reference would claim an exclusivity the
-//! process's own mapping of that page does not give.
+//! The fourth names two files, the pipe ring and the user-copy windows, where a
+//! slice or an exclusive reference would claim what the mapping does not give.
 
 use std::path::{Path, PathBuf};
 
@@ -695,15 +694,18 @@ mod tests {
         );
     }
 
-    /// A page a process can write while the kernel is inside it never becomes
-    /// a Rust reference. Two files, named rather than walked: building a slice
-    /// from a raw pointer is ordinary elsewhere, and only these two address
-    /// somebody else's live mapping.
+    /// A page a process can write while the kernel is inside it never becomes a
+    /// slice, and never an exclusive reference. Two files, named rather than
+    /// walked: both spellings are ordinary elsewhere.
+    ///
+    /// A *shared* reference is not banned: `Ring::header` soundly takes one over
+    /// the same page, its whole subject being an `AtomicU32`.
     #[test]
-    fn a_page_userland_can_write_never_becomes_a_reference() {
+    fn no_slice_or_exclusive_reference_is_built_over_a_mapped_page() {
         const OVER_A_MAPPING: &[&str] = &["toyos-abi/src/ring.rs", "kernel/src/user_ptr.rs"];
-        const SPELLINGS: &[&str] =
+        const SLICES: &[&str] =
             &["from_raw_parts", "from_raw_parts_mut", "from_ptr_range", "from_ptr_range_mut"];
+        const EXCLUSIVE: &str = "&mut *";
         let root = repo_root();
         let mut complaints = Vec::new();
         for file in OVER_A_MAPPING {
@@ -711,17 +713,20 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{file}: {e} — the scan is looking elsewhere"));
             for (n, line) in text.lines().enumerate() {
                 let code = code_only(line);
-                for spelling in SPELLINGS {
+                for spelling in SLICES {
                     if names(&code, spelling) {
                         complaints.push(format!("{file}:{}: `{spelling}`", n + 1));
                     }
+                }
+                if code.contains(EXCLUSIVE) {
+                    complaints.push(format!("{file}:{}: `{EXCLUSIVE}`", n + 1));
                 }
             }
         }
         assert!(
             complaints.is_empty(),
-            "a reference over a page a process can write is an exclusivity claim \
-             the mapping does not give:\n{}",
+            "a slice or an exclusive reference over a page a process can write \
+             claims an exclusivity the mapping does not give:\n{}",
             complaints.join("\n"),
         );
     }
