@@ -270,6 +270,32 @@ const PAGER_ARITHMETIC: &str = "the verdict was the defect. It injected all thir
     2026-08-24: PASS 6 of 6 alone on the dev host at 2.00x-8.00x width, 16-31 s each, against \
     every recorded red's 6-10 s";
 
+/// What retired the two `locale_detect` rows below: a line's bursts stopped
+/// going out unacknowledged.
+const TYPING_PACED: &str = "the unacknowledged burst, closed at `shell_type_once`. `ps2_bursts` \
+    always bounded each batch, but every batch of a line went out inside one QMP session with \
+    no guest-side wait, and the Enter went out last behind all of them. **The control is on the \
+    shipping kernel with no actuator armed**: pacing reverted, the 44-byte handshake nonce typed \
+    at `console: ready` — the moment `shell_answers` types — and the first line is short in 15 \
+    of 20 boots, the panel stopping at `/home/root> echo surface-up-` and the whole-line echo \
+    never arriving; an earlier 12-boot run of the same arm gave 5 of 12, so the rate moves with \
+    the host. The same code at the same moment with a 14-byte line is whole in 120 of 120 \
+    injections over 12 boots, and the 44-byte line on a *warm* guest is whole in 50 of 50: the \
+    loss is the queue bound, and it bites where the suite actually types. **Where the bytes \
+    went** is a second arm with `i8042-trace`, which selects the test kernel and, through \
+    `kernel/src/actuator.rs`'s `IMPLIES`, also arms `i8042-fast-health` and `i8042-edge-race` — \
+    an instrumented guest, so it names the destination and never the rate. There the first line \
+    is short in 20 of 20 boots: 18 read `drained 32` with the panel independently at `echo \
+    surface-up-`, sixteen characters and so those same 32 bytes, and 2 read `drained 34` against \
+    an empty row — a correspondence observed at 18 of 20 and not a property of the pair. The CI \
+    sightings are the shipping-kernel evidence at load, which is where this rate lives. Each \
+    burst now waits for the guest's own report of taking the last: the decoded input row where \
+    there is a panel, `i8042: drain bytes=` where the shell is behind a compositor and there is \
+    none. Paced, on the fixed tree and the same host: `console_locale_detect` 10 of 10 PASS \
+    and `desktop_locale_detect` 5 of 5 PASS, against 15 of 20 boots losing the first line \
+    unpaced; `desktop_typing_damage` PASS (11s) at 16 of its 16 appearances, \
+    `desktop_audio_client` PASS (13s), `blocked_dump` PASS (3s)";
+
 /// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
 ///
 /// The number in the second row was the whole finding, and it no longer holds.
@@ -2491,7 +2517,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "console_locale_detect",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Stands,
+        standing: Standing::Retired(TYPING_PACED),
         what: "`FAIL console_locale_detect: 10 typed lines and none of them came back`, green on \
                the alone re-run: `ALONE: GREEN, and it was alone both times — nothing the harness \
                controls differed, so it failed once and passed once. That is a rate and not a \
@@ -2504,7 +2530,58 @@ pub const KNOWN_RED: &[Red] = &[
                kernel, userland or harness byte, and the guest ran the declared QEMU.",
         evidence: "pull-request `ci` run 33411831704, job 99553283770 (`guest (1)`), headSha \
                    30918d0e, 2026-08-31",
-        source: "issues/build/console-locale-detect-loses-every-typed-line.md",
+        source: "tests/toyos.rs shell_type_once",
+        measured: "2026-08-31",
+    },
+    // The same sentence under the same call site, on another branch. Its own
+    // row and not a fold: one name is one row's subject.
+    Red {
+        test: "desktop_locale_detect",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(1, 2),
+        standing: Standing::Retired(TYPING_PACED),
+        what: "`FAIL desktop_locale_detect: 10 typed lines and none of them came back`, the \
+               sentence `console_locale_detect` failed with hours earlier, and green on the \
+               alone re-run: `ALONE: GREEN, and it was alone both times — nothing the harness \
+               controls differed, so it failed once and passed once. That is a rate and not a \
+               classification`. **One call site, one string**: `shell_answers` types `echo \
+               surface-up-zqjxk` and `shell_echoes` says this after ten attempts, so the two \
+               names differ only in which surface owner is behind the shell. `shell_type_once` \
+               sends all three of that line's bursts and its Enter back to back with no \
+               guest-side wait — 44 set-1 bytes against the 16 the device holds — which is a \
+               defect in the code whether or not it is this sighting's cause; the counter that \
+               separates dropped bytes from a shell that was not reading was recorded by \
+               neither sighting. Not about the diff it appeared on, a pipe-`Gone` rename \
+               touching neither typing nor the terminal.",
+        evidence: "pull-request `ci` run 33426887418, job 99613902394 (`guest (9)`), headSha \
+                   28be5a85, 2026-08-31; the failure body carries two `compositor: frames=` \
+                   lines and nothing from the shell",
+        source: "tests/toyos.rs shell_type_once",
+        measured: "2026-08-31",
+    },
+    // A rate on a shared shard, adjudicated here rather than re-run away. Not
+    // the typing family: it shares a day and an `ALONE: GREEN` with the two
+    // rows above and nothing else.
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(1, 2),
+        standing: Standing::Stands,
+        what: "`the 300 rounds took 3.007165755s, past the 3s bound — a wake was slow enough to \
+               be a lost one recovered by a later edge`, then `PASS poll_wake_pipe (1s)` alone \
+               in the same job. **No wake was lost.** The test owes two assertions and the \
+               lost-wake one passed: all 300 edges woke the armed ring, and what failed is a \
+               `const BOUND: Duration = Duration::from_secs(3)` inside the guest binary, missed \
+               by 7.2 ms — 0.24%. Nothing widens it: the same job priced its host at `fastest \
+               boot 1890 ms against the reference 1320 ms — liveness ceilings paid at 1.43x \
+               width` over `4 core(s)`, and that factor reaches every host-side ceiling and not \
+               this one. First sighting: `--known-red` answered `NOT ON THE LIST`. Not about \
+               the diff it appeared on, a `NamespaceBuild` flags word touching neither the pipe \
+               nor the poller.",
+        evidence: "pull-request `ci` run 33429908117, job 99613928630 (`guest (1)`), headSha \
+                   bd533bd0, 2026-08-31; the shard was otherwise green at 196 passed, 1 failed, \
+                   197 total (104.2s)",
+        source: "issues/build/poll-wake-pipe-bound-is-a-host-of-the-day-number.md",
         measured: "2026-08-31",
     },
     // Found auditing the merge-health backfill
