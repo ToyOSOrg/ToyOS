@@ -30,6 +30,14 @@ reads as a far larger claim than the truth.
 This is the entry that says the two largest holes in *"Rust and QEMU, one
 command"* are real, and what follows is the whole of both.
 
+**The owner ruled on 2026-09-01: it stays declaration-only, and it stays
+open.** Closing the Python half means a Rust bootstrap inside the `rust/` fork —
+a large delta carried against upstream forever, for no product benefit today.
+That is a real cost and this is a real hole, so the entry is not downgraded: it
+remains a present-state weakness on the self-hosting track, to be sequenced when
+that track is funded rather than taken opportunistically. Do not propose the
+Rust bootstrap again as an incidental fix; do not soften the entry either.
+
 `src/toolchain.rs:749` picks `./x` when `rust/x` exists, which it does. That file
 is a `/bin/sh` script whose whole job is `SEARCH="python3 python py python2 uv"`,
 and it execs `x.py` → `src/bootstrap/bootstrap.py` (55,550 bytes). So a clean
