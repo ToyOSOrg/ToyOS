@@ -120,3 +120,11 @@ shard's wall clock moved. `Shard::keep`'s unit tests (`src/testargs.rs`) can
 judge that a partition stays complete and unique and that the bins total, under
 any cost function; they cannot judge whether the partition got better, which is
 the whole of what this entry claims is wrong.
+
+`issues/build/there-is-no-attributed-session-ledger.md` is where the first two
+of those live: it names this entry as one of its consumers, wants *"image-build
+spans with their content key and cache hit or miss"* among the intervals it
+records, and puts the shard pricing first because `Shard::keep`'s partitioning
+tests are an oracle that already exists. That is the right order and this entry
+waits on it. The third — the two hosted runs — is nobody's ledger and is what
+says whether any of it worked.
