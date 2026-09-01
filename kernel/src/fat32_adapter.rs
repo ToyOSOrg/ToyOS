@@ -634,10 +634,14 @@ impl ReplaceRename for FatFs {
     ) -> Result<Committed<Self::Displaced>, SyscallError> {
         let role = self.role;
         let displaced = self.by_name.get(new).copied();
-        let replaced = self
-            .fs
-            .replace_rename(old, new)
-            .map_err(|e| refused(role, "replace rename", old, e))?;
+        let replaced = self.fs.replace_rename(old, new).map_err(|e| {
+            // Nothing on the volume names it, so this line is the only record
+            // that the destination's data is alive and unreachable.
+            if let Some(stranded) = &e.stranded {
+                log!("{role}-volume: {new} could not be put back and is under {stranded}");
+            }
+            refused(role, "replace rename", old, e.cause)
+        })?;
         Ok(Committed::new((replaced, displaced)))
     }
 

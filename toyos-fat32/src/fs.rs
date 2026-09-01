@@ -152,6 +152,36 @@ impl Replaced {
     }
 }
 
+/// A replacing rename that did not commit.
+///
+/// `stranded` is the whole reason this is not a bare [`Error`]: when the
+/// rollback fails too, the destination is absent from its name and its data is
+/// alive under the staging one, which nothing on the volume records and no
+/// fsck pass can see — the volume is structurally perfect either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceFailed {
+    /// What refused the move of the source onto the destination.
+    pub cause: Error,
+    /// The staging name the destination is still under, or `None` when the
+    /// rollback put it back where it was.
+    pub stranded: Option<String>,
+}
+
+impl From<Error> for ReplaceFailed {
+    fn from(cause: Error) -> Self {
+        ReplaceFailed { cause, stranded: None }
+    }
+}
+
+impl core::fmt::Display for ReplaceFailed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self.stranded {
+            Some(name) => write!(f, "{}; the destination is under {name}", self.cause),
+            None => self.cause.fmt(f),
+        }
+    }
+}
+
 fn components(path: &str) -> impl Iterator<Item = &str> {
     path.split('/').filter(|c| !c.is_empty())
 }
@@ -919,7 +949,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// The staged name costs four directory entries, claimed in `to`'s directory
     /// before anything is freed: an overwrite refuses on a full directory or
     /// volume where freeing the destination first would have made its own room.
-    pub fn replace_rename(&mut self, from: &str, to: &str) -> Result<Replaced, Error> {
+    pub fn replace_rename(&mut self, from: &str, to: &str) -> Result<Replaced, ReplaceFailed> {
         if !self.exists(to)? {
             self.rename(from, to)?;
             return Ok(Replaced { temporary: None });
@@ -928,8 +958,13 @@ impl<D: BlockAccess> Fat32<D> {
         let temporary = self.replacement_temporary(to)?;
         self.rename(to, &temporary)?;
         if let Err(cause) = self.rename(from, to) {
-            let _ = self.rename(&temporary, to);
-            return Err(cause);
+            // The restore is the only thing that can put `to` back, so its own
+            // failure is the caller's to hear: discarding it leaves a
+            // destination nothing can name.
+            return Err(match self.rename(&temporary, to) {
+                Ok(()) => ReplaceFailed { cause, stranded: None },
+                Err(_) => ReplaceFailed { cause, stranded: Some(temporary) },
+            });
         }
         Ok(Replaced { temporary: Some(temporary) })
     }

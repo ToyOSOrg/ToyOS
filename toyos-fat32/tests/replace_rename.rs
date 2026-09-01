@@ -11,7 +11,12 @@ struct RefuseSourceAtDestination {
     bytes: Vec<u8>,
     destination_entry: u64,
     source_cluster: u32,
-    refused: bool,
+    /// Set to refuse the rollback too. Any short entry naming this cluster
+    /// after the source's move was refused is the restore's: the staging
+    /// rename's own writes are all behind that point.
+    rollback_cluster: Option<u32>,
+    refused_source: bool,
+    refused_rollback: bool,
 }
 
 impl RefuseSourceAtDestination {
@@ -44,8 +49,16 @@ impl BlockAccess for RefuseSourceAtDestination {
         } else {
             0
         };
-        if !self.refused && offset == self.destination_entry && cluster == self.source_cluster {
-            self.refused = true;
+        if !self.refused_source && offset == self.destination_entry && cluster == self.source_cluster {
+            self.refused_source = true;
+            return Err(IoError::Device);
+        }
+        if self.refused_source
+            && !self.refused_rollback
+            && buf.len() == 32
+            && self.rollback_cluster == Some(cluster)
+        {
+            self.refused_rollback = true;
             return Err(IoError::Device);
         }
         let (start, end) = self.check(offset, buf.len())?;
@@ -65,18 +78,11 @@ fn read_all(fs: &mut Fat32<RefuseSourceAtDestination>, path: &str) -> Vec<u8> {
     bytes
 }
 
-#[test]
-fn source_move_failure_restores_destination_before_any_free() {
-    let source = b"source survives";
-    let destination = b"destination survives";
+/// `source.txt` and `destination.txt`, each with its own cluster of content,
+/// on a volume the checker passes before the driver touches it.
+fn staged(source: &[u8], destination: &[u8]) -> (Volume, u32, u32, u64) {
     let mut volume = Volume::new();
-    volume.add_file(
-        ROOT_CLUSTER,
-        "source.txt",
-        b"SOURCE  TXT",
-        None,
-        source.len() as u32,
-    );
+    volume.add_file(ROOT_CLUSTER, "source.txt", b"SOURCE  TXT", None, source.len() as u32);
     volume.add_file(
         ROOT_CLUSTER,
         "destination.txt",
@@ -86,28 +92,84 @@ fn source_move_failure_restores_destination_before_any_free() {
     );
     let source_cluster = volume.at("source.txt").first;
     let destination_entry = volume.at("destination.txt").entry as u64;
-    volume.poke(cluster_offset(source_cluster), source);
     let destination_cluster = volume.at("destination.txt").first;
+    volume.poke(cluster_offset(source_cluster), source);
     volume.poke(cluster_offset(destination_cluster), destination);
     volume.finish();
     assert!(toyos_fat32_check::check(&volume.bytes).is_empty());
+    (volume, source_cluster, destination_cluster, destination_entry)
+}
+
+#[test]
+fn source_move_failure_restores_destination_before_any_free() {
+    let source = b"source survives";
+    let destination = b"destination survives";
+    let (volume, source_cluster, _, destination_entry) = staged(source, destination);
 
     let dev = RefuseSourceAtDestination {
         bytes: volume.bytes,
         destination_entry,
         source_cluster,
-        refused: false,
+        rollback_cluster: None,
+        refused_source: false,
+        refused_rollback: false,
     };
     let mut fs = Fat32::mount(dev).expect("mount");
-    assert!(matches!(
-        fs.replace_rename("source.txt", "destination.txt"),
-        Err(Error::Io)
-    ));
+    let failed = fs
+        .replace_rename("source.txt", "destination.txt")
+        .expect_err("the refused source move must not report success");
+    assert_eq!(failed.cause, Error::Io);
+    assert_eq!(failed.stranded, None, "the rollback succeeded, so nothing is stranded");
     assert_eq!(read_all(&mut fs, "source.txt"), source);
     assert_eq!(read_all(&mut fs, "destination.txt"), destination);
 
     let dev = fs.into_device();
-    assert!(dev.refused, "the device error did not hit the source move");
+    assert!(dev.refused_source, "the device error did not hit the source move");
+    let complaints = toyos_fat32_check::check(&dev.bytes);
+    assert!(
+        complaints.is_empty(),
+        "{}",
+        toyos_fat32_check::describe(&complaints)
+    );
+}
+
+/// The rollback fails too, and the caller is told which name holds the
+/// destination.
+///
+/// Nothing on the volume records it: the entry is a valid entry under a valid
+/// name, so the checker below is silent in both arms and no fsck pass could
+/// ever surface this. The reported name is the only way back to the data.
+#[test]
+fn a_failed_rollback_names_where_the_destination_went() {
+    let source = b"source survives";
+    let destination = b"destination survives";
+    let (volume, source_cluster, destination_cluster, destination_entry) =
+        staged(source, destination);
+
+    let dev = RefuseSourceAtDestination {
+        bytes: volume.bytes,
+        destination_entry,
+        source_cluster,
+        rollback_cluster: Some(destination_cluster),
+        refused_source: false,
+        refused_rollback: false,
+    };
+    let mut fs = Fat32::mount(dev).expect("mount");
+    let failed = fs
+        .replace_rename("source.txt", "destination.txt")
+        .expect_err("both refusals must reach the caller");
+    assert_eq!(failed.cause, Error::Io);
+    let stranded = failed.stranded.expect("the failed rollback must name the staging file");
+    assert_eq!(stranded, ".toyos-replaced-00000000.tmp");
+
+    // What the report claims, checked against the volume: the destination is
+    // not at its own name and its bytes are under the reported one.
+    assert_eq!(fs.exists("destination.txt"), Ok(false));
+    assert_eq!(read_all(&mut fs, "source.txt"), source);
+    assert_eq!(read_all(&mut fs, &stranded), destination);
+
+    let dev = fs.into_device();
+    assert!(dev.refused_source && dev.refused_rollback, "both refusals must have fired");
     let complaints = toyos_fat32_check::check(&dev.bytes);
     assert!(
         complaints.is_empty(),

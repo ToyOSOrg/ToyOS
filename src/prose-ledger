@@ -102,7 +102,7 @@ kernel/src/elf/cache.rs 24 0
 kernel/src/elf/index.rs 23 0
 kernel/src/elf/mod.rs 105 0
 kernel/src/elf/reloc.rs 38 0
-kernel/src/fat32_adapter.rs 171 0
+kernel/src/fat32_adapter.rs 173 0
 kernel/src/file_backing.rs 25 0
 kernel/src/file_cache.rs 93 0
 kernel/src/fs_rename.rs 18 0
@@ -466,7 +466,7 @@ toyos-fat32/src/device.rs 42 0
 toyos-fat32/src/dir.rs 72 0
 toyos-fat32/src/error.rs 33 0
 toyos-fat32/src/fat.rs 127 0
-toyos-fat32/src/fs.rs 208 0
+toyos-fat32/src/fs.rs 220 0
 toyos-fat32/src/lib.rs 59 0
 toyos-fat32/src/name.rs 104 0
 toyos-fat32/src/time.rs 40 0
@@ -474,7 +474,7 @@ toyos-fat32/tests/common/mod.rs 105 0
 toyos-fat32/tests/host_read.rs 26 0
 toyos-fat32/tests/host_write.rs 86 1
 toyos-fat32/tests/hostile.rs 195 3
-toyos-fat32/tests/replace_rename.rs 2 0
+toyos-fat32/tests/replace_rename.rs 15 0
 toyos-gpt/src/crc32.rs 13 0
 toyos-gpt/src/guid.rs 19 0
 toyos-gpt/src/lib.rs 161 0
