@@ -616,7 +616,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
-    // One boot; the reopen control's one verdict line, `UNMEASURED_MS` until the shards price it.
+    // One boot; the reopen control's one verdict line.
     ("process_reopen_selftest", Sched::Parallel, Tier::Fast),
     // One boot; three read-fault control verdicts. Carrying `UNMEASURED_MS`
     // until the shards price it.
