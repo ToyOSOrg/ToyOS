@@ -11,16 +11,16 @@
 //! reads the code today.
 //!
 //! **The ratchet.** [`LEDGER`] records, for every `.rs` file the tree holds,
-//! the comment lines and the dated comment lines it is permitted. A file
-//! measured above either number is refused; a file measured below either is
-//! green, and the shrinkage prints so a sweep knows which rows to rewrite.
-//! Raising an entry is a line in the diff somebody wrote on purpose, which is
-//! the whole mechanism: no comment is forbidden and no comment is free.
+//! the comment lines and the dated comment lines it holds. A file measured
+//! away from either number is refused, and the refusal names the row that
+//! replaces it. Moving an entry is a line in the diff somebody wrote on
+//! purpose, which is the whole mechanism: no comment is forbidden and no
+//! comment is free.
 //!
-//! **Slack is tolerated deliberately.** Requiring a file to sit at its exact
-//! count would red every unrelated change that deletes code, and a gate that
-//! reds on innocent work is one people route around. Only a deliberate
-//! re-record lowers an entry.
+//! **A row is its file's exact count, both ways.** An entry left above what
+//! the file holds is an allowance for prose nobody wrote, spendable by whoever
+//! next opens the file; the branch that removed the lines books it. A row is
+//! per file and cannot cross; [`DATED_TOTAL`] is one scalar and can.
 //!
 //! **Chronology is banned outright rather than ratcheted**, and it carries a
 //! second lock: [`DATED_TOTAL`] is the ledger's whole dated column, declared
@@ -89,12 +89,16 @@ pub(crate) const UNLEDGERED: &[&str] = &["rust", "target", ".git"];
 /// edit here as well as there. It only goes down: a sweep that removes
 /// chronology lowers this and the rows together.
 #[cfg(test)]
-const DATED_TOTAL: usize = 217;
+const DATED_TOTAL: usize = 216;
 
 /// The sentence a raised entry has to be worth.
 #[cfg(test)]
 const RAISING: &str =
     "raising the ledger is the deliberate act; the same PR edits it or the prose goes";
+
+/// The sentence a lowered entry has to be worth.
+#[cfg(test)]
+const BOOKING: &str = "an entry above its file is an allowance for prose nobody wrote";
 
 /// One file's lines by kind: measured from its text, or — comments and dated
 /// only — permitted by its ledger row.
@@ -282,6 +286,18 @@ fn refusals(
                 found.dated, allowed.dated
             ));
         }
+        if found.comments < allowed.comments || found.dated < allowed.dated {
+            bad.push(format!(
+                "{path}: {} comment lines and {} dated, where {LEDGER} permits {} and {} — \
+                 {BOOKING}. Replace the row with `{path} {} {}`",
+                found.comments,
+                found.dated,
+                allowed.comments,
+                allowed.dated,
+                found.comments,
+                found.dated
+            ));
+        }
     }
 
     for path in permitted.keys() {
@@ -294,22 +310,6 @@ fn refusals(
     }
 
     bad
-}
-
-/// The rows a re-record would rewrite, each already in the ledger's own form.
-#[cfg(test)]
-fn shrinkage(
-    permitted: &BTreeMap<String, Prose>,
-    measured: &BTreeMap<String, Prose>,
-) -> Vec<String> {
-    let mut rows = Vec::new();
-    for (path, found) in measured {
-        let Some(allowed) = permitted.get(path) else { continue };
-        if found.comments < allowed.comments || found.dated < allowed.dated {
-            rows.push(format!("{path} {} {}", found.comments, found.dated));
-        }
-    }
-    rows
 }
 
 #[cfg(test)]
@@ -342,16 +342,6 @@ mod tests {
         let text = std::fs::read_to_string(root.join(LEDGER))
             .unwrap_or_else(|e| panic!("reading {LEDGER}: {e}"));
         let permitted = read_ledger(&text).unwrap_or_else(|e| panic!("{e}"));
-
-        let shrunk = shrinkage(&permitted, &measured);
-        if !shrunk.is_empty() {
-            println!(
-                "{} file(s) are under their entry. A sweep books the win by replacing these rows \
-                 in {LEDGER} and lowering `DATED_TOTAL` to match:\n{}",
-                shrunk.len(),
-                shrunk.join("\n")
-            );
-        }
 
         let bad = refusals(&permitted, &measured, DATED_TOTAL);
         assert!(
@@ -438,25 +428,15 @@ mod tests {
         // A dated column that does not sum to what is declared — the second
         // lock, and the one a raised dated entry has to get past.
         says(ledgered, &[("a.rs", 10, 0), ("b.rs", 5, 2)], 5, "sums to 2");
+        // A file under its comment ceiling, and the row that books it.
+        says(ledgered, &[("a.rs", 4, 0), ("b.rs", 5, 2)], 2, "Replace the row with `a.rs 4 0`");
+        // A file under its dated ceiling alone, comment count exact.
+        says(ledgered, &[("a.rs", 10, 0), ("b.rs", 5, 1)], 2, "Replace the row with `b.rs 5 1`");
 
-        // The positive controls: at the ceiling is green, under it is green,
-        // and neither is refused for having been staged.
-        let green = |measured: &[(&str, usize, usize)]| {
-            let bad = refusals(&staged(ledgered), &staged(measured), 2);
-            assert!(bad.is_empty(), "expected no refusal, got {bad:?}");
-        };
-        green(&[("a.rs", 10, 0), ("b.rs", 5, 2)]);
-        green(&[("a.rs", 0, 0), ("b.rs", 1, 0)]);
-    }
-
-    /// The shrinkage report is what a sweep reads to book its win, so it names
-    /// the rows that moved and only those, already in the ledger's own form.
-    #[test]
-    fn the_shrinkage_report_names_the_rows_a_sweep_rewrites() {
-        let permitted = staged(&[("a.rs", 10, 2), ("b.rs", 5, 0), ("c.rs", 1, 0)]);
-        let measured = staged(&[("a.rs", 4, 1), ("b.rs", 5, 0), ("c.rs", 0, 0)]);
-        assert_eq!(shrinkage(&permitted, &measured), ["a.rs 4 1", "c.rs 0 0"]);
-        assert!(shrinkage(&permitted, &permitted).is_empty());
+        // The positive control: the ledger is the tree's own count, and a row
+        // that matches is not refused for having been staged.
+        let bad = refusals(&staged(ledgered), &staged(ledgered), 2);
+        assert!(bad.is_empty(), "expected no refusal, got {bad:?}");
     }
 
     /// What the one methodology counts, stated as cases because a well-formed
