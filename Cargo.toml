@@ -120,6 +120,10 @@ toyos-ld = { path = "toyos-ld" }
 # from this workspace with its own lockfile, so nothing here reaches the kernel's
 # resolution of the same crate.
 toyos-sched = { path = "toyos-sched", features = ["check"] }
+# The digest `NOTICE` records for every committed binary file, re-derived by
+# `src/sourcegate.rs` from the bytes. Already in this lockfile through
+# `toyos-ld`, so naming it here resolves nothing new.
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 2

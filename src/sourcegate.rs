@@ -7,7 +7,7 @@
 //! and the bootloader (`--target x86_64-unknown-uefi`) — so a `clippy.toml` is
 //! no longer a wall with nothing behind it.
 //!
-//! What is behind it is still not these four scans. `disallowed-methods` could
+//! What is behind it is still not these six scans. `disallowed-methods` could
 //! take the first one, and would lose what makes it useful: the exceptions
 //! below are per file *and per line count*, so an added `mem::forget` beside a
 //! permitted one reds, which a name-based allow list cannot express. The second
@@ -37,6 +37,13 @@
 //!
 //! The fourth names two files, the pipe ring and the user-copy windows, where a
 //! slice or an exclusive reference would claim what the mapping does not give.
+//!
+//! The fifth and sixth are the dependency bar: every argument the host's code
+//! hands to `Command::new`, and every committed file whose bytes are not text
+//! with the digest `NOTICE` records for it. Both declare rather than judge —
+//! the bar is `CLAUDE.md`'s and its standing failures are the owner's — and
+//! both refuse the undeclared rather than the known-bad, which is what a scan
+//! for a spelling cannot do.
 
 use std::path::{Path, PathBuf};
 
@@ -427,6 +434,230 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/trace.rs", 1),
 ];
 
+/// Directories whose Rust is compiled for the guest or is not ours, by
+/// repository-relative prefix. What is left is what runs on the development
+/// host, and it is the only code that can reach a host binary: a ToyOS program
+/// spawning `/bin/echo` is spawning a file out of its own image.
+const NOT_HOST_CODE: &[&str] = &[
+    "rust",
+    "kernel/src",
+    "toyos/src",
+    "toyos-abi/src",
+    "userland",
+    "tests/toyos-rust-tests",
+    "tests/testcases",
+];
+
+/// Every argument the host's code hands to `Command::new`, and what it names.
+///
+/// The dependency bar is Rust and QEMU (`CLAUDE.md`, "Dependencies"), and its
+/// standing failures are declared rather than removed. A row here is that
+/// declaration made checkable: an undeclared name is a red, and so is a name
+/// spelled differently, which is what a scan for known-bad strings cannot say.
+/// A non-literal argument is a row of its own, because a name assembled at run
+/// time is a name this scan cannot read.
+const HOST_SPAWNS: &[(&str, &str)] = &[
+    ("\"cargo\"", "Rust's build driver, installed by rustup"),
+    ("\"git\"", "the version control this repository is, and `REQUIRED` in src/main.rs"),
+    ("\"rustc\"", "the Rust compiler, installed by rustup"),
+    ("\"rustup\"", "how the toolchain is installed and linked, and `REQUIRED`"),
+    ("\"qemu-system-x86_64\"", "QEMU, the other half of the bar, and `REQUIRED`"),
+    (
+        "\"gh\"",
+        "GitHub's CLI, read-only, in `--merge-health` alone. Outside the bar and \
+         declared by nothing else: no build, boot or gate reaches it",
+    ),
+    (
+        "\"/sbin/newfs_msdos\"",
+        "a macOS binary, and one of the standing failures CLAUDE.md declares. It \
+         formats the FAT32 fixtures the crate's own reader is judged against; \
+         issues/filesystem/fat32-suite-needs-macos-binaries.md is what removing it costs",
+    ),
+    (
+        "\"/usr/bin/hdiutil\"",
+        "the other one: newfs_msdos refuses a plain file, so the fixture is formatted \
+         through a device node",
+    ),
+    ("std::env::current_exe().unwrap()", "this build system re-running itself under the lock"),
+    (
+        "x",
+        "`./x` or `./x.py` in `rust/`, upstream's bootstrap. The `/bin/sh` half of the \
+         Python standing failure — issues/build/python-and-cc-are-declared.md",
+    ),
+    (
+        "cmd",
+        "`run`'s parameter, and `src/toolchain.rs:1136` is its one caller: `rustup`. A \
+         second caller is a name this scan cannot read and a row it must gain",
+    ),
+    ("env!(\"CARGO_BIN_EXE_toyos-cc\")", "our own compiler, built by cargo for its own tests"),
+    ("env!(\"CARGO_BIN_EXE_toyos-ld\")", "our own linker, the same way"),
+];
+
+/// Every file `git` tracks whose bytes are not text, with the digest of what is
+/// committed and where its terms are recorded.
+///
+/// A third column of `NOTICE` means that file carries this same digest, so the
+/// obligation and the bytes cannot drift apart; anything else names the file
+/// that carries the attribution, or says why it is ours.
+const COMMITTED_BINARIES: &[(&str, &str, &str)] = &[
+    (
+        "assets/DOOM1.WAD",
+        "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",
+        "NOTICE",
+    ),
+    (
+        "assets/JetBrainsMono-Regular.ttf",
+        "e6fd0d7e91550b3ed2b735d4312474362c4716edc4fc0577a0f61ed782d5aed1",
+        "NOTICE",
+    ),
+    (
+        "assets/soundfont.sf2",
+        "89a13a5c907b5cc83c15679e07e6dcb06fd72102937e092dc4a582f1aa5905c3",
+        "NOTICE",
+    ),
+    (
+        "assets/wallpaper.jpg",
+        "b6f0c89bf966cfb458333b280614f0c7723615e42e340b9d43a760a64fe05976",
+        "ours: `cargo run -- --regen-wallpaper` writes it from src/wallpaper.rs",
+    ),
+    (
+        "doom.jpg",
+        "ae22f71dc732580bd4f789937c9fe564969029413fc2092f27bdae8d1ceaf8e3",
+        "ours: a screenshot of this system running, in README.md",
+    ),
+    (
+        "first-boot.jpg",
+        "41a65f4bf1f752bcc9da717e3c8f7f776bfbc214b2354b11a3c1e0278a9be22e",
+        "ours: the T14's first boot photographed, in README.md",
+    ),
+    (
+        "kernel/src/drivers/panic_console/font8x16.bin",
+        "e1bea9791e07a0e2509196c6cb4563d44cafca1f19b0ef660319b0fa53546a3e",
+        "NOTICE",
+    ),
+    (
+        "ovmf/DEBUGX64_OVMF.fd",
+        "800ff5af1220d1232d4da7173ccddbb74a9217600bd8935903d9d534801778b4",
+        "NOTICE",
+    ),
+    (
+        "ovmf/OVMF_CODE-pure-efi.fd",
+        "9de33971d47958f42af86584b502f83256120b2482e4f7ed14db32fd68e92922",
+        "NOTICE",
+    ),
+    (
+        "ovmf/OVMF_VARS-pure-efi.fd",
+        "c653de93db67e4f2213a35598efb379a13ef4a12c241e003699d4d7afd193635",
+        "NOTICE",
+    ),
+    (
+        "toyos-elf/tests/fixtures/toyos-ld-headers.bin",
+        "6243d543a15941133514c1a8a24c79d118060caeae7e985870a67d9fc3021354",
+        "ours: the first 4096 bytes of a toyos-ld output (toyos-elf/tests/real.rs)",
+    ),
+    (
+        "toyos-symbols/tests/fixtures/input-test.bin",
+        "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
+        "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
+    ),
+];
+
+/// `text` looks like a binary file by git's own heuristic: a NUL in the first
+/// 8000 bytes.
+#[cfg(test)]
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8000).any(|b| *b == 0)
+}
+
+/// Every `.rs` file under the repository that runs on the host.
+#[cfg(test)]
+fn host_files() -> Vec<PathBuf> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" {
+                continue;
+            }
+            let at = rel(root, &path);
+            if NOT_HOST_CODE.iter().any(|skip| at == *skip || at.starts_with(&format!("{skip}/")))
+            {
+                continue;
+            }
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = repo_root();
+    let mut out = Vec::new();
+    walk(&root, &root, &mut out);
+    out
+}
+
+/// The argument text of every `Command::new(` `text` names in code, verbatim.
+///
+/// Verbatim is the point: a literal and the expression that computes one are
+/// different rows, because only the first names a binary this gate can read.
+/// A call written inside a string literal or a comment is not a call — this
+/// file's own refusal messages and its case table both spell one out.
+#[cfg(test)]
+fn spawn_arguments(text: &str) -> Vec<String> {
+    const OPEN: &str = "Command::new(";
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut in_string = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_string => i += 2,
+            b'"' => {
+                in_string = !in_string;
+                i += 1;
+            }
+            b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => break,
+            _ if !in_string && bytes[i..].starts_with(OPEN.as_bytes()) => {
+                i += OPEN.len();
+                let start = i;
+                let mut depth = 1usize;
+                let mut inner = false;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' if inner => i += 1,
+                        b'"' => inner = !inner,
+                        b'(' if !inner => depth += 1,
+                        b')' if !inner => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let arg = String::from_utf8_lossy(&bytes[start..i.min(bytes.len())]);
+                out.push(arg.trim().to_string());
+                i = (i + 1).min(bytes.len());
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
+#[cfg(test)]
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,6 +958,129 @@ mod tests {
             complaints.is_empty(),
             "a slice or an exclusive reference over a page a process can write \
              claims an exclusivity the mapping does not give:\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// **The dependency bar, made checkable at the one place a host binary can
+    /// be reached from.** Rust and QEMU are the whole of what this project may
+    /// need; the standing failures are declared rather than removed, and a row
+    /// here is that declaration written where something reads it.
+    ///
+    /// Keyed on the argument text rather than on a set of known-bad names: a
+    /// scan for `fsck_msdos` passes the day the call is spelled
+    /// `/sbin/fsck_msdos`, and says nothing at all about the tool that arrives
+    /// next. An argument that is not a literal is a row of its own, because a
+    /// name assembled at run time is a name this scan cannot read.
+    #[test]
+    fn every_binary_the_host_runs_is_declared() {
+        let root = repo_root();
+        let mut found: Vec<(String, String)> = Vec::new();
+        for path in host_files() {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (n, line) in text.lines().enumerate() {
+                for arg in spawn_arguments(line) {
+                    found.push((arg, format!("{}:{}", rel(&root, &path), n + 1)));
+                }
+            }
+        }
+        assert!(
+            found.iter().any(|(arg, _)| arg == "\"qemu-system-x86_64\""),
+            "the walk did not find the QEMU launch, so it is reading no host tree"
+        );
+
+        let mut complaints = Vec::new();
+        for (arg, at) in &found {
+            if !HOST_SPAWNS.iter().any(|(a, _)| a == arg) {
+                complaints.push(format!("{at}: `Command::new({arg})`, which nothing declares"));
+            }
+        }
+        for (arg, why) in HOST_SPAWNS {
+            if !found.iter().any(|(a, _)| a == arg) {
+                complaints.push(format!(
+                    "nothing runs `Command::new({arg})` any more, so the row saying it is {why} \
+                     is a permission nobody re-argued"
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "only Rust and QEMU are in the bar, and what is outside it is declared:\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// What the walk can and cannot read, stated as cases.
+    #[test]
+    fn the_spawn_scan_reads_the_argument_and_not_the_call() {
+        assert_eq!(spawn_arguments("Command::new(\"git\")"), ["\"git\""]);
+        assert_eq!(spawn_arguments("  let c = Command::new(&exe);"), ["&exe"]);
+        assert_eq!(
+            spawn_arguments("Command::new(env!(\"CARGO_BIN_EXE_toyos-ld\"))"),
+            ["env!(\"CARGO_BIN_EXE_toyos-ld\")"]
+        );
+        let call = "Command::new(format!(\"/bin/{cmd}\"))";
+        assert_eq!(spawn_arguments(call), ["format!(\"/bin/{cmd}\")"]);
+        assert_eq!(spawn_arguments("Command::new(\"a\"); Command::new(\"b\")"), ["\"a\"", "\"b\""]);
+        assert!(spawn_arguments("let x = 1;").is_empty());
+    }
+
+    /// **Every committed binary file is a file somebody judged.** `NOTICE`
+    /// names each one's upstream, licence and digest; nothing read it, so a new
+    /// one arrived unremarked and a changed one changed silently.
+    ///
+    /// The digest is taken from the bytes and held against both the row and, for
+    /// a third-party file, `NOTICE`'s own text — so the obligation and the
+    /// bytes it is an obligation about cannot drift apart.
+    #[test]
+    fn every_committed_binary_file_is_declared() {
+        let root = repo_root();
+        let out = std::process::Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
+        assert!(out.status.success(), "git ls-files failed");
+        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
+
+        let mut found: Vec<(String, String)> = Vec::new();
+        for name in listing.split('\0').filter(|s| !s.is_empty()) {
+            let Ok(bytes) = std::fs::read(root.join(name)) else { continue };
+            if !is_binary(&bytes) {
+                continue;
+            }
+            found.push((name.to_string(), digest(&bytes)));
+        }
+        assert!(
+            found.iter().any(|(name, _)| name == "assets/DOOM1.WAD"),
+            "the walk found no DOOM1.WAD, so it is not reading the tracked tree"
+        );
+
+        let notice = std::fs::read_to_string(root.join("NOTICE")).expect("NOTICE");
+        let mut complaints = Vec::new();
+        for (name, sha) in &found {
+            match COMMITTED_BINARIES.iter().find(|(f, _, _)| f == name) {
+                None => complaints
+                    .push(format!("{name} is committed, is not text, and nothing declares it")),
+                Some((_, want, _)) if want != sha => complaints.push(format!(
+                    "{name} is sha256 {sha} where it is declared {want}"
+                )),
+                Some((_, _, "NOTICE")) if !notice.contains(sha.as_str()) => complaints
+                    .push(format!("{name} is sha256 {sha}, which NOTICE does not carry")),
+                Some(_) => {}
+            }
+        }
+        for (name, _, where_from) in COMMITTED_BINARIES {
+            if !found.iter().any(|(f, _)| f == name) {
+                complaints.push(format!(
+                    "{name} is declared here ({where_from}) and is no longer a committed binary"
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "a committed binary is a file somebody had to judge, and NOTICE is where the \
+             judgement is:\n{}",
             complaints.join("\n"),
         );
     }
