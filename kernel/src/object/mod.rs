@@ -171,6 +171,7 @@ macro_rules! kobject {
         }
 
         $(
+            kobject!(@pair $kind $naming);
             kobject!(@empty_hook $kind $ty);
 
             impl KObjectVariant for $ty {
@@ -220,6 +221,16 @@ macro_rules! kobject {
 
     (@reopen sealed) => { false };
     (@reopen reopenable) => { true };
+
+    (@pair deferred sealed) => {};
+    (@pair immediate sealed) => {};
+    (@pair immediate reopenable) => {};
+    (@pair deferred reopenable) => {
+        compile_error!(
+            "a `deferred reopenable` row would run its zero-handle hook once per \
+             zero-crossing, and `ZeroHandles::on_zero_handles` runs exactly once"
+        );
+    };
 
     (@empty_hook deferred $ty:ty) => {};
     (@empty_hook immediate $ty:ty) => {
