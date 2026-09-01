@@ -4031,6 +4031,26 @@ fn run_screen_test(
                 "late_panic::Nest",
             )?;
             check_wrap(&dump)?;
+            // What tells the frozen snapshot from a live re-read: the kernel
+            // writes this record after `capture()` and before the paint. On the
+            // console it is proof the record exists, so its absence from the panel
+            // means the panel painted the snapshot — with `capture()` a no-op the
+            // renderer falls back to the ring and paints that too.
+            const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
+            let said = qemu.console_stream().since(0);
+            if !said.contains(AFTER_CAPTURE) {
+                return Err(format!(
+                    "{AFTER_CAPTURE:?} never reached the console, so its absence from the \
+                     panel says nothing:\n{said}"
+                ));
+            }
+            if text.contains(AFTER_CAPTURE) {
+                return Err(format!(
+                    "{AFTER_CAPTURE:?} is on the panel — the report was re-read from the \
+                     record ring at paint time, not painted from the snapshot `capture()` \
+                     froze\ndecoded screen:\n{text}"
+                ));
+            }
             Ok(())
         }
         "screen_paged_scrollback" => {

@@ -80,7 +80,7 @@ kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 131 0
 kernel/src/drivers/panic_console/access.rs 6 0
 kernel/src/drivers/panic_console/latch.rs 9 0
-kernel/src/drivers/panic_console/mod.rs 215 0
+kernel/src/drivers/panic_console/mod.rs 216 0
 kernel/src/drivers/pci.rs 23 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
@@ -136,7 +136,7 @@ kernel/src/log/registry.rs 12 0
 kernel/src/log/shard.rs 55 0
 kernel/src/log/storm.rs 15 0
 kernel/src/log/user.rs 16 0
-kernel/src/main.rs 71 0
+kernel/src/main.rs 76 0
 kernel/src/mm/alloc.rs 88 0
 kernel/src/mm/dma.rs 34 0
 kernel/src/mm/mmio.rs 18 0
@@ -382,7 +382,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5064 23
+tests/toyos.rs 5069 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

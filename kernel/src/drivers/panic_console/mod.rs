@@ -465,9 +465,10 @@ pub fn remap() {
 /// Render the newest records into the console's static scratch, before
 /// `panic_flush` drains them; no pixels, no lock. Skipped when no
 /// framebuffer is armed. Freezes the report at the instant of the panic —
-/// [`live_tail`] re-reads a ring siblings may still be writing to. Keep
-/// this even though no test distinguishes its absence: a sibling still
-/// logging between panic and paint could otherwise push the report off `live_tail`'s window.
+/// [`live_tail`] re-reads a ring siblings may still be writing to, so a sibling
+/// still logging between panic and paint would otherwise push the report off
+/// its window. `screen_late_panic` writes exactly that record and reads the
+/// panel for it, which is what tells this apart from a no-op.
 pub fn capture() {
     capture_into(false);
 }
