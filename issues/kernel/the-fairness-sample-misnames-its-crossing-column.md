@@ -7,11 +7,11 @@ opened: 2026-09-01
 # `FAIRNESS_SAMPLE`'s table says "crossed by N ms" for a quantity that is not that
 
 `scenarios::FAIRNESS_SAMPLE`'s doc table
-(`toyos-sched/sim/src/scenarios.rs:726-733`) carries a verdict column reading
+(`toyos-sched/sim/src/scenarios.rs:723-734`, the crossed rows at `:728-731`) carries a verdict column reading
 `**crossed**, by 116 ms in some window` at 4 CPUs and `by 324/418/634 ms` at
 6, 8 and 12. The number in it is `Outcome::fair_over_bound`, which
 `check_fairness` sets as `vm.fair_over_bound.max(spread)` for a window whose
-spread exceeded the derived bound (`invariants.rs:718-720`) — the *widest
+spread exceeded the derived bound (`invariants.rs:719-720`) — the *widest
 spread seen in a crossing window*, not the amount by which the bound was
 crossed. The two are different quantities, and the table's own row shows it:
 at 4 CPUs the worst spread is 198 ms against a 204 ms bound, so nothing was

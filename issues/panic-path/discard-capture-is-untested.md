@@ -6,8 +6,8 @@ opened: 2026-09-01
 
 # Nothing distinguishes `panic_console::discard_capture` from a no-op
 
-The narrowed half of `panic-console-capture-untested`, which `#366` closed for
-`capture` and not for this. `capture` is now told from a no-op by
+The narrowed half of what `#366` closed. It told `capture` from a no-op and left
+this one where it was. `capture` is now read by
 `screen_late_panic`: the panic path writes one record after the snapshot and the
 test reads it on the console and not on the panel. `discard_capture`
 (`kernel/src/drivers/panic_console/mod.rs:518`) has no such reading. Its arm is

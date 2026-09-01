@@ -67,3 +67,10 @@ threads' parks only: every park a still-live thread has already finished is
 invisible too, not merely the one it is in. Publishing `(class, since)` at the
 park closes the smaller half; the larger half is a live thread's completed
 parks reaching a cross-CPU reader at all.
+
+**And the dump is not a substitute for the counters**, so "already answers this"
+above is about the *site*, not about the need. It paints the panel on
+Ctrl+Alt+D, never answers `SYS_PROCESS_STATS`; it prints at most
+`LINES_PER_CPU` = 16 ordinary parked lines per CPU (`kernel/src/sched/dump.rs:32`,
+truncating at `:370`) and counts the rest; and it reports a park's duration, not
+the per-class totals `ps` reads.
