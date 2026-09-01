@@ -164,12 +164,6 @@ pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: u
     let Some(relocs) = scanned else {
         return owned(alloc);
     };
-    log!(
-        "dlopen: cached {} with {} bind + {} tpoff64 + {} tpoff32 + {} dtpmod64 + {} dtpoff64 pre-scanned relocs",
-        path, relocs.bind.len(), relocs.tpoff64.len(), relocs.tpoff32.len(),
-        relocs.dtpmod64.len(), relocs.dtpoff64.len()
-    );
-
     let Some(rw_alloc) = PageAlloc::new(rw_size, crate::mm::pmm::Category::Elf) else {
         return owned(alloc);
     };
@@ -180,10 +174,26 @@ pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: u
     }
     let rw_delta = rw_alloc.ptr() as i64 - (alloc_ptr as i64 + rw_offset as i64);
 
-    SO_CACHE.lock().push((
+    let mut cache = SO_CACHE.lock();
+    // Asked again under the lock that publishes: `try_clone_cached` released it
+    // before the load, so two loaders of one name both arrive here with an image
+    // of it. Entries are never removed, so a second one strands a whole library
+    // for the life of the machine — the loser clones the winner's instead.
+    if let Some(idx) = cache.iter().position(|(p, _)| p == path) {
+        let cloned = clone_from_cache(&cache[idx].1);
+        drop(cache);
+        return cloned.unwrap_or_else(|| owned(alloc));
+    }
+    cache.push((
         String::from(path),
         CachedLib { alloc, snapshot, rw_offset, rw_size, relocs: relocs.clone() },
     ));
+    drop(cache);
+    log!(
+        "dlopen: cached {} with {} bind + {} tpoff64 + {} tpoff32 + {} dtpmod64 + {} dtpoff64 pre-scanned relocs",
+        path, relocs.bind.len(), relocs.tpoff64.len(), relocs.tpoff32.len(),
+        relocs.dtpmod64.len(), relocs.dtpoff64.len()
+    );
 
     snapshot.into_lib(
         LibMemory::Shared {

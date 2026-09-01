@@ -62,7 +62,7 @@ kernel/src/arch/syscall/ipc.rs 35 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
-kernel/src/arch/syscall/vm.rs 81 0
+kernel/src/arch/syscall/vm.rs 88 0
 kernel/src/arch/tlb.rs 43 0
 kernel/src/bcachefs_adapter.rs 74 0
 kernel/src/block.rs 33 0
@@ -98,7 +98,7 @@ kernel/src/drivers/xhci/wait/boot.rs 89 0
 kernel/src/drivers/xhci/wait/mod.rs 78 0
 kernel/src/drivers/xhci/wait/msc.rs 214 0
 kernel/src/durability.rs 16 0
-kernel/src/elf/cache.rs 24 0
+kernel/src/elf/cache.rs 28 0
 kernel/src/elf/index.rs 23 0
 kernel/src/elf/mod.rs 105 0
 kernel/src/elf/reloc.rs 38 0
@@ -280,7 +280,7 @@ tests/toyos-rust-tests/src/bin/demand_window_race.rs 156 0
 tests/toyos-rust-tests/src/bin/device_claim_lifetime.rs 56 0
 tests/toyos-rust-tests/src/bin/disk_backtrace.rs 18 0
 tests/toyos-rust-tests/src/bin/disk_backtrace_child.rs 7 0
-tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 12 0
+tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 18 0
 tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 34 0

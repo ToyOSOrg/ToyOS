@@ -6,14 +6,20 @@
 //! module, one TLS block; a fresh second module would read zero). Raw `dl_*`
 //! syscalls, not `libloading`, so the handle integer is observable.
 
+use std::sync::{Arc, Barrier};
+
 use toyos_abi::syscall;
 
 const LIB: &[u8] = b"/lib/libtls_dlopen_lib.so";
+/// A name this binary loads nowhere else, so the concurrent arm below starts
+/// from a process that does not hold it.
+const OTHER_LIB: &[u8] = b"/lib/libtls_multi_crate.so";
 const LOADS: usize = 64;
 
 fn main() {
     let handles = handle_identity();
     object_identity(handles[0], handles[LOADS - 1]);
+    one_name_under_contention();
     println!("all dlopen dedup checks passed");
 }
 
@@ -62,4 +68,29 @@ fn object_identity(first: u64, last: u64) {
          repeat dlopen produced a separate object rather than the same one"
     );
     println!("  PASS: a module-global written through one handle is read through the other");
+}
+
+/// One name under contention is still one module. A second library and not the
+/// one above, because a name this process already holds never reaches the
+/// window between the dedup lookup and the registration; the barrier is what
+/// makes the racers collide rather than queue.
+fn one_name_under_contention() {
+    const RACERS: usize = 8;
+    let line = Arc::new(Barrier::new(RACERS));
+    let racers: Vec<_> = (0..RACERS)
+        .map(|i| {
+            let line = Arc::clone(&line);
+            std::thread::spawn(move || {
+                line.wait();
+                syscall::dl_open(OTHER_LIB).unwrap_or_else(|e| panic!("racer {i}: {e:?}"))
+            })
+        })
+        .collect();
+    let handles: Vec<u64> = racers.into_iter().map(|t| t.join().expect("a racer")).collect();
+    assert!(
+        handles.iter().all(|&h| h == handles[0]),
+        "{RACERS} threads loading one name concurrently got {handles:?} — the dedup holds \
+         only once the race has settled, so each loser mapped the library again"
+    );
+    println!("  PASS: {RACERS} concurrent loads of one name returned one handle ({})", handles[0]);
 }
