@@ -244,7 +244,7 @@ tests/common/storage.rs 70 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 956 4
 tests/common/volumes.rs 602 3
-tests/common/wallclock.rs 139 0
+tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
 tests/toyos-rust-tests/src/bin/abuse_elf_loader.rs 135 0

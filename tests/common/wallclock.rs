@@ -303,10 +303,8 @@ pub fn wall_clock_file(
         ));
     }
 
-    // The third reading of the same instant, and the layer that used to answer
-    // 1970 on a machine whose kernel and libc both knew the date. Judged
-    // against `RTC_BASE` rather than against the syscall above, so a std that
-    // agreed with a wrong kernel would still land outside this window.
+    // Judged against `RTC_BASE` and not against the syscall above, so a std
+    // agreeing with a wrong kernel still lands outside this window.
     let Some(std_epoch) = probed_std_epoch(&log) else {
         return Err(format!(
             "the guest never printed what std's `SystemTime::now` answered\n{}",
