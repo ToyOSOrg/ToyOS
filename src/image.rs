@@ -617,7 +617,7 @@ mod tests {
             .partition
             .first_lba as usize
             * LBA as usize;
-        let mut broken = disk.clone();
+        let mut broken = disk;
         broken[at + 510] ^= 0xff;
         let refusal = certify(&broken, &parts).expect_err("that volume is not FAT32");
         assert!(refusal.contains("toyos-fat32-check"), "{refusal}");
