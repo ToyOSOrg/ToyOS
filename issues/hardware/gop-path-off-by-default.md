@@ -11,6 +11,28 @@ Until `06ce633` no configuration in this tree produced a UEFI GOP at all:
 was zero everywhere. `cargo run --gop` and `BootOptions { profile: Profile::Gop }`
 (`-vga std`) fixed that and the path works, but two residuals remain.
 
+**The owner ruled on 2026-09-01: GOP is the floor, and the mode is the
+firmware's.** Two things follow, and neither is a preference.
+
+The mode policy is not a choice between candidates: no operating system picks
+the largest mode. The firmware has already negotiated with the panel over EDID
+and set the display's own mode, and an OS inherits it — Linux's `efifb`, now
+`simpledrm`, exists to do exactly that and never does modesetting itself. So
+`bootloader/src/main.rs`'s "most pixels wins" is replaced by the mode already
+set, and the 2048x2048 square goes with it.
+
+GOP is also not a profile to enable. It is the stage every physical machine
+boots through, and virtio-gpu is the accelerated stage that only exists inside
+a VM — on the T14 there is no virtio-gpu at all, and until an Intel display
+engine driver exists the compositor sits on the GOP framebuffer directly. So
+GOP becomes the path every boot takes, with virtio-gpu layered above it where
+the machine has one.
+
+The 118 ms against 188 ms below prices the bug and not the feature: it was
+measured at 2048x2048, and a repaint costs per pixel, so a 1920x1080 panel is
+roughly half the pixels. Re-measure after the mode fix. Do not carry the 70 ms
+into the decision it was taken to inform.
+
 **It is not the default.** Plain `cargo run` and the default test config still
 boot `-vga none` with virtio-gpu or with no display device, so `gop.rs` is
 exercised only by `--gop`, by `--metal-sim` (which every machine test now

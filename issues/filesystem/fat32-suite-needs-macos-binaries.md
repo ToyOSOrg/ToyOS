@@ -36,5 +36,17 @@ platform. Whether that is enough is the decision, and it is the owner's. Note
 that `src/image.rs` already uses `fatfs` for exactly one thing (formatting the
 empty volume), so the precedent exists and its limits are recorded there.
 
+**The owner ruled on 2026-09-01: `fatfs` replaces both binaries.** The judge
+is already ours and already independent — `toyos-fat32-check`, written from
+fatgen103 and derived from neither our writer nor our reader — so what
+`newfs_msdos` and `hdiutil` still supply is a *fixture* that produces bytes we
+did not write, not an oracle. `fatfs` supplies that, `src/image.rs` already
+uses it to format the empty volume, and the precedent's limits are recorded
+there. What is knowingly given up is `msdosfs` as a second *reader* written by
+people with no sight of our code; the ruling accepts that, because the oracle
+role is filled and the cost of keeping it is that this suite runs on one laptop
+and `host-tests.yml` is pinned to `macos-latest` for that alone. Closing this
+removes the pin.
+
 Nothing in the *guest* suite is affected: `tests/common/volumes.rs` needs no
 formatter, only the judge.

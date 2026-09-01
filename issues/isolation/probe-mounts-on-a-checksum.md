@@ -39,6 +39,20 @@ Recommendation, for the owner to decide:
   stamp — and everything else mounts read-only. ToyOS has no key store and no
   TPM support, so this is a metal-track decision, not a patch.
 
+**The owner ruled on 2026-09-01: take the exact check now, authenticate on
+the metal track.** `Superblock::check` goes from `block_count <= device_blocks`
+to `==`, which is the first bullet above and costs one character. It is not
+authentication and the entry must keep saying so: an attacker who knows the
+disk's size writes the right number. What it removes is every case where the
+volume did not come from this disk.
+
+Authentication — read-write only for something the attacker cannot compute,
+read-only for everything else — is deferred to the metal track, because it needs
+a place to keep a secret and ToyOS has neither a key store nor TPM support. The
+threat this leaves open is stated rather than reduced: a deliberately crafted
+block 0 on a disk handed to the machine still earns a read-write mount, and
+read-write means written on sight.
+
 **Separately, and reproduced:** a designation stamp written over a disk that
 already held a ToyOS volume does **not** cause a reformat. `designate_for_format`
 writes block 0 only, `Superblock::read` falls back to the backup superblock at
