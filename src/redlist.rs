@@ -271,24 +271,30 @@ const PAGER_ARITHMETIC: &str = "the verdict was the defect. It injected all thir
     every recorded red's 6-10 s";
 
 /// What retired the two `locale_detect` rows below: a line's bursts stopped
-/// going out unacknowledged. **A differential, not the test agreeing with
-/// itself** — the two counts below share no code, and they agree.
+/// going out unacknowledged.
 const TYPING_PACED: &str = "the unacknowledged burst, closed at `shell_type_once`. `ps2_bursts` \
     always bounded each batch, but every batch of a line went out inside one QMP session with \
-    no guest-side wait, and the Enter went out last behind all of them. Staged on the dev host \
-    with the pacing reverted and nothing else changed: `echo surface-up-zqjxk` is 44 set-1 \
-    bytes against the device's 16, and the guest took 32 of them (`injected 44, kernel drained \
-    32`, refused at the burst `\"zqjxk\"`), with the panel independently truncated to \
-    `/home/root> echo surface-up-` — sixteen characters, which is those same 32 bytes. \
-    Whole-line echo false, because the dropped Enter is the byte whose absence leaves nothing \
-    to echo at all. The same code with a 14-byte line, `echo z`, is `injected 14, kernel \
-    drained 14` and green: the loss is the queue bound and not the wire. Paced, both are whole \
-    — `injected 44, kernel drained 44` with the input row carrying the line, and 14 of 14. \
-    Each burst now waits for the guest's own report of taking the last: the decoded input row \
-    where there is a panel, the kernel's `i8042: drain bytes=` where the shell is behind a \
-    compositor and there is none. Green after, on the dev host: `console_locale_detect` PASS \
-    (4s), `desktop_locale_detect` PASS (4s), `desktop_typing_damage` PASS (12s) at 16 of its \
-    16 appearances, `desktop_audio_client` PASS (13s), `blocked_dump` PASS (3s)";
+    no guest-side wait, and the Enter went out last behind all of them. **The control is on the \
+    shipping kernel with no actuator armed**: pacing reverted, the 44-byte handshake nonce typed \
+    at `console: ready` — the moment `shell_answers` types — and the first line is short in 15 \
+    of 20 boots, the panel stopping at `/home/root> echo surface-up-` and the whole-line echo \
+    never arriving; an earlier 12-boot run of the same arm gave 5 of 12, so the rate moves with \
+    the host. The same code at the same moment with a 14-byte line is whole in 120 of 120 \
+    injections over 12 boots, and the 44-byte line on a *warm* guest is whole in 50 of 50: the \
+    loss is the queue bound, and it bites where the suite actually types. **Where the bytes \
+    went** is a second arm with `i8042-trace`, which selects the test kernel and, through \
+    `kernel/src/actuator.rs`'s `IMPLIES`, also arms `i8042-fast-health` and `i8042-edge-race` — \
+    an instrumented guest, so it names the destination and never the rate. There the first line \
+    is short in 20 of 20 boots: 18 read `drained 32` with the panel independently at `echo \
+    surface-up-`, sixteen characters and so those same 32 bytes, and 2 read `drained 34` against \
+    an empty row — a correspondence observed at 18 of 20 and not a property of the pair. The CI \
+    sightings are the shipping-kernel evidence at load, which is where this rate lives. Each \
+    burst now waits for the guest's own report of taking the last: the decoded input row where \
+    there is a panel, `i8042: drain bytes=` where the shell is behind a compositor and there is \
+    none. Paced, on the fixed tree and the same host: `console_locale_detect` 10 of 10 PASS \
+    and `desktop_locale_detect` 5 of 5 PASS, against 15 of 20 boots losing the first line \
+    unpaced; `desktop_typing_damage` PASS (11s) at 16 of its 16 appearances, \
+    `desktop_audio_client` PASS (13s), `blocked_dump` PASS (3s)";
 
 /// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
 ///

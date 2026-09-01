@@ -6161,6 +6161,19 @@ enum Drained {
     /// path rather than the surface, counting the bytes the queue is measured
     /// in. Needs `i8042-trace`, and [`shell_type_once`] refuses a boot without
     /// it rather than pacing on nothing.
+    ///
+    /// **What that costs the boot, said here because it is invisible at the
+    /// site that arms it.** A non-empty `kernel_params` selects the test
+    /// kernel, and `kernel/src/actuator.rs`'s `IMPLIES` arms
+    /// `i8042-fast-health` and `i8042-edge-race` alongside the trace — a 500 ms
+    /// health log and a scheduler pass held inside the drain path. A test
+    /// pacing on this is therefore not on the shipping kernel, and its input
+    /// path is slower than the shipped one.
+    ///
+    /// Two inexactnesses, both latent: any drain after the mark counts, so a
+    /// queue's worth of older bytes can acknowledge a burst that is not theirs;
+    /// and `drain bytes=` counts the aux port too, so a mouse packet would pay
+    /// for typing — no caller injects one mid-line.
     Bytes,
 }
 
@@ -6599,8 +6612,8 @@ fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         // pipes back to each other, and on two cores most of that is ordered
         // by having nowhere else to run.
         smp: 8,
-        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
-        // without it.
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
@@ -6791,8 +6804,8 @@ fn desktop_typing_damage() -> Result<(), String> {
         profile: qemu::Profile::Metal,
         qmp: true,
         ready_marker: "compositor: ready",
-        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
-        // without it.
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
@@ -6979,8 +6992,8 @@ fn desktop_locale_detect() -> Result<(), String> {
         profile: qemu::Profile::Metal,
         qmp: true,
         ready_marker: "compositor: ready",
-        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
-        // without it.
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
@@ -7070,8 +7083,8 @@ fn desktop_audio_client() -> Result<(), String> {
         smp: 8,
         qmp: true,
         ready_marker: "compositor: ready",
-        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
-        // without it.
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
@@ -7228,8 +7241,8 @@ fn blocked_dump() -> Result<(), String> {
         smp: 8,
         qmp: true,
         ready_marker: "compositor: ready",
-        // What `Drained::Bytes` paces on; `shell_type_once` refuses a boot
-        // without it.
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
