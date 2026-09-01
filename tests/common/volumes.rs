@@ -817,6 +817,13 @@ pub fn writeback_durability(
     fn blob() -> Vec<u8> {
         (0..BLOB_LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
     }
+    /// The same mirroring, for the file the guest shrank and regrew.
+    const SHRUNK_NAME: &str = "wb-shrunk.bin";
+    const SHRUNK_LEN: usize = 3 * 4096;
+    const CUT: usize = 100;
+    fn seed() -> Vec<u8> {
+        (0..SHRUNK_LEN).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8 | 1).collect()
+    }
 
     // Stage the one failure QEMU will not produce: a budget expiry on the FAT-1
     // mirror write of the blob's cluster allocation, on the write-back drain path
@@ -937,7 +944,9 @@ pub fn writeback_durability(
 
     // Ground truth: the bytes on the device, against the bytes the guest wrote,
     // read by the host's own FAT implementation and never by the kernel.
-    let got = need(read_files(volume, &[BLOB_NAME])?.pop().flatten(), BLOB_NAME)?;
+    let mut files = read_files(volume, &[BLOB_NAME, SHRUNK_NAME])?;
+    let shrunk = need(files.pop().flatten(), SHRUNK_NAME)?;
+    let got = need(files.pop().flatten(), BLOB_NAME)?;
     if got.len() != BLOB_LEN {
         return Err(format!(
             "{BLOB_NAME} is {} bytes on the volume; the guest wrote {BLOB_LEN} and never fsynced — \
@@ -949,10 +958,32 @@ pub fn writeback_durability(
         return Err(format!("{BLOB_NAME} differs on the volume from what the guest wrote at byte {at}"));
     }
 
+    // The shrink the drain's one `update_metadata` could not see. The volume is
+    // valid either way — a file naming its own old clusters breaks no rule the
+    // checker knows — so the bytes are the only place this shows.
+    if shrunk.len() != SHRUNK_LEN {
+        return Err(format!(
+            "{SHRUNK_NAME} is {} bytes on the volume; the guest regrew it to {SHRUNK_LEN}",
+            shrunk.len()
+        ));
+    }
+    if shrunk[..CUT] != seed()[..CUT] {
+        return Err(format!("{SHRUNK_NAME}'s surviving head changed across the shrink and regrow"));
+    }
+    if let Some(at) = shrunk[CUT..].iter().position(|&b| b != 0) {
+        return Err(format!(
+            "{SHRUNK_NAME} byte {} on the volume is {:#04x}, not zero — the shrink gave no clusters \
+             back and the regrow served the discarded tail",
+            CUT + at,
+            shrunk[CUT + at],
+        ));
+    }
+
     let _ = std::fs::remove_file(&image_path);
     eprintln!(
         "  [wb] {BLOB_LEN} bytes closed without fsync reached the log volume through the \
-         write-back queue and the shutdown drain; the checker is silent"
+         write-back queue and the shutdown drain; {SHRUNK_NAME}'s regrown tail is zeros; \
+         the checker is silent"
     );
     Ok(())
 }

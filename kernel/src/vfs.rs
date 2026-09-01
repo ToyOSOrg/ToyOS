@@ -91,6 +91,12 @@ pub trait FileSystem: Send {
     /// Update file metadata (size, mtime) after flushing dirty pages.
     fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError>;
 
+    /// Give everything above `size` back before a flush writes its pages.
+    /// [`FileSystem::update_metadata`] sees only the final size and so cannot
+    /// tell a file that shrank and regrew from one that was always that long;
+    /// this is the shrink itself, carried from where it happened.
+    fn truncate_to(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError>;
+
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError>;
 
     /// An implementation of `sync` must not swallow a lower-level failure and report success: the log depends on this call telling the truth about durability.
@@ -451,6 +457,12 @@ impl Vfs {
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
         if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
 
+        // Before the pages, so a page rewritten above the mark is not freed
+        // by the trim that gives the shrink's blocks back.
+        if let Some(mark) = plan.shrunk_to {
+            fs.truncate_to(file_id, mark, mtime)?;
+        }
+
         // On the heap: the idle loop's 16 KiB stack has no guard page.
         let mut heap = alloc::vec![0u8; PAGE_BYTES].into_boxed_slice();
         let buf: &mut [u8; PAGE_BYTES] = (&mut heap[..]).try_into().expect("PAGE_BYTES bytes");
@@ -469,6 +481,7 @@ impl Vfs {
         stalled_metadata_window(path, file_id, size);
         fs.update_metadata(file_id, size, mtime)?;
         crate::file_cache::settle_file(file_id, plan.file);
+        crate::file_cache::settle_shrink(file_id);
 
         // A refusal is logged, not returned: the bytes are on the device; only evictability is lost.
         if !crate::file_cache::has_backing(file_id) {

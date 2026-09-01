@@ -64,7 +64,7 @@ kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
 kernel/src/arch/syscall/vm.rs 81 0
 kernel/src/arch/tlb.rs 43 0
-kernel/src/bcachefs_adapter.rs 74 0
+kernel/src/bcachefs_adapter.rs 76 0
 kernel/src/block.rs 33 0
 kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
@@ -102,9 +102,9 @@ kernel/src/elf/cache.rs 24 0
 kernel/src/elf/index.rs 23 0
 kernel/src/elf/mod.rs 105 0
 kernel/src/elf/reloc.rs 38 0
-kernel/src/fat32_adapter.rs 169 0
+kernel/src/fat32_adapter.rs 171 0
 kernel/src/file_backing.rs 25 0
-kernel/src/file_cache.rs 82 0
+kernel/src/file_cache.rs 93 0
 kernel/src/fs_rename.rs 18 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
@@ -186,11 +186,11 @@ kernel/src/smp_roster.rs 22 0
 kernel/src/symbols.rs 39 0
 kernel/src/sync.rs 26 0
 kernel/src/time.rs 47 0
-kernel/src/tmpfs.rs 20 0
+kernel/src/tmpfs.rs 21 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
 kernel/src/user_ptr.rs 67 0
-kernel/src/vfs.rs 85 0
+kernel/src/vfs.rs 91 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
@@ -243,7 +243,7 @@ tests/common/stats.rs 44 0
 tests/common/storage.rs 70 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 956 4
-tests/common/volumes.rs 602 3
+tests/common/volumes.rs 606 3
 tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
@@ -294,7 +294,7 @@ tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_dirs_durable.rs 11 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_rename_durable.rs 4 0
-tests/toyos-rust-tests/src/bin/fs_transactional.rs 38 0
+tests/toyos-rust-tests/src/bin/fs_transactional.rs 47 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
 tests/toyos-rust-tests/src/bin/fsync_flush_failed.rs 3 0
 tests/toyos-rust-tests/src/bin/ftruncate_flush_race.rs 12 0
@@ -373,7 +373,7 @@ tests/toyos-rust-tests/src/bin/window_caps.rs 26 0
 tests/toyos-rust-tests/src/bin/window_child.rs 21 0
 tests/toyos-rust-tests/src/bin/window_drag.rs 30 0
 tests/toyos-rust-tests/src/bin/window_refusal.rs 30 0
-tests/toyos-rust-tests/src/bin/writeback_durability.rs 23 0
+tests/toyos-rust-tests/src/bin/writeback_durability.rs 29 0
 tests/toyos-rust-tests/src/bin/writeback_reopen.rs 22 0
 tests/toyos-rust-tests/src/bin/writeback_spawn.rs 47 0
 tests/toyos-rust-tests/src/tone.rs 12 0

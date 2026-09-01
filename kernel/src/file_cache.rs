@@ -41,6 +41,12 @@ struct CachedFile {
     teardown_owed: bool,
     /// The file, not any one handle, owes a flush; settled only by [`settle_file`] on a flush that succeeded.
     dirt: Owed,
+    /// The smallest size a shrink has taken this file to since the last
+    /// settled metadata write; `None` when none has. Everything at or above it
+    /// was discarded, so a page missing from here is zeros and never the
+    /// backing's — whose extents still name the dropped blocks until a flush
+    /// gives them back.
+    shrunk_to: Option<u64>,
 }
 
 impl CachedFile {
@@ -95,6 +101,7 @@ pub fn create_file(evictable: bool) -> FileId {
         deleted: false,
         teardown_owed: false,
         dirt: Owed::new(),
+        shrunk_to: None,
     });
     id
 }
@@ -221,6 +228,12 @@ pub fn finish_writeback(file_id: FileId) -> Teardown {
     Teardown::Released
 }
 
+/// Whether a shrink discarded this page's bytes, so the backing's copy of them
+/// is no longer the file's and a miss reads zeros instead.
+fn discarded(file: &CachedFile, page_idx: u32) -> bool {
+    file.shrunk_to.is_some_and(|mark| page_idx as u64 * PAGE_SIZE as u64 >= mark)
+}
+
 /// Read a file page into `buf`; on `Err` the fetch failed and `buf` holds zeros, not the file's bytes.
 pub fn read_page(
     file_id: FileId,
@@ -246,7 +259,7 @@ pub fn read_page(
             copy_page_region_to_buf(&page.data[..], offset, buf, avail);
             return Ok(());
         }
-        backing = file.backing.clone();
+        backing = if discarded(file, page_idx) { None } else { file.backing.clone() };
     }
     // Cache miss: unlock, fetch from backing, re-lock, insert if still absent.
 
@@ -297,6 +310,8 @@ pub fn write_page<S: ByteSource + ?Sized>(
             if file.pages.contains_key(&page_idx) {
                 apply_write(file, page_idx, offset, data);
                 backing = None;
+            } else if discarded(file, page_idx) {
+                backing = Some(None);
             } else {
                 backing = Some(file.backing.clone());
             }
@@ -370,6 +385,8 @@ pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) 
 pub struct FlushPlan {
     pub file: Settlement,
     pub pages: BTreeSet<u32>,
+    /// What the mount has to give back before this flush's pages land on top of it.
+    pub shrunk_to: Option<u64>,
 }
 
 pub fn begin_flush(file_id: FileId) -> FlushPlan {
@@ -378,8 +395,13 @@ pub fn begin_flush(file_id: FileId) -> FlushPlan {
         Some(file) => FlushPlan {
             file: file.dirt.snapshot(),
             pages: file.pages.iter().filter(|(_, p)| p.is_dirty()).map(|(&i, _)| i).collect(),
+            shrunk_to: file.shrunk_to,
         },
-        None => FlushPlan { file: Owed::new().snapshot(), pages: BTreeSet::new() },
+        None => FlushPlan {
+            file: Owed::new().snapshot(),
+            pages: BTreeSet::new(),
+            shrunk_to: None,
+        },
     }
 }
 
@@ -407,6 +429,15 @@ pub fn settle_file(file_id: FileId, upto: Settlement) {
     }
 }
 
+/// Clear the shrink mark: the metadata write the flush just made is what the
+/// mount now records, so nothing is above it any more. Sound without a
+/// generation because every shrink runs under the VFS lock this flush holds.
+pub fn settle_shrink(file_id: FileId) {
+    if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
+        file.shrunk_to = None;
+    }
+}
+
 /// Get the authoritative file size.
 pub fn size(file_id: FileId) -> u64 {
     FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.size)
@@ -416,6 +447,9 @@ pub fn size(file_id: FileId) -> u64 {
 pub fn set_size(file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
     set_size_locked(&mut cache, file_id, new_size);
+    if let Some(file) = cache.files.get_mut(&file_id) {
+        file.shrunk_to = None;
+    }
 }
 
 /// A user truncate: [`set_size`], plus marks the file dirty even when no page changed.
@@ -423,9 +457,13 @@ pub fn set_size(file_id: FileId, new_size: u64) {
 /// pair runs under the VFS lock, so a resize outside it could record a stale size.
 pub fn resize(_vfs: &mut crate::vfs::Vfs, file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
+    let shrank = cache.files.get(&file_id).is_some_and(|f| new_size < f.size);
     set_size_locked(&mut cache, file_id, new_size);
     if let Some(file) = cache.files.get_mut(&file_id) {
         file.dirt.record_write();
+        if shrank {
+            file.shrunk_to = Some(file.shrunk_to.map_or(new_size, |mark| mark.min(new_size)));
+        }
     }
 }
 

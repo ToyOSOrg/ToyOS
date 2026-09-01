@@ -14,7 +14,7 @@
 //! logic — so the bytes on the device and the structure around them are judged
 //! by something that is not the code under test.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::thread;
 use std::time::Duration;
@@ -22,9 +22,17 @@ use std::time::Duration;
 /// Mirrored in `tests/common/volumes.rs::writeback_durability`.
 const PATH: &str = "/log/wb-durable.bin";
 const LEN: usize = 5 * 4096 + 91;
+/// The second file, and the same mirroring.
+const SHRUNK: &str = "/log/wb-shrunk.bin";
+const SHRUNK_LEN: usize = 3 * 4096;
+pub const CUT: u64 = 100;
 
 fn blob() -> Vec<u8> {
     (0..LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
+}
+
+fn seed() -> Vec<u8> {
+    (0..SHRUNK_LEN).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8 | 1).collect()
 }
 
 fn main() {
@@ -60,5 +68,28 @@ fn main() {
         panic!("{PATH} differs from what was written at byte {at}: the write-back did not reach the device");
     }
 
+    shrink_unflushed_then_regrow();
+
     println!("wrote {LEN} bytes, closed without fsync, and read them back after the write-back drained");
+}
+
+/// A durable file shrunk and regrown with nothing flushed between the two, and
+/// then only closed. The drain's single `update_metadata` carries the final
+/// size alone, so the volume the host judges is the only place the dropped
+/// clusters can still be named — and the checker cannot see the harm, because
+/// a file naming its own old clusters is a structurally valid file.
+fn shrink_unflushed_then_regrow() {
+    let want = seed();
+    let mut f = OpenOptions::new()
+        .read(true).write(true).create(true).truncate(true)
+        .open(SHRUNK)
+        .unwrap_or_else(|e| panic!("create {SHRUNK}: {e}"));
+    f.write_all(&want).expect("write the seed");
+    f.sync_all().expect("fsync the seed");
+    f.set_len(CUT).expect("shrink into the first page");
+    f.set_len(SHRUNK_LEN as u64).expect("regrow");
+    drop(f);
+
+    thread::sleep(Duration::from_millis(200));
+    println!("shrank {SHRUNK} to {CUT} and regrew it to {SHRUNK_LEN}, closed without fsync");
 }

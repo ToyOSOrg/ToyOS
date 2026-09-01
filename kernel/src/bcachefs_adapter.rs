@@ -328,6 +328,21 @@ impl FileSystem for BcacheFsAdapter {
         })
     }
 
+    /// Same order as [`BcacheFsAdapter::update_metadata`]'s own trim, for the
+    /// same reason: the shortened list is recorded before the blocks are freed.
+    fn truncate_to(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError> {
+        let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
+        let name = info.name.clone();
+        let blocks = Arc::clone(&info.blocks);
+        let dropped = blocks.truncate_to_blocks(size.div_ceil(crate::mm::PAGE_SIZE));
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        let extents = blocks.with(|extents| extents.clone()).ok_or(SyscallError::NotFound)?;
+        mapped("truncate_to", &name, self.fs.update_metadata(&name, &extents, size, mtime))?;
+        mapped("free of a shrunk tail", &name, self.fs.free_extents(&dropped))
+    }
+
     fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError> {
         let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
         let name = info.name.clone();
@@ -448,6 +463,10 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
     }
 
     fn update_metadata(&mut self, _file_id: FileId, _size: u64, _mtime: u64) -> Result<(), SyscallError> {
+        Err(SyscallError::PermissionDenied)
+    }
+
+    fn truncate_to(&mut self, _file_id: FileId, _size: u64, _mtime: u64) -> Result<(), SyscallError> {
         Err(SyscallError::PermissionDenied)
     }
 

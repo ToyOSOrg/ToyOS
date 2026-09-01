@@ -10,6 +10,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::process::Command;
 
 const PAGE: usize = 4096;
 
@@ -163,6 +164,46 @@ fn shrink_then_regrow_reads_zeros(dir: &str, seed_len: usize, durable: bool) {
     fs::remove_file(&path).expect("cleanup");
 }
 
+/// The same shrink and regrow with nothing flushed between them, which is the
+/// shape a flush cannot reconstruct: one `update_metadata` carrying only the
+/// final size, and a mount that trims to it sees no shrink at all. The seed is
+/// made durable first, so the extents the backing resolves through really do
+/// name the dropped blocks. Read twice — through the handle that shrank it,
+/// and again after a close and a drain, off what the device kept.
+fn shrink_unflushed_then_regrow_reads_zeros(dir: &str, seed_len: usize) {
+    let path = format!("{dir}/fstx_unflushed.bin");
+    let seed = pattern(seed_len);
+    const CUT: u64 = 100;
+
+    {
+        let mut f = OpenOptions::new()
+            .read(true).write(true).create(true).truncate(true)
+            .open(&path)
+            .unwrap_or_else(|e| panic!("create {path}: {e}"));
+        f.write_all(&seed).expect("write the seed");
+        f.sync_all().expect("fsync the seed");
+        f.set_len(CUT).expect("shrink into the first page");
+        f.set_len(seed_len as u64).expect("regrow");
+
+        let mut got = vec![0u8; seed_len];
+        f.seek(SeekFrom::Start(0)).expect("rewind");
+        f.read_exact(&mut got).expect("read the whole file back");
+        check_hole(dir, &got, &seed, CUT as usize);
+
+        f.sync_all().expect("fsync the pair");
+    }
+
+    // A spawn settles the write-back queue, so the file has left the cache and
+    // this read is the device's answer rather than the pages that were just in it.
+    let echo = Command::new("/bin/echo").arg("drained").output().expect("run echo");
+    assert!(echo.status.success());
+
+    let back = fs::read(&path).unwrap_or_else(|e| panic!("reread {path}: {e}"));
+    assert_eq!(back.len(), seed_len, "{dir}: the regrown length did not survive the close");
+    check_hole(dir, &back, &seed, CUT as usize);
+    fs::remove_file(&path).expect("cleanup");
+}
+
 fn check_hole(dir: &str, got: &[u8], seed: &[u8], cut: usize) {
     assert_eq!(&got[..cut], &seed[..cut], "{dir}: the surviving head changed across shrink and regrow");
     if let Some(at) = got[cut..].iter().position(|&b| b != 0) {
@@ -228,6 +269,9 @@ fn main() {
     // up, not only the page cache.
     shrink_then_regrow_reads_zeros("/home", 3 * PAGE, true);
     shrink_then_regrow_reads_zeros("/log", 3 * PAGE, true);
+    // And the same pair with no flush between them, on both device mounts.
+    shrink_unflushed_then_regrow_reads_zeros("/home", 3 * PAGE);
+    shrink_unflushed_then_regrow_reads_zeros("/log", 3 * PAGE);
     write_into_hole_reads_zeros("/tmp");
     write_into_hole_reads_zeros("/home");
 

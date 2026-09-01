@@ -197,6 +197,11 @@ impl FileSystem for TmpFs {
         Ok(())
     }
 
+    /// Nothing to give back: the pages are the file, and `set_size` dropped them.
+    fn truncate_to(&mut self, _file_id: FileId, _size: u64, _mtime: u64) -> Result<(), SyscallError> {
+        Ok(())
+    }
+
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
         // Displaces whatever answered to this name: one name, one entry.
         if let Some(Entry::File { id, alive, .. }) =

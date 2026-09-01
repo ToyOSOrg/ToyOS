@@ -796,6 +796,23 @@ impl FileSystem for FatFs {
     /// Record the real length and re-derive the backing; a shrink truncates
     /// the extent list before `set_len` frees the tail, so no backing ever
     /// names a reissued cluster.
+    /// `set_len` frees the clusters and the cell stops naming them, so a later
+    /// grow zero-fills what it takes back rather than serving the old tail.
+    fn truncate_to(&mut self, file_id: FileId, size: u64, _mtime: u64) -> Result<(), SyscallError> {
+        let role = self.role;
+        let known = self.open.get(&file_id).ok_or(SyscallError::NotFound)?;
+        let (name, was) = (known.name.clone(), known.file.len());
+        if was <= size {
+            return Ok(());
+        }
+        if let Some(cell) = self.live_extents(&name) {
+            cell.truncate_to(size);
+        }
+        let Self { fs, open, .. } = self;
+        let info = open.get_mut(&file_id).ok_or(SyscallError::NotFound)?;
+        fs.set_len(&mut info.file, size).map_err(|e| refused(role, "set_len", &name, e))
+    }
+
     fn update_metadata(
         &mut self,
         file_id: FileId,
