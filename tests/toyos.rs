@@ -6146,35 +6146,119 @@ fn console_type_line(
 /// three lines running is not a busy guest.
 const SHELL_TYPE_TRIES: usize = 3;
 
+/// What the guest offers as proof it took the last burst out of the device
+/// before the next one goes in.
+///
+/// **A choice with no default, because the two surfaces cannot answer the same
+/// question.** `/bin/console` draws each echoed character onto glass this
+/// harness decodes; a windowed shell renders into a window the compositor
+/// places and mirrors to a line-buffered stdout, so nothing of a line under
+/// construction reaches the console at all.
+enum Drained {
+    /// The decoded input row, for a shell behind `/bin/console`.
+    Panel(screen::ConsoleFont),
+    /// The kernel's drain report, for a shell behind a compositor: the device
+    /// path rather than the surface, counting the bytes the queue is measured
+    /// in. Needs `i8042-trace`, and [`shell_type_once`] refuses a boot without
+    /// it rather than pacing on nothing.
+    ///
+    /// **A boot that arms it is not the shipping kernel**, and the site that
+    /// arms it cannot see that: a non-empty `kernel_params` selects the test
+    /// kernel, and `kernel/src/actuator.rs`'s `IMPLIES` adds
+    /// `i8042-fast-health` and `i8042-edge-race` — a scheduler pass held inside
+    /// the drain path. Two latent inexactnesses: any drain after the mark
+    /// counts, and `drain bytes=` counts the aux port too.
+    Bytes,
+}
+
+/// Set-1 bytes the kernel reports taking off the i8042 in `said`; `bytes=`, not `keys=`.
+fn i8042_drained(said: &str) -> usize {
+    said.lines()
+        .filter_map(|line| line.split("i8042: drain bytes=").nth(1))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter_map(|count| count.parse::<usize>().ok())
+        .sum()
+}
+
+/// What has gone out on this line so far. `base` is what a previous attempt
+/// left in the editor: the next burst lands after it, so the echo begins with both.
+struct Sent<'a> {
+    mark: usize,
+    bytes: usize,
+    base: &'a str,
+    typed: &'a str,
+    burst: &'a str,
+}
+
+/// Wait until the guest has taken everything sent so far out of the device, and
+/// name the burst it never accounted for if it has not.
+fn await_drained(
+    qemu: &mut QemuInstance,
+    ack: &Drained,
+    ceiling: Duration,
+    sent: Sent<'_>,
+) -> Result<(), String> {
+    let Sent { mark, bytes, base, typed, burst } = sent;
+    match ack {
+        Drained::Panel(font) => {
+            let want = format!("{base}{typed}");
+            let echoed = |dump: &screen::Ppm| {
+                console_input_row(dump, font).is_some_and(|row| row.starts_with(&want))
+            };
+            let dump =
+                qemu.screendump_while_rendering(CONSOLE_ECHO, Duration::from_millis(50), echoed);
+            if echoed(&dump) {
+                return Ok(());
+            }
+            Err(format!(
+                "the console never echoed the burst {burst:?}: its input line reads {:?}, which \
+                 does not begin {want:?}. A keystroke was lost between the host and the shell",
+                console_input_row(&dump, font).unwrap_or_default()
+            ))
+        }
+        Drained::Bytes => {
+            let deadline = Instant::now() + ceiling;
+            loop {
+                let drained = i8042_drained(&qemu.console_stream().since(mark));
+                if drained >= bytes {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "the kernel took {drained} of the {bytes} set-1 bytes typed so far off \
+                         the i8042 inside {ceiling:?}, so the burst {burst:?} went out against a \
+                         queue the guest had not emptied"
+                    ));
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+}
+
 /// Type `line` at a shell this harness cannot read a panel for, press Enter, and
 /// **make the guest say what it received before the caller asserts on what it
 /// did**.
 ///
-/// [`console_type_line`] paces on the panel because `/bin/console` draws every
-/// echoed character onto glass this harness decodes. Under a compositor there is
-/// no such row: `/bin/terminal` renders into a window at an offset the
-/// compositor picks, and the mirror both surface owners keep to their own stdout
-/// is line-buffered by std — so nothing of a line under construction reaches the
-/// console at all, and there is no per-burst channel to pace against. What does
-/// reach it is the whole echoed line, the moment Enter flushes it.
+/// **Bounding each batch is not bounding what is in flight.** Every burst waits
+/// for [`Drained`] before the next goes out, so each starts against a queue the
+/// guest has emptied. A QMP reply proves QEMU's main loop ran and never that a
+/// vCPU read port 0x60, which is the only thing that empties it.
 ///
-/// So the two halves are split. Delivery is bounded by [`QEMU_PS2_QUEUE`]: one
-/// QMP command per burst, each waiting for QEMU's reply, so the emulator's main
-/// loop has run and a vCPU has had its turn between any two of them, and a guest
-/// that took none of those turns still cannot be past the queue inside one
-/// burst. The **verdict** is the guest's own echo of the line, read back before
-/// anything below asserts on what the command did — a lost byte makes the echo
-/// differ from what was sent, and nothing here reports success on a command the
-/// guest was never asked to run.
+/// Enter goes out last, behind all of the line's bytes, and the verdict is the
+/// shell's echo — which reaches the console only when a newline flushes the
+/// surface owner's line-buffered stdout. So a dropped Enter echoes *nothing*
+/// rather than something mangled, and the retype lands after the fragment the
+/// last attempt left in the editor.
 ///
 /// Read through [`qemu::ConsoleStream`] rather than by draining, because the
 /// caller owns the capture: a wait that consumed lines here would take the
 /// marker its assertion is waiting for.
-fn shell_type_line(qemu: &QemuInstance, line: &str) -> Result<(), String> {
+fn shell_type_line(qemu: &mut QemuInstance, line: &str, ack: &Drained) -> Result<(), String> {
     let echo = qemu.budget(ECHO_TRY);
     let mut last = String::new();
     for _ in 0..SHELL_TYPE_TRIES {
-        match shell_type_once(qemu, line, echo) {
+        match shell_type_once(qemu, line, echo, ack) {
             Ok(()) => return Ok(()),
             Err(said) => last = said,
         }
@@ -6193,17 +6277,53 @@ fn shell_type_line(qemu: &QemuInstance, line: &str) -> Result<(), String> {
 ///
 /// `echo` is a liveness ceiling and never the pacing: it is paid only when the
 /// line did not arrive, and a healthy shell echoes inside a round trip.
-fn shell_type_once(qemu: &QemuInstance, line: &str, echo: Duration) -> Result<(), String> {
+fn shell_type_once(
+    qemu: &mut QemuInstance,
+    line: &str,
+    echo: Duration,
+    ack: &Drained,
+) -> Result<(), String> {
     assert!(
         !line.contains('\n'),
         "shell_type_line presses Enter itself; {line:?} carries its own"
     );
+    assert!(
+        !matches!(ack, Drained::Bytes) || qemu.i8042_trace_armed(),
+        "a windowed shell can acknowledge a burst only through the kernel's drain report, so a \
+         boot that paces on Drained::Bytes has to arm `i8042-trace`; this one did not, and \
+         {line:?} would have gone out unpaced"
+    );
     let mark = qemu.console_stream().mark();
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        for burst in ps2_bursts(line) {
+    // The row is trimmed, so an empty editor comes back as the bare prompt and
+    // loses the space the console draws after it — put it back, or every first
+    // burst is compared against a prefix the panel never shows.
+    let base = match ack {
+        Drained::Panel(font) => {
+            let dump = qemu.screendump();
+            match console_input_row(&dump, font) {
+                Some(row) if row.len() > CONSOLE_PROMPT.len() => row,
+                _ => format!("{CONSOLE_PROMPT} "),
+            }
+        }
+        Drained::Bytes => String::new(),
+    };
+    let mut typed = String::new();
+    let mut bytes = 0usize;
+    for burst in ps2_bursts(line) {
+        {
+            // Opened and dropped around each burst: a `-qmp …,server` socket
+            // serves one monitor at a time, and the panel wait below is a
+            // screendump, which needs the socket back.
+            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
             input.type_burst(&burst);
         }
+        typed.push_str(&burst);
+        bytes += burst.chars().map(qemu::scancode_bytes).sum::<usize>();
+        let sent = Sent { mark, bytes, base: &base, typed: &typed, burst: &burst };
+        await_drained(qemu, ack, echo, sent)?;
+    }
+    {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
         input.keys(&[("ret", true), ("ret", false)]);
     }
     let deadline = Instant::now() + echo;
@@ -6219,16 +6339,8 @@ fn shell_type_once(qemu: &QemuInstance, line: &str, echo: Duration) -> Result<()
     }
 }
 
-/// Wait until keys typed at the guest reach a shell and come back out.
-///
-/// **There is no prompt to wait for.** `/bin/shell` writes `"{cwd}> "` with no
-/// newline and the harness's serial reader is line-based, so the prompt is not
-/// a line and never will be — which is why `screen_console_shell` reads the
-/// panel instead. The handshake here is a command whose *echo* is a line, and
-/// it is retried because the first keystrokes can land before the shell has
-/// its stdin.
-fn shell_answers(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String> {
-    shell_echoes(qemu, log, "surface-up-zqjxk")
+fn shell_answers(qemu: &mut QemuInstance, log: &mut String, ack: &Drained) -> Result<(), String> {
+    shell_echoes(qemu, log, "surface-up-zqjxk", ack)
 }
 
 /// [`shell_answers`] with the nonce named, for a caller that asks more than
@@ -6247,7 +6359,12 @@ fn shell_answers(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String
 /// says so, so this asks it and waits on the guest's own liveness. The second is
 /// "does a keystroke reach the shell", and it starts from a machine that is
 /// demonstrably up — a ceiling on *that* is a claim about the guest.
-fn shell_echoes(qemu: &mut QemuInstance, log: &mut String, nonce: &str) -> Result<(), String> {
+fn shell_echoes(
+    qemu: &mut QemuInstance,
+    log: &mut String,
+    nonce: &str,
+    ack: &Drained,
+) -> Result<(), String> {
     // Whichever surface owner this config put a shell behind, printed once its
     // screen exists and the shell's stdin is a pipe it holds. Before that a
     // keystroke lands nowhere and leaves no trace. Both, because `shell_answers`
@@ -6288,7 +6405,9 @@ fn shell_echoes(qemu: &mut QemuInstance, log: &mut String, nonce: &str) -> Resul
         // One attempt, because here a line that does not come back is the
         // loop's ordinary step: the surface is up and the shell may still not
         // be reading, which is what the retype exists for.
-        if let Err(said) = shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY)) {
+        if let Err(said) =
+            shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY), ack)
+        {
             lost = said;
             continue;
         }
@@ -6484,6 +6603,9 @@ fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         // pipes back to each other, and on two cores most of that is ordered
         // by having nowhere else to run.
         smp: 8,
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
+        kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
@@ -6530,7 +6652,8 @@ fn freeze_report(qemu: &mut QemuInstance, log: &mut String) -> String {
 }
 
 fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String> {
-    if let Err(why) = shell_answers(qemu, log) {
+    let ack = Drained::Bytes;
+    if let Err(why) = shell_answers(qemu, log, &ack) {
         return Err(format!(
             "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
         ));
@@ -6539,12 +6662,12 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
     // A windowed child that leaves on its own. The shell is in `waitpid` and
     // the compositor never touches its connection, so this is the plain case
     // and it has to work before the second probe means anything.
-    shell_type_line(qemu, "test_rs_window_child exit")?;
+    shell_type_line(qemu, "test_rs_window_child exit", &ack)?;
     let by = qemu.budget(Duration::from_secs(20));
     if !serial_until(qemu, log, "WINDOW-CHILD-GONE", by) {
         return Err(format!("the windowed child never reported leaving:\n{log}"));
     }
-    if let Err(why) = shell_echoes(qemu, log, "after-own-exit-zqjxk") {
+    if let Err(why) = shell_echoes(qemu, log, "after-own-exit-zqjxk", &ack) {
         return Err(format!(
             "{why}\na windowed child exited by itself and the shell never answered again:\n{log}"
         ));
@@ -6553,7 +6676,7 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
     // The owner's case: the process is alive and the compositor takes its
     // window away underneath it.
     let started = log.len();
-    shell_type_line(qemu, "test_rs_window_child")?;
+    shell_type_line(qemu, "test_rs_window_child", &ack)?;
     // Its own marker, not the one the probe above already printed.
     let by = qemu.budget(Duration::from_secs(20));
     if !serial_until_new(
@@ -6590,7 +6713,7 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
             &log[before..]
         ));
     }
-    if let Err(why) = shell_echoes(qemu, log, "after-window-closed-zqjxk") {
+    if let Err(why) = shell_echoes(qemu, log, "after-window-closed-zqjxk", &ack) {
         return Err(format!(
             "{why}\nthe compositor closed a child's window and the shell never answered again \
              — this is the owner's snake report, reproduced:\n{log}"
@@ -6605,7 +6728,7 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
     // second after it opened exercises a quieter program than that. One green
     // round would say very little about a report that arrived once.
     for round in 0..SNAKE_ROUNDS {
-        shell_type_line(qemu, "snake")?;
+        shell_type_line(qemu, "snake", &ack)?;
         // snake prints nothing of its own, so the compositor's second window
         // is what says it is up — and a window it has just created is the
         // focused one, which is what GUI+Q then closes.
@@ -6637,7 +6760,7 @@ fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), 
                 &log[before.min(log.len())..]
             ));
         }
-        if let Err(why) = shell_echoes(qemu, log, &format!("after-snake-{round}-zqjxk")) {
+        if let Err(why) = shell_echoes(qemu, log, &format!("after-snake-{round}-zqjxk"), &ack) {
             return Err(format!(
                 "{why}\nsnake's window was closed, snake left, and the shell never answered \
                  again (round {round}) — the owner's report, reproduced:\n{log}"
@@ -6672,12 +6795,17 @@ fn desktop_typing_damage() -> Result<(), String> {
         profile: qemu::Profile::Metal,
         qmp: true,
         ready_marker: "compositor: ready",
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
+        kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    if let Err(why) = shell_answers(&mut qemu, &mut log) {
+    // No panel row under a compositor; the kernel's drain report is the answer.
+    let ack = Drained::Bytes;
+    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!(
             "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
         ));
@@ -6710,7 +6838,7 @@ fn desktop_typing_damage() -> Result<(), String> {
     // rather than the cause. Each line now waits for its own echo before the
     // next goes in, which costs a slow guest wall clock and never the stimulus.
     for line in 0..8u32 {
-        shell_type_line(&qemu, &format!("echo {NONCE}"))?;
+        shell_type_line(&mut qemu, &format!("echo {NONCE}"), &ack)?;
         // Two: the shell echoes the command as it is typed and again as its
         // output. The same arithmetic the verdict below makes.
         let want = ((line + 1) * 2) as usize;
@@ -6742,6 +6870,8 @@ fn desktop_typing_damage() -> Result<(), String> {
     if intervals == 0 {
         return Err(format!("the compositor reported no interval while typing:\n{typed}"));
     }
+    // A max over intervals: a fragmenting injector can only weaken this, never
+    // manufacture a false red — the exposure is a masked regression.
     if biggest * 50 > screen_px {
         return Err(format!(
             "a keystroke's frame repainted {biggest} of {screen_px} pixels — over two percent of \
@@ -6775,11 +6905,13 @@ fn console_locale_detect() -> Result<(), String> {
     };
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    if let Err(why) = shell_answers(&mut qemu, &mut log) {
+    // The panel, because this is the surface that has one.
+    let ack = Drained::Panel(screen::ConsoleFont::load());
+    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!("{why}\nnothing typed at /bin/console reached a shell:\n{log}"));
     }
 
-    shell_type_line(&qemu, "locale detect")?;
+    shell_type_line(&mut qemu, "locale detect", &ack)?;
     await_marker(
         &mut qemu,
         &mut log,
@@ -6853,18 +6985,23 @@ fn desktop_locale_detect() -> Result<(), String> {
         profile: qemu::Profile::Metal,
         qmp: true,
         ready_marker: "compositor: ready",
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
+        kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    if let Err(why) = shell_answers(&mut qemu, &mut log) {
+    // No panel row under a compositor; the kernel's drain report is the answer.
+    let ack = Drained::Bytes;
+    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!(
             "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
         ));
     }
 
-    shell_type_line(&qemu, "locale detect")?;
+    shell_type_line(&mut qemu, "locale detect", &ack)?;
     await_marker(
         &mut qemu,
         &mut log,
@@ -6939,6 +7076,9 @@ fn desktop_audio_client() -> Result<(), String> {
         smp: 8,
         qmp: true,
         ready_marker: "compositor: ready",
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
+        kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
@@ -6948,7 +7088,9 @@ fn desktop_audio_client() -> Result<(), String> {
     const NULL_LINE: &str = "soundd: no audio device, presenting a null sink";
     await_marker(&mut qemu, &mut log, NULL_LINE, "soundd to present a null sink")
         .map_err(|why| format!("{why}\n{log}"))?;
-    if let Err(why) = shell_answers(&mut qemu, &mut log) {
+    // No panel row under a compositor; the kernel's drain report is the answer.
+    let ack = Drained::Bytes;
+    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!(
             "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
         ));
@@ -6957,7 +7099,7 @@ fn desktop_audio_client() -> Result<(), String> {
     // One client, start to finish. `tone: done` is the client's own last line,
     // so it is the client saying it got its callbacks and left — not the shell
     // saying it launched something.
-    shell_type_line(&qemu, "tone 440 1")?;
+    shell_type_line(&mut qemu, "tone 440 1", &ack)?;
     await_marker(
         &mut qemu,
         &mut log,
@@ -6972,7 +7114,7 @@ fn desktop_audio_client() -> Result<(), String> {
     // reached two live clients, and why the second terminal is part of the
     // stimulus rather than only part of the verdict.
     let before_second = log.len();
-    shell_type_line(&qemu, "tone 660 8")?;
+    shell_type_line(&mut qemu, "tone 660 8", &ack)?;
     await_marker_new(
         &mut qemu,
         &mut log,
@@ -6981,8 +7123,8 @@ fn desktop_audio_client() -> Result<(), String> {
         "the long tone to start",
     )
     .map_err(|why| format!("{why}\n{}", &log[before_second..]))?;
-    open_terminal(&mut qemu, &mut log, "overlap-terminal-jc4t")?;
-    shell_type_line(&qemu, "tone 440 1")?;
+    open_terminal(&mut qemu, &mut log, "overlap-terminal-jc4t", &ack)?;
+    shell_type_line(&mut qemu, "tone 440 1", &ack)?;
     // **The count is the verdict and the wait is not.** Both of these used to be
     // `budget(60 s)`, which is a claim that a desktop with two audio clients on
     // it finishes inside a minute times the width — and at 385 s wide against
@@ -7018,7 +7160,7 @@ fn desktop_audio_client() -> Result<(), String> {
     // above, focused the moment it maps its window. This is the verdict the
     // owner's machine failed while the compositor was still painting, which is
     // why nothing that reads pixels or counts frames would have caught it.
-    open_terminal(&mut qemu, &mut log, "post-audio-desktop-vqmz")?;
+    open_terminal(&mut qemu, &mut log, "post-audio-desktop-vqmz", &ack)?;
     eprintln!("  [desktop] three shell-spawned audio clients ran and the desktop still answers");
     Ok(())
 }
@@ -7030,7 +7172,12 @@ fn desktop_audio_client() -> Result<(), String> {
 /// came up. [`shell_echoes`]'s split applies for the same reason it does there,
 /// and `terminal: ready` is looked for after `before` rather than anywhere,
 /// because every terminal already up has printed one.
-fn open_terminal(qemu: &mut QemuInstance, log: &mut String, nonce: &str) -> Result<(), String> {
+fn open_terminal(
+    qemu: &mut QemuInstance,
+    log: &mut String,
+    nonce: &str,
+    ack: &Drained,
+) -> Result<(), String> {
     let before = log.len();
     {
         let mut input = qemu::QmpInput::open(qemu.qmp_socket());
@@ -7043,7 +7190,9 @@ fn open_terminal(qemu: &mut QemuInstance, log: &mut String, nonce: &str) -> Resu
     const TRIES: usize = 10;
     let mut lost = String::new();
     for _ in 0..TRIES {
-        if let Err(said) = shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY)) {
+        if let Err(said) =
+            shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY), ack)
+        {
             lost = said;
             continue;
         }
@@ -7085,12 +7234,17 @@ fn blocked_dump() -> Result<(), String> {
         smp: 8,
         qmp: true,
         ready_marker: "compositor: ready",
+        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // and edge-race.
+        kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    if let Err(why) = shell_answers(&mut qemu, &mut log) {
+    // No panel row under a compositor; the kernel's drain report is the answer.
+    let ack = Drained::Bytes;
+    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
         return Err(format!(
             "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
         ));

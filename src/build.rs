@@ -1967,6 +1967,57 @@ mod tests {
         }
     }
 
+    /// `Rights::LOG`'s doc names its holders, which is a claim about these
+    /// manifests and rots on its own: `/bin/console` stood in it for the whole
+    /// time no boot config gave it a `logread` row.
+    #[test]
+    fn the_log_right_doc_names_exactly_the_manifests_holders() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut every_program = BTreeSet::new();
+        let mut holders = BTreeSet::new();
+        for config in ALL_CONFIGS {
+            for (name, program) in parse_config(&root.join(config)).programs {
+                if program.syscap.iter().any(|s| s == "logread") {
+                    holders.insert(name.clone());
+                }
+                every_program.insert(name);
+            }
+        }
+        let handle = root.join("toyos-abi/src/handle.rs");
+        let source = fs::read_to_string(&handle).expect("toyos-abi/src/handle.rs");
+        // Only a backticked token that is a program name somewhere is a holder
+        // claim: `SYS_LOG_READ` and `/log` are in the same block and are not.
+        let named: BTreeSet<String> = doc_block(&source, "pub const LOG: Rights")
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(|token| token.trim_start_matches("/bin/").to_string())
+            .filter(|token| every_program.contains(token))
+            .collect();
+        assert_eq!(
+            named,
+            holders,
+            "`Rights::LOG`'s doc in {} names {named:?} as holders, and the boot configs give \
+             `logread` to {holders:?}",
+            handle.display(),
+        );
+    }
+
+    /// The `///` lines directly above the one `item` starts, newest first.
+    fn doc_block(source: &str, item: &str) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with(item))
+            .unwrap_or_else(|| panic!("no `{item}` in the source"));
+        lines[..at]
+            .iter()
+            .rev()
+            .map_while(|line| line.trim_start().strip_prefix("///"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The twelve `system.toml` files this repository builds an image from.
     /// `every_shipped_boot_config_is_covered` asserts this equals what a walk of
     /// the tree finds, so a config added without a gate row reds rather than
