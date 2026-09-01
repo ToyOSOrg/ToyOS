@@ -9,6 +9,7 @@ fn main() {
     test_exit_code();
     test_spawn_and_wait();
     test_piped_stdin();
+    test_write_to_a_gone_reader();
     println!("all process tests passed");
 }
 
@@ -100,4 +101,43 @@ fn test_piped_stdin() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim(), "piped input");
     println!("  piped stdin/stdout: ok");
+}
+
+/// A write into a pipe whose reader has exited is `BrokenPipe`.
+///
+/// The kernel answers `SyscallError::Gone` here and this machine's libc turns
+/// that into `EPIPE`; a Rust caller must be told the same fact, not that the
+/// pipe was never there and not `Other`.
+fn test_write_to_a_gone_reader() {
+    use std::io::{ErrorKind, Write};
+    use std::process::Stdio;
+
+    let mut child = Command::new("/bin/echo")
+        .arg("gone")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn echo");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let status = child.wait().expect("failed to wait");
+    assert!(status.success(), "echo exited {status:?}");
+
+    // Enough writes to fill any ring: a buffered success is not a live reader.
+    let mut last = None;
+    for _ in 0..64 {
+        match stdin.write(&[b'x'; 4096]) {
+            Ok(_) => continue,
+            Err(e) => {
+                last = Some(e);
+                break;
+            }
+        }
+    }
+    let err = last.expect("64 writes into a pipe with no reader all succeeded");
+    assert_eq!(
+        err.kind(),
+        ErrorKind::BrokenPipe,
+        "a write into a pipe whose reader has exited answered {err:?}"
+    );
+    println!("  write to a gone reader: ok");
 }
