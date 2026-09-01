@@ -270,9 +270,6 @@ const PAGER_ARITHMETIC: &str = "the verdict was the defect. It injected all thir
     2026-08-24: PASS 6 of 6 alone on the dev host at 2.00x-8.00x width, 16-31 s each, against \
     every recorded red's 6-10 s";
 
-/// What retired the two `locale_detect` rows below: a line's bursts stopped
-/// going out unacknowledged.
-
 const TYPING_UNATTRIBUTED: &str = "`shell_type_once` no longer sends a burst \
     the guest has not acknowledged, so the harness cannot provoke this again — but that is \
     avoidance, not attribution. This row's verdict is ten typed lines with no whole echo, and \
