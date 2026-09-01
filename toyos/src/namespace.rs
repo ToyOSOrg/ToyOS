@@ -7,6 +7,7 @@
 use toyos_abi::handle::HANDLE_INVALID;
 use toyos_abi::syscall::{
     self, NameRef, NamespaceBuild, NamespaceEntry, SyscallError, MAX_NAMESPACE_ENTRIES,
+    NAMESPACE_KEEP_ALL,
 };
 
 use crate::ipc::Connection;
@@ -50,6 +51,7 @@ impl AsHandle for Namespace {
 /// does exactly that.
 pub struct Builder<'a> {
     base: RawHandle,
+    flags: u32,
     names: heapless_names::Names,
     keep: heapless_names::Vec<NameRef, MAX_NAMESPACE_ENTRIES>,
     add: heapless_names::Vec<NamespaceEntry, MAX_NAMESPACE_ENTRIES>,
@@ -120,6 +122,7 @@ mod heapless_names {
 pub fn build<'a>() -> Builder<'a> {
     Builder {
         base: HANDLE_INVALID,
+        flags: 0,
         names: heapless_names::Names::new(),
         keep: heapless_names::Vec::new(NameRef { off: 0, len: 0 }),
         add: heapless_names::Vec::new(NamespaceEntry {
@@ -150,6 +153,14 @@ impl<'a> Builder<'a> {
         self
     }
 
+    /// Carry over **every** name `base` holds, which [`keep`](Self::keep)
+    /// cannot spell. Not with `keep`: the kernel refuses the two together.
+    pub fn keep_all(mut self, base: &Namespace) -> Self {
+        self.base = base.0.raw();
+        self.flags |= NAMESPACE_KEEP_ALL;
+        self
+    }
+
     pub fn add(mut self, name: &str, connector: &'a Connector) -> Self {
         match self.names.push(name) {
             Some((off, len)) => {
@@ -172,7 +183,7 @@ impl<'a> Builder<'a> {
         }
         let args = NamespaceBuild {
             base: self.base,
-            _pad: 0,
+            flags: self.flags,
             keep_ptr: self.keep.as_slice().as_ptr() as u64,
             keep_n: self.keep.as_slice().len() as u64,
             add_ptr: self.add.as_slice().as_ptr() as u64,

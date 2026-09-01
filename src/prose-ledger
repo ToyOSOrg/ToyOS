@@ -58,7 +58,7 @@ kernel/src/arch/syscall/fs.rs 11 0
 kernel/src/arch/syscall/gate.rs 23 0
 kernel/src/arch/syscall/handles.rs 21 0
 kernel/src/arch/syscall/io.rs 24 0
-kernel/src/arch/syscall/ipc.rs 34 0
+kernel/src/arch/syscall/ipc.rs 35 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
@@ -154,7 +154,7 @@ kernel/src/object/file.rs 3 0
 kernel/src/object/handle.rs 60 0
 kernel/src/object/inbox.rs 6 0
 kernel/src/object/mod.rs 51 0
-kernel/src/object/namespace.rs 9 0
+kernel/src/object/namespace.rs 10 0
 kernel/src/object/ops.rs 60 0
 kernel/src/object/pipe.rs 14 0
 kernel/src/object/port.rs 21 0
@@ -284,7 +284,7 @@ tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 27 0
 tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 34 0
-tests/toyos-rust-tests/src/bin/endowment_denied.rs 148 2
+tests/toyos-rust-tests/src/bin/endowment_denied.rs 157 2
 tests/toyos-rust-tests/src/bin/esp_files.rs 50 0
 tests/toyos-rust-tests/src/bin/exit_wait_storm.rs 36 0
 tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs 60 0
@@ -393,7 +393,7 @@ toyos-abi/src/lib.rs 31 0
 toyos-abi/src/log.rs 143 0
 toyos-abi/src/net.rs 11 0
 toyos-abi/src/ring.rs 128 0
-toyos-abi/src/syscall.rs 841 0
+toyos-abi/src/syscall.rs 847 0
 toyos-abi/src/virtio_sound.rs 71 0
 toyos-cc/src/ast.rs 8 0
 toyos-cc/src/codegen/addr.rs 12 0
@@ -610,7 +610,7 @@ toyos/src/ipc.rs 162 0
 toyos/src/launch.rs 91 0
 toyos/src/lib.rs 50 1
 toyos/src/log.rs 33 0
-toyos/src/namespace.rs 32 0
+toyos/src/namespace.rs 34 0
 toyos/src/net.rs 124 0
 toyos/src/poller.rs 227 0
 toyos/src/port.rs 32 0
