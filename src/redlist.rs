@@ -1352,8 +1352,9 @@ pub const KNOWN_RED: &[Red] = &[
              indistinguishable from an empty queue and the killing syscall returns with its \
              objects unreleased — caught in a kernel trace as eight `RingRef` frees landing \
              after `kill_process` returned, and as a second CPU taking a batch mid-kill. Both \
-             binaries now settle before reading (`issues/build/free-memory-verdicts-share-a-boot.md`), \
-             and the kernel half is `issues/kernel/deferred-release-outlives-its-syscall.md`. \
+             binaries now settle before reading, and both read the per-kind object census \
+             rather than the machine's free memory; the kernel half is \
+             `issues/kernel/deferred-release-outlives-its-syscall.md`. \
              **`Sched::Serial` would have retired nothing**, which is why that proposal is \
              recorded as ruled out rather than left standing",
         ),
@@ -1370,7 +1371,7 @@ pub const KNOWN_RED: &[Red] = &[
                    boot invokes. Two earlier sevens on the same two trees gave 1 of 7 and 2 of 7, \
                    so the rate this row carries is the widest of four readings and not the only \
                    one",
-        source: "issues/build/free-memory-verdicts-share-a-boot.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-15",
     },
     // ---------------------------------------------------------------------
@@ -1402,28 +1403,34 @@ pub const KNOWN_RED: &[Red] = &[
         // `ci` half is a verdict, and it is what this row rests on.
         evidence: "CI run 32237424649 (PR #126, job `guest (1)`); `main` red at `8e9f851` on \
                    `ci` the same day",
-        source: "issues/build/free-memory-verdicts-share-a-boot.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-19",
     },
     Red {
         test: "handle_lifetime",
         instrument: Instrument::DevHostAlone,
         finding: Finding::quiet(20),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the instrument it measured is gone. `kill_releases_ring`'s verdict is now the \
+             kernel's live `Inbox` count either side of the kill, not the machine's free memory, \
+             so neither the neighbours nor the margin this row is about exists any more: a leak \
+             of one ring is `+1` where 2 MiB fitted inside 6 MiB and passed. Measured with that \
+             leak deliberately planted, 2026-09-01: green on the free-memory verdict, red on the \
+             census, both arms on this host",
+        ),
         what: "twenty consecutive filtered runs of the unmodified binary, all green — which is \
                why every dev-host sighting of this name had said `ALONE … GREEN` and why the \
                defect was read as its neighbours' page churn. The dev host is two CPUs under \
                TCG; CI is four under KVM, and the race widens with the CPU count",
         evidence: "20 × `cargo test --test toyos-build -- handle_lifetime` on one quiet dev host, \
                    `wt/toyos-fdleak` at `8e9f851`",
-        source: "issues/build/free-memory-verdicts-share-a-boot.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-19",
     },
     // `shm_release_reclaims` gets no row: it has the same instrument with the
     // same hole and it took the same settle, but nothing here measured it red,
     // and a `Seen` written from an argument rather than a run is exactly the
-    // overstatement this index refuses. `issues/build/free-memory-verdicts-share-a-boot.md`
-    // carries it.
+    // overstatement this index refuses. It took the same census with it.
     Red {
         test: "screen_console_scroll",
         instrument: Instrument::DevHostLoaded,

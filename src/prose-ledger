@@ -212,7 +212,7 @@ src/mergehealth.rs 229 3
 src/pr.rs 177 5
 src/prosegate.rs 128 0
 src/qemu.rs 113 0
-src/redlist.rs 520 25
+src/redlist.rs 519 25
 src/soundfont.rs 133 0
 src/sourcegate.rs 269 1
 src/stamps.rs 3 0
@@ -304,7 +304,7 @@ tests/toyos-rust-tests/src/bin/gsbase_locked.rs 2 0
 tests/toyos-rust-tests/src/bin/gsbase_probe.rs 2 0
 tests/toyos-rust-tests/src/bin/handle_basic.rs 121 2
 tests/toyos-rust-tests/src/bin/handle_kill_policy.rs 207 4
-tests/toyos-rust-tests/src/bin/handle_lifetime.rs 94 1
+tests/toyos-rust-tests/src/bin/handle_lifetime.rs 102 1
 tests/toyos-rust-tests/src/bin/handle_transfer.rs 84 0
 tests/toyos-rust-tests/src/bin/hda_client_stall.rs 27 0
 tests/toyos-rust-tests/src/bin/heap_ceiling.rs 69 0
@@ -344,7 +344,7 @@ tests/toyos-rust-tests/src/bin/readdir_bound.rs 40 0
 tests/toyos-rust-tests/src/bin/redirty_mid_flush.rs 16 0
 tests/toyos-rust-tests/src/bin/sched_stress.rs 22 0
 tests/toyos-rust-tests/src/bin/segfault_child.rs 3 0
-tests/toyos-rust-tests/src/bin/shm_release_reclaims.rs 43 0
+tests/toyos-rust-tests/src/bin/shm_release_reclaims.rs 51 0
 tests/toyos-rust-tests/src/bin/smp_hole_shootdown.rs 6 0
 tests/toyos-rust-tests/src/bin/std_alloc.rs 1 0
 tests/toyos-rust-tests/src/bin/std_fs.rs 11 0
@@ -382,7 +382,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5065 23
+tests/toyos.rs 5068 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

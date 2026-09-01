@@ -157,9 +157,9 @@ read.
 
 ## Why it matters beyond a test
 
-Two harness binaries had to learn to settle (`handle_lifetime`,
-`shm_release_reclaims`; `issues/build/free-memory-verdicts-share-a-boot.md`
-carries that story). The consequence that is not a test is a process which kills
+Two harness binaries had to learn to settle before reading --- `handle_lifetime`
+and `shm_release_reclaims`, whose verdicts are the per-kind object census either
+side of the release. The consequence that is not a test is a process which kills
 a child to make room and immediately allocates: the pages it just freed are not
 free yet, and `SYS_SHM_CREATE`/`io_uring_setup` can answer `ResourceExhausted`
 for memory the machine is in the middle of handing back. On a memory-tight
