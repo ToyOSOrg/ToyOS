@@ -186,11 +186,11 @@ kernel/src/smp_roster.rs 22 0
 kernel/src/symbols.rs 39 0
 kernel/src/sync.rs 26 0
 kernel/src/time.rs 47 0
-kernel/src/tmpfs.rs 19 0
+kernel/src/tmpfs.rs 20 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 48 0
 kernel/src/user_ptr.rs 67 0
-kernel/src/vfs.rs 76 0
+kernel/src/vfs.rs 85 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
@@ -375,7 +375,7 @@ tests/toyos-rust-tests/src/bin/window_drag.rs 30 0
 tests/toyos-rust-tests/src/bin/window_refusal.rs 30 0
 tests/toyos-rust-tests/src/bin/writeback_durability.rs 23 0
 tests/toyos-rust-tests/src/bin/writeback_reopen.rs 22 0
-tests/toyos-rust-tests/src/bin/writeback_spawn.rs 40 0
+tests/toyos-rust-tests/src/bin/writeback_spawn.rs 47 0
 tests/toyos-rust-tests/src/tone.rs 12 0
 tests/toyos-rust-tests/tls-cranelift/src/lib.rs 8 0
 tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0

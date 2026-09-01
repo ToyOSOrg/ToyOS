@@ -219,4 +219,9 @@ impl FileSystem for TmpFs {
             _ => Err(SyscallError::NotFound),
         }
     }
+
+    /// `TmpfsBacking` reads the file cache, so it is never behind it.
+    fn cached_file_id(&mut self, _name: &str) -> Option<FileId> {
+        None
+    }
 }

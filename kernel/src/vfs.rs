@@ -98,6 +98,12 @@ pub trait FileSystem: Send {
 
     /// `open_backing` has no default body: an unimplemented one would silently report every file on that mount as missing (the sentinel this trait exists to remove).
     fn open_backing(&mut self, name: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError>;
+
+    /// The `FileId` this mount already minted for `name`, when a device view of
+    /// it could be behind the file cache. `None` from a mount whose backing
+    /// reads the cache itself, which can never be behind it, and from a name
+    /// the mount holds no id for.
+    fn cached_file_id(&mut self, name: &str) -> Option<FileId>;
 }
 
 
@@ -686,6 +692,20 @@ impl Vfs {
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
         crate::writeback::drain_held(self);
         let target = self.resolve_for_open(path, ResolveIntent::KernelOrRead)?;
+        // A file still open is on no write-back queue, so the drain above
+        // cannot see it: its writes are cache pages and the mount's record is
+        // what `create` wrote. A device view taken now would read round them.
+        let dirty = {
+            let (fs, fs_path) = self.fs_for_target(&target)?;
+            fs.cached_file_id(&fs_path).filter(|&id| crate::file_cache::flush_owed(id))
+        };
+        if let Some(file_id) = dirty {
+            // The flush's own instant: no handle's last write is the file's,
+            // and these are the bytes as of now.
+            let mtime = crate::clock::nanos_since_boot();
+            let owner = String::from(target.as_str());
+            self.flush_file(&owner, file_id, mtime)?;
+        }
         let (fs, fs_path) = self.fs_for_target(&target)?;
         fs.open_backing(&fs_path)
     }

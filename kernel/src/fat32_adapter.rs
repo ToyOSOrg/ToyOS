@@ -845,6 +845,10 @@ impl FileSystem for FatFs {
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         self.backing(name)
     }
+
+    fn cached_file_id(&mut self, name: &str) -> Option<FileId> {
+        self.by_name.get(name).copied()
+    }
 }
 
 /// Ask every USB disk for the partitions this kernel was given, retrying

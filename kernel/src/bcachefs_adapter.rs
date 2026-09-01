@@ -360,6 +360,10 @@ impl FileSystem for BcacheFsAdapter {
         let blocks = self.blocks_for(name, extents);
         Ok(Arc::new(NvmeBacking::new(blocks, size)))
     }
+
+    fn cached_file_id(&mut self, name: &str) -> Option<FileId> {
+        self.name_to_id.get(name).copied()
+    }
 }
 
 /// VFS adapter for read-only bcachefs (initrd mounted in memory).
@@ -458,6 +462,10 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         let (extents, size) = present("open_backing", name, self.fs.file_extents(name))?;
         Ok(Arc::new(InitrdBacking::new(self.image, extents, size)))
+    }
+
+    fn cached_file_id(&mut self, name: &str) -> Option<FileId> {
+        self.name_to_id.get(name).copied()
     }
 }
 
