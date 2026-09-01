@@ -68,3 +68,40 @@ The two mechanisms worth naming before anybody measures again:
 - **Or it is the host.** Three of the five reds across both arms are on tests
   that read a volume back *after* QEMU has gone, so anything that shortens the
   guest's shutdown under load reaches all of them the same way.
+
+## A fourth name, and one more both-arms pair
+
+**2026-09-01, `w5b5-host-build` at `dbc7d610` against `627e5f0f`**, two full
+`cargo test` runs on this dev host, one an arm, back to back. Each arm reported
+exactly one red and each red was `ALONE … GREEN`:
+
+| arm | red | the host it ran on |
+|---|---|---|
+| branch | `fs_dirs_durable` | fastest boot 1629 ms, 1.23x width |
+| `627e5f0f` | `i8042_undecoded_bytes` | fastest boot 3517 ms, 2.66x width |
+
+`fs_dirs_durable` is the fourth name of the shape this entry is about, and it
+says the most of any of them:
+
+```
+the staged directories left the log volume breaking the format:
+FAT 1 differs from FAT 0 at entry 34: 0x00000000 against 0x00000023. BPB_ExtFlags
+has mirroring on, so every copy must carry every update
+/2026-09-01-202502.log: DIR_FileSize is 14307 bytes, which needs 28 clusters, and
+the chain holds 29
+2 cluster(s) from 34 are marked allocated and no directory entry reaches them
+FSInfo: FSI_Free_Count is 68522 and the FAT has 68519 free clusters
+```
+
+Four complaints at once, and every one of them is `/log` mid-write: an
+unmirrored FAT entry, a chain one cluster longer than the size, two clusters
+allocated and unreachable, and an `FSI_Free_Count` three off. That is the
+signature of a volume read back before its writer finished, not of four
+independent format faults --- which is the first of the two mechanisms this
+entry already names, seen from a fourth angle.
+
+One run an arm decides nothing about a rate, and neither arm was quiet in the
+same way, so this is a sighting and not a measurement. What it adds is that the
+class is still both-arms: `i8042_undecoded_bytes` is not a volume checker at
+all, so the base arm produced the *parallel-classification* red without
+producing this one.

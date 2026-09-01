@@ -1432,6 +1432,27 @@ pub const KNOWN_RED: &[Red] = &[
     // and a `Seen` written from an argument rather than a run is exactly the
     // overstatement this index refuses. It took the same census with it.
     Red {
+        test: "fs_dirs_durable",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`the staged directories left the log volume breaking the format`, and it says \
+               four things at once — an unmirrored FAT entry, a chain one cluster longer than \
+               `DIR_FileSize`, two clusters allocated and unreachable, and `FSI_Free_Count` \
+               three off. Four format complaints on one volume is the signature of a read that \
+               beat its writer, not of four faults. `ALONE … GREEN`, so the harness classifies \
+               it as `Sched::Parallel` and the run stays red on that. The fourth name of the \
+               shape `fat_backing_revoked`, `device_claim_lifetime` and `esp_filesystem` \
+               already carry",
+        evidence: "one full `cargo test` an arm, back to back on this dev host 2026-09-01: \
+                   `w5b5-host-build` at dbc7d610 (this red, host at 1.23x width) against \
+                   627e5f0f (no red under this name; one `i8042_undecoded_bytes`, also \
+                   `ALONE … GREEN`, host at 2.66x width). One run an arm is a sighting and not \
+                   a rate",
+        source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
+        measured: "2026-09-01",
+    },
+    Red {
         test: "screen_console_scroll",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
