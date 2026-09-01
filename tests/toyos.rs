@@ -6871,6 +6871,9 @@ fn desktop_typing_damage() -> Result<(), String> {
     if intervals == 0 {
         return Err(format!("the compositor reported no interval while typing:\n{typed}"));
     }
+    // A max over intervals, so an injector that fragments a line can only
+    // weaken this verdict and never manufacture a false red: the exposure is a
+    // masked regression, not a caused one.
     if biggest * 50 > screen_px {
         return Err(format!(
             "a keystroke's frame repainted {biggest} of {screen_px} pixels — over two percent of \

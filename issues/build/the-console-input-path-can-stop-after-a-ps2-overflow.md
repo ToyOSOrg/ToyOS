@@ -34,20 +34,33 @@ path that stops explains `10 typed lines and none of them came back`, which is
 what `console_locale_detect` and `desktop_locale_detect` reported on CI on
 2026-08-31.
 
-**What is not established: which side stopped.** The kernel's own drain counter
-would separate "the ISR stopped taking bytes off the controller" from "the
-console stopped reading the kernel's queue", and that counter needs
-`i8042-trace`. Twenty boots with the trace armed did not reproduce the wedge at
-all: every one of those 200 attempts recovered by the next line and none ever
-read `drained 0`. So the arm that can see the counter is the arm that does not
-fail, and the instrument changes the outcome — arming the trace also arms
-`i8042-fast-health` and `i8042-edge-race` (`kernel/src/actuator.rs`'s `IMPLIES`)
-and selects the test kernel, so it is a different guest in three ways.
+## Which side stopped, and the two armed measurements that disagree
 
-Exit: reproduce the wedge with a byte counter visible — a counter the shipping
-kernel already prints, or an actuator that adds the count and nothing else —
-and then read whether `RX_BYTES` is still rising while the panel is frozen. That
-one number says whether this is a driver defect or a console one.
+The kernel's drain counter separates "the ISR stopped taking bytes off the
+controller" from "the console stopped reading the kernel's queue", and it needs
+`i8042-trace`.
+
+- **Twenty armed boots here did not reproduce the wedge at all**: 200 attempts,
+  every one recovered by the next line, and `drained 0` never once appeared.
+- **An independent staging of the same arm reported it 2 of 5**, with
+  `injected 44, kernel drained 16` and then attempts 1 through 9 all
+  `drained 0`, the row frozen at `echo sur`. That result is reported here, not
+  measured here.
+
+The two do not reconcile at a common rate: at the 2-of-5 arm's own p = 0.4,
+P(0 of 20) is 3.66e-05. **The tree is not the difference** — the branch's
+armed boots ran with `4c35c920` as their base, which is the same base the other
+staging used, so the merge that followed cannot account for it. Nobody has an
+explanation yet, and the file says so rather than asserting the negative.
+
+**If the armed arm can wedge, this is nearly answered.** The counter is then
+available on a wedged boot, and the reported `drained 0` *while bytes were
+still being injected* is the ISR side having stopped taking them off the
+controller — not the console having stopped reading the kernel's queue.
+
+Exit: reproduce a wedge with the counter visible and read whether `RX_BYTES` is
+still rising while the panel is frozen. One number decides it, and it is
+already within reach of the armed arm rather than blocked on a new instrument.
 
 Not a reason to leave `shell_type_once` unpaced: pacing keeps the harness from
 provoking this, and the tracker keeps the defect.
