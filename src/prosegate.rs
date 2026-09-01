@@ -19,8 +19,8 @@
 //!
 //! **A row is its file's exact count, both ways.** An entry left above what
 //! the file holds is an allowance for prose nobody wrote, spendable by whoever
-//! next opens the file; the branch that removed the lines books them, so no
-//! landing inherits room it did not make.
+//! next opens the file; the branch that removed the lines books it. A row is
+//! per file and cannot cross; [`DATED_TOTAL`] is one scalar and can.
 //!
 //! **Chronology is banned outright rather than ratcheted**, and it carries a
 //! second lock: [`DATED_TOTAL`] is the ledger's whole dated column, declared
