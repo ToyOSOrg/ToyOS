@@ -6181,9 +6181,8 @@ fn i8042_drained(said: &str) -> usize {
         .sum()
 }
 
-/// What has gone out on this line so far, which is what an acknowledgement is
-/// checked against. `base` is whatever a previous attempt left in the shell's
-/// editor: the next burst lands after it, so the echo has to begin with both.
+/// What has gone out on this line so far. `base` is what a previous attempt
+/// left in the editor: the next burst lands after it, so the echo begins with both.
 struct Sent<'a> {
     mark: usize,
     bytes: usize,
@@ -6296,10 +6295,9 @@ fn shell_type_once(
          {line:?} would have gone out unpaced"
     );
     let mark = qemu.console_stream().mark();
-    // Whatever a previous attempt left in the shell's line editor. The row is
-    // trimmed, so an empty editor comes back as the bare prompt and loses the
-    // space the console draws after it — put it back, or every first burst is
-    // compared against a prefix the panel never shows.
+    // The row is trimmed, so an empty editor comes back as the bare prompt and
+    // loses the space the console draws after it — put it back, or every first
+    // burst is compared against a prefix the panel never shows.
     let base = match ack {
         Drained::Panel(font) => {
             let dump = qemu.screendump();
