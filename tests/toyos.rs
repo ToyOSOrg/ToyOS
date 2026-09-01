@@ -6171,8 +6171,7 @@ enum Drained {
     Bytes,
 }
 
-/// Set-1 bytes the kernel reports having taken off the i8042 in `said`.
-/// `bytes=` and not `keys=`: the queue this paces against holds bytes.
+/// Set-1 bytes the kernel reports taking off the i8042 in `said`; `bytes=`, not `keys=`.
 fn i8042_drained(said: &str) -> usize {
     said.lines()
         .filter_map(|line| line.split("i8042: drain bytes=").nth(1))
@@ -6871,9 +6870,8 @@ fn desktop_typing_damage() -> Result<(), String> {
     if intervals == 0 {
         return Err(format!("the compositor reported no interval while typing:\n{typed}"));
     }
-    // A max over intervals, so an injector that fragments a line can only
-    // weaken this verdict and never manufacture a false red: the exposure is a
-    // masked regression, not a caused one.
+    // A max over intervals: a fragmenting injector can only weaken this, never
+    // manufacture a false red — the exposure is a masked regression.
     if biggest * 50 > screen_px {
         return Err(format!(
             "a keystroke's frame repainted {biggest} of {screen_px} pixels — over two percent of \
