@@ -683,9 +683,9 @@ impl ReplaceRename for FatFs {
 impl FileSystem for FatFs {
     /// The `limit` bound is honoured before each push, not after — unlike the
     /// bcachefs adapters.
-    fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         let role = self.role;
-        self.fs.walk(limit).map_err(|e| refused(role, "list", "/", e))
+        self.fs.walk(dir, limit).map_err(|e| refused(role, "list", dir, e))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {

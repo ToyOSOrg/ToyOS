@@ -342,24 +342,43 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(out)
     }
 
-    /// Every file in the volume, as a path relative to the root, paired with
-    /// its size.
+    /// Every file at or under `under` — `""` for the volume root — as a path
+    /// relative to the root, paired with its size.
     ///
     /// A directory appears as its own entry — the path with a trailing `/`
     /// and size 0 — as well as a prefix on the paths inside it, so an empty
     /// directory is a visible entry rather than an absence ToyOS's VFS
-    /// `list` cannot tell from a name that was never there.
+    /// `list` cannot tell from a name that was never there. `under` is
+    /// descended to, not filtered for, so `limit` bounds that directory's
+    /// subtree and never the volume.
     ///
     /// Iterative, with a visited set of directory clusters and a depth bound,
     /// because the tree is on-disk data and a crafted volume can make it a
     /// graph. `limit` bounds files and directories alike; either exceeding it
     /// abandons the whole listing.
-    pub fn walk(&mut self, limit: usize) -> Result<Vec<(String, u64)>, Error> {
+    pub fn walk(&mut self, under: &str, limit: usize) -> Result<Vec<(String, u64)>, Error> {
         let mut out = Vec::new();
         let mut visited = BTreeSet::new();
         let mut queue: Vec<(Cluster, String, usize)> = Vec::new();
-        queue.push((self.geom.root(), String::new(), 0));
-        visited.insert(self.geom.root());
+
+        let (start, start_prefix) = if under.is_empty() {
+            (self.geom.root(), String::new())
+        } else {
+            let node = self.resolve(under)?;
+            let first = node.first_cluster.ok_or(Error::CorruptDirectory)?;
+            if !node.raw.is_dir() {
+                return Ok(vec![(String::from(under), node.raw.size() as u64)]);
+            }
+            let mut prefix = String::from(under);
+            prefix.push('/');
+            if limit == 0 {
+                return Err(Error::LimitExceeded);
+            }
+            out.push((prefix.clone(), 0));
+            (first, prefix)
+        };
+        queue.push((start, start_prefix, 0));
+        visited.insert(start);
 
         while let Some((cluster, prefix, depth)) = queue.pop() {
             let mut scan = DirScan::new(cluster);

@@ -57,8 +57,10 @@ fn stalled_metadata_window(path: &str, file_id: FileId, size_read: u64) {
 
 /// A device that would not answer is `Io`; `NotFound` means only that the name is absent.
 pub trait FileSystem: Send {
-    /// Every name in the whole mount — not one directory — or `ResourceExhausted` above `limit`.
-    fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError>;
+    /// Every name at or under the directory `dir` (`""` for the mount root), or
+    /// `ResourceExhausted` above `limit` — which counts what `dir` holds, never
+    /// what the mount does. [`under_directory`] is the membership rule.
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError>;
 
     /// When `name` was last written, in whatever epoch the mount keeps.
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError>;
@@ -141,8 +143,16 @@ pub struct Vfs {
 /// `MAX_PATH` exists because `resolve_absolute` prepends `cwd` before `normalize`, defeating `MAX_USER_STR`'s per-argument bound unless `cwd` is separately bounded.
 pub const MAX_PATH: usize = 4096;
 
-/// The most entries one `FileSystem::list` may materialise — per mount, not per directory.
+/// The most entries one `FileSystem::list` may materialise for one directory.
 pub const MAX_LIST_ENTRIES: usize = 16_384;
+
+/// Whether a mount's `name` is the directory `dir` itself or lies beneath it;
+/// an empty `dir` is the mount root, which every name lies under.
+pub fn under_directory(name: &str, dir: &str) -> bool {
+    dir.is_empty()
+        || name == dir
+        || (name.starts_with(dir) && name.as_bytes().get(dir.len()) == Some(&b'/'))
+}
 
 /// The most directories `created_dirs` holds before `mkdir` refuses: each is a
 /// userland-chosen key, bounded the way `list` is by [`MAX_LIST_ENTRIES`].
@@ -274,7 +284,7 @@ impl Vfs {
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
         let prefix = format!("{}/", fs_path);
         // A mount too large to list cannot be entered either: the answer needs the same allocation.
-        let names = fs.list(MAX_LIST_ENTRIES)?;
+        let names = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
         if names.iter().any(|(name, _)| name.starts_with(&prefix) || *name == fs_path) {
             return Ok(abs);
         }
@@ -302,7 +312,7 @@ impl Vfs {
             }
 
             if let Some(root) = self.root.as_deref_mut() {
-                for (name, _size) in root.list(MAX_LIST_ENTRIES)? {
+                for (name, _size) in root.list("", MAX_LIST_ENTRIES)? {
                     if let Some(slash_pos) = name.find('/') {
                         let dir_name = format!("{}/", &name[..slash_pos]);
                         if seen_dirs.insert(dir_name.clone()) {
@@ -317,7 +327,7 @@ impl Vfs {
 
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir)
             .ok_or(SyscallError::NotFound)?;
-        let all_files = fs.list(MAX_LIST_ENTRIES)?;
+        let all_files = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
 
         let prefix = if fs_path.is_empty() {
             String::new()
@@ -552,7 +562,7 @@ impl Vfs {
         }
 
         let (fs, fs_path) = self.resolve_fs(&mount, &subdir).ok_or(SyscallError::NotFound)?;
-        let names = fs.list(MAX_LIST_ENTRIES)?;
+        let names = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
         let child_prefix = format!("{fs_path}/");
         let is_file = names.iter().any(|(n, _)| *n == fs_path);
         // A listing mount's own `name/` self-entry is not a child, or every empty directory reads non-empty.

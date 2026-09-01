@@ -696,15 +696,23 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         }
     }
 
-    /// Up to `limit` files as (name, size); more is refused before any materialise.
-    pub fn list(&self, limit: usize) -> Result<Vec<(String, u64)>, FsError> {
-        let entries = btree::collect_up_to(&self.io, self.sb.root_node, limit)?;
-        let mut result = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            if let Ok(leaf) = self.decode(&entry.value) {
-                result.push((String::from(leaf.name()), leaf.size()));
+    /// Up to `limit` of the files `keep` accepts, as (name, size); more is
+    /// refused before any materialise. `limit` counts the kept names, so a
+    /// caller listing one directory pays that directory's bound and not the
+    /// volume's.
+    pub fn list(&self, limit: usize, keep: &dyn Fn(&str) -> bool) -> Result<Vec<(String, u64)>, FsError> {
+        let mut result = Vec::new();
+        btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
+            let Ok(leaf) = self.decode(&entry.value) else { return Ok(()) };
+            if !keep(leaf.name()) {
+                return Ok(());
             }
-        }
+            if result.len() >= limit {
+                return Err(FsError::ListTooLong { limit });
+            }
+            result.push((String::from(leaf.name()), leaf.size()));
+            Ok(())
+        })?;
         Ok(result)
     }
 
@@ -1127,14 +1135,14 @@ mod tests {
 
         let mut fs = mount_rw(raw).expect("mount");
         assert!(
-            fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
+            fs.list(usize::MAX, &|_| true).expect("list").iter().any(|(n, _)| n == "victim.txt"),
             "the craft did not leave victim.txt on the volume",
         );
 
         assert!(!fs.delete("ghost").expect("delete"), "nothing on this volume is named ghost");
 
         assert!(
-            fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
+            fs.list(usize::MAX, &|_| true).expect("list").iter().any(|(n, _)| n == "victim.txt"),
             "deleting a name that does not exist destroyed the entry it collided with",
         );
     }
@@ -1147,7 +1155,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("the volume still describes its device");
-        match fs.list(usize::MAX) {
+        match fs.list(usize::MAX, &|_| true) {
             Err(FsError::TreeTooDeep(_)) => {}
             other => panic!("expected TreeTooDeep, got {other:?}"),
         }
@@ -1161,7 +1169,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("mount");
-        match fs.list(usize::MAX) {
+        match fs.list(usize::MAX, &|_| true) {
             Err(FsError::CorruptedNode(_)) => {}
             other => panic!("expected CorruptedNode, got {other:?}"),
         }
@@ -1175,7 +1183,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("mount");
-        match fs.list(usize::MAX) {
+        match fs.list(usize::MAX, &|_| true) {
             Err(FsError::BlockOffDevice { .. }) => {}
             other => panic!("expected BlockOffDevice, got {other:?}"),
         }
@@ -1374,7 +1382,7 @@ mod tests {
         let ceiling = 2 * 1024 * 1024 - 4096; // mm::MAX_HEAP_ALLOC
         let limit = 16_384; // vfs::MAX_LIST_ENTRIES, what the kernel passes down
         let count = 40_000usize;
-        let doubled = 65_536 * core::mem::size_of::<crate::btree::Entry>();
+        let doubled = 65_536 * core::mem::size_of::<(String, u64)>();
         assert!(
             doubled > ceiling,
             "{doubled} bytes is under the ceiling — this test proves nothing",
@@ -1387,7 +1395,7 @@ mod tests {
         let fs = fs.mount();
 
         crate::alloc_probe::take_peak();
-        let listed = fs.list(limit);
+        let listed = fs.list(limit, &|_| true);
         let peak = crate::alloc_probe::take_peak();
 
         // Asserted first: the allocation is the harm, before any return value.
@@ -1402,8 +1410,18 @@ mod tests {
         }
 
         // The legal case the bound must not take with it.
-        let all = fs.list(count).expect("list with room");
+        let all = fs.list(count, &|_| true).expect("list with room");
         assert_eq!(all.len(), count, "a listing with room came back short");
+
+        // What `keep` bounds is the kept set, so one directory in a volume
+        // past the ceiling still lists.
+        let mut fs = fs.into_formatted();
+        fs.create("d/only", &[], 0).expect("create");
+        let fs = fs.mount();
+        let listed = fs
+            .list(limit, &|name| name == "d" || name.starts_with("d/"))
+            .expect("one directory in an over-full volume");
+        assert_eq!(listed.len(), 1, "listing d/ returned {listed:?}");
     }
 
     #[test]

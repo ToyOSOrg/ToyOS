@@ -221,9 +221,9 @@ impl ReplaceRename for BcacheFsAdapter {
 }
 
 impl FileSystem for BcacheFsAdapter {
-    fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         // An empty listing on error would be a lie indistinguishable from an empty directory.
-        mapped("list", "/", self.fs.list(limit))
+        mapped("list", dir, self.fs.list(limit, &|name| crate::vfs::under_directory(name, dir)))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
@@ -378,8 +378,8 @@ impl ReadOnlyBcacheFsAdapter {
 }
 
 impl FileSystem for ReadOnlyBcacheFsAdapter {
-    fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
-        mapped("list", "/", self.fs.list(limit))
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
+        mapped("list", dir, self.fs.list(limit, &|name| crate::vfs::under_directory(name, dir)))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {

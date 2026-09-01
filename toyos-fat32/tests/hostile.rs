@@ -115,7 +115,7 @@ fn exercise(dev: SparseDevice) {
     let Ok(mut fs) = Fat32::mount(dev) else { return };
     let t = FatTime::EPOCH;
     let _ = fs.free_bytes();
-    let _ = fs.walk(2048);
+    let _ = fs.walk("", 2048);
 
     if let Ok(entries) = fs.read_dir("", 2048) {
         for e in entries.iter().take(32) {
@@ -151,7 +151,7 @@ fn exercise(dev: SparseDevice) {
 #[test]
 fn the_corpus_is_a_volume_we_can_read() {
     let mut fs = Fat32::mount(pristine()).expect("mount");
-    let mut names: Vec<String> = fs.walk(1024).expect("walk").into_iter().map(|(n, _)| n).collect();
+    let mut names: Vec<String> = fs.walk("", 1024).expect("walk").into_iter().map(|(n, _)| n).collect();
     names.sort();
     assert_eq!(
         names,
@@ -260,7 +260,7 @@ fn a_device_that_fails_mid_read_reports_it() {
     // Enough for the boot sector and FSInfo, not enough for the root cluster.
     dev.fail_reads_past = Some(l.first_data * l.bps);
     let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.walk(1024).unwrap_err(), Error::Io);
+    assert_eq!(fs.walk("", 1024).unwrap_err(), Error::Io);
 }
 
 /// **A budget that expired is not a device that failed, and this crate must not
@@ -289,7 +289,7 @@ fn a_budget_that_expired_is_not_a_device_that_failed() {
     dev.fail_reads_past = Some(l.first_data * l.bps);
     dev.refusal = IoError::BudgetExpired;
     let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.walk(1024).unwrap_err(), Error::BudgetExpired);
+    assert_eq!(fs.walk("", 1024).unwrap_err(), Error::BudgetExpired);
 }
 
 /// The flush is the call `/bin/logd`'s durability claim rests on, so it is the
@@ -402,7 +402,7 @@ fn a_directory_entry_pointing_outside_the_volume_is_refused() {
     dev.poke(at + 20, &[0xFF, 0x0F]);
 
     let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.walk(1024).unwrap_err(), Error::CorruptDirectory);
+    assert_eq!(fs.walk("", 1024).unwrap_err(), Error::CorruptDirectory);
 }
 
 /// One cluster of a directory, packed with entries and no end marker, so a
@@ -439,7 +439,7 @@ fn a_cyclic_directory_chain_terminates() {
     l.set_chain(&mut dev, root + 1, root);
 
     let mut fs = Fat32::mount(dev).expect("mount");
-    let err = fs.walk(1024).unwrap_err();
+    let err = fs.walk("", 1024).unwrap_err();
     assert!(
         matches!(err, Error::CorruptDirectory | Error::CorruptChain | Error::LimitExceeded),
         "unexpected {err:?}"
@@ -470,7 +470,7 @@ fn a_directory_tree_cycle_terminates() {
     let mut fs = Fat32::mount(dev).expect("mount");
     // Either answer is sound: the visited set stops the descent, and the
     // budget stops a tree that is merely enormous.
-    match fs.walk(1024) {
+    match fs.walk("", 1024) {
         Ok(files) => assert!(files.len() <= 1024),
         Err(e) => assert!(matches!(e, Error::LimitExceeded | Error::CorruptDirectory)),
     }
@@ -506,7 +506,7 @@ fn a_directory_longer_than_the_entry_bound_is_refused() {
     assert_eq!(err, Error::CorruptDirectory);
     // The listing bound is the caller's; this one is the crate's, and it has
     // to hold even when the caller offers a bound larger than it.
-    assert_eq!(fs.walk(1_000_000).unwrap_err(), Error::CorruptDirectory);
+    assert_eq!(fs.walk("", 1_000_000).unwrap_err(), Error::CorruptDirectory);
 }
 
 /// The caller's own bound has to hold too, and it has to refuse rather than
@@ -514,10 +514,31 @@ fn a_directory_longer_than_the_entry_bound_is_refused() {
 #[test]
 fn the_caller_limit_refuses_rather_than_truncates() {
     let mut fs = Fat32::mount(pristine()).expect("mount");
-    assert_eq!(fs.walk(1).unwrap_err(), Error::LimitExceeded);
+    assert_eq!(fs.walk("", 1).unwrap_err(), Error::LimitExceeded);
     assert_eq!(fs.read_dir("", 1).unwrap_err(), Error::LimitExceeded);
     assert_eq!(fs.read_dir("", 0).unwrap_err(), Error::LimitExceeded);
-    assert!(fs.walk(64).is_ok());
+    assert!(fs.walk("", 64).is_ok());
+}
+
+/// And it is spent on the named subtree, so a bound the whole volume exceeds
+/// still lists a directory inside it.
+#[test]
+fn the_caller_limit_is_the_named_directorys_and_not_the_volumes() {
+    let mut fs = Fat32::mount(pristine()).expect("mount");
+    let whole = fs.walk("", 64).expect("walk");
+    assert_eq!(whole.len(), 6, "the corpus walked to {whole:?}");
+
+    assert_eq!(fs.walk("", whole.len() - 1).unwrap_err(), Error::LimitExceeded);
+    assert_eq!(
+        fs.walk("sub/deeper", whole.len() - 1).expect("walk one directory"),
+        vec![(String::from("sub/deeper/"), 0), (String::from("sub/deeper/leaf.txt"), 4)],
+    );
+    assert_eq!(fs.walk("sub/deeper", 1).unwrap_err(), Error::LimitExceeded);
+    assert_eq!(
+        fs.walk("plain.txt", 1).expect("walk a file"),
+        vec![(String::from("plain.txt"), 12)],
+    );
+    assert_eq!(fs.walk("nope", 64).unwrap_err(), Error::NotFound);
 }
 
 // -------------------------------------------------------------- long names
@@ -764,7 +785,7 @@ fn a_crafted_zero_size_entry_cannot_write_outside_the_volume() {
     // *reported*: it is on the disk, and saying so computes no offset from it.
     // One bad entry making a whole directory unlistable would be a denial of
     // service on a volume that is otherwise fine.
-    assert!(fs.walk(1024).expect("walk").iter().any(|(n, _)| n == "CRAFTED.BIN"));
+    assert!(fs.walk("", 1024).expect("walk").iter().any(|(n, _)| n == "CRAFTED.BIN"));
     assert_eq!(fs.device().out_of_volume, 0, "the crate asked for bytes outside the volume");
 }
 
