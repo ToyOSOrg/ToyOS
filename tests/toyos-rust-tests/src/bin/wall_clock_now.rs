@@ -19,6 +19,11 @@ use std::time::Instant;
 /// update-in-progress flag that could take a second.
 const CALLS: u32 = 1000;
 
+/// How far std's reading of the wall clock may sit from the SDK's. Both come
+/// from `SYS_CLOCK_EPOCH`, whole seconds apart at most, and the two calls are
+/// adjacent — so this is a tick, not a margin.
+const MAX_CLOCK_SKEW_SECS: u64 = 2;
+
 fn main() {
     let epoch = toyos::system::clock_epoch();
     let time = toyos::system::clock_realtime();
@@ -40,6 +45,20 @@ fn main() {
     println!(
         "wall-clock: epoch={epoch} local={:02}:{:02}:{:02}",
         time.hours, time.minutes, time.seconds
+    );
+
+    // What `std` makes of the same clock. Nothing in the tree compared a std
+    // timestamp against the machine's own, which is how `SystemTime::now`
+    // answered 1970 unnoticed; the host puts this against the instant it
+    // staged in the RTC, which is the one reading here from outside the guest.
+    let std_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("std put the wall clock before the epoch")
+        .as_secs();
+    println!("wall-clock: std_epoch={std_epoch}");
+    assert!(
+        std_epoch.abs_diff(epoch) <= MAX_CLOCK_SKEW_SECS,
+        "std's SystemTime::now says {std_epoch} and SYS_CLOCK_EPOCH says {epoch}",
     );
 
     let began = Instant::now();
