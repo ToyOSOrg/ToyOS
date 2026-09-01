@@ -7,9 +7,9 @@ opened: 2026-09-01
 # Two lifetime edges the loom models stop short of: the probe node's victim-retire, and nested crash entry
 
 The rule that a model must import its subject rather than transliterate it is
-already this tree's, and already enforced. `toyos-sched/loom/src/lib.rs:26-40`
-pulls every scheduler source in by `#[path]`, and its own header says why:
-"loom explores the interleavings of the *real* primitives, not of a
+already this tree's, and already enforced. `toyos-sched/loom/src/lib.rs` pulls
+every scheduler source in by `#[path]` (`:26-49`), and its header at `:6-8` says
+why: "loom explores the interleavings of the *real* primitives, not of a
 re-implementation — a re-implementation is exactly the divergence risk this
 crate is meant to remove." What is owed is not the principle. It is two edges.
 

@@ -25,11 +25,17 @@ from a release, and it appears exactly when the process is busy — which is whe
 a spawn/join loop is running.
 
 `ProcessStats` (`SYS_PROCESS_STATS`) carries `alloc_count`, `peak_memory` and
-the two fault counts. `alloc_count` is cumulative, and `free_count` exists on
-`ProcessData` (`kernel/src/process.rs:502`) but is **not** exported in the
-struct — so live count = allocations − frees cannot be computed from userland.
-`peak_memory` is a high-water mark, which means a *fix* is invisible in it: a
-leak that stops leaking leaves the peak where it was.
+the two fault counts. Subtracting frees from allocations would not give a live
+count even if `free_count` were exported, and it is not (`kernel/src/process.rs:502`,
+absent from the ABI struct) — **the two counters count different populations.**
+`alloc_count` is bumped at four sites including the demand-page fill
+(`kernel/src/arch/syscall/vm.rs:117`, `:142`, `:374`, `kernel/src/process.rs:1432`);
+`free_count` at two, `munmap` and TLS teardown (`vm.rs:161`, `process.rs:189`).
+Demand-page release is never counted at all — `demand_pages` is cleared wholesale
+at teardown (`process.rs:965`) — so the difference folds in every demand fill ever
+taken and climbs forever. Exporting one field is the cheap fix that yields a
+number which never returns. `peak_memory` is a high-water mark, which means a
+*fix* is invisible in it: a leak that stops leaking leaves the peak where it was.
 
 `tests/toyos-rust-tests/src/bin/abuse_tls_alloc.rs` has the harness shape. It
 runs raw `thread_spawn`/`thread_join` over an explicitly `mmap`ed stack, and its

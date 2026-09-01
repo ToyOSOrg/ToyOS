@@ -10,9 +10,9 @@ opened: 2026-09-01
 allocation-error handler at all, which is what
 `issues/kernel/no-alloc-error-handler.md` records. That half is simply true.
 
-**What exists, and why it is not enough.** `DebugAction::HEAP_AT_CEILING_PAGE_ALIGNED`
-(`toyos-abi/src/syscall.rs:723`, dispatched at
-`kernel/src/arch/syscall/dispatch.rs:538`) drives `debug_heap_alloc` at
+**What exists, and why it is not enough.** `debug_action::HEAP_AT_CEILING_PAGE_ALIGNED`
+(a `pub const` in `toyos-abi/src/syscall.rs`'s `debug_action` module, `:709` and `:723`;
+dispatched at `kernel/src/arch/syscall/dispatch.rs:538`) drives `debug_heap_alloc` at
 `MAX_HEAP_ALLOC` with 4096-byte alignment, which the page source cannot back;
 `kernel/src/arch/syscall/debug.rs:25-27` reports the null as
 `ResourceExhausted` rather than unwrapping it, and
