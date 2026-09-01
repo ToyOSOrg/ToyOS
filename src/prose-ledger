@@ -244,7 +244,7 @@ tests/common/storage.rs 70 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 956 4
 tests/common/volumes.rs 602 3
-tests/common/wallclock.rs 139 0
+tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
 tests/toyos-rust-tests/src/bin/abuse_elf_loader.rs 135 0
@@ -351,7 +351,7 @@ tests/toyos-rust-tests/src/bin/std_fs.rs 11 0
 tests/toyos-rust-tests/src/bin/std_fs_write.rs 0 0
 tests/toyos-rust-tests/src/bin/std_io.rs 0 0
 tests/toyos-rust-tests/src/bin/std_mmap.rs 0 0
-tests/toyos-rust-tests/src/bin/std_process.rs 7 0
+tests/toyos-rust-tests/src/bin/std_process.rs 10 0
 tests/toyos-rust-tests/src/bin/std_sync.rs 1 0
 tests/toyos-rust-tests/src/bin/std_threading.rs 5 0
 tests/toyos-rust-tests/src/bin/std_tls.rs 9 0
@@ -368,7 +368,7 @@ tests/toyos-rust-tests/src/bin/tlb_shootdown_waits.rs 59 0
 tests/toyos-rust-tests/src/bin/toybox_file_tools.rs 74 0
 tests/toyos-rust-tests/src/bin/va_exhaustion.rs 32 0
 tests/toyos-rust-tests/src/bin/wake_storm_cost.rs 122 1
-tests/toyos-rust-tests/src/bin/wall_clock_now.rs 21 0
+tests/toyos-rust-tests/src/bin/wall_clock_now.rs 25 0
 tests/toyos-rust-tests/src/bin/window_caps.rs 26 0
 tests/toyos-rust-tests/src/bin/window_child.rs 21 0
 tests/toyos-rust-tests/src/bin/window_drag.rs 30 0

@@ -4,9 +4,9 @@
 //! makes this checkable from outside the guest at all: `-rtc base=` puts a
 //! known instant in the emulated CMOS before the machine starts, so the name
 //! and the timestamp of the file the guest writes are both known before there
-//! is a guest. Every verdict here is read off the disk image the device
-//! received, never off anything the guest said about it — the boot log is used
-//! only to say *why* a disagreement happened.
+//! is a guest. The volume's verdicts are read off the disk image the device
+//! received; the clock *syscalls* reach no disk, so what the guest printed for
+//! those is judged against that same staged instant and nothing it derived.
 //!
 //! # What only an actuator can stage
 //!
@@ -103,6 +103,13 @@ fn names(entries: &[&Entry]) -> String {
 fn probed_epoch(log: &str) -> Option<i64> {
     let line = log.lines().find(|l| l.contains("wall-clock: epoch="))?;
     let rest = line.split("epoch=").nth(1)?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+/// What the same probe printed for `std`'s `SystemTime::now`.
+fn probed_std_epoch(log: &str) -> Option<i64> {
+    let line = log.lines().find(|l| l.contains("wall-clock: std_epoch="))?;
+    let rest = line.split("std_epoch=").nth(1)?;
     rest.split_whitespace().next()?.parse().ok()
 }
 
@@ -296,9 +303,29 @@ pub fn wall_clock_file(
         ));
     }
 
+    // Judged against `RTC_BASE` and not against the syscall above, so a std
+    // agreeing with a wrong kernel still lands outside this window.
+    let Some(std_epoch) = probed_std_epoch(&log) else {
+        return Err(format!(
+            "the guest never printed what std's `SystemTime::now` answered\n{}",
+            clock_lines(&log)
+        ));
+    };
+    let std_drift = std_epoch - RTC_BASE_SECS;
+    if !(0..=MAX_BOOT_DRIFT_SECS).contains(&std_drift) {
+        return Err(format!(
+            "std's `SystemTime::now` answered {std_epoch}, {std_drift}s from the {RTC_BASE} the \
+             host set and outside 0..={MAX_BOOT_DRIFT_SECS}. A std that never asks the kernel \
+             answers the epoch, which is {}s out\n{}",
+            -RTC_BASE_SECS,
+            clock_lines(&log)
+        ));
+    }
+
     eprintln!(
         "  [clock] {} carries {} bytes, stamped {drift}s after the {RTC_BASE} the host set, epoch \
-         {epoch_drift}s after it; {} deleted for the {MAX_LOG_FILES}-log bound",
+         {epoch_drift}s after it and std {std_drift}s after it; {} deleted for the \
+         {MAX_LOG_FILES}-log bound",
         mine.name, mine.len, oldest
     );
     Ok(())
