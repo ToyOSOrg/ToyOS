@@ -80,7 +80,7 @@ kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 131 0
 kernel/src/drivers/panic_console/access.rs 6 0
 kernel/src/drivers/panic_console/latch.rs 9 0
-kernel/src/drivers/panic_console/mod.rs 216 0
+kernel/src/drivers/panic_console/mod.rs 215 0
 kernel/src/drivers/pci.rs 23 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
