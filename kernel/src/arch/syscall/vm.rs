@@ -266,10 +266,9 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls_total_memsz, &tls_info);
         }
 
-        // The module id is reserved but not registered: the `tls_modules` push and
-        // the `next_tls_module_id` bump happen only once the copy-out has succeeded.
-        // A self-defined TLS symbol resolves to this id directly, so the not-yet-pushed
-        // module is not needed here.
+        // Read here and bumped only at the registration below, so nothing reserves it
+        // against a sibling load of another name
+        // (`issues/kernel/two-dlopens-of-different-names-share-one-tls-module-id.md`).
         let tls_module = lib_has_tls.then(|| {
             let module_id = data.elf.next_tls_module_id;
             let tls_info = crate::elf::TlsModuleInfo {

@@ -62,7 +62,7 @@ kernel/src/arch/syscall/ipc.rs 35 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
-kernel/src/arch/syscall/vm.rs 85 0
+kernel/src/arch/syscall/vm.rs 84 0
 kernel/src/arch/tlb.rs 43 0
 kernel/src/bcachefs_adapter.rs 74 0
 kernel/src/block.rs 33 0
