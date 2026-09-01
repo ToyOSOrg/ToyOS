@@ -26,3 +26,8 @@ quiescent barriers, where it answers "did they agree" and nothing about when.
 **This is an instrument, not the exit.** The eventual answer is consolidation —
 one ledger — and this track exists because nobody can currently show that
 consolidating changed nothing. Do not let the model become the fix.
+
+The nearest existing observation is `mmap_stress` — the target record says the
+panic that found the defect is gated by it. So a divergence severe enough to
+panic is already caught. What no test can do is read the two ledgers and say
+they agreed.

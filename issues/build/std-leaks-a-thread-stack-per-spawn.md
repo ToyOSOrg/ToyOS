@@ -27,13 +27,15 @@ without joining detaches — so on that path nobody is left holding the base.
 **The kernel is already told the base and does not own it.** `stack_base` is the
 fourth argument of `SYS_THREAD_SPAWN`; `sys_thread_spawn` refuses it above
 `stack_ptr` and `spawn_thread` stores it as `user_stack_base`/`user_stack_size`
-on the process data. The only reader is `SYS_STACK_INFO`, which copies the pair
-back out to userland. Nothing frees it, and nothing ties it to the thread's
-lifetime. So the detached half's answer is a design question — the kernel
+on the **`ThreadData`** (`kernel/src/process.rs:565`, `:569-570`) — per-thread,
+not on the process. The only reader is `SYS_STACK_INFO`, which copies the pair
+back out to userland. So the record dies with the thread and the memory does
+not: nothing frees the stack, and nothing makes the mapping the thread's to
+release. The detached half's answer is therefore a design question — the kernel
 reclaiming a thread stack it already knows, or std refusing to detach a thread
 whose stack it allocated — and not a missing line in `join`.
 
 **It cannot be closed without a plateau to measure**, which is
-`issues/kernel/nothing-can-count-a-processs-mappings-or-its-resident-frames.md`:
+`issues/kernel/a-processs-memory-is-a-byte-total-that-reads-zero-under-contention.md`:
 a single before/after pair cannot distinguish a leak from a deferred release, and
 the plateau has to cover the detached path too.

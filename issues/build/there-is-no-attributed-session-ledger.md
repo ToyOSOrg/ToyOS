@@ -20,6 +20,11 @@ instrument, seven times.
 - `issues/build/parallel-tests-red-under-other-suites.md`
 - `issues/kernel/syscall-window-nmi-shortfalls-on-a-contended-host.md`
 
+**Not the other two ledgers.** `issues/build/defect-events.md` records where a
+defect came from and how far it escaped; the swarm track's metric programme
+counts outcomes. This one records host *intervals* — who held what, when — and
+is the only one a sighting can be joined against.
+
 **What to build.** An append-only host-side ledger, one file per session,
 recording *intervals* rather than samples: monotonic start and end, host
 identity, process and job identity, build-lock and guest-slot holder intervals,
