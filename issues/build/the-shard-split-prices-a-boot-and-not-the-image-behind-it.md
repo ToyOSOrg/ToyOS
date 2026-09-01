@@ -78,3 +78,45 @@ Two directions, and they are not exclusive:
 
 Filed from the CI wall-clock task of 2026-08-15, which measured it while
 landing the one-accumulator fix and did not touch it.
+
+## What is missing is the attribution, not the clock
+
+Looked at 2026-09-01, because two readings of this entry disagreed about whether
+it is blocked on a ledger that does not exist.
+
+**The clock exists.** `ARTIFACT_BUILD_TIME` (`src/build.rs:26`) is a thread-local
+duration the suite already accumulates: `ArtifactBuildTimer::start()`
+(`src/build.rs:1282`) charges every cache-missing part of `build_test_image` to
+it, and `ArtifactBuildMark::execution_part` (`src/build.rs:48`) *subtracts* it
+from a test's measured time, through `tests/common/clock.rs:65` and `:78`. So
+the number this entry says nothing prices is measured on every run, deliberately
+removed from the price, and then dropped on the floor. What is missing is two
+smaller things: nothing attributes that duration to the *config* that caused it
+rather than to the worker thread that happened to ask first, and nothing writes
+it anywhere. `tests/test-durations` cannot be where it goes — the same file is
+read against `FAST_CEILING_MS` (`src/tiers.rs:84`, 10,000 ms), which is this
+entry's own reason for wanting a second profile.
+
+**What no work on this host can supply is the seed and the verdict.** The cost
+being priced is a *cold-checkout* rebuild on a hosted shard: `actions/checkout`
+writes every source with the current time and cargo's freshness for a path crate
+is an mtime comparison, so a fresh runner recompiles what a dev host does not.
+The 197.8 s and 145.3 s above were read out of a hosted job log by hand, and
+nothing in the tree produces them.
+
+**And the verdict is a wall clock this host cannot resolve.** The entry's own
+bound on a correct price is *"about 31 s"* off the widest shard, and its own A/B
+moved the priced metric 147.0 s while moving the phase clock 11.0 s the wrong
+way — so the priced metric is not the verdict and only the twelve hosted shards'
+wall clocks are. Two full `cargo test` runs in one session on this dev host,
+2026-09-01, over two trees whose diff touches no partitioning: 1012.7 s and
+989.3 s. A 23.4 s spread from nothing, against a best case of about 31 s.
+
+So a taker needs, in order: the build clock keyed by config rather than by
+thread; a committed per-config profile that only `Shard::keep` reads, merged the
+way `cargo run -- --merge-durations` merges the test profile; and **two
+twelve-shard hosted runs** — one to fill it and one to say whether the widest
+shard's wall clock moved. `Shard::keep`'s unit tests (`src/testargs.rs`) can
+judge that a partition stays complete and unique and that the bins total, under
+any cost function; they cannot judge whether the partition got better, which is
+the whole of what this entry claims is wrong.
