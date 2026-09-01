@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use bcachefs::{Formatted, VecBlockIO};
@@ -155,6 +156,9 @@ fn params_of(path: &Path) -> Result<Vec<String>, String> {
 /// the final partial write fails with `EINVAL` and the tail, including the
 /// backup GPT, never lands. QEMU reads the image as a file and never noticed.
 const SECTOR: usize = 4096;
+
+/// The logical block a GPT on this image is written and read in.
+const LBA: u32 = 512;
 
 fn round_up_sectors(n: usize) -> usize {
     n.div_ceil(SECTOR) * SECTOR
@@ -454,6 +458,19 @@ fn create_gpt_disk(esp_volume: Vec<u8>, log_volume: Vec<u8>, log_guid: uuid::Uui
     let esp_start = start_of(esp_id);
     let log_start = start_of(log_id);
 
+    let named = |id: u32| {
+        toyos_gpt::Guid(
+            gdisk
+                .partitions()
+                .get(&id)
+                .expect("a partition that was just added")
+                .part_guid
+                .to_bytes_le(),
+        )
+    };
+    let esp_guid = named(esp_id);
+    let log_partition_guid = named(log_id);
+
     // The invariant [`PARTITION_ALIGN`] exists for, checked rather than
     // assumed: the kernel mounts both of these at once over one 4 KiB block
     // device, and a device block belonging to both volumes would be cached
@@ -479,7 +496,64 @@ fn create_gpt_disk(esp_volume: Vec<u8>, log_volume: Vec<u8>, log_guid: uuid::Uui
     final_bytes[esp_start..esp_start + esp_volume.len()].copy_from_slice(&esp_volume);
     final_bytes[log_start..log_start + log_volume.len()].copy_from_slice(&log_volume);
 
+    certify(&final_bytes, &[("ESP", esp_guid), ("log partition", log_partition_guid)])
+        .unwrap_or_else(|refusal| panic!("{refusal}"));
+
     final_bytes
+}
+
+/// A disk image as logical blocks, so a GPT parser can read it without a file.
+struct ImageSectors<'a>(&'a [u8]);
+
+impl toyos_gpt::Sectors for ImageSectors<'_> {
+    fn lba_bytes(&self) -> u32 {
+        LBA
+    }
+
+    fn lba_count(&self) -> u64 {
+        self.0.len() as u64 / u64::from(LBA)
+    }
+
+    fn lba_count_granularity(&self) -> NonZeroU64 {
+        NonZeroU64::new(1).expect("one is not zero")
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
+        let at = lba as usize * LBA as usize;
+        let Some(block) = self.0.get(at..at + buf.len()) else { return false };
+        buf.copy_from_slice(block);
+        true
+    }
+}
+
+/// Why the image at `disk` may not be published, or `Ok` because two readers
+/// that did not write it agree it is sound.
+///
+/// **This is the predecessor of publishing a flash target, not a report about
+/// one.** `toyos-gpt` finds each partition by the unique GUID the table claims
+/// for it and `toyos-fat32-check` judges the bytes it lands on against
+/// fatgen103; neither shares a line with the `gpt` crate or with [`populate`],
+/// so a writer defect cannot be waved through by its own judge. A volume the
+/// table misplaces fails the format check on whatever it does land on, which is
+/// why the extents are not compared separately.
+fn certify(disk: &[u8], parts: &[(&str, toyos_gpt::Guid)]) -> Result<(), String> {
+    for (what, guid) in parts {
+        let located = toyos_gpt::locate(&mut ImageSectors(disk), *guid)
+            .map_err(|e| format!("toyos-gpt cannot find the {what} ({guid}) on this image: {e:?}"))?;
+        let at = located.partition.first_lba as usize * LBA as usize;
+        let bytes = located.partition.lba_count() as usize * LBA as usize;
+        let volume = disk
+            .get(at..at + bytes)
+            .ok_or_else(|| format!("the {what} runs to byte {} of a {}-byte image", at + bytes, disk.len()))?;
+        let complaints = toyos_fat32_check::check(volume);
+        if !complaints.is_empty() {
+            return Err(format!(
+                "toyos-fat32-check refuses the {what} of the image this build wrote:\n{}",
+                toyos_fat32_check::describe(&complaints)
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -513,6 +587,40 @@ mod tests {
                 toyos_fat32_check::describe(&complaints)
             );
         }
+    }
+
+    /// Publishing a flash target runs both readers over the assembled image,
+    /// and a damaged one is refused by name.
+    ///
+    /// The two mutations are the negative controls for the two halves: a torn
+    /// protective MBR is refused before any partition is looked for, and a
+    /// volume that parses out of a sound table is still judged against the
+    /// format. Both are staged on the image [`create_gpt_disk`] just returned,
+    /// which certifies — so each refusal is about the mutation.
+    #[test]
+    fn a_damaged_image_is_refused_by_the_reader_that_caught_it() {
+        let log_uuid = uuid::Uuid::new_v4();
+        let esp = create_esp_volume(b"kernel", b"bootloader", b"initrd", log_uuid, "");
+        let disk = create_gpt_disk(esp, create_log_volume(), log_uuid);
+        let log = toyos_gpt::Guid(log_uuid.to_bytes_le());
+        let parts = [("log partition", log)];
+        certify(&disk, &parts).expect("the image this build writes certifies");
+
+        let mut torn = disk.clone();
+        torn[510] ^= 0xff;
+        let refusal = certify(&torn, &parts).expect_err("a torn protective MBR is not a GPT");
+        assert!(refusal.contains("toyos-gpt"), "{refusal}");
+        assert!(refusal.contains("NoProtectiveMbr"), "{refusal}");
+
+        let at = toyos_gpt::locate(&mut ImageSectors(&disk), log)
+            .expect("the log partition is on the image")
+            .partition
+            .first_lba as usize
+            * LBA as usize;
+        let mut broken = disk.clone();
+        broken[at + 510] ^= 0xff;
+        let refusal = certify(&broken, &parts).expect_err("that volume is not FAT32");
+        assert!(refusal.contains("toyos-fat32-check"), "{refusal}");
     }
 
     /// And it is clean because it is right, not because it is empty: a
