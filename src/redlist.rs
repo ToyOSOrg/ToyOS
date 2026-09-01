@@ -272,29 +272,19 @@ const PAGER_ARITHMETIC: &str = "the verdict was the defect. It injected all thir
 
 /// What retired the two `locale_detect` rows below: a line's bursts stopped
 /// going out unacknowledged.
-const TYPING_PACED: &str = "the unacknowledged burst, closed at `shell_type_once`. `ps2_bursts` \
-    always bounded each batch, but every batch of a line went out inside one QMP session with \
-    no guest-side wait, and the Enter went out last behind all of them. **The control is on the \
-    shipping kernel with no actuator armed**: pacing reverted, the 44-byte handshake nonce typed \
-    at `console: ready` — the moment `shell_answers` types — and the first line is short in 15 \
-    of 20 boots, the panel stopping at `/home/root> echo surface-up-` and the whole-line echo \
-    never arriving; an earlier 12-boot run of the same arm gave 5 of 12, so the rate moves with \
-    the host. The same code at the same moment with a 14-byte line is whole in 120 of 120 \
-    injections over 12 boots, and the 44-byte line on a *warm* guest is whole in 50 of 50: the \
-    loss is the queue bound, and it bites where the suite actually types. **Where the bytes \
-    went** is a second arm with `i8042-trace`, which selects the test kernel and, through \
-    `kernel/src/actuator.rs`'s `IMPLIES`, also arms `i8042-fast-health` and `i8042-edge-race` — \
-    an instrumented guest, so it names the destination and never the rate. There the first line \
-    is short in 20 of 20 boots: 18 read `drained 32` with the panel independently at `echo \
-    surface-up-`, sixteen characters and so those same 32 bytes, and 2 read `drained 34` against \
-    an empty row — a correspondence observed at 18 of 20 and not a property of the pair. The CI \
-    sightings are the shipping-kernel evidence at load, which is where this rate lives. Each \
-    burst now waits for the guest's own report of taking the last: the decoded input row where \
-    there is a panel, `i8042: drain bytes=` where the shell is behind a compositor and there is \
-    none. Paced, on the fixed tree and the same host: `console_locale_detect` 10 of 10 PASS \
-    and `desktop_locale_detect` 5 of 5 PASS, against 15 of 20 boots losing the first line \
-    unpaced; `desktop_typing_damage` PASS (11s) at 16 of its 16 appearances, \
-    `desktop_audio_client` PASS (13s), `blocked_dump` PASS (3s)";
+
+const TYPING_UNATTRIBUTED: &str = "`shell_type_once` no longer sends a burst \
+    the guest has not acknowledged, so the harness cannot provoke this again — but that is \
+    avoidance, not attribution. This row's verdict is ten typed lines with no whole echo, and \
+    `issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md` records that an \
+    ordinary queue overflow shortens one line and the next recovers, while an input path that \
+    stops explains ten of ten — naming both locale sightings as that shape. The counter that \
+    separates bytes never delivered from a guest that stopped reading was recorded by neither \
+    sighting, so the pacing fix accounts for a defect that is real and may not be this one's \
+    cause. Disputed rather than retired: the name is not known-red on this row alone, and this \
+    row does not silence it either. Settled by reproducing the ten-of-ten verdict with \
+    `i8042-trace` armed and reading whether the drain count keeps rising after the first \
+    failed line";
 
 /// What retired both `xhci_slow_connect` rows: a later measurement, not a fix.
 ///
@@ -2517,7 +2507,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "console_locale_detect",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Retired(TYPING_PACED),
+        standing: Standing::Disputed(TYPING_UNATTRIBUTED),
         what: "`FAIL console_locale_detect: 10 typed lines and none of them came back`, green on \
                the alone re-run: `ALONE: GREEN, and it was alone both times — nothing the harness \
                controls differed, so it failed once and passed once. That is a rate and not a \
@@ -2539,7 +2529,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_locale_detect",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Retired(TYPING_PACED),
+        standing: Standing::Disputed(TYPING_UNATTRIBUTED),
         what: "`FAIL desktop_locale_detect: 10 typed lines and none of them came back`, the \
                sentence `console_locale_detect` failed with hours earlier, and green on the \
                alone re-run: `ALONE: GREEN, and it was alone both times — nothing the harness \
