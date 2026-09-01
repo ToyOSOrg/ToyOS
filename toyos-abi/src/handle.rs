@@ -89,8 +89,8 @@ impl Rights {
     ///
     /// [`SYS_LOG_READ`] answers every record every CPU wrote, which is every
     /// process's business and no process's right by default. `/bin/logd` holds
-    /// it because writing `/log` is its job, `/bin/console` because it paints
-    /// the panel, and `test-runner` because a gate reads what the kernel said.
+    /// it because writing `/log` is its job and `test-runner` because a gate
+    /// reads what the kernel said; no other program in any boot config does.
     ///
     /// [`SYS_LOG_READ`]: crate::syscall::SYS_LOG_READ
     pub const LOG: Rights = Rights(1 << 9);
