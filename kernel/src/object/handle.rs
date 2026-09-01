@@ -135,9 +135,9 @@ impl Drop for HandleEntry {
     fn drop(&mut self) {
         let core = self.object.core();
         if core.handle_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // A `reopenable` object is not retired by its last handle going: the
-            // process table still answers for it, and `SYS_PROCESS_OPEN` turns a
-            // pid — untrusted input — back into a handle, which may not assert.
+            // A `reopenable` object is not retired by its last handle going: the process
+            // table still answers for it, and `SYS_PROCESS_OPEN` turns a pid — untrusted
+            // input — back into a handle, which may not assert.
             if !self.object.reopenable() {
                 let first = !core.retired.swap(true, Ordering::AcqRel);
                 assert!(

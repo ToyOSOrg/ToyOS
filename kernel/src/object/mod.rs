@@ -73,9 +73,8 @@ pub struct ObjectCore {
     koid: Koid,
     /// Table slots, in-flight transfers and spawn endowments — never the `Arc` strong count.
     handle_count: AtomicU32,
-    /// A `sealed` row only: set once when its last handle goes, and a second
-    /// arrival is a kernel bug caught by `HandleEntry`'s drop assert. A
-    /// `reopenable` row is nameable again, so nothing ever sets this.
+    /// A `sealed` row only: set once when its last handle goes, and a second arrival
+    /// is a kernel bug caught by `HandleEntry`'s drop assert. Never set on a `reopenable` row.
     retired: AtomicBool,
     /// This type's census counter; decremented by `ObjectCore`'s own drop.
     live: &'static AtomicU64,
@@ -163,8 +162,7 @@ macro_rules! kobject {
                 }
             }
 
-            /// Whether something outside every handle table answers for this
-            /// object, so a fresh handle is a second name and not a resurrection.
+            /// Whether something outside every handle table answers for this object.
             fn reopenable(&self) -> bool {
                 match self {
                     $(Self::$variant(_) => kobject!(@reopen $naming),)+

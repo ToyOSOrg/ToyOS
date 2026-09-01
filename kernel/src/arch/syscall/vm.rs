@@ -303,15 +303,12 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     }
 
     let mut data = data_arc.lock();
-    // Asked again under the guard that registers, because the lookup at the top
-    // released this lock across the whole load: a sibling thread of this process
-    // can have registered the same name meanwhile, and two mappings would then
-    // both answer to it. The loser commits nothing, so its mapping goes down
-    // with the guard and the name keeps the module the winner registered.
+    // Asked again under the guard that registers: the lookup at the top released
+    // this lock across the whole load, so a sibling can have registered the name
+    // meanwhile. The loser commits nothing and its mapping goes down with the guard.
     if let Some(idx) = data.elf.lib_paths.iter().position(|p| *p == resolved) {
         drop(data);
-        // The winner's initializers have already run or are the winner's to run:
-        // empty init, the same answer the lookup at the top gives.
+        // Empty init, the same answer the lookup at the top of the call gives.
         if let Some(out) = init_out {
             if ctx.copy_out(out, &[0u64, 0]).is_err() {
                 return SyscallError::BadAddress.to_u64();

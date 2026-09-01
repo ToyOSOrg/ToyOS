@@ -11,8 +11,7 @@ use std::sync::{Arc, Barrier};
 use toyos_abi::syscall;
 
 const LIB: &[u8] = b"/lib/libtls_dlopen_lib.so";
-/// A name this binary loads nowhere else, so the concurrent arm below starts
-/// from a process that does not hold it.
+/// A name this binary loads nowhere else, so the concurrent arm starts clean.
 const OTHER_LIB: &[u8] = b"/lib/libtls_multi_crate.so";
 const LOADS: usize = 64;
 
@@ -70,10 +69,9 @@ fn object_identity(first: u64, last: u64) {
     println!("  PASS: a module-global written through one handle is read through the other");
 }
 
-/// One name under contention is still one module. A second library and not the
-/// one above, because a name this process already holds never reaches the
-/// window between the dedup lookup and the registration; the barrier is what
-/// makes the racers collide rather than queue.
+/// One name under contention is still one module. A second library, because a name
+/// this process already holds never reaches the window between the dedup lookup and
+/// the registration; the barrier is what makes the racers collide rather than queue.
 fn one_name_under_contention() {
     const RACERS: usize = 8;
     let line = Arc::new(Barrier::new(RACERS));

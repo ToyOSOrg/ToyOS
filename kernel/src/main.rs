@@ -91,8 +91,7 @@ mod vma;
 /// proving `screen_late_panic`'s renderer really wraps.
 #[cfg(feature = "boot-actuators")]
 mod late_panic {
-    /// The record the panic path writes after `capture()`; on serial and not on
-    /// the panel is what says the panel painted the snapshot.
+    /// The record the panic path writes after `capture()`, for `screen_late_panic`.
     pub const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
 
     pub struct Nest<T>(core::marker::PhantomData<T>);
@@ -158,9 +157,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     // Captures now: recovery below may re-enter a scheduler this panic left locked, so a later drain isn't guaranteed.
     drivers::panic_console::capture();
-    // One record after the snapshot and before the paint: it is what tells a
-    // frozen report from a live re-read of a ring siblings are still writing to,
-    // and `screen_late_panic` reads it on serial and not on the panel.
+    // One record after the snapshot and before the paint: what tells a frozen
+    // report from a live re-read of a ring siblings are still writing to.
     #[cfg(feature = "boot-actuators")]
     if actuator::test_late_panic() {
         log!("{}", late_panic::AFTER_CAPTURE);

@@ -176,9 +176,8 @@ pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: u
 
     let mut cache = SO_CACHE.lock();
     // Asked again under the lock that publishes: `try_clone_cached` released it
-    // before the load, so two loaders of one name both arrive here with an image
-    // of it. Entries are never removed, so a second one strands a whole library
-    // for the life of the machine — the loser clones the winner's instead.
+    // before the load. Entries are never removed, so a second one for a name would
+    // strand a whole library forever — the loser clones the winner's instead.
     if let Some(idx) = cache.iter().position(|(p, _)| p == path) {
         let cloned = clone_from_cache(&cache[idx].1);
         drop(cache);

@@ -85,10 +85,9 @@ impl ProcessObject {
     }
 }
 
-/// Control for the `reopenable` row: a process the table still answers for
-/// takes a fresh handle after its last one has gone. These are
-/// `sys_process_open`'s own two steps with the `SysCap` demand left off, and
-/// the second install is where the resurrection assert used to fire.
+/// Control for the `reopenable` row: a process the table still answers for takes
+/// a fresh handle after its last one has gone. `sys_process_open`'s own two steps
+/// with the `SysCap` demand left off; the second install is where it used to assert.
 #[cfg(feature = "boot-actuators")]
 pub(crate) fn reopen_selftest(pid: Pid) {
     use super::handle::HandleTable;

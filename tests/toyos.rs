@@ -616,8 +616,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
-    // One boot; the reopen control's one verdict line. Carrying `UNMEASURED_MS`
-    // until the shards price it.
+    // One boot; the reopen control's one verdict line, `UNMEASURED_MS` until the shards price it.
     ("process_reopen_selftest", Sched::Parallel, Tier::Fast),
     // One boot; three read-fault control verdicts. Carrying `UNMEASURED_MS`
     // until the shards price it.
@@ -4031,11 +4030,10 @@ fn run_screen_test(
                 "late_panic::Nest",
             )?;
             check_wrap(&dump)?;
-            // What tells the frozen snapshot from a live re-read: the kernel
-            // writes this record after `capture()` and before the paint. On the
-            // console it is proof the record exists, so its absence from the panel
-            // means the panel painted the snapshot — with `capture()` a no-op the
-            // renderer falls back to the ring and paints that too.
+            // The kernel writes this record after `capture()` and before the paint.
+            // On the console it is proof the record exists; off the panel it is proof
+            // the panel painted the snapshot, since a no-op `capture()` leaves
+            // `render()` re-reading the ring, which has it.
             const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
             let said = qemu.console_stream().since(0);
             if !said.contains(AFTER_CAPTURE) {
@@ -11316,10 +11314,9 @@ fn run_machine_test(
             Ok(())
         }
         "process_reopen_selftest" => {
-            // The kernel reopens init by pid after the only handle to it has
-            // gone — `SYS_PROCESS_OPEN`'s two steps. On the `sealed` row that
-            // second install tripped the resurrection assert and took the boot
-            // with it, so a guest that never reaches the line is the red.
+            // The kernel reopens init by pid after the only handle to it has gone.
+            // On the `sealed` row that second install took the boot down with it, so a
+            // guest that never reaches the verdict line is the red.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
