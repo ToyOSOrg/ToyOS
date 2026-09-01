@@ -164,12 +164,11 @@ fn shrink_then_regrow_reads_zeros(dir: &str, seed_len: usize, durable: bool) {
     fs::remove_file(&path).expect("cleanup");
 }
 
-/// The same shrink and regrow with nothing flushed between them, which is the
-/// shape a flush cannot reconstruct: one `update_metadata` carrying only the
-/// final size, and a mount that trims to it sees no shrink at all. The seed is
-/// made durable first, so the extents the backing resolves through really do
-/// name the dropped blocks. Read twice — through the handle that shrank it,
-/// and again after a close and a drain, off what the device kept.
+/// The same shrink and regrow with nothing flushed between them: one
+/// `update_metadata` carrying only the final size, which a mount that trims to
+/// it cannot tell from no shrink at all. The seed is made durable first, so the
+/// extents really do name the dropped blocks; read through the handle that
+/// shrank it, then again after a close and a drain, off what the device kept.
 fn shrink_unflushed_then_regrow_reads_zeros(dir: &str, seed_len: usize) {
     let path = format!("{dir}/fstx_unflushed.bin");
     let seed = pattern(seed_len);

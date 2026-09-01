@@ -294,7 +294,7 @@ tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_dirs_durable.rs 11 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_rename_durable.rs 4 0
-tests/toyos-rust-tests/src/bin/fs_transactional.rs 47 0
+tests/toyos-rust-tests/src/bin/fs_transactional.rs 46 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
 tests/toyos-rust-tests/src/bin/fsync_flush_failed.rs 3 0
 tests/toyos-rust-tests/src/bin/ftruncate_flush_race.rs 12 0
