@@ -154,10 +154,9 @@ impl Replaced {
 
 /// A replacing rename that did not commit.
 ///
-/// `stranded` is the whole reason this is not a bare [`Error`]: when the
-/// rollback fails too, the destination is absent from its name and its data is
-/// alive under the staging one, which nothing on the volume records and no
-/// fsck pass can see — the volume is structurally perfect either way.
+/// `stranded` is the whole reason this is not a bare [`Error`]: a rollback that
+/// fails too leaves the destination alive under a staging name that nothing on
+/// the volume records and no fsck pass can see.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaceFailed {
     /// What refused the move of the source onto the destination.
@@ -958,9 +957,8 @@ impl<D: BlockAccess> Fat32<D> {
         let temporary = self.replacement_temporary(to)?;
         self.rename(to, &temporary)?;
         if let Err(cause) = self.rename(from, to) {
-            // The restore is the only thing that can put `to` back, so its own
-            // failure is the caller's to hear: discarding it leaves a
-            // destination nothing can name.
+            // The restore is the only thing that can put `to` back, so discarding
+            // its failure leaves a destination nothing can name.
             return Err(match self.rename(&temporary, to) {
                 Ok(()) => ReplaceFailed { cause, stranded: None },
                 Err(_) => ReplaceFailed { cause, stranded: Some(temporary) },

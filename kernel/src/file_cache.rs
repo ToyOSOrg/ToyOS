@@ -41,11 +41,9 @@ struct CachedFile {
     teardown_owed: bool,
     /// The file, not any one handle, owes a flush; settled only by [`settle_file`] on a flush that succeeded.
     dirt: Owed,
-    /// The smallest size a shrink has taken this file to since the last
-    /// settled metadata write; `None` when none has. Everything at or above it
-    /// was discarded, so a page missing from here is zeros and never the
-    /// backing's — whose extents still name the dropped blocks until a flush
-    /// gives them back.
+    /// The smallest size a shrink has taken this file to since the last settled
+    /// metadata write; `None` when none has. Everything at or above it was
+    /// discarded, so a page missing from here is zeros and never the backing's.
     shrunk_to: Option<u64>,
 }
 
@@ -228,8 +226,7 @@ pub fn finish_writeback(file_id: FileId) -> Teardown {
     Teardown::Released
 }
 
-/// Whether a shrink discarded this page's bytes, so the backing's copy of them
-/// is no longer the file's and a miss reads zeros instead.
+/// Whether a shrink discarded this page, so the backing's copy is no longer the file's.
 fn discarded(file: &CachedFile, page_idx: u32) -> bool {
     file.shrunk_to.is_some_and(|mark| page_idx as u64 * PAGE_SIZE as u64 >= mark)
 }
@@ -429,9 +426,8 @@ pub fn settle_file(file_id: FileId, upto: Settlement) {
     }
 }
 
-/// Clear the shrink mark: the metadata write the flush just made is what the
-/// mount now records, so nothing is above it any more. Sound without a
-/// generation because every shrink runs under the VFS lock this flush holds.
+/// Clear the shrink mark: the flush's metadata write is what the mount records now.
+/// Sound without a generation because every shrink runs under the VFS lock a flush holds.
 pub fn settle_shrink(file_id: FileId) {
     if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
         file.shrunk_to = None;

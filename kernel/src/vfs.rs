@@ -57,9 +57,8 @@ fn stalled_metadata_window(path: &str, file_id: FileId, size_read: u64) {
 
 /// A device that would not answer is `Io`; `NotFound` means only that the name is absent.
 pub trait FileSystem: Send {
-    /// Every name at or under the directory `dir` (`""` for the mount root), or
-    /// `ResourceExhausted` above `limit` — which counts what `dir` holds, never
-    /// what the mount does. [`under_directory`] is the membership rule.
+    /// Every name [`under_directory`] puts at or under `dir` (`""` is the mount
+    /// root), or `ResourceExhausted` above `limit`, which counts only those.
     fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError>;
 
     /// When `name` was last written, in whatever epoch the mount keeps.
@@ -91,10 +90,9 @@ pub trait FileSystem: Send {
     /// Update file metadata (size, mtime) after flushing dirty pages.
     fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError>;
 
-    /// Give everything above `size` back before a flush writes its pages.
-    /// [`FileSystem::update_metadata`] sees only the final size and so cannot
-    /// tell a file that shrank and regrew from one that was always that long;
-    /// this is the shrink itself, carried from where it happened.
+    /// Give everything above `size` back before a flush writes its pages:
+    /// [`FileSystem::update_metadata`] sees only the final size, which cannot
+    /// tell a file that shrank and regrew from one that was always that long.
     fn truncate_to(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError>;
 
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError>;
@@ -106,9 +104,8 @@ pub trait FileSystem: Send {
     fn open_backing(&mut self, name: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError>;
 
     /// The `FileId` this mount already minted for `name`, when a device view of
-    /// it could be behind the file cache. `None` from a mount whose backing
-    /// reads the cache itself, which can never be behind it, and from a name
-    /// the mount holds no id for.
+    /// it could be behind the file cache; `None` from a mount whose backing
+    /// reads the cache itself, and from a name it holds no id for.
     fn cached_file_id(&mut self, name: &str) -> Option<FileId>;
 }
 
@@ -158,8 +155,7 @@ pub const MAX_PATH: usize = 4096;
 /// The most entries one `FileSystem::list` may materialise for one directory.
 pub const MAX_LIST_ENTRIES: usize = 16_384;
 
-/// Whether a mount's `name` is the directory `dir` itself or lies beneath it;
-/// an empty `dir` is the mount root, which every name lies under.
+/// Whether `name` is the directory `dir` or lies beneath it; `dir` empty is the mount root.
 pub fn under_directory(name: &str, dir: &str) -> bool {
     dir.is_empty()
         || name == dir
@@ -457,8 +453,7 @@ impl Vfs {
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
         if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
 
-        // Before the pages, so a page rewritten above the mark is not freed
-        // by the trim that gives the shrink's blocks back.
+        // Before the pages: a page rewritten above the mark must outlive the trim.
         if let Some(mark) = plan.shrunk_to {
             fs.truncate_to(file_id, mark, mtime)?;
         }
@@ -705,16 +700,14 @@ impl Vfs {
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
         crate::writeback::drain_held(self);
         let target = self.resolve_for_open(path, ResolveIntent::KernelOrRead)?;
-        // A file still open is on no write-back queue, so the drain above
-        // cannot see it: its writes are cache pages and the mount's record is
-        // what `create` wrote. A device view taken now would read round them.
+        // A file still open is on no write-back queue, so the drain above cannot
+        // see it and a device view taken now would read round its cache pages.
         let dirty = {
             let (fs, fs_path) = self.fs_for_target(&target)?;
             fs.cached_file_id(&fs_path).filter(|&id| crate::file_cache::flush_owed(id))
         };
         if let Some(file_id) = dirty {
-            // The flush's own instant: no handle's last write is the file's,
-            // and these are the bytes as of now.
+            // The flush's own instant: no one handle's last write is the file's.
             let mtime = crate::clock::nanos_since_boot();
             let owner = String::from(target.as_str());
             self.flush_file(&owner, file_id, mtime)?;

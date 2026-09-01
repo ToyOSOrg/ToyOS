@@ -134,11 +134,8 @@ fn source_move_failure_restores_destination_before_any_free() {
 }
 
 /// The rollback fails too, and the caller is told which name holds the
-/// destination.
-///
-/// Nothing on the volume records it: the entry is a valid entry under a valid
-/// name, so the checker below is silent in both arms and no fsck pass could
-/// ever surface this. The reported name is the only way back to the data.
+/// destination — which is the only way back to it, the checker below being
+/// silent in both arms because a staging entry breaks no rule of the format.
 #[test]
 fn a_failed_rollback_names_where_the_destination_went() {
     let source = b"source survives";
@@ -162,8 +159,7 @@ fn a_failed_rollback_names_where_the_destination_went() {
     let stranded = failed.stranded.expect("the failed rollback must name the staging file");
     assert_eq!(stranded, ".toyos-replaced-00000000.tmp");
 
-    // What the report claims, checked against the volume: the destination is
-    // not at its own name and its bytes are under the reported one.
+    // What the report claims, checked against the volume.
     assert_eq!(fs.exists("destination.txt"), Ok(false));
     assert_eq!(read_all(&mut fs, "source.txt"), source);
     assert_eq!(read_all(&mut fs, &stranded), destination);

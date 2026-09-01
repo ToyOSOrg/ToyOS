@@ -43,9 +43,8 @@ fn pattern(nonce: u64, block: u64, i: usize) -> u8 {
     n ^ b.wrapping_mul(37) ^ (i as u8).wrapping_mul(101)
 }
 
-/// FNV-1a, mirrored byte-for-byte from `kernel/src/usb_gate.rs`. The guest's
-/// own comparator says a block matched; this says *which bytes* it read, and
-/// the two are computed by different code on different sides of the boot.
+/// FNV-1a, mirrored byte-for-byte from `kernel/src/usb_gate.rs`: the guest's
+/// comparator says a block matched, and this says which bytes it read.
 fn digest(buf: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &byte in buf {
@@ -278,10 +277,8 @@ pub fn usb_storage_gate(
              refused as a fact about the disk\n{log}"
         ));
     }
-    // What the guest read, and not that it approved of it. `first_bad` is one
-    // in-guest comparator and nothing in the guest certifies it; this is the
-    // same bytes hashed on the host, off the image, so a comparator that
-    // agreed with everything reds here.
+    // What the guest read, and not that it approved of it: `first_bad` is one
+    // in-guest comparator, and this is the same bytes hashed off the image.
     let mut staged = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -334,10 +331,8 @@ pub fn usb_storage_gate(
     }
     let _ = std::fs::remove_file(&foreign);
 
-    // The stamp's *geometry* guard, which nothing staged before this. A stamp
-    // written for a different block count makes every offset in it name a
-    // different block, so the gate must refuse the disk by name rather than
-    // work from the numbers it found.
+    // The stamp's *geometry* guard, which nothing staged before this: a stamp
+    // written for another block count makes every offset in it name another block.
     let blocks = bytes / BLOCK;
     let claimed = blocks + 1;
     let mis_stamped = test_dir().join("usb-gate-misstamped.img");

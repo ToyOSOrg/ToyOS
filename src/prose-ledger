@@ -104,7 +104,7 @@ kernel/src/elf/mod.rs 105 0
 kernel/src/elf/reloc.rs 38 0
 kernel/src/fat32_adapter.rs 173 0
 kernel/src/file_backing.rs 25 0
-kernel/src/file_cache.rs 93 0
+kernel/src/file_cache.rs 89 0
 kernel/src/fs_rename.rs 18 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
@@ -190,7 +190,7 @@ kernel/src/tmpfs.rs 21 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 53 0
 kernel/src/user_ptr.rs 67 0
-kernel/src/vfs.rs 91 0
+kernel/src/vfs.rs 84 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
@@ -242,7 +242,7 @@ tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
 tests/common/storage.rs 70 0
 tests/common/toybox.rs 74 0
-tests/common/usb.rs 967 4
+tests/common/usb.rs 962 4
 tests/common/volumes.rs 606 3
 tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
@@ -466,7 +466,7 @@ toyos-fat32/src/device.rs 42 0
 toyos-fat32/src/dir.rs 72 0
 toyos-fat32/src/error.rs 33 0
 toyos-fat32/src/fat.rs 127 0
-toyos-fat32/src/fs.rs 220 0
+toyos-fat32/src/fs.rs 218 0
 toyos-fat32/src/lib.rs 59 0
 toyos-fat32/src/name.rs 104 0
 toyos-fat32/src/time.rs 40 0
@@ -474,7 +474,7 @@ toyos-fat32/tests/common/mod.rs 105 0
 toyos-fat32/tests/host_read.rs 26 0
 toyos-fat32/tests/host_write.rs 86 1
 toyos-fat32/tests/hostile.rs 195 3
-toyos-fat32/tests/replace_rename.rs 15 0
+toyos-fat32/tests/replace_rename.rs 11 0
 toyos-gpt/src/crc32.rs 13 0
 toyos-gpt/src/guid.rs 19 0
 toyos-gpt/src/lib.rs 161 0
