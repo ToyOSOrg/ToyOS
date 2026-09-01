@@ -84,3 +84,43 @@ impl ProcessObject {
         completion::post(Subject::of(&self.watch), Outcome::Ready);
     }
 }
+
+/// Control for the `reopenable` row: a process the table still answers for takes
+/// a fresh handle after its last one has gone. `sys_process_open`'s own two steps
+/// with the `SysCap` demand left off; the second install is where it used to assert.
+#[cfg(feature = "boot-actuators")]
+pub(crate) fn reopen_selftest(pid: Pid) {
+    use super::handle::HandleTable;
+    use super::{ops, KObjectRef};
+    use toyos_abi::handle::Rights;
+
+    let Some(object) = crate::process::process_object(pid) else {
+        crate::log!("process-reopen: FAIL (pid {} names no process)", pid.raw());
+        return;
+    };
+    let mut table = HandleTable::new();
+    let opened = match ops::install(&mut table, KObjectRef::Process(Arc::clone(&object))) {
+        Ok(h) => h,
+        Err(e) => {
+            crate::log!("process-reopen: FAIL (the first install was refused: {e:?})");
+            return;
+        }
+    };
+    match table.remove(opened) {
+        Ok(entry) => drop(entry),
+        Err(e) => {
+            crate::log!("process-reopen: FAIL (the first handle would not close: {e})");
+            return;
+        }
+    }
+    let retired = object.core().retired();
+    let reopened = ops::install(&mut table, KObjectRef::Process(Arc::clone(&object)))
+        .ok()
+        .and_then(|h| table.get::<ProcessObject>(h, Rights::WAIT).ok())
+        .is_some_and(|reached| reached.pid() == pid);
+    let verdict = if reopened && !retired { "PASS" } else { "FAIL" };
+    crate::log!(
+        "process-reopen: {verdict} (pid={} retired={retired} reopened={reopened})",
+        pid.raw(),
+    );
+}

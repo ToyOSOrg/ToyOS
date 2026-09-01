@@ -266,10 +266,9 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls_total_memsz, &tls_info);
         }
 
-        // The module id is reserved but not registered: the `tls_modules` push and
-        // the `next_tls_module_id` bump happen only once the copy-out has succeeded.
-        // A self-defined TLS symbol resolves to this id directly, so the not-yet-pushed
-        // module is not needed here.
+        // Read here and bumped only at the registration below, so nothing reserves it
+        // against a sibling load of another name
+        // (`issues/kernel/two-dlopens-of-different-names-share-one-tls-module-id.md`).
         let tls_module = lib_has_tls.then(|| {
             let module_id = data.elf.next_tls_module_id;
             let tls_info = crate::elf::TlsModuleInfo {
@@ -301,9 +300,23 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             return SyscallError::BadAddress.to_u64();
         }
     }
-    mapping.commit();
 
     let mut data = data_arc.lock();
+    // Asked again under the guard that registers: the lookup at the top released
+    // this lock across the whole load, so a sibling can have registered the name
+    // meanwhile. The loser commits nothing and its mapping goes down with the guard.
+    if let Some(idx) = data.elf.lib_paths.iter().position(|p| *p == resolved) {
+        drop(data);
+        // Empty init, the same answer the lookup at the top of the call gives.
+        if let Some(out) = init_out {
+            if ctx.copy_out(out, &[0u64, 0]).is_err() {
+                return SyscallError::BadAddress.to_u64();
+            }
+        }
+        return idx as u64;
+    }
+    mapping.commit();
+
     let idx = data.elf.loaded_libs.len();
     if let Some(module) = tls_module {
         data.elf.next_tls_module_id = module.module_id + 1;
