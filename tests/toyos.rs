@@ -4030,10 +4030,9 @@ fn run_screen_test(
                 "late_panic::Nest",
             )?;
             check_wrap(&dump)?;
-            // The kernel writes this record after `capture()` and before the paint.
-            // On the console it is proof the record exists; off the panel it is proof
-            // the panel painted the snapshot, since a no-op `capture()` leaves
-            // `render()` re-reading the ring, which has it.
+            // Written after `capture()` and before the paint. On the console it is proof
+            // the record exists; off the panel it is proof the panel painted the
+            // snapshot, since a no-op `capture()` leaves `render()` re-reading the ring.
             const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
             let said = qemu.console_stream().since(0);
             if !said.contains(AFTER_CAPTURE) {
@@ -11314,9 +11313,9 @@ fn run_machine_test(
             Ok(())
         }
         "process_reopen_selftest" => {
-            // The kernel reopens init by pid after the only handle to it has gone.
-            // On the `sealed` row that second install took the boot down with it, so a
-            // guest that never reaches the verdict line is the red.
+            // The kernel reopens init by pid after the only handle to it has gone; on
+            // the `sealed` row that install took the boot down, so a guest that never
+            // reaches the verdict line is the red.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
