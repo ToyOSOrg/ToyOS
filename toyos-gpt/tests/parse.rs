@@ -221,6 +221,9 @@ impl Sectors for Image {
     fn lba_count(&self) -> u64 {
         self.lba_count
     }
+    fn lba_count_granularity(&self) -> core::num::NonZeroU64 {
+        core::num::NonZeroU64::MIN
+    }
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
         if self.fail_at == Some(lba) {
             return false;
@@ -601,9 +604,8 @@ fn no_byte_of_the_table_can_panic_the_parser() {
     assert!(img.locate(guid(0xC3)).is_ok(), "the sweep did not put the table back");
 }
 
-/// The backup GPT's blocks — 2015..=2047 here — are not usable space: a
-/// usable range reaching them lets a partition sit on the recovery copy.
-/// With one caller block of flooring conceded, the bound is 2022, not 2015.
+/// The backup GPT's blocks — 2015..=2047 here — are not usable space, and an
+/// exact reader concedes none of them for a coarser reader it does not have.
 #[test]
 fn a_usable_range_reaching_the_backup_gpt_is_refused() {
     let mut b = Builder { last_usable: DISK_LBAS - 2, backup: true, ..Default::default() };
@@ -613,20 +615,18 @@ fn a_usable_range_reaching_the_backup_gpt_is_refused() {
         img.locate(guid(0xD4)),
         Err(GptError::UsableRangeCoversBackup {
             last: DISK_LBAS - 2,
-            backup_array_lba: DISK_LBAS + 7 - 33,
+            backup_array_lba: DISK_LBAS - 33,
         })
     );
 
-    // The bound is exact: the last value inside the flooring concession
-    // passes, and the first past it is refused.
-    let mut img = Builder { last_usable: DISK_LBAS + 7 - 34, ..Default::default() }.build();
-    img.locate(guid(0xC3)).expect("the concession's edge parses");
-    let mut img = Builder { last_usable: DISK_LBAS + 7 - 33, ..Default::default() }.build();
+    let mut img = Builder { last_usable: DISK_LBAS - 34, ..Default::default() }.build();
+    img.locate(guid(0xC3)).expect("the last usable LBA below the mirror was refused");
+    let mut img = Builder { last_usable: DISK_LBAS - 33, ..Default::default() }.build();
     assert_eq!(
         img.locate(guid(0xC3)),
         Err(GptError::UsableRangeCoversBackup {
-            last: DISK_LBAS + 7 - 33,
-            backup_array_lba: DISK_LBAS + 7 - 33,
+            last: DISK_LBAS - 33,
+            backup_array_lba: DISK_LBAS - 33,
         })
     );
 }
@@ -644,6 +644,9 @@ fn an_honest_table_on_a_floored_device_view_parses() {
         }
         fn lba_count(&self) -> u64 {
             self.1
+        }
+        fn lba_count_granularity(&self) -> core::num::NonZeroU64 {
+            core::num::NonZeroU64::new(8).expect("8 is nonzero")
         }
         fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
             self.0.read_lba(lba, buf)
@@ -678,9 +681,8 @@ fn two_entries_claiming_the_target_guid_are_refused() {
     assert_eq!(img.locate(guid(0xB2)).map(|f| f.partition.index), Ok(1));
 }
 
-/// `entry_count` is the table's own byte: 8 entries make a 2-LBA array, and
-/// the unclamped concession ran the bound past the device end — this table
-/// answered Ok with a partition covering LBA 2047, the backup header itself.
+/// `entry_count` is the table's own byte: 8 entries make a 2-LBA array, whose
+/// first block remains the usable range's exact ceiling.
 #[test]
 fn a_tiny_entry_array_cannot_buy_the_backup_header() {
     let mut b = Builder { entry_count: 8, last_usable: DISK_LBAS - 1, ..Default::default() };
@@ -690,7 +692,7 @@ fn a_tiny_entry_array_cannot_buy_the_backup_header() {
         img.locate(guid(0xD4)),
         Err(GptError::UsableRangeCoversBackup {
             last: DISK_LBAS - 1,
-            backup_array_lba: DISK_LBAS - 1,
+            backup_array_lba: DISK_LBAS - 3,
         })
     );
 }

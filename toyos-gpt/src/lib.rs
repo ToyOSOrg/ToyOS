@@ -67,6 +67,9 @@ const MBR_TYPE_PROTECTIVE: u8 = 0xEE;
 pub trait Sectors {
     fn lba_bytes(&self) -> u32;
     fn lba_count(&self) -> u64;
+    /// Granularity of `lba_count()` in logical blocks. A count floored by a
+    /// coarser reader can omit at most one less than this value.
+    fn lba_count_granularity(&self) -> core::num::NonZeroU64;
     /// Fill `buf` — exactly `lba_bytes()` long — with logical block `lba`.
     /// `false` means the read did not happen and its contents are unknown.
     fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool;
@@ -231,6 +234,7 @@ pub fn locate(dev: &mut dyn Sectors, target: Guid) -> Result<Located, GptError> 
     if lba_count < 3 {
         return Err(GptError::DeviceTooSmall(lba_count));
     }
+    let lba_count_slack = dev.lba_count_granularity().get() - 1;
 
     let mut block = [0u8; MAX_LBA_BYTES as usize];
     let block = &mut block[..lba_bytes as usize];
@@ -238,10 +242,11 @@ pub fn locate(dev: &mut dyn Sectors, target: Guid) -> Result<Located, GptError> 
     read(dev, 0, block)?;
     check_protective_mbr(block)?;
 
-    match locate_at(dev, 1, target, lba_bytes, lba_count) {
+    match locate_at(dev, 1, target, lba_bytes, lba_count, lba_count_slack) {
         Ok(located) => Ok(located),
         Err(primary_err) if primary_err.primary_never_checked_out() => {
-            locate_at(dev, lba_count - 1, target, lba_bytes, lba_count).or(Err(primary_err))
+            locate_at(dev, lba_count - 1, target, lba_bytes, lba_count, lba_count_slack)
+                .or(Err(primary_err))
         }
         Err(primary_err) => Err(primary_err),
     }
@@ -255,12 +260,13 @@ fn locate_at(
     target: Guid,
     lba_bytes: u32,
     lba_count: u64,
+    lba_count_slack: u64,
 ) -> Result<Located, GptError> {
     let mut block = [0u8; MAX_LBA_BYTES as usize];
     let block = &mut block[..lba_bytes as usize];
 
     read(dev, header_lba, block)?;
-    let header = parse_header(block, lba_bytes, lba_count, header_lba)?;
+    let header = parse_header(block, lba_bytes, lba_count, lba_count_slack, header_lba)?;
 
     let (found, used_entries) = scan_entries(dev, &header, target, lba_bytes)?;
     let Some(partition) = found else {
@@ -318,7 +324,13 @@ fn check_protective_mbr(lba0: &[u8]) -> Result<(), GptError> {
     Ok(())
 }
 
-fn parse_header(lba1: &[u8], lba_bytes: u32, lba_count: u64, header_lba: u64) -> Result<Header, GptError> {
+fn parse_header(
+    lba1: &[u8],
+    lba_bytes: u32,
+    lba_count: u64,
+    lba_count_slack: u64,
+    header_lba: u64,
+) -> Result<Header, GptError> {
     if lba1.get(..8) != Some(&HEADER_SIGNATURE[..]) {
         return Err(GptError::NoHeader);
     }
@@ -384,20 +396,12 @@ fn parse_header(lba1: &[u8], lba_bytes: u32, lba_count: u64, header_lba: u64) ->
     if misplaced {
         return Err(GptError::EntryArrayMisplaced { lba: entry_array_lba, lbas: array_lbas });
     }
-    // The mirror of the backup arm's placement check above: the primary's
-    // usable range must stop below the backup GPT, or a partition may
-    // lawfully sit on the recovery copy. A [`Sectors`] caller adapting a
-    // coarser block reports `lba_count` floored by up to one of its blocks
-    // while an honest table is laid out against the true end, so the bound
-    // concedes that sliver. The cost: with a conformant array
-    // (`array_lbas >= floor_slack`), up to `floor_slack` LBAs of the mirror
-    // array's low end — corruptible, never forgeable, and a corrupted copy
-    // fails its own CRC. With a smaller array — `entry_count` is the table's
-    // own byte — the unclamped bound would reach the backup header, so the
-    // device's last block is never conceded.
-    let floor_slack = (MAX_LBA_BYTES / lba_bytes) as u64 - 1;
+    // UEFI 2.11 §5.3.2: “The backup GPT Partition Entry Array must be located
+    // after the Last Usable LBA and end before the backup GPT Header.” A
+    // coarser [`Sectors`] reader concedes only its declared count-floor sliver;
+    // the clamp keeps the backup header itself unconcedable.
     let backup_array_lba = lba_count
-        .saturating_add(floor_slack)
+        .saturating_add(lba_count_slack)
         .saturating_sub(1 + array_lbas)
         .min(lba_count.saturating_sub(1));
     if header_lba == 1 && last_usable_lba >= backup_array_lba {

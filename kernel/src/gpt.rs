@@ -227,6 +227,11 @@ impl Sectors for DeviceSectors<'_> {
         self.dev.block_count().saturating_mul(self.lbas_per_block)
     }
 
+    fn lba_count_granularity(&self) -> core::num::NonZeroU64 {
+        core::num::NonZeroU64::new(self.lbas_per_block)
+            .expect("a supported GPT LBA size divides 4096")
+    }
+
     fn read_lba(&mut self, lba: u64, out: &mut [u8]) -> bool {
         if self.lbas_per_block == 0 || out.len() != self.lba_bytes as usize {
             return false;

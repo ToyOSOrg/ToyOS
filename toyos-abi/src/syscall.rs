@@ -1314,7 +1314,8 @@ pub struct NamespaceBuild {
     ///
     /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
     pub base: RawHandle,
-    pub _pad: u32,
+    /// [`NAMESPACE_KEEP_ALL`], and nothing else.
+    pub flags: u32,
     /// `[NameRef]` — the names to carry over from `base`.
     pub keep_ptr: u64,
     pub keep_n: u64,
@@ -1329,6 +1330,14 @@ pub struct NamespaceBuild {
 const _: () = assert!(core::mem::size_of::<NamespaceBuild>() == 56);
 const _: () = assert!(core::mem::size_of::<NamespaceEntry>() == 16);
 const _: () = assert!(core::mem::size_of::<NameRef>() == 8);
+
+/// Carry over every name `base` holds — no syscall enumerates a namespace, so
+/// no `keep` list can spell it. `keep_n` must be `0` beside it, and a name it
+/// carries that `add` also binds is `AlreadyExists`.
+pub const NAMESPACE_KEEP_ALL: u32 = 1 << 0;
+/// Every bit [`NamespaceBuild::flags`] defines. A caller that sets another is
+/// refused `InvalidArgument`, never served the request it did not make.
+pub const NAMESPACE_FLAGS_KNOWN: u32 = NAMESPACE_KEEP_ALL;
 
 /// Names one namespace may bind. Policy on the primitive; a caller asking for
 /// one more is refused by name and never truncated.

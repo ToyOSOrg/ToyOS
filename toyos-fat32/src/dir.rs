@@ -501,6 +501,7 @@ impl<D: BlockAccess> Fat32<D> {
 
         let checksum = name::lfn_checksum(&short);
         let mut cursor = EntryCursor::new(dir_start);
+        let mut written = 0u32;
         for g in (0..groups).rev() {
             let mut raw = RawEntry::zeroed();
             let ord = (g + 1) as u8;
@@ -516,17 +517,57 @@ impl<D: BlockAccess> Fat32<D> {
                 }
             }
             let index = start + (groups - 1 - g) as u32;
-            let offset = cursor.offset_of(self, index)?.ok_or(Error::NoSpace)?;
-            self.write_entry_at(offset, &raw)?;
+            let offset = match cursor.offset_of(self, index) {
+                Ok(Some(offset)) => offset,
+                Ok(None) => {
+                    self.erase_inserted(dir_start, start, written);
+                    return Err(Error::NoSpace);
+                }
+                Err(e) => {
+                    self.erase_inserted(dir_start, start, written);
+                    return Err(e);
+                }
+            };
+            if let Err(e) = self.write_entry_at(offset, &raw) {
+                self.erase_inserted(dir_start, start, written);
+                return Err(e);
+            }
+            written += 1;
         }
 
         let mut entry = *template;
         entry.set_short(&short);
         entry.0[12] = 0;
         let index = start + groups as u32;
-        let offset = cursor.offset_of(self, index)?.ok_or(Error::NoSpace)?;
-        self.write_entry_at(offset, &entry)?;
+        let offset = match cursor.offset_of(self, index) {
+            Ok(Some(offset)) => offset,
+            Ok(None) => {
+                self.erase_inserted(dir_start, start, written);
+                return Err(Error::NoSpace);
+            }
+            Err(e) => {
+                self.erase_inserted(dir_start, start, written);
+                return Err(e);
+            }
+        };
+        if let Err(e) = self.write_entry_at(offset, &entry) {
+            self.erase_inserted(dir_start, start, written);
+            return Err(e);
+        }
         Ok((Loc { dir_start, first_index: start, index, entry_offset: offset }, entry))
+    }
+
+    fn erase_inserted(&mut self, dir_start: Cluster, start: u32, written: u32) {
+        let mut cursor = EntryCursor::new(dir_start);
+        let mut free = RawEntry::zeroed();
+        free.0[0] = FREE;
+        for distance in 0..written {
+            let Some(index) = start.checked_add(distance) else { return };
+            let Ok(Some(offset)) = cursor.offset_of(self, index) else { return };
+            if self.write_entry_at(offset, &free).is_err() {
+                return;
+            }
+        }
     }
 
     /// Mark every entry of a run free. Does not touch the cluster chain — a

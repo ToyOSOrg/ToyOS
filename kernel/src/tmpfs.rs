@@ -86,10 +86,16 @@ impl ReplaceRename for TmpFs {
         Ok(Committed::new(displaced))
     }
 
-    fn release(&mut self, _old: &str, _new: &str, committed: Committed<Option<Entry>>) {
+    fn release(
+        &mut self,
+        _old: &str,
+        _new: &str,
+        committed: Committed<Option<Entry>>,
+    ) -> Result<(), SyscallError> {
         if let Some(Entry::File { id, alive, .. }) = committed.into_displaced() {
             retire(id, &alive);
         }
+        Ok(())
     }
 }
 

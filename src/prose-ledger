@@ -9,7 +9,7 @@ bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 121 0
 bootloader/src/main.rs 198 0
 examples/imgstat.rs 16 0
-kernel-loom/src/lib.rs 150 0
+kernel-loom/src/lib.rs 154 0
 kernel-loom/tests/durability.rs 29 0
 kernel-loom/tests/i8042_tally.rs 96 0
 kernel-loom/tests/inbox.rs 126 3
@@ -58,7 +58,7 @@ kernel/src/arch/syscall/fs.rs 11 0
 kernel/src/arch/syscall/gate.rs 23 0
 kernel/src/arch/syscall/handles.rs 21 0
 kernel/src/arch/syscall/io.rs 24 0
-kernel/src/arch/syscall/ipc.rs 34 0
+kernel/src/arch/syscall/ipc.rs 35 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 27 0
@@ -78,8 +78,9 @@ kernel/src/drivers/i8042/tally.rs 16 0
 kernel/src/drivers/ioapic.rs 30 0
 kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 131 0
+kernel/src/drivers/panic_console/access.rs 6 0
 kernel/src/drivers/panic_console/latch.rs 12 0
-kernel/src/drivers/panic_console/mod.rs 213 0
+kernel/src/drivers/panic_console/mod.rs 215 0
 kernel/src/drivers/pci.rs 23 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
@@ -153,7 +154,7 @@ kernel/src/object/file.rs 3 0
 kernel/src/object/handle.rs 60 0
 kernel/src/object/inbox.rs 6 0
 kernel/src/object/mod.rs 51 0
-kernel/src/object/namespace.rs 9 0
+kernel/src/object/namespace.rs 10 0
 kernel/src/object/ops.rs 60 0
 kernel/src/object/pipe.rs 14 0
 kernel/src/object/port.rs 21 0
@@ -283,7 +284,7 @@ tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 27 0
 tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 34 0
-tests/toyos-rust-tests/src/bin/endowment_denied.rs 148 2
+tests/toyos-rust-tests/src/bin/endowment_denied.rs 157 2
 tests/toyos-rust-tests/src/bin/esp_files.rs 50 0
 tests/toyos-rust-tests/src/bin/exit_wait_storm.rs 36 0
 tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs 60 0
@@ -392,7 +393,7 @@ toyos-abi/src/lib.rs 31 0
 toyos-abi/src/log.rs 143 0
 toyos-abi/src/net.rs 11 0
 toyos-abi/src/ring.rs 128 0
-toyos-abi/src/syscall.rs 843 0
+toyos-abi/src/syscall.rs 849 0
 toyos-abi/src/virtio_sound.rs 71 0
 toyos-cc/src/ast.rs 8 0
 toyos-cc/src/codegen/addr.rs 12 0
@@ -465,7 +466,7 @@ toyos-fat32/src/device.rs 42 0
 toyos-fat32/src/dir.rs 72 0
 toyos-fat32/src/error.rs 33 0
 toyos-fat32/src/fat.rs 127 0
-toyos-fat32/src/fs.rs 200 0
+toyos-fat32/src/fs.rs 206 0
 toyos-fat32/src/lib.rs 59 0
 toyos-fat32/src/name.rs 104 0
 toyos-fat32/src/time.rs 40 0
@@ -473,6 +474,7 @@ toyos-fat32/tests/common/mod.rs 105 0
 toyos-fat32/tests/host_read.rs 26 0
 toyos-fat32/tests/host_write.rs 86 1
 toyos-fat32/tests/hostile.rs 193 3
+toyos-fat32/tests/replace_rename.rs 2 0
 toyos-gpt/src/crc32.rs 13 0
 toyos-gpt/src/guid.rs 19 0
 toyos-gpt/src/lib.rs 168 0
@@ -608,7 +610,7 @@ toyos/src/ipc.rs 162 0
 toyos/src/launch.rs 91 0
 toyos/src/lib.rs 50 1
 toyos/src/log.rs 33 0
-toyos/src/namespace.rs 32 0
+toyos/src/namespace.rs 34 0
 toyos/src/net.rs 124 0
 toyos/src/poller.rs 227 0
 toyos/src/port.rs 32 0

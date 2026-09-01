@@ -50,4 +50,8 @@ impl Namespace {
         Some(&self.entries[i].1)
     }
 
+    /// Every binding, for a build carrying the whole of this one over.
+    pub fn entries(&self) -> &[(Box<str>, Arc<Connector>)] {
+        &self.entries
+    }
 }

@@ -40,7 +40,12 @@ pub(crate) trait ReplaceRename {
         -> Result<Committed<Self::Displaced>, SyscallError>;
 
     /// Free the displaced destination and re-key the source, the move committed.
-    fn release(&mut self, old: &str, new: &str, committed: Committed<Self::Displaced>);
+    fn release(
+        &mut self,
+        old: &str,
+        new: &str,
+        committed: Committed<Self::Displaced>,
+    ) -> Result<(), SyscallError>;
 }
 
 /// Validate the source, treat a rename onto the same object as POSIX's no-op
@@ -57,6 +62,5 @@ pub(crate) fn replace_rename<R: ReplaceRename>(
         return Ok(());
     }
     let committed = adapter.commit(old, new)?;
-    adapter.release(old, new, committed);
-    Ok(())
+    adapter.release(old, new, committed)
 }

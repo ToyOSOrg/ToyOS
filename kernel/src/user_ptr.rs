@@ -40,7 +40,7 @@ unsafe impl UserSafe for crate::object::ops::Stat {}
 
 // SAFETY: `#[repr(C)] Copy`, ten `u64`s, no padding; every field is validated where it is used, not here.
 unsafe impl UserSafe for toyos_abi::syscall::SpawnArgs {}
-// SAFETY: `#[repr(C)] Copy`, `RawHandle`, an explicit `_pad: u32`, then six `u64`s — no padding.
+// SAFETY: `#[repr(C)] Copy`, `RawHandle`, a `flags: u32`, then six `u64`s — no padding.
 unsafe impl UserSafe for toyos_abi::syscall::NamespaceBuild {}
 // SAFETY: `#[repr(C)] Copy`, `u64`, `u64`, `i64` — 24 bytes, no padding.
 unsafe impl UserSafe for toyos_abi::syscall::SchedInfo {}
