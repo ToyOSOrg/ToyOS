@@ -616,6 +616,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
+    // One boot; the reopen control's one verdict line.
+    ("process_reopen_selftest", Sched::Parallel, Tier::Fast),
     // One boot; three read-fault control verdicts. Carrying `UNMEASURED_MS`
     // until the shards price it.
     ("read_fault_selftests", Sched::Parallel, Tier::Fast),
@@ -4028,6 +4030,24 @@ fn run_screen_test(
                 "late_panic::Nest",
             )?;
             check_wrap(&dump)?;
+            // Written after `capture()` and before the paint. On the console it is proof
+            // the record exists; off the panel it is proof the panel painted the
+            // snapshot, since a no-op `capture()` leaves `render()` re-reading the ring.
+            const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
+            let said = qemu.console_stream().since(0);
+            if !said.contains(AFTER_CAPTURE) {
+                return Err(format!(
+                    "{AFTER_CAPTURE:?} never reached the console, so its absence from the \
+                     panel says nothing:\n{said}"
+                ));
+            }
+            if text.contains(AFTER_CAPTURE) {
+                return Err(format!(
+                    "{AFTER_CAPTURE:?} is on the panel — the report was re-read from the \
+                     record ring at paint time, not painted from the snapshot `capture()` \
+                     froze\ndecoded screen:\n{text}"
+                ));
+            }
             Ok(())
         }
         "screen_paged_scrollback" => {
@@ -11290,6 +11310,29 @@ fn run_machine_test(
                 }
                 eprintln!("  [leak] {}", verdict.trim());
             }
+            Ok(())
+        }
+        "process_reopen_selftest" => {
+            // The kernel reopens init by pid after the only handle to it has gone; on
+            // the `sealed` row that install took the boot down, so a guest that never
+            // reaches the verdict line is the red.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["process-reopen-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
+                return Err(format!("the reopen control never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [process] {}", verdict.trim());
             Ok(())
         }
         "driver_wait_refused" => {

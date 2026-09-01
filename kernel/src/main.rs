@@ -91,6 +91,9 @@ mod vma;
 /// proving `screen_late_panic`'s renderer really wraps.
 #[cfg(feature = "boot-actuators")]
 mod late_panic {
+    /// The record the panic path writes after `capture()`, for `screen_late_panic`.
+    pub const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
+
     pub struct Nest<T>(core::marker::PhantomData<T>);
 
     impl<T> Nest<T> {
@@ -154,6 +157,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
     // Captures now: recovery below may re-enter a scheduler this panic left locked, so a later drain isn't guaranteed.
     drivers::panic_console::capture();
+    // One record after the snapshot and before the paint: what tells a frozen
+    // report from a live re-read of a ring siblings are still writing to.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::test_late_panic() {
+        log!("{}", late_panic::AFTER_CAPTURE);
+    }
     // SAFETY: IF is clear on this CPU and every other one halts before anything else can write the port.
     unsafe { drivers::serial::panic_flush(); }
 
@@ -531,6 +540,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // init reads /etc/system.manifest itself; the boot config never names the program it starts.
     let pid = process::spawn_init();
     log!("spawned {} pid={pid}", process::INIT_PATH);
+
+    // Here and not beside the other controls: it needs a process the table answers for.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::process_reopen_selftest() {
+        object::process::reopen_selftest(pid);
+    }
 
     report_log_destination();
     boot_phase!("complete", 0);
