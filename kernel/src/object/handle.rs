@@ -102,7 +102,7 @@ pub struct HandleEntry {
 }
 
 impl HandleEntry {
-    /// The only constructor; resurrecting an already-retired object is a kernel bug.
+    /// The only constructor; resurrecting an already-retired object is a kernel bug — which a `reopenable` row never is, since something outside every table still answers for it.
     pub fn new(object: KObjectRef, rights: Rights) -> Self {
         let core = object.core();
         assert!(
@@ -135,13 +135,18 @@ impl Drop for HandleEntry {
     fn drop(&mut self) {
         let core = self.object.core();
         if core.handle_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let first = !core.retired.swap(true, Ordering::AcqRel);
-            assert!(
-                first,
-                "handle_count resurrected after zero on {} (koid {})",
-                self.object.kind(),
-                core.koid().raw(),
-            );
+            // A `reopenable` object is not retired by its last handle going: the
+            // process table still answers for it, and `SYS_PROCESS_OPEN` turns a
+            // pid — untrusted input — back into a handle, which may not assert.
+            if !self.object.reopenable() {
+                let first = !core.retired.swap(true, Ordering::AcqRel);
+                assert!(
+                    first,
+                    "handle_count resurrected after zero on {} (koid {})",
+                    self.object.kind(),
+                    core.koid().raw(),
+                );
+            }
             // Deferred, not run inline: a release hook must never run under this lock.
             if self.object.defers_release() {
                 super::enqueue_zero_handles(self.object.clone());

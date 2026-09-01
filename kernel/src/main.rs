@@ -532,6 +532,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     let pid = process::spawn_init();
     log!("spawned {} pid={pid}", process::INIT_PATH);
 
+    // Here and not beside the other controls: it needs a process the table answers for.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::process_reopen_selftest() {
+        object::process::reopen_selftest(pid);
+    }
+
     report_log_destination();
     boot_phase!("complete", 0);
 

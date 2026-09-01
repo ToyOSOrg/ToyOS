@@ -73,7 +73,9 @@ pub struct ObjectCore {
     koid: Koid,
     /// Table slots, in-flight transfers and spawn endowments — never the `Arc` strong count.
     handle_count: AtomicU32,
-    /// Set once; a second arrival is a kernel bug caught by `HandleEntry`'s drop assert.
+    /// A `sealed` row only: set once when its last handle goes, and a second
+    /// arrival is a kernel bug caught by `HandleEntry`'s drop assert. A
+    /// `reopenable` row is nameable again, so nothing ever sets this.
     retired: AtomicBool,
     /// This type's census counter; decremented by `ObjectCore`'s own drop.
     live: &'static AtomicU64,
@@ -123,9 +125,10 @@ pub trait KObjectVariant: ZeroHandles + Send + Sync + Sized + 'static {
 }
 
 /// Declares the closed set of object types; each row says whether its last
-/// handle is deferred ([`ZeroHandles`]) or immediate.
+/// handle is deferred ([`ZeroHandles`]) or immediate, and whether losing that
+/// handle is the object's last name (`sealed`) or not (`reopenable`).
 macro_rules! kobject {
-    ($($kind:ident $variant:ident => $ty:ty),+ $(,)?) => {
+    ($($kind:ident $naming:ident $variant:ident => $ty:ty),+ $(,)?) => {
         /// Every kind of thing a handle can name; matched exhaustively with no
         /// wildcard arm, so a new row is a compile error at every dispatch site.
         #[derive(Clone)]
@@ -157,6 +160,14 @@ macro_rules! kobject {
             fn defers_release(&self) -> bool {
                 match self {
                     $(Self::$variant(_) => kobject!(@defers $kind),)+
+                }
+            }
+
+            /// Whether something outside every handle table answers for this
+            /// object, so a fresh handle is a second name and not a resurrection.
+            fn reopenable(&self) -> bool {
+                match self {
+                    $(Self::$variant(_) => kobject!(@reopen $naming),)+
                 }
             }
         }
@@ -209,6 +220,9 @@ macro_rules! kobject {
     (@defers deferred) => { true };
     (@defers immediate) => { false };
 
+    (@reopen sealed) => { false };
+    (@reopen reopenable) => { true };
+
     (@empty_hook deferred $ty:ty) => {};
     (@empty_hook immediate $ty:ty) => {
         impl ZeroHandles for $ty {
@@ -218,26 +232,26 @@ macro_rules! kobject {
 }
 
 kobject! {
-    deferred PipeRead => pipe::PipeReadEnd,
-    deferred PipeWrite => pipe::PipeWriteEnd,
-    deferred Connection => service::ConnectionEnd,
-    deferred Device => device::DeviceClaim,
-    deferred Acceptor => port::Acceptor,
+    deferred sealed PipeRead => pipe::PipeReadEnd,
+    deferred sealed PipeWrite => pipe::PipeWriteEnd,
+    deferred sealed Connection => service::ConnectionEnd,
+    deferred sealed Device => device::DeviceClaim,
+    deferred sealed Acceptor => port::Acceptor,
     // Kind name is the ABI's; `CENSUS_KIND` asserts the two lists agree.
-    deferred Inbox => inbox::InboxObject,
+    deferred sealed Inbox => inbox::InboxObject,
     // The flush that makes releasing it safe waits for every CPU, so it runs from the queue, never inline.
-    deferred SharedMem => shm::SharedMemObject,
+    deferred sealed SharedMem => shm::SharedMemObject,
     // A service with no clients right now is not a service that has stopped.
-    immediate Connector => port::Connector,
+    immediate sealed Connector => port::Connector,
     // Immutable once built: its `Arc<Connector>`s go with the last reference and nothing observes it.
-    immediate Namespace => namespace::Namespace,
+    immediate sealed Namespace => namespace::Namespace,
     // A file's flush and cache reference ride the last `Arc`; `read`/`write` on a file never park.
-    immediate File => file::FileObject,
-    immediate Console => device::ConsoleObject,
+    immediate sealed File => file::FileObject,
+    immediate sealed Console => device::ConsoleObject,
     // The authority is the rights on the handle; a handle going away *is* the whole event.
-    immediate SysCap => syscap::SysCap,
+    immediate sealed SysCap => syscap::SysCap,
     // The last handle's loss is the loss of the *ability to wait*, not proof the process should stop.
-    immediate Process => process::ProcessObject,
+    immediate reopenable Process => process::ProcessObject,
 }
 
 /// Objects whose last handle has gone, waiting for release with nothing held;

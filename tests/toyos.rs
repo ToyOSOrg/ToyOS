@@ -616,6 +616,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot; the leak-rollback controls' two verdict lines. Carrying
     // `UNMEASURED_MS` until the shards price it.
     ("leak_rollback_selftest", Sched::Parallel, Tier::Fast),
+    // One boot; the reopen control's one verdict line. Carrying `UNMEASURED_MS`
+    // until the shards price it.
+    ("process_reopen_selftest", Sched::Parallel, Tier::Fast),
     // One boot; three read-fault control verdicts. Carrying `UNMEASURED_MS`
     // until the shards price it.
     ("read_fault_selftests", Sched::Parallel, Tier::Fast),
@@ -11290,6 +11293,30 @@ fn run_machine_test(
                 }
                 eprintln!("  [leak] {}", verdict.trim());
             }
+            Ok(())
+        }
+        "process_reopen_selftest" => {
+            // The kernel reopens init by pid after the only handle to it has
+            // gone — `SYS_PROCESS_OPEN`'s two steps. On the `sealed` row that
+            // second install tripped the resurrection assert and took the boot
+            // with it, so a guest that never reaches the line is the red.
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["process-reopen-selftest"],
+                    ..Default::default()
+                },
+            );
+            let log = qemu.boot_log().to_string();
+            let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
+                return Err(format!("the reopen control never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [process] {}", verdict.trim());
             Ok(())
         }
         "driver_wait_refused" => {

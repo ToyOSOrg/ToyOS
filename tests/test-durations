@@ -281,6 +281,7 @@ poller_capacity 36 shards=12
 port_poll_churn 84 shards=12
 pre_idle_wedge_speaks 3688 shards=12
 process_lifecycle 225 shards=12
+process_reopen_selftest 18446744073709551615 shards=none
 process_stats 221 shards=12
 query_modules_size 12 shards=12
 query_pci_agreement 7182 shards=12

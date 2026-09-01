@@ -289,6 +289,9 @@ actuators! {
 
     /// Wrap the metadata cache's device in a read-fault injector and run the un-index control after mount.
     pc_unbind_selftest = "pc-unbind-selftest";
+
+    /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
+    process_reopen_selftest = "process-reopen-selftest";
 }
 
 #[cfg(feature = "boot-actuators")]
