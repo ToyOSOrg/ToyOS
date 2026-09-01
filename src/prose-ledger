@@ -188,7 +188,7 @@ kernel/src/sync.rs 26 0
 kernel/src/time.rs 47 0
 kernel/src/tmpfs.rs 21 0
 kernel/src/trace.rs 29 0
-kernel/src/usb_gate.rs 48 0
+kernel/src/usb_gate.rs 53 0
 kernel/src/user_ptr.rs 67 0
 kernel/src/vfs.rs 91 0
 kernel/src/vma.rs 11 0
@@ -242,7 +242,7 @@ tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
 tests/common/storage.rs 70 0
 tests/common/toybox.rs 74 0
-tests/common/usb.rs 956 4
+tests/common/usb.rs 967 4
 tests/common/volumes.rs 606 3
 tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
@@ -382,7 +382,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5058 23
+tests/toyos.rs 5062 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

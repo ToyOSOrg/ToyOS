@@ -9293,6 +9293,29 @@ fn run_machine_test(
             // And nothing claimed a device on it. This is the assertion the
             // old code failed: it bound the keyboard, printed
             // `USB keyboard ready on slot 2`, and delivered nothing.
+            //
+            // The needle is certified by the same capture rather than assumed:
+            // the boot stick announces itself with it too, so a renamed line
+            // reds here instead of making the negative below vacuous.
+            const ANNOUNCED: &str = " ready on slot ";
+            const BOOT_STICK: &str = "usb-storage: disk 0";
+            let carrying: Vec<&str> =
+                boot.text().lines().filter(|l| l.contains(ANNOUNCED)).collect();
+            if !carrying.iter().any(|l| l.contains(BOOT_STICK)) {
+                return Err(format!(
+                    "no line carries {ANNOUNCED:?} and {BOOT_STICK:?}, so the absence asserted \
+                     below would be the needle's and not the driver's:\n{}",
+                    boot.text()
+                ));
+            }
+            let announced: Vec<&&str> =
+                carrying.iter().filter(|l| !l.contains(BOOT_STICK)).collect();
+            if !announced.is_empty() {
+                return Err(format!(
+                    "a device was announced on a controller nothing can read: {announced:?}\n{}",
+                    boot.text()
+                ));
+            }
             let binds = parse_xhci_binds(boot.text());
             if !binds.is_empty() {
                 return Err(format!(
