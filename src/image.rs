@@ -529,13 +529,11 @@ impl toyos_gpt::Sectors for ImageSectors<'_> {
 /// Why the image at `disk` may not be published, or `Ok` because two readers
 /// that did not write it agree it is sound.
 ///
-/// **This is the predecessor of publishing a flash target, not a report about
-/// one.** `toyos-gpt` finds each partition by the unique GUID the table claims
-/// for it and `toyos-fat32-check` judges the bytes it lands on against
-/// fatgen103; neither shares a line with the `gpt` crate or with [`populate`],
-/// so a writer defect cannot be waved through by its own judge. A volume the
-/// table misplaces fails the format check on whatever it does land on, which is
-/// why the extents are not compared separately.
+/// `toyos-gpt` finds each partition by the unique GUID the table claims for it
+/// and `toyos-fat32-check` judges the bytes it lands on against fatgen103, so
+/// no writer defect is waved through by its own judge. A volume the table
+/// misplaces fails the format check on whatever it does land on, which is why
+/// the extents are not compared separately.
 fn certify(disk: &[u8], parts: &[(&str, toyos_gpt::Guid)]) -> Result<(), String> {
     for (what, guid) in parts {
         let located = toyos_gpt::locate(&mut ImageSectors(disk), *guid)
@@ -589,14 +587,9 @@ mod tests {
         }
     }
 
-    /// Publishing a flash target runs both readers over the assembled image,
-    /// and a damaged one is refused by name.
-    ///
-    /// The two mutations are the negative controls for the two halves: a torn
-    /// protective MBR is refused before any partition is looked for, and a
-    /// volume that parses out of a sound table is still judged against the
-    /// format. Both are staged on the image [`create_gpt_disk`] just returned,
-    /// which certifies — so each refusal is about the mutation.
+    /// Publishing a flash target runs both readers over the assembled image, and
+    /// a damaged one is refused by name: the two mutations are staged on an
+    /// image [`create_gpt_disk`] just certified, so each refusal is its own.
     #[test]
     fn a_damaged_image_is_refused_by_the_reader_that_caught_it() {
         let log_uuid = uuid::Uuid::new_v4();
