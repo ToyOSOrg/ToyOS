@@ -17,12 +17,9 @@ pipe's *write* end was handed to a child as its stdin
 of a handle carrying no `Rights::READ` — `HandleTable::get_ref` returns
 `HandleError::Rights`, which `refuse_as_error` turns into `PermissionDenied`.
 The child's `std::io::stdin().read()` **succeeded**, so slot 0 was something
-else it could read. The kernel's spawn line said `dst=1` for that child, the
-same value a child with inherited stdio gets, where a `Stdio::piped()` stdout
-gave `dst=0`:
+else it could read:
 
 ```
-spawn: /bin/test_rs_stdio_refusal_child pid=17 tid=0 dst=1 base=0x10000000000 …
 exit: test_rs_stdio_refusal_child pid=17 code=4 cpu=4ms
 ```
 
@@ -48,6 +45,13 @@ Whether these are one defect or two is not established here; both are about a
 child not holding what its parent named, which is why they are filed together.
 The root cause was not chased — the bundle that found them was closing an
 unrelated defect.
+
+**Neither observation reproduces from anything in the tree.** Both probes were
+scratch binaries, written to stage a guest arm and deleted with it, so the two
+captures above are the whole of the evidence and whoever picks this up rebuilds
+them. An earlier revision of this file also read the spawn line's `dst=` field
+as a handle slot; it is the destination CPU (`scheduler::enqueue_new` returns
+`CpuId`), it says nothing about stdio, and that paragraph is struck.
 
 ## What closing it takes
 

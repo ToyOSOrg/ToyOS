@@ -4,9 +4,9 @@
 //! makes this checkable from outside the guest at all: `-rtc base=` puts a
 //! known instant in the emulated CMOS before the machine starts, so the name
 //! and the timestamp of the file the guest writes are both known before there
-//! is a guest. Every verdict here is read off the disk image the device
-//! received, never off anything the guest said about it — the boot log is used
-//! only to say *why* a disagreement happened.
+//! is a guest. The volume's verdicts are read off the disk image the device
+//! received; the clock *syscalls* reach no disk, so what the guest printed for
+//! those is judged against that same staged instant and nothing it derived.
 //!
 //! # What only an actuator can stage
 //!
