@@ -27,6 +27,9 @@ const EACCES: i32 = 13;
 const EEXIST: i32 = 17;
 const EINVAL: i32 = 22;
 const EAGAIN: i32 = 11;
+/// `include/errno.h` declares it 32; a write whose reader is gone is this and
+/// not `ENOENT`, which says the file does not exist.
+const EPIPE: i32 = 32;
 
 // stat file type bits
 const S_IFREG: u32 = 0o100000;
@@ -45,6 +48,7 @@ fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
         SyscallError::AlreadyExists => EEXIST,
         SyscallError::InvalidArgument => EINVAL,
         SyscallError::WouldBlock => EAGAIN,
+        SyscallError::Gone => EPIPE,
         SyscallError::Io => EIO,
         _ => EINVAL,
     };

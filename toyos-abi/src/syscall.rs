@@ -662,7 +662,8 @@ fn encode_timeout(timeout: Option<u64>) -> u64 {
     timeout.unwrap_or(u64::MAX)
 }
 
-/// Write bytes to a handle. Returns number of bytes written.
+/// Write bytes to a handle. Returns number of bytes written; a pipe or
+/// connection whose other end has closed is [`SyscallError::Gone`].
 pub fn write(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_WRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
@@ -1679,7 +1680,8 @@ pub fn read_nonblock(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Syscall
     check(syscall(SYS_READ_NONBLOCK, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
 
-/// Non-blocking write. Returns bytes written, or `Err(WouldBlock)` if no space available.
+/// Non-blocking write. Returns bytes written, `Err(WouldBlock)` if no space is
+/// available, or [`SyscallError::Gone`] if the other end has closed.
 pub fn write_nonblock(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_WRITE_NONBLOCK, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }

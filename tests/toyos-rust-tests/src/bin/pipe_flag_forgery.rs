@@ -1,7 +1,7 @@
 //! `RingHeader::flags` lives in the page `SYS_PIPE_MAP` maps writable, so a
 //! peer can forge `RING_READER_CLOSED`/`RING_WRITER_CLOSED`. The kernel answers
 //! "is the other end gone?" from its own reader/writer counts instead — EOF on
-//! a read, `NotFound` on a write — the facts netd switched to. Here the forged
+//! a read, `Gone` on a write — the facts netd switched to. Here the forged
 //! flag and the kernel fact are made to disagree, and the kernel fact is shown
 //! true in both directions.
 
@@ -64,7 +64,7 @@ fn reader_gone_is_the_kernels_to_report() {
     let probe = syscall::write_nonblock(write, &[]);
     assert_eq!(
         probe,
-        Err(SyscallError::NotFound),
+        Err(SyscallError::Gone),
         "a pipe whose reader is really gone did not refuse the write: {probe:?}"
     );
     println!("  PASS: a genuinely closed reader is reported by the kernel as BrokenPipe");

@@ -175,7 +175,7 @@ fn write_handle(handle: toyos_abi::RawHandle, bytes: &[u8], what: &str) {
 /// answers `Ok` here forever.
 fn await_refusal(deaf: &Window) {
     for _ in 0..REFUSAL_POLLS {
-        if let Err(SyscallError::NotFound) = syscall::write_nonblock(deaf.handle(), &[]) {
+        if let Err(SyscallError::Gone) = syscall::write_nonblock(deaf.handle(), &[]) {
             return;
         }
         syscall::nanosleep(PROBE_POLL_NS);

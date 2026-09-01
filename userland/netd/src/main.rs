@@ -1043,7 +1043,7 @@ impl NetDaemon {
             // the pipe has no reader — the kernel's fact, not the client's.
             if let Some(ref pipe) = conn.rx_write {
                 if toyos_abi::syscall::write_nonblock(pipe.as_handle(), &[])
-                    == Err(toyos_abi::syscall::SyscallError::NotFound)
+                    == Err(toyos_abi::syscall::SyscallError::Gone)
                 {
                     conn.close_rx();
                 }
@@ -1080,7 +1080,7 @@ impl NetDaemon {
             // As in `bridge_piped`: the kernel refuses a reader-less pipe by
             // name, and a zero-byte probe moves nothing.
             if toyos_abi::syscall::write_nonblock(listener.notify_write.as_handle(), &[])
-                == Err(toyos_abi::syscall::SyscallError::NotFound)
+                == Err(toyos_abi::syscall::SyscallError::Gone)
             {
                 dead.push(socket_id);
             }

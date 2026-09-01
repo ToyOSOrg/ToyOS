@@ -377,7 +377,8 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
 
 fn write_pipe(id: PipeId, buf: &UserBytes) -> Option<u64> {
     match pipe::try_write(id, buf) {
-        Some(pipe::PipeWrite::BrokenPipe) => Some(SyscallError::NotFound.to_u64()),
+        // The reader is gone, not absent: `NotFound` means the name is not there and nothing else may say so.
+        Some(pipe::PipeWrite::BrokenPipe) => Some(SyscallError::Gone.to_u64()),
         Some(pipe::PipeWrite::NoMemory) => Some(SyscallError::ResourceExhausted.to_u64()),
         Some(pipe::PipeWrite::Wrote(n)) => Some(n as u64),
         None => None,
