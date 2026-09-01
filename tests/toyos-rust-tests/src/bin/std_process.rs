@@ -103,11 +103,8 @@ fn test_piped_stdin() {
     println!("  piped stdin/stdout: ok");
 }
 
-/// A write into a pipe whose reader has exited is `BrokenPipe`.
-///
-/// The kernel answers `SyscallError::Gone` here and this machine's libc turns
-/// that into `EPIPE`; a Rust caller must be told the same fact, not that the
-/// pipe was never there and not `Other`.
+/// A write into a pipe whose reader has exited is `BrokenPipe` — the word
+/// POSIX spells `EPIPE` and this machine's libc already sets.
 fn test_write_to_a_gone_reader() {
     use std::io::{ErrorKind, Write};
     use std::process::Stdio;
