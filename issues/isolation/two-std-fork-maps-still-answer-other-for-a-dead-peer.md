@@ -6,7 +6,7 @@ opened: 2026-09-01
 
 # A `TcpStream` write to a departed peer is still `ErrorKind::Other`
 
-Closing `a-broken-pipe-answers-not-found` put one exhaustive
+Making a broken pipe reach a Rust caller as `BrokenPipe` put one exhaustive
 `SyscallError -> ErrorKind` map in `rust/library/std/src/sys/pal/toyos/mod.rs`
 and pointed `sys/pipe`, `sys/stdio` and `sys/fs` at it. Two maps in the same
 fork were not moved and still carry a `_ => Other` arm, at fork commit
@@ -34,11 +34,11 @@ The first is on a write path. `TcpStream::write`
 (`library/std/src/sys/net/connection/toyos.rs:199`) ends in
 `syscall::write(self.raw_handle(), buf).map_err(syscall_err)` at `:216`, and a
 netd socket's tx end is a pipe — so a Rust program writing to a socket whose
-peer has gone gets `ErrorKind::Other`, which is exactly the defect
-`a-broken-pipe-answers-not-found` closed one layer over. `SyscallError::Gone`
-is the kernel's word for it (`kernel/src/object/ops.rs:381`).
+peer has gone gets `ErrorKind::Other` — the same wrong word the pipe path was
+just cured of, one layer down. `SyscallError::Gone` is the kernel's word for it
+(`kernel/src/object/ops.rs:381`).
 
-**And the claim that closed that issue is only true of the three modules it
+**And the claim that closed that one is only true of the three modules it
 moved.** Its commit message and pull-request body said a new `SyscallError`
 variant "now fails to compile until somebody decides its kind"; these two arms
 would absorb one silently. The correction is recorded in this branch's history
