@@ -108,6 +108,98 @@ pub fn foreign_disk_untouched(
     Ok(())
 }
 
+/// The volume is genuine and the disk is not: block 0 here carries the magic,
+/// the version and the CRC this crate wrote, and every other stimulus in this
+/// file is refused before any of that is read. What it does not carry is this
+/// device's block count, and a read-write mount writes on sight.
+pub fn volume_from_another_disk(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const VOLUME_BLOCKS: u64 = 4096;
+    const DEVICE_BYTES: u64 = 128 * 1024 * 1024;
+    let dir = super::lane::dir();
+    let image = dir.join("copied-volume.img");
+
+    let mut fs = bcachefs::Formatted::format(bcachefs::VecBlockIO::new(VOLUME_BLOCKS))
+        .map_err(|e| format!("format a volume on the host: {e:?}"))?;
+    fs.create("stranger.txt", b"a file that was already here", 1)
+        .map_err(|e| format!("put a file on the host volume: {e:?}"))?;
+    let volume = fs
+        .into_io()
+        .map_err(|e| format!("sync the host volume: {e:?}"))?
+        .into_vec();
+
+    // The premise, checked before the boot: the guest's refusal below is about
+    // the device's size and not about an image nothing could have mounted.
+    bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(bcachefs::VecBlockIO::from_vec(
+        volume.clone(),
+    ))
+    .map_err(|e| format!("the volume this test wrote does not mount on its own device: {e:?}"))?;
+
+    std::fs::write(&image, &volume).map_err(|e| format!("write the copied volume: {e}"))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&image)
+        .and_then(|f| f.set_len(DEVICE_BYTES))
+        .map_err(|e| format!("grow the device under the volume: {e}"))?;
+    let before = whole_device(&image);
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            nvme_image: Some(image.clone()),
+            ..Default::default()
+        },
+    );
+    let log = qemu.boot_log().to_string();
+    for bad in ["PANIC:", "panicked at"] {
+        if log.contains(bad) {
+            return Err(format!("{bad:?}: refusing a copied volume must not be fatal\n{log}"));
+        }
+    }
+    const MOUNTED: &str = "mounted the ToyOS volume at block 0";
+    if log.contains(MOUNTED) {
+        return Err(format!(
+            "the kernel mounted a volume that did not come from this disk: it said \
+             {MOUNTED:?}\n{log}"
+        ));
+    }
+    const REFUSED: &str = "this disk is not ours";
+    if !log.contains(REFUSED) {
+        return Err(format!("the kernel never said {REFUSED:?} — did it reach storage?\n{log}"));
+    }
+    if log.contains("formatting it") {
+        return Err(format!("the kernel decided to format a disk it was not given\n{log}"));
+    }
+    if !log.contains("Boot: complete") {
+        return Err(format!("the boot did not complete on a volume it refused\n{log}"));
+    }
+
+    // Down through `PageCache::sync`, the only thing that moves a write out of
+    // the cache and onto the device.
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} during shutdown\n{tail}"));
+        }
+    }
+    drop(qemu);
+
+    let after = whole_device(&image);
+    if let Some(diff) = first_difference(&before, &after) {
+        return Err(format!("the kernel wrote to a volume it refused: {diff}"));
+    }
+    let _ = std::fs::remove_file(&image);
+    Ok(())
+}
+
 /// A GPT protective MBR and a plausible partition header: what the front of a
 /// disk with another operating system on it looks like. Nothing in it is a
 /// bcachefs superblock and nothing in it is a designation stamp, which is the

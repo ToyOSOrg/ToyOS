@@ -113,12 +113,23 @@ impl Op {
 pub struct WatchFlags(u32);
 
 impl WatchFlags {
-    pub const READABLE: Self = Self(1);
-    pub const WRITABLE: Self = Self(4);
+    pub const READABLE: Self = Self(toyos_abi::inbox::READABLE);
+    pub const WRITABLE: Self = Self(toyos_abi::inbox::WRITABLE);
+    /// Every bit `toyos_abi::inbox` defines for `Submission::op_flags`;
+    /// hand-copied and unchecked, for the reason `arch/syscall/vm.rs`'s
+    /// `MMAP_PROT_KNOWN` gives for all four of these masks.
+    const KNOWN: u32 = Self::READABLE.0 | Self::WRITABLE.0;
 
-    pub fn from_raw(raw: u32) -> Self { Self(raw) }
-    pub fn readable(self) -> bool { self.0 & 1 != 0 }
-    pub fn writable(self) -> bool { self.0 & 4 != 0 }
+    /// A bit outside [`Self::KNOWN`] is an interest this kernel would register
+    /// for neither direction, so the whole watch is refused rather than served.
+    fn from_raw(raw: u32) -> Result<Self, SyscallError> {
+        if raw & !Self::KNOWN != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        Ok(Self(raw))
+    }
+    pub fn readable(self) -> bool { self.0 & Self::READABLE.0 != 0 }
+    pub fn writable(self) -> bool { self.0 & Self::WRITABLE.0 != 0 }
     pub fn raw(self) -> u32 { self.0 }
 }
 
@@ -552,6 +563,12 @@ fn with_instance<R>(inbox_id: InboxId, f: impl FnOnce(&Inbox) -> R) -> Result<R,
 
 /// Process a single submission.
 fn process_submission(inbox_id: InboxId, submission: &Submission) {
+    // `Submission::flags` is declared and read by nothing, so a caller setting
+    // it is asking for a behaviour that does not exist.
+    if submission.flags != 0 {
+        post_completion_locked(inbox_id, submission.token, -(SyscallError::InvalidArgument as i32), 0);
+        return;
+    }
     let op = match Op::from_raw(submission.op) {
         Ok(op) => op,
         Err(_) => {
@@ -576,8 +593,14 @@ fn process_submission(inbox_id: InboxId, submission: &Submission) {
 /// Registers an `OP_WATCH`, or answers it immediately; every refusal posts a completion rather than going silent.
 fn process_watch(inbox_id: InboxId, submission: &Submission) {
     let handle = submission.handle;
-    let flags = WatchFlags::from_raw(submission.op_flags);
     let user_data = submission.token;
+    let flags = match WatchFlags::from_raw(submission.op_flags) {
+        Ok(flags) => flags,
+        Err(e) => {
+            post_completion_locked(inbox_id, user_data, -(e as i32), 0);
+            return;
+        }
+    };
 
     // Readiness is checked on the process's table, not the thread's: a ring is process-wide.
     let resolved = process::with_process_data(|data| {

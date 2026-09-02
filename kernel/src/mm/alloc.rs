@@ -516,6 +516,7 @@ impl KernelAllocator {
     }
 }
 
+// A null returned from `alloc` is `alloc`'s no_std default error handler's business, and it panics naming the size, the layer and the call site — which is why no `#[alloc_error_handler]` is installed anywhere in this kernel.
 // SAFETY: an early-phase pointer is recognized on `dealloc` by address range (`is_early_ptr`), not by re-reading the phase, so it frees correctly even after `init()` switches to PHASE_READY.
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {

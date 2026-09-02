@@ -114,7 +114,7 @@ pub fn resolve_dlopen_relocs(lib: &LoadedLib, other_libs: &[LoadedLib]) {
 /// executable's own exports.
 pub fn resolve_lib_bind_relocs(
     lib: &LoadedLib,
-    exe_sym_map: &hashbrown::HashMap<&str, UserAddr>,
+    exe_sym_map: &alloc::collections::BTreeMap<&str, UserAddr>,
     libs: &[LoadedLib],
 ) {
     let symbols = lib.symbols();
