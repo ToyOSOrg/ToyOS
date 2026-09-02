@@ -179,7 +179,7 @@ fn preempted_producer_strands_suffix() {
 }
 
 /// Whether the drain after both threads have joined *is* the victim's next
-/// pass, or is the model reading a queue whose consumer is gone. The whole of
+/// pass, or is the model reading a queue whose consumer is gone — the whole of
 /// what the feature decides, and it decides no code path.
 #[cfg(not(feature = "no-preempt-guard"))]
 const VICTIM_RETIRES: bool = cfg!(feature = "victim-retires-mid-probe");
@@ -198,10 +198,9 @@ const STRANDED: &str = "the victim retired with a probe still linked in its queu
 /// and its thief's next `claim()` answers `None` for ever.
 ///
 /// **What it does not model:** `best_victim` posts only into a CPU
-/// `CpuHandle::answering` still admits, so the window is one probe wide. The
-/// thief here posts unconditionally — what the model shows is that the
-/// primitive has no reclamation path once the consumer is gone, not how wide
-/// the window is.
+/// `CpuHandle::answering` still admits, so the window is one probe wide, where
+/// this thief posts unconditionally. What the model shows is that the primitive
+/// has no reclamation path once the consumer is gone, not how wide that is.
 #[cfg(not(feature = "no-preempt-guard"))]
 fn steal_probe_model() {
     let (tx, mut rx) = mailbox::<Msg>();
