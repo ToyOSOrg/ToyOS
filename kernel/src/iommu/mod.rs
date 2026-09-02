@@ -107,17 +107,13 @@ impl core::fmt::Display for DomainId {
 /// sends whoever reads it looking in the wrong place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IommuError {
-    /// No unit on this machine translates, so there is no domain to be in.
     NoUnit,
     /// The units disagree on the depth a domain's tables would be built at.
     WidthsDisagree,
-    /// Every domain id the units can name is taken.
     DomainsExhausted(u32),
-    /// The domain's addresses do not stretch to another mapping this size.
     AddressesExhausted(u8),
-    /// A base or length that is not a whole number of the 2 MiB leaves this kernel writes.
+    /// Not a whole number of the 2 MiB leaves this kernel writes.
     Unaligned(u64),
-    /// Nothing this domain has mapped covers the range named.
     NotMapped(Iova),
 }
 

@@ -9,6 +9,8 @@ use crate::log;
 const VENDOR_ID: u64 = 0x00;
 const DEVICE_ID: u64 = 0x02;
 const COMMAND: u64 = 0x04;
+/// `COMMAND` bit 2, PCI 3.0 §6.2.2: without it the function issues no transaction of its own.
+const BUS_MASTER: u16 = 0x04;
 const PROG_IF: u64 = 0x09;
 const SUBCLASS: u64 = 0x0A;
 const CLASS: u64 = 0x0B;
@@ -63,6 +65,13 @@ impl Capability<'_> {
     }
 }
 
+/// Takes the window rather than a device: the DMA-fault handler has a requester
+/// id, no [`PciDevice`], and no lock it may take.
+pub fn stop_bus_mastering(config: Mmio) {
+    let cmd = config.read_u16(COMMAND);
+    config.write_u16(COMMAND, cmd & !BUS_MASTER);
+}
+
 /// PCI device identified by ECAM base + Bus/Device/Function.
 #[derive(Clone, Copy)]
 pub struct PciDevice {
@@ -84,6 +93,15 @@ impl PciDevice {
     #[cfg(feature = "boot-actuators")]
     pub(crate) fn over_config(mmio: crate::mm::Mmio) -> Self {
         Self { mmio, bus: 0, dev: 0, func: 0 }
+    }
+
+    /// This function's whole config-space window.
+    ///
+    /// For the DMA-fault handler, which has a requester id, no `PciDevice`, and
+    /// no lock it may take: it publishes these at boot and clears Bus Master
+    /// Enable through the one that matches.
+    pub fn config_window(&self) -> Mmio {
+        self.mmio
     }
 
     pub fn vendor_id(&self) -> u16 {
@@ -165,8 +183,7 @@ impl PciDevice {
 
     /// Clear bus mastering only — memory space stays, so config and BAR reads still work.
     pub fn disable_bus_master(&self) {
-        let cmd = self.mmio.read_u16(COMMAND);
-        self.mmio.write_u16(COMMAND, cmd & !0x04);
+        stop_bus_mastering(self.mmio);
     }
 
     /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it, or return false if MSI-X cannot be armed.

@@ -137,6 +137,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
         yn(dmar.flags & dmar::FLAG_DMA_CTRL_OPT_IN != 0),
     );
 
+    // Before any unit is armed: the handler reaches a faulting function's
+    // config space through this and cannot take a lock to find it.
+    fault::describe(devices);
+
     let mut units = 0usize;
     let mut regions = 0usize;
     // Described and planned before any unit is armed: whether sources may move

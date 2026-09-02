@@ -1033,15 +1033,47 @@ pub fn iommu_domain_isolation(
             PROBE_WORDS * 8
         ));
     }
+    // The handler's own half, read out of the offending function's `COMMAND`
+    // rather than off the line the handler printed: a device that cannot master
+    // the bus raises no second fault, which is what bounds the handler.
+    let command = over_qmp(socket, config_space(&log, &nic)? + PCI_COMMAND, 1, 'w')?[0] as u16;
+    if command & PCI_BUS_MASTER != 0 {
+        return Err(format!(
+            "the unit blocked {nic} and its COMMAND is {command:#06x}, so it still masters the \
+             bus and can fault again"
+        ));
+    }
+    let handled = log.must_say(FAULT)?;
+    for field in ["bme=cleared", "first=y"] {
+        if !handled.contains(field) {
+            return Err(format!("the fault line does not say {field}: {handled:?}"));
+        }
+    }
     eprintln!(
-        "  [iommu] {nic} aimed at {}, inside {nvme}'s pool: blocked on a {} for {}, and all \
-         {} bytes there are still zero",
+        "  [iommu] {nic} aimed at {}, inside {nvme}'s pool: blocked on a {} for {}, all {} bytes \
+         there are still zero, and its COMMAND reads {command:#06x} — bus mastering gone",
         blocked.address,
         blocked.access,
         blocked.reason,
         PROBE_WORDS * 8
     );
     Ok(())
+}
+
+/// `COMMAND` and its Bus Master Enable bit, PCI 3.0 §6.2.2.
+const PCI_COMMAND: u64 = 0x04;
+const PCI_BUS_MASTER: u16 = 0x04;
+
+/// One function's config space in ECAM, over the monitor.
+fn config_space(log: &Serial, bdf: &str) -> Result<u64, String> {
+    let line = log.must_say("ACPI: ECAM base address: ")?;
+    let ecam = line
+        .split("ACPI: ECAM base address: 0x")
+        .nth(1)
+        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+        .ok_or_else(|| format!("unreadable ECAM base on {line:?}"))?;
+    let (bus, dev, func) = parse_bdf(bdf)?;
+    Ok(ecam + (u64::from(bus) << 20) + (u64::from(dev) << 15) + (u64::from(func) << 12))
 }
 
 /// How much of the untouched half of NVMe's admin completion queue page the
@@ -1065,18 +1097,11 @@ fn register_window(log: &Serial, name: &str) -> Result<u64, String> {
 /// A function's memory BAR 0, read out of ECAM over the monitor rather than
 /// taken from anything the guest printed about it.
 fn nvme_bar(socket: &Path, log: &Serial, bdf: &str) -> Result<u64, String> {
-    let line = log.must_say("ACPI: ECAM base address: ")?;
-    let ecam = line
-        .split("ACPI: ECAM base address: 0x")
-        .nth(1)
-        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
-        .ok_or_else(|| format!("unreadable ECAM base on {line:?}"))?;
-    let (bus, dev, func) = parse_bdf(bdf)?;
-    let config = ecam + (u64::from(bus) << 20) + (u64::from(dev) << 15) + (u64::from(func) << 12);
+    let config = config_space(log, bdf)?;
     // A window that decodes at all: an ECAM base the kernel invented would read
     // back all ones here, which is no vendor id.
     if over_qmp(socket, config, 1, 'w')?[0] as u32 & 0xFFFF == 0xFFFF {
-        return Err(format!("no PCI function decodes at {config:#x}, so {ecam:#x} is not ECAM"));
+        return Err(format!("no PCI function decodes at {config:#x}, so that is not ECAM"));
     }
     Ok(over_qmp(socket, config + 0x10, 1, 'g')?[0] & !0xF)
 }

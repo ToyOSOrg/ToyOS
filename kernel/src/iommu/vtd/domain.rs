@@ -4,27 +4,21 @@
 //! Every layout and rule here is quoted from Intel VT-d Rev. 4.0, order number
 //! D51397-015:
 //!
-//! - **Second-level paging entry**, Section 9.8 and Table 27: `R` bit 0, `W`
-//!   bit 1, page-size bit 7 at a page-directory level, address bits 51:12. The
-//!   walk ANDs `R`/`W` down the levels (Section 3.7.1), so a leaf grants no
-//!   more than the entries above it.
-//! - **Context entry**, Section 9.3 Figure 9-3: `P` bit 0, `T` bits 3:2 with
-//!   `00b` meaning the second-level table this entry names, `SLPTPTR` bits
-//!   51:12, `AW` bits 66:64 encoding levels minus two, `DID` bits 87:72.
-//! - **Context-cache invalidate descriptor**, Section 6.5.2.1 and Figure 6-8:
-//!   type `1h`, `G` bits 5:4 with `11b` device-selective, `DID` bits 31:16,
-//!   `SID` bits 47:32.
-//! - **IOTLB invalidate descriptor**, Section 6.5.2.2 and Figure 6-9: type
-//!   `2h`, `G` bits 5:4 with `10b` domain-selective, `DR` bit 7, `DW` bit 6,
-//!   `DID` bits 31:16.
-//! - **`CAP.CM`**, Section 6.1: with caching mode reported, software
-//!   invalidates after *every* change, a mapping becoming present included,
-//!   because the unit may have cached the absence.
-//! - Section 6.5.2.1: a context-entry change is followed by a context-cache
-//!   invalidation and then an IOTLB invalidation, in that order.
+//! - **Second-level entry**, 9.8 and Table 27: `R` bit 0, `W` bit 1, page-size
+//!   bit 7 at a page-directory level, address 51:12; the walk ANDs `R`/`W` down
+//!   the levels (3.7.1), so a leaf grants no more than what is above it.
+//! - **Context entry**, 9.3 Figure 9-3: `P` bit 0, `T` 3:2 with `00b` naming
+//!   the second-level table, `SLPTPTR` 51:12, `AW` 66:64 as levels minus two,
+//!   `DID` 87:72.
+//! - **Invalidation descriptors**, 6.5.2.1 Figure 6-8 and 6.5.2.2 Figure 6-9:
+//!   context cache type `1h` with `G` 5:4 = `11b` device-selective, `DID`
+//!   31:16, `SID` 47:32; IOTLB type `2h` with `G` = `10b` domain-selective,
+//!   `DR` bit 7, `DW` bit 6. A context-entry change takes the first and then
+//!   the second, in that order.
+//! - **`CAP.CM`**, 6.1: with caching mode reported, software invalidates after
+//!   *every* change, a mapping becoming present included.
 //!
-//! Lock order in this subsystem is `DOMAINS` then `REMAP` then `UNITS` then
-//! `TABLES`, and no path takes them the other way round.
+//! Lock order here is `DOMAINS`, `REMAP`, `UNITS`, `TABLES`, never the reverse.
 
 use alloc::vec::Vec;
 
@@ -139,6 +133,7 @@ pub fn attach(stream: StreamId, id: DomainId) {
         table::bind(&mut TABLES.lock(), unit.root(), stream, &domain);
         unit.invalidate_context(domain.id(), stream.requester());
     }
+    super::fault::attached(stream, domain.id());
     log!("iommu: {stream} moves to domain{}", domain.id());
 }
 
