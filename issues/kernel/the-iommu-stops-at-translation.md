@@ -16,22 +16,28 @@ below its context entry — the only things in the suite that can tell a
 translating unit from one that is merely switched on, because under identity
 mapping every device *in* the tables behaves the same either way.
 
-Interrupt remapping, per-driver domains and the refusal are not built. They land
-in this order and each leaves the tree green.
+Interrupt remapping is built: every source is in the remappable format, `IRE` is
+set, `CFI` is never written, and every table entry is source-id-verified against
+the requester id its one source really carries. Per-driver domains and the
+refusal are not. They land in this order and each leaves the tree green.
 
-**Interrupt remapping.** Remappable I/O APIC redirection entries and remappable
-MSI/MSI-X, `IRE` set and `CFI` clear, every IRTE source-id-verified. This is the
-step that can black-screen the machine: enabling `IRE` changes how *every*
-interrupt message is interpreted, so every source already programmed —
-the i8042's two I/O APIC lines, and xHCI, virtio-net, virtio-sound and HDA,
-which all write the compatibility-format address that `CFI=0` blocks — must be
-reprogrammed first. It lands alone, against a suite where every input, storage
-and audio test already depends on an interrupt arriving. Two things to *verify*
-on the first boot rather than assume: that QEMU blocks compatibility-format
-messages once `CFI` is clear, and that the unit's own fault-event MSI is exempt.
-A fault channel that stops working the moment faults become possible is the
-worst version of this bug — which is why the unit is armed before translation
-is enabled today.
+What the gate still takes from the kernel is the unit's register-window address
+(the `iommu: unit0 @0x…` line); a kernel lying there would have the gate read
+some other page, where `GSTS` would not show `IRES`, so the lie is not free but
+it is not closed either — closing it means the gate parsing the DMAR itself.
+
+Of the two things this stage was told to verify rather than assume, one was
+decided and one cannot be. QEMU does **not** block a compatibility-format
+message once `CFI` is clear, though the specification requires it — measured, by
+leaving one source at a time in that format and watching its device go on
+working — so a source nobody moved keeps working here and black-screens on real
+hardware. Whether the unit's own fault-event MSI is exempt is settled
+by nothing in reach, the green fault gates included: QEMU sends that event
+straight to the APIC without consulting the remapping path at all, so those
+gates are consistent with the exemption holding and with the model blocking
+nothing. Both, with the interrupt-cache invalidation that is unmeasurable for a
+third reason, are recorded in
+`issues/kernel/qemu-passes-compatibility-format-interrupts.md` as T14 questions.
 
 **Domains, mapping, invalidation, faults.** Create/attach/map/unmap/flush, an
 IOVA allocator, and the half of the fault handler that kills a process instead
@@ -51,7 +57,9 @@ Parallels and essentially every cloud instance — and protects nothing that has
 moved. Two rules need restating before they can be written, because as worded
 they would refuse the harness's own machines: the extended-interrupt-mode rule
 has to be stated in terms of the x2APIC ids actually in use rather than of
-x2APIC being enabled, and the isolation-scope rule refuses a device whose scope
+x2APIC being enabled — which is what interrupt remapping already does, since
+QEMU reports `ECAP.EIM` clear and a table entry's destination is then eight
+bits wide — and the isolation-scope rule refuses a device whose scope
 is not a singleton — written for peer-to-peer behind a switch, and wrong for a
 root-complex-integrated function, which is what both the audio and networking
 targets on the T14 are. Restating it is the owner's call.

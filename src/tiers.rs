@@ -714,9 +714,11 @@ pub const RELEGATED: &[Relegated] = &[
         test: "iommu_discovery",
         ci_ms: 17_594,
         why: Why::Cost,
-        guards: "Four machines whose remapping units differ in exactly one advertised \
+        guards: "Five machines whose remapping units differ in exactly one advertised \
                  capability each, and whether the kernel's decode moves with them. A \
-                 plausible constant satisfies any single-machine assertion.",
+                 plausible constant satisfies any single-machine assertion. Also the two \
+                 remapping-entry destination encodings, which only a source on a CPU that \
+                 is not 0 can tell apart.",
     },
     Relegated {
         test: "kernel_heartbeat",

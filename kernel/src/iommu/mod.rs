@@ -1,6 +1,6 @@
 //! The unit that decides what a device may reach.
 //!
-//! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, and turns translation on; an unusable unit is logged and left off rather than halting boot, and interrupt remapping and per-driver domains are not yet built (`issues/kernel/the-iommu-stops-at-translation.md`). Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
+//! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, turns translation on, and remaps every interrupt source through a source-id-verified table entry; an unusable unit is logged and left off rather than halting boot, and per-driver domains are not yet built (`issues/kernel/the-iommu-stops-at-translation.md`). Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
 //!
 //! The refusal is deliberately not yet built: landing it before any userspace driver exists would cost every machine and protect nothing.
 //!
@@ -49,6 +49,11 @@ impl StreamId {
     pub(in crate::iommu) const fn devfn(self) -> u8 {
         (self.0 & 0xFF) as u8
     }
+
+    /// The 16-bit requester id a source-id check compares against; `pci` is the only constructor, so it always fits.
+    pub(in crate::iommu) const fn requester(self) -> u16 {
+        self.0 as u16
+    }
 }
 
 /// An address a *device* uses. Never a physical address, never a virtual one.
@@ -85,6 +90,82 @@ impl core::fmt::Display for StreamId {
 /// Calls `vtd::init` directly rather than through a dispatch, because x86-64 has one backend and the dispatch is not yet a real seam.
 pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice]) {
     vtd::init(rsdp_addr, devices);
+}
+
+/// How a source must address its interrupt. Not a yes/no: a caller that folded
+/// the third answer into [`Delivery::Direct`] would write a message the unit
+/// blocks and lose the device in silence.
+pub enum Delivery<T> {
+    /// No unit remaps interrupts on this machine; write what has always been written.
+    Direct,
+    /// Write this instead — the interrupt now reaches its destination through the unit.
+    Remapped(T),
+    /// The unit remaps and this source has no entry; the caller refuses the device.
+    Refused(Refused),
+}
+
+/// Why a source could not be given an entry. Carried rather than collapsed:
+/// one message for all three sends whoever reads it looking in the wrong place.
+#[derive(Clone, Copy)]
+pub enum Refused {
+    /// Wider than the destination an entry holds without extended interrupt mode.
+    DestinationTooWide(u32),
+    /// Every entry in the table is already spoken for.
+    TableFull,
+    /// Firmware's device scopes named no requester id for this interrupt controller.
+    ControllerUnnamed(u8),
+}
+
+impl core::fmt::Display for Refused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DestinationTooWide(id) => {
+                write!(f, "apic id {id:#x} does not fit a remapping entry's destination")
+            }
+            Self::TableFull => write!(f, "the interrupt remapping table is full"),
+            Self::ControllerUnnamed(id) => {
+                write!(f, "firmware named no requester id for interrupt controller {id}")
+            }
+        }
+    }
+}
+
+pub struct MsiMessage {
+    pub address: u32,
+    pub data: u32,
+}
+
+pub struct PinRedirect {
+    pub low: u32,
+    pub high: u32,
+}
+
+/// Where `bus:device.function`'s message-signalled interrupt must point. Takes
+/// the triple, not a [`StreamId`]: what a requester id is stays in this module.
+pub fn remap_msi(
+    bus: u8,
+    device: u8,
+    function: u8,
+    vector: u8,
+    dest: u32,
+) -> Delivery<MsiMessage> {
+    if !vtd::interrupt::is_armed() {
+        return Delivery::Direct;
+    }
+    match vtd::interrupt::msi(StreamId::pci(bus, device, function), vector, dest) {
+        Ok(msi) => Delivery::Remapped(MsiMessage { address: msi.address, data: msi.data }),
+        Err(why) => Delivery::Refused(why),
+    }
+}
+
+pub fn remap_pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Delivery<PinRedirect> {
+    if !vtd::interrupt::is_armed() {
+        return Delivery::Direct;
+    }
+    match vtd::interrupt::pin(apic_id, vector, dest, level) {
+        Ok(pin) => Delivery::Remapped(PinRedirect { low: pin.low, high: pin.high }),
+        Err(why) => Delivery::Refused(why),
+    }
 }
 
 /// Reached from the IDT gate the unit's own `FEDATA` names.

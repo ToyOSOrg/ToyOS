@@ -3,14 +3,18 @@
 //! `SourceId`.
 //!
 //! Finds units, decodes capabilities, gives every enumerated PCI function a
-//! context entry naming one identity-mapped domain, and turns translation on.
-//! A capability the kernel cannot use leaves the unit switched off rather than
-//! halting, logged by register value rather than a bare "unsupported".
+//! context entry naming one identity-mapped domain, turns translation on, and
+//! points every unit at one interrupt remapping table. A capability the kernel
+//! cannot use leaves the unit switched off rather than halting, logged by
+//! register value rather than a bare "unsupported".
 
 pub mod dmar;
 pub mod fault;
+pub mod interrupt;
 mod queue;
 mod table;
+
+use alloc::vec::Vec;
 
 use crate::drivers::acpi::TableError;
 use crate::drivers::pci::PciDevice;
@@ -96,20 +100,24 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
 
     let mut units = 0usize;
     let mut regions = 0usize;
-    // One identity-domain table set per address width: units may disagree on
-    // `CAP.SAGAW`, and a shared set would be programmed at the wrong depth for one.
-    let mut domains: [Option<Table>; 2] = [None, None];
+    // Described and planned before any unit is armed: whether sources may move
+    // to the remappable format is one decision, taken before the first `IRE`.
+    let mut ready: Vec<(Unit, Plan)> = Vec::new();
     for structure in dmar.structures() {
         match structure {
             Ok(Structure::Drhd(drhd)) => {
-                if units == MAX_UNITS {
-                    log!("iommu: more than {MAX_UNITS} units described; the rest are not inventoried");
-                    return;
-                }
-                if let Some(unit) = describe_unit(units, &drhd) {
-                    enable(unit, devices, &mut domains);
-                }
+                // Counted before the ceiling refuses it: a unit left uninventoried
+                // leaves `units` above `ready`, which is what stops `remappable`.
                 units += 1;
+                if units > MAX_UNITS {
+                    log!("iommu: more than {MAX_UNITS} units described; the rest are not inventoried");
+                    break;
+                }
+                if let Some(unit) = describe_unit(units - 1, &drhd) {
+                    if let Some(plan) = plan(&unit) {
+                        ready.push((unit, plan));
+                    }
+                }
             }
             // Kernel devices get RMRR regions for free and userspace handoff of
             // one is refused elsewhere; QEMU publishes none, so this arm is
@@ -143,6 +151,56 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     if units == 0 {
         log!("iommu: DMAR describes no remapping unit");
     }
+
+    let remap = remappable(&ready, units);
+    // One identity-domain table set per address width: units may disagree on
+    // `CAP.SAGAW`, and a shared set would be programmed at the wrong depth for one.
+    let mut domains: [Option<Table>; 2] = [None, None];
+    for (unit, plan) in ready {
+        enable(unit, plan, devices, &mut domains, remap);
+    }
+}
+
+/// Whether every interrupt source may be moved to the remappable format, and
+/// with `EIME` if so; `None` leaves the machine exactly as it boots with no unit.
+///
+/// A source writes one address, so a unit left without `IRE` beside one that has
+/// it would read that address as a compatibility message and deliver the
+/// interrupt to whatever the handle bits spell. Every condition below therefore
+/// refuses for the machine, not for the unit that failed it.
+fn remappable(ready: &[(Unit, Plan)], described: usize) -> Option<bool> {
+    if ready.is_empty() {
+        return None;
+    }
+    if ready.len() != described {
+        log!(
+            "iommu: {} of {described} units are programmed, so no source may use the remappable \
+             format — one left without IRE would misread it",
+            ready.len()
+        );
+        return None;
+    }
+    if let Some((unit, _)) = ready.iter().find(|(u, _)| !u.caps.interrupt_remapping()) {
+        log!(
+            "iommu: unit{} cannot remap interrupts (ECAP={:#018x}) — every source stays in \
+             compatibility format",
+            unit.index,
+            unit.caps.ecap
+        );
+        return None;
+    }
+    let apics = crate::drivers::ioapic::ids();
+    if !interrupt::apics_are_named(&apics) {
+        log!(
+            "iommu: firmware named a requester id for only some of this machine's {} I/O APICs, \
+             so no pin could be source-id-verified — every source stays in compatibility format",
+            apics.len()
+        );
+        return None;
+    }
+    // Without `ECAP.EIM` on every unit an entry's destination is eight bits
+    // wide, which is a bound on the ids in use and not a refusal of x2APIC.
+    Some(ready.iter().all(|(u, _)| u.caps.extended_interrupt_mode()))
 }
 
 /// A unit whose register window decodes, with its capabilities and `GCMD` state.
@@ -247,9 +305,14 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
     Some(Unit { index, base, regs, caps, gcmd: 0 })
 }
 
-/// Programs the unit in its own order — queue, root pointer, global
-/// invalidation, then `TE` — each confirmed in `GSTS` before the next.
-fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2]) {
+/// What a unit's capabilities let this kernel program, or `None` with the
+/// register value that refused it.
+struct Plan {
+    width: AddressWidth,
+    records: fault::Records,
+}
+
+fn plan(unit: &Unit) -> Option<Plan> {
     let index = unit.index;
     let Some(width) = unit.caps.address_width() else {
         log!(
@@ -257,21 +320,21 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
              (CAP={:#018x}) — not programmed",
             unit.caps.cap
         );
-        return;
+        return None;
     };
     if !unit.caps.superpage_2m() {
         log!(
             "iommu: unit{index} cannot map 2 MiB pages (CAP={:#018x}) — not programmed",
             unit.caps.cap
         );
-        return;
+        return None;
     }
     if !unit.caps.queued_invalidation() {
         log!(
             "iommu: unit{index} has no queued invalidation (ECAP={:#018x}) — not programmed",
             unit.caps.ecap
         );
-        return;
+        return None;
     }
     if unit.caps.domains() <= table::KERNEL_DOMAIN as u32 {
         log!(
@@ -280,7 +343,7 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
             unit.caps.domains(),
             unit.caps.cap
         );
-        return;
+        return None;
     }
     let records =
         fault::Records { offset: unit.caps.fault_recording_offset(), count: unit.caps.fault_recording_registers() };
@@ -292,10 +355,25 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
             records.offset,
             unit.caps.cap
         );
-        return;
+        return None;
     }
+    Some(Plan { width, records })
+}
 
-    let root = {
+/// Programs the unit in its own order — queue, root pointer, interrupt remap
+/// pointer, global invalidation, then `TE` — each confirmed in `GSTS` before
+/// the next.
+fn enable(
+    mut unit: Unit,
+    plan: Plan,
+    devices: &[PciDevice],
+    domains: &mut [Option<Table>; 2],
+    remap: Option<bool>,
+) {
+    let index = unit.index;
+    let Plan { width, records } = plan;
+
+    let (root, queue) = {
         let mut tables = TABLES.lock();
         let domain = match domains[domain_slot(width)] {
             Some(domain) => domain,
@@ -339,6 +417,7 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
         }
 
         let mut queue = Queue::new(&mut tables, unit.regs);
+        let irta = remap.map(|extended| interrupt::arm(&mut tables, extended));
         drop(tables);
 
         // Before `TE`: the first blocked transaction must be reportable, not merely counted.
@@ -352,19 +431,47 @@ fn enable(mut unit: Unit, devices: &[PciDevice], domains: &mut [Option<Table>; 2
         );
         unit.regs.write_u64(RTADDR_REG, root.phys());
         unit.command(SET_ROOT_TABLE_POINTER, false, ROOT_TABLE_SET, "the root table pointer");
+        if let Some(irta) = irta {
+            unit.regs.write_u64(interrupt::IRTA_REG, irta);
+            unit.command(
+                interrupt::SET_TABLE_POINTER,
+                false,
+                interrupt::SET_TABLE_POINTER,
+                "the interrupt remap table pointer",
+            );
+            queue.invalidate_interrupts(unit.regs);
+        }
         queue.invalidate_all(unit.regs);
-        root
+        (root, queue)
     };
 
     unit.command(TRANSLATION_ENABLE, true, TRANSLATION_ENABLE, "translation");
+    // `GCMD.CFI` is never among the bits `command` writes, so every write leaves
+    // it clear and `GSTS.CFIS` reads clear: a compatibility-format message is
+    // blocked from here on, which is the whole point of the step.
+    if remap.is_some() {
+        unit.command(
+            interrupt::INTERRUPT_REMAPPING_ENABLE,
+            true,
+            interrupt::INTERRUPT_REMAPPING_ENABLE,
+            "interrupt remapping",
+        );
+        // After `IRE`, so nothing is invalidated on a unit that is not yet reading the table.
+        interrupt::adopt(unit.regs, queue);
+    }
 
     let gsts = unit.regs.read_u32(GSTS_REG);
     log!(
-        "iommu: unit{index} @{:#x} translating gsts={gsts:#010x} tes={} qies={} root={:#x} \
-         domain={} aw={} streams={}",
+        "iommu: unit{index} @{:#x} translating gsts={gsts:#010x} tes={} qies={} ires={} cfis={} \
+         irt={:#x} irta={:#x} eime={} root={:#x} domain={} aw={} streams={}",
         unit.base,
         yn(gsts & TRANSLATION_ENABLE != 0),
         yn(gsts & QUEUED_INVALIDATION_ENABLE != 0),
+        yn(gsts & interrupt::INTERRUPT_REMAPPING_ENABLE != 0),
+        yn(gsts & interrupt::COMPATIBILITY_FORMAT != 0),
+        interrupt::table_address(),
+        unit.regs.read_u64(interrupt::IRTA_REG),
+        yn(remap == Some(true)),
         root.phys(),
         table::KERNEL_DOMAIN,
         width.bits(),
@@ -398,13 +505,24 @@ fn describe_scopes(owner: &str, index: usize, scopes: Scopes) {
     }
 }
 
+/// Device scope type 3, whose enumeration id is an I/O APIC's MADT id.
+const SCOPE_IOAPIC: u8 = 3;
+
 fn log_scope(owner: &str, index: usize, scope: &Scope) {
     match scope.stream_id() {
-        Some(stream) => log!(
-            "iommu: {owner}{index} scope {} {stream} id={}",
-            scope.kind_name(),
-            scope.enumeration_id()
-        ),
+        Some(stream) => {
+            log!(
+                "iommu: {owner}{index} scope {} {stream} id={}",
+                scope.kind_name(),
+                scope.enumeration_id()
+            );
+            // The only place an I/O APIC's requester id is stated: it sits on a
+            // pseudo-bus no PCI walk reaches, so firmware naming it here is the
+            // whole of what a source-id check on a pin can be built from.
+            if scope.kind() == SCOPE_IOAPIC {
+                interrupt::describe_apic(scope.enumeration_id(), stream);
+            }
+        }
         // No requester id for a device behind a bridge; print what firmware
         // wrote instead.
         None => log!(

@@ -20,16 +20,25 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::qemu::{self, BootOptions, Profile, QemuInstance};
+
+/// Offsets into a unit's register window, Sections 11.4.4.2 and 11.4.10.
+const GSTS_REG: u64 = 0x1C;
+const IRTA_REG: u64 = 0xB8;
 use super::serial::Serial;
 
-/// The four machines, and what each one moves.
+/// The five machines, and what each one moves.
 ///
 /// [`Profile::Metal`] is the reference: the configuration every other profile
 /// in the suite runs, so a difference below is a difference the profile made
-/// and not one the shape did — all four are metal-sim and differ in the unit
+/// and not one the shape did — all five are metal-sim and differ in the unit
 /// alone.
-const MACHINES: &[Profile] =
-    &[Profile::Metal, Profile::NoIommu, Profile::IommuNarrow, Profile::IommuNoIntremap];
+const MACHINES: &[Profile] = &[
+    Profile::Metal,
+    Profile::NoIommu,
+    Profile::IommuNarrow,
+    Profile::IommuNoIntremap,
+    Profile::IommuEim,
+];
 
 pub fn iommu_discovery(
     test_config: &Path,
@@ -40,7 +49,7 @@ pub fn iommu_discovery(
 
     for &profile in MACHINES {
         let name = profile_name(profile);
-        let options = BootOptions { profile, ..Default::default() };
+        let options = BootOptions { profile, qmp: true, ..Default::default() };
         argv_check(profile, &qemu::profile_argv(&options))?;
 
         let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
@@ -52,6 +61,7 @@ pub fn iommu_discovery(
         log.must_say("Boot: complete")?;
 
         let Some(unit) = profile.iommu() else {
+            interrupt_format(&log, name, None, None)?;
             // `Absent` is firmware answering the question, and the answer is
             // one a user can act on — so the line names the firmware setting
             // as well as the hardware. What makes this assertion mean
@@ -88,6 +98,7 @@ pub fn iommu_discovery(
         // The decode, against what the profile asked QEMU for.
         expect(&field("aw")?, &unit.aw_bits.to_string(), "aw", name, line)?;
         expect(&field("ir")?, if unit.intremap { "y" } else { "n" }, "ir", name, line)?;
+        expect(&field("eim")?, if unit.eim { "y" } else { "n" }, "eim", name, line)?;
         // Not a profile dimension, and asserted because the whole suite rests
         // on it: `caching-mode=on` is what makes QEMU's IOTLB a real cache and
         // the map-side invalidation load-bearing, and 2 MiB
@@ -112,6 +123,10 @@ pub fn iommu_discovery(
         // requester ids that look like addresses and match no device.
         let scopes = scope_check(&log, name)?;
 
+        // The `intremap=off` machine is what makes this mean something: the same
+        // parser over the same lines has to reach the opposite verdict on it.
+        interrupt_format(&log, name, Some(qemu.qmp_socket()), unit.intremap.then_some(unit.eim))?;
+
         eprintln!(
             "  [iommu] {name}: aw={} ir={} cap={} ecap={} — {scopes} PCI scopes matched",
             field("aw")?,
@@ -122,13 +137,14 @@ pub fn iommu_discovery(
         decoded.insert(name, fields);
     }
 
-    // The negative control, and the reason this test boots four machines
+    // The negative control, and the reason this test boots five machines
     // instead of one. Each pair below differs in one QEMU knob, so a decode
     // that reports the same value for both is a decode that is not reading the
     // register the knob moves.
     for (a, b, key) in [
         (profile_name(Profile::Metal), profile_name(Profile::IommuNarrow), "aw"),
         (profile_name(Profile::Metal), profile_name(Profile::IommuNoIntremap), "ir"),
+        (profile_name(Profile::Metal), profile_name(Profile::IommuEim), "eim"),
     ] {
         let (Some(left), Some(right)) = (decoded.get(a), decoded.get(b)) else {
             return Err(format!("{a} or {b} produced no unit line to compare"));
@@ -158,7 +174,478 @@ pub fn iommu_discovery(
         eprintln!("  [iommu] {a} vs {b}: {key} {lv} != {rv}, out of {raw} {lr} != {rr}");
     }
 
+    destination_encoding(test_config, c_bins, rust_bins)
+}
+
+/// The two ways an entry can name a CPU, told apart.
+///
+/// `EIME` puts a 32-bit id at `DST` 63:32 and its absence an 8-bit one at 47:40
+/// (Section 9.9) — the same bits for APIC 0, which is where every interrupt in
+/// this kernel goes, so a kernel with the two backwards boots green everywhere.
+/// `iommu-dest-apic1` moves the device messages to APIC 1, where they differ.
+fn destination_encoding(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut seen = Vec::new();
+    for (profile, extended) in [(Profile::Metal, false), (Profile::IommuEim, true)] {
+        let options = BootOptions {
+            profile,
+            qmp: true,
+            kernel_params: &["iommu-dest-apic1"],
+            ..Default::default()
+        };
+        let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+        let log = Serial::boot(&qemu);
+        log.must_be_clean()?;
+        log.must_say("Boot: complete")?;
+        let name = profile_name(profile);
+        interrupt_format(&log, name, Some(qemu.qmp_socket()), Some(extended))?;
+
+        // A PCI function's entry: the pins keep the boot CPU either way.
+        let entries = table_entries(&log, name)?;
+        let moved = entries
+            .iter()
+            .find(|e| e.apic == 1)
+            .ok_or_else(|| format!("{name}: no entry was moved to APIC 1 by the actuator"))?;
+        let base = interrupt_table_base(&log, name, qemu.qmp_socket())?;
+        let (lo, _) = table_word(qemu.qmp_socket(), base, moved.index)?;
+        seen.push((name, lo >> 32));
+        eprintln!("  [iommu] {name}: APIC 1 encodes as DST {:#x}", lo >> 32);
+    }
+    let [(a, left), (b, right)] = seen[..] else {
+        return Err("the destination arm booted the wrong number of machines".to_string())
+    };
+    if left == right {
+        return Err(format!(
+            "{a} and {b} both put APIC 1 at DST {left:#x}, and one has EIME set and the other \
+             does not — the encoding is not moving with the mode"
+        ));
+    }
     Ok(())
+}
+
+/// The table's address out of `IRTA_REG`, over the monitor.
+fn interrupt_table_base(log: &Serial, name: &str, socket: &Path) -> Result<u64, String> {
+    let line = log.must_say("translating gsts=")?;
+    let window = line
+        .split(" @")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| format!("{name}: no register window on {line:?}"))?;
+    Ok(over_qmp(socket, window + IRTA_REG, 1, 'g')?[0] & !0xFFF)
+}
+
+fn table_word(socket: &Path, base: u64, index: u16) -> Result<(u64, u64), String> {
+    let words = over_qmp(socket, base + u64::from(index) * 16, 2, 'g')?;
+    Ok((words[0], words[1]))
+}
+
+/// Every interrupt source in the machine, in the format the hardware holds it.
+///
+/// Stage I3, and the trap is a source nobody moved. The specification blocks a
+/// compatibility-format message under `IRE` with `CFI` clear, so on real
+/// hardware a source left behind is a device that has silently stopped — but
+/// QEMU delivers it anyway
+/// (`issues/kernel/qemu-passes-compatibility-format-interrupts.md`), so no
+/// behavioural test in this suite can see one and this is the only thing that
+/// can. So it starts at hardware: `GSTS` and `IRTA_REG` are read out of the
+/// unit's register window over the monitor, the table is read at **the address
+/// `IRTA_REG` holds** and not the one the kernel printed, and every requester id
+/// is checked against this machine's PCI walk and DMAR scope. The kernel's line
+/// is checked against all of it — naming a page the register does not hold reds.
+///
+/// [`Profile::Headless`] carries the most sources of both kinds — the i8042's
+/// two pins, and xHCI, virtio-net and virtio-sound over MSI-X.
+///
+/// **Per pull request this is the one machine that runs.** The machines that
+/// make the verdict move — `intremap=off`, and `eim=on` for the other entry
+/// format — are [`iommu_discovery`]'s, and that is nightly, so a change that
+/// broke only the not-remapping arm would land and be caught the next night.
+pub fn iommu_interrupt_remapping(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions { profile: Profile::Headless, qmp: true, ..Default::default() };
+    let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let log = Serial::boot(&qemu);
+    log.must_be_clean()?;
+    log.must_say("Boot: complete")?;
+    interrupt_format(&log, "headless", Some(qemu.qmp_socket()), Some(false))
+}
+
+/// `count` words of guest *physical* address space at `base`, over the monitor.
+/// `xp` reaches the unit's MMIO window as readily as RAM, which is what lets the
+/// checks below start at a register rather than at a number the guest printed.
+fn over_qmp(socket: &Path, base: u64, count: usize, width: char) -> Result<Vec<u64>, String> {
+    let dump = qemu::QmpMonitor::open(socket).human(&format!("xp/{count}x{width} 0x{base:x}"));
+    let mut words = Vec::new();
+    for token in dump.split_whitespace() {
+        let Some(hex) = token.strip_prefix("0x") else { continue };
+        let hex = hex.trim_end_matches(|c: char| !c.is_ascii_hexdigit());
+        words.push(
+            u64::from_str_radix(hex, 16)
+                .map_err(|_| format!("unreadable word {token:?} in\n{dump}"))?,
+        );
+    }
+    if words.len() != count {
+        return Err(format!(
+            "the monitor returned {} words for {count} at {base:#x}:\n{dump}",
+            words.len()
+        ));
+    }
+    Ok(words)
+}
+
+/// One machine's sources, judged against whether its unit remaps at all and,
+/// if it does, whether its entries name a 32-bit destination.
+fn interrupt_format(
+    log: &Serial,
+    name: &str,
+    socket: Option<&Path>,
+    mode: Option<bool>,
+) -> Result<(), String> {
+    let remapping = mode.is_some();
+    let entries = table_entries(log, name)?;
+    if remapping != !entries.is_empty() {
+        return Err(format!(
+            "{name}: the unit remaps interrupts = {remapping}, and the kernel wrote {} table \
+             entries. Neither number is allowed to move without the other",
+            entries.len()
+        ));
+    }
+
+    // A machine with no unit prints no unit line, and must be one that does not remap.
+    let sources = source_formats(log, name)?;
+    if sources.is_empty() {
+        return Err(format!(
+            "{name}: this machine armed no interrupt source at all, so there is nothing here to \
+             be in the right format"
+        ));
+    }
+    for source in &sources {
+        if source.remappable != remapping {
+            return Err(format!(
+                "{name}: {} is in {} format and the unit remaps = {remapping}. Under IRE with \
+                 CFI clear a compatibility-format message is blocked, so this source has stopped",
+                source.who,
+                if source.remappable { "remappable" } else { "compatibility" }
+            ));
+        }
+    }
+
+    let Some(line) = log.text().lines().find(|l| l.contains("translating gsts=")).map(str::to_string)
+    else {
+        if remapping {
+            return Err(format!("{name}: no unit is translating, so none can be remapping"));
+        }
+        return report(log, name, mode, &sources);
+    };
+    let fields = unit_fields(&line);
+    let field = |k: &str| -> Result<String, String> {
+        fields.get(k).cloned().ok_or_else(|| format!("{name}: no {k}= on {line:?}"))
+    };
+    let socket = socket.ok_or_else(|| format!("{name}: this gate needs BootOptions {{ qmp }}"))?;
+    // `@0xfed90000` carries no `=`, so it is not one of the fields above.
+    let window = line
+        .split(" @")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| format!("{name}: no register window on {line:?}"))?;
+
+    // GSTS and IRTA_REG out of that window, and the kernel's line checked
+    // against them — the only direction that catches a kernel misreporting them.
+    let gsts = over_qmp(socket, window + GSTS_REG, 1, 'w')?[0] as u32;
+    let irta = over_qmp(socket, window + IRTA_REG, 1, 'g')?[0];
+    let ires = gsts & (1 << 25) != 0;
+    let cfis = gsts & (1 << 23) != 0;
+    expect(&field("gsts")?, &format!("{gsts:#010x}"), "gsts", name, &line)?;
+    expect(&field("ires")?, if ires { "y" } else { "n" }, "ires", name, &line)?;
+    expect(&field("cfis")?, if cfis { "y" } else { "n" }, "cfis", name, &line)?;
+    expect(&field("irta")?, &format!("{irta:#x}"), "irta", name, &line)?;
+    if ires != remapping {
+        return Err(format!("{name}: GSTS.IRES is {ires} where the unit remaps = {remapping}\n{line}"));
+    }
+    // `CFI` is the bit that would let a compatibility message through. It cannot
+    // fail here — QEMU defines VTD_GCMD_CFI and VTD_GSTS_CFIS and references
+    // neither — so it states the kernel's intent for whoever reads it on
+    // hardware; it is not an instrument.
+    if cfis {
+        return Err(format!(
+            "{name}: GSTS.CFIS is set, so the unit passes compatibility-format interrupts through \
+             unremapped\n{line}"
+        ));
+    }
+
+    let mut memory = Vec::new();
+    if let Some(extended) = mode {
+        // The address the unit walks is IRTA's, never the kernel's `irt=`.
+        let base = irta & !0xFFF;
+        if (irta & (1 << 11) != 0) != extended {
+            return Err(format!(
+                "{name}: IRTA_REG is {irta:#x}, whose EIME is {} where this unit's ECAP.EIM says \
+                 {extended}\n{line}",
+                irta & (1 << 11) != 0
+            ));
+        }
+        expect(&field("irt")?, &format!("{base:#x}"), "irt", name, &line)?;
+        let highest = entries.iter().map(|e| e.index).max().unwrap_or(0) as usize;
+        memory = over_qmp(socket, base, (highest + 1) * 2, 'g')?
+            .chunks(2)
+            .map(|pair| (pair[0], pair[1]))
+            .collect();
+    }
+
+    if !remapping {
+        return report(log, name, mode, &sources);
+    }
+
+    // Two requester ids that no single source could produce: a PCI function's,
+    // which the walk printed, and the I/O APIC's, which sits on a pseudo-bus no
+    // walk reaches and exists only in the DMAR scope.
+    let functions = enumerated_functions(log);
+    let apics = scope_sources(log);
+    if apics.is_empty() {
+        return Err(format!("{name}: the unit named no I/O APIC scope to take a source id from"));
+    }
+
+    // The handle a source carries has to reach the entry that verifies *its
+    // own* requester id. A source pointed at somebody else's entry would be
+    // refused by the unit for source-id verification, and a gate that only
+    // asked whether the entry existed would call that correct.
+    for source in &sources {
+        let want = match &source.requester {
+            Requester::Function(bdf) => bdf.clone(),
+            Requester::Controller(id) => apics.get(id).cloned().ok_or_else(|| {
+                format!("{name}: {} sits on a chip the unit's scopes never named", source.who)
+            })?,
+        };
+        let Some(entry) = entries.iter().find(|e| e.index == source.handle) else {
+            return Err(format!(
+                "{name}: {} carries handle {}, and the kernel wrote no table entry with that \
+                 index — the unit would refuse it as out of bounds",
+                source.who, source.handle
+            ));
+        };
+        if entry.source != want {
+            return Err(format!(
+                "{name}: {} carries handle {}, and irte{} is verified against {} rather than \
+                 {want} — the unit refuses that message for source-id verification",
+                source.who, source.handle, entry.index, entry.source
+            ));
+        }
+    }
+
+    let mut from_pci = 0usize;
+    let mut from_apic = 0usize;
+    for entry in &entries {
+        let (lo, hi) = memory[entry.index as usize];
+        // Section 9.9: P bit 0, V 23:16, DST 63:32, SID 79:64, SQ 81:80, SVT 83:82.
+        let (svt, sq, sid) = ((hi >> 18) & 0x3, (hi >> 16) & 0x3, hi & 0xFFFF);
+        if svt != 1 || sq != 0 {
+            return Err(format!(
+                "{name}: irte{} is SVT={svt} SQ={sq} in the memory the unit reads, so a message \
+                 carrying any other requester id would be remapped through it. Every entry is \
+                 verified against all sixteen bits of one source id",
+                entry.index
+            ));
+        }
+        if lo & 1 == 0 {
+            return Err(format!("{name}: irte{} is not Present in memory", entry.index));
+        }
+        // Not two witnesses: the kernel's read of these bytes against the
+        // host's, which catches it reporting a table the register does not name.
+        if format!("{sid:#06x}") != entry.sid {
+            return Err(format!(
+                "{name}: irte{} carries SID {sid:#06x} in memory and the kernel reported {}",
+                entry.index, entry.sid
+            ));
+        }
+        // `entry.apic` is the id the kernel was *given*; `DST` is where it put
+        // it. Section 9.9 puts a 32-bit id at 63:32 under EIME and an 8-bit one
+        // at 47:40 without, so the two differ for every id but 0.
+        let dst = lo >> 32;
+        let want = if mode == Some(true) { entry.apic } else { entry.apic << 8 };
+        if dst != want {
+            return Err(format!(
+                "{name}: irte{} has DST {dst:#x} where APIC {:#x} in {} mode encodes as {want:#x}",
+                entry.index,
+                entry.apic,
+                if mode == Some(true) { "extended" } else { "xAPIC" }
+            ));
+        }
+        if apics.values().any(|sid| *sid == entry.source) {
+            from_apic += 1;
+        } else if functions.contains(&entry.source) {
+            from_pci += 1;
+        } else {
+            return Err(format!(
+                "{name}: irte{} is verified against {}, which is neither a function this machine \
+                 enumerated ({functions:?}) nor an I/O APIC the unit scoped ({apics:?})",
+                entry.index, entry.source
+            ));
+        }
+    }
+    if from_pci == 0 || from_apic == 0 {
+        return Err(format!(
+            "{name}: {from_pci} entries name a PCI function and {from_apic} name the I/O APIC. \
+             Both paths into the unit have to be covered or half of this gate is vacuous"
+        ));
+    }
+    let indices: BTreeSet<u16> = entries.iter().map(|e| e.index).collect();
+    if indices.len() != entries.len() {
+        return Err(format!(
+            "{name}: {} entries over {} distinct indices — two sources share a handle, so one \
+             of them is delivered as the other",
+            entries.len(),
+            indices.len()
+        ));
+    }
+
+    report(log, name, mode, &sources)?;
+    eprintln!(
+        "  [iommu] {name}: {} entries at the address IRTA_REG holds ({from_pci} pci, \
+         {from_apic} ioapic), all SVT=1 SQ=0 Present",
+        entries.len()
+    );
+    Ok(())
+}
+
+fn report(log: &Serial, name: &str, mode: Option<bool>, sources: &[Source]) -> Result<(), String> {
+    let _ = log;
+    match mode {
+        None => eprintln!(
+            "  [iommu] {name}: no remapping, and all {} source(s) in compatibility format",
+            sources.len()
+        ),
+        Some(extended) => eprintln!(
+            "  [iommu] {name}: IRES=1 CFIS=0 EIME={}, {} source(s) remappable",
+            u8::from(extended),
+            sources.len()
+        ),
+    }
+    Ok(())
+}
+
+/// What the kernel reported reading back out of one entry, all of it cross-checked against memory.
+struct Entry {
+    index: u16,
+    source: String,
+    sid: String,
+    /// The APIC id it was handed, as against the `DST` field it encoded into.
+    apic: u64,
+}
+
+fn table_entries(log: &Serial, name: &str) -> Result<Vec<Entry>, String> {
+    let mut entries = Vec::new();
+    for line in log.text().lines() {
+        let Some(rest) = line.split("iommu: irte").nth(1) else { continue };
+        let (index, _) = rest
+            .split_once(' ')
+            .ok_or_else(|| format!("{name}: unreadable table entry line: {line:?}"))?;
+        let index: u16 = index
+            .parse()
+            .map_err(|_| format!("{name}: {index:?} is not an entry index: {line:?}"))?;
+        let fields = unit_fields(line);
+        let field = |k: &str| -> Result<String, String> {
+            fields.get(k).cloned().ok_or_else(|| format!("{name}: no {k}= on {line:?}"))
+        };
+        entries.push(Entry {
+            index,
+            source: field("source")?,
+            sid: field("sid")?,
+            apic: u64::from_str_radix(field("apic")?.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable apic on {line:?}"))?,
+        });
+    }
+    Ok(entries)
+}
+
+enum Requester {
+    /// A PCI function, which the walk printed as `bb:dd.f`.
+    Function(String),
+    /// An interrupt controller, by MADT id: its requester id exists only in the DMAR.
+    Controller(String),
+}
+
+struct Source {
+    who: String,
+    requester: Requester,
+    remappable: bool,
+    handle: u16,
+}
+
+fn source_formats(log: &Serial, name: &str) -> Result<Vec<Source>, String> {
+    let mut sources = Vec::new();
+    for line in log.text().lines() {
+        let fields = unit_fields(line);
+        if let Some(rest) = line.split("ioapic: gsi ").nth(1) {
+            let gsi = rest.split(' ').next().unwrap_or_default();
+            let (Some(id), Some(rte)) = (fields.get("id"), fields.get("rte")) else {
+                return Err(format!("{name}: unreadable redirection entry line: {line:?}"));
+            };
+            let rte = u64::from_str_radix(rte.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable rte on {line:?}"))?;
+            // Figure 5-3: format bit 48, index 63:49, index[15] at bit 11.
+            sources.push(Source {
+                who: format!("the pin on GSI {gsi}"),
+                requester: Requester::Controller(id.clone()),
+                remappable: rte & (1 << 48) != 0,
+                handle: ((rte >> 49) & 0x7FFF) as u16 | (((rte >> 11) & 1) as u16) << 15,
+            });
+        } else if line.contains(": msix address=") || line.contains(": msi address=") {
+            let (Some(address), Some(data)) = (fields.get("address"), fields.get("data")) else {
+                return Err(format!("{name}: unreadable message line: {line:?}"));
+            };
+            let Some(who) = line
+                .split("PCI ")
+                .nth(1)
+                .and_then(|r| r.split_whitespace().next())
+                .map(|bdf| bdf.trim_end_matches(':'))
+            else {
+                return Err(format!("{name}: a message line naming no function: {line:?}"));
+            };
+            let address = u32::from_str_radix(address.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable message address on {line:?}"))?;
+            let data = u32::from_str_radix(data.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable message data on {line:?}"))?;
+            // Figure 5-4: format bit 4, SHV bit 3, handle 19:5, handle[15] at bit 2.
+            let remappable = address & (1 << 4) != 0;
+            let handle = ((address >> 5) & 0x7FFF) as u16 | (((address >> 2) & 1) as u16) << 15;
+            if remappable && (address & (1 << 3) == 0 || data != 0) {
+                return Err(format!(
+                    "{name}: {who} writes a remappable message with SHV={} and data={data:#x}; \
+                     Figure 5-4 sets SHV and programs the data register to 0h, and the index the \
+                     unit computes is handle plus subhandle",
+                    (address >> 3) & 1
+                ));
+            }
+            sources.push(Source {
+                who: format!("the message-signalled interrupt of {who}"),
+                requester: Requester::Function(who.to_string()),
+                remappable,
+                handle,
+            });
+        }
+    }
+    Ok(sources)
+}
+
+/// The requester id the unit's scopes give each interrupt controller, by MADT id.
+fn scope_sources(log: &Serial) -> BTreeMap<String, String> {
+    let mut named = BTreeMap::new();
+    for line in log.text().lines() {
+        let Some(rest) = line.split("scope ioapic ").nth(1) else { continue };
+        let Some(sid) = rest.split(' ').next() else { continue };
+        if let Some(id) = unit_fields(line).get("id") {
+            named.insert(id.clone(), sid.to_string());
+        }
+    }
+    named
 }
 
 /// The needle that says the unit blocked something, and the marker both gates
@@ -483,6 +970,7 @@ fn profile_name(profile: Profile) -> &'static str {
         Profile::NoIommu => "no-iommu",
         Profile::IommuNarrow => "narrow",
         Profile::IommuNoIntremap => "no-intremap",
+        Profile::IommuEim => "eim",
         _ => "unexpected",
     }
 }
@@ -526,6 +1014,7 @@ fn argv_check(profile: Profile, argv: &[String]) -> Result<(), String> {
             for field in [
                 format!("aw-bits={}", want.aw_bits),
                 format!("intremap={}", if want.intremap { "on" } else { "off" }),
+                format!("eim={}", if want.eim { "on" } else { "off" }),
                 String::from("caching-mode=on"),
             ] {
                 if !d.contains(&field) {

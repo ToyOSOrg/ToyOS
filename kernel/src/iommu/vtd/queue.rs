@@ -16,6 +16,8 @@ const QUEUE_ENTRIES: usize = 256;
 
 const CONTEXT_CACHE: u64 = 0x1;
 const IOTLB: u64 = 0x2;
+/// Type 4h, Section 6.5.2.7 — granularity inverted against the two above: clear is global.
+const INTERRUPT_ENTRY_CACHE: u64 = 0x4;
 const WAIT: u64 = 0x5;
 
 /// Granularity field, bits 5:4: `01` is global — every domain, every entry.
@@ -64,6 +66,13 @@ impl Queue {
                 (IOTLB | GLOBAL | DRAIN_WRITES | DRAIN_READS, 0),
             ],
         );
+    }
+
+    /// Every cached interrupt remapping entry, gone. Owed after `SIRTP` where
+    /// `CAP.ESIRTPS` is clear (Section 6.7); sent only to a unit that remaps,
+    /// since a type it does not implement stalls its queue.
+    pub fn invalidate_interrupts(&mut self, regs: Mmio) {
+        self.submit(regs, &[(INTERRUPT_ENTRY_CACHE, 0)]);
     }
 
     fn submit(&mut self, regs: Mmio, descriptors: &[(u64, u64)]) {
