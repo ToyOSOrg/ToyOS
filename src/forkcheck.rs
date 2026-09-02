@@ -714,7 +714,7 @@ mod tests {
     /// without which nothing here would be judged at all.
     fn tree(case: &Path, url: &Path, branch: &str, rev: &str) -> PathBuf {
         let root = case.join("tree");
-        fs::create_dir_all(&root.join("rust")).unwrap();
+        fs::create_dir_all(root.join("rust")).unwrap();
         fs::write(root.join("rust/Cargo.toml"), "[package]\nname = \"r\"\n").unwrap();
         fs::write(
             root.join("forks.toml"),
