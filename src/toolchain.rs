@@ -1133,7 +1133,13 @@ pub fn ensure(
         Scope::Global,
         "link the toyos rustup toolchain",
         || link_stale(&stage2).then_some(()),
-        |()| run("rustup", &["toolchain", "link", "toyos", stage2.to_str().unwrap()]),
+        |()| {
+            let status = Command::new("rustup")
+                .args(["toolchain", "link", "toyos", stage2.to_str().unwrap()])
+                .status()
+                .unwrap_or_else(|e| panic!("Failed to run rustup: {e}"));
+            assert!(status.success(), "rustup toolchain link failed");
+        },
     );
 
     // After both bootstrap steps above, because either of them recreates `bin/`
@@ -1497,8 +1503,14 @@ fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<String>) {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::sync::{Arc, Mutex};
 
-    let x = if rust_dir.join("x").exists() { "./x" } else { "./x.py" };
-    let mut child = Command::new(x)
+    // Two literals and not one variable: `src/sourcegate::every_binary_the_host_runs_is_declared`
+    // reads the argument, and a name assembled at run time is a name nobody declared.
+    let (x, mut command) = if rust_dir.join("x").exists() {
+        ("./x", Command::new("./x"))
+    } else {
+        ("./x.py", Command::new("./x.py"))
+    };
+    let mut child = command
         .args(args)
         .env("BOOTSTRAP_SKIP_TARGET_SANITY", "1")
         .current_dir(rust_dir)
@@ -1818,14 +1830,6 @@ fn link_host_target(rust_dir: &Path) {
             e
         )
     });
-}
-
-fn run(cmd: &str, args: &[&str]) {
-    let status = Command::new(cmd)
-        .args(args)
-        .status()
-        .unwrap_or_else(|e| panic!("Failed to run {cmd}: {e}"));
-    assert!(status.success(), "{cmd} failed");
 }
 
 #[cfg(test)]

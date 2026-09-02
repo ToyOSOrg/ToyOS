@@ -164,6 +164,19 @@ Eight files, all byte-identical to Phosphor Icons originals (verified with
                           folder-bold
 
     Copyright (c) 2020-2024 Phosphor Icons
+
+Digests taken 2026-09-01, when `src/sourcegate.rs` started reading this file:
+these eight are text, so the committed-binary walk never saw them and a ninth
+would have arrived unremarked. `assets/` is walked whole for that reason.
+
+    sha256 8e107bfe4c746c762c97a7dbb6472db4669947ccdb5498fa843448ce8f6b69f4  arrow-down-right-bold.svg
+    sha256 d1c42a390a49ef683b42e7aa2f45da0cf7f0ebdecf6a4977b2c2e2f2226fd594  crosshair-simple-bold.svg
+    sha256 cc39efe6482c577e6a3ccedf6efcad26769a9eb0bc2868fb18f9a22de43bf172  cursor-bold.svg
+    sha256 b74d67f0af33fc62e83fbb2c7c8189f37713f482f06685088d46f8592f0e660f  file-bold.svg
+    sha256 3f564dd4a0d27706ff9cb2d9738cef9ac1009b70f82d1da6d3bac119e41949a0  folder-bold.svg
+    sha256 ec912ee836d44c0e94e2493e7efbf9c4b93ee9c0dd9193d19cf86448b7e31dcd  minus-bold.svg
+    sha256 d8284370bac0b7ccb3760fc1cd214f36f716e2724e4abd63eb2696bc345bdc45  square-bold.svg
+    sha256 394ad30f37b493b58cc7c26e816d7ec0bf7acc4a583fa39c9aed438c19b5fc57  x-bold.svg
     Licence text: licenses/MIT-PhosphorIcons.txt
 
 MIT requires the notice to be included in copies. Before this file the only
