@@ -101,13 +101,11 @@ const MANIFEST: &str = "/etc/system.manifest";
 const BIN: &str = "/bin";
 const MULTICALL: &str = "/bin/toybox";
 
-/// The manifest records a `program` row may grant: everything that reaches the
-/// spawned process as authority rather than as an argument.
+/// What reaches a spawned process as authority rather than as an argument.
 const AUTHORITY: &[&str] = &["serve", "provide", "receive", "device", "syscap"];
 
-/// What each applet behind [`MULTICALL`] needs, spelled as the manifest record
-/// that would grant it. An applet with no row here is a new applet nobody has
-/// said anything about, and is a red.
+/// What each applet behind [`MULTICALL`] needs, as the manifest record that
+/// would grant it. An applet with no row here is one nobody has spoken for.
 const APPLET_NEEDS: &[(&str, &[&str])] = &[
     ("cat", &[]),
     ("cp", &[]),
