@@ -11,10 +11,17 @@ holds the tracker to it. `src/issuegate.rs` derives its `areas` set from the
 directories under `issues/` that hold a file, so a new directory *becomes* an
 area by existing, and every gate then treats citations under it as resolving.
 
-Measured 2026-09-02 on this branch: `issues/networking/an-area-nobody-declared.md`
-plus a citation of it in `NOTICE` — `cargo test --lib issuegate` reported
-`5 passed`. The citation gate that refuses an unknown area was green on it,
-because by then it was a known area.
+Measured 2026-09-02 on this branch — one file under a new directory, plus a
+citation of it in `NOTICE`:
+
+```
+issues/networking/an-area-nobody-declared.md
+test issuegate::tests::every_citation_resolves ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored
+```
+
+The citation gate that refuses an unknown area was green on it, because by then
+it was a known area.
 
 The area list is closed for a reason `issues/README.md` states: an area is a
 directory so that every cross-reference is a path that resolves, and the slug
