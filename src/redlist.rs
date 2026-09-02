@@ -3255,15 +3255,51 @@ fn expiry_note(r: &Red, today: Day) -> String {
     }
 }
 
+/// The index's headline counts, arrived at in one place so that the answer a
+/// reader gets and the gate over it read the same arithmetic. `live` and
+/// `expiring` are both counted among the standing rows alone.
+#[derive(PartialEq, Eq, Debug)]
+pub struct Census {
+    pub rows: usize,
+    pub standing: usize,
+    pub live: usize,
+    pub expiring: usize,
+}
+
+impl Census {
+    pub fn of(rows: &[Red], today: Day) -> Census {
+        let standing = || rows.iter().filter(|r| r.standing == Standing::Stands);
+        Census {
+            rows: rows.len(),
+            standing: standing().count(),
+            live: standing().filter(|r| r.finding.is_red()).count(),
+            expiring: standing()
+                .filter(|r| {
+                    Day::parse(r.measured)
+                        .is_some_and(|d| today.until(d.plus_days(SHELF_LIFE_DAYS)) <= 7)
+                })
+                .count(),
+        }
+    }
+
+    fn rendered(&self) -> String {
+        format!(
+            "{} standing, {} of them live reds, {} expiring within 7 days.",
+            self.standing, self.live, self.expiring
+        )
+    }
+}
+
 fn everything(rows: &[Red], today: Day) -> String {
     let mut names: BTreeSet<&str> = BTreeSet::new();
     for r in rows {
         names.insert(r.test);
     }
     let mut out = format!(
-        "{} measurements of {} tests. `--known-red <test>` for the rows.\n\n",
+        "{} measurements of {} tests. {} `--known-red <test>` for the rows.\n\n",
         rows.len(),
-        names.len()
+        names.len(),
+        Census::of(rows, today).rendered(),
     );
     for test in &names {
         let mine = rows_for(rows, test);
@@ -3515,29 +3551,39 @@ mod tests {
         );
     }
 
-    /// Printed on the way past, because what a reader wants before trusting a
-    /// row is how old it is, and the only honest place for that is a run.
+    /// The arithmetic behind the three numbers the answer opens with, against a
+    /// table small enough to count by hand: the same filters re-typed over
+    /// `KNOWN_RED` would agree with themselves whatever they said.
     #[test]
-    fn the_index_prints_what_it_is_carrying() {
-        let today = Day::today();
-        let standing = KNOWN_RED.iter().filter(|r| r.standing == Standing::Stands).count();
-        let live = KNOWN_RED
-            .iter()
-            .filter(|r| r.standing == Standing::Stands && r.finding.is_red())
-            .count();
-        let due_soon = KNOWN_RED
-            .iter()
-            .filter(|r| r.standing == Standing::Stands)
-            .filter(|r| {
-                Day::parse(r.measured)
-                    .is_some_and(|d| today.until(d.plus_days(SHELF_LIFE_DAYS)) <= 7)
-            })
-            .count();
-        println!(
-            "known-red index: {} rows, {standing} standing, {live} live reds, {due_soon} expiring \
-             within 7 days",
-            KNOWN_RED.len()
+    fn the_index_counts_what_it_is_carrying() {
+        let today = Day::parse("2026-08-11").unwrap();
+        let row = Red {
+            test: "a_real_test",
+            instrument: Instrument::Ci,
+            finding: Finding::fires(1, 5),
+            standing: Standing::Stands,
+            what: "x",
+            evidence: "run 1",
+            source: "src/redlist.rs",
+            measured: "2026-08-10",
+        };
+        // A standing row expires SHELF_LIFE_DAYS after it was measured, so
+        // "expiring within 7 days" reaches 24 days back from `today`.
+        let fixture = [
+            Red { ..row },
+            Red { finding: Finding::Seen, measured: "2026-07-18", ..row },
+            Red { finding: Finding::quiet(5), measured: "2026-07-01", ..row },
+            Red { standing: Standing::Retired("a fix"), ..row },
+            Red { standing: Standing::Disputed("two sources"), finding: Finding::Seen, ..row },
+            Red { finding: Finding::fires(3, 5), measured: "no date at all", ..row },
+        ];
+        assert_eq!(
+            Census::of(&fixture, today),
+            Census { rows: 6, standing: 4, live: 3, expiring: 2 }
         );
+
+        let live = Census::of(KNOWN_RED, Day::today());
+        println!("known-red index: {} rows, {}", live.rows, live.rendered());
     }
 
     /// The four things the gate exists to refuse, run rather than argued. The
