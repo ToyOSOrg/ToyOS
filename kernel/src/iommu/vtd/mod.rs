@@ -9,7 +9,7 @@
 
 pub mod dmar;
 pub mod fault;
-mod interrupt;
+pub mod interrupt;
 mod queue;
 mod table;
 

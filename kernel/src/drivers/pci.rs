@@ -23,6 +23,8 @@ pub const MSIX_ENTRY: u16 = 0;
 
 // Every device interrupt in this kernel targets this LAPIC address, so all land on cpu0.
 const MSG_ADDR: u32 = 0xFEE0_0000;
+// The same CPU, named as a destination rather than encoded in an address, for the unit to put in an entry.
+const MSG_DEST: u32 = 0;
 
 pub struct Capability<'a> {
     device: &'a PciDevice,
@@ -199,16 +201,37 @@ impl PciDevice {
             }
         };
 
+        let Some((message, data)) = self.message(vector) else {
+            return false;
+        };
+
         let entry = address + MSIX_ENTRY as u64 * msix::ENTRY_BYTES;
         let table = crate::mm::paging::map_mmio(entry, 0x1000, MmioPolicy::Uncacheable);
 
-        table.write_u32(msix::ENTRY_ADDRESS_LO, MSG_ADDR);
+        table.write_u32(msix::ENTRY_ADDRESS_LO, message);
         table.write_u32(msix::ENTRY_ADDRESS_HI, 0);
-        table.write_u32(msix::ENTRY_DATA, vector as u32);
+        table.write_u32(msix::ENTRY_DATA, data);
         table.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_UNMASKED);
 
         cap.write_u16(msix::MESSAGE_CONTROL, msix::Msix::enabled(control));
         true
+    }
+
+    /// The address and data this function's interrupt registers take for `vector`.
+    ///
+    /// `None` refuses the device: the machine remaps interrupts and this
+    /// function has no entry, so the message it would otherwise write is one the
+    /// unit blocks.
+    fn message(&self, vector: u8) -> Option<(u32, u32)> {
+        match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, MSG_DEST) {
+            crate::iommu::Delivery::Direct => Some((MSG_ADDR, vector as u32)),
+            crate::iommu::Delivery::Remapped(m) => Some((m.address, m.data)),
+            crate::iommu::Delivery::Refused => {
+                log!("PCI {:02x}:{:02x}.{}: no interrupt remapping entry, not armed",
+                    self.bus, self.dev, self.func);
+                None
+            }
+        }
     }
 
     /// Point this function's single MSI message at `vector` and enable it.
@@ -217,13 +240,17 @@ impl PciDevice {
             return false;
         };
 
+        let Some((message, data)) = self.message(vector) else {
+            return false;
+        };
+
         let control = cap.read_u16(msi::MESSAGE_CONTROL);
         let msi = msi::Msi::decode(control);
-        cap.write_u32(msi.address_lo(), MSG_ADDR);
+        cap.write_u32(msi.address_lo(), message);
         if let Some(address_hi) = msi.address_hi() {
             cap.write_u32(address_hi, 0);
         }
-        cap.write_u16(msi.data(), vector as u16);
+        cap.write_u16(msi.data(), data as u16);
         if let Some(mask) = msi.mask() {
             cap.write_u32(mask, 0);
         }

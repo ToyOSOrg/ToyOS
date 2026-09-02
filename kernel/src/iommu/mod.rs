@@ -49,6 +49,11 @@ impl StreamId {
     pub(in crate::iommu) const fn devfn(self) -> u8 {
         (self.0 & 0xFF) as u8
     }
+
+    /// The 16-bit requester id a source-id check compares against; `pci` is the only constructor, so it always fits.
+    pub(in crate::iommu) const fn requester(self) -> u16 {
+        self.0 as u16
+    }
 }
 
 /// An address a *device* uses. Never a physical address, never a virtual one.
@@ -85,6 +90,62 @@ impl core::fmt::Display for StreamId {
 /// Calls `vtd::init` directly rather than through a dispatch, because x86-64 has one backend and the dispatch is not yet a real seam.
 pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice]) {
     vtd::init(rsdp_addr, devices);
+}
+
+/// How a source must address its interrupt, which is not a yes/no: a unit that
+/// remaps and cannot give this source an entry is a third answer, and a caller
+/// that folded it into [`Delivery::Direct`] would write a message the unit
+/// blocks and lose the device in silence.
+pub enum Delivery<T> {
+    /// No unit remaps interrupts on this machine; write what has always been written.
+    Direct,
+    /// Write this instead — the interrupt now reaches its destination through the unit.
+    Remapped(T),
+    /// The unit remaps and this source has no entry; the caller refuses the device.
+    Refused,
+}
+
+/// The address and data a PCI function writes into its MSI or MSI-X registers.
+pub struct MsiMessage {
+    pub address: u32,
+    pub data: u32,
+}
+
+/// What a pin's redirection entry carries in place of a destination.
+pub struct PinRedirect {
+    pub low: u32,
+    pub high: u32,
+}
+
+/// Where `bus:device.function`'s message-signalled interrupt must point.
+///
+/// Takes the triple rather than a [`StreamId`], which no driver can build: what
+/// a requester id is stays inside this module.
+pub fn remap_msi(
+    bus: u8,
+    device: u8,
+    function: u8,
+    vector: u8,
+    dest: u32,
+) -> Delivery<MsiMessage> {
+    if !vtd::interrupt::is_armed() {
+        return Delivery::Direct;
+    }
+    match vtd::interrupt::msi(StreamId::pci(bus, device, function), vector, dest) {
+        Some(msi) => Delivery::Remapped(MsiMessage { address: msi.address, data: msi.data }),
+        None => Delivery::Refused,
+    }
+}
+
+/// Where a pin on the interrupt controller with `apic_id` must send `vector`.
+pub fn remap_pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Delivery<PinRedirect> {
+    if !vtd::interrupt::is_armed() {
+        return Delivery::Direct;
+    }
+    match vtd::interrupt::pin(apic_id, vector, dest, level) {
+        Some(pin) => Delivery::Remapped(PinRedirect { low: pin.low, high: pin.high }),
+        None => Delivery::Refused,
+    }
 }
 
 /// Reached from the IDT gate the unit's own `FEDATA` names.
