@@ -38,16 +38,20 @@
 //! The fourth names two files, the pipe ring and the user-copy windows, where a
 //! slice or an exclusive reference would claim what the mapping does not give.
 //!
-//! The fifth and sixth are the dependency bar: every argument the host's code
-//! hands to `Command::new`, and every committed file whose terms somebody had
-//! to establish, against the digest `NOTICE` records for it. Both declare
-//! rather than judge — the bar is `CLAUDE.md`'s and its standing failures are
-//! the owner's — and both refuse the undeclared rather than the known-bad,
-//! which is what a scan for a spelling cannot do.
+//! The fifth and sixth are the dependency bar, and each closes a spelling
+//! rather than the rule behind it — say what they close, because a scan over
+//! Rust source cannot say more. The fifth reads the text `Command::new(` and
+//! refuses an argument no row declares, with every non-literal argument pinned
+//! to a file and a count; beside it, a one-line `use`/`type` rename of
+//! `Command` after any visibility is refused, because such a line makes every
+//! row unreachable at once. The sixth reads every committed file that carries
+//! a NUL, plus everything under `assets/`, against the digest `NOTICE` records.
 //!
-//! **The fifth carries a second half**, because a scan on a spelling has one: a
-//! rename of `Command` is refused outright, and an argument that is not a
-//! string literal is pinned to the sites it is read at.
+//! **What neither reaches is filed rather than implied**: a brace-group or
+//! multi-line alias, a spawn that is not `Command` at all, a binary a
+//! third-party crate or a workflow runs. The exit from all of it is one scan
+//! that resolves names the way the compiler does; the entries under
+//! `issues/build/` say so and this does not pretend otherwise.
 
 use std::path::{Path, PathBuf};
 
@@ -440,11 +444,12 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
 
 /// Directories whose Rust is compiled for the guest, by repository-relative
 /// prefix. A ToyOS program spawning `/bin/echo` is spawning a file out of its
-/// own image, and the guest has no way to reach a host binary at all.
 ///
-/// **A `build.rs` is host code wherever it sits** and is walked whatever prefix
-/// it is under: `userland/doom/build.rs` fetches over the network and drives
-/// `cc::Build` on this machine, and excluding `userland` wholesale hid it.
+/// own image, and the guest has no way to reach a host binary at all.
+/// **A crate's build script is host code and is walked**, whatever prefix it is
+/// under: `userland/doom/build.rs` fetches over the network and drives
+/// `cc::Build` on this machine. Both spellings --- the `build.rs` default and
+/// whatever a `build = "…"` key names --- because the key overrides the name.
 const GUEST_CODE: &[&str] = &[
     "rust",
     "kernel/src",
@@ -471,16 +476,20 @@ struct Spawn {
 ///
 /// The dependency bar is Rust and QEMU (`CLAUDE.md`, "Dependencies"), and its
 /// standing failures are declared rather than removed. A row here is that
-/// declaration made checkable: an undeclared name is a red, and so is a name
-/// spelled differently, which is what a scan for known-bad strings cannot say.
+/// declaration made checkable for one spelling: an undeclared argument to
+/// `Command::new(` is a red, and a non-literal one is a red anywhere but the
+/// file and count its row pins.
 ///
-/// **What this scan does not reach**, so that nobody reads it as the whole bar:
-/// a binary a third-party crate runs for us. `userland/doom/build.rs` drives
-/// `cc::Build`, which compiles and then archives with whatever `cc` and `ar` it
-/// finds in `PATH` — the `cc` half is one of the three standing failures
-/// `CLAUDE.md` declares, and neither is a `Command::new` in this repository.
-/// Nor does it reach a workflow or a container image;
-/// `issues/build/nothing-reads-the-workflows-for-a-binary.md` is that half.
+/// **What this scan does not reach**, so that nobody reads it as the whole bar.
+/// A spawn that is not `Command` — `libc::system`, `execvp`, `posix_spawn` —
+/// which `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md` carries.
+/// A binary a third-party crate runs for us: `userland/doom/build.rs` drives
+/// `cc::Build`, which compiles and archives with whatever `cc` and `ar` it
+/// finds in `PATH`, and the `cc` half is one of the three standing failures
+/// `CLAUDE.md` declares. A workflow or a container image, which is
+/// `issues/build/nothing-reads-the-workflows-for-a-binary.md`. And an alias no
+/// one line spells, which is
+/// `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`.
 const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "\"cargo\"",
@@ -560,15 +569,6 @@ const HOST_SPAWNS: &[Spawn] = &[
 const NO_COMMAND_ALIAS: &str =
     "a renamed `Command` spawns past the scan that reads the text `Command::new(`";
 
-/// Whether `code` renames `std::process::Command` --- a `use` rename or a `type`
-/// alias, matched on the item so an ordinary
-/// `let c = std::process::Command::new(…)` is untouched.
-#[cfg(test)]
-fn renames_command(code: &str) -> bool {
-    let code = code.trim_start();
-    (code.starts_with("use ") && code.contains("Command as "))
-        || (code.starts_with("type ") && code.contains("Command"))
-}
 
 /// Every committed file whose terms somebody had to establish, with the digest
 /// of what is committed and where the terms are recorded.
@@ -577,13 +577,14 @@ fn renames_command(code: &str) -> bool {
 /// obligation and the bytes cannot drift apart; anything else names the file
 /// that carries the attribution, or says why it is ours.
 ///
-/// **Two populations, and the walk finds each its own way.** Everything `git`
-/// tracks whose bytes are not text, because a committed binary is a file
-/// nobody can read in review; and everything under `assets/`, text or not,
-/// because that directory is where third-party material arrives — the eight
-/// Phosphor SVGs are text and a ninth would otherwise land unremarked.
-/// `tests/testcases/` is the third-party corpus neither reaches;
-/// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is it.
+/// **Two populations, and each is a spelling too.** Everything `git` tracks
+/// that carries a NUL in its first 8000 bytes, which is git's own heuristic for
+/// a file nobody can read in review; and everything under `assets/`, text or
+/// not, because that directory is where third-party material arrives. A
+/// third-party *text* file anywhere else — a ninth Phosphor SVG one directory
+/// over, `tests/testcases/`'s corpus — is reached by neither;
+/// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
+/// that gap.
 const COMMITTED_FILES: &[(&str, &str, &str)] = &[
     (
         "assets/DOOM1.WAD",
@@ -707,11 +708,79 @@ fn is_binary(bytes: &[u8]) -> bool {
 #[cfg(test)]
 const NOT_OURS: &str = "rust";
 
-/// Every `.rs` file under the repository that runs on the host, which is every
-/// one outside [`GUEST_CODE`] plus every `build.rs` inside it.
+/// Whether `code` renames `std::process::Command` on one line, after any
+/// visibility on the front of it.
+///
+/// A `use` rename and a `type` alias, and only where the item begins the line.
+/// Rather than chase every alias a Rust file can build, this refuses the forms
+/// that spell one on a single line; `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+/// is what it does not reach.
+#[cfg(test)]
+fn renames_command(code: &str) -> bool {
+    let mut code = code.trim_start();
+    if let Some(rest) = code.strip_prefix("pub") {
+        let rest = match rest.strip_prefix('(') {
+            Some(group) => group.split_once(')').map_or("", |(_, after)| after),
+            None => rest,
+        };
+        if rest.starts_with(char::is_whitespace) {
+            code = rest.trim_start();
+        }
+    }
+    (code.starts_with("use ") && code.contains("Command as "))
+        || (code.starts_with("type ") && code.contains("Command"))
+}
+
+/// Every path a `build = "…"` key names, repository-relative.
+///
+/// Cargo's default is `build.rs` and the key overrides it, so a build script
+/// under another name runs on this host and is reached by no walk keyed on the
+/// filename. `userland/doom/Cargo.toml` sets the key today.
+#[cfg(test)]
+fn declared_build_scripts() -> std::collections::BTreeSet<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" || rel(root, &path) == NOT_OURS {
+                continue;
+            }
+            if path.is_dir() {
+                walk(root, &path, out);
+                continue;
+            }
+            if name != "Cargo.toml" {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Ok(doc) = text.parse::<toml::Value>() else { continue };
+            let Some(script) =
+                doc.get("package").and_then(|p| p.get("build")).and_then(|b| b.as_str())
+            else {
+                continue;
+            };
+            let Some(dir) = path.parent() else { continue };
+            out.insert(rel(root, &dir.join(script)));
+        }
+    }
+    let root = repo_root();
+    let mut out = std::collections::BTreeSet::new();
+    walk(&root, &root, &mut out);
+    out
+}
+
+/// Every `.rs` file under the repository that runs on the host: every one
+/// outside [`GUEST_CODE`], plus each crate's build script inside it.
 #[cfg(test)]
 fn host_files() -> Vec<PathBuf> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        scripts: &std::collections::BTreeSet<String>,
+        out: &mut Vec<PathBuf>,
+    ) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         let mut entries: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
         entries.sort();
@@ -725,7 +794,7 @@ fn host_files() -> Vec<PathBuf> {
                 continue;
             }
             if path.is_dir() {
-                walk(root, &path, out);
+                walk(root, &path, scripts, out);
                 continue;
             }
             if !path.extension().is_some_and(|e| e == "rs") {
@@ -734,14 +803,15 @@ fn host_files() -> Vec<PathBuf> {
             let guest = GUEST_CODE
                 .iter()
                 .any(|skip| at == *skip || at.starts_with(&format!("{skip}/")));
-            if !guest || name == "build.rs" {
+            if !guest || name == "build.rs" || scripts.contains(&at) {
                 out.push(path);
             }
         }
     }
     let root = repo_root();
+    let scripts = declared_build_scripts();
     let mut out = Vec::new();
-    walk(&root, &root, &mut out);
+    walk(&root, &root, &scripts, &mut out);
     out
 }
 
@@ -1193,8 +1263,13 @@ mod tests {
     }
 
     /// **A renamed `Command` spawns past the scan above in one line**, which is
-    /// what makes refusing the rename part of the check. It does not reach a
-    /// function pointer taken from `Command::new` itself.
+    /// what makes refusing the rename part of the check. Rather than chase every
+    /// alias a Rust file can build, this refuses the forms that spell one on a
+    /// single line, and no shorter rule does; what it closes is the one-line
+    /// form after any visibility, and
+    /// `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+    /// is the rest. It does not reach a function pointer taken from
+    /// `Command::new` itself either.
     #[test]
     fn no_host_file_renames_command() {
         let root = repo_root();

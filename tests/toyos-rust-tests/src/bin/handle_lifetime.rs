@@ -181,6 +181,9 @@ fn kill_releases_acceptor() {
 /// `do_schedule` entry and the idle loop, none of which a killer can order
 /// against another process's exit. A count of live objects moves only when
 /// somebody makes or releases one, and it is exact: a leak of one is `+1`.
+/// **It is still machine-wide**: the daemons this boot starts run alongside
+/// this binary, so an object one of them makes inside the window would read as
+/// a leak here.
 ///
 /// **Every kind and not the one this arm is about**, because the arrival check
 /// is what says the rings were seen and the reclaim check is about everything
@@ -206,9 +209,10 @@ fn kill_releases_ring() {
     );
 
     kill_and_reap(&mut child);
-    // Dropped before the reading, not after: a live `Child` holds the read end
-    // of the pipe it was spawned with, so a census taken over one counts a
-    // `PipeRead` this arm made and blames the kill for it.
+    // Dropped before the reading, not after: a reaped `Child` still names its
+    // process, so a census taken over one reads `Process` one higher and blames
+    // the kill for it. No pipe end is involved --- `spawn_holder`'s reader is
+    // bound to `_` and is gone at the call.
     drop(child);
 
     let after = settled_census();
