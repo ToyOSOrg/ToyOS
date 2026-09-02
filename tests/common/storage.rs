@@ -38,7 +38,7 @@ pub fn foreign_disk_untouched(
     let dir = super::lane::dir();
     let image = dir.join("foreign-disk.img");
     foreign_disk_image(&image, BYTES);
-    let before = whole_device(&image, BYTES);
+    let before = whole_device(&image);
 
     // The premise, checked before the boot rather than assumed: if this image
     // somehow already parsed as a ToyOS volume, the kernel would mount it and
@@ -100,7 +100,7 @@ pub fn foreign_disk_untouched(
     }
     drop(qemu);
 
-    let after = whole_device(&image, BYTES);
+    let after = whole_device(&image);
     if let Some(diff) = first_difference(&before, &after) {
         return Err(format!("the kernel wrote to a disk it was not given: {diff}"));
     }

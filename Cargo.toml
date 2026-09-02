@@ -106,8 +106,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # The digest behind two readings that must not be able to agree by accident:
 # `NOTICE`'s record of every committed binary file (`src/sourcegate.rs`), and a
 # disk this system was not given, before and after a boot
-# (`src/fingerprint.rs`). Already in this lockfile through `toyos-ld`, so
-# naming it here resolves nothing new.
+# (`src/fingerprint.rs`). Already resolved here through a dev-dependency, so
+# nothing new is fetched — but `cargo run` did not compile it before this.
 sha2 = "0.10"
 
 [dev-dependencies]

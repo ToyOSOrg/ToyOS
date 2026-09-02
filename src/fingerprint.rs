@@ -17,31 +17,33 @@ use sha2::{Digest, Sha256};
 /// The span one digest covers, and the resolution a difference is reported at.
 pub const BLOCK: u64 = 1024 * 1024;
 
-/// One 32-byte digest per [`BLOCK`] of the first `len` bytes of `path`.
+/// One 32-byte digest per [`BLOCK`], to the end of the file.
 ///
-/// A short read is a difference like any other: the last block's digest is over
-/// the bytes that were there, so a truncation moves the fingerprint.
-pub fn whole_device(path: &Path, len: u64) -> Vec<u8> {
+/// **To the end, not to a declared length**: a device that grew past what the
+/// caller expected is a device that was written to, and a fingerprint bounded
+/// by the caller's number could not see it. The last block is short and
+/// digested short, so a size change in either direction moves the fingerprint.
+pub fn whole_device(path: &Path) -> Vec<u8> {
     let mut file = std::fs::File::open(path)
         .unwrap_or_else(|e| panic!("open {} to fingerprint: {e}", path.display()));
     let mut out = Vec::new();
     let mut buf = vec![0u8; BLOCK as usize];
-    let mut left = len;
-    while left > 0 {
-        let want = usize::try_from(left.min(BLOCK)).expect("a block fits a usize");
+    loop {
         let mut got = 0;
-        while got < want {
-            match file.read(&mut buf[got..want]) {
+        while got < buf.len() {
+            match file.read(&mut buf[got..]) {
                 Ok(0) => break,
                 Ok(n) => got += n,
                 Err(e) => panic!("read {} to fingerprint: {e}", path.display()),
             }
         }
-        out.extend_from_slice(&Sha256::digest(&buf[..got]));
-        if got < want {
+        if got == 0 {
             break;
         }
-        left -= want as u64;
+        out.extend_from_slice(&Sha256::digest(&buf[..got]));
+        if got < buf.len() {
+            break;
+        }
     }
     out
 }
@@ -81,46 +83,45 @@ mod tests {
         path
     }
 
-    /// The reading this replaced took the front and the back, so a write in
-    /// between was invisible to a gate that says "untouched". Every block is
-    /// covered, and the failure says which one.
+    /// Every block is covered, and the failure says which one.
     #[test]
     fn a_write_anywhere_changes_the_fingerprint() {
-        const LEN: u64 = 8 * 1024 * 1024;
+        const LEN: u64 = 8 * BLOCK;
         let path = sparse("midpoint", LEN);
-        let before = whole_device(&path, LEN);
+        let before = whole_device(&path);
         assert_eq!(
             before.len() as u64,
             32 * LEN / BLOCK,
             "one digest per block, and every block of the device"
         );
-        assert_eq!(first_difference(&before, &whole_device(&path, LEN)), None);
+        assert_eq!(first_difference(&before, &whole_device(&path)), None);
 
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).expect("open");
         file.seek(SeekFrom::Start(LEN / 2)).expect("seek");
         file.write_all(&[1]).expect("write");
         drop(file);
 
-        let diff = first_difference(&before, &whole_device(&path, LEN))
+        let diff = first_difference(&before, &whole_device(&path))
             .expect("a byte at the midpoint is a byte the device did not have");
         assert!(diff.contains(&format!("offset {}", LEN / 2)), "{diff}");
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A device that came back shorter is a difference and not a panic: the
-    /// block where the bytes stopped is the one that moved. A fingerprint that
-    /// covers fewer blocks than the one it is held against is the other shape,
-    /// and it is a difference too.
+    /// A device that came back a different size is a difference and not a
+    /// panic, whichever way it moved.
     #[test]
-    fn a_shorter_device_is_a_difference_and_not_a_panic() {
+    fn a_device_that_changed_size_is_a_difference_either_way() {
         const LEN: u64 = 3 * BLOCK;
-        let path = sparse("short", LEN);
-        let before = whole_device(&path, LEN);
+        let path = sparse("resized", LEN);
+        let before = whole_device(&path);
+
         std::fs::File::options().write(true).open(&path).unwrap().set_len(BLOCK).unwrap();
-        let diff = first_difference(&before, &whole_device(&path, LEN)).expect("shorter");
-        assert!(diff.contains(&format!("offset {BLOCK}")), "{diff}");
-        let short = first_difference(&before, &whole_device(&path, BLOCK)).expect("fewer blocks");
-        assert!(short.contains("changed length"), "{short}");
+        let shorter = first_difference(&before, &whole_device(&path)).expect("shorter");
+        assert!(shorter.contains("changed length"), "{shorter}");
+
+        std::fs::File::options().write(true).open(&path).unwrap().set_len(4 * BLOCK).unwrap();
+        let longer = first_difference(&before, &whole_device(&path)).expect("longer");
+        assert!(longer.contains("changed length"), "{longer}");
         let _ = std::fs::remove_file(&path);
     }
 }
