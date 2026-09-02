@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
+use crate::iommu::Delivery;
 use crate::mm::paging::MmioPolicy;
 use crate::log;
 use crate::mm::Mmio;
@@ -62,8 +63,10 @@ pub enum RouteError {
     NoUnit(Gsi),
     /// Destination APIC id does not fit the 8-bit field (0xFF is broadcast).
     DestTooWide(u32),
+    /// The IOMMU remaps interrupts and had no entry to give this pin, and why.
+    NotRemappable(Gsi, crate::iommu::Refused),
     /// The written redirection entry did not read back unchanged.
-    Readback { wrote: u32, read: u32 },
+    Readback { wrote: u64, read: u64 },
 }
 
 /// Hand-written: `derive(Debug)` would print register values in decimal.
@@ -72,8 +75,9 @@ impl core::fmt::Debug for RouteError {
         match self {
             Self::NoUnit(gsi) => write!(f, "no I/O APIC covers GSI {}", gsi.0),
             Self::DestTooWide(id) => write!(f, "apic id {id:#x} does not fit an 8-bit destination"),
+            Self::NotRemappable(gsi, why) => write!(f, "GSI {} cannot be remapped: {why}", gsi.0),
             Self::Readback { wrote, read } => {
-                write!(f, "wrote {wrote:#010x}, read back {read:#010x}")
+                write!(f, "wrote {wrote:#018x}, read back {read:#018x}")
             }
         }
     }
@@ -81,6 +85,8 @@ impl core::fmt::Debug for RouteError {
 
 struct Unit {
     mmio: Mmio,
+    /// The MADT's id for this chip, which is also the name a DMAR device scope gives its source id.
+    id: u8,
     gsi_base: u32,
     entries: u32,
 }
@@ -120,7 +126,7 @@ pub fn init(madt: &MadtInfo) {
     for entry in &madt.io_apics {
         // 0x20 covers IOREGSEL and IOWIN; every entry is reached through those two.
         let mmio = crate::mm::paging::map_mmio(entry.address as u64, 0x20, MmioPolicy::Uncacheable);
-        let mut unit = Unit { mmio, gsi_base: entry.gsi_base, entries: 0 };
+        let mut unit = Unit { mmio, id: entry.id, gsi_base: entry.gsi_base, entries: 0 };
         let ver = unit.read(REG_VER);
         let version = ver & 0xFF;
         unit.entries = ((ver >> 16) & 0xFF) + 1;
@@ -226,6 +232,12 @@ pub fn gsi_for_isa_irq(irq: u8) -> Option<IsaLine> {
     )
 }
 
+/// Every chip this machine routes pins through, by MADT id: the IOMMU needs the
+/// whole set before it can decide anything, and decides once for the machine.
+pub fn ids() -> Vec<u8> {
+    TOPOLOGY.lock().units.iter().map(|u| u.id).collect()
+}
+
 fn locate(topology: &Topology, gsi: Gsi) -> Result<(&Unit, u32), RouteError> {
     topology
         .units
@@ -236,6 +248,10 @@ fn locate(topology: &Topology, gsi: Gsi) -> Result<(&Unit, u32), RouteError> {
 }
 
 /// Point `gsi` at `vector` on one CPU, fixed delivery, physical destination; the entry is left masked.
+///
+/// Under remapping the entry names a table slot and the destination lives in
+/// that slot — but the id must still fit whatever names it, so `DestTooWide`
+/// moves rather than disappearing and arrives as [`Delivery::Refused`].
 pub fn route(
     gsi: Gsi,
     vector: u8,
@@ -243,24 +259,45 @@ pub fn route(
     trigger: Trigger,
     polarity: Polarity,
 ) -> Result<(), RouteError> {
-    if dest_apic_id >= 0xFF {
-        return Err(RouteError::DestTooWide(dest_apic_id));
-    }
     let topology = TOPOLOGY.lock();
     let (unit, n) = locate(&topology, gsi)?;
+    let level = trigger == Trigger::Level;
+    let (index, high) =
+        match crate::iommu::remap_pin(unit.id, vector, dest_apic_id, level) {
+            Delivery::Direct => {
+                if dest_apic_id >= 0xFF {
+                    return Err(RouteError::DestTooWide(dest_apic_id));
+                }
+                (0, dest_apic_id << 24)
+            }
+            Delivery::Remapped(pin) => (pin.low, pin.high),
+            Delivery::Refused(why) => return Err(RouteError::NotRemappable(gsi, why)),
+        };
     let low = vector as u32
+        | index
         | RTE_MASKED
         | if polarity == Polarity::Low { RTE_POLARITY_LOW } else { 0 }
-        | if trigger == Trigger::Level { RTE_TRIGGER_LEVEL } else { 0 };
+        | if level { RTE_TRIGGER_LEVEL } else { 0 };
     // Destination first: writing the low word last means it is never briefly armed at the old destination.
-    unit.write(REG_REDTBL + 2 * n + 1, dest_apic_id << 24);
+    unit.write(REG_REDTBL + 2 * n + 1, high);
     unit.write(REG_REDTBL + 2 * n, low);
     // Delivery status (12) and remote IRR (14) are the chip's, not ours.
     let read_low = unit.read(REG_REDTBL + 2 * n) & !(RTE_DELIVERY_STATUS | RTE_REMOTE_IRR);
-    let read_dest = (unit.read(REG_REDTBL + 2 * n + 1) >> 24) & 0xFF;
-    if read_low != low || read_dest != dest_apic_id {
-        return Err(RouteError::Readback { wrote: low, read: read_low });
+    let read_high = unit.read(REG_REDTBL + 2 * n + 1);
+    if read_low != low || read_high != high {
+        return Err(RouteError::Readback {
+            wrote: u64::from(high) << 32 | u64::from(low),
+            read: u64::from(read_high) << 32 | u64::from(read_low),
+        });
     }
+    // The entry as the chip holds it, which is the only evidence of what format
+    // a pin is really in — what the kernel meant to write is not the same claim.
+    log!(
+        "ioapic: gsi {} on id={} rte={:#018x}",
+        gsi.0,
+        unit.id,
+        u64::from(read_high) << 32 | u64::from(read_low)
+    );
     Ok(())
 }
 
