@@ -456,11 +456,20 @@ pub fn abi_lands_alone(root: &Path, base: &str) -> Result<(), String> {
          whose old form the rest of the tree still uses — put a `{ABI_INSEPARABLE} <why>` trailer \
          in one of this branch's commit messages. It lands with the branch and stays as the \
          record.\n\
+         {}\
          [abi] Nothing was pushed and main was not touched.",
         rest.len(),
         crate::toolchain::SYSROOT_SOURCES.join(", "),
         listed(&touching),
         listed(&rest),
+        if commits.iter().any(|c| c.bare_inseparable) {
+            format!(
+                "[abi] A `{ABI_INSEPARABLE}` with nothing after the colon is in this branch's \
+                 history and it declares nothing: the why is the whole of the escape.\n"
+            )
+        } else {
+            String::new()
+        },
     ))
 }
 
@@ -469,6 +478,16 @@ struct Commit {
     subject: String,
     touches_sysroot: bool,
     declares_inseparable: bool,
+    /// The trailer with nothing after the colon, which declares nothing and is
+    /// tracked only so the refusal can say why it did not take.
+    bare_inseparable: bool,
+}
+
+/// `Abi-Inseparable: <why>` on `line`, and whether the why is there. The reason
+/// is the contract — CLAUDE.md declares "the split that genuinely cannot be
+/// made" — so the keyword alone is a word typed, not a declaration.
+fn inseparable(line: &str) -> Option<bool> {
+    line.trim_start().strip_prefix(ABI_INSEPARABLE).map(|why| !why.trim().is_empty())
 }
 
 /// `<base>..HEAD` oldest first, merges excluded.
@@ -496,18 +515,27 @@ fn branch_commits(root: &Path, base: &str) -> Result<Vec<Commit>, String> {
                 subject: subject.to_string(),
                 touches_sysroot: false,
                 declares_inseparable: false,
+                bare_inseparable: false,
             });
             continue;
         }
         let Some(last) = commits.last_mut() else { continue };
         if let Some(body) = line.strip_prefix('\x02') {
-            last.declares_inseparable |= body.trim_start().starts_with(ABI_INSEPARABLE);
+            match inseparable(body) {
+                Some(true) => last.declares_inseparable = true,
+                Some(false) => last.bare_inseparable = true,
+                None => {}
+            }
             continue;
         }
         if line.trim().is_empty() {
             continue;
         }
-        last.declares_inseparable |= line.trim_start().starts_with(ABI_INSEPARABLE);
+        match inseparable(line) {
+            Some(true) => last.declares_inseparable = true,
+            Some(false) => last.bare_inseparable = true,
+            None => {}
+        }
         last.touches_sysroot |= crate::toolchain::SYSROOT_SOURCES
             .iter()
             .any(|tree| line.starts_with(tree));
@@ -617,24 +645,31 @@ pub(crate) mod tests {
 
     /// The escape is a trailer rather than a flag, because CI has no command
     /// line from the author and a flag's only record was a commit `--land`
-    /// wrote.
+    /// wrote — and it is the reason that declares, so the keyword alone is not
+    /// the escape.
     #[test]
     fn the_inseparable_trailer_is_the_escape_and_it_is_in_the_history() {
-        let (_origin, wt) = repo("abi-declared");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: rename A to B");
-        fs::write(wt.join("g"), "mine\n").unwrap();
-        sh(&wt, &["add", "g"]);
-        sh(
-            &wt,
-            &[
-                "commit",
-                "-qm",
-                "vfs: every caller of A\n\nAbi-Inseparable: A's old name is gone, so nothing \
-                 compiles between the two halves.",
-            ],
-        );
+        let staged = |name: &str, trailer: &str| {
+            let (_origin, wt) = repo(name);
+            commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: rename A to B");
+            fs::write(wt.join("g"), "mine\n").unwrap();
+            sh(&wt, &["add", "g"]);
+            sh(&wt, &["commit", "-qm", &format!("vfs: every caller of A\n\n{trailer}")]);
+            abi_lands_alone(&wt, "origin/main")
+        };
 
-        abi_lands_alone(&wt, "origin/main").expect("a declared branch must pass");
+        staged(
+            "abi-declared",
+            "Abi-Inseparable: A's old name is gone, so nothing compiles between the two halves.",
+        )
+        .expect("a declared branch must pass");
+
+        for bare in ["Abi-Inseparable:", "Abi-Inseparable:   "] {
+            let refusal = staged("abi-bare", bare)
+                .expect_err("a trailer with no reason declares nothing");
+            assert!(refusal.contains("declares nothing"), "{refusal}");
+            assert!(refusal.contains("shared sysroot's sources"), "{refusal}");
+        }
     }
 
     /// A branch carrying only the sysroot's sources is the shape the rule asks
