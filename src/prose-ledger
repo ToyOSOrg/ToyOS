@@ -25,7 +25,7 @@ kernel-loom/tests/sleep_lock.rs 80 1
 kernel-loom/tests/smp_bringup.rs 11 0
 kernel-loom/tests/ticket_lock.rs 35 1
 kernel-loom/tests/tlb_shootdown.rs 93 2
-kernel/src/actuator.rs 104 0
+kernel/src/actuator.rs 103 0
 kernel/src/arch/apic.rs 56 0
 kernel/src/arch/control_regs.rs 66 0
 kernel/src/arch/cpu.rs 60 0

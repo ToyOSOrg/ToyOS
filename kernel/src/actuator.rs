@@ -272,9 +272,8 @@ actuators! {
     /// Give it a present context entry naming an empty second-level table, distinct from an absent context: passthrough would fault identically to the row above.
     iommu_empty_domain = "iommu-empty-domain";
 
-    /// Point every device MSI at APIC 1 rather than 0. The only way to tell the
-    /// two remapping-entry destination encodings apart: 0 is written identically
-    /// by both, and nothing else in this kernel targets a CPU that is not 0.
+    /// Point every device MSI at APIC 1 rather than 0 — the only way to tell the
+    /// two remapping-entry destination encodings apart, since 0 encodes alike in both.
     iommu_dest_apic1 = "iommu-dest-apic1";
 
     /// Run the HDA register allow-list over every arm of it at bind time.

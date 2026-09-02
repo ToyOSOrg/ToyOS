@@ -68,9 +68,9 @@ impl Queue {
         );
     }
 
-    /// Every cached interrupt remapping entry, gone. Owed after `SIRTP` on a
-    /// unit whose `CAP.ESIRTPS` is clear (Section 6.7), and submitted only to a
-    /// unit that remaps: a type this unit does not implement stalls its queue.
+    /// Every cached interrupt remapping entry, gone. Owed after `SIRTP` where
+    /// `CAP.ESIRTPS` is clear (Section 6.7); sent only to a unit that remaps,
+    /// since a type it does not implement stalls its queue.
     pub fn invalidate_interrupts(&mut self, regs: Mmio) {
         self.submit(regs, &[(INTERRUPT_ENTRY_CACHE, 0)]);
     }
