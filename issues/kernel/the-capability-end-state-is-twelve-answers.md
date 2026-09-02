@@ -17,10 +17,34 @@ change that would answer one silently is stopped and the question surfaced
 instead.**
 
 The audit pass that first work item asked for was run on **2026-08-20**, from
-the code, against `syscall_dispatch`'s every arm
-(`kernel/src/arch/syscall.rs:275`-`860`), every `HandleEntry` constructor, both
-move paths and the boot's one capability mint. Eight answers are committed,
-four are open.
+the code, against `syscall_dispatch`'s every arm, every `HandleEntry`
+constructor, both move paths and the boot's one capability mint.
+
+**Where the twelve stand, counted off the sections below.** Seven are
+**COMMITTED** — 1, 3, 6, 7, 8, 10, 11. Four were **RULED** and no longer await
+the owner — 2 (the filesystem is deliberately outside the model), 4 and 5
+(ruled and since implemented), and 9 (threads as objects, declined until a
+caller exists). **One is OPEN: question 12**, held by
+`issues/kernel/cpu-time-is-a-band-and-not-a-reservation.md`. "Eight answers are
+committed, four are open" was this line's own summary and stopped being true
+when those four rulings landed; "The ruling set" below is a record of decisions
+taken, not a queue waiting on anybody.
+
+Four of the rulings are enforced in code, each at a site that demands a right
+where none was demanded before: `SYS_SHUTDOWN` takes a `SysCap` carrying
+`Rights::POWER` (`kernel/src/arch/syscall/machine.rs:46-48`); `SYS_SYSINFO`'s
+roster takes `Rights::ROSTER`, demanded only once the buffer has room for an
+entry (`kernel/src/arch/syscall/machine.rs:84`, `:94`), spelled `roster` in
+`toyos-manifest/src/lib.rs:80`; and `SYS_PROCESS_OPEN` takes `Rights::MANAGE`
+(`kernel/src/arch/syscall/proc.rs:89-91`), which is what makes question 3's
+"a pid is not authority" checkable — the ABI says so at the field
+(`toyos-abi/src/syscall.rs:1882-1884`).
+
+**Every `kernel/src/arch/syscall.rs:NNN` citation below is a dead pointer.**
+That file is not in the tree; the syscalls are `kernel/src/arch/syscall/`,
+twelve files with `dispatch.rs` decoding every user pointer. The twenty-one
+line references are kept as the sections they were taken from, to be re-taken
+rather than trusted.
 
 ## 1. What constitutes authority? — COMMITTED
 
