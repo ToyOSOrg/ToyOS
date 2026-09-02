@@ -103,6 +103,12 @@ toyos-gpt = { path = "toyos-gpt" }
 toyos-keymap = { path = "toyos-keymap" }
 toyos-manifest = { path = "toyos-manifest" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# The digest behind two readings that must not be able to agree by accident:
+# `NOTICE`'s record of every committed binary file (`src/sourcegate.rs`), and a
+# disk this system was not given, before and after a boot
+# (`src/fingerprint.rs`). Already in this lockfile through `toyos-ld`, so
+# naming it here resolves nothing new.
+sha2 = "0.10"
 
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
@@ -120,10 +126,6 @@ toyos-ld = { path = "toyos-ld" }
 # from this workspace with its own lockfile, so nothing here reaches the kernel's
 # resolution of the same crate.
 toyos-sched = { path = "toyos-sched", features = ["check"] }
-# The digest `NOTICE` records for every committed binary file, re-derived by
-# `src/sourcegate.rs` from the bytes. Already in this lockfile through
-# `toyos-ld`, so naming it here resolves nothing new.
-sha2 = "0.10"
 
 [profile.release]
 opt-level = 2

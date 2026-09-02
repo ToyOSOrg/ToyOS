@@ -17,6 +17,8 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+use toyos_build::fingerprint::{first_difference, whole_device};
+
 use super::qemu::{self, BootOptions, QemuInstance};
 
 /// Boot the guest against a disk that belongs to somebody else, and prove it
@@ -36,12 +38,12 @@ pub fn foreign_disk_untouched(
     let dir = super::lane::dir();
     let image = dir.join("foreign-disk.img");
     foreign_disk_image(&image, BYTES);
-    let before = write_fingerprint(&image, BYTES);
+    let before = whole_device(&image, BYTES);
 
     // The premise, checked before the boot rather than assumed: if this image
     // somehow already parsed as a ToyOS volume, the kernel would mount it and
     // the assertion below would pass for the wrong reason.
-    if before.starts_with(b"BCFS") {
+    if front(&image, 4) == *b"BCFS" {
         return Err("the foreign image starts with a bcachefs superblock".to_string());
     }
 
@@ -98,7 +100,7 @@ pub fn foreign_disk_untouched(
     }
     drop(qemu);
 
-    let after = write_fingerprint(&image, BYTES);
+    let after = whole_device(&image, BYTES);
     if let Some(diff) = first_difference(&before, &after) {
         return Err(format!("the kernel wrote to a disk it was not given: {diff}"));
     }
@@ -136,44 +138,17 @@ pub fn foreign_disk_image(path: &Path, len: u64) {
     file.write_all(&gpt).expect("write gpt header");
 }
 
-/// Every byte the guest could plausibly have touched, as a fingerprint.
-///
-/// The whole image is 128 MiB and sparse; hashing it would materialize
-/// nothing but would read it all. The regions below are where a format
-/// writes: the superblock and allocation bitmap at the front, and the backup
-/// superblock at the very end. `Formatted::format` cannot leave those alone
-/// and still have produced a filesystem, so a match over them is a proof and
-/// not a sample.
-pub fn write_fingerprint(path: &Path, len: u64) -> Vec<u8> {
-    use std::io::{Read, Seek, SeekFrom};
+/// The first `n` bytes of `path`, for a premise that is about the front of the
+/// image rather than about all of it.
+fn front(path: &Path, n: usize) -> Vec<u8> {
+    use std::io::Read;
 
-    let mut file = std::fs::File::open(path).expect("open image to fingerprint");
-    let mut out = Vec::new();
-    // The first 1 MiB: protective MBR, superblock, bitmap, root node.
-    let mut head = vec![0u8; 1024 * 1024];
-    file.read_exact(&mut head).expect("read head");
-    out.extend_from_slice(&head);
-    // The last 4 KiB: the backup superblock.
-    file.seek(SeekFrom::Start(len - 4096)).expect("seek tail");
-    let mut tail = vec![0u8; 4096];
-    file.read_exact(&mut tail).expect("read tail");
-    out.extend_from_slice(&tail);
-    out
-}
-
-/// Where two fingerprints first differ, rendered for a failure message.
-pub fn first_difference(before: &[u8], after: &[u8]) -> Option<String> {
-    if before == after {
-        return None;
-    }
-    let at = before.iter().zip(after).position(|(a, b)| a != b);
-    Some(match at {
-        Some(at) => format!(
-            "byte {at} of the fingerprinted region changed: {:#04x} -> {:#04x}",
-            before[at], after[at]
-        ),
-        None => format!("the region changed length: {} -> {}", before.len(), after.len()),
-    })
+    let mut head = vec![0u8; n];
+    std::fs::File::open(path)
+        .expect("open image")
+        .read_exact(&mut head)
+        .expect("read the front of the image");
+    head
 }
 
 /// F9's negative control: an fsync on `/home` whose first attempt is
