@@ -713,25 +713,31 @@ pub fn fork_storm() -> Scenario {
 /// bound whatever this table allows, so the allowance can hide a red suite but
 /// never the gap.
 ///
-/// Provenance — every number below came from this command at `be28bbd`, on one
-/// host, with no other measurement running:
+/// Provenance — every number below came from this command, re-taken over all ten
+/// widths at `ae974921`, on one host, with no other measurement running:
 ///
 /// ```text
 /// cargo run --release -p toyos-sched-sim -- measure fairness_storm:<cpus> 500
 /// ```
 ///
-/// | cpus | worst spread | derived bound | verdict |
+/// The last column is `Outcome::fair_over_bound`, and it is **not** the amount
+/// by which the bound was crossed: it is the widest spread seen in a window
+/// whose spread exceeded that window's own bound, which is a different quantity
+/// from the row's worst spread and from the row's bound. Row 4 is what shows it
+/// — 198 ms under a 204 ms bound, and a narrower window crossed anyway.
+///
+/// | cpus | worst spread | derived bound | `fair_over_bound` |
 /// |---|---|---|---|
-/// | 1  |   30 ms |   60 ms | meets it, 2.0x |
-/// | 2  |   84 ms |  108 ms | meets it, 1.3x |
-/// | 3  |  125 ms |  156 ms | meets it, 1.2x |
-/// | 4  |  198 ms |  204 ms | **crossed**, by 116 ms in some window |
-/// | 6  |  324 ms |  300 ms | **crossed**, by 324 ms |
-/// | 8  |  418 ms |  396 ms | **crossed**, by 418 ms |
-/// | 12 |  634 ms |  588 ms | **crossed**, by 634 ms |
-/// | 16 |  720 ms |  780 ms | meets it, 1.1x |
-/// | 24 | 1056 ms | 1164 ms | meets it, 1.1x |
-/// | 32 | 1386 ms | 1548 ms | meets it, 1.1x |
+/// | 1  |   30 ms |   60 ms | none |
+/// | 2  |   84 ms |  108 ms | none |
+/// | 3  |  125 ms |  156 ms | none |
+/// | 4  |  198 ms |  204 ms | **112 ms** |
+/// | 6  |  324 ms |  300 ms | **324 ms** |
+/// | 8  |  418 ms |  396 ms | **418 ms** |
+/// | 12 |  634 ms |  588 ms | **634 ms** |
+/// | 16 |  720 ms |  780 ms | none |
+/// | 24 | 1056 ms | 1164 ms | none |
+/// | 32 | 1386 ms | 1548 ms | none |
 ///
 /// Widths 1 and 2 were additionally run at 10 000 seeds — the count `gate`
 /// uses — giving 30 ms and 102 ms. One CPU is stable at 30 ms across 400, 500

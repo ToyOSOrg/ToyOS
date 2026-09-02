@@ -556,7 +556,7 @@ toyos-sched/sim/src/lib.rs 22 0
 toyos-sched/sim/src/main.rs 15 0
 toyos-sched/sim/src/msg.rs 1 0
 toyos-sched/sim/src/payload.rs 26 0
-toyos-sched/sim/src/scenarios.rs 606 1
+toyos-sched/sim/src/scenarios.rs 612 1
 toyos-sched/sim/src/shrink.rs 24 0
 toyos-sched/sim/src/sweep.rs 56 0
 toyos-sched/sim/src/vm.rs 631 0
