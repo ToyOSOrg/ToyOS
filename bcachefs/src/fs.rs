@@ -1213,6 +1213,20 @@ mod tests {
     }
 
     #[test]
+    fn a_volume_copied_onto_a_larger_device_does_not_mount() {
+        let blocks = 128;
+        let mut raw = image(blocks);
+        mount(raw.clone()).expect("the volume mounts on the device it was formatted on");
+        raw.resize(raw.len() + 8 * BLOCK_SIZE, 0);
+
+        match mount(raw) {
+            Err(FsError::BadSuperblock { field }) => assert_eq!(field, "block_count"),
+            Err(other) => panic!("expected BadSuperblock, got {other:?}"),
+            Ok(_) => panic!("mounted a volume that did not come from this device"),
+        }
+    }
+
+    #[test]
     fn a_bitmap_outside_the_volume_is_refused() {
         // `set_used`, `set_free` and `is_free` all compute
         // `bitmap_start + byte_idx / 4096` and check it against nothing, so a

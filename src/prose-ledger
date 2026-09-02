@@ -5,7 +5,7 @@ bcachefs/src/btree.rs 119 0
 bcachefs/src/crc32c.rs 9 0
 bcachefs/src/fs.rs 344 0
 bcachefs/src/lib.rs 21 0
-bcachefs/src/superblock.rs 45 0
+bcachefs/src/superblock.rs 47 0
 bcachefs/tests/integration.rs 116 0
 bootloader/src/main.rs 198 0
 examples/imgstat.rs 16 0
@@ -241,7 +241,7 @@ tests/common/qemu.rs 1627 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
-tests/common/storage.rs 61 0
+tests/common/storage.rs 69 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
 tests/common/volumes.rs 624 3
