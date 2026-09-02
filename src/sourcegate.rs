@@ -1108,8 +1108,8 @@ fn spawn_arguments(text: &str) -> Vec<String> {
 }
 
 /// Every file under `.github/` that can install a package: a workflow, a shell
-/// script, or a container recipe. A walk and not a list, so a workflow that
-/// arrives installing something is read on its first commit.
+/// script, or a container recipe. A walk and not a list, so an arrival is read
+/// on its first commit.
 #[cfg(test)]
 fn ci_install_files(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1814,11 +1814,9 @@ mod tests {
         assert!(complaints.is_empty(), "{NO_COMMAND_ALIAS}:\n{}", complaints.join("\n"));
     }
 
-    /// **The dependency bar at the other place a host binary arrives: the CI
-    /// image and the workflows.** `src/ci.rs` reads these files for one
-    /// package's provenance; this holds the whole *set* against a ledger, so a
-    /// ninth package in the image is a red naming it rather than a line nobody
-    /// reads.
+    /// **The dependency bar at the other place a host binary arrives.**
+    /// `src/ci.rs` reads these files for one package's provenance; this holds
+    /// the whole *set*, so a ninth package in the image reds by name.
     #[test]
     fn every_package_ci_installs_is_declared() {
         let root = repo_root();
