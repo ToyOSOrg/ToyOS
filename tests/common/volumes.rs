@@ -2177,6 +2177,18 @@ pub fn boot_volume_metadata_error(
                  refused read into NotFound.\n{log}"
             ));
         }
+        // The class, and not merely "some other word than NotFound": the
+        // refused read is `IoError::Device` in `toyos-fat32`, `Error::Io` out
+        // of it, `SyscallError::Io` at `as_syscall_error`, and `Other` in ToyOS
+        // std — so any adapter that lands anywhere else has translated a device
+        // failure into something its caller would act on wrongly.
+        if !said.contains("kind=Other") {
+            return Err(format!(
+                "{what} of a volume that refused every read answered {said}\n\
+                 A device that would not answer has to reach the caller as the I/O class \
+                 (`SyscallError::Io`, `ErrorKind::Other`).\n{log}"
+            ));
+        }
     }
 
     // 4. And it is this volume's refusal and not the machine's. The other FAT
