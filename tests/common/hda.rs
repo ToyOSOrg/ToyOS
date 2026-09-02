@@ -318,6 +318,10 @@ pub fn hda_two_live_refused(
     log.must_not_say("bound, statests=")?;
     // The machine still boots and still has a sink: absence of hardware is a
     // routing state, and a refusal must not be a machine that will not run.
+    // **And it is the bind's absence and not a second spelling of the line
+    // above**: init claims each class before it spawns, and soundd reaches the
+    // null sink only where the endowment is missing — so this line requires
+    // `device::try_claim(HdaAudio)` to have answered `Absent`.
     log.must_say(NULL_SINK)
         .map_err(|why| match stalled {
             Some(stall) => format!("{stall}\n{why}"),

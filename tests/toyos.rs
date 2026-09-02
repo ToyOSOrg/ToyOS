@@ -2133,7 +2133,37 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         );
         return false;
     }
-    eprintln!("  [syscall] {cycles} cycles per SYS_CLOCK, tsc {mhz} MHz");
+    // And the workload happened. `SYS_CLOCK` is 8, and `kernel/src/process.rs`
+    // writes one ` <num>=<count>` field per used syscall at process exit — a
+    // counter this test cannot reach, so a printed pair no loop produced fails
+    // here however plausible the numbers are.
+    let Some(claimed) = result.stdout.lines().find_map(|l| {
+        let (reps, per) = l.split_once(" over ")?.1.split_once('x')?;
+        Some(reps.trim().parse::<u64>().ok()? * per.trim().parse::<u64>().ok()?)
+    }) else {
+        eprintln!(
+            "FAIL rs::syscall_cost: the run did not say how many syscalls it made\nstdout:\n{}",
+            result.stdout
+        );
+        return false;
+    };
+    let counted = result
+        .serial
+        .lines()
+        .filter(|l| l.contains("syscalls: pid="))
+        .filter_map(|l| l.split(" 8=").nth(1)?.split_whitespace().next()?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    if counted < claimed {
+        eprintln!(
+            "FAIL rs::syscall_cost: the run claims {claimed} SYS_CLOCK transitions and the \
+             kernel counted {counted}\nstdout:\n{}{}",
+            result.stdout,
+            kernel_account(result)
+        );
+        return false;
+    }
+    eprintln!("  [syscall] {cycles} cycles per SYS_CLOCK over {counted} of them, tsc {mhz} MHz");
     true
 }
 
@@ -4757,11 +4787,12 @@ fn run_screen_test(
             Ok(())
         }
         "screen_recoverable_untouched" => {
-            // The negative of screen_fatal_halt, and the property that makes
-            // the capture/render split worth having: a panic the kernel
-            // recovers from must not clobber a live display. Action 0 panics
-            // in syscall context, which the handler recovers from, so it
-            // never reaches halt_all_cpus and must leave every pixel alone.
+            // The negative of screen_fatal_halt: a panic the kernel recovers
+            // from must not clobber a live display. Action 0 panics in syscall
+            // context, which the handler recovers from, so it never reaches
+            // halt_all_cpus. **Two endpoints and not an interval** — a paint
+            // made and undone between the screendumps is invisible here, and
+            // observing the middle needs a QMP client of its own.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -9572,13 +9603,14 @@ fn run_machine_test(
                 ready_marker: REFUSAL,
                 ..Default::default()
             };
+            /// A liveness margin over the work that follows the refusal in the
+            /// same call, never a threshold.
             const AFTER_REFUSAL: Duration = Duration::from_secs(2);
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // It dies before virtio-console exists, so the 16550 file is the
-            // only record — which is also the T14's situation exactly. The
-            // drain is the rest of the window: `boot_log` ends at the refusal.
+            // This profile has no virtio-serial, so stdio *is* the 16550 and
+            // `boot_log` is the whole record. It ends at the refusal, and the
+            // drain is the rest of the window the downstream work would be in.
             let mut log = serial::Serial::boot(&qemu);
-            log.push(&qemu.uart_log());
             log.push(&qemu.drain_serial(AFTER_REFUSAL));
 
             // Named, not just refused: the value the device reported is the
@@ -10218,6 +10250,8 @@ fn run_machine_test(
             // the CPU: the branch printed no `RECURSIVE` and ran the whole
             // second report. `test-late-panic` is the first crash and
             // `fault-in-report` is the wild read inside its report.
+            /// A liveness margin over the report that follows the alert in the
+            /// same call, never a threshold.
             const AFTER_RECURSIVE: Duration = Duration::from_secs(1);
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
@@ -10271,7 +10305,9 @@ fn run_machine_test(
             // which lines arrived, from the first phase to the wedge, and that
             // the phase after it never did.
             const WEDGE: &str = "pre-idle-wedge: the boot stops here";
-            const STAYED_WEDGED: Duration = Duration::from_secs(3);
+            /// A liveness margin over the phase that follows the wedge line,
+            /// never a threshold.
+            const STAYED_WEDGED: Duration = Duration::from_millis(1500);
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,

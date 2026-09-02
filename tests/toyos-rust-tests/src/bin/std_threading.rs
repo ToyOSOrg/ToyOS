@@ -1,16 +1,20 @@
 use std::thread;
 use std::time::Duration;
 
-/// The child's life, so the first `try_wait` asks about a running process.
+/// The child's life on the first attempt; a lost race quadruples it. **A host
+/// fact, not a bound**: winning it means being scheduled between the spawn and
+/// the question, which a twelve-wide TCG suite can take away.
 const LINGER: Duration = Duration::from_millis(200);
-/// Its poll and ceiling — 25x `LINGER`, a liveness margin and not a threshold.
+/// Attempts at the running answer. Three covers a 64x slower host.
+const TRIES: u32 = 3;
+/// The poll for the exited answer, and its ceiling — a liveness margin.
 const POLL: Duration = Duration::from_millis(10);
 const POLLS: u32 = 500;
 
 fn main() {
-    // The `try_wait` target.
-    if std::env::args().nth(1).as_deref() == Some("linger") {
-        thread::sleep(LINGER);
+    // The `try_wait` target, told how long to stay up.
+    if let Some(ms) = std::env::args().nth(1).and_then(|a| a.strip_prefix("linger=").map(String::from)) {
+        thread::sleep(Duration::from_millis(ms.parse().expect("linger= wants milliseconds")));
         return;
     }
 
@@ -35,15 +39,29 @@ fn main() {
     assert_eq!(total, expected, "partial sums mismatch: {total} != {expected}");
 
     // Both answers, because a `try_wait` stuck on either satisfies the other.
+    // The running answer re-arms with a longer child rather than reding the
+    // first time this process loses the race to be asked.
     let exe = std::env::current_exe().expect("current_exe failed");
-    let mut child = std::process::Command::new(&exe)
-        .arg("linger")
-        .spawn()
-        .expect("spawn child failed");
-
-    if let Some(early) = child.try_wait().expect("try_wait failed") {
-        panic!("try_wait reported {early} for a child that is still sleeping");
+    let mut running = None;
+    for attempt in 0..TRIES {
+        let mut child = std::process::Command::new(&exe)
+            .arg(format!("linger={}", (LINGER * 4u32.pow(attempt)).as_millis()))
+            .spawn()
+            .expect("spawn child failed");
+        match child.try_wait().expect("try_wait failed") {
+            None => {
+                running = Some(child);
+                break;
+            }
+            Some(_) => child.wait().map(|_| ()).expect("reap the raced child"),
+        }
     }
+    let mut child = running.unwrap_or_else(|| {
+        panic!(
+            "try_wait reported an exited child on all {TRIES} attempts, the last a {:?} sleep",
+            LINGER * 4u32.pow(TRIES - 1)
+        )
+    });
 
     let mut exited = None;
     for _ in 0..POLLS {

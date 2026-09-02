@@ -2183,7 +2183,9 @@ pub fn boot_volume_metadata_error(
             return Err(format!(
                 "{what} of a volume that refused every read answered {said}\n\
                  A device that would not answer has to reach the caller as the I/O class \
-                 (`SyscallError::Io`, `ErrorKind::Other`).\n{log}"
+                 (`SyscallError::Io`, `ErrorKind::Other`). That spelling is owed a change and \
+                 this site moves with it — the record is\n\
+issues/design-debt/std-maps-a-device-error-to-other-not-uncategorized.md\n{log}"
             ));
         }
     }
