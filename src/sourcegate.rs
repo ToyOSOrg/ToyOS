@@ -921,6 +921,24 @@ fn spawn_arguments(text: &str) -> Vec<String> {
     out
 }
 
+/// Every `.rs` file `git` tracks under `tree`, repository-relative — the list
+/// the walks above are held against, read from something that is not a walk.
+#[cfg(test)]
+fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<String> {
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--", tree])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|e| panic!("git ls-files {tree}: {e}"));
+    assert!(out.status.success(), "git ls-files {tree} failed");
+    String::from_utf8(out.stdout)
+        .expect("git ls-files is not UTF-8")
+        .split('\0')
+        .filter(|p| p.ends_with(".rs"))
+        .map(str::to_string)
+        .collect()
+}
+
 /// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
 #[cfg(test)]
 fn digest(bytes: &[u8]) -> String {
@@ -1221,16 +1239,35 @@ mod tests {
         );
     }
 
-    /// The scan has teeth only if it can find anything: this file names every
-    /// banned identifier in its own table, and the walk must not be looking at
-    /// a tree where none of them can occur.
+    /// The scan has teeth only over the files it actually opens, and "at least
+    /// one" is a floor a walk that reads a single file per tree also meets. The
+    /// floor is the tree's own file list: every `.rs` file `git` tracks under
+    /// it is a file the walk read. An untracked one only adds to the walk, so
+    /// a scratch file in `kernel/src` is not a red.
     #[test]
     fn the_scan_reaches_the_trees_it_claims_to() {
         let root = repo_root();
         for tree in TREES {
             let mut files = Vec::new();
             rust_files(&root.join(tree), &mut files);
-            assert!(!files.is_empty(), "{tree} has no .rs files — the walk is looking elsewhere");
+            let walked: std::collections::BTreeSet<String> =
+                files.iter().map(|p| rel(&root, p)).collect();
+            let tracked = tracked_rust_files(&root, tree);
+            assert!(
+                tracked.len() > 1,
+                "git tracks {} .rs file(s) under {tree}, so this floor is not one",
+                tracked.len()
+            );
+            let missed: Vec<&String> = tracked.difference(&walked).collect();
+            assert!(
+                missed.is_empty(),
+                "the walk over {tree} read {} of the {} .rs files git tracks there, and missed \
+                 {} of them, the first being {:?}",
+                walked.len(),
+                tracked.len(),
+                missed.len(),
+                missed.first(),
+            );
         }
         assert!(
             !occurrences("mem::forget").is_empty(),
