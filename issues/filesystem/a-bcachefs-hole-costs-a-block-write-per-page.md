@@ -19,7 +19,7 @@ sequentially, so `covered` reaches `target` in one block and the zeroing loop
 does not run — `fs_large_file` writes 1024 pages and allocates one block per
 page with no gap. The path that pays is a `lseek` past the end followed by a
 write, which
-`issues/filesystem/a-seek-past-the-end-is-clamped-and-reported-as-success.md`
+`issues/kernel/lseek-past-eof-is-silently-clamped.md`
 currently makes unreachable, and a shrink-then-write-above-the-mark, whose gap
 is bounded by the file.
 

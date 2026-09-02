@@ -74,6 +74,7 @@ pub fn set_cursor(hot_x: u32, hot_y: u32) {
     }
 }
 
+/// Publishes the new mode as `INFO` only: the registry is the caller's single writer.
 pub fn set_resolution(width: u32, height: u32) -> Result<GpuInfo, SyscallError> {
     let new_info = {
         let mut gpu = GPU.lock();
@@ -95,8 +96,6 @@ pub fn set_resolution(width: u32, height: u32) -> Result<GpuInfo, SyscallError> 
         pixel_format: new_info.pixel_format,
         flags: new_info.flags,
     });
-    // This function owns invalidating every cached description of the old mode.
-    crate::device::set_framebuffer_info(screen(&new_info));
     Ok(new_info)
 }
 

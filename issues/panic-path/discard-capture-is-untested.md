@@ -12,9 +12,11 @@ this one where it was. `capture` is now read by
 test reads it on the console and not on the panel. `discard_capture`
 (`kernel/src/drivers/panic_console/mod.rs:518`) has no such reading. Its arm is
 the recovery branch (`kernel/src/main.rs:174`), which `test-late-panic` never
-takes, and `screen_recoverable_untouched` asserts that a recovered panic leaves
-every pixel alone — a property of `render` never running on that branch, which
-holds whether or not the discard did anything.
+takes, and `screen_recoverable_untouched` compares two screendumps either side
+of the recovered panic (`tests/toyos.rs:4765`, `before.identical_to(&after)`),
+which is equal endpoints and not an untouched interval: a paint that is
+repainted before the second dump passes it. Either way it holds whether or not
+the discard did anything.
 
 **The protocol is modelled; the wiring is not.** `kernel-loom/tests/panic_capture.rs`
 covers what the latch owes — `a_recovered_panic_hands_the_snapshot_to_the_next_captor`

@@ -260,11 +260,20 @@ fn citation_refusals(
     let mut bad = Vec::new();
     let mut judge = |path: &str, n: usize, s: &str, seam: Option<usize>| {
         for (start, end, area, slug) in path_claims(s) {
-            if seam.is_some_and(|at| start >= at || end <= at) || !areas.contains(&area) {
+            if seam.is_some_and(|at| start >= at || end <= at) {
                 continue;
             }
             let cited = format!("issues/{area}/{slug}.md");
-            if !issue_files.contains(&cited) {
+            // `areas` is the set of directories under `issues/` that hold a
+            // file, so the tracker on disk is the authority here and
+            // `issues/README.md`'s closed list is read by nothing.
+            if !areas.contains(&area) {
+                bad.push(format!(
+                    "{path}:{n}: cites `{cited}`, and no directory under `issues/` is named \
+                     `{area}` — a claim under an area the tracker does not hold resolves to \
+                     nothing"
+                ));
+            } else if !issue_files.contains(&cited) {
                 bad.push(format!(
                     "{path}:{n}: cites `{cited}` and no such file exists — the merge that \
                      deletes an issue takes every mention of it"
@@ -423,12 +432,19 @@ mod tests {
         );
     }
 
-    /// The citation gate's teeth: a dangling path and a dead bare name red, and
-    /// the shapes beside them stay green for the stated reasons.
+    /// A tracker path built rather than typed: a literal one is a citation this
+    /// gate reads out of its own source and refuses.
+    fn at(area: &str, slug: &str) -> String {
+        format!("issues/{area}/{slug}.md")
+    }
+
+    /// The citation gate's teeth: a dangling path, an unknown area and a dead
+    /// bare name red, and the shapes beside them stay green for the stated
+    /// reasons.
     #[test]
     fn the_citation_gate_refuses_a_dangling_claim_and_a_dead_name() {
         let areas: BTreeSet<String> = ["area".to_string()].into();
-        let issue_files: BTreeSet<String> = ["issues/area/staged.md".to_string()].into();
+        let issue_files: BTreeSet<String> = [at("area", "staged")].into();
         let dead: BTreeSet<String> = ["a-name-the-tracker-dropped".to_string()].into();
         let judge = |text: &str| {
             citation_refusals(
@@ -439,16 +455,19 @@ mod tests {
             )
         };
 
-        assert!(judge("see issues/area/staged.md").is_empty());
-        assert!(judge("see issues/area/bare.md")[0].contains("no such file exists"));
-        // An area the tracker does not hold is a fixture, not a claim.
-        assert!(judge("see issues/other/bare.md").is_empty());
+        assert!(judge(&format!("see {}", at("area", "staged"))).is_empty());
+        assert!(
+            judge(&format!("see {}", at("area", "bare")))[0].contains("no such file exists")
+        );
+        // An area the tracker does not hold is itself a dangling claim.
+        assert!(judge(&format!("see {}", at("other", "bare")))[0]
+            .contains("no directory under `issues/` is named"));
         assert!(judge("the fix `a-name-the-tracker-dropped` took")[0].contains("deleted issue"));
         assert!(judge("`a-name-the-tracker-kept`").is_empty());
         // A dead slug inside a longer token is that token, not a mention.
         assert!(judge("pre-a-name-the-tracker-dropped-post").is_empty());
         // Both shapes on one line are two findings, at the same line number.
-        let both = judge("issues/area/bare.md was a-name-the-tracker-dropped");
+        let both = judge(&format!("{} was a-name-the-tracker-dropped", at("area", "bare")));
         assert_eq!(both.len(), 2, "{both:?}");
         assert!(both.iter().all(|b| b.contains(":1:")), "{both:?}");
 
@@ -461,11 +480,12 @@ mod tests {
         // An unwrapped finding beside a seam is reported once, by the line scan.
         assert_eq!(judge("a-name-the-tracker-dropped\nprose").len(), 1);
         // A fence is recorded output, exempt to its closing line.
-        assert!(judge("```\nissues/area/bare.md\na-name-the-tracker-dropped\n```").is_empty());
-        assert!(judge("```\nfenced\n```\nissues/area/bare.md").len() == 1);
+        let fenced = format!("```\n{}\na-name-the-tracker-dropped\n```", at("area", "bare"));
+        assert!(judge(&fenced).is_empty());
+        assert_eq!(judge(&format!("```\nfenced\n```\n{}", at("area", "bare"))).len(), 1);
         // An archive names deleted files as history; the gate does not read it.
         let archive = citation_refusals(
-            &[("issues/build/defect-events.md".to_string(), "a-name-the-tracker-dropped".into())],
+            &[(at("build", "defect-events"), "a-name-the-tracker-dropped".into())],
             &areas,
             &issue_files,
             &dead,
@@ -477,8 +497,8 @@ mod tests {
     /// and a set scoped to its current path missed everything closed before.
     #[test]
     fn a_tracker_file_is_recognised_wherever_the_tracker_stood() {
-        assert!(tracker_shaped("issues/area/some-old-entry.md"));
-        assert!(tracker_shaped("specs/issues/area/some-old-entry.md"));
+        assert!(tracker_shaped(&at("area", "some-old-entry")));
+        assert!(tracker_shaped(&format!("specs/{}", at("area", "some-old-entry"))));
         assert!(!tracker_shaped("specs/some-plan.md"));
         assert!(!tracker_shaped("issues/README.md"));
         assert!(!tracker_shaped("docs/issues.md"));
@@ -489,12 +509,8 @@ mod tests {
     /// `kind: design-debt` lived in the tracker unseen.
     #[test]
     fn the_gate_refuses_what_the_readme_does_not_define() {
-        let staged = |front: &str| {
-            vec![(
-                "issues/area/staged.md".to_string(),
-                format!("---\n{front}\n---\n\n# a heading\n"),
-            )]
-        };
+        let staged =
+            |front: &str| vec![(at("area", "staged"), format!("---\n{front}\n---\n\n# a heading\n"))];
         let says = |front: &str, needle: &str| {
             let bad = refusals(&staged(front));
             assert!(
@@ -511,7 +527,7 @@ mod tests {
         says("status: open\nkind: rejected\nopened: 2026-08-15", "already says what is owed");
 
         assert!(
-            refusals(&[("issues/area/bare.md".to_string(), "# no frontmatter\n".to_string())])
+            refusals(&[(at("area", "bare"), "# no frontmatter\n".to_string())])
                 .iter()
                 .any(|b| b.contains("no `---` frontmatter block"))
         );

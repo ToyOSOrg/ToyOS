@@ -88,7 +88,7 @@ fn main() {
         toyos_build::pr::dispatch_retired_land();
     }
     if args.iter().any(|a| a == "--pr") {
-        toyos_build::pr::dispatch_pr(&root);
+        toyos_build::pr::dispatch_pr(&root, &args);
         return;
     }
     if args.iter().any(|a| a == "--sync") {

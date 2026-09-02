@@ -49,8 +49,40 @@ use crate::buildlock;
 /// flag could never be, because CI has no command line from the author.
 const ABI_INSEPARABLE: &str = "Abi-Inseparable:";
 
-pub fn dispatch_pr(root: &Path) {
-    report(prepare(root));
+/// The flag that says the caller will re-run the gates on the merged shape.
+const ACCEPTS_MERGE: &str = "--gates-after-merge";
+
+/// What `--pr` says last, and exits non-zero on, when it merged `origin/main`
+/// in: every gate the agent ran before this ran on a tree that no longer
+/// exists. The push succeeded — the exit is the re-run owed, and a
+/// `--pr && gh pr create` chain stopping here is the point of it.
+const MERGED_SHAPE: &str = "[pr] pushed; origin/main was merged in, so this exits 1 until the \
+                            merged shape is gated: re-run cargo test --lib, --clippy and \
+                            --build-only, then run --pr again (it will merge nothing and exit \
+                            0) or pass --gates-after-merge.";
+
+/// Whether this run owes a re-run: it merged, and nothing on the command line
+/// says the caller will gate the shape the merge made.
+fn owes_a_rerun(merged: bool, args: &[String]) -> bool {
+    merged && !args.iter().any(|a| a == ACCEPTS_MERGE)
+}
+
+pub fn dispatch_pr(root: &Path, args: &[String]) {
+    match prepare(root) {
+        Err(refusal) => {
+            eprintln!("{refusal}");
+            std::process::exit(1);
+        }
+        Ok(done) => {
+            println!("{}", done.text);
+            if done.merged {
+                println!("{MERGED_SHAPE}");
+            }
+            if owes_a_rerun(done.merged, args) {
+                std::process::exit(1);
+            }
+        }
+    }
 }
 
 pub fn dispatch_sync(root: &Path) {
@@ -120,15 +152,15 @@ fn report(outcome: Result<String, String>) {
 ///
 /// The order is the one that costs least when it refuses: the local questions
 /// first, then one fetch, then the merge, then the push.
-fn prepare(root: &Path) -> Result<String, String> {
+fn prepare(root: &Path) -> Result<Prepared, String> {
     let branch = preflight(root)?;
     let mut lines = vec![sync(root)?];
 
     abi_lands_alone(root, "origin/main")?;
     lines.push(crate::writinglaw::judge(root, "origin/main")?);
 
-    let merged = merge_base_into_branch(root, &branch)?;
-    lines.push(merged);
+    let (merged, line) = merge_base_into_branch(root, &branch)?;
+    lines.push(line);
 
     let carried = git(root, &["rev-list", "--count", "origin/main..HEAD"])?;
     if carried.trim() == "0" {
@@ -154,16 +186,26 @@ fn prepare(root: &Path) -> Result<String, String> {
     lines.push(format!("pushed {branch} to origin"));
 
     let head = git(root, &["rev-parse", "--short", "HEAD"])?;
-    Ok(format!(
-        "[pr] {}\n\
-         [pr] {branch} is at {head} on origin.\n\
-         [pr]\n\
-         {}\n\
-         [pr] main must be *in* this branch for the merge button to unlock, which is what the \
-         merge above is for. If main moves again, re-run `cargo run -- --pr`.",
-        lines.join("\n[pr] "),
-        if first_push { open_it_now(&branch) } else { finish_it(&branch) },
-    ))
+    Ok(Prepared {
+        merged,
+        text: format!(
+            "[pr] {}\n\
+             [pr] {branch} is at {head} on origin.\n\
+             [pr]\n\
+             {}\n\
+             [pr] main must be *in* this branch for the merge button to unlock, which is what \
+             the merge above is for. If main moves again, re-run `cargo run -- --pr`.",
+            lines.join("\n[pr] "),
+            if first_push { open_it_now(&branch) } else { finish_it(&branch) },
+        ),
+    })
+}
+
+/// What `--pr` did: `merged` is whether this run brought `origin/main` into the
+/// branch, which is what the exit code turns on.
+struct Prepared {
+    merged: bool,
+    text: String,
 }
 
 /// **The first push is where the draft belongs, and a branch's first `--pr` is
@@ -342,10 +384,10 @@ fn stranded(primary: &Path) -> String {
 /// A conflict is left in the working tree rather than aborted: the index git has
 /// already built and the markers it has already written are exactly what the
 /// agent resolves against, and an abort deletes them.
-fn merge_base_into_branch(root: &Path, branch: &str) -> Result<String, String> {
+fn merge_base_into_branch(root: &Path, branch: &str) -> Result<(bool, String), String> {
     let base = git(root, &["rev-parse", "--short", "origin/main"])?;
     match git(root, &["merge", "--no-ff", "--no-commit", "origin/main"]) {
-        Ok(_) if !merging(root) => Ok(format!("origin/main {base} is already in {branch}")),
+        Ok(_) if !merging(root) => Ok((false, format!("origin/main {base} is already in {branch}"))),
         Ok(_) => {
             let message = format!(
                 "{branch}: merged main {base} before the pull request\n\n\
@@ -360,7 +402,7 @@ fn merge_base_into_branch(root: &Path, branch: &str) -> Result<String, String> {
                 .map_err(|e| format!("[pr] write {}: {e}", file.display()))?;
             git(root, &["commit", "-q", "-F", &file.to_string_lossy()])?;
             let _ = fs::remove_file(&file);
-            Ok(format!("merged origin/main {base} into {branch}"))
+            Ok((true, format!("merged origin/main {base} into {branch}")))
         }
         Err(e) if merging(root) => Err(format!(
             "{e}\n\
@@ -456,11 +498,20 @@ pub fn abi_lands_alone(root: &Path, base: &str) -> Result<(), String> {
          whose old form the rest of the tree still uses — put a `{ABI_INSEPARABLE} <why>` trailer \
          in one of this branch's commit messages. It lands with the branch and stays as the \
          record.\n\
+         {}\
          [abi] Nothing was pushed and main was not touched.",
         rest.len(),
         crate::toolchain::SYSROOT_SOURCES.join(", "),
         listed(&touching),
         listed(&rest),
+        if commits.iter().any(|c| c.bare_inseparable) {
+            format!(
+                "[abi] A `{ABI_INSEPARABLE}` with nothing after the colon is in this branch's \
+                 history and it declares nothing: the why is the whole of the escape.\n"
+            )
+        } else {
+            String::new()
+        },
     ))
 }
 
@@ -469,6 +520,17 @@ struct Commit {
     subject: String,
     touches_sysroot: bool,
     declares_inseparable: bool,
+    /// The trailer with nothing after the colon: tracked so the refusal can say
+    /// why it did not take.
+    bare_inseparable: bool,
+}
+
+/// `Abi-Inseparable: <why>` on `line`, and whether the why is there. The reason
+/// is the contract — CLAUDE.md declares "the split that genuinely cannot be
+/// made" — so the keyword alone is a word typed, not a declaration. "There"
+/// means one non-whitespace byte; a reason that says nothing is a reviewer's.
+fn inseparable(line: &str) -> Option<bool> {
+    line.trim_start().strip_prefix(ABI_INSEPARABLE).map(|why| !why.trim().is_empty())
 }
 
 /// `<base>..HEAD` oldest first, merges excluded.
@@ -496,18 +558,27 @@ fn branch_commits(root: &Path, base: &str) -> Result<Vec<Commit>, String> {
                 subject: subject.to_string(),
                 touches_sysroot: false,
                 declares_inseparable: false,
+                bare_inseparable: false,
             });
             continue;
         }
         let Some(last) = commits.last_mut() else { continue };
         if let Some(body) = line.strip_prefix('\x02') {
-            last.declares_inseparable |= body.trim_start().starts_with(ABI_INSEPARABLE);
+            match inseparable(body) {
+                Some(true) => last.declares_inseparable = true,
+                Some(false) => last.bare_inseparable = true,
+                None => {}
+            }
             continue;
         }
         if line.trim().is_empty() {
             continue;
         }
-        last.declares_inseparable |= line.trim_start().starts_with(ABI_INSEPARABLE);
+        match inseparable(line) {
+            Some(true) => last.declares_inseparable = true,
+            Some(false) => last.bare_inseparable = true,
+            None => {}
+        }
         last.touches_sysroot |= crate::toolchain::SYSROOT_SOURCES
             .iter()
             .any(|tree| line.starts_with(tree));
@@ -565,6 +636,9 @@ pub(crate) mod tests {
         sh(&seed, &["add", "f", ".gitignore"]);
         sh(&seed, &["commit", "-qm", "base"]);
         sh(&seed, &["clone", "-q", "--bare", ".", origin.to_str().unwrap()]);
+        // The remote records every value a ref takes, which is the only way a
+        // test on this side can see the *order* a push happened in.
+        sh(&origin, &["config", "core.logAllRefUpdates", "true"]);
 
         sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), work.to_str().unwrap()]);
         identify(&work);
@@ -617,24 +691,33 @@ pub(crate) mod tests {
 
     /// The escape is a trailer rather than a flag, because CI has no command
     /// line from the author and a flag's only record was a commit `--land`
-    /// wrote.
+    /// wrote — and it is the reason that declares, so the keyword alone is not
+    /// the escape.
     #[test]
     fn the_inseparable_trailer_is_the_escape_and_it_is_in_the_history() {
-        let (_origin, wt) = repo("abi-declared");
-        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: rename A to B");
-        fs::write(wt.join("g"), "mine\n").unwrap();
-        sh(&wt, &["add", "g"]);
-        sh(
-            &wt,
-            &[
-                "commit",
-                "-qm",
-                "vfs: every caller of A\n\nAbi-Inseparable: A's old name is gone, so nothing \
-                 compiles between the two halves.",
-            ],
-        );
+        let staged = |name: &str, trailer: &str| {
+            let (_origin, wt) = repo(name);
+            commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: rename A to B");
+            fs::write(wt.join("g"), "mine\n").unwrap();
+            sh(&wt, &["add", "g"]);
+            sh(&wt, &["commit", "-qm", &format!("vfs: every caller of A\n\n{trailer}")]);
+            abi_lands_alone(&wt, "origin/main")
+        };
 
-        abi_lands_alone(&wt, "origin/main").expect("a declared branch must pass");
+        staged(
+            "abi-declared",
+            "Abi-Inseparable: A's old name is gone, so nothing compiles between the two halves.",
+        )
+        .expect("a declared branch must pass");
+
+        staged("abi-terse", "Abi-Inseparable: .").expect("one non-whitespace byte is a reason");
+
+        for bare in ["Abi-Inseparable:", "Abi-Inseparable:   "] {
+            let refusal = staged("abi-bare", bare)
+                .expect_err("a trailer with no reason declares nothing");
+            assert!(refusal.contains("declares nothing"), "{refusal}");
+            assert!(refusal.contains("shared sysroot's sources"), "{refusal}");
+        }
     }
 
     /// A branch carrying only the sysroot's sources is the shape the rule asks
@@ -652,6 +735,12 @@ pub(crate) mod tests {
 
     /// The whole point of `--pr`: main is *in* the branch before GitHub is asked
     /// to merge it, so the checks that run are checks on the merged result.
+    ///
+    /// **Read off the remote, because the merge helper cannot say it**: a
+    /// `prepare` that pushed, merged and pushed again leaves the same end
+    /// state, and only the sequence of values the branch ref took tells them
+    /// apart. One landing is staged and one push asserted, so the main read
+    /// back is the main that push owed.
     #[test]
     fn the_branch_gets_main_before_it_is_pushed() {
         let (origin, wt) = repo("merge-first");
@@ -665,10 +754,13 @@ pub(crate) mod tests {
         identify(&theirs);
         commit(&theirs, "h", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
+        // This fixture is its own primary and on a branch, so `main` is put
+        // where `sync` would have put it.
+        sh(&wt, &["fetch", "-q", "origin", "main:main"]);
 
-        sh(&wt, &["fetch", "-q", "origin", "main"]);
-        let line = merge_base_into_branch(&wt, "wt").expect("the merge should have gone through");
-        assert!(line.contains("merged origin/main"), "{line}");
+        let done = prepare(&wt).expect("--pr should merge origin/main in and push");
+        assert!(done.merged, "{}", done.text);
+        assert!(done.text.contains("merged origin/main"), "{}", done.text);
         assert!(fs::read_to_string(wt.join("h")).is_ok(), "main's file did not arrive");
         let subject = git(&wt, &["log", "-1", "--format=%s"]).unwrap();
         assert!(subject.starts_with("wt: merged main"), "{subject}");
@@ -676,10 +768,43 @@ pub(crate) mod tests {
             !subject.contains("Merge branch 'main' into"),
             "git's own direction is still what the history records: {subject}"
         );
+
+        let main = git(&origin, &["rev-parse", "refs/heads/main"]).unwrap();
+        let pushed = git(&origin, &["reflog", "show", "--format=%H", "refs/heads/wt"]).unwrap();
+        let pushes: Vec<&str> = pushed.lines().filter(|l| !l.is_empty()).collect();
+        for at in &pushes {
+            assert!(
+                git(&origin, &["merge-base", "--is-ancestor", &main, at]).is_ok(),
+                "{at} was pushed without origin/main {main} in it, so CI would have gated a \
+                 shape nobody is going to merge:\n{pushed}"
+            );
+        }
+        assert_eq!(pushes.len(), 1, "one push is what a --pr is:\n{pushed}");
+
         // A second run is a no-op and says so, rather than making an empty
         // merge commit every time an agent re-runs it.
-        let again = merge_base_into_branch(&wt, "wt").expect("a second merge must be a no-op");
-        assert!(again.contains("already in wt"), "{again}");
+        let again = prepare(&wt).expect("a second --pr must be a no-op");
+        assert!(!again.merged, "{}", again.text);
+        assert!(again.text.contains("already in wt"), "{}", again.text);
+    }
+
+    /// **`--pr` is never the last gate when it merged anything**, and the tool
+    /// is the only place that can be said: every gate run before it ran on a
+    /// tree that is now history. It exits non-zero unless the caller has said
+    /// it will re-run them.
+    #[test]
+    fn a_pr_that_merged_says_the_gates_ran_on_another_shape() {
+        assert!(MERGED_SHAPE.contains("re-run cargo test --lib, --clippy and --build-only"));
+        assert!(MERGED_SHAPE.contains(ACCEPTS_MERGE));
+        assert!(owes_a_rerun(true, &["--pr".to_string()]));
+        assert!(!owes_a_rerun(true, &["--pr".to_string(), ACCEPTS_MERGE.to_string()]));
+        assert!(!owes_a_rerun(false, &["--pr".to_string()]));
+
+        let (_origin, wt) = repo("merged-notice");
+        commit(&wt, "g", "mine\n", "work");
+        let quiet = prepare(&wt).expect("nothing to merge");
+        assert!(!quiet.merged, "{}", quiet.text);
+        assert!(quiet.text.contains("is already in wt"), "{}", quiet.text);
     }
 
     /// A conflict is left where the agent can resolve it, and the *next* run
@@ -735,7 +860,7 @@ pub(crate) mod tests {
         assert!(before.trim().is_empty(), "the branch is not on the remote yet");
         assert!(open_it_now("wt").contains("gh pr create --draft"));
 
-        let first = prepare(&wt).expect("the first --pr should push and print");
+        let first = prepare(&wt).expect("the first --pr should push and print").text;
         assert!(first.contains("Open it as a draft now"), "{first}");
         assert!(
             !first.contains("create --fill"),
@@ -746,7 +871,7 @@ pub(crate) mod tests {
         assert!(!after.trim().is_empty(), "the push happened");
 
         commit(&wt, "g2", "more\n", "more work");
-        let later = prepare(&wt).expect("a later --pr should push and print");
+        let later = prepare(&wt).expect("a later --pr should push and print").text;
         assert!(later.contains("gh pr ready"), "{later}");
         assert!(!later.contains("Open it as a draft now"), "{later}");
         assert!(!later.contains("create --fill"), "{later}");
