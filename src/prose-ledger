@@ -215,7 +215,7 @@ src/prosegate.rs 128 0
 src/qemu.rs 113 0
 src/redlist.rs 529 25
 src/soundfont.rs 133 0
-src/sourcegate.rs 354 1
+src/sourcegate.rs 378 1
 src/stamps.rs 3 0
 src/testargs.rs 97 0
 src/tiers.rs 336 26
@@ -358,7 +358,7 @@ tests/toyos-rust-tests/src/bin/std_threading.rs 5 0
 tests/toyos-rust-tests/src/bin/std_tls.rs 9 0
 tests/toyos-rust-tests/src/bin/std_tls_cranelift.rs 3 0
 tests/toyos-rust-tests/src/bin/std_tls_dlopen.rs 19 0
-tests/toyos-rust-tests/src/bin/std_tls_multi_crate.rs 9 0
+tests/toyos-rust-tests/src/bin/std_tls_multi_crate.rs 20 0
 tests/toyos-rust-tests/src/bin/std_unwind.rs 4 0
 tests/toyos-rust-tests/src/bin/std_unwind_so.rs 3 0
 tests/toyos-rust-tests/src/bin/syscall_cost.rs 25 0

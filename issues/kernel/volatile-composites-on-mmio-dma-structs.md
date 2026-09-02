@@ -42,5 +42,5 @@ ordering its rings actually require, decide per site whether one
 target's ISA guarantees a single-instruction store, which is again not
 something the *language* promises) or needs splitting, and add the
 regression coverage that would have caught the difference. Filed rather than
-fixed — `issues/build/clippy-has-never-run-here.md` records the measurement
+fixed — `issues/build/clippy-stage-two-is-lints-one-at-a-time.md` records the measurement
 and the reason it wasn't attempted here.

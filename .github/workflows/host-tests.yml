@@ -93,7 +93,7 @@ jobs:
       # set is default clippy everywhere, plus a short, individually-adopted list from
       # `pedantic`/`nursery` — never the groups themselves, and never
       # `restriction` as a group.
-      # `issues/build/clippy-has-never-run-here.md` carries the full ledger:
+      # `issues/build/clippy-stage-two-is-lints-one-at-a-time.md` carries the full ledger:
       # every `pedantic`/`nursery` lint measured, each adoption or rejection
       # with its count and reason (`pedantic` + `nursery` together were 1,684
       # findings on the kernel alone — almost all of it stayed rejected).
@@ -134,7 +134,7 @@ jobs:
       # custom `rustup toolchain link` target can't `rustup component add` one,
       # it would need building from `rust/` by hand — so userland's
       # `undocumented_unsafe_blocks` count is still unmeasured, not measured
-      # and deferred (`issues/build/clippy-has-never-run-here.md`).
+      # and deferred (`issues/build/clippy-stage-two-is-lints-one-at-a-time.md`).
       #
       # `--all-targets` on the workspace and *not* on the other two: it is what
       # reaches `tests/`, `examples/` and every crate's test targets, and on the
@@ -154,7 +154,7 @@ jobs:
       #
       # `undocumented_unsafe_blocks` (a `restriction` lint, cherry-picked, never
       # the group) is adopted per area as each area's justifications land — the
-      # plan `issues/build/clippy-has-never-run-here.md` records. The bootloader
+      # plan `issues/build/clippy-stage-two-is-lints-one-at-a-time.md` records. The bootloader
       # (10 blocks) is documented and gated below, inline. `toyos-abi` (19
       # blocks) is documented too, but gated as its own `-p` invocation rather
       # than folded into the workspace one: the workspace command lints every
@@ -178,7 +178,7 @@ jobs:
       # beside `main.rs` is gated the day it appears. To read *through* whatever
       # `allow`s are left and re-measure what is owed, add
       # `--force-warn clippy::undocumented_unsafe_blocks`;
-      # `issues/build/clippy-has-never-run-here.md` carries the per-area ledger
+      # `issues/build/clippy-stage-two-is-lints-one-at-a-time.md` carries the per-area ledger
       # and the counts. **They are not restated here**, and that is the point:
       # this comment kept a per-area list twice and both copies went stale
       # inside a day, because an area's status changes on somebody else's

@@ -18,8 +18,15 @@ findings — two removable `unsafe impl`s discovered by trying to justify
 them — are the precedent: the already-swept areas' filed reduction findings
 execute under this ruling too.
 
-Stage one (#132) put default clippy on every PR — kernel, host workspace,
-bootloader, `-D warnings`. This entry now carries stage two: every
+Stage one (#132) put default clippy on every PR and it runs today: the `host`
+job's `clippy` step lints the host workspace (`--workspace --all-targets`), the
+kernel under `x86_64-unknown-none` in both feature arms, the bootloader under
+`x86_64-unknown-uefi` and `toyos-abi`, each with `-D warnings` and the six
+adopted lints (`.github/workflows/host-tests.yml:199-220`). `userland/` is the
+one tree it cannot reach, and that step says why at
+`.github/workflows/host-tests.yml:130-137`: `x86_64-unknown-toyos` is a custom
+target and the `toyos` toolchain has no `cargo-clippy` component. This entry
+carries stage two: every
 `pedantic`/`nursery` lint measured on all three trees, adopted or rejected
 by name with the count that decided it, plus `undocumented_unsafe_blocks`
 measured per area. Method: never a group, never a guess — a lint's findings
