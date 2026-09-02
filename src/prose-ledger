@@ -114,11 +114,11 @@ kernel/src/id_map.rs 5 0
 kernel/src/inbox.rs 94 0
 kernel/src/input_merge_test.rs 18 0
 kernel/src/iod.rs 10 0
-kernel/src/iommu/mod.rs 46 0
+kernel/src/iommu/mod.rs 44 0
 kernel/src/iommu/vtd/dmar.rs 33 0
 kernel/src/iommu/vtd/fault.rs 34 0
-kernel/src/iommu/vtd/interrupt.rs 56 0
-kernel/src/iommu/vtd/mod.rs 100 0
+kernel/src/iommu/vtd/interrupt.rs 55 0
+kernel/src/iommu/vtd/mod.rs 98 0
 kernel/src/iommu/vtd/queue.rs 22 0
 kernel/src/iommu/vtd/table.rs 39 0
 kernel/src/irq_census.rs 38 0
@@ -237,7 +237,7 @@ tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/qemu.rs 1637 11
+tests/common/qemu.rs 1632 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0

@@ -92,9 +92,8 @@ pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice]) {
     vtd::init(rsdp_addr, devices);
 }
 
-/// How a source must address its interrupt, which is not a yes/no: a unit that
-/// remaps and cannot give this source an entry is a third answer, and a caller
-/// that folded it into [`Delivery::Direct`] would write a message the unit
+/// How a source must address its interrupt. Not a yes/no: a caller that folded
+/// the third answer into [`Delivery::Direct`] would write a message the unit
 /// blocks and lose the device in silence.
 pub enum Delivery<T> {
     /// No unit remaps interrupts on this machine; write what has always been written.
@@ -106,8 +105,7 @@ pub enum Delivery<T> {
 }
 
 /// Why a source could not be given an entry. Carried rather than collapsed:
-/// the two have different exits, and one message for both sends whoever reads
-/// it looking in the wrong place.
+/// one message for both sends whoever reads it looking in the wrong place.
 #[derive(Clone, Copy)]
 pub enum Refused {
     /// Wider than the destination an entry holds without extended interrupt mode.

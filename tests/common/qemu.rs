@@ -1305,12 +1305,9 @@ pub enum Profile {
     /// refusals, because a platform that declares it cannot remap and a unit
     /// that cannot are different facts a user can act on differently.
     IommuNoIntremap,
-    /// metal-sim whose unit advertises Extended Interrupt Mode.
-    ///
-    /// The only machine here that does. QEMU's `eim` default is `auto`, which
-    /// resolves to off without an in-kernel irqchip, so without this profile
-    /// the guest's 32-bit-destination entry format — the one every real
-    /// machine with more than 255 CPUs takes — is written by no boot.
+    /// metal-sim whose unit advertises Extended Interrupt Mode — the only
+    /// machine here that does, and so the only boot that writes the guest's
+    /// 32-bit-destination entry format rather than the 8-bit one.
     IommuEim,
     /// [`Profile::Headless`] with its virtio sound card replaced by an Intel
     /// HDA controller and one codec — the machine soundd drives itself.
@@ -1352,10 +1349,8 @@ pub struct Iommu {
     pub aw_bits: u8,
     /// Interrupt remapping. Off is a platform declaring it cannot remap.
     pub intremap: bool,
-    /// `ECAP.EIM`. QEMU's own default is `auto`, which is off without an
-    /// in-kernel irqchip and so off on every guest this host boots — leaving
-    /// the 32-bit-destination half of the guest's entry format unreachable
-    /// unless a profile asks for it by name.
+    /// `ECAP.EIM`. QEMU's default is `auto`, which resolves to off without an
+    /// in-kernel irqchip and so on every guest this host boots.
     pub eim: bool,
 }
 

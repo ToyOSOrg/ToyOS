@@ -101,15 +101,13 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     let mut units = 0usize;
     let mut regions = 0usize;
     // Described and planned before any unit is armed: whether sources may move
-    // to the remappable format is one decision about the whole machine, and it
-    // has to be taken before the first `IRE`.
+    // to the remappable format is one decision, taken before the first `IRE`.
     let mut ready: Vec<(Unit, Plan)> = Vec::new();
     for structure in dmar.structures() {
         match structure {
             Ok(Structure::Drhd(drhd)) => {
-                // Counted before the ceiling refuses it, so a unit left
-                // uninventoried leaves `units` above `ready`, which is what
-                // stops `remappable` arming a machine it cannot see all of.
+                // Counted before the ceiling refuses it: a unit left uninventoried
+                // leaves `units` above `ready`, which is what stops `remappable`.
                 units += 1;
                 if units > MAX_UNITS {
                     log!("iommu: more than {MAX_UNITS} units described; the rest are not inventoried");

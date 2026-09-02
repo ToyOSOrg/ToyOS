@@ -128,8 +128,7 @@ pub fn pointer() -> u64 {
 /// Take over a remapping unit's invalidation queue, once `IRE` is confirmed.
 ///
 /// Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the entry a
-/// fault was taken on — including a not-present one — so an entry filled in
-/// later is invisible until its cache is told, and a stale entry misdelivers.
+/// fault was taken on, so a later entry is invisible until its cache is told.
 pub fn adopt(regs: Mmio, queue: Queue) {
     REMAP.lock().units.push((regs, queue));
 }
