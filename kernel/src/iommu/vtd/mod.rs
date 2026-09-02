@@ -445,6 +445,17 @@ fn enable(
     };
 
     unit.command(TRANSLATION_ENABLE, true, TRANSLATION_ENABLE, "translation");
+    // `GCMD.CFI` is never among the bits `command` writes, so every write leaves
+    // it clear and `GSTS.CFIS` reads clear: a compatibility-format message is
+    // blocked from here on, which is the whole point of the step.
+    if remap.is_some() {
+        unit.command(
+            interrupt::INTERRUPT_REMAPPING_ENABLE,
+            true,
+            interrupt::INTERRUPT_REMAPPING_ENABLE,
+            "interrupt remapping",
+        );
+    }
 
     let gsts = unit.regs.read_u32(GSTS_REG);
     log!(
