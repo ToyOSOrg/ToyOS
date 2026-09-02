@@ -3,9 +3,9 @@
 //! `kernel/Cargo.toml` takes hashbrown's `default-hasher`, so every kernel
 //! `HashMap`/`HashSet` gets `foldhash::fast::RandomState`, whose seeds are
 //! addresses — and with no ASLR here they are the same on every boot of an
-//! image. A container whose keys crossed the boundary is therefore a collision
-//! flood away from a linear probe under whatever lock it sits behind, so it is
-//! a `BTreeMap`/`BTreeSet` instead: logarithmic worst case, no seed to derive.
+//! image. A container whose keys crossed the boundary is a collision flood away
+//! from a linear probe under whatever lock it sits behind, so it is a
+//! `BTreeMap`/`BTreeSet`: logarithmic worst case, no seed to derive.
 //! [`DECLARED`] is what is left hashed, and every row says who mints its keys.
 //!
 //! **A row's `keys` sentence is a human assertion and nothing checks it**: the
@@ -24,10 +24,9 @@
 //! arguments split across lines, as rustfmt writes a long type; a turbofish
 //! (`HashSet::<String>::new()`, *written* and not inferred); and a type that is
 //! inferred, from `HashMap::new()`. **The exit condition is the compiler**:
-//! dropping `default-hasher` from `kernel/Cargo.toml` deletes
-//! `DefaultHashBuilder`'s `BuildHasher` impl, so no `HashMap::new()` compiles
-//! until it names a `BuildHasher` the kernel seeds itself — every spelling at
-//! once, and this scan goes with it.
+//! dropping `default-hasher` deletes `DefaultHashBuilder`'s `BuildHasher` impl,
+//! so no `HashMap::new()` compiles until it names a `BuildHasher` the kernel
+//! seeds itself — every spelling at once, and this scan goes with it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
