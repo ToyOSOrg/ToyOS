@@ -797,9 +797,6 @@ impl FileSystem for FatFs {
         }
     }
 
-    /// Record the real length and re-derive the backing; a shrink truncates
-    /// the extent list before `set_len` frees the tail, so no backing ever
-    /// names a reissued cluster.
     /// `set_len` frees the clusters and the cell stops naming them, so a later
     /// grow zero-fills what it takes back rather than serving the old tail.
     fn truncate_to(&mut self, file_id: FileId, size: u64, _mtime: u64) -> Result<(), SyscallError> {
@@ -817,6 +814,9 @@ impl FileSystem for FatFs {
         fs.set_len(&mut info.file, size).map_err(|e| refused(role, "set_len", &name, e))
     }
 
+    /// Record the real length and re-derive the backing; a shrink truncates
+    /// the extent list before `set_len` frees the tail, so no backing ever
+    /// names a reissued cluster.
     fn update_metadata(
         &mut self,
         file_id: FileId,
