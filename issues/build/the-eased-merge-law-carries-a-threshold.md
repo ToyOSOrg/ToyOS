@@ -6,6 +6,18 @@ opened: 2026-08-20
 
 # The eased merge law carries a threshold
 
+**The eased law is superseded and this entry is its record, not a live policy.**
+The consequence it defined — "the organization move that unlocks GitHub's merge
+queue" — happened. CI triggers on `merge_group` (`.github/workflows/ci.yml:28`),
+`main` carries a required merge-queue rule, and `src/mergehealth.rs` reads that
+rule to decide which regime a window is in: `Regime::Eased` when no
+`merge_queue` rule is on `main`, `Regime::Queued` from the earliest
+`merge_group` run onward (`src/mergehealth.rs:263-278`, read at
+`src/mergehealth.rs:280`). What is still owed is below: the instrument keeps
+reporting per regime, and the threshold stays written as the criterion that
+would apply again if the queue were ever removed. Everything from here to the
+2026-08-20 report is the reasoning as it stood under the eased law.
+
 An external review (2026-08-20, adopted by the owner) named the eased law for
 what it is: a deliberate correctness/throughput trade, not an equivalent of
 pre-merge composition testing. A branch green against an older `main` can
