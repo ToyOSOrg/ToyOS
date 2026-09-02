@@ -15,8 +15,13 @@ use crate::{log, process, vfs};
 use toyos_abi::syscall::*;
 
 /// Every bit `MmapProt` defines; `NONE` is the empty word and needs no bit.
+///
+/// **Hand-copied from `toyos-abi` and nothing checks the copy**: a bit added
+/// there and not here is refused although the ABI defines it.
+/// `issues/kernel/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md` holds the
+/// measurement and the one-line fix, which is an ABI change.
 const MMAP_PROT_KNOWN: u64 = MmapProt::READ.0 | MmapProt::WRITE.0;
-/// Every bit `MmapFlags` defines.
+/// Every bit `MmapFlags` defines; hand-copied, as `MMAP_PROT_KNOWN` says.
 const MMAP_FLAGS_KNOWN: u64 = MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0;
 
 /// Map anonymous memory honouring `prot`; `MmapFlags::FIXED` places it at

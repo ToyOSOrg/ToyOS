@@ -68,6 +68,8 @@ pub fn install(table: &mut HandleTable, object: KObjectRef) -> Result<RawHandle,
 
 /// Every bit `OpenFlags` defines; `READ` is among them although nothing asks for
 /// it, because the word is validated in both directions or in neither.
+/// Hand-copied from `toyos-abi` and unchecked, for the reason
+/// `arch/syscall/vm.rs`'s `MMAP_PROT_KNOWN` gives for all four of these masks.
 const OPEN_FLAGS_KNOWN: u64 = OpenFlags::READ.0
     | OpenFlags::WRITE.0
     | OpenFlags::CREATE.0

@@ -1,25 +1,33 @@
 //! Whose keys a kernel hash container may hold.
 //!
-//! `kernel/Cargo.toml` takes hashbrown's `default-hasher`, so every
-//! `HashMap`/`HashSet` the kernel builds gets `foldhash::fast::RandomState`,
-//! whose two seeds are addresses and nothing else — and this machine has no
-//! address space layout randomisation for that to lean on, so both seeds are
-//! the same on every boot of the same image. A container whose keys crossed the
-//! user/kernel boundary is therefore a collision flood away from a linear probe
-//! under whatever lock it sits behind. The answer is unrepresentable rather than
-//! checked: such a container is a `BTreeMap`/`BTreeSet`, logarithmic in the
-//! worst case with no seed to derive. [`DECLARED`] is what is left hashed, and
-//! every row says where its keys are minted.
+//! `kernel/Cargo.toml` takes hashbrown's `default-hasher`, so every kernel
+//! `HashMap`/`HashSet` gets `foldhash::fast::RandomState`, whose seeds are
+//! addresses — and with no ASLR here they are the same on every boot of an
+//! image. A container whose keys crossed the boundary is therefore a collision
+//! flood away from a linear probe under whatever lock it sits behind, so it is
+//! a `BTreeMap`/`BTreeSet` instead: logarithmic worst case, no seed to derive.
+//! [`DECLARED`] is what is left hashed, and every row says who mints its keys.
 //!
-//! **This is a text scan, and it closes exactly one spelling**: a `HashMap<…>`
-//! or `HashSet<…>` written with its generic arguments, on a line that is not a
-//! comment, in a `.rs` file under `kernel/src`. It does not reach a `type`
-//! alias, a re-export, a map whose type is inferred from `HashMap::new()`, or
-//! any other hashed container. **The exit condition is the compiler**: dropping
-//! `default-hasher` from `kernel/Cargo.toml` deletes `DefaultHashBuilder`'s
-//! `BuildHasher` impl, so no `HashMap::new()` compiles until it names a
-//! `BuildHasher` the kernel seeds itself — every spelling at once, and this scan
-//! goes with it.
+//! **A row's `keys` sentence is a human assertion and nothing checks it**: the
+//! scan matches types, not origins, and the only test over that column asks
+//! that it is not empty. A false one greens the gate — measured, with
+//! `created_dirs` back as a `HashSet` and a row calling its key kernel-minted —
+//! and adding a row is the cheapest way to close a red here, so **whoever
+//! reviews a new row owes the trace of that key across the boundary**.
+//!
+//! **This is a text scan closing one spelling**: a `HashMap<…>`/`HashSet<…>`
+//! with its generic arguments, balanced on one line, not a comment, under
+//! `kernel/src`. A `type` alias's *definition* is caught, since it writes those
+//! arguments. Four forms walk past, each measured and each asserted in
+//! [`tests::the_scan_walks_past_four_measured_forms`]: an import alias
+//! (`use hashbrown::HashSet as UserKeyed;`, which compiles and builds an image);
+//! arguments split across lines, as rustfmt writes a long type; a turbofish
+//! (`HashSet::<String>::new()`, *written* and not inferred); and a type that is
+//! inferred, from `HashMap::new()`. **The exit condition is the compiler**:
+//! dropping `default-hasher` from `kernel/Cargo.toml` deletes
+//! `DefaultHashBuilder`'s `BuildHasher` impl, so no `HashMap::new()` compiles
+//! until it names a `BuildHasher` the kernel seeds itself — every spelling at
+//! once, and this scan goes with it.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -32,7 +40,7 @@ pub struct Declared {
     /// The type as it is written at the site, generic arguments included.
     pub ty: &'static str,
     /// Where the key is minted. A key userland can choose is not a row here; it
-    /// is a `BTreeMap`.
+    /// is a `BTreeMap`. Nothing checks this sentence — see the module header.
     pub keys: &'static str,
 }
 
@@ -76,9 +84,6 @@ pub const DECLARED: &[Declared] = &[
 ];
 
 /// Every `HashMap<…>`/`HashSet<…>` this scan can see, as `file -> types`.
-///
-/// A comment line is skipped, and a `HashMap` written without its generic
-/// arguments has no type to read and is not one of them.
 fn found(root: &Path) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut stack = vec![root.join("kernel/src")];
@@ -222,8 +227,33 @@ mod tests {
             ["HashMap<Pid, Arc<KShare>>"]
         );
         assert_eq!(types_in("    created_dirs: HashSet<String>,"), ["HashSet<String>"]);
-        // No generic arguments, so no type to read — the spelling this scan
-        // does not close, stated as a test rather than only as prose.
+        // A `type` alias *definition* writes its arguments, so it is caught —
+        // the header used to claim the opposite.
+        assert_eq!(
+            types_in("type UserKeyed = hashbrown::HashSet<String>;"),
+            ["HashSet<String>"]
+        );
+    }
+
+    /// The four forms that walk past, each one measured against a kernel that
+    /// compiled — the header names the same four and neither may drift from the
+    /// other. Asserted rather than only written down, because a limitation
+    /// nothing executes is the unchecked sentence this gate exists to replace.
+    #[test]
+    fn the_scan_walks_past_four_measured_forms() {
+        // 1. An import alias: the `use` carries no arguments, and the field it
+        //    renames then carries neither word.
+        assert!(types_in("use hashbrown::HashSet as UserKeyed;").is_empty());
+        assert!(types_in("    created_dirs: UserKeyed<String>,").is_empty());
+        // 2. Arguments split across lines, which is what rustfmt produces for a
+        //    long type: no balanced `>` on the line the name is on.
+        assert!(types_in("    extents: HashMap<").is_empty());
+        assert!(types_in("        String,").is_empty());
+        assert!(types_in("        Weak<FatExtents>,").is_empty());
+        assert!(types_in("    >,").is_empty());
+        // 3. A turbofish, which is written and not inferred: `::<` is not `<`.
+        assert!(types_in("    let mut seen = HashSet::<String>::new();").is_empty());
+        // 4. A type that really is inferred from its constructor.
         assert!(types_in("    let mut seen = HashSet::new();").is_empty());
     }
 }
