@@ -2642,8 +2642,8 @@ pub const KNOWN_RED: &[Red] = &[
         source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
         measured: "2026-08-31",
     },
-    // The last sighting before the assertion was deleted, and the one that
-    // makes the CI rate 3 reds of 4 attempts rather than the row above's 1 of 2.
+    // The three jobs after the row above, on two branches and two shards that
+    // touch neither pipe nor poller: 7 reds of 8 attempts over the four jobs.
     Red {
         test: "poll_wake_pipe",
         instrument: Instrument::Ci,
@@ -2664,6 +2664,51 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "merge-queue `ci` run 33644950006, job 100297692632 (`guest (1)`), headSha \
                    ae974921, 2026-09-02; the shard was otherwise green at 194 passed, 1 failed, \
                    195 total (135.0s), 81 held back for the nightly tier",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
+        measured: "2026-09-02",
+    },
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(2, 2),
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
+        what: "the same job re-run, and the same two panics at `poll_wake_pipe.rs:68:5`: \
+               `the 300 rounds took 3.006928225s, past the 3s bound`, then `3.003953429s` on the \
+               harness's own re-run, `ALONE poll_wake_pipe: red again, the same failure both \
+               times — the defect is real`. **A re-run does not clear it**, which is what \
+               stopped the branch it was gating from getting a green run at all. Host priced at \
+               `fastest boot 1972 ms against the reference 1320 ms — liveness ceilings paid at \
+               1.49x width` over `4 core(s)`: a *faster* host than the attempt above and the \
+               same overshoot, so this is not the host getting slower either.",
+        evidence: "merge-queue `ci` run 33644950006 attempt 2, job 100312837672 (`guest (1)`), \
+                   headSha ae974921, 2026-09-02; the shard was otherwise green at 194 passed, \
+                   1 failed, 195 total (134.2s), 81 held back for the nightly tier",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
+        measured: "2026-09-02",
+    },
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(2, 2),
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
+        what: "`the 300 rounds took 3.095220897s, past the 3s bound`, then `3.005337855s`, \
+               `ALONE poll_wake_pipe: red again, the same failure both times — the defect is \
+               real` — **on an unrelated branch and a different shard**. The IOMMU branch \
+               touches interrupt remapping and nothing near a pipe, and this is `guest (2)` \
+               where the three jobs above are `guest (1)`, so neither the diff nor one shard's \
+               machine is what the bound is measuring. Host priced at `fastest boot 3253 ms \
+               against the reference 1320 ms — liveness ceilings paid at 2.46x width` over \
+               `4 core(s)`, and that factor reaches every host-side ceiling and not this one.",
+        evidence: "pull-request `ci` run 33649279837, job 100311933914 (`guest (2)`), branch \
+                   `iommu-interrupt-remapping`, headSha 08b88a8a, 2026-09-02; the shard was \
+                   otherwise green at 195 passed, 1 failed, 196 total (105.5s), 81 held back \
+                   for the nightly tier",
         source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
         measured: "2026-09-02",
     },
