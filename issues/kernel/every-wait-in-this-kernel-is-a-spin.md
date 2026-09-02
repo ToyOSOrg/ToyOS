@@ -6,11 +6,25 @@ opened: 2026-08-12
 
 # Every wait in this kernel is a spin, and a killed task dies by having its stack discarded
 
-Four wait sites still spin — two in xHCI, one in NVMe, one in virtio — so a CPU
+**The heading and the paragraph under it are the state at opening, not the
+state of the tree.** What exists now: the completion core, where every wait in
+the kernel rechecks one predicate and a waiter lends a watch to the object it
+waits on (`kernel/src/completion/mod.rs:1-8`); typed durations; and a sleep
+lock a contender parks on — written, loom-driven, and still
+`#![allow(dead_code)]` "until a kernel static converts to it"
+(`kernel/src/sleeplock.rs:1-9`), because none has. What has not moved is the
+disk path: BOT runs one command in flight per controller and `with_disk`
+(`kernel/src/drivers/xhci/mod.rs:1339`) holds the controller lock for the whole
+of it (`kernel/src/drivers/xhci/wait/msc.rs:1-4`), which is why
+`kernel/CLAUDE.md:12` still reads "No disk wait in this kernel can park". The
+four-site count below has not been re-measured since it was written: it is a
+baseline to re-take before the next chunk, not a number to quote.
+
+The state at opening, kept because every chunk below is written against it:
+four wait sites still spin — two in xHCI, one in NVMe, one in virtio — so a CPU
 waits for a device. A kill is answered by throwing the task's kernel stack away
 at five separate reap-in-place arms, and the parked arm is the one that strands
-a held lock. Every duration in the kernel is a bare number. None of that is true
-on `main`.
+a held lock. Every duration in the kernel is a bare number.
 
 **The first five chunks landed 2026-08-19 as #91** (`a5ccf14`): duration kinds,
 the completion core, the one park site with the cancellable kill, the sleep

@@ -264,7 +264,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
 
     let lib_has_tls = lib.tls_memsz > 0;
     let data_arc = process::process_data();
-    let (init_info, tls_module) = {
+    let init_info = {
         let data = data_arc.lock();
         crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
 
@@ -276,31 +276,11 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls_total_memsz, &tls_info);
         }
 
-        // Read here and bumped only at the registration below, so nothing reserves it
-        // against a sibling load of another name
-        // (`issues/kernel/two-dlopens-of-different-names-share-one-tls-module-id.md`).
-        let tls_module = lib_has_tls.then(|| {
-            let module_id = data.elf.next_tls_module_id;
-            let tls_info = crate::elf::TlsModuleInfo {
-                libs: &data.elf.loaded_libs,
-                modules: &data.elf.tls_modules,
-            };
-            crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
-            crate::elf::TlsModule {
-                template: lib.tls_template,
-                memsz: lib.tls_memsz,
-                base_offset: 0,
-                module_id,
-                is_static: false,
-            }
-        });
-
         // init_info layout: [init_array_vaddr, init_array_count], vaddr rebased to user_base.
-        let init_info = [
+        [
             if lib.init_array_vaddr != 0 { lib.user_base.raw() + lib.init_array_vaddr } else { 0 },
             lib.init_array_size / 8,
-        ];
-        (init_info, tls_module)
+        ]
     };
 
     // The point of no return: copy the init info out first, then register. A
@@ -328,9 +308,24 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     mapping.commit();
 
     let idx = data.elf.loaded_libs.len();
-    if let Some(module) = tls_module {
-        data.elf.next_tls_module_id = module.module_id + 1;
-        data.elf.tls_modules.push(module);
+    // Taken and bumped under the guard that registers, so two names loading at
+    // once are two modules: the id a library's `DTPMOD64` relocations carry is
+    // no other library's, and `dynamic_tls_blocks` is keyed on it.
+    if lib_has_tls {
+        let module_id = data.elf.next_tls_module_id;
+        data.elf.next_tls_module_id = module_id + 1;
+        let tls_info = crate::elf::TlsModuleInfo {
+            libs: &data.elf.loaded_libs,
+            modules: &data.elf.tls_modules,
+        };
+        crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
+        data.elf.tls_modules.push(crate::elf::TlsModule {
+            template: lib.tls_template,
+            memsz: lib.tls_memsz,
+            base_offset: 0,
+            module_id,
+            is_static: false,
+        });
     }
     data.elf.lib_paths.push(resolved);
     data.elf.loaded_libs.push(lib);
