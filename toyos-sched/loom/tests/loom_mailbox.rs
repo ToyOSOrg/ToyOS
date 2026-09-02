@@ -178,52 +178,114 @@ fn preempted_producer_strands_suffix() {
     );
 }
 
-/// The steal probe is one reusable node. A thief may only post when its
-/// previous probe has been consumed, and the victim releases the node
-/// strictly after unlinking it — so the node is never linked twice.
+/// Whether the drain after both threads have joined *is* the victim's next
+/// pass, or is the model reading a queue whose consumer is gone. The whole of
+/// what the feature decides, and it decides no code path.
 #[cfg(not(feature = "no-preempt-guard"))]
-#[test]
-fn steal_probe_node_is_never_double_linked() {
-    model(|| {
-        let (tx, mut rx) = mailbox::<Msg>();
-        let world = Arc::new((tx, MailboxNode::<Msg>::new(), PreemptModel::new()));
+const VICTIM_RETIRES: bool = cfg!(feature = "victim-retires-mid-probe");
 
-        let thief = {
-            let world = world.clone();
-            loom::thread::spawn(move || {
-                let mut posted = 0;
-                for probe in 0..2 {
-                    let guard = world.2.disable();
-                    // No probe is posted while one is outstanding; the thief
-                    // simply doesn't post another.
-                    if let Some(slot) = world.1.claim() {
-                        world.0.post(slot, Msg::Probe(probe), &guard);
-                        posted += 1;
-                    }
-                }
-                posted
-            })
-        };
+/// The steal probe's node, through claim, post, pop, repost and the victim's
+/// end: a thief posts only when its previous probe has been consumed, and the
+/// victim releases the node strictly after unlinking it.
+///
+/// **The node's lifetime is the victim's to end** — `MailboxNode::in_flight` is
+/// cleared by the *victim's* consumer, so a probe it never drains stays claimed
+/// and its thief's next `claim()` answers `None` for ever. The queue is dropped
+/// where the victim ends rather than at scope exit, because N2's bomb firing
+/// mid-unwind would hide the verdict that caused it.
+///
+/// **What it does not model:** `best_victim` posts only into a CPU
+/// `CpuHandle::answering` still admits, so the window is one probe wide. The
+/// thief here posts unconditionally — what the model shows is that the
+/// primitive has no reclamation path once the consumer is gone, not how wide
+/// the window is.
+#[cfg(not(feature = "no-preempt-guard"))]
+fn steal_probe_model() {
+    let (tx, mut rx) = mailbox::<Msg>();
+    let world = Arc::new((tx, MailboxNode::<Msg>::new(), PreemptModel::new()));
 
-        let victim = {
-            let world = world.clone();
-            loom::thread::spawn(move || {
+    let thief = {
+        let world = world.clone();
+        loom::thread::spawn(move || {
+            let mut posted = 0;
+            for probe in 0..2 {
                 let guard = world.2.disable();
-                let mut got = 0;
-                while rx.pop(&guard).is_some() {
-                    got += 1;
+                // No probe is posted while one is outstanding; the thief
+                // simply doesn't post another.
+                if let Some(slot) = world.1.claim() {
+                    world.0.post(slot, Msg::Probe(probe), &guard);
+                    posted += 1;
                 }
-                (rx, got)
-            })
-        };
+            }
+            posted
+        })
+    };
 
-        let posted = thief.join().unwrap();
-        let (mut rx, mut got) = victim.join().unwrap();
+    let victim = {
+        let world = world.clone();
+        loom::thread::spawn(move || {
+            let guard = world.2.disable();
+            let mut got = 0;
+            while rx.pop(&guard).is_some() {
+                got += 1;
+            }
+            (rx, got)
+        })
+    };
+
+    let posted = thief.join().unwrap();
+    let (mut rx, mut got) = victim.join().unwrap();
+
+    let mut stranded = 0;
+    {
         let guard = world.2.disable();
         while rx.pop(&guard).is_some() {
-            got += 1;
+            if VICTIM_RETIRES {
+                stranded += 1;
+            } else {
+                got += 1;
+            }
         }
-        assert_eq!(got, posted, "every posted probe is consumed exactly once");
-        assert!(!world.1.in_flight(), "the node is free after consumption");
-    });
+    }
+    // The drop edge: the victim's mailbox goes away with its CPU (N2).
+    drop(rx);
+
+    assert_eq!(
+        stranded, 0,
+        "the victim retired with a probe still linked in its queue, so the node \
+         stays claimed for the rest of the boot and every later `claim()` by its \
+         thief answers `None` — one CPU stopping costs a second CPU its pull half \
+         permanently"
+    );
+    assert_eq!(got, posted, "every posted probe is consumed exactly once");
+    assert!(!world.1.in_flight(), "the node is free after consumption");
+}
+
+/// A victim that keeps taking passes reclaims every probe exactly once.
+#[cfg(not(any(feature = "no-preempt-guard", feature = "victim-retires-mid-probe")))]
+#[test]
+fn steal_probe_node_is_never_double_linked() {
+    model(steal_probe_model);
+}
+
+/// **A control for a defect that stands, not for a mutation.** This crate's
+/// other features model a rule away to show the model catches the lie; this one
+/// changes nothing and lets the victim do what a stopped CPU does, and the
+/// model must then fail — `issues/kernel/steal-probe-node-dies-with-its-victim.md`
+/// reproduced instead of argued. `TOYOS_LOOM_RAW=1` skips the catch and prints
+/// loom's offending execution. **This case and its feature go with the fix**: a
+/// green run here would mean the leak is gone.
+#[cfg(all(feature = "victim-retires-mid-probe", not(feature = "no-preempt-guard")))]
+#[test]
+fn a_probe_outstanding_when_its_victim_retires_is_never_reclaimed() {
+    if std::env::var_os("TOYOS_LOOM_RAW").is_some() {
+        model(steal_probe_model);
+        panic!("the model ran clean: the stranded probe was NOT detected");
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model(steal_probe_model)));
+    assert!(
+        result.is_err(),
+        "a victim that stops taking passes left no probe stranded: the mailbox \
+         grew a reclamation path and this control is what has to go",
+    );
 }

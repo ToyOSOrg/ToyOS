@@ -678,6 +678,38 @@ jobs:
             exit 1
           fi
 
+      # **The one control here that models nothing away.** Its three siblings
+      # relax an ordering or delete a guard and demand that the model catches
+      # the lie. `victim-retires-mid-probe` changes no rule: it lets the mailbox
+      # model's victim stop taking passes, which is what a CPU that stops does,
+      # and the model must then fail because `MailboxNode::in_flight` is the
+      # consumer's to clear and a retired consumer clears nothing.
+      #
+      # So it reproduces an open defect —
+      # `issues/kernel/steal-probe-node-dies-with-its-victim.md` — rather than
+      # proving a lie is caught, and this step and its feature go away with the
+      # fix. Its shape is `no-preempt-guard`'s: the case catches its own panic
+      # and turns it into an assertion, so the step's teeth are a green run plus
+      # the verdict line demanded by name.
+      - name: toyos-sched-loom probe-outlives-its-victim reproduces
+        run: |
+          set -o pipefail
+          echo "=== toyos-sched-loom --features victim-retires-mid-probe --test loom_mailbox (must pass — it catches its own red)" \
+            | tee -a /tmp/host.log
+          if ! cargo test -p toyos-sched-loom --features victim-retires-mid-probe \
+               --test loom_mailbox 2>&1 \
+               | tee /tmp/victim-retires.log | tee -a /tmp/host.log; then
+            echo "loom_mailbox failed with the victim retiring: either the internal catch itself failed or something else broke, so this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'a_probe_outstanding_when_its_victim_retires_is_never_reclaimed \.\.\. ok' \
+               /tmp/victim-retires.log; then
+            echo "loom_mailbox passed without a_probe_outstanding_when_its_victim_retires_is_never_reclaimed reaching a verdict: this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
       # **The process lifecycle's two controls.** Not loom, and the reason is
       # worth stating: nothing in `toyos-proclife` is lock-free — every decision
       # it makes is made under `PROCESS_TABLE` — so what the model explores is
