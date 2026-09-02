@@ -26,11 +26,21 @@ one of this project's verdicts is measured on, and both this gate and
 `.github/instrument.sh` stay green through it — the instrument check reads
 QEMU's version, which an action does not touch.
 
-The container images are the contrast, and they are why this is a gap and not a
-convention: `.github/ci-image/Dockerfile` and `.github/runner/Dockerfile` are
-both **consumed pinned by digest** exactly so "a rebuild cannot change what a
-verdict was measured with" (`.github/ci-image/Dockerfile:1-8`). The same
-argument applies to an action and is not applied.
+One container image is the contrast, and it is why digest pinning is this
+repository's stated rule rather than a preference: `route.yml:131` consumes the
+T14's image as `127.0.0.1:5000/toyos-ci@sha256:…`, "a digest and never a moving
+tag: a rebuild must not be able to change the QEMU or Rust a recorded number was
+taken on" (`route.yml:128-130`). The same argument applies to an action and is
+not applied.
+
+**The other two are not a contrast, and an earlier draft of this entry said they
+were.** `route.yml:123` hands the untrusted lane a bare `debian:sid`, which is a
+moving tag on the machine every pull-request verdict is measured on; and
+`.github/ci-image/Dockerfile`'s image is pushed to `:latest` (`ci-image.yml:43`,
+`:47`) and consumed by nothing — `git grep ci-hosted` returns only
+`ci-image.yml:41`, and `ci-image.yml:10-11` says the cutover into `route.yml` is
+a separate deliberate act nobody has taken. So the tree pins one image by
+digest, runs one lane on a moving tag, and publishes one image no job pulls.
 
 ## What it costs to close
 

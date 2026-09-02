@@ -41,9 +41,8 @@ is still open (`issues/kernel/spawned-process-never-starts.md`).
 
 `toyos-sched/loom/tests/loom_mailbox.rs`'s `steal_probe_model` drives the real
 `MailboxNode`, `MailboxProducer` and `MailboxConsumer` through claim, post, pop
-and repost, with the victim's mailbox dropped where the victim ends. The
-`victim-retires-mid-probe` feature makes the victim's last pass its last, and
-loom finds the schedule:
+and repost. The `victim-retires-mid-probe` feature makes the victim's last pass
+its last, and loom finds the schedule:
 
 ```
 $ TOYOS_LOOM_RAW=1 cargo test -p toyos-sched-loom \
@@ -61,6 +60,13 @@ so what the red measures is the retirement and not the model. What it does not
 measure is the width of the window: the model's thief posts unconditionally,
 where `best_victim` posts only into a CPU `CpuHandle::answering` still admits.
 
+**No drop edge is modelled, and an earlier draft of this entry claimed one.**
+`MailboxConsumer` has no `Drop` impl — `toyos-sched/src/mailbox.rs` has two,
+`MailboxNode:172` and `PostSlot:200` — so dropping the consumer runs no code,
+and the count above already clears `in_flight` before any assertion. The line
+that dropped it was deleted after it was measured bit-identical in both arms.
+
 **The control and its feature are deleted by whatever closes this entry**, in
-the same commit — a green run under that feature would mean the reclamation
-path exists.
+the same commit. Not flipped to green: the feature *defines* every post-join pop
+as stranded, so no change to the mailbox can make that case pass. Its premise
+goes away with the defect, and the deletion is the only exit.

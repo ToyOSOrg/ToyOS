@@ -184,15 +184,19 @@ fn preempted_producer_strands_suffix() {
 #[cfg(not(feature = "no-preempt-guard"))]
 const VICTIM_RETIRES: bool = cfg!(feature = "victim-retires-mid-probe");
 
+/// The stranded-probe verdict, in one place: the assertion prints it and the
+/// control below refuses a caught panic that is not it, so the control cannot
+/// read a different failure as the defect reproducing.
+#[cfg(not(feature = "no-preempt-guard"))]
+const STRANDED: &str = "the victim retired with a probe still linked in its queue";
+
 /// The steal probe's node, through claim, post, pop, repost and the victim's
 /// end: a thief posts only when its previous probe has been consumed, and the
 /// victim releases the node strictly after unlinking it.
 ///
 /// **The node's lifetime is the victim's to end** — `MailboxNode::in_flight` is
 /// cleared by the *victim's* consumer, so a probe it never drains stays claimed
-/// and its thief's next `claim()` answers `None` for ever. The queue is dropped
-/// where the victim ends rather than at scope exit, because N2's bomb firing
-/// mid-unwind would hide the verdict that caused it.
+/// and its thief's next `claim()` answers `None` for ever.
 ///
 /// **What it does not model:** `best_victim` posts only into a CPU
 /// `CpuHandle::answering` still admits, so the window is one probe wide. The
@@ -247,15 +251,11 @@ fn steal_probe_model() {
             }
         }
     }
-    // The drop edge: the victim's mailbox goes away with its CPU (N2).
-    drop(rx);
-
     assert_eq!(
         stranded, 0,
-        "the victim retired with a probe still linked in its queue, so the node \
-         stays claimed for the rest of the boot and every later `claim()` by its \
-         thief answers `None` — one CPU stopping costs a second CPU its pull half \
-         permanently"
+        "{STRANDED}, so the node stays claimed for the rest of the boot and every \
+         later `claim()` by its thief answers `None` — one CPU stopping costs a \
+         second CPU its pull half permanently"
     );
     assert_eq!(got, posted, "every posted probe is consumed exactly once");
     assert!(!world.1.in_flight(), "the node is free after consumption");
@@ -273,8 +273,13 @@ fn steal_probe_node_is_never_double_linked() {
 /// changes nothing and lets the victim do what a stopped CPU does, and the
 /// model must then fail — `issues/kernel/steal-probe-node-dies-with-its-victim.md`
 /// reproduced instead of argued. `TOYOS_LOOM_RAW=1` skips the catch and prints
-/// loom's offending execution. **This case and its feature go with the fix**: a
-/// green run here would mean the leak is gone.
+/// loom's offending execution.
+///
+/// **The exit is deletion, not a green run.** The feature *defines* every
+/// post-join pop as stranded, so no fix to the mailbox can turn this case
+/// green; whatever closes the record removes this case and the feature with it,
+/// in the same commit. What a green run here would mean is that the model
+/// stopped reaching the state at all.
 #[cfg(all(feature = "victim-retires-mid-probe", not(feature = "no-preempt-guard")))]
 #[test]
 fn a_probe_outstanding_when_its_victim_retires_is_never_reclaimed() {
@@ -282,10 +287,19 @@ fn a_probe_outstanding_when_its_victim_retires_is_never_reclaimed() {
         model(steal_probe_model);
         panic!("the model ran clean: the stranded probe was NOT detected");
     }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model(steal_probe_model)));
+    let Err(payload) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model(steal_probe_model)))
+    else {
+        panic!("the model ran clean: no schedule left a probe stranded");
+    };
+    let said = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("a panic payload that is not a string");
     assert!(
-        result.is_err(),
-        "a victim that stops taking passes left no probe stranded: the mailbox \
-         grew a reclamation path and this control is what has to go",
+        said.contains(STRANDED),
+        "the model failed on something that is not the stranded probe: {said}",
     );
+    println!("caught the verdict: {STRANDED}");
 }

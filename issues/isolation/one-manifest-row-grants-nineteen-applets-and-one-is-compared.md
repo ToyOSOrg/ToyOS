@@ -51,6 +51,14 @@ the differential that would see `/bin/echo` holding `Rights::POWER` has to read
 `system.toml` and the initrd's link list on the host, in `cargo test --lib`,
 because no boot carries that manifest.
 
+**The differential reads one row for every link, and the proposed fix is exactly
+what that would ignore.** `declared` tries `row(invoked path)` *before*
+`read_link` (`userland/init/src/main.rs:433-441`), so a row keyed `shutdown` with
+`path = "/bin/shutdown"` would win — while this checker resolves every link to
+`/bin/toybox`, reads that one row, and would keep reporting the union. Whoever
+builds the per-path row extends the checker to ask `row(invoked path)` first, in
+the same landing: a red after that fix is this checker's and not the fix's.
+
 **The circularity that was avoided, and it is the strongest reason this shape is
 the shape.** A checker that reimplements init's resolver agrees with init by
 construction. The two sides above come from different places — the links off the

@@ -594,17 +594,23 @@ struct Package {
 /// **A sibling of [`HOST_SPAWNS`] rather than a row in it**, because a
 /// `HOST_SPAWNS` row's `sites` field is empty *exactly when* its `arg` is a
 /// string literal, and a package name is always one — the field would be dead
-/// in every row here, and a package legitimately appears at eight sites across
-/// six files. What the two share is the shape: a row per name with a reason, refused
-/// when a name has no row and refused when a row has no name.
+/// in every row, and a package appears at eight sites across six files.
 ///
-/// **What this closes is a spelling.** [`INSTALLERS`] lists the
-/// `(manager, subcommand)` pairs it understands and [`installed_packages`]
-/// states how a line is cut into commands. What it does not reach: a binary a
-/// `run:` step downloads and executes (every workflow here fetches
-/// `rustup-init.sh` over `curl`), a binary a third-party `uses:` action runs
-/// inside itself, and a package name a shell variable holds in full — the class
+/// **What this closes is a spelling**, and each form it walks past is a case in
+/// `the_package_scan_reads_the_install_command_and_not_the_shell` asserting that
+/// it does, so widening the scan reds that test instead of growing a regex
+/// quietly. Walked past: a YAML **folded scalar** (`run: >-`, which
+/// `.github/workflows/ci-image.yml:34` is today), whose lines YAML joins where
+/// this joins only on a trailing `\`; an install behind an **interpreter head
+/// word** — `bash -c`, `sh -c`, `python3 -m pip` — because the command's first
+/// word is then the interpreter and not a manager; a **manager [`INSTALLERS`]
+/// does not list**, `pipx` among them; a binary a `run:` step downloads and
+/// runs (every workflow here fetches `rustup-init.sh` over `curl`); and a
+/// binary a third-party `uses:` action runs inside itself — the class
 /// `cc::Build`'s host `ar` is in, which the Rust scan does not reach either.
+///
+/// A name a shell variable holds is *not* on that list: `$PKG` is a token like
+/// any other and reds under its own spelling, which is why `qemu@$want` is a row.
 const CI_PACKAGES: &[Package] = &[
     Package {
         name: "build-essential",
@@ -708,6 +714,10 @@ struct Action {
 /// moves, so this refuses an undeclared action and an unmoved row and claims
 /// nothing about the code behind the tag —
 /// `issues/build/an-action-tag-pins-a-name-and-not-bytes.md` is that gap.
+///
+/// The walk reads `.github/workflows/` only, so a composite action's own
+/// `uses:` — an `action.yml` elsewhere under `.github/` — is unread. This tree
+/// holds no such file.
 const CI_ACTIONS: &[Action] = &[
     Action {
         name: "actions/checkout@v4",
@@ -729,10 +739,12 @@ const CI_ACTIONS: &[Action] = &[
     },
 ];
 
-/// The `(manager, subcommands)` pairs [`installed_packages`] understands.
-///
-/// Managers nothing here uses are listed anyway: an arrival then reds by name
-/// instead of walking past a list of what was in use the day it was written.
+/// The `(manager, subcommands)` pairs [`installed_packages`] understands: the
+/// four `.github/` uses (`apt-get`, `apt`, `brew`, and `npm` for its subcommand
+/// set) plus `apk`, `dnf`, `yum`, `pacman`, `zypper`, `snap`, `pip`, `pip3`,
+/// `yarn`, `pnpm`, `gem` and `cargo`, so those arrive by name rather than
+/// silently. `pipx`, `uv`, `go` and `add-apt-repository` are **not** here and
+/// are part of [`CI_PACKAGES`]'s stated non-reach.
 const INSTALLERS: &[(&str, &[&str])] = &[
     ("apt-get", &["install"]),
     ("apt", &["install"]),
@@ -1937,6 +1949,21 @@ mod tests {
         assert_eq!(one("command -v cmake"), Vec::<String>::new());
         // A manager nothing uses today is still read, so its arrival reds.
         assert_eq!(one("npm i left-pad"), ["left-pad"]);
+        // A shell variable is a token like any other: it reds under its own
+        // spelling rather than being walked past.
+        assert_eq!(one("apt-get install -y $PKG"), ["$PKG"]);
+
+        // **The forms this walks past, asserted as misses.** Each is a hole
+        // `CI_PACKAGES`'s doc names; widening the scan to catch one reds here,
+        // which is what stops the scan being iterated against a reviewer's
+        // plants until the record and the code disagree.
+        let missed = |text: &str| assert_eq!(one(text), Vec::<String>::new(), "{text:?}");
+        // A YAML folded scalar: YAML joins the two lines, this does not.
+        missed("run: >-\n  apt-get install -y\n  folded-scalar-pkg");
+        missed("bash -c \"apt-get install -y bash-dash-c-pkg\"");
+        missed("sh -c 'apt-get install -y sh-dash-c-pkg'");
+        missed("python3 -m pip install pythonm-pip-pkg");
+        missed("pipx install pipx-pkg");
     }
 
     /// What the walk can and cannot read, stated as cases.
