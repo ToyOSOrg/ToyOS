@@ -768,9 +768,23 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
         }
     }
 
+    // An address space of this controller's own, holding one pool and nothing
+    // else; attached before a single address is written to a register.
+    //
+    // Both isolation actuators mis-program *this* function's context entry by
+    // hand, and attaching it to a domain would write a good one over the
+    // staging, so a staged boot leaves the controller where the actuator put it.
+    let space = if crate::actuator::iommu_context_absent()
+        || crate::actuator::iommu_empty_domain()
+    {
+        crate::iommu::DeviceSpace::Untranslated
+    } else {
+        crate::iommu::DeviceSpace::create()
+    };
     // Leaked, not held in a `static`; allocated after every refusal above so
     // a declined NVMe function costs no physical memory.
-    let dma = DmaPool::alloc(DMA_SIZE).leak();
+    let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
+    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
     const SQ_PAGE: usize = QUEUE_DEPTH * core::mem::size_of::<SqEntry>();
     const CQ_PAGE: usize = QUEUE_DEPTH * core::mem::size_of::<CqEntry>();
     let admin_sq = dma.subview(OFF_ADMIN_SQ, SQ_PAGE);

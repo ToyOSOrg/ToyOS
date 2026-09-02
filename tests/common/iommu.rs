@@ -1057,7 +1057,90 @@ pub fn iommu_domain_isolation(
         blocked.reason,
         PROBE_WORDS * 8
     );
+    domains_are_disjoint(socket, &log, window, victim)
+}
+
+/// Every function the kernel says it moved is in a domain of its own, and none
+/// of those domains maps the page the NIC was aimed at.
+///
+/// One boot can only take one fault, so the behavioural arm above covers one
+/// driver. This covers all of them, out of the same tables the unit walks: the
+/// context entry each function really has, its `DID` and its second-level root,
+/// and the walk for the victim page in each. A driver moved into somebody
+/// else's domain, or into one that still reaches the identity domain's pages,
+/// fails here without needing a boot of its own.
+fn domains_are_disjoint(
+    socket: &Path,
+    log: &Serial,
+    window: u64,
+    victim: u64,
+) -> Result<(), String> {
+    let mut seen: BTreeMap<String, u64> = BTreeMap::new();
+    for line in log.text().lines() {
+        let Some(rest) = line.split("iommu: ").nth(1) else { continue };
+        let Some((bdf, tail)) = rest.split_once(' ') else { continue };
+        let Some(id) = tail.strip_prefix("moves to domain") else { continue };
+        let id: u64 = id.trim().parse().map_err(|_| format!("unreadable domain on {line:?}"))?;
+        if seen.insert(bdf.to_string(), id).is_some() {
+            return Err(format!("{bdf} moved twice: {line:?}"));
+        }
+    }
+    if seen.len() < 2 {
+        return Err(format!(
+            "{} function(s) moved to a domain of their own, so there is no pair here to be \
+             disjoint\n{}",
+            seen.len(),
+            log.text()
+        ));
+    }
+
+    let mut roots: BTreeMap<u64, String> = BTreeMap::new();
+    for (bdf, want) in &seen {
+        let (did, root) = context_of(socket, window, bdf)?;
+        if did != *want {
+            return Err(format!(
+                "the kernel says {bdf} is in domain {want} and its context entry names domain \
+                 {did}"
+            ));
+        }
+        if let Some(other) = roots.insert(root, bdf.clone()) {
+            return Err(format!(
+                "{bdf} and {other} name the same second-level table at {root:#x}, so they are \
+                 one address space wearing two domain ids"
+            ));
+        }
+        if let Ok(at) = translate(socket, window, bdf, victim) {
+            return Err(format!(
+                "{bdf}'s domain {did} translates {victim:#x} to {at:#x}, and that page belongs \
+                 to another driver's pool"
+            ));
+        }
+    }
+    eprintln!(
+        "  [iommu] {} function(s) in {} domains over {} distinct second-level tables, none of \
+         which maps {victim:#x}: {seen:?}",
+        seen.len(),
+        seen.values().collect::<BTreeSet<_>>().len(),
+        roots.len()
+    );
     Ok(())
+}
+
+/// One function's context entry, as `(DID, second-level root)`; Section 9.3
+/// puts `DID` at 87:72 and `SLPTPTR` at 51:12.
+fn context_of(socket: &Path, window: u64, bdf: &str) -> Result<(u64, u64), String> {
+    let (bus, dev, func) = parse_bdf(bdf)?;
+    let root = over_qmp(socket, window + RTADDR_REG, 1, 'g')?[0] & ENTRY_ADDR;
+    let entry = over_qmp(socket, root + u64::from(bus) * 16, 1, 'g')?[0];
+    if entry & 1 == 0 {
+        return Err(format!("{bdf}: the root entry for bus {bus:#04x} is not present"));
+    }
+    let devfn = u64::from(dev) * 8 + u64::from(func);
+    let context = over_qmp(socket, (entry & ENTRY_ADDR) + devfn * 16, 2, 'g')?;
+    if context[0] & 1 == 0 {
+        return Err(format!("{bdf}: its context entry is not present"));
+    }
+    Ok(((context[1] >> 8) & 0xFFFF, context[0] & ENTRY_ADDR))
 }
 
 /// `COMMAND` and its Bus Master Enable bit, PCI 3.0 §6.2.2.

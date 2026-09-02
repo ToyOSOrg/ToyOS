@@ -309,9 +309,14 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
     }
     log!("xHCI: controller reset");
 
+    // An address space of this controller's own, holding one pool and nothing
+    // else; attached before the first address is written to a register.
+    let space = crate::iommu::DeviceSpace::create();
     // After the reset: a controller refused above never allocates, and
-    // `DmaPool` frees the pool on every refusal below when it drops.
-    let pool = DmaPool::alloc(layout.pool_size);
+    // `DmaPool` frees the pool — and takes it back out of the domain — on every
+    // refusal below when it drops.
+    let pool = DmaPool::alloc_in(layout.pool_size, space);
+    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     // MaxSlotsEn caps what this driver can track; the controller then refuses
     // Enable Slot past it.

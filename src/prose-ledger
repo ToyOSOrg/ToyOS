@@ -77,7 +77,7 @@ kernel/src/drivers/i8042/mod.rs 250 0
 kernel/src/drivers/i8042/tally.rs 16 0
 kernel/src/drivers/ioapic.rs 40 0
 kernel/src/drivers/mod.rs 5 0
-kernel/src/drivers/nvme.rs 139 0
+kernel/src/drivers/nvme.rs 145 0
 kernel/src/drivers/panic_console/access.rs 6 0
 kernel/src/drivers/panic_console/latch.rs 9 0
 kernel/src/drivers/panic_console/mod.rs 215 0
@@ -85,7 +85,7 @@ kernel/src/drivers/pci.rs 40 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
 kernel/src/drivers/virtio.rs 130 0
-kernel/src/drivers/virtio_console.rs 31 0
+kernel/src/drivers/virtio_console.rs 33 0
 kernel/src/drivers/virtio_gpu.rs 29 0
 kernel/src/drivers/virtio_net.rs 59 0
 kernel/src/drivers/virtio_sound.rs 68 0
@@ -94,7 +94,7 @@ kernel/src/drivers/xhci/hid.rs 26 0
 kernel/src/drivers/xhci/legacy.rs 31 0
 kernel/src/drivers/xhci/mod.rs 222 0
 kernel/src/drivers/xhci/usbd.rs 8 0
-kernel/src/drivers/xhci/wait/boot.rs 89 0
+kernel/src/drivers/xhci/wait/boot.rs 92 0
 kernel/src/drivers/xhci/wait/mod.rs 78 0
 kernel/src/drivers/xhci/wait/msc.rs 214 0
 kernel/src/durability.rs 16 0
@@ -233,7 +233,7 @@ tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 85 0
 tests/common/hostload.rs 48 1
-tests/common/iommu.rs 292 0
+tests/common/iommu.rs 303 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2

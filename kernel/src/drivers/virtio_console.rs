@@ -154,8 +154,12 @@ pub fn init(devices: &[PciDevice]) -> bool {
     };
     log!("virtio-console: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
 
+    // An address space of this device's own, holding one pool and nothing else.
+    let space = crate::iommu::DeviceSpace::create();
     // Leaked, not held in a `static`: the console is never unbound.
-    let dma = DmaPool::alloc(DMA_SIZE).leak();
+    let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
+    // Before the device is told an address, and after the only mapping it gets.
+    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1) {
         Ok(device) => device,
