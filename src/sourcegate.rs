@@ -1562,11 +1562,6 @@ mod tests {
         );
     }
 
-    /// The corpus's attribution is a count per population in a licence file this
-    /// repository did not write, and until this ran nothing held the directory
-    /// to it: a file added to `tinycc/` was attributed by a sentence that was
-    /// true when somebody wrote it.
-    ///
     /// **What the scan closes**: an arrival and a deletion under either
     /// population, a tracked file under the corpus that no population
     /// attributes, and the one name `NOTICE` says is not to come back. **What
