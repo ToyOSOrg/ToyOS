@@ -20,6 +20,14 @@ decodes a leaf value per entry on `/home`. Only the *allocation* is bounded by
 what the directory holds; the work is not. Nothing measures it, and no test
 would notice the difference.
 
+**This is a bound that was there and is not any more.** The old
+`list(16_384)` stopped at the 16,384th entry it materialised and refused, so a
+mount with a million names cost 16,384 entries of work and then an error. The
+new one visits every name in the mount and filters, so that same mount costs a
+million — the refusal now counts only what the listed directory holds, and
+nothing counts the walk. It runs under the VFS lock a `SYS_READDIR` holds,
+which every other filesystem syscall on the machine waits behind.
+
 The end of it is a real directory index — a store keyed by (directory, name)
 rather than a flat namespace of paths that happen to contain `/`. On bcachefs
 that is an on-disk format change, so it is not a small one.
