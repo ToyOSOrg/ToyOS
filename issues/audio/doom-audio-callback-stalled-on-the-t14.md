@@ -29,6 +29,18 @@ where any syscall on that thread can become the USB
 driver's engine for as long as a second; and plain scheduling pressure from a
 game thread and a compositor that never yield to it.
 
+**One runner sighting is filed under this name and is not this defect.** In run
+`31247206462`, `doom_sound_flood` was `timed out after 88s` when re-run alone,
+against 4–26 s on the dev host, and 0 of 5 in the rate probe five days later —
+a sighting without a rate, carried as a row in `src/redlist.rs`. It was one of
+four reds in that run, three of them soundd's, which is why they were read
+together at the time; of the other three, `metal_sim_null_audio` was a test
+reading a boot line through a span of host wall clock and is closed,
+`hda_client_stall` was a `DEADLOCK` between the idle loop's log-file flush and
+the xHCI disk lock and is no longer reachable, and `sshd_fail_closed` is
+undiagnosed and has its own row. Nothing in that run's capture names the
+callback, so it neither supports the mechanism above nor rules it out.
+
 What would decide it is the callback's own period count against wall clock, on
 that machine. doom now keeps that counter (`MIXED_PERIODS`) and now survives
 the stall, so the next T14 session can be asked the question instead of losing

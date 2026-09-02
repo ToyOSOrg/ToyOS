@@ -703,9 +703,9 @@ pub const KNOWN_RED: &[Red] = &[
         finding: Finding::Seen,
         standing: Standing::Stands,
         what: "`timed out after 88s` alone, against 4–26 s on the dev host. Nothing here is \
-               diagnosed",
+               diagnosed, and it is 0 of 5 in the rate probe five days later",
         evidence: "run 31247206462, red again alone",
-        source: "issues/hardware/four-runner-reds-unclassified.md",
+        source: "issues/audio/doom-audio-callback-stalled-on-the-t14.md",
         measured: "2026-08-08",
     },
     Red {
@@ -719,7 +719,7 @@ pub const KNOWN_RED: &[Red] = &[
         ),
         what: "`the ring arm: timed out`, and `timed out after 9s` alone",
         evidence: "run 31247206462, red again alone",
-        source: "issues/hardware/four-runner-reds-unclassified.md",
+        source: "tests/common/hda.rs hda_client_stall",
         measured: "2026-08-08",
     },
     Red {
@@ -730,7 +730,7 @@ pub const KNOWN_RED: &[Red] = &[
         what: "red alone in 22 s, having taken 152 s in the phase. Not diagnosed, and 0 of 5 in \
                the rate probe five days later",
         evidence: "run 31247206462, red again alone",
-        source: "issues/hardware/four-runner-reds-unclassified.md",
+        source: "tests/toyos.rs sshd_fail_closed",
         measured: "2026-08-08",
     },
     Red {
