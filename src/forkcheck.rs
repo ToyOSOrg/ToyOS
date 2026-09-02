@@ -109,11 +109,19 @@ struct Pin {
     rev: String,
 }
 
+/// One `forks.toml` entry, as much of it as this check reads: the repository
+/// its `upstream` names, and whether `tier = "source"` says the tree fetches
+/// and compiles it rather than patching it — the one shape no manifest
+/// consumes and none is expected to.
+struct Fork {
+    repo: Option<String>,
+    fetched: bool,
+}
+
 /// Everything read off the disk, before anything is asked of the network.
 struct Estate {
-    /// `forks.toml`'s entries by table name, with the repository each names.
-    /// `None` where the entry carries no `upstream` this check can read.
-    forks: BTreeMap<String, Option<String>>,
+    /// `forks.toml`'s entries by table name.
+    forks: BTreeMap<String, Fork>,
     /// Every branch a manifest asks for, and the manifests asking for it.
     consumed: BTreeMap<Source, BTreeSet<String>>,
     /// Every git-sourced package in every lockfile.
@@ -350,10 +358,10 @@ fn string(value: &toml::Value, key: &str) -> String {
 /// `forks.toml`'s fork entries, and the repository each one names.
 ///
 /// Read for its inventory only. An entry this cannot read — one with no
-/// `upstream`, or a shape added after this was written — becomes a `None` the
-/// report names, because a fork nothing can compare is exactly what the reader
-/// needs told.
-fn forks_toml(root: &Path) -> BTreeMap<String, Option<String>> {
+/// `upstream`, or a shape added after this was written — carries no repository,
+/// and the report refuses it: a declaration nothing can compare declares
+/// nothing.
+fn forks_toml(root: &Path) -> BTreeMap<String, Fork> {
     let path = root.join("forks.toml");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{TAG} read {}: {e} — it is the fork manifest", path.display()));
@@ -369,7 +377,8 @@ fn forks_toml(root: &Path) -> BTreeMap<String, Option<String>> {
             .and_then(toml::Value::as_str)
             .and_then(|u| u.rsplit('/').next())
             .map(str::to_string);
-        forks.insert(name.clone(), repo);
+        let fetched = entry.get("tier").and_then(toml::Value::as_str) == Some("source");
+        forks.insert(name.clone(), Fork { repo, fetched });
     }
     forks
 }
@@ -541,17 +550,25 @@ fn render(estate: &Estate, heads: &BTreeMap<Source, Result<String, String>>) -> 
     // Everything the comparison above could not reach, so a fork whose shape
     // this does not understand is a line here rather than a silence or a panic.
     let named: BTreeSet<&str> = estate.consumed.keys().map(|s| repo_name(&s.url)).collect();
-    for (name, repo) in &estate.forks {
-        match repo {
+    // A declaration nothing consumes is a dead declaration and not a note: this
+    // manifest is worth something only as the estate's inventory.
+    let mut dead = Vec::new();
+    for (name, fork) in &estate.forks {
+        match &fork.repo {
             Some(repo) if named.contains(repo.as_str()) => {}
-            Some(repo) => uncompared.push(format!(
+            Some(repo) if fork.fetched => uncompared.push(format!(
+                "{name} — forks.toml names {repo} at tier `source`, fetched rather than patched, \
+                 so no manifest consumes it"
+            )),
+            Some(repo) => dead.push(format!(
                 "{name} — forks.toml names {repo}, which no manifest in this tree consumes"
             )),
-            None => uncompared
+            None => dead
                 .push(format!("{name} — forks.toml entry carries no `upstream` this can read")),
         }
     }
-    let declared: BTreeSet<&str> = estate.forks.values().flatten().map(String::as_str).collect();
+    let declared: BTreeSet<&str> =
+        estate.forks.values().filter_map(|f| f.repo.as_deref()).collect();
     for repo in &named {
         if !declared.contains(repo) {
             uncompared.push(format!("{repo} — consumed by a manifest and not in forks.toml"));
@@ -584,6 +601,15 @@ fn render(estate: &Estate, heads: &BTreeMap<Source, Result<String, String>>) -> 
         }
         say("");
     }
+    dead.sort();
+    dead.dedup();
+    if !dead.is_empty() {
+        say("dead declarations — an entry nothing consumes is not an inventory:");
+        for line in &dead {
+            say(&format!("  DEAD  {line}"));
+        }
+        say("");
+    }
 
     say(&match wrong {
         0 => format!("{} branches asked, all current.", estate.consumed.len()),
@@ -592,7 +618,14 @@ fn render(estate: &Estate, heads: &BTreeMap<Source, Result<String, String>>) -> 
             estate.consumed.len()
         ),
     });
-    (out, wrong)
+    if !dead.is_empty() {
+        say(&format!(
+            "{} forks.toml entr(ies) declare a fork this tree does not consume. Delete the \
+             entry, or consume it.",
+            dead.len()
+        ));
+    }
+    (out, wrong + dead.len())
 }
 
 fn short(rev: &str) -> &str {
@@ -748,24 +781,30 @@ mod tests {
         assert!(!report.contains("in Cargo.lock"), "{report}");
     }
 
-    /// A `forks.toml` entry nothing consumes — the shape a source fetched
-    /// outside cargo has — is a line in the report and not a panic, and so is
-    /// one this cannot read at all.
+    /// A `forks.toml` entry no manifest consumes is a dead declaration and the
+    /// run is not clean, whether it names a repository or carries no
+    /// `upstream` at all; `tier = "source"` is the one shape that stays a note.
     #[test]
-    fn a_fork_no_manifest_consumes_is_reported_rather_than_fatal() {
+    fn a_fork_no_manifest_consumes_is_a_dead_declaration() {
         let case = case("orphan");
         let (url, rev) = remote(&case, "toyos");
         let root = tree(&case, &url, "toyos", &rev);
         fs::write(
             root.join("forks.toml"),
             "[meta]\nowner = \"Japabu\"\n\n[widget]\nupstream = \"someone/widget\"\n\n\
-             [doomgeneric]\nupstream = \"ozkl/doomgeneric\"\n\n[nameless]\nwhy = \"no upstream\"\n",
+             [doomgeneric]\nupstream = \"ozkl/doomgeneric\"\n\n[nameless]\nwhy = \"no upstream\"\n\n\
+             [fetched]\nupstream = \"someone/fetched\"\ntier = \"source\"\n",
         )
         .unwrap();
         let (report, wrong) = check(&root);
-        assert_eq!(wrong, 0, "{report}");
-        assert!(report.contains("doomgeneric — forks.toml names doomgeneric"), "{report}");
-        assert!(report.contains("nameless — forks.toml entry carries no `upstream`"), "{report}");
+        assert_eq!(wrong, 2, "{report}");
+        assert!(report.contains("DEAD  doomgeneric — forks.toml names doomgeneric"), "{report}");
+        assert!(
+            report.contains("DEAD  nameless — forks.toml entry carries no `upstream`"),
+            "{report}"
+        );
+        assert!(report.contains("fetched — forks.toml names fetched at tier `source`"), "{report}");
+        assert!(!report.contains("DEAD  fetched"), "{report}");
     }
 
     /// A remote that cannot be reached is not a clean run.
