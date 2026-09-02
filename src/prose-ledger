@@ -120,7 +120,7 @@ kernel/src/iommu/vtd/fault.rs 34 0
 kernel/src/iommu/vtd/interrupt.rs 55 0
 kernel/src/iommu/vtd/mod.rs 98 0
 kernel/src/iommu/vtd/queue.rs 21 0
-kernel/src/iommu/vtd/table.rs 39 0
+kernel/src/iommu/vtd/table.rs 38 0
 kernel/src/irq_census.rs 38 0
 kernel/src/irq_ring.rs 14 0
 kernel/src/keyboard.rs 19 0

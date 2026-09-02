@@ -103,8 +103,7 @@ impl Table {
         self.write(index * 2, lo);
     }
 
-    /// The 16-byte entry at `index`, back out of memory: `write` flushed the
-    /// line, so this refetches rather than reading the cache it was written to.
+    /// The 16-byte entry at `index`, back out of memory: `write` flushed the line, so this refetches.
     pub fn read_pair(self, index: usize) -> (u64, u64) {
         (self.read(index * 2), self.read(index * 2 + 1))
     }
