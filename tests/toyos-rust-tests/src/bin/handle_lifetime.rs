@@ -26,6 +26,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
+use toyos::census::Census;
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::inbox::RingLayout;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom, SyscallError, SERVE_PREFIX};
@@ -40,10 +41,9 @@ const PAYLOAD: &[u8] = b"a file outlives the handle that was closed first";
 const KILLED_PAYLOAD: &[u8] = b"written by a process that was killed before it could close";
 /// `process::HANDLE_FAULT_EXIT_CODE`.
 const HANDLE_FAULT: i32 = 139;
-/// How many rings the `ring` holder makes. One is 2 MiB, and the witness for
-/// a killed process giving them back is the machine's own free memory — so the
-/// figure has to be far enough above what the rest of a boot moves under it
-/// that a reclaim cannot hide in the noise.
+/// How many rings the `ring` holder makes. Eight rather than one because the
+/// arrival check has to be able to fail: a holder that made none would leave
+/// nothing for the reclaim assertion to be about.
 const HOLDER_RINGS: usize = 8;
 
 fn main() {
@@ -171,49 +171,64 @@ fn kill_releases_acceptor() {
 }
 
 /// A ring's pages are its own and no second name reaches them, so the witness
-/// is the machine's free memory rather than a token this process could try to
-/// map. The holder makes [`HOLDER_RINGS`] of them, which is 16 MiB.
+/// is the kernel's own count of live objects. The holder makes
+/// [`HOLDER_RINGS`] of them.
 ///
-/// **The reading after the kill is [`settled_free_bytes`] and not
-/// [`free_bytes`], because the release does not finish inside the killing
-/// syscall** — see that function.
+/// **Per kind, and not the machine's free memory.** `SYS_SYSINFO` answers for
+/// the whole machine, so a verdict taken from it is sound only while nothing
+/// else in the guest holds or releases a page across the window — and nothing
+/// orders that: the object layer's release queue drains at syscall exit,
+/// `do_schedule` entry and the idle loop, none of which a killer can order
+/// against another process's exit. A count of live objects moves only when
+/// somebody makes or releases one, and it is exact: a leak of one is `+1`.
+/// **It is still machine-wide**: the daemons this boot starts run alongside
+/// this binary, so an object one of them makes inside the window would read as
+/// a leak here.
+///
+/// **Every kind and not the one this arm is about**, because the arrival check
+/// is what says the rings were seen and the reclaim check is about everything
+/// the dead process held: a `SharedMem` or a `File` it kept would otherwise be
+/// a green run. `Census::grown_since` is the comparison the census header asks
+/// for.
+///
+/// **Both readings are [`settled_census`] and not [`Census::now`], because the
+/// release does not finish inside the killing syscall** — see that function.
 fn kill_releases_ring() {
-    let before = free_bytes();
+    let before = settled_census();
     let (mut child, _) = spawn_holder("ring");
-    let held = free_bytes();
+    let held = Census::now();
 
-    // Non-vacuity: an instrument that cannot see 16 MiB leave cannot see it
-    // come back either, and the reclaim assertion would pass on a kernel that
+    // Non-vacuity: an instrument that cannot see eight rings arrive cannot see
+    // them leave either, and the reclaim assertion would pass on a kernel that
     // frees nothing.
-    let taken = before.saturating_sub(held);
+    let taken = held.kind("Inbox").saturating_sub(before.kind("Inbox"));
     assert!(
-        taken >= 12 * 1024 * 1024,
-        "the holder made {HOLDER_RINGS} rings and free memory only moved {taken} bytes"
+        taken >= HOLDER_RINGS as u64,
+        "the holder made {HOLDER_RINGS} rings and the live Inbox count moved {taken}: \
+         first {before}, then {held}"
     );
 
     kill_and_reap(&mut child);
-    let leaked = before.saturating_sub(settled_free_bytes());
+    // Dropped before the reading, not after: a reaped `Child` still names its
+    // process, so a census taken over one reads `Process` one higher and blames
+    // the kill for it. No pipe end is involved --- `spawn_holder`'s reader is
+    // bound to `_` and is gone at the call.
+    drop(child);
+
+    let after = settled_census();
+    let grown: Vec<_> = after.grown_since(&before).collect();
     assert!(
-        leaked < 6 * 1024 * 1024,
-        "a killed process kept {leaked} bytes of its io_urings"
+        grown.is_empty(),
+        "a killed process kept what it held: {grown:?} — first {before}, then {after}"
     );
 }
 
-fn free_bytes() -> u64 {
-    let mut buf = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
-    let n = toyos::system::sysinfo(&mut buf);
-    assert_eq!(n, buf.len(), "sysinfo returned {n} bytes");
-    let total = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-    let used = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-    total - used
-}
-
-/// How many 10 ms samples [`settled_free_bytes`] will take before it stops
-/// asking. Reaching it is not a failure — the last reading is handed back and
-/// the caller's assertion is still the whole verdict.
+/// How many 10 ms samples [`settled_census`] will take before it stops asking.
+/// Reaching it is not a failure — the last reading is handed back and the
+/// caller's assertion is still the whole verdict.
 const SETTLE_SAMPLES: usize = 100;
 
-/// Free memory once the machine has stopped giving it back.
+/// The live-object census once the machine has stopped giving objects back.
 ///
 /// **A killed process's rings are not released by the syscall that killed it,
 /// and the first reading after `wait` is therefore not the reading this test
@@ -235,13 +250,13 @@ const SETTLE_SAMPLES: usize = 100;
 ///
 /// So this samples until two readings ten milliseconds apart agree, which is
 /// the machine saying it has finished. **It is a liveness bound and not a
-/// margin**: a kernel that frees nothing is quiescent on the first pair and
-/// reds immediately, so nothing here weakens the assertion above.
-fn settled_free_bytes() -> u64 {
-    let mut last = free_bytes();
+/// margin**: a kernel that releases nothing holds a stable, elevated census, is
+/// quiescent on the first pair, and reds at once.
+fn settled_census() -> Census {
+    let mut last = Census::now();
     for _ in 0..SETTLE_SAMPLES {
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let next = free_bytes();
+        let next = Census::now();
         if next == last {
             return next;
         }

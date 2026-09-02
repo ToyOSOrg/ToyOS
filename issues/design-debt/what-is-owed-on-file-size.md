@@ -4,29 +4,25 @@ kind: defect
 opened: 2026-08-08
 ---
 
-# What is still owed on "this file is too big", with the numbers
+# What is still owed on "this file is too big"
 
 Nine of the owner's review notes asked whether a large file could become a
-crate, a host test, or both. Five have been answered and four have not; the
-numbers below are 2026-08-08 except where a line dates itself, and exist so the
-next reader does not re-measure.
+crate, a host test, or both. Eight are answered. The ninth's premise is gone and
+what survives it is a different question.
 
 **Answered:**
 
-- `elf.rs` → `toyos-elf/` (1,604 lines, host-tested, crafted-input corpus),
-  `e2c6a06`; the mapping half stayed as `kernel/src/elf/` (1,186), `42b29c9`.
-- `compositor/main.rs` → `toyos-desktop/` (2,684 lines, pure), `763712b`; the
-  effects shell is `userland/compositor/` at 2,085 over five files with a
-  68-line `main.rs`, `72705d9`.
-- `xhci/mod.rs` → the port machine is `toyos-xhci/` (2,082 lines with a host
-  simulator), `2e81ae8`. `xhci/mod.rs` is still 1,825 lines, so the shell has
-  not shrunk to match.
-- `soundd/main.rs` → `toyos-mixer/` (2,739 lines over nine files, pure,
-  `no_std`), 2026-08-20; the effects shell is `userland/soundd/` at 2,822 over
-  eight files with a 261-line `main.rs`, from a 2,366-line one. What the note
-  asked for is what it got: **the mixing is sample-exact and proven so.**
-  `toyos-mixer/fixtures/mix-corpus.txt` — 924 lines, 56,600 bytes — was written
-  by `soundd/src/main.rs` before a line of it moved, and
+- `elf.rs` → `toyos-elf/` (host-tested, crafted-input corpus), `e2c6a06`; the
+  mapping half stayed as `kernel/src/elf/`, `42b29c9`.
+- `compositor/main.rs` → `toyos-desktop/` (pure), `763712b`; the effects shell
+  is `userland/compositor/` over five files with a 71-line `main.rs`, `72705d9`.
+- `xhci/mod.rs` → the port machine is `toyos-xhci/`, with a host simulator,
+  `2e81ae8`.
+- `soundd/main.rs` → `toyos-mixer/` (pure, `no_std`), 2026-08-20; the effects
+  shell is `userland/soundd/` over eight files with a 261-line `main.rs`, from a
+  2,366-line one. What the note asked for is what it got: **the mixing is
+  sample-exact and proven so.** `toyos-mixer/fixtures/mix-corpus.txt` was
+  written by `soundd/src/main.rs` before a line of it moved, and
   `the_corpus_is_reproduced_bit_for_bit` holds the crate to it byte for byte.
   The transcript is compact because exhausted domains are digested rather than
   listed: all 65,536 i16 both ways, all 65,538 quantizer ties, 65,536 dither
@@ -35,10 +31,10 @@ next reader does not re-measure.
   moved. Keeping the crate `no_std` cost a rounding function — `core` has no
   `f32::round` — and that one is held to `std`'s over all 4,294,967,296 f32 bit
   patterns.
-- `loader.rs` → `kernel/src/loader/` (1,397 over four files), `42b29c9`, with
-  the pure decisions in `toyos-elf`. The plan/execute split — a `LoadPlan` an
-  executor applies — is **not** built, and #159 changes what a mapping's
-  protection is, so its shape is not settled.
+- `loader.rs` → `kernel/src/loader/` (four files), `42b29c9`, with the pure
+  decisions in `toyos-elf`. The plan/execute split — a `LoadPlan` an executor
+  applies — is **not** built, and #159 changes what a mapping's protection is,
+  so its shape is not settled.
 
 **Answered 2026-08-24, in the review-completion wave:**
 
@@ -57,22 +53,26 @@ next reader does not re-measure.
   second chunk), `handle_page_fault`'s window arithmetic (~290 pure lines
   inside a function that also does device I/O), and the accounting
   (`stats_from`, `retire_threads`' merge, `PageFaultTrace`). #142 and #156
-  remain the standing evidence; the shell did not shrink (2,317 → 2,399 lines),
-  the same criticism this file already makes of `xhci/mod.rs`.
+  remain the standing evidence.
 - `symbols.rs` → `toyos-symbols/` (`no_std`, no alloc, `forbid(unsafe_code)` —
   stricter than the "core + alloc" expected; a real 1.6 MB ToyOS binary is the
   fixture, cross-checked against GNU readelf/nm). The raw-pointer `SymbolTable`
-  read from fault handlers stays in the kernel, 318 lines, by design.
+  read from fault handlers stays in the kernel, by design.
 
-**Still owed:**
+**The ninth: `drivers/acpi.rs`, and it is no longer a size.** Measured
+2026-09-01, the file is 611 lines — outside the twenty largest this repository
+tracks, against the 1,400 to 2,700 every answered entry started at. Better than
+the note feared in kind as well: typed `TableError`, named bounds, packed
+structs only for `offset_of!`. Nothing about it is owed to *this* record.
 
-- `drivers/acpi.rs` — no `toyos-acpi`. Better than the note feared (typed
-  `TableError`, named bounds, packed structs only for `offset_of!`), and it is
-  stage 0 of the ACPI/AML track, whose interpreter is the most host-testable
-  component this kernel will ever have.
+What the note was really reaching for outlives the size, and it is filed as
+`issues/kernel/acpi-table-decoding-has-no-host-test.md`: the decode is over
+firmware-supplied untrusted input and there is no host reproduction of any of
+it.
 
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling; promoted **in
 place** — this is the owner's review ledger and stays as the record of what the
 nine notes asked and what answered them, rather than folding into any one
-module). One entry is still owed and it is real work, not a note: `drivers/acpi.rs`
-has no `toyos-acpi`. Owed by the ACPI/AML track, whose stage 0 this is.
+module). It stays open while `loader.rs`'s plan/execute split and
+`process.rs`'s three remaining subjects are unbuilt; both are named above and
+neither is a file-size claim any more either.

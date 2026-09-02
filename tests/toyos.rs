@@ -169,6 +169,11 @@ const ACTUATOR_TESTS: &[&str] = &[
     "handle_basic",
     "handle_kill_policy",
     "handle_transfer",
+    // The last two took action 16 in place of `SYS_SYSINFO`: a verdict about
+    // what one killed process gave back cannot be the whole machine's free
+    // memory, which every other binary in a shared boot moves under it.
+    "handle_lifetime",
+    "shm_release_reclaims",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with

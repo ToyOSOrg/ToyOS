@@ -1352,8 +1352,9 @@ pub const KNOWN_RED: &[Red] = &[
              indistinguishable from an empty queue and the killing syscall returns with its \
              objects unreleased — caught in a kernel trace as eight `RingRef` frees landing \
              after `kill_process` returned, and as a second CPU taking a batch mid-kill. Both \
-             binaries now settle before reading (`issues/build/free-memory-verdicts-share-a-boot.md`), \
-             and the kernel half is `issues/kernel/deferred-release-outlives-its-syscall.md`. \
+             binaries now settle before reading, and both read the per-kind object census \
+             rather than the machine's free memory; the kernel half is \
+             `issues/kernel/deferred-release-outlives-its-syscall.md`. \
              **`Sched::Serial` would have retired nothing**, which is why that proposal is \
              recorded as ruled out rather than left standing",
         ),
@@ -1370,7 +1371,7 @@ pub const KNOWN_RED: &[Red] = &[
                    boot invokes. Two earlier sevens on the same two trees gave 1 of 7 and 2 of 7, \
                    so the rate this row carries is the widest of four readings and not the only \
                    one",
-        source: "issues/build/free-memory-verdicts-share-a-boot.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-15",
     },
     // ---------------------------------------------------------------------
@@ -1402,28 +1403,55 @@ pub const KNOWN_RED: &[Red] = &[
         // `ci` half is a verdict, and it is what this row rests on.
         evidence: "CI run 32237424649 (PR #126, job `guest (1)`); `main` red at `8e9f851` on \
                    `ci` the same day",
-        source: "issues/build/free-memory-verdicts-share-a-boot.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-19",
     },
     Red {
         test: "handle_lifetime",
         instrument: Instrument::DevHostAlone,
         finding: Finding::quiet(20),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the instrument it measured is gone. `kill_releases_ring`'s verdict is now the \
+             kernel's live `Inbox` count either side of the kill, not the machine's free memory, \
+             so neither the neighbours nor the margin this row is about exists any more: a leak \
+             of one ring is `+1` where 2 MiB fitted inside 6 MiB and passed. Measured with that \
+             leak deliberately planted, 2026-09-01: green on the free-memory verdict, red on the \
+             census, both arms on this host",
+        ),
         what: "twenty consecutive filtered runs of the unmodified binary, all green — which is \
                why every dev-host sighting of this name had said `ALONE … GREEN` and why the \
                defect was read as its neighbours' page churn. The dev host is two CPUs under \
                TCG; CI is four under KVM, and the race widens with the CPU count",
         evidence: "20 × `cargo test --test toyos-build -- handle_lifetime` on one quiet dev host, \
                    `wt/toyos-fdleak` at `8e9f851`",
-        source: "issues/build/free-memory-verdicts-share-a-boot.md",
+        source: "issues/kernel/deferred-release-outlives-its-syscall.md",
         measured: "2026-08-19",
     },
     // `shm_release_reclaims` gets no row: it has the same instrument with the
     // same hole and it took the same settle, but nothing here measured it red,
     // and a `Seen` written from an argument rather than a run is exactly the
-    // overstatement this index refuses. `issues/build/free-memory-verdicts-share-a-boot.md`
-    // carries it.
+    // overstatement this index refuses. It took the same census with it.
+    Red {
+        test: "fs_dirs_durable",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`the staged directories left the log volume breaking the format`, and it says \
+               four things at once — an unmirrored FAT entry, a chain one cluster longer than \
+               `DIR_FileSize`, two clusters allocated and unreachable, and `FSI_Free_Count` \
+               three off. Four format complaints on one volume is the signature of a read that \
+               beat its writer, not of four faults. `ALONE … GREEN`, so the harness classifies \
+               it as `Sched::Parallel` and the run stays red on that. The fourth name of the \
+               shape `fat_backing_revoked`, `device_claim_lifetime` and `esp_filesystem` \
+               already carry",
+        evidence: "one full `cargo test` an arm, back to back on this dev host 2026-09-01: \
+                   `w5b5-host-build` at dbc7d610 (this red, host at 1.23x width) against \
+                   627e5f0f (no red under this name; one `i8042_undecoded_bytes`, also \
+                   `ALONE … GREEN`, host at 2.66x width). One run an arm is a sighting and not \
+                   a rate",
+        source: "issues/build/a-loaded-suite-reds-a-volume-checker-on-both-arms.md",
+        measured: "2026-09-01",
+    },
     Red {
         test: "screen_console_scroll",
         instrument: Instrument::DevHostLoaded,
@@ -2223,6 +2251,26 @@ pub const KNOWN_RED: &[Red] = &[
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
         standing: Standing::Stands,
+        what: "`the close probe exited Some(1)`, and the probe's own line: `log-close: FAILED: \
+               the poll outlived the close and then never completed on a record either, so what \
+               it outlived may have been its own arming`. `ALONE … GREEN`, so the harness \
+               classifies it as `Sched::Parallel` and the run stays red on that. **A second row \
+               under this name and not a correction of the first**: the row above is a \
+               `DOUBLE PANIC` and nothing disputes it, while this is the probe returning a \
+               verdict the guest survived. It also spends the other row's retirement clause — \
+               `three loaded suites of the fixed tree with no red under this name` — because \
+               this loaded suite went red under it",
+        evidence: "one full `cargo test` on the dev host 2026-09-01, `w5b5-host-build` at \
+                   2617bab9, host at 1.05x width; 300 passed, 1 failed, 301 total (396.3s), and \
+                   the harness's own `ALONE` re-run green",
+        source: "issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md",
+        measured: "2026-09-01",
+    },
+    Red {
+        test: "log_poll_outlives_a_close",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
         what: "`kernel panic: DOUBLE PANIC — the guest went quiet because every CPU is halted, \
                not because it was still working. The panic is the finding and the guard never \
                got to be one`. The kernel's complete last words were `[kernel 0.991 cpu0] DOUBLE \
@@ -2549,6 +2597,23 @@ pub const KNOWN_RED: &[Red] = &[
     // A rate on a shared shard, adjudicated here rather than re-run away. Not
     // the typing family: it shares a day and an `ALONE: GREEN` with the two
     // rows above and nothing else.
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`the 300 rounds took 3.010175191s, past the 3s bound` — the row above's own \
+               message, 10.2 ms over where CI was 7.2 ms over, and `ALONE … GREEN`. **A second \
+               instrument and not a second defect**: the row above is `Instrument::Ci`, which \
+               sees one guest per machine, so it could not have said whether a loaded dev host \
+               produces the same overshoot. It does, at 1.02x width, which is a quiet host — so \
+               the bound is not a contention ceiling either",
+        evidence: "one full `cargo test` on the dev host 2026-09-02, `w5b5-host-build` at \
+                   71f25c0a, `fastest boot 1353 ms against the reference 1320 ms`; 299 passed, \
+                   1 failed, 300 total (214.9s)",
+        source: "issues/build/poll-wake-pipe-bound-is-a-host-of-the-day-number.md",
+        measured: "2026-09-02",
+    },
     Red {
         test: "poll_wake_pipe",
         instrument: Instrument::Ci,

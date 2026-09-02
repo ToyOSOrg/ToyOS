@@ -16,34 +16,26 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 
+use toyos::census::Census;
 use toyos::shm::SharedMemory;
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 
 const SELF_PATH: &str = "/bin/test_rs_shm_release_reclaims";
 const PAYLOAD: &[u8] = b"sent-before-the-maker-let-go";
-/// Each region rounds up to one 2 MiB page, so the loop moves 32 MiB — far
-/// enough above the megabyte or so the rest of the boot moves under it that a
-/// leak cannot hide in the noise.
+/// Sixteen rather than one because the arrival check has to be able to fail: a
+/// loop that made no region would leave nothing for the reclaim assertion to
+/// be about.
 const ROUNDS: usize = 16;
 const REGION: usize = 4096;
 const SERVICE: &str = "region";
 
-fn free_bytes() -> u64 {
-    let mut buf = [0u8; toyos::system::SYSINFO_HEADER_SIZE];
-    let n = toyos::system::sysinfo(&mut buf);
-    assert_eq!(n, buf.len(), "sysinfo returned {n} bytes");
-    let total = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-    let used = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-    total - used
-}
-
-/// How many 10 ms samples [`settled_free_bytes`] takes before it stops asking.
+/// How many 10 ms samples [`settled_census`] takes before it stops asking.
 /// Reaching it is not a failure — the last reading is handed back and the
 /// caller's assertion is still the whole verdict.
 const SETTLE_SAMPLES: usize = 100;
 
-/// Free memory once the machine has stopped giving it back.
+/// The live-object census once the machine has stopped giving objects back.
 ///
 /// **A region's pages are not released by the `close` that dropped its last
 /// handle.** The drop queues the region on the object layer's zero-handle
@@ -55,13 +47,14 @@ const SETTLE_SAMPLES: usize = 100;
 /// `issues/kernel/deferred-release-outlives-its-syscall.md` the kernel
 /// half.
 ///
-/// **A liveness bound and not a margin**: a kernel that frees nothing is
-/// quiescent on the first pair of samples and reds immediately.
-fn settled_free_bytes() -> u64 {
-    let mut last = free_bytes();
+/// **A liveness bound and not a margin**: a kernel that releases nothing holds
+/// a stable, elevated census, is quiescent on the first pair of samples, and
+/// reds immediately.
+fn settled_census() -> Census {
+    let mut last = Census::now();
     for _ in 0..SETTLE_SAMPLES {
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let next = free_bytes();
+        let next = Census::now();
         if next == last {
             return next;
         }
@@ -75,7 +68,12 @@ fn main() {
         return donor();
     }
 
-    let start = free_bytes();
+    // **Per kind, and not the machine's free memory.** `SYS_SYSINFO` answers
+    // for the whole machine, so a verdict taken from it is sound only while
+    // nothing else in the guest holds or releases a page across the window, and
+    // nothing orders that. A live object count moves only when somebody makes
+    // or releases one, and it is exact: a leak of one region is `+1`.
+    let start = settled_census();
 
     let mut regions = Vec::new();
     for _ in 0..ROUNDS {
@@ -83,28 +81,26 @@ fn main() {
         region.as_mut_slice()[0] = 0xA5;
         regions.push(region);
     }
-    let held = free_bytes();
+    let held = Census::now();
 
-    // Non-vacuity: if the instrument could not see 32 MiB leave, it cannot see
-    // it come back either, and the reclaim assertion below would pass on a
-    // kernel that frees nothing.
-    let taken = start.saturating_sub(held);
+    // Non-vacuity: if the instrument could not see sixteen regions arrive, it
+    // cannot see them come back either, and the reclaim assertion below would
+    // pass on a kernel that frees nothing.
+    let taken = held.kind("SharedMem").saturating_sub(start.kind("SharedMem"));
     assert!(
-        taken >= 24 * 1024 * 1024,
-        "{ROUNDS} regions were allocated but free memory only moved {taken} bytes — \
-         the measurement is not seeing the allocation"
+        taken >= ROUNDS as u64,
+        "{ROUNDS} regions were allocated and the live SharedMem count moved {taken}: \
+         first {start}, then {held}"
     );
 
     drop(regions);
-    let after = settled_free_bytes();
-
-    let leaked = start.saturating_sub(after);
+    let after = settled_census();
+    let grown: Vec<_> = after.grown_since(&start).collect();
     assert!(
-        leaked < 8 * 1024 * 1024,
-        "{ROUNDS} regions ({taken} bytes) were allocated, mapped and dropped, \
-         and {leaked} bytes never came back"
+        grown.is_empty(),
+        "{ROUNDS} regions were allocated, mapped and dropped, and this was not released: \
+         {grown:?} --- first {start}, then {after}"
     );
-
     // The other direction. The donor makes a region, sends it here, and drops
     // its own handle before this process has mapped anything — nobody has the
     // region mapped at that moment, and it is still this process's.
@@ -148,7 +144,7 @@ fn main() {
     assert!(donor.wait().expect("wait donor").success(), "donor exited nonzero");
 
     println!(
-        "dropped regions reclaimed ({taken} bytes out, {leaked} bytes unreturned); \
+        "dropped regions reclaimed ({taken} live SharedMem out and back); \
          a sent region survived its maker letting go"
     );
 }

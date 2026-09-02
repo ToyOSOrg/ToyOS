@@ -7,7 +7,7 @@
 //! and the bootloader (`--target x86_64-unknown-uefi`) — so a `clippy.toml` is
 //! no longer a wall with nothing behind it.
 //!
-//! What is behind it is still not these four scans. `disallowed-methods` could
+//! What is behind it is still not these six scans. `disallowed-methods` could
 //! take the first one, and would lose what makes it useful: the exceptions
 //! below are per file *and per line count*, so an added `mem::forget` beside a
 //! permitted one reds, which a name-based allow list cannot express. The second
@@ -37,6 +37,21 @@
 //!
 //! The fourth names two files, the pipe ring and the user-copy windows, where a
 //! slice or an exclusive reference would claim what the mapping does not give.
+//!
+//! The fifth and sixth are the dependency bar, and each closes a spelling
+//! rather than the rule behind it — say what they close, because a scan over
+//! Rust source cannot say more. The fifth reads the text `Command::new(` and
+//! refuses an argument no row declares, with every non-literal argument pinned
+//! to a file and a count; beside it, a one-line `use`/`type` rename of
+//! `Command` after any visibility is refused, because such a line makes every
+//! row unreachable at once. The sixth reads every committed file that carries
+//! a NUL, plus everything under `assets/`, against the digest `NOTICE` records.
+//!
+//! **What neither reaches is filed rather than implied**: a brace-group or
+//! multi-line alias, a spawn that is not `Command` at all, a binary a
+//! third-party crate or a workflow runs. The exit from all of it is one scan
+//! that resolves names the way the compiler does; the entries under
+//! `issues/build/` say so and this does not pretend otherwise.
 
 use std::path::{Path, PathBuf};
 
@@ -427,6 +442,438 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
     ("kernel/src/trace.rs", 1),
 ];
 
+/// Directories whose Rust is compiled for the guest, by repository-relative
+/// prefix. A ToyOS program spawning `/bin/echo` is spawning a file out of its
+///
+/// own image, and the guest has no way to reach a host binary at all.
+/// **A crate's build script is host code and is walked**, whatever prefix it is
+/// under: `userland/doom/build.rs` fetches over the network and drives
+/// `cc::Build` on this machine. Both spellings --- the `build.rs` default and
+/// whatever a `build = "…"` key names --- because the key overrides the name.
+const GUEST_CODE: &[&str] = &[
+    "rust",
+    "kernel/src",
+    "toyos/src",
+    "toyos-abi/src",
+    "userland",
+    "tests/toyos-rust-tests",
+    "tests/testcases",
+];
+
+/// One argument the host's code may hand to `Command::new`.
+struct Spawn {
+    /// The argument text, verbatim.
+    arg: &'static str,
+    /// `(path relative to the repository root, how many times)`, and **empty
+    /// exactly when [`Spawn::arg`] is a string literal**: a literal names its
+    /// binary, anything else names nothing and is a permission for those lines
+    /// alone.
+    sites: &'static [(&'static str, usize)],
+    why: &'static str,
+}
+
+/// Every argument the host's code hands to `Command::new`, and what it names.
+///
+/// The dependency bar is Rust and QEMU (`CLAUDE.md`, "Dependencies"), and its
+/// standing failures are declared rather than removed. A row here is that
+/// declaration made checkable for one spelling: an undeclared argument to
+/// `Command::new(` is a red, and a non-literal one is a red anywhere but the
+/// file and count its row pins.
+///
+/// **What this scan does not reach**, so that nobody reads it as the whole bar.
+/// A spawn that is not `Command` — `libc::system`, `execvp`, `posix_spawn` —
+/// which `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md` carries.
+/// A binary a third-party crate runs for us: `userland/doom/build.rs` drives
+/// `cc::Build`, which compiles and archives with whatever `cc` and `ar` it
+/// finds in `PATH`, and the `cc` half is one of the three standing failures
+/// `CLAUDE.md` declares. A workflow or a container image, which is
+/// `issues/build/nothing-reads-the-workflows-for-a-binary.md`. And an alias no
+/// one line spells, which is
+/// `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`.
+const HOST_SPAWNS: &[Spawn] = &[
+    Spawn {
+        arg: "\"cargo\"",
+        sites: &[],
+        why: "Rust's build driver, installed by rustup",
+    },
+    Spawn {
+        arg: "\"git\"",
+        sites: &[],
+        why: "the version control this repository is, and `REQUIRED` in src/main.rs",
+    },
+    Spawn { arg: "\"rustc\"", sites: &[], why: "the Rust compiler, installed by rustup" },
+    Spawn {
+        arg: "\"rustup\"",
+        sites: &[],
+        why: "how the toolchain is installed and linked, and `REQUIRED`",
+    },
+    Spawn {
+        arg: "\"qemu-system-x86_64\"",
+        sites: &[],
+        why: "QEMU, the other half of the bar, and `REQUIRED`",
+    },
+    Spawn {
+        arg: "\"gh\"",
+        sites: &[],
+        why: "GitHub's CLI, read-only, in `--merge-health` alone. Outside the bar and \
+              declared by nothing else: no build, boot or gate reaches it",
+    },
+    Spawn {
+        arg: "\"/sbin/newfs_msdos\"",
+        sites: &[],
+        why: "a macOS binary, and one of the standing failures CLAUDE.md declares. It \
+              formats the FAT32 fixtures the crate's own reader is judged against; \
+              issues/filesystem/fat32-suite-needs-macos-binaries.md is what removing it costs",
+    },
+    Spawn {
+        arg: "\"/usr/bin/hdiutil\"",
+        sites: &[],
+        why: "the other one: newfs_msdos refuses a plain file, so the fixture is formatted \
+              through a device node. **Two, where CLAUDE.md says four macOS FAT tools**: \
+              `fsck_msdos` came out of all three of its call sites on 2026-08-08 \
+              (issues/filesystem/fat32-suite-needs-macos-binaries.md, which counts two left) \
+              and the sentence was not edited. The owner ruled on 2026-09-01 that `fatfs` \
+              replaces both of these, so this scan is what will notice when it has",
+    },
+    Spawn {
+        arg: "\"./x\"",
+        sites: &[],
+        why: "`rust/x`, upstream's bootstrap, when the fork carries it. A `/bin/sh` script \
+              whose whole job is to find a Python — the standing failure \
+              issues/build/python-and-cc-are-declared.md is about",
+    },
+    Spawn {
+        arg: "\"./x.py\"",
+        sites: &[],
+        why: "the same bootstrap where the shell wrapper is absent, and the Python is then \
+              the thing spawned rather than the thing found",
+    },
+    Spawn {
+        arg: "std::env::current_exe().unwrap()",
+        sites: &[("src/buildlock.rs", 2)],
+        why: "this build system re-running itself under the lock",
+    },
+    Spawn {
+        arg: "env!(\"CARGO_BIN_EXE_toyos-cc\")",
+        sites: &[("toyos-cc/tests/determinism.rs", 1), ("toyos-cc/tests/pp_corpus.rs", 1)],
+        why: "our own compiler, built by cargo for its own tests",
+    },
+    Spawn {
+        arg: "env!(\"CARGO_BIN_EXE_toyos-ld\")",
+        sites: &[("toyos-ld/tests/common/mod.rs", 2), ("toyos-ld/tests/determinism.rs", 1)],
+        why: "our own linker, the same way",
+    },
+];
+
+/// The refusal `no_host_file_renames_command` prints.
+const NO_COMMAND_ALIAS: &str =
+    "a renamed `Command` spawns past the scan that reads the text `Command::new(`";
+
+
+/// Every committed file whose terms somebody had to establish, with the digest
+/// of what is committed and where the terms are recorded.
+///
+/// A third column of `NOTICE` means that file carries this same digest, so the
+/// obligation and the bytes cannot drift apart; anything else names the file
+/// that carries the attribution, or says why it is ours.
+///
+/// **Two populations, and each is a spelling too.** Everything `git` tracks
+/// that carries a NUL in its first 8000 bytes, which is git's own heuristic for
+/// a file nobody can read in review; and everything under `assets/`, text or
+/// not, because that directory is where third-party material arrives. A
+/// third-party *text* file anywhere else — a ninth Phosphor SVG one directory
+/// over, `tests/testcases/`'s corpus — is reached by neither;
+/// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
+/// that gap.
+const COMMITTED_FILES: &[(&str, &str, &str)] = &[
+    (
+        "assets/DOOM1.WAD",
+        "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",
+        "NOTICE",
+    ),
+    (
+        "assets/JetBrainsMono-Regular.ttf",
+        "e6fd0d7e91550b3ed2b735d4312474362c4716edc4fc0577a0f61ed782d5aed1",
+        "NOTICE",
+    ),
+    (
+        "assets/icons/arrow-down-right-bold.svg",
+        "8e107bfe4c746c762c97a7dbb6472db4669947ccdb5498fa843448ce8f6b69f4",
+        "NOTICE",
+    ),
+    (
+        "assets/icons/crosshair-simple-bold.svg",
+        "d1c42a390a49ef683b42e7aa2f45da0cf7f0ebdecf6a4977b2c2e2f2226fd594",
+        "NOTICE",
+    ),
+    (
+        "assets/icons/cursor-bold.svg",
+        "cc39efe6482c577e6a3ccedf6efcad26769a9eb0bc2868fb18f9a22de43bf172",
+        "NOTICE",
+    ),
+    (
+        "assets/icons/file-bold.svg",
+        "b74d67f0af33fc62e83fbb2c7c8189f37713f482f06685088d46f8592f0e660f",
+        "NOTICE",
+    ),
+    (
+        "assets/icons/folder-bold.svg",
+        "3f564dd4a0d27706ff9cb2d9738cef9ac1009b70f82d1da6d3bac119e41949a0",
+        "NOTICE",
+    ),
+    (
+        "assets/icons/minus-bold.svg",
+        "ec912ee836d44c0e94e2493e7efbf9c4b93ee9c0dd9193d19cf86448b7e31dcd",
+        "NOTICE",
+    ),
+    (
+        "assets/icons/square-bold.svg",
+        "d8284370bac0b7ccb3760fc1cd214f36f716e2724e4abd63eb2696bc345bdc45",
+        "NOTICE",
+    ),
+    (
+        "assets/icons/x-bold.svg",
+        "394ad30f37b493b58cc7c26e816d7ec0bf7acc4a583fa39c9aed438c19b5fc57",
+        "NOTICE",
+    ),
+    (
+        "assets/hello.rs",
+        "f30395cdbe2fff2c6ff6fe6dd270ded78a6b236ecfb598b9476cb71dc6cea214",
+        "ours: the smallest guest binary's source, built by tests/common/compile.rs",
+    ),
+    (
+        "assets/soundfont.sf2",
+        "89a13a5c907b5cc83c15679e07e6dcb06fd72102937e092dc4a582f1aa5905c3",
+        "NOTICE",
+    ),
+    (
+        "assets/wallpaper.jpg",
+        "b6f0c89bf966cfb458333b280614f0c7723615e42e340b9d43a760a64fe05976",
+        "ours: `cargo run -- --regen-wallpaper` writes it from src/wallpaper.rs",
+    ),
+    (
+        "doom.jpg",
+        "ae22f71dc732580bd4f789937c9fe564969029413fc2092f27bdae8d1ceaf8e3",
+        "ours: a screenshot of this system running, in README.md",
+    ),
+    (
+        "first-boot.jpg",
+        "41a65f4bf1f752bcc9da717e3c8f7f776bfbc214b2354b11a3c1e0278a9be22e",
+        "ours: the T14's first boot photographed, in README.md",
+    ),
+    (
+        "kernel/src/drivers/panic_console/font8x16.bin",
+        "e1bea9791e07a0e2509196c6cb4563d44cafca1f19b0ef660319b0fa53546a3e",
+        "NOTICE",
+    ),
+    (
+        "ovmf/DEBUGX64_OVMF.fd",
+        "800ff5af1220d1232d4da7173ccddbb74a9217600bd8935903d9d534801778b4",
+        "NOTICE",
+    ),
+    (
+        "ovmf/OVMF_CODE-pure-efi.fd",
+        "9de33971d47958f42af86584b502f83256120b2482e4f7ed14db32fd68e92922",
+        "NOTICE",
+    ),
+    (
+        "ovmf/OVMF_VARS-pure-efi.fd",
+        "c653de93db67e4f2213a35598efb379a13ef4a12c241e003699d4d7afd193635",
+        "NOTICE",
+    ),
+    (
+        "toyos-elf/tests/fixtures/toyos-ld-headers.bin",
+        "6243d543a15941133514c1a8a24c79d118060caeae7e985870a67d9fc3021354",
+        "ours: the first 4096 bytes of a toyos-ld output (toyos-elf/tests/real.rs)",
+    ),
+    (
+        "toyos-symbols/tests/fixtures/input-test.bin",
+        "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
+        "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
+    ),
+];
+
+/// `bytes` look like a binary file by git's own heuristic: a NUL in the first
+/// 8000 bytes.
+///
+/// A heuristic and not a proof — 8 KB of ASCII in front of a payload reads as
+/// text — which is why `assets/` is walked whole rather than through this.
+#[cfg(test)]
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8000).any(|b| *b == 0)
+}
+
+/// The compiler fork, which is upstream's tree and is judged by
+/// `src/forkcheck.rs` rather than by anything here.
+#[cfg(test)]
+const NOT_OURS: &str = "rust";
+
+/// Whether `code` renames `std::process::Command` on one line, after any
+/// visibility on the front of it.
+///
+/// A `use` rename and a `type` alias, and only where the item begins the line.
+/// Rather than chase every alias a Rust file can build, this refuses the forms
+/// that spell one on a single line; `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+/// is what it does not reach.
+#[cfg(test)]
+fn renames_command(code: &str) -> bool {
+    let mut code = code.trim_start();
+    if let Some(rest) = code.strip_prefix("pub") {
+        let rest = match rest.strip_prefix('(') {
+            Some(group) => group.split_once(')').map_or("", |(_, after)| after),
+            None => rest,
+        };
+        if rest.starts_with(char::is_whitespace) {
+            code = rest.trim_start();
+        }
+    }
+    (code.starts_with("use ") && code.contains("Command as "))
+        || (code.starts_with("type ") && code.contains("Command"))
+}
+
+/// Every path a `build = "…"` key names, repository-relative.
+///
+/// Cargo's default is `build.rs` and the key overrides it, so a build script
+/// under another name runs on this host and is reached by no walk keyed on the
+/// filename. `userland/doom/Cargo.toml` sets the key today.
+#[cfg(test)]
+fn declared_build_scripts() -> std::collections::BTreeSet<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" || rel(root, &path) == NOT_OURS {
+                continue;
+            }
+            if path.is_dir() {
+                walk(root, &path, out);
+                continue;
+            }
+            if name != "Cargo.toml" {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let Ok(doc) = text.parse::<toml::Value>() else { continue };
+            let Some(script) =
+                doc.get("package").and_then(|p| p.get("build")).and_then(|b| b.as_str())
+            else {
+                continue;
+            };
+            let Some(dir) = path.parent() else { continue };
+            out.insert(rel(root, &dir.join(script)));
+        }
+    }
+    let root = repo_root();
+    let mut out = std::collections::BTreeSet::new();
+    walk(&root, &root, &mut out);
+    out
+}
+
+/// Every `.rs` file under the repository that runs on the host: every one
+/// outside [`GUEST_CODE`], plus each crate's build script inside it.
+#[cfg(test)]
+fn host_files() -> Vec<PathBuf> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        scripts: &std::collections::BTreeSet<String>,
+        out: &mut Vec<PathBuf>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" {
+                continue;
+            }
+            let at = rel(root, &path);
+            if at == NOT_OURS {
+                continue;
+            }
+            if path.is_dir() {
+                walk(root, &path, scripts, out);
+                continue;
+            }
+            if !path.extension().is_some_and(|e| e == "rs") {
+                continue;
+            }
+            let guest = GUEST_CODE
+                .iter()
+                .any(|skip| at == *skip || at.starts_with(&format!("{skip}/")));
+            if !guest || name == "build.rs" || scripts.contains(&at) {
+                out.push(path);
+            }
+        }
+    }
+    let root = repo_root();
+    let scripts = declared_build_scripts();
+    let mut out = Vec::new();
+    walk(&root, &root, &scripts, &mut out);
+    out
+}
+
+/// The argument text of every `Command::new(` `text` names in code, verbatim.
+///
+/// Verbatim is the point: a literal and the expression that computes one are
+/// different rows, because only the first names a binary this gate can read.
+/// A call written inside a string literal or a comment is not a call — this
+/// file's own refusal messages and its case table both spell one out.
+#[cfg(test)]
+fn spawn_arguments(text: &str) -> Vec<String> {
+    const OPEN: &str = "Command::new(";
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let mut in_string = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_string => i += 2,
+            b'"' => {
+                in_string = !in_string;
+                i += 1;
+            }
+            b'/' if !in_string && bytes.get(i + 1) == Some(&b'/') => break,
+            _ if !in_string && bytes[i..].starts_with(OPEN.as_bytes()) => {
+                i += OPEN.len();
+                let start = i;
+                let mut depth = 1usize;
+                let mut inner = false;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' if inner => i += 1,
+                        b'"' => inner = !inner,
+                        b'(' if !inner => depth += 1,
+                        b')' if !inner => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let arg = String::from_utf8_lossy(&bytes[start..i.min(bytes.len())]);
+                out.push(arg.trim().to_string());
+                i = (i + 1).min(bytes.len());
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
+#[cfg(test)]
+fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,7 +1025,7 @@ mod tests {
                 }
             }
         }
-        assert!(complaints.is_empty(), "{}", complaints.join("\n"));
+        assert!(complaints.is_empty(), "{NO_COMMAND_ALIAS}:\n{}", complaints.join("\n"));
     }
 
     /// Both directions: a resurrected early enable reds, and so does a stale row.
@@ -727,6 +1174,196 @@ mod tests {
             complaints.is_empty(),
             "a slice or an exclusive reference over a page a process can write \
              claims an exclusivity the mapping does not give:\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// **The dependency bar, made checkable at the one place a host binary can
+    /// be reached from.** Keyed on the argument text rather than on a set of
+    /// known-bad names: a scan for `fsck_msdos` passes the day the call is
+    /// spelled `/sbin/fsck_msdos`, and says nothing about the tool that arrives
+    /// next.
+    #[test]
+    fn every_binary_the_host_runs_is_declared() {
+        let root = repo_root();
+        let mut found: Vec<(String, String, usize)> = Vec::new();
+        for path in host_files() {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (n, line) in text.lines().enumerate() {
+                for arg in spawn_arguments(line) {
+                    found.push((arg, rel(&root, &path), n + 1));
+                }
+            }
+        }
+        assert!(
+            found.iter().any(|(arg, _, _)| arg == "\"qemu-system-x86_64\""),
+            "the walk did not find the QEMU launch, so it is reading no host tree"
+        );
+        assert!(
+            host_files().iter().any(|p| rel(&root, p) == "userland/doom/build.rs"),
+            "the walk did not reach a userland build script, which runs on this machine"
+        );
+
+        let mut complaints = Vec::new();
+        for (arg, file, line) in &found {
+            let Some(row) = HOST_SPAWNS.iter().find(|r| r.arg == arg) else {
+                complaints
+                    .push(format!("{file}:{line}: `Command::new({arg})`, which nothing declares"));
+                continue;
+            };
+            if row.sites.is_empty() {
+                continue;
+            }
+            let here = found.iter().filter(|(a, f, _)| a == arg && f == file).count();
+            match row.sites.iter().find(|(f, _)| f == file) {
+                Some((_, want)) if *want == here => {}
+                Some((_, want)) => complaints.push(format!(
+                    "{file} reads `Command::new({arg})` {here} time(s) where this table pins {want}"
+                )),
+                None => complaints.push(format!(
+                    "{file}:{line}: `Command::new({arg})` is not a literal and this file is not \
+                     one of its declared sites — {}",
+                    row.why
+                )),
+            }
+        }
+        for row in HOST_SPAWNS {
+            let literal = row.arg.starts_with('"') && row.arg.ends_with('"');
+            if literal != row.sites.is_empty() {
+                complaints.push(format!(
+                    "`{}` is {}a literal and carries {} site(s): a literal names its binary and \
+                     pins nothing, anything else names nothing and pins everything",
+                    row.arg,
+                    if literal { "" } else { "not " },
+                    row.sites.len()
+                ));
+            }
+            if !found.iter().any(|(a, _, _)| a == row.arg) {
+                complaints.push(format!(
+                    "nothing runs `Command::new({})` any more, so the row saying it is {} is a \
+                     permission nobody re-argued",
+                    row.arg, row.why
+                ));
+            }
+            for (file, want) in row.sites {
+                let here = found.iter().filter(|(a, f, _)| a == row.arg && f == file).count();
+                if here != *want {
+                    complaints.push(format!(
+                        "{file} is pinned to {want} × `Command::new({})` and has {here}",
+                        row.arg
+                    ));
+                }
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "only Rust and QEMU are in the bar, and what is outside it is declared:\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// **A renamed `Command` spawns past the scan above in one line**, which is
+    /// what makes refusing the rename part of the check. Rather than chase every
+    /// alias a Rust file can build, this refuses the forms that spell one on a
+    /// single line, and no shorter rule does; what it closes is the one-line
+    /// form after any visibility, and
+    /// `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+    /// is the rest. It does not reach a function pointer taken from
+    /// `Command::new` itself either.
+    #[test]
+    fn no_host_file_renames_command() {
+        let root = repo_root();
+        let mut complaints = Vec::new();
+        for path in host_files() {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (n, line) in text.lines().enumerate() {
+                let code = code_only(line);
+                if renames_command(&code) {
+                    complaints.push(format!(
+                        "{}:{}: {}",
+                        rel(&root, &path),
+                        n + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+        assert!(complaints.is_empty(), "{NO_COMMAND_ALIAS}:\n{}", complaints.join("\n"));
+    }
+
+    /// What the walk can and cannot read, stated as cases.
+    #[test]
+    fn the_spawn_scan_reads_the_argument_and_not_the_call() {
+        assert_eq!(spawn_arguments("Command::new(\"git\")"), ["\"git\""]);
+        assert_eq!(spawn_arguments("  let c = Command::new(&exe);"), ["&exe"]);
+        assert_eq!(
+            spawn_arguments("Command::new(env!(\"CARGO_BIN_EXE_toyos-ld\"))"),
+            ["env!(\"CARGO_BIN_EXE_toyos-ld\")"]
+        );
+        let call = "Command::new(format!(\"/bin/{cmd}\"))";
+        assert_eq!(spawn_arguments(call), ["format!(\"/bin/{cmd}\")"]);
+        assert_eq!(spawn_arguments("Command::new(\"a\"); Command::new(\"b\")"), ["\"a\"", "\"b\""]);
+        assert!(spawn_arguments("let x = 1;").is_empty());
+    }
+
+    /// **Every committed file somebody had to judge is judged here.** `NOTICE`
+    /// names each one's upstream, licence and digest; nothing read it, so a new
+    /// one arrived unremarked and a changed one changed silently. The digest is
+    /// taken from the bytes and held against the row and, for a third-party
+    /// file, against `NOTICE` itself.
+    #[test]
+    fn every_committed_binary_file_is_declared() {
+        let root = repo_root();
+        let out = std::process::Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
+        assert!(out.status.success(), "git ls-files failed");
+        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
+
+        let mut found: Vec<(String, String)> = Vec::new();
+        for name in listing.split('\0').filter(|s| !s.is_empty()) {
+            let Ok(bytes) = std::fs::read(root.join(name)) else { continue };
+            if !is_binary(&bytes) && !name.starts_with("assets/") {
+                continue;
+            }
+            found.push((name.to_string(), digest(&bytes)));
+        }
+        assert!(
+            found.iter().any(|(name, _)| name == "assets/DOOM1.WAD"),
+            "the walk found no DOOM1.WAD, so it is not reading the tracked tree"
+        );
+        assert!(
+            found.iter().any(|(name, _)| name == "assets/icons/x-bold.svg"),
+            "the walk found no Phosphor SVG, so `assets/` is not being read whole"
+        );
+
+        let notice = std::fs::read_to_string(root.join("NOTICE")).expect("NOTICE");
+        let mut complaints = Vec::new();
+        for (name, sha) in &found {
+            match COMMITTED_FILES.iter().find(|(f, _, _)| f == name) {
+                None => complaints
+                    .push(format!("{name} is committed and nothing declares it")),
+                Some((_, want, _)) if want != sha => {
+                    complaints.push(format!("{name} is sha256 {sha} where it is declared {want}"))
+                }
+                Some((_, _, "NOTICE")) if !notice.contains(sha.as_str()) => complaints
+                    .push(format!("{name} is sha256 {sha}, which NOTICE does not carry")),
+                Some(_) => {}
+            }
+        }
+        for (name, _, where_from) in COMMITTED_FILES {
+            if !found.iter().any(|(f, _)| f == name) {
+                complaints.push(format!(
+                    "{name} is declared here ({where_from}) and is no longer committed"
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "a committed binary is a file somebody had to judge, and NOTICE is where the \
+             judgement is:\n{}",
             complaints.join("\n"),
         );
     }
