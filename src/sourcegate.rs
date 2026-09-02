@@ -1246,6 +1246,16 @@ mod tests {
                 ));
             }
             for (file, want) in row.sites {
+                // A row naming a file the tree does not hold is a permission at
+                // a site that cannot be read, and it agrees with both counting
+                // directions at once because both find nothing.
+                if !root.join(file).is_file() {
+                    complaints.push(format!(
+                        "`{}` is pinned to {want} × `Command::new(…)` in {file}, and this tree \
+                         holds no such file",
+                        row.arg
+                    ));
+                }
                 let here = found.iter().filter(|(a, f, _)| a == row.arg && f == file).count();
                 if here != *want {
                     complaints.push(format!(
