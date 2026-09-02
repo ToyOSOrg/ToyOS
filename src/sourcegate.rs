@@ -491,8 +491,8 @@ struct Spawn {
 /// finds in `PATH`, and the `cc` half is one of the three standing failures
 /// `CLAUDE.md` declares. A workflow or a container image, which is
 /// `issues/build/nothing-reads-the-workflows-for-a-binary.md`. And an alias no
-/// one line spells, which is
-/// `issues/build/an-alias-split-across-lines-escapes-both-scans.md`.
+/// one line spells, which the same record carries under its own
+/// heading.
 const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "\"cargo\"",
@@ -737,7 +737,7 @@ fn after_visibility(code: &str) -> &str {
 ///
 /// A `use` rename and a `type` alias, and only where the item begins the line.
 /// Rather than chase every alias a Rust file can build, this refuses the forms
-/// that spell one on a single line; `issues/build/an-alias-split-across-lines-escapes-both-scans.md`
+/// that spell one on a single line; `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md`
 /// is what it does not reach.
 #[cfg(test)]
 fn renames_command(code: &str) -> bool {
@@ -750,7 +750,7 @@ fn renames_command(code: &str) -> bool {
 /// visibility — **exactly one spelling and no other**, a brace group on that
 /// line included. A `use` split across lines, a plain re-import and a `type`
 /// alias walk past it, and
-/// `issues/build/an-alias-split-across-lines-escapes-both-scans.md` carries
+/// `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md` carries
 /// them. No `type` half here: `type PageTables = Arc<…>` is ordinary.
 #[cfg(test)]
 fn use_renames(code: &str, item: &str) -> bool {
@@ -1422,7 +1422,7 @@ mod tests {
     /// alias a Rust file can build, this refuses the forms that spell one on a
     /// single line, and no shorter rule does; what it closes is the one-line
     /// form after any visibility, and
-    /// `issues/build/an-alias-split-across-lines-escapes-both-scans.md`
+    /// `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md`
     /// is the rest. It does not reach a function pointer taken from
     /// `Command::new` itself either.
     #[test]

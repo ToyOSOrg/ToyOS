@@ -18,9 +18,9 @@ and each is a spelling, not a rule:
 
 Everything else the two clauses asked for is an entry, not a silence:
 `nothing-reads-the-workflows-for-a-binary.md`,
-`the-third-party-corpus-is-in-no-machine-read-ledger.md`,
-`an-alias-split-across-lines-escapes-both-scans.md` and
-`a-spawn-that-is-not-command-is-in-no-ledger.md`. A text scan over Rust source
+`the-third-party-corpus-is-in-no-machine-read-ledger.md` and
+`a-spawn-that-is-not-command-is-in-no-ledger.md`, which carries the alias half
+too. A text scan over Rust source
 cannot be hardened into a rule — three rounds of one-token variants said so —
 and the exit named in those entries is one scan that resolves names the way the
 compiler does.
