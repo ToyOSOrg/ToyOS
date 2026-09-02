@@ -33,7 +33,7 @@ it by saying where the log will be, and cannot put a line in it.
 
 `panic_console::boot_checkpoint` returns immediately once
 `SCREEN_OWNED_BY_USERLAND` is set
-(`kernel/src/drivers/panic_console/mod.rs:885`), and a compositor claiming the
+(`kernel/src/drivers/panic_console/mod.rs:639`), and a compositor claiming the
 framebuffer sets it. So on `bootable.img` the last kernel screenful ever painted
 is the one at `Boot: complete`, the desktop overwrites it a few tens of
 milliseconds later, and no key pauses it: `page_forever` is reached only from
