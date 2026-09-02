@@ -75,7 +75,7 @@ kernel/src/drivers/gop.rs 11 0
 kernel/src/drivers/hda.rs 70 0
 kernel/src/drivers/i8042/mod.rs 250 0
 kernel/src/drivers/i8042/tally.rs 16 0
-kernel/src/drivers/ioapic.rs 30 0
+kernel/src/drivers/ioapic.rs 36 0
 kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 131 0
 kernel/src/drivers/panic_console/access.rs 6 0
@@ -117,8 +117,9 @@ kernel/src/iod.rs 10 0
 kernel/src/iommu/mod.rs 31 0
 kernel/src/iommu/vtd/dmar.rs 33 0
 kernel/src/iommu/vtd/fault.rs 34 0
-kernel/src/iommu/vtd/mod.rs 73 0
-kernel/src/iommu/vtd/queue.rs 17 0
+kernel/src/iommu/vtd/interrupt.rs 28 0
+kernel/src/iommu/vtd/mod.rs 93 0
+kernel/src/iommu/vtd/queue.rs 22 0
 kernel/src/iommu/vtd/table.rs 37 0
 kernel/src/irq_census.rs 38 0
 kernel/src/irq_ring.rs 14 0

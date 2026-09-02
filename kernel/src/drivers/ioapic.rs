@@ -81,6 +81,8 @@ impl core::fmt::Debug for RouteError {
 
 struct Unit {
     mmio: Mmio,
+    /// The MADT's id for this chip, which is also the name a DMAR device scope gives its source id.
+    id: u8,
     gsi_base: u32,
     entries: u32,
 }
@@ -120,7 +122,7 @@ pub fn init(madt: &MadtInfo) {
     for entry in &madt.io_apics {
         // 0x20 covers IOREGSEL and IOWIN; every entry is reached through those two.
         let mmio = crate::mm::paging::map_mmio(entry.address as u64, 0x20, MmioPolicy::Uncacheable);
-        let mut unit = Unit { mmio, gsi_base: entry.gsi_base, entries: 0 };
+        let mut unit = Unit { mmio, id: entry.id, gsi_base: entry.gsi_base, entries: 0 };
         let ver = unit.read(REG_VER);
         let version = ver & 0xFF;
         unit.entries = ((ver >> 16) & 0xFF) + 1;
@@ -224,6 +226,15 @@ pub fn gsi_for_isa_irq(irq: u8) -> Option<IsaLine> {
                 |o| IsaLine { gsi: Gsi(o.gsi), trigger: o.trigger, polarity: o.polarity },
             ),
     )
+}
+
+/// Every chip this machine routes pins through, by MADT id.
+///
+/// The IOMMU needs the whole set before it can decide anything: a chip whose
+/// requester id firmware never named cannot be remapped, and that is a decision
+/// about the machine, taken before the first entry is written.
+pub fn ids() -> Vec<u8> {
+    TOPOLOGY.lock().units.iter().map(|u| u.id).collect()
 }
 
 fn locate(topology: &Topology, gsi: Gsi) -> Result<(&Unit, u32), RouteError> {
