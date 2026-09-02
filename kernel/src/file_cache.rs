@@ -462,7 +462,12 @@ pub fn resize(
     // under the same hold that spends it: a page admitted and released again is
     // clean and unreferenced, which is what a sweep takes at or after its hand —
     // and `sys_read`/`sys_write` sweep holding no VFS lock, so they run here.
-    let fetched = match straddled_by_shrink(file_id, new_size) {
+    let straddled = straddled_by_shrink(file_id, new_size);
+    #[cfg(feature = "boot-actuators")]
+    if straddled.is_some() && refuse_fault(new_size) {
+        return Err(block::BlockError::Device);
+    }
+    let fetched = match straddled {
         Some(page_idx) => fetch_page(file_id, page_idx)?.map(|page| (page_idx, page)),
         None => None,
     };
@@ -485,6 +490,20 @@ pub fn resize(
     // `evict_one` never takes a dirty page.
     evict_if_needed(&mut cache);
     Ok(())
+}
+
+/// The `resize-fault-refuse` actuator: the device read a shrink makes for its
+/// straddled page, refused. Keyed on the staged length, so no other shrink in
+/// the boot can spend it.
+#[cfg(feature = "boot-actuators")]
+fn refuse_fault(new_size: u64) -> bool {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/writeback_durability.rs`.
+    const STAGED: u64 = 133;
+    let refuse = crate::actuator::resize_fault_refuse() && new_size == STAGED;
+    if refuse {
+        log!("file cache: resize-fault-refuse: refusing the straddled read of a shrink to {STAGED}");
+    }
+    refuse
 }
 
 /// The `resize-evict-window` actuator: one other CPU's CLOCK sweep, landing in

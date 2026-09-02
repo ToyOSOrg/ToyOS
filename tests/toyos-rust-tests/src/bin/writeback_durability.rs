@@ -43,6 +43,11 @@ const WITNESS: &str = "/log/wb-served.bin";
 const RETRY: &str = "/log/wb-retry.bin";
 const RETRY_AT: u64 = 2 * 4096;
 
+/// The file whose straddled read `resize-fault-refuse` refuses; the length is
+/// what keys the actuator, and is mirrored in `kernel/src/file_cache.rs`.
+const REFUSED: &str = "/log/wb-refused.bin";
+const REFUSED_CUT: u64 = 133;
+
 fn kept() -> Vec<u8> {
     (0..4096usize).map(|i| (i.wrapping_mul(53) ^ 0xC3) as u8).collect()
 }
@@ -83,6 +88,7 @@ fn main() {
     shrink_unflushed_then_regrow();
     shrink_a_file_the_cache_no_longer_holds();
     a_refused_metadata_write_keeps_the_pages_it_wrote();
+    a_refused_fault_resizes_nothing();
 
     println!("wrote {LEN} bytes, closed without fsync, and read them back after the write-back drained");
 }
@@ -138,6 +144,31 @@ fn shrink_a_file_the_cache_no_longer_holds() {
 
     thread::sleep(Duration::from_millis(200));
     println!("shrank a cold {REOPENED} to {CUT}, regrew it, and wrote the {} bytes it served to {WITNESS}", served.len());
+}
+
+
+/// The refused half of the fault a shrink makes. A device that will not give
+/// the straddled page back leaves the file alone: zeroing half a page is a
+/// read-modify-write, and there is nothing to modify.
+fn a_refused_fault_resizes_nothing() {
+    {
+        let mut f = fs::File::create(REFUSED).unwrap_or_else(|e| panic!("create {REFUSED}: {e}"));
+        f.write_all(&seed()).expect("write the seed");
+        f.sync_all().expect("fsync the seed");
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    let f = OpenOptions::new()
+        .read(true).write(true)
+        .open(REFUSED)
+        .unwrap_or_else(|e| panic!("reopen {REFUSED}: {e}"));
+    let err = f.set_len(REFUSED_CUT).expect_err("a refused fault must refuse the truncate");
+    let len = f.metadata().expect("stat").len();
+    assert_eq!(len, SHRUNK_LEN as u64, "{REFUSED} is {len} bytes after a truncate that was refused");
+    drop(f);
+
+    thread::sleep(Duration::from_millis(200));
+    println!("the refused straddled read left {REFUSED} whole: {err}");
 }
 
 /// A durable file shrunk and regrown with nothing flushed between the two, and

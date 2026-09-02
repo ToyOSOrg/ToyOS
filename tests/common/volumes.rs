@@ -826,6 +826,8 @@ pub fn writeback_durability(
     }
     /// And for the bytes a read got back from a file shrunk only once cold.
     const SERVED_NAME: &str = "wb-served.bin";
+    /// And for the file whose straddled read is refused, which leaves it whole.
+    const REFUSED_NAME: &str = "wb-refused.bin";
     /// And for the file whose flush is refused at its directory-entry write.
     const RETRY_NAME: &str = "wb-retry.bin";
     const RETRY_AT: usize = 2 * 4096;
@@ -846,8 +848,12 @@ pub fn writeback_durability(
     // The third takes the page the cold shrink just read off the device, in the
     // window between that read and the lock that spends it: the sweep any other
     // CPU can run there, since neither `sys_read` nor `sys_write` holds the VFS lock.
-    const PARAMS: &[&str] =
-        &["fat-mirror-write-refuse", "fat-flush-meta-refuse", "resize-evict-window"];
+    const PARAMS: &[&str] = &[
+        "fat-mirror-write-refuse",
+        "fat-flush-meta-refuse",
+        "resize-evict-window",
+        "resize-fault-refuse",
+    ];
 
     let image_path = test_dir().join("writeback-durability.img");
     let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
@@ -959,7 +965,9 @@ pub fn writeback_durability(
 
     // Ground truth: the bytes on the device, against the bytes the guest wrote,
     // read by the host's own FAT implementation and never by the kernel.
-    let mut files = read_files(volume, &[BLOB_NAME, SHRUNK_NAME, SERVED_NAME, RETRY_NAME])?;
+    let mut files =
+        read_files(volume, &[BLOB_NAME, SHRUNK_NAME, SERVED_NAME, RETRY_NAME, REFUSED_NAME])?;
+    let refused = need(files.pop().flatten(), REFUSED_NAME)?;
     let retried = need(files.pop().flatten(), RETRY_NAME)?;
     let served = need(files.pop().flatten(), SERVED_NAME)?;
     let shrunk = need(files.pop().flatten(), SHRUNK_NAME)?;
@@ -999,6 +1007,28 @@ pub fn writeback_durability(
     // The same shrink over a page the cache did not hold, judged through the
     // bytes a read got back: `Fat32::set_len` zero-fills on every grow, so the
     // volume's own bytes are right whatever the cache answered.
+    // The refused fault. The actuator must have fired, or the truncate was
+    // never refused; then the file has to be untouched on the volume.
+    const FAULT_REFUSED: &str = "resize-fault-refuse: refusing the straddled read";
+    let fault_refused = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
+        .iter()
+        .map(|cap| cap.matches(FAULT_REFUSED).count())
+        .sum::<usize>();
+    if fault_refused != 1 {
+        return Err(format!(
+            "the resize-fault-refuse actuator fired {fault_refused} time(s), not the 1 the staged \
+             shrink asks for — the refused error path this gate covers never ran\nkernel log:\n{}{}\nshutdown:\n{}",
+            result.before, result.serial, tail
+        ));
+    }
+    if refused.len() != SHRUNK_LEN || refused[..] != seed()[..] {
+        return Err(format!(
+            "{REFUSED_NAME} is {} bytes on the volume and not the {SHRUNK_LEN} bytes the guest \
+             seeded it with — a truncate whose straddled read was refused changed the file",
+            refused.len()
+        ));
+    }
+
     // The sweep must have run in the window, or the eviction this arm is about
     // never happened and the bytes below prove only the ordinary cold shrink.
     const SWEPT: &str = "resize-evict-window swept page";
