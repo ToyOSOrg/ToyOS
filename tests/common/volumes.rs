@@ -843,7 +843,11 @@ pub fn writeback_durability(
     // The second refuses one file's second directory-entry write, so a flush
     // fails at its metadata write with its pages already written and settled.
     // Different file, different site: neither stands in for the other.
-    const PARAMS: &[&str] = &["fat-mirror-write-refuse", "fat-flush-meta-refuse"];
+    // The third takes the page the cold shrink just read off the device, in the
+    // window between that read and the lock that spends it: the sweep any other
+    // CPU can run there, since neither `sys_read` nor `sys_write` holds the VFS lock.
+    const PARAMS: &[&str] =
+        &["fat-mirror-write-refuse", "fat-flush-meta-refuse", "resize-evict-window"];
 
     let image_path = test_dir().join("writeback-durability.img");
     let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
@@ -995,6 +999,20 @@ pub fn writeback_durability(
     // The same shrink over a page the cache did not hold, judged through the
     // bytes a read got back: `Fat32::set_len` zero-fills on every grow, so the
     // volume's own bytes are right whatever the cache answered.
+    // The sweep must have run in the window, or the eviction this arm is about
+    // never happened and the bytes below prove only the ordinary cold shrink.
+    const SWEPT: &str = "resize-evict-window swept page";
+    let swept = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
+        .iter()
+        .map(|cap| cap.matches(SWEPT).count())
+        .sum::<usize>();
+    if swept != 1 {
+        return Err(format!(
+            "the resize-evict-window actuator swept {swept} time(s), not the 1 the cold shrink \
+             stages — nothing ran in the window this arm exists for\nkernel log:\n{}{}\nshutdown:\n{}",
+            result.before, result.serial, tail
+        ));
+    }
     if served.len() != SHRUNK_LEN {
         return Err(format!(
             "{SERVED_NAME} is {} bytes; the guest read back a file it had regrown to {SHRUNK_LEN}",

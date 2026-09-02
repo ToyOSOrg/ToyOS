@@ -89,6 +89,9 @@ actuators! {
     /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
     fat_flush_meta_refuse = "fat-flush-meta-refuse";
 
+    /// Take the page a shrink has just read off the device, in the window between that read and the lock that spends it — one other CPU's CLOCK sweep, which needs no VFS lock and so runs there.
+    resize_evict_window = "resize-evict-window";
+
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
 

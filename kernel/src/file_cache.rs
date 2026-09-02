@@ -458,10 +458,21 @@ pub fn resize(
     file_id: FileId,
     new_size: u64,
 ) -> Result<(), block::BlockError> {
-    if let Some(straddled) = straddled_by_shrink(file_id, new_size) {
-        fault_in(file_id, straddled)?;
-    }
+    // Fetched outside the lock because it is a device read, and admitted below
+    // under the same hold that spends it: a page admitted and released again is
+    // clean and unreferenced, which is what a sweep takes at or after its hand —
+    // and `sys_read`/`sys_write` sweep holding no VFS lock, so they run here.
+    let fetched = match straddled_by_shrink(file_id, new_size) {
+        Some(page_idx) => fetch_page(file_id, page_idx)?.map(|page| (page_idx, page)),
+        None => None,
+    };
+    #[cfg(feature = "boot-actuators")]
+    swept_fault_window(file_id, fetched.as_ref().map(|&(idx, _)| idx));
+
     let mut cache = FILE_CACHE.lock();
+    if let Some((page_idx, page)) = fetched {
+        admit_locked(&mut cache, file_id, page_idx, page);
+    }
     let shrank = cache.files.get(&file_id).is_some_and(|f| new_size < f.size);
     set_size_locked(&mut cache, file_id, new_size);
     if let Some(file) = cache.files.get_mut(&file_id) {
@@ -470,8 +481,31 @@ pub fn resize(
             file.shrunk_to = Some(file.shrunk_to.map_or(new_size, |mark| mark.min(new_size)));
         }
     }
+    // Safe on the page just admitted: `set_size_locked` dirtied it, and
+    // `evict_one` never takes a dirty page.
     evict_if_needed(&mut cache);
     Ok(())
+}
+
+/// The `resize-evict-window` actuator: one other CPU's CLOCK sweep, landing in
+/// the window between the fault's device read and the lock that spends it.
+#[cfg(feature = "boot-actuators")]
+fn swept_fault_window(file_id: FileId, page_idx: Option<u32>) {
+    let Some(page_idx) = page_idx.filter(|_| crate::actuator::resize_evict_window()) else {
+        return;
+    };
+    let mut cache = FILE_CACHE.lock();
+    let mut taken = false;
+    if let Some(file) = cache.files.get_mut(&file_id) {
+        let is_cache = file.is_cache();
+        if file.pages.get(&page_idx).is_some_and(|p| !p.is_dirty()) {
+            file.pages.remove(&page_idx);
+            taken = is_cache;
+        }
+    }
+    cache.cached_pages -= usize::from(taken);
+    drop(cache);
+    log!("file cache: resize-evict-window swept page {page_idx} of file {file_id}: took it = {taken}");
 }
 
 /// The page a shrink to `new_size` would cut in half and does not hold.
@@ -489,13 +523,17 @@ fn straddled_by_shrink(file_id: FileId, new_size: u64) -> Option<u32> {
         .then_some(idx)
 }
 
-/// Make `page_idx` resident, reading it through the backing.
-fn fault_in(file_id: FileId, page_idx: u32) -> Result<(), block::BlockError> {
+/// Read `page_idx` through the backing, holding no lock across the device.
+/// `None` is nothing to admit: the page arrived, or the mark now covers it.
+fn fetch_page(
+    file_id: FileId,
+    page_idx: u32,
+) -> Result<Option<Box<[u8; PAGE_SIZE]>>, block::BlockError> {
     let backing = {
         let cache = FILE_CACHE.lock();
-        let Some(file) = cache.files.get(&file_id) else { return Ok(()) };
+        let Some(file) = cache.files.get(&file_id) else { return Ok(None) };
         if file.pages.contains_key(&page_idx) || discarded(file, page_idx) {
-            return Ok(());
+            return Ok(None);
         }
         file.backing.clone()
     };
@@ -503,19 +541,23 @@ fn fault_in(file_id: FileId, page_idx: u32) -> Result<(), block::BlockError> {
     if let Some(backing) = &backing {
         backing.read_page(page_idx as u64 * PAGE_SIZE as u64, &mut fetched)?;
     }
-    let mut cache = FILE_CACHE.lock();
+    Ok(Some(fetched))
+}
+
+/// Insert a fetched page if the file still wants it, under the caller's lock.
+/// Re-checked here because the fetch above released the lock across a device read.
+fn admit_locked(cache: &mut FileCache, file_id: FileId, page_idx: u32, page: Box<[u8; PAGE_SIZE]>) {
     let mut added = 0;
     if let Some(file) = cache.files.get_mut(&file_id) {
         let is_cache = file.is_cache();
-        if let Entry::Vacant(slot) = file.pages.entry(page_idx) {
-            slot.insert(CachedPage::new(fetched));
-            added = is_cache as usize;
+        if !discarded(file, page_idx) {
+            if let Entry::Vacant(slot) = file.pages.entry(page_idx) {
+                slot.insert(CachedPage::new(page));
+                added = usize::from(is_cache);
+            }
         }
     }
     cache.cached_pages += added;
-    // No eviction here: a clean unreferenced page is what a sweep takes first,
-    // so [`resize`] evicts once the shrink has dirtied this one.
-    Ok(())
 }
 
 fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
