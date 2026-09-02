@@ -238,6 +238,50 @@ fn shrink_a_reopened_file_reads_zeros(dir: &str, seed_len: usize) {
     fs::remove_file(&path).expect("cleanup");
 }
 
+/// The same reopened shrink with a page written above the mark before the
+/// flush. The trim frees the blocks under the hole and the flush writes only
+/// the dirty pages, so a mount that bridges the gap with a freed block and does
+/// not zero it hands the discarded tail back — on the device only, where the
+/// read above cannot see it.
+fn shrink_then_write_above_the_mark(dir: &str, seed_len: usize) {
+    let path = format!("{dir}/fstx_above.bin");
+    let seed = pattern(seed_len);
+    const CUT: usize = 100;
+    let at = seed_len - PAGE;
+    let payload: Vec<u8> = (0..PAGE).map(|i| (i.wrapping_mul(53) ^ 0xC3) as u8).collect();
+
+    {
+        let mut f = File::create(&path).unwrap_or_else(|e| panic!("create {path}: {e}"));
+        f.write_all(&seed).expect("write the seed");
+        f.sync_all().expect("fsync the seed");
+    }
+    drained();
+
+    let mut f = OpenOptions::new()
+        .read(true).write(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("reopen {path}: {e}"));
+    f.set_len(CUT as u64).expect("shrink into a page the cache does not hold");
+    f.set_len(seed_len as u64).expect("regrow");
+    f.seek(SeekFrom::Start(at as u64)).expect("seek above the mark");
+    f.write_all(&payload).expect("write a page above the mark");
+    f.sync_all().expect("fsync the shrink and the page above it");
+    drop(f);
+    drained();
+
+    let back = fs::read(&path).unwrap_or_else(|e| panic!("reread {path}: {e}"));
+    assert_eq!(back.len(), seed_len, "{dir}: the regrown length did not survive the close");
+    assert_eq!(&back[..CUT], &seed[..CUT], "{dir}: the surviving head changed");
+    assert_eq!(&back[at..], &payload[..], "{dir}: the page written above the mark did not survive");
+    if let Some(i) = back[CUT..at].iter().position(|&b| b != 0) {
+        panic!("{dir}: byte {} between the shrink and the rewritten page is {:#04x}, not zero — \
+                the mount bridged the hole with a block it had just freed",
+            CUT + i, back[CUT + i]);
+    }
+    fs::remove_file(&path).expect("cleanup");
+    println!("{dir}: the hole under a page written above a shrink is zeros on the device");
+}
+
 /// A spawn settles the write-back queue, so a just-closed file has left the cache.
 fn drained() {
     let echo = Command::new("/bin/echo").arg("drained").output().expect("run echo");
@@ -315,6 +359,10 @@ fn main() {
     // And the same pair on a file that is on the device and in no page of the cache.
     shrink_a_reopened_file_reads_zeros("/home", 3 * PAGE);
     shrink_a_reopened_file_reads_zeros("/log", 3 * PAGE);
+    // And the same, with a page written above the mark before the flush: the
+    // hole between them is bridged by blocks the trim had just freed.
+    shrink_then_write_above_the_mark("/log", 3 * PAGE);
+    shrink_then_write_above_the_mark("/home", 3 * PAGE);
     write_into_hole_reads_zeros("/tmp");
     write_into_hole_reads_zeros("/home");
 

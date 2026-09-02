@@ -3,7 +3,7 @@ bcachefs/src/alloc_bitmap.rs 43 0
 bcachefs/src/block_io.rs 112 0
 bcachefs/src/btree.rs 119 0
 bcachefs/src/crc32c.rs 9 0
-bcachefs/src/fs.rs 334 0
+bcachefs/src/fs.rs 344 0
 bcachefs/src/lib.rs 21 0
 bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 116 0
@@ -294,7 +294,7 @@ tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_dirs_durable.rs 11 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_rename_durable.rs 4 0
-tests/toyos-rust-tests/src/bin/fs_transactional.rs 50 0
+tests/toyos-rust-tests/src/bin/fs_transactional.rs 57 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
 tests/toyos-rust-tests/src/bin/fsync_flush_failed.rs 3 0
 tests/toyos-rust-tests/src/bin/ftruncate_flush_race.rs 12 0
