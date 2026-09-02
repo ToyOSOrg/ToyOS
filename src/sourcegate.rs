@@ -50,6 +50,13 @@
 //! row unreachable at once. The sixth reads every committed file that carries
 //! a NUL, plus everything under `assets/`, against the digest `NOTICE` records.
 //!
+//! The seventh is the third-party C corpus, and it is a text scan over one
+//! licence file rather than over Rust: it reads the per-population counts
+//! `tests/testcases/LICENSE` states, counts what `git` tracks under each
+//! population, and refuses the one case `NOTICE` names as not to be
+//! re-imported. An arrival, a deletion and that name are what it closes; no
+//! file's provenance is what it does not.
+//!
 //! **What neither reaches is filed rather than implied**: an alias split across
 //! lines, a spawn that is not `Command` at all, a binary a
 //! third-party crate or a workflow runs. The exit from all of it is one scan
@@ -589,9 +596,9 @@ const NO_BAN_ALIAS: &str = "these trees may not count a reference by hand, and a
 /// a file nobody can read in review; and everything under `assets/`, text or
 /// not, because that directory is where third-party material arrives. A
 /// third-party *text* file anywhere else — a ninth Phosphor SVG one directory
-/// over, `tests/testcases/`'s corpus — is reached by neither;
+/// over — is reached by neither, and the corpus by count alone and no digest;
 /// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
-/// that gap.
+/// what is left of that gap.
 const COMMITTED_FILES: &[(&str, &str, &str)] = &[
     (
         "assets/DOOM1.WAD",
@@ -937,6 +944,38 @@ fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<Str
         .filter(|p| p.ends_with(".rs"))
         .map(str::to_string)
         .collect()
+}
+
+/// The third-party C corpus, whose attribution is per *population* rather than
+/// per file: `tests/testcases/LICENSE` states how many files each of these
+/// directories holds, and `NOTICE` points at that file for the terms.
+#[cfg(test)]
+const CORPUS: &str = "tests/testcases";
+
+/// The populations that licence attributes, each the directory its count counts.
+#[cfg(test)]
+const CORPUS_POPULATIONS: &[&str] = &["tinycc", "pp_tcc"];
+
+/// The corpus files that are this repository's own, so a tracked file under
+/// [`CORPUS`] that is in no population and is none of these is an arrival.
+#[cfg(test)]
+const CORPUS_OURS: &[&str] = &["tests/testcases/LICENSE", "tests/testcases/system.toml"];
+
+/// `NOTICE`: "Do not re-import it." A re-import arrives as new bytes under a new
+/// digest, so the file name is the thing that can be refused.
+#[cfg(test)]
+const NOT_RE_IMPORTED: &str = "46_grep.c";
+
+/// The count `tests/testcases/LICENSE` states for one population, read off its
+/// own `<population>/ N files:` line.
+#[cfg(test)]
+fn declared_corpus_count(licence: &str, population: &str) -> Option<usize> {
+    let head = format!("{population}/");
+    licence.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix(&head)?;
+        let (count, _) = rest.trim_start().split_once(" files:")?;
+        count.trim().parse().ok()
+    })
 }
 
 /// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
@@ -1519,6 +1558,79 @@ mod tests {
             complaints.is_empty(),
             "a committed binary is a file somebody had to judge, and NOTICE is where the \
              judgement is:\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// The corpus's attribution is a count per population in a licence file this
+    /// repository did not write, and until this ran nothing held the directory
+    /// to it: a file added to `tinycc/` was attributed by a sentence that was
+    /// true when somebody wrote it.
+    ///
+    /// **What the scan closes**: an arrival and a deletion under either
+    /// population, a tracked file under the corpus that no population
+    /// attributes, and the one name `NOTICE` says is not to come back. **What
+    /// it does not**: any one file's provenance — a substituted file of the same
+    /// count passes, which is
+    /// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md`'s
+    /// remaining half and wants a walk keyed on content rather than on path.
+    #[test]
+    fn the_corpus_matches_the_counts_its_own_licence_declares() {
+        let root = repo_root();
+        let licence_path = format!("{CORPUS}/LICENSE");
+        let licence = std::fs::read_to_string(root.join(&licence_path))
+            .unwrap_or_else(|e| panic!("{licence_path}: {e}"));
+        let out = std::process::Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
+        assert!(out.status.success(), "git ls-files failed");
+        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
+        let tracked: Vec<&str> = listing.split('\0').filter(|s| !s.is_empty()).collect();
+        let under_corpus: Vec<&&str> =
+            tracked.iter().filter(|f| f.starts_with(&format!("{CORPUS}/"))).collect();
+        assert!(
+            under_corpus.len() > CORPUS_OURS.len(),
+            "the walk found {} tracked files under {CORPUS}, so it is not reading the tracked tree",
+            under_corpus.len()
+        );
+
+        let mut complaints = Vec::new();
+        for population in CORPUS_POPULATIONS {
+            let prefix = format!("{CORPUS}/{population}/");
+            let held = under_corpus.iter().filter(|f| f.starts_with(&prefix)).count();
+            let Some(declared) = declared_corpus_count(&licence, population) else {
+                complaints.push(format!("{licence_path} states no count for {population}/"));
+                continue;
+            };
+            if held != declared {
+                complaints.push(format!(
+                    "{prefix} holds {held} tracked files where {licence_path} attributes {declared}"
+                ));
+            }
+        }
+        for file in &under_corpus {
+            let attributed = CORPUS_OURS.contains(file)
+                || CORPUS_POPULATIONS
+                    .iter()
+                    .any(|p| file.starts_with(&format!("{CORPUS}/{p}/")));
+            if !attributed {
+                complaints
+                    .push(format!("{file} is under {CORPUS} and no population attributes it"));
+            }
+        }
+        for file in &tracked {
+            if file.rsplit('/').next() == Some(NOT_RE_IMPORTED) {
+                complaints.push(format!(
+                    "{file} is {NOT_RE_IMPORTED}, which NOTICE says is not to be re-imported"
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "the corpus is attributed by the counts in {licence_path}, and a count nothing holds \
+             is a sentence that was true once:\n{}",
             complaints.join("\n"),
         );
     }
