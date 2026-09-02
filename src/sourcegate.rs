@@ -1386,9 +1386,16 @@ mod tests {
                 ));
             }
             for (file, want) in row.sites {
-                // A row naming a file the tree does not hold is a permission at
-                // a site that cannot be read, and it agrees with both counting
-                // directions at once because both find nothing.
+                // Both shapes of a row that pins nothing, and both agree with
+                // each counting direction at once because both find nothing: a
+                // file the tree does not hold, and a count of zero.
+                if *want == 0 {
+                    complaints.push(format!(
+                        "`{}` is pinned to 0 × `Command::new(…)` in {file}, which permits \
+                         nothing and expires never",
+                        row.arg
+                    ));
+                }
                 if !root.join(file).is_file() {
                     complaints.push(format!(
                         "`{}` is pinned to {want} × `Command::new(…)` in {file}, and this tree \

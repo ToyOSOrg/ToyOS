@@ -3577,9 +3577,13 @@ mod tests {
             Red { standing: Standing::Disputed("two sources"), finding: Finding::Seen, ..row },
             Red { finding: Finding::fires(3, 5), measured: "no date at all", ..row },
         ];
+        let census = Census::of(&fixture, today);
+        assert_eq!(census, Census { rows: 6, standing: 4, live: 3, expiring: 2 });
+        // The sentence too, and not only the struct: the three numbers reach a
+        // reader through it, and nothing else would notice two of them swapped.
         assert_eq!(
-            Census::of(&fixture, today),
-            Census { rows: 6, standing: 4, live: 3, expiring: 2 }
+            census.rendered(),
+            "4 standing, 3 of them live reds, 2 expiring within 7 days."
         );
 
         let live = Census::of(KNOWN_RED, Day::today());
