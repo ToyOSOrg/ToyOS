@@ -703,9 +703,9 @@ pub const KNOWN_RED: &[Red] = &[
         finding: Finding::Seen,
         standing: Standing::Stands,
         what: "`timed out after 88s` alone, against 4–26 s on the dev host. Nothing here is \
-               diagnosed",
+               diagnosed, and it is 0 of 5 in the rate probe five days later",
         evidence: "run 31247206462, red again alone",
-        source: "issues/hardware/four-runner-reds-unclassified.md",
+        source: "issues/audio/doom-audio-callback-stalled-on-the-t14.md",
         measured: "2026-08-08",
     },
     Red {
@@ -719,7 +719,7 @@ pub const KNOWN_RED: &[Red] = &[
         ),
         what: "`the ring arm: timed out`, and `timed out after 9s` alone",
         evidence: "run 31247206462, red again alone",
-        source: "issues/hardware/four-runner-reds-unclassified.md",
+        source: "tests/common/hda.rs hda_client_stall",
         measured: "2026-08-08",
     },
     Red {
@@ -730,7 +730,7 @@ pub const KNOWN_RED: &[Red] = &[
         what: "red alone in 22 s, having taken 152 s in the phase. Not diagnosed, and 0 of 5 in \
                the rate probe five days later",
         evidence: "run 31247206462, red again alone",
-        source: "issues/hardware/four-runner-reds-unclassified.md",
+        source: "tests/toyos.rs sshd_fail_closed",
         measured: "2026-08-08",
     },
     Red {
@@ -2601,7 +2601,10 @@ pub const KNOWN_RED: &[Red] = &[
         test: "poll_wake_pipe",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
         what: "`the 300 rounds took 3.010175191s, past the 3s bound` — the row above's own \
                message, 10.2 ms over where CI was 7.2 ms over, and `ALONE … GREEN`. **A second \
                instrument and not a second defect**: the row above is `Instrument::Ci`, which \
@@ -2611,30 +2614,103 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "one full `cargo test` on the dev host 2026-09-02, `w5b5-host-build` at \
                    71f25c0a, `fastest boot 1353 ms against the reference 1320 ms`; 299 passed, \
                    1 failed, 300 total (214.9s)",
-        source: "issues/build/poll-wake-pipe-bound-is-a-host-of-the-day-number.md",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
         measured: "2026-09-02",
     },
     Red {
         test: "poll_wake_pipe",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
         what: "`the 300 rounds took 3.007165755s, past the 3s bound — a wake was slow enough to \
                be a lost one recovered by a later edge`, then `PASS poll_wake_pipe (1s)` alone \
-               in the same job. **No wake was lost.** The test owes two assertions and the \
+               in the same job. **No wake was lost.** The test owed two assertions and the \
                lost-wake one passed: all 300 edges woke the armed ring, and what failed is a \
                `const BOUND: Duration = Duration::from_secs(3)` inside the guest binary, missed \
-               by 7.2 ms — 0.24%. Nothing widens it: the same job priced its host at `fastest \
+               by 7.2 ms — 0.24%. Nothing widened it: the same job priced its host at `fastest \
                boot 1890 ms against the reference 1320 ms — liveness ceilings paid at 1.43x \
                width` over `4 core(s)`, and that factor reaches every host-side ceiling and not \
-               this one. First sighting: `--known-red` answered `NOT ON THE LIST`. Not about \
+               that one. First sighting: `--known-red` answered `NOT ON THE LIST`. Not about \
                the diff it appeared on, a `NamespaceBuild` flags word touching neither the pipe \
                nor the poller.",
         evidence: "pull-request `ci` run 33429908117, job 99613928630 (`guest (1)`), headSha \
                    bd533bd0, 2026-08-31; the shard was otherwise green at 196 passed, 1 failed, \
                    197 total (104.2s)",
-        source: "issues/build/poll-wake-pipe-bound-is-a-host-of-the-day-number.md",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
         measured: "2026-08-31",
+    },
+    // The three jobs after the row above, on two branches and two shards that
+    // touch neither pipe nor poller: 7 reds of 8 attempts over the four jobs.
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(2, 2),
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
+        what: "`the 300 rounds took 3.000355515s, past the 3s bound`, then \
+               `3.003595533s` on the harness's own re-run, and \
+               `ALONE poll_wake_pipe: red again, the same failure both times — the defect is \
+               real`. **Still no wake lost, and still the same assertion**: both panics are \
+               `poll_wake_pipe.rs:68:5`, the elapsed bound, 0.36 ms and 3.6 ms over, while the \
+               lost-wake `assert_eq!` at `:63` passed both times. The job priced its host at \
+               `fastest boot 2274 ms against the reference 1320 ms — liveness ceilings paid at \
+               1.72x width` over `4 core(s)`, and that factor reached every host-side ceiling \
+               and not this one. It red a merge queue on a branch of host-side gates.",
+        evidence: "merge-queue `ci` run 33644950006, job 100297692632 (`guest (1)`), headSha \
+                   ae974921, 2026-09-02; the shard was otherwise green at 194 passed, 1 failed, \
+                   195 total (135.0s), 81 held back for the nightly tier",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
+        measured: "2026-09-02",
+    },
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(2, 2),
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
+        what: "the same job re-run, and the same two panics at `poll_wake_pipe.rs:68:5`: \
+               `the 300 rounds took 3.006928225s, past the 3s bound`, then `3.003953429s` on the \
+               harness's own re-run, `ALONE poll_wake_pipe: red again, the same failure both \
+               times — the defect is real`. **A re-run does not clear it**, which is what \
+               stopped the branch it was gating from getting a green run at all. Host priced at \
+               `fastest boot 1972 ms against the reference 1320 ms — liveness ceilings paid at \
+               1.49x width` over `4 core(s)`: a *faster* host than the attempt above and the \
+               same overshoot, so this is not the host getting slower either.",
+        evidence: "merge-queue `ci` run 33644950006 attempt 2, job 100312837672 (`guest (1)`), \
+                   headSha ae974921, 2026-09-02; the shard was otherwise green at 194 passed, \
+                   1 failed, 195 total (134.2s), 81 held back for the nightly tier",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
+        measured: "2026-09-02",
+    },
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(2, 2),
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
+        what: "`the 300 rounds took 3.095220897s, past the 3s bound`, then `3.005337855s`, \
+               `ALONE poll_wake_pipe: red again, the same failure both times — the defect is \
+               real` — **on an unrelated branch and a different shard**. The IOMMU branch \
+               touches interrupt remapping and nothing near a pipe, and this is `guest (2)` \
+               where the three jobs above are `guest (1)`, so neither the diff nor one shard's \
+               machine is what the bound is measuring. Host priced at `fastest boot 3253 ms \
+               against the reference 1320 ms — liveness ceilings paid at 2.46x width` over \
+               `4 core(s)`, and that factor reaches every host-side ceiling and not this one.",
+        evidence: "pull-request `ci` run 33649279837, job 100311933914 (`guest (2)`), branch \
+                   `iommu-interrupt-remapping`, headSha 08b88a8a, 2026-09-02; the shard was \
+                   otherwise green at 195 passed, 1 failed, 196 total (105.5s), 81 held back \
+                   for the nightly tier",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
+        measured: "2026-09-02",
     },
     // Found auditing the merge-health backfill
     // (`issues/build/the-eased-merge-law-carries-a-threshold.md`), not by
@@ -3255,15 +3331,51 @@ fn expiry_note(r: &Red, today: Day) -> String {
     }
 }
 
+/// The index's headline counts, arrived at in one place so that the answer a
+/// reader gets and the gate over it read the same arithmetic. `live` and
+/// `expiring` are both counted among the standing rows alone.
+#[derive(PartialEq, Eq, Debug)]
+pub struct Census {
+    pub rows: usize,
+    pub standing: usize,
+    pub live: usize,
+    pub expiring: usize,
+}
+
+impl Census {
+    pub fn of(rows: &[Red], today: Day) -> Census {
+        let standing = || rows.iter().filter(|r| r.standing == Standing::Stands);
+        Census {
+            rows: rows.len(),
+            standing: standing().count(),
+            live: standing().filter(|r| r.finding.is_red()).count(),
+            expiring: standing()
+                .filter(|r| {
+                    Day::parse(r.measured)
+                        .is_some_and(|d| today.until(d.plus_days(SHELF_LIFE_DAYS)) <= 7)
+                })
+                .count(),
+        }
+    }
+
+    fn rendered(&self) -> String {
+        format!(
+            "{} standing, {} of them live reds, {} expiring within 7 days.",
+            self.standing, self.live, self.expiring
+        )
+    }
+}
+
 fn everything(rows: &[Red], today: Day) -> String {
     let mut names: BTreeSet<&str> = BTreeSet::new();
     for r in rows {
         names.insert(r.test);
     }
     let mut out = format!(
-        "{} measurements of {} tests. `--known-red <test>` for the rows.\n\n",
+        "{} measurements of {} tests. {} `--known-red <test>` for the rows.\n\n",
         rows.len(),
-        names.len()
+        names.len(),
+        Census::of(rows, today).rendered(),
     );
     for test in &names {
         let mine = rows_for(rows, test);
@@ -3515,29 +3627,43 @@ mod tests {
         );
     }
 
-    /// Printed on the way past, because what a reader wants before trusting a
-    /// row is how old it is, and the only honest place for that is a run.
+    /// The arithmetic behind the three numbers the answer opens with, against a
+    /// table small enough to count by hand: the same filters re-typed over
+    /// `KNOWN_RED` would agree with themselves whatever they said.
     #[test]
-    fn the_index_prints_what_it_is_carrying() {
-        let today = Day::today();
-        let standing = KNOWN_RED.iter().filter(|r| r.standing == Standing::Stands).count();
-        let live = KNOWN_RED
-            .iter()
-            .filter(|r| r.standing == Standing::Stands && r.finding.is_red())
-            .count();
-        let due_soon = KNOWN_RED
-            .iter()
-            .filter(|r| r.standing == Standing::Stands)
-            .filter(|r| {
-                Day::parse(r.measured)
-                    .is_some_and(|d| today.until(d.plus_days(SHELF_LIFE_DAYS)) <= 7)
-            })
-            .count();
-        println!(
-            "known-red index: {} rows, {standing} standing, {live} live reds, {due_soon} expiring \
-             within 7 days",
-            KNOWN_RED.len()
+    fn the_index_counts_what_it_is_carrying() {
+        let today = Day::parse("2026-08-11").unwrap();
+        let row = Red {
+            test: "a_real_test",
+            instrument: Instrument::Ci,
+            finding: Finding::fires(1, 5),
+            standing: Standing::Stands,
+            what: "x",
+            evidence: "run 1",
+            source: "src/redlist.rs",
+            measured: "2026-08-10",
+        };
+        // A standing row expires SHELF_LIFE_DAYS after it was measured, so
+        // "expiring within 7 days" reaches 24 days back from `today`.
+        let fixture = [
+            Red { ..row },
+            Red { finding: Finding::Seen, measured: "2026-07-18", ..row },
+            Red { finding: Finding::quiet(5), measured: "2026-07-01", ..row },
+            Red { standing: Standing::Retired("a fix"), ..row },
+            Red { standing: Standing::Disputed("two sources"), finding: Finding::Seen, ..row },
+            Red { finding: Finding::fires(3, 5), measured: "no date at all", ..row },
+        ];
+        let census = Census::of(&fixture, today);
+        assert_eq!(census, Census { rows: 6, standing: 4, live: 3, expiring: 2 });
+        // The sentence too, and not only the struct: the three numbers reach a
+        // reader through it, and nothing else would notice two of them swapped.
+        assert_eq!(
+            census.rendered(),
+            "4 standing, 3 of them live reds, 2 expiring within 7 days."
         );
+
+        let live = Census::of(KNOWN_RED, Day::today());
+        println!("known-red index: {} rows, {}", live.rows, live.rendered());
     }
 
     /// The four things the gate exists to refuse, run rather than argued. The

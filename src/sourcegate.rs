@@ -17,6 +17,9 @@
 //! lifetime out of its `Arc`'s hands — `Arc::into_raw`, `Arc::from_raw`, the
 //! two strong-count adjusters — and `mem::forget`. It runs in
 //! `cargo test --lib`, on every machine that builds this tree, in milliseconds.
+//! Beside the counts it refuses a one-line `use … as …` of a name those
+//! needles spell — a brace group on that line included — because one such line
+//! puts every row that names it out of reach at once.
 //!
 //! The exceptions are per file and per line count, so an *added* `forget`
 //! beside a permitted one is a red rather than a silence.
@@ -47,8 +50,8 @@
 //! row unreachable at once. The sixth reads every committed file that carries
 //! a NUL, plus everything under `assets/`, against the digest `NOTICE` records.
 //!
-//! **What neither reaches is filed rather than implied**: a brace-group or
-//! multi-line alias, a spawn that is not `Command` at all, a binary a
+//! **What neither reaches is filed rather than implied**: an alias split across
+//! lines, a spawn that is not `Command` at all, a binary a
 //! third-party crate or a workflow runs. The exit from all of it is one scan
 //! that resolves names the way the compiler does; the entries under
 //! `issues/build/` say so and this does not pretend otherwise.
@@ -488,8 +491,8 @@ struct Spawn {
 /// finds in `PATH`, and the `cc` half is one of the three standing failures
 /// `CLAUDE.md` declares. A workflow or a container image, which is
 /// `issues/build/nothing-reads-the-workflows-for-a-binary.md`. And an alias no
-/// one line spells, which is
-/// `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`.
+/// one line spells, which the same record carries under its own
+/// heading.
 const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "\"cargo\"",
@@ -568,6 +571,10 @@ const HOST_SPAWNS: &[Spawn] = &[
 /// The refusal `no_host_file_renames_command` prints.
 const NO_COMMAND_ALIAS: &str =
     "a renamed `Command` spawns past the scan that reads the text `Command::new(`";
+
+/// The refusal `nothing_in_the_kernel_counts_a_reference_by_hand` prints.
+const NO_BAN_ALIAS: &str = "these trees may not count a reference by hand, and a one-line \
+                            rename of a name the bans spell hides every row that names it";
 
 
 /// Every committed file whose terms somebody had to establish, with the digest
@@ -708,27 +715,75 @@ fn is_binary(bytes: &[u8]) -> bool {
 #[cfg(test)]
 const NOT_OURS: &str = "rust";
 
+/// `code` with any visibility on the front of it removed, so that the item it
+/// begins with is the first word.
+#[cfg(test)]
+fn after_visibility(code: &str) -> &str {
+    let code = code.trim_start();
+    let Some(rest) = code.strip_prefix("pub") else { return code };
+    let rest = match rest.strip_prefix('(') {
+        Some(group) => group.split_once(')').map_or("", |(_, after)| after),
+        None => rest,
+    };
+    if rest.starts_with(char::is_whitespace) {
+        rest.trim_start()
+    } else {
+        code
+    }
+}
+
 /// Whether `code` renames `std::process::Command` on one line, after any
 /// visibility on the front of it.
 ///
 /// A `use` rename and a `type` alias, and only where the item begins the line.
 /// Rather than chase every alias a Rust file can build, this refuses the forms
-/// that spell one on a single line; `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+/// that spell one on a single line; `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md`
 /// is what it does not reach.
 #[cfg(test)]
 fn renames_command(code: &str) -> bool {
-    let mut code = code.trim_start();
-    if let Some(rest) = code.strip_prefix("pub") {
-        let rest = match rest.strip_prefix('(') {
-            Some(group) => group.split_once(')').map_or("", |(_, after)| after),
-            None => rest,
-        };
-        if rest.starts_with(char::is_whitespace) {
-            code = rest.trim_start();
-        }
-    }
+    let code = after_visibility(code);
     (code.starts_with("use ") && code.contains("Command as "))
         || (code.starts_with("type ") && code.contains("Command"))
+}
+
+/// Whether `code` is a one-line `use` that renames `item`, after any
+/// visibility — **exactly one spelling and no other**, a brace group on that
+/// line included. A `use` split across lines, a plain re-import and a `type`
+/// alias walk past it, and
+/// `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md` carries
+/// them. No `type` half here: `type PageTables = Arc<…>` is ordinary.
+#[cfg(test)]
+fn use_renames(code: &str, item: &str) -> bool {
+    let code = after_visibility(code);
+    if !code.starts_with("use ") {
+        return false;
+    }
+    let mark = format!("{item} as ");
+    let bytes = code.as_bytes();
+    code.match_indices(&mark).any(|(at, _)| {
+        !at.checked_sub(1)
+            .and_then(|j| bytes.get(j))
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    })
+}
+
+/// Every identifier a path needle above spells: the names one rename hides the
+/// whole table behind.
+#[cfg(test)]
+fn banned_path_names() -> std::collections::BTreeSet<&'static str> {
+    let ident = |s: &str| {
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !s.starts_with(|c: char| c.is_ascii_digit())
+    };
+    let mut out = std::collections::BTreeSet::new();
+    for ban in BANS {
+        let parts: Vec<&str> = ban.needle.split("::").collect();
+        if parts.len() > 1 && parts.iter().all(|p| ident(p)) {
+            out.extend(parts);
+        }
+    }
+    out
 }
 
 /// Every path a `build = "…"` key names, repository-relative.
@@ -864,6 +919,24 @@ fn spawn_arguments(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Every `.rs` file `git` tracks under `tree`, repository-relative — the list
+/// the walks above are held against, read from something that is not a walk.
+#[cfg(test)]
+fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<String> {
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--", tree])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|e| panic!("git ls-files {tree}: {e}"));
+    assert!(out.status.success(), "git ls-files {tree} failed");
+    String::from_utf8(out.stdout)
+        .expect("git ls-files is not UTF-8")
+        .split('\0')
+        .filter(|p| p.ends_with(".rs"))
+        .map(str::to_string)
+        .collect()
 }
 
 /// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
@@ -1007,8 +1080,13 @@ mod tests {
         );
     }
 
+    /// The bans are text, so a one-line `use … as …` of a name one of them
+    /// spells takes every row that names it out of reach at once, and is
+    /// refused here beside the counts. `use_renames` says what it does not
+    /// reach.
     #[test]
     fn nothing_in_the_kernel_counts_a_reference_by_hand() {
+        let root = repo_root();
         let mut complaints = Vec::new();
         for ban in BANS {
             for (file, count) in occurrences(ban.needle) {
@@ -1025,7 +1103,49 @@ mod tests {
                 }
             }
         }
-        assert!(complaints.is_empty(), "{NO_COMMAND_ALIAS}:\n{}", complaints.join("\n"));
+
+        let names = banned_path_names();
+        assert!(names.contains("Arc") && names.contains("forget"), "{names:?}");
+        let mut files = Vec::new();
+        for tree in TREES {
+            rust_files(&root.join(tree), &mut files);
+        }
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (n, line) in text.lines().enumerate() {
+                let code = code_only(line);
+                for item in &names {
+                    if use_renames(&code, item) {
+                        complaints.push(format!(
+                            "{}:{}: renames `{item}` — {}",
+                            rel(&root, &path),
+                            n + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(complaints.is_empty(), "{NO_BAN_ALIAS}:\n{}", complaints.join("\n"));
+    }
+
+    /// What the rename scan reads, stated as cases, including the two shapes it
+    /// deliberately lets past.
+    #[test]
+    fn the_rename_scan_reads_one_line_after_visibility() {
+        assert!(use_renames("use alloc::sync::Arc as A;", "Arc"));
+        assert!(use_renames("pub use core::mem as m;", "mem"));
+        assert!(use_renames("pub(crate) use core::mem::forget as leak;", "forget"));
+        assert!(!use_renames("use alloc::sync::Arc;", "Arc"));
+        // A longer name that ends in the guarded one is a different name.
+        assert!(!use_renames("use crate::PageArc as A;", "Arc"));
+        // Neither reached, and both are the filed weakness rather than a claim.
+        assert!(use_renames("use alloc::sync::{Arc as C, Weak};", "Arc"));
+        assert!(use_renames("pub(crate) use alloc::sync::{Weak, Arc as C};", "Arc"));
+        assert!(renames_command("use std::process::{Command as Cmd, Stdio};"));
+        assert!(renames_command("pub use std::process::{Stdio, Command as Cmd};"));
+        assert!(!use_renames("    Arc as A,", "Arc"));
+        assert!(!use_renames("type PageTables = Arc<Lock<AddressSpace>>;", "Arc"));
     }
 
     /// Both directions: a resurrected early enable reds, and so does a stale row.
@@ -1123,16 +1243,34 @@ mod tests {
         );
     }
 
-    /// The scan has teeth only if it can find anything: this file names every
-    /// banned identifier in its own table, and the walk must not be looking at
-    /// a tree where none of them can occur.
+    /// The scan has teeth only over the files it opens, and "at least one" is
+    /// a floor a walk of a single file per tree also meets. The floor is the
+    /// tree's own file list: every `.rs` file `git` tracks under it was read.
+    /// An untracked one only adds to the walk.
     #[test]
     fn the_scan_reaches_the_trees_it_claims_to() {
         let root = repo_root();
         for tree in TREES {
             let mut files = Vec::new();
             rust_files(&root.join(tree), &mut files);
-            assert!(!files.is_empty(), "{tree} has no .rs files — the walk is looking elsewhere");
+            let walked: std::collections::BTreeSet<String> =
+                files.iter().map(|p| rel(&root, p)).collect();
+            let tracked = tracked_rust_files(&root, tree);
+            assert!(
+                tracked.len() > 1,
+                "git tracks {} .rs file(s) under {tree}, so this floor is not one",
+                tracked.len()
+            );
+            let missed: Vec<&String> = tracked.difference(&walked).collect();
+            assert!(
+                missed.is_empty(),
+                "the walk over {tree} read {} of the {} .rs files git tracks there, and missed \
+                 {} of them, the first being {:?}",
+                walked.len(),
+                tracked.len(),
+                missed.len(),
+                missed.first(),
+            );
         }
         assert!(
             !occurrences("mem::forget").is_empty(),
@@ -1246,6 +1384,23 @@ mod tests {
                 ));
             }
             for (file, want) in row.sites {
+                // Both shapes of a row that pins nothing, and both agree with
+                // each counting direction at once because both find nothing: a
+                // file the tree does not hold, and a count of zero.
+                if *want == 0 {
+                    complaints.push(format!(
+                        "`{}` is pinned to 0 × `Command::new(…)` in {file}, which permits \
+                         nothing and expires never",
+                        row.arg
+                    ));
+                }
+                if !root.join(file).is_file() {
+                    complaints.push(format!(
+                        "`{}` is pinned to {want} × `Command::new(…)` in {file}, and this tree \
+                         holds no such file",
+                        row.arg
+                    ));
+                }
                 let here = found.iter().filter(|(a, f, _)| a == row.arg && f == file).count();
                 if here != *want {
                     complaints.push(format!(
@@ -1267,7 +1422,7 @@ mod tests {
     /// alias a Rust file can build, this refuses the forms that spell one on a
     /// single line, and no shorter rule does; what it closes is the one-line
     /// form after any visibility, and
-    /// `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+    /// `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md`
     /// is the rest. It does not reach a function pointer taken from
     /// `Command::new` itself either.
     #[test]

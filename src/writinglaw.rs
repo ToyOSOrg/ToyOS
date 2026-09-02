@@ -8,7 +8,8 @@
 //! code adds no prose. Over every `CLAUDE.md` it changes, Δw is the net words
 //! and the rule is `Δw ≤ 0`. Both sides are read from the committed trees,
 //! never the working tree, so `--pr` and CI's `abi-split` job judge the same
-//! bytes.
+//! bytes. The `CLAUDE.md` rule is per file — a guide the branch cuts funds
+//! nothing in another one, because the rule it holds is about each guide.
 
 use std::path::Path;
 
@@ -51,7 +52,8 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
     let dk: i64 = sources.iter().map(|d| d.code).sum();
     let allowance = dk.max(0) / 4;
     let dw: i64 = guides.iter().map(|(_, words)| *words).sum();
-    if dc <= allowance && dw <= 0 {
+    let grew: Vec<&(String, i64)> = guides.iter().filter(|(_, words)| *words > 0).collect();
+    if dc <= allowance && grew.is_empty() {
         return Ok(format!(
             "{dc:+} comment lines against {dk:+} code lines (allowance {allowance}); CLAUDE.md \
              {dw:+} words."
@@ -82,13 +84,13 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
             dc - allowance
         ));
     }
-    if dw > 0 {
-        for (path, words) in guides.iter().filter(|(_, words)| *words > 0) {
-            lines.push(format!("[prose] {path} grew by {words} word(s)."));
-        }
+    for (path, words) in &grew {
+        lines.push(format!("[prose] {path} grew by {words} word(s)."));
+    }
+    if !grew.is_empty() {
         lines.push(
             "[prose] A CLAUDE.md never grows: a bullet in is a bullet out, and the story goes in \
-             the commit message."
+             the commit message. Per file — cutting one guide funds nothing in another."
                 .to_string(),
         );
     }
@@ -210,6 +212,22 @@ mod tests {
         commit(&wt, "src/CLAUDE.md", "# Build\n\nOne rule.\n", "a word out");
         let line = judge(&wt, "main").expect("a shrinking CLAUDE.md passes");
         assert!(line.ends_with("CLAUDE.md -1 words."), "{line}");
+    }
+
+    /// The rule is per file: two guides that cancel each other out are one
+    /// guide grown, and the aggregate cannot tell.
+    #[test]
+    fn one_claude_md_does_not_fund_another() {
+        let (_origin, wt) = repo("law-guides");
+        commit(&wt, "CLAUDE.md", "one two three four\n", "the root guide");
+        commit(&wt, "src/CLAUDE.md", "five six seven eight\n", "the build guide");
+        main_is_here(&wt);
+        commit(&wt, "CLAUDE.md", "one two\n", "two words out of the root");
+        commit(&wt, "src/CLAUDE.md", "five six seven eight nine ten\n", "two words into src");
+        let refusal = judge(&wt, "main").expect_err("a cut in one guide funds nothing in another");
+        assert!(refusal.contains("src/CLAUDE.md grew by 2 word(s)"), "{refusal}");
+        assert!(!refusal.contains("[prose] CLAUDE.md grew"), "the shrinking guide is named:\n{refusal}");
+        assert!(refusal.contains("cutting one guide funds nothing in another"), "{refusal}");
     }
 
     #[test]
