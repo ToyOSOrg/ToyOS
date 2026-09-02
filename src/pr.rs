@@ -54,11 +54,13 @@ const ACCEPTS_MERGE: &str = "--gates-after-merge";
 
 /// What `--pr` says last, and exits non-zero on, when it merged `origin/main`
 /// in: every gate the agent ran before this ran on a tree that no longer
-/// exists, and nothing else in the workflow says so.
-const MERGED_SHAPE: &str = "[pr] origin/main was merged in: re-run cargo test --lib, --clippy \
-                            and --build-only on this shape before you rely on any earlier run.\n\
-                            [pr] Pass --gates-after-merge to --pr once you have, or to say up \
-                            front that you will.";
+/// exists, and nothing else in the workflow says so. **The push succeeded and
+/// the first line says so** — the exit is the re-run owed, not a failure, and
+/// a `--pr && gh pr create` chain stopping here is the point of it.
+const MERGED_SHAPE: &str = "[pr] pushed; origin/main was merged in, so this exits 1 until the \
+                            merged shape is gated: re-run cargo test --lib, --clippy and \
+                            --build-only, then run --pr again (it will merge nothing and exit \
+                            0) or pass --gates-after-merge.";
 
 /// Whether this run owes a re-run: it merged, and nothing on the command line
 /// says the caller will gate the shape the merge made.
@@ -526,7 +528,9 @@ struct Commit {
 
 /// `Abi-Inseparable: <why>` on `line`, and whether the why is there. The reason
 /// is the contract — CLAUDE.md declares "the split that genuinely cannot be
-/// made" — so the keyword alone is a word typed, not a declaration.
+/// made" — so the keyword alone is a word typed, not a declaration. "There"
+/// means one non-whitespace byte: this reads the shape, and a reason that says
+/// nothing is a reviewer's to refuse.
 fn inseparable(line: &str) -> Option<bool> {
     line.trim_start().strip_prefix(ABI_INSEPARABLE).map(|why| !why.trim().is_empty())
 }
@@ -708,6 +712,8 @@ pub(crate) mod tests {
         )
         .expect("a declared branch must pass");
 
+        staged("abi-terse", "Abi-Inseparable: .").expect("one non-whitespace byte is a reason");
+
         for bare in ["Abi-Inseparable:", "Abi-Inseparable:   "] {
             let refusal = staged("abi-bare", bare)
                 .expect_err("a trailer with no reason declares nothing");
@@ -735,7 +741,8 @@ pub(crate) mod tests {
     /// **Read off the remote, because the merge helper cannot say it.** A
     /// `prepare` that pushed, merged and pushed again calls that helper too and
     /// leaves the same end state; only the sequence of values the branch ref
-    /// took on the remote tells them apart.
+    /// took on the remote tells them apart. One landing is staged and exactly
+    /// one push asserted, so the main read back is the main that push owed.
     #[test]
     fn the_branch_gets_main_before_it_is_pushed() {
         let (origin, wt) = repo("merge-first");
