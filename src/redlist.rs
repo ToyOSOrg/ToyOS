@@ -2601,7 +2601,10 @@ pub const KNOWN_RED: &[Red] = &[
         test: "poll_wake_pipe",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
         what: "`the 300 rounds took 3.010175191s, past the 3s bound` — the row above's own \
                message, 10.2 ms over where CI was 7.2 ms over, and `ALONE … GREEN`. **A second \
                instrument and not a second defect**: the row above is `Instrument::Ci`, which \
@@ -2611,29 +2614,32 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "one full `cargo test` on the dev host 2026-09-02, `w5b5-host-build` at \
                    71f25c0a, `fastest boot 1353 ms against the reference 1320 ms`; 299 passed, \
                    1 failed, 300 total (214.9s)",
-        source: "issues/build/poll-wake-pipe-bound-is-a-host-of-the-day-number.md",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
         measured: "2026-09-02",
     },
     Red {
         test: "poll_wake_pipe",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
         what: "`the 300 rounds took 3.007165755s, past the 3s bound — a wake was slow enough to \
                be a lost one recovered by a later edge`, then `PASS poll_wake_pipe (1s)` alone \
-               in the same job. **No wake was lost.** The test owes two assertions and the \
+               in the same job. **No wake was lost.** The test owed two assertions and the \
                lost-wake one passed: all 300 edges woke the armed ring, and what failed is a \
                `const BOUND: Duration = Duration::from_secs(3)` inside the guest binary, missed \
-               by 7.2 ms — 0.24%. Nothing widens it: the same job priced its host at `fastest \
+               by 7.2 ms — 0.24%. Nothing widened it: the same job priced its host at `fastest \
                boot 1890 ms against the reference 1320 ms — liveness ceilings paid at 1.43x \
                width` over `4 core(s)`, and that factor reaches every host-side ceiling and not \
-               this one. First sighting: `--known-red` answered `NOT ON THE LIST`. Not about \
+               that one. First sighting: `--known-red` answered `NOT ON THE LIST`. Not about \
                the diff it appeared on, a `NamespaceBuild` flags word touching neither the pipe \
                nor the poller.",
         evidence: "pull-request `ci` run 33429908117, job 99613928630 (`guest (1)`), headSha \
                    bd533bd0, 2026-08-31; the shard was otherwise green at 196 passed, 1 failed, \
                    197 total (104.2s)",
-        source: "issues/build/poll-wake-pipe-bound-is-a-host-of-the-day-number.md",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
         measured: "2026-08-31",
     },
     // Found auditing the merge-health backfill
