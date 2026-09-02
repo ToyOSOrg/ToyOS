@@ -57,6 +57,11 @@ pub(super) fn sys_spawn(
 
 /// Take a process's exit code, blocking until there is one; repeatable across waiters, and `WNOHANG` skips the block.
 pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
+    // First, so the answer is the bit and not the handle's own refusal:
+    // `WNOHANG` is the whole of this word and the other 63 bits mean nothing.
+    if flags & !WNOHANG != 0 {
+        return SyscallError::InvalidArgument.to_u64();
+    }
     let object = match process::with_process_data(|data| {
         data.handles.get::<crate::object::process::ProcessObject>(h, Rights::WAIT)
     }) {

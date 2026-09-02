@@ -64,7 +64,53 @@ fn test() {
     a_kill_publishes_like_an_exit();
     a_handle_is_the_whole_of_the_right();
     a_pid_is_not_authority();
+    an_undefined_wait_flag_bit_is_refused();
     println!("a process is a handle: the code is read, not claimed, and a pid grants nothing");
+}
+
+/// `WNOHANG` is the whole of `SYS_PROCESS_WAIT`'s flag word; the other 63 bits
+/// were dropped, so a caller asking for something else was answered as though
+/// it had asked for a plain wait. The differential is the bit: the same call
+/// without it reads the code.
+fn an_undefined_wait_flag_bit_is_refused() {
+    const UNDEFINED: u64 = 2;
+    const _: () = assert!(UNDEFINED & syscall::WNOHANG == 0);
+
+    let (mut child, release) = start(5);
+    drop(release);
+    assert_eq!(child.wait().expect("wait").code(), Some(5), "the child did not exit");
+    let handle = RawHandle(child.as_raw_handle());
+
+    let refused = wait_raw(handle, syscall::WNOHANG | UNDEFINED);
+    assert_eq!(
+        SyscallError::from_u64(refused),
+        Some(SyscallError::InvalidArgument),
+        "a wait carrying a flag bit this ABI does not define was served: {refused:#x}",
+    );
+    assert_eq!(syscall::process_wait_nonblock(handle), Ok(5), "the same wait without the bit");
+    println!("  an undefined WNOHANG-word bit is InvalidArgument, and without it the code comes back");
+}
+
+/// The typed wrapper cannot spell a flag word the ABI does not define, so the
+/// argument under test only exists at the raw boundary.
+fn wait_raw(handle: RawHandle, flags: u64) -> u64 {
+    let ret: u64;
+    // SAFETY: a register-to-register `syscall`; neither argument is a pointer
+    // this call dereferences.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rdi") syscall::SYS_PROCESS_WAIT,
+            in("rsi") handle.0 as u64,
+            in("rdx") flags,
+            in("r8") 0u64,
+            in("r9") 0u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+        );
+    }
+    ret
 }
 
 /// Wait, wait again, and ask a third time without blocking. The pid-keyed shape

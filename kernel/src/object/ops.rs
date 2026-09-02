@@ -66,8 +66,20 @@ pub fn install(table: &mut HandleTable, object: KObjectRef) -> Result<RawHandle,
         .map_err(|_| SyscallError::ResourceExhausted)
 }
 
+/// Every bit `OpenFlags` defines; `READ` is among them although nothing asks for
+/// it, because the word is validated in both directions or in neither.
+const OPEN_FLAGS_KNOWN: u64 = OpenFlags::READ.0
+    | OpenFlags::WRITE.0
+    | OpenFlags::CREATE.0
+    | OpenFlags::TRUNCATE.0
+    | OpenFlags::APPEND.0;
+
 /// A file opened at absolute `path`, installed in `table`.
 pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
+    // First, so the answer is the bit and not the path's own refusal.
+    if flags.0 & !OPEN_FLAGS_KNOWN != 0 {
+        return SyscallError::InvalidArgument.to_u64();
+    }
     let writable = flags.contains(OpenFlags::WRITE);
     let create = flags.contains(OpenFlags::CREATE);
     let truncate = flags.contains(OpenFlags::TRUNCATE);

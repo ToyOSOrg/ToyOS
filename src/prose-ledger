@@ -61,8 +61,8 @@ kernel/src/arch/syscall/io.rs 24 0
 kernel/src/arch/syscall/ipc.rs 35 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
-kernel/src/arch/syscall/proc.rs 27 0
-kernel/src/arch/syscall/vm.rs 84 0
+kernel/src/arch/syscall/proc.rs 29 0
+kernel/src/arch/syscall/vm.rs 88 0
 kernel/src/arch/tlb.rs 43 0
 kernel/src/bcachefs_adapter.rs 76 0
 kernel/src/block.rs 33 0
@@ -111,7 +111,7 @@ kernel/src/gpu.rs 10 0
 kernel/src/heartbeat.rs 24 0
 kernel/src/hw.rs 83 0
 kernel/src/id_map.rs 5 0
-kernel/src/inbox.rs 94 0
+kernel/src/inbox.rs 99 0
 kernel/src/input_merge_test.rs 18 0
 kernel/src/iod.rs 10 0
 kernel/src/iommu/mod.rs 31 0
@@ -155,7 +155,7 @@ kernel/src/object/handle.rs 63 0
 kernel/src/object/inbox.rs 6 0
 kernel/src/object/mod.rs 54 0
 kernel/src/object/namespace.rs 10 0
-kernel/src/object/ops.rs 62 0
+kernel/src/object/ops.rs 65 0
 kernel/src/object/pipe.rs 14 0
 kernel/src/object/port.rs 21 0
 kernel/src/object/process.rs 17 0
@@ -252,7 +252,7 @@ tests/toyos-rust-tests/src/bin/abuse_elf_loader.rs 135 0
 tests/toyos-rust-tests/src/bin/abuse_elf_segments.rs 58 0
 tests/toyos-rust-tests/src/bin/abuse_gpu_resolution.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_handle_table.rs 40 0
-tests/toyos-rust-tests/src/bin/abuse_inbox.rs 19 0
+tests/toyos-rust-tests/src/bin/abuse_inbox.rs 25 0
 tests/toyos-rust-tests/src/bin/abuse_kernel_addr.rs 48 0
 tests/toyos-rust-tests/src/bin/abuse_listener_hijack.rs 77 0
 tests/toyos-rust-tests/src/bin/abuse_page_straddle.rs 37 0
@@ -305,7 +305,7 @@ tests/toyos-rust-tests/src/bin/gsbase_locked.rs 2 0
 tests/toyos-rust-tests/src/bin/gsbase_probe.rs 2 0
 tests/toyos-rust-tests/src/bin/handle_basic.rs 121 2
 tests/toyos-rust-tests/src/bin/handle_kill_policy.rs 207 4
-tests/toyos-rust-tests/src/bin/handle_lifetime.rs 113 1
+tests/toyos-rust-tests/src/bin/handle_lifetime.rs 116 1
 tests/toyos-rust-tests/src/bin/handle_transfer.rs 84 0
 tests/toyos-rust-tests/src/bin/hda_client_stall.rs 27 0
 tests/toyos-rust-tests/src/bin/heap_ceiling.rs 69 0
@@ -322,7 +322,7 @@ tests/toyos-rust-tests/src/bin/launcher_refusals.rs 110 0
 tests/toyos-rust-tests/src/bin/locale_gate.rs 64 0
 tests/toyos-rust-tests/src/bin/log_volume_reread.rs 27 0
 tests/toyos-rust-tests/src/bin/mkdir_cap.rs 11 0
-tests/toyos-rust-tests/src/bin/mmap_prot.rs 62 0
+tests/toyos-rust-tests/src/bin/mmap_prot.rs 72 0
 tests/toyos-rust-tests/src/bin/mmap_stress.rs 31 0
 tests/toyos-rust-tests/src/bin/munmap_reissues_read_window.rs 29 0
 tests/toyos-rust-tests/src/bin/netd_caps.rs 64 0
@@ -338,7 +338,7 @@ tests/toyos-rust-tests/src/bin/pipe_flag_forgery.rs 15 0
 tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs 12 0
 tests/toyos-rust-tests/src/bin/poller_capacity.rs 33 0
 tests/toyos-rust-tests/src/bin/port_poll_churn.rs 49 0
-tests/toyos-rust-tests/src/bin/process_lifecycle.rs 94 0
+tests/toyos-rust-tests/src/bin/process_lifecycle.rs 102 0
 tests/toyos-rust-tests/src/bin/process_stats.rs 72 0
 tests/toyos-rust-tests/src/bin/query_modules_size.rs 16 0
 tests/toyos-rust-tests/src/bin/readdir_bound.rs 48 0

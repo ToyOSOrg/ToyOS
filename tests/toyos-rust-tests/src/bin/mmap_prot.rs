@@ -19,7 +19,7 @@
 
 use std::process::{Command, Stdio};
 
-use toyos_abi::syscall::{mmap, MmapFlags, MmapProt};
+use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt, SyscallError, SYS_MMAP};
 
 const SIZE: usize = 4096;
 /// Well inside the 2 MiB page every mapping is rounded up to.
@@ -44,6 +44,7 @@ fn main() {
     readwrite_is_readable_and_writable();
     readonly_is_readable();
     none_is_a_mapping_and_not_an_error();
+    an_undefined_bit_in_either_word_is_refused();
     text_is_readable_and_executable();
 
     dies("write-none", "a store to a PROT_NONE mapping");
@@ -99,6 +100,62 @@ fn none_is_a_mapping_and_not_an_error() {
         "two PROT_NONE mappings overlap: {a:p} and {b:p}"
     );
     println!("  PASS: PROT_NONE reserves address space and returns it");
+}
+
+/// A caller that sets a bit `MmapProt` or `MmapFlags` does not define is asking
+/// for something it will not get — an executable mapping, say — so the request
+/// is refused rather than served as the bits below it. The differential is the
+/// bit and nothing else: the same call without it is the mapping this returns.
+fn an_undefined_bit_in_either_word_is_refused() {
+    const PROT: MmapProt = MmapProt(MmapProt::READ.0 | MmapProt::WRITE.0);
+    const FLAGS: MmapFlags = MmapFlags(MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0);
+    const UNDEFINED_PROT: u64 = 4;
+    const UNDEFINED_FLAG: u64 = 8;
+    const _: () = assert!(UNDEFINED_PROT & (MmapProt::READ.0 | MmapProt::WRITE.0) == 0);
+    const _: () = assert!(
+        UNDEFINED_FLAG & (MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0) == 0
+    );
+
+    for (prot, flags, what) in [
+        (MmapProt(PROT.0 | UNDEFINED_PROT), FLAGS, "a prot"),
+        (PROT, MmapFlags(FLAGS.0 | UNDEFINED_FLAG), "a flags"),
+    ] {
+        let refused = mmap_raw(SIZE, prot, flags);
+        assert_eq!(
+            SyscallError::from_u64(refused),
+            Some(SyscallError::InvalidArgument),
+            "{what} bit this ABI does not define was served: {refused:#x}",
+        );
+    }
+
+    // The control: the same request without either bit is the mapping the
+    // refusals above must not have been about.
+    let served = mmap_raw(SIZE, PROT, FLAGS);
+    assert_eq!(SyscallError::from_u64(served), None, "the defined request was refused");
+    unsafe { munmap(served as *mut u8, SIZE) }.expect("unmap the served request");
+    println!("  PASS: an undefined mmap prot or flags bit is InvalidArgument, and without it the same call maps");
+}
+
+/// `syscall::mmap` reports a refusal as a null pointer, which cannot tell
+/// `InvalidArgument` from any other error; the raw return can.
+fn mmap_raw(size: usize, prot: MmapProt, flags: MmapFlags) -> u64 {
+    let ret: u64;
+    // SAFETY: a register-to-register `syscall`; no argument here is a pointer
+    // this call dereferences.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rdi") SYS_MMAP,
+            in("rsi") 0u64,
+            in("rdx") size as u64,
+            in("r8") prot.0,
+            in("r9") flags.0,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+        );
+    }
+    ret
 }
 
 /// The positive control for `write-text`: making `.text` unwritable must not

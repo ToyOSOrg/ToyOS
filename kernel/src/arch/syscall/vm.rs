@@ -14,9 +14,19 @@ use crate::{log, process, vfs};
 
 use toyos_abi::syscall::*;
 
+/// Every bit `MmapProt` defines; `NONE` is the empty word and needs no bit.
+const MMAP_PROT_KNOWN: u64 = MmapProt::READ.0 | MmapProt::WRITE.0;
+/// Every bit `MmapFlags` defines.
+const MMAP_FLAGS_KNOWN: u64 = MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0;
+
 /// Map anonymous memory honouring `prot`; `MmapFlags::FIXED` places it at
 /// exactly `req_addr`, replacing at most one whole mapping this process made.
 pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlags) -> u64 {
+    // First, so the answer is the bit and not whichever other refusal came
+    // first: a bit this kernel does not define is a request it cannot serve.
+    if prot.0 & !MMAP_PROT_KNOWN != 0 || flags.0 & !MMAP_FLAGS_KNOWN != 0 {
+        return SyscallError::InvalidArgument.to_u64();
+    }
     // `size` crossed the trust boundary: zero, and a size whose 2 MiB rounding
     // would wrap, are refused rather than silently turned into a small request.
     // No cap beyond that: the PMM's own `free_count` check is the physical limit.
