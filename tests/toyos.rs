@@ -2100,8 +2100,47 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "null_sink_client_exits" => check_null_sink_client_exits,
         "fault_gates" => check_fault_gates,
         "debug_trap" => check_debug_trap,
+        "syscall_cost" => check_syscall_cost,
         _ => check_rust_result,
     }
+}
+
+/// The two numbers `syscall_cost` measures, read back and recorded.
+///
+/// **Still no threshold, and the guest's own header says why**: a cycle count
+/// taken under TCG prices nothing like silicon, so the number is for a
+/// same-session A/B against another build of this tree. What the host owes it
+/// is that the measurement happened — before this, both lines were printed and
+/// nothing anywhere consumed either, so an `rdtsc` frozen at a constant
+/// reported zero cycles for twenty thousand syscalls and passed.
+fn check_syscall_cost(result: &TestResult) -> bool {
+    if !check_rust_result(result) {
+        return false;
+    }
+    let field = |prefix: &str| -> Option<u64> {
+        result.stdout.lines().find_map(|l| {
+            l.trim().strip_prefix(prefix)?.split_whitespace().next()?.parse::<u64>().ok()
+        })
+    };
+    let (Some(cycles), Some(mhz)) = (field("syscall_cost: "), field("syscall_cost: tsc ")) else {
+        eprintln!(
+            "FAIL rs::syscall_cost: the run reported no cycles/syscall and MHz pair\nstdout:\n{}",
+            result.stdout
+        );
+        return false;
+    };
+    // A counter that did not move, which is the whole of what a measurement can
+    // be wrong about without saying so.
+    if cycles == 0 || mhz == 0 {
+        eprintln!(
+            "FAIL rs::syscall_cost: {cycles} cycles/syscall at {mhz} MHz — twenty thousand \
+             transitions cost no cycles on a clock that did not tick\nstdout:\n{}",
+            result.stdout
+        );
+        return false;
+    }
+    eprintln!("  [syscall] {cycles} cycles per SYS_CLOCK, tsc {mhz} MHz");
+    true
 }
 
 /// Minimum active (non-silent) playback the 3s test tone must produce.
