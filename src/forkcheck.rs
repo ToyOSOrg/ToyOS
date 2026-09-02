@@ -832,10 +832,9 @@ mod tests {
         assert!(!report.contains("DEAD  fetched"), "{report}");
     }
 
-    /// **A stub `rust/` accuses nothing.** Every linked worktree and every clone
-    /// without `--recursive` has one, and the toolchain's forks are consumed by
-    /// its manifests alone — so without this the run calls three live forks dead
-    /// and tells the reader to delete them.
+    /// **A stub `rust/` accuses nothing.** The toolchain's forks are consumed
+    /// by its manifests alone, so without this the run calls three live forks
+    /// dead and tells the reader to delete them.
     #[test]
     fn a_stub_rust_checkout_judges_nothing_dead() {
         let case = case("stub-rust");

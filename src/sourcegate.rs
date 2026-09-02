@@ -751,8 +751,7 @@ fn renames_command(code: &str) -> bool {
 /// line included. A `use` split across lines, a plain re-import and a `type`
 /// alias walk past it, and
 /// `issues/build/an-alias-split-across-lines-escapes-both-scans.md` carries
-/// them with the exit condition. The `type` half of `renames_command` is
-/// deliberately absent: `type PageTables = Arc<…>` is ordinary here.
+/// them. No `type` half here: `type PageTables = Arc<…>` is ordinary.
 #[cfg(test)]
 fn use_renames(code: &str, item: &str) -> bool {
     let code = after_visibility(code);
@@ -1244,11 +1243,10 @@ mod tests {
         );
     }
 
-    /// The scan has teeth only over the files it actually opens, and "at least
-    /// one" is a floor a walk that reads a single file per tree also meets. The
-    /// floor is the tree's own file list: every `.rs` file `git` tracks under
-    /// it is a file the walk read. An untracked one only adds to the walk, so
-    /// a scratch file in `kernel/src` is not a red.
+    /// The scan has teeth only over the files it opens, and "at least one" is
+    /// a floor a walk of a single file per tree also meets. The floor is the
+    /// tree's own file list: every `.rs` file `git` tracks under it was read.
+    /// An untracked one only adds to the walk.
     #[test]
     fn the_scan_reaches_the_trees_it_claims_to() {
         let root = repo_root();
