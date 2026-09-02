@@ -3,15 +3,19 @@
 //! Two DMA pools, split by who writes an address: the kernel-only pool holds
 //! both virtqueues in full — every address this driver programs — and the
 //! shared pool, the one a `DeviceType::Nic` claim maps, holds only the frame
-//! buffers. [`assert_queues_are_private`] checks that split against the
-//! addresses the device was actually programmed with. `DmaPool` allocates whole
-//! pages and a claim maps a whole page, so the two pools cannot share one.
+//! buffers. [`assert_queues_are_private`] checks that split against where the
+//! rings physically are. `DmaPool` allocates whole pages and a claim maps a
+//! whole page, so the two pools cannot share one.
+//!
+//! Both pools sit in an address space of this device's own, so the addresses in
+//! its descriptors name these two pools or nothing at all.
 
 use alloc::boxed::Box;
 
 use super::pci::{PciDevice, MSIX_ENTRY};
 use super::virtio::{BufDir, DescSlot, Virtqueue, VirtqueueRegions, VirtioDevice, VIRTIO_F_VERSION_1};
 use super::DmaPool;
+use crate::iommu::DeviceSpace;
 use crate::mm::paging::CachePolicy;
 use crate::log;
 use crate::mm::Dma;
@@ -66,7 +70,7 @@ struct VirtioNic {
     device: VirtioDevice,
     rxq: Virtqueue<'static>,
     txq: Virtqueue<'static>,
-    tx_phys: u64,
+    tx_addr: u64,
     rx_bufs: [Dma<'static>; RX_BUF_COUNT],
     // Descriptor index -> rx_bufs index.
     desc_to_buf: [u16; RX_QUEUE_SIZE as usize],
@@ -78,13 +82,29 @@ struct VirtioNic {
 }
 
 impl VirtioNic {
+    /// Where the device is told to put the next frame. The actuator points the
+    /// first buffer at another driver's pool by its *physical* address, which
+    /// is an address this device's own domain does not map, so a unit really
+    /// translating for it blocks the write instead of letting it land.
+    fn rx_target(&self, buf_idx: usize) -> u64 {
+        #[cfg(feature = "boot-actuators")]
+        if buf_idx == 0 && crate::actuator::iommu_nic_foreign_dma() {
+            let foreign =
+                super::nvme::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
+            if foreign != 0 {
+                return foreign;
+            }
+        }
+        self.rx_bufs[buf_idx].device_addr()
+    }
+
     fn refill_rx(&mut self, buf_idx: usize, slot: DescSlot) {
         // `buf_idx` is bounded by `desc_to_buf`.
         // Nothing else writes this buffer yet.
         self.rx_bufs[buf_idx].subview(0, NET_HDR_SIZE).zero();
         let desc_id = self.rxq.submit(
             slot,
-            &[(self.rx_bufs[buf_idx].phys(), RX_BUF_SIZE, BufDir::Writable)],
+            &[(self.rx_target(buf_idx), RX_BUF_SIZE, BufDir::Writable)],
             self.device.notify_mmio(),
             self.device.notify_off_multiplier(),
             RX_QUEUE,
@@ -140,7 +160,7 @@ impl crate::net::Nic for VirtioNic {
         let slot = self.tx_slot.take().expect("virtio-net: no tx slot");
         self.tx_slot = Some(self.txq.submit_and_wait(
             slot,
-            &[(self.tx_phys, total_len as u32, BufDir::Readable)],
+            &[(self.tx_addr, total_len as u32, BufDir::Readable)],
             self.device.notify_mmio(),
             self.device.notify_off_multiplier(),
             TX_QUEUE,
@@ -174,16 +194,18 @@ fn arm_interrupt(pci_dev: &PciDevice, device: &VirtioDevice) -> bool {
 /// claim maps.
 ///
 /// Panics rather than allowing it, since the alternative is a userland
-/// process able to name any physical address in the machine.
+/// process able to name every address this device's domain holds.
 fn assert_queues_are_private(rxq: &Virtqueue<'_>, txq: &Virtqueue<'_>, shared_phys: u64) {
     let page = shared_phys..shared_phys + crate::mm::PAGE_2M;
+    let [rx_desc, rx_avail, rx_used] = rxq.rings();
+    let [tx_desc, tx_avail, tx_used] = txq.rings();
     for (what, phys) in [
-        ("the RX descriptor table", rxq.descs_phys()),
-        ("the RX available ring", rxq.avail_phys()),
-        ("the RX used ring", rxq.used_phys()),
-        ("the TX descriptor table", txq.descs_phys()),
-        ("the TX available ring", txq.avail_phys()),
-        ("the TX used ring", txq.used_phys()),
+        ("the RX descriptor table", rx_desc.host_phys()),
+        ("the RX available ring", rx_avail.host_phys()),
+        ("the RX used ring", rx_used.host_phys()),
+        ("the TX descriptor table", tx_desc.host_phys()),
+        ("the TX available ring", tx_avail.host_phys()),
+        ("the TX used ring", tx_used.host_phys()),
     ] {
         assert!(
             !page.contains(&phys),
@@ -195,6 +217,36 @@ fn assert_queues_are_private(rxq: &Virtqueue<'_>, txq: &Virtqueue<'_>, shared_ph
     }
 }
 
+/// One ARP request for the emulated gateway, so something answers and the
+/// device has a frame to write into the buffer the actuator moved.
+///
+/// The isolation control needs an inbound frame and nothing in this kernel ever
+/// puts one on the wire: no address is configured here, and the only IP stack is
+/// a userland daemon that speaks when spoken to. RFC 826 over Ethernet II, and
+/// the two addresses are QEMU's user-mode network's own.
+#[cfg(feature = "boot-actuators")]
+fn provoke_a_reply(nic: &mut VirtioNic, shared: Dma<'static>, mac: [u8; 6]) {
+    use crate::net::Nic;
+    const FRAME: usize = 14 + 28;
+    let mut frame = [0u8; FRAME];
+    frame[0..6].copy_from_slice(&[0xFF; 6]);
+    frame[6..12].copy_from_slice(&mac);
+    frame[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+    frame[14..16].copy_from_slice(&1u16.to_be_bytes());
+    frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes());
+    frame[18] = 6;
+    frame[19] = 4;
+    frame[20..22].copy_from_slice(&1u16.to_be_bytes());
+    frame[22..28].copy_from_slice(&mac);
+    frame[28..32].copy_from_slice(&[10, 0, 2, 15]);
+    frame[38..42].copy_from_slice(&[10, 0, 2, 2]);
+    let tx = shared.subview(OFF_TX_BUF, NET_HDR_SIZE + FRAME);
+    tx.zero();
+    tx.copy_from(NET_HDR_SIZE, &frame);
+    nic.submit_tx(NET_HDR_SIZE + FRAME);
+    log!("VirtIO net: an ARP request for 10.0.2.2 is on the wire (actuator)");
+}
+
 pub fn init(devices: &[PciDevice]) {
     let pci_dev = match devices.iter().find(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_NET_DEVICE)) {
         Some(dev) => *dev,
@@ -204,12 +256,18 @@ pub fn init(devices: &[PciDevice]) {
         }
     };
     log!("VirtIO net: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
+    // An address space holding these two pools and nothing else, so a
+    // descriptor this device is handed reaches its own buffers or faults.
+    let space = DeviceSpace::create();
     // Leaked, not `static`: this NIC is never unbound, so the pages must outlive every scope.
-    let kernel_mem = DmaPool::alloc(KERNEL_DMA_BYTES).leak();
-    let shared = DmaPool::alloc(SHARED_DMA_BYTES).leak();
+    let kernel_mem = DmaPool::alloc_in(KERNEL_DMA_BYTES, space).leak();
+    let shared = DmaPool::alloc_in(SHARED_DMA_BYTES, space).leak();
     // Exclusive: allocated on the two lines above, nothing else holds a view.
     // Zeroed because these pages held other data before this allocation.
     shared.zero();
+    // Before the device is told a single address, and after every mapping it
+    // will ever be given: the identity domain is what it leaves behind.
+    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC) {
         Ok(device) => device,
@@ -253,15 +311,17 @@ pub fn init(devices: &[PciDevice]) {
     let rx_bufs: [Dma<'static>; RX_BUF_COUNT] = core::array::from_fn(|i| {
         shared.subview(OFF_RX_BUFS + i * RX_BUF_SIZE as usize, RX_BUF_SIZE as usize)
     });
-    let tx_phys = shared.phys() + OFF_TX_BUF as u64;
+    let tx_addr = shared.device_addr() + OFF_TX_BUF as u64;
 
+    // A claim maps physical pages into a process, so this is the one place the
+    // shared pool is named by where it is rather than by what the NIC calls it.
     let dma_region = Region {
-        phys: crate::DirectMap::from_phys(shared.phys()),
+        phys: crate::DirectMap::from_phys(shared.host_phys()),
         size: crate::mm::PAGE_2M,
         cache: CachePolicy::DeferToMtrr,
         pages: None,
     };
-    assert_queues_are_private(&rxq, &txq, shared.phys());
+    assert_queues_are_private(&rxq, &txq, shared.host_phys());
 
     crate::net::set_nic_info(NicInfo {
         dma: toyos_abi::HANDLE_INVALID,
@@ -280,7 +340,7 @@ pub fn init(devices: &[PciDevice]) {
 
     const NONE_SLOT: Option<DescSlot> = None;
     let mut nic = VirtioNic {
-        device, rxq, txq, tx_phys, rx_bufs,
+        device, rxq, txq, tx_addr, rx_bufs,
         desc_to_buf: [0; RX_QUEUE_SIZE as usize],
         reported_refusals: 0,
         pending_rx_slots: [NONE_SLOT; RX_BUF_COUNT],
@@ -290,6 +350,11 @@ pub fn init(devices: &[PciDevice]) {
     for i in 0..RX_BUF_COUNT {
         let slot = rx_slots.pop().expect("virtio-net: not enough rx slots");
         nic.refill_rx(i, slot);
+    }
+
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_nic_foreign_dma() {
+        provoke_a_reply(&mut nic, shared, mac);
     }
 
     crate::net::register(Box::new(nic));

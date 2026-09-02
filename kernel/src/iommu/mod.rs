@@ -1,10 +1,10 @@
 //! The unit that decides what a device may reach.
 //!
-//! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, turns translation on, and remaps every interrupt source through a source-id-verified table entry; an unusable unit is logged and left off rather than halting boot, and per-driver domains are not yet built (`issues/kernel/the-iommu-stops-at-translation.md`). Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
+//! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, turns translation on, remaps every interrupt source through a source-id-verified table entry, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
 //!
 //! The refusal is deliberately not yet built: landing it before any userspace driver exists would cost every machine and protect nothing.
 //!
-//! `DomainId`, `DmaPerm`, `IommuError`, and `trait Iommu` are deliberately not added: with one domain and one backend, each would be a type with a single value and a single implementor.
+//! `trait Iommu` is deliberately not added: with one backend it would have a single implementor.
 
 // CI runs kernel clippy with `-D warnings`, so an undocumented `unsafe` block anywhere in this module tree fails the build.
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -62,15 +62,138 @@ impl StreamId {
 pub struct Iova(u64);
 
 impl Iova {
-    /// This kernel always identity-maps: a device address equals its physical address, by policy, never because passthrough is unavailable.
+    /// The domain every kernel driver that has not moved is still on maps a device address to the physical address it equals.
     ///
-    /// This constructor is the single site the identity policy is stated in, so the stage that ends identity-mapping deletes it and the compiler flags every site that assumed it.
+    /// The single site that policy is stated in, so the stage that moves the last driver deletes it and the compiler flags every site that assumed it.
     pub(in crate::iommu) const fn identity(phys: u64) -> Self {
         Self(phys)
     }
 
-    pub(in crate::iommu) const fn raw(self) -> u64 {
+    /// An address a domain's allocator handed out, which is nothing else's address.
+    pub(in crate::iommu) const fn translated(at: u64) -> Self {
+        Self(at)
+    }
+
+    pub const fn raw(self) -> u64 {
         self.0
+    }
+}
+
+/// A device address space. Never 0: an all-zero context entry names domain 0,
+/// so a fault record and a domain-selective invalidation could not tell a
+/// domain apart from an entry nobody wrote.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct DomainId(u16);
+
+impl DomainId {
+    pub(in crate::iommu) const fn new(id: u16) -> Self {
+        assert!(id != 0);
+        Self(id)
+    }
+
+    pub(in crate::iommu) const fn raw(self) -> u16 {
+        self.0
+    }
+}
+
+impl core::fmt::Display for DomainId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "domain{}", self.0)
+    }
+}
+
+/// Why a device could not be given an address space of its own, or something
+/// put in one. Carried rather than collapsed: one message for all of them
+/// sends whoever reads it looking in the wrong place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IommuError {
+    /// No unit on this machine translates, so there is no domain to be in.
+    NoUnit,
+    /// The units disagree on the depth a domain's tables would be built at.
+    WidthsDisagree,
+    /// Every domain id the units can name is taken.
+    DomainsExhausted(u32),
+    /// The domain's addresses do not stretch to another mapping this size.
+    AddressesExhausted(u8),
+    /// A base or length that is not a whole number of the 2 MiB leaves this kernel writes.
+    Unaligned(u64),
+    /// Nothing this domain has mapped covers the range named.
+    NotMapped(Iova),
+}
+
+impl core::fmt::Display for IommuError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoUnit => write!(f, "no unit on this machine translates"),
+            Self::WidthsDisagree => {
+                write!(f, "this machine's units disagree on the address width a domain covers")
+            }
+            Self::DomainsExhausted(ceiling) => {
+                write!(f, "every one of this machine's {ceiling} domains is taken")
+            }
+            Self::AddressesExhausted(bits) => {
+                write!(f, "a domain's {bits} bits of device address are all handed out")
+            }
+            Self::Unaligned(at) => write!(f, "{at:#x} is not a 2 MiB boundary"),
+            Self::NotMapped(at) => write!(f, "{:#x} is not mapped in this domain", at.raw()),
+        }
+    }
+}
+
+/// Where a device's addresses come from. Not a `DomainId` on its own: a machine
+/// with no unit has to be a thing this type can say, or every driver grows the
+/// same branch.
+#[derive(Clone, Copy)]
+pub enum DeviceSpace {
+    /// Nothing translates here, so a device address is a physical address.
+    Untranslated,
+    /// The device reaches exactly what is mapped in this and nothing else.
+    Own(DomainId),
+}
+
+impl DeviceSpace {
+    /// An address space of a device's own, or the machine's own with the
+    /// register value that decided it — the same policy an unusable unit gets.
+    pub fn create() -> Self {
+        match vtd::domain::create() {
+            Ok(id) => Self::Own(id),
+            Err(why) => {
+                log!("iommu: no domain of its own for a device: {why}");
+                Self::Untranslated
+            }
+        }
+    }
+
+    /// Put `bytes` of physical memory at `phys` in this space and return the
+    /// address the device must be programmed with.
+    ///
+    /// Read and write both, always. A permission set is not a type here yet
+    /// because nothing in this kernel can give it a second value: the only
+    /// leaf is 2 MiB, which is coarser than any split a driver's pools offer,
+    /// and QEMU drops an access its cached translation denies rather than
+    /// recording a fault, so a narrowed mapping is unobservable as well as
+    /// unexpressible.
+    pub fn map(self, phys: u64, bytes: u64) -> Result<u64, IommuError> {
+        match self {
+            Self::Untranslated => Ok(phys),
+            Self::Own(id) => vtd::domain::map(id, phys, bytes).map(Iova::raw),
+        }
+    }
+
+    /// Take `bytes` at `at` back, so the pages behind them can be reused.
+    pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
+        match self {
+            Self::Untranslated => Ok(()),
+            Self::Own(id) => vtd::domain::unmap(id, Iova::translated(at), bytes),
+        }
+    }
+
+    /// Move `bus:device.function` onto this space; every mapping it needs is in
+    /// place first, since the device is translating the moment this returns.
+    pub fn attach(self, bus: u8, device: u8, function: u8) {
+        if let Self::Own(id) = self {
+            vtd::domain::attach(StreamId::pci(bus, device, function), id);
+        }
     }
 }
 

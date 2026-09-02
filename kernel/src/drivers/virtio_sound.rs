@@ -343,7 +343,7 @@ pub fn init(devices: &[PciDevice]) {
         abi::TX_QUEUE_SIZE,
     );
 
-    build_chains(&mut controlq, &mut eventq, &mut txq, shared.phys());
+    build_chains(&mut controlq, &mut eventq, &mut txq, shared.device_addr());
 
     // Installed before the vector can fire, so no interrupt observes a half-written Option.
     // SAFETY: MSI-X is not enabled yet.
@@ -362,7 +362,7 @@ pub fn init(devices: &[PciDevice]) {
 
     // DmaPool allocations are whole 2 MiB pages; ABI offsets are relative to that page.
     let dma_region = Region {
-        phys: crate::DirectMap::from_phys(shared.phys()),
+        phys: crate::DirectMap::from_phys(shared.host_phys()),
         size: crate::mm::PAGE_2M,
         cache: CachePolicy::DeferToMtrr,
         pages: None,

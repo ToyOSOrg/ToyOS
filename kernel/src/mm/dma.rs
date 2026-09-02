@@ -1,9 +1,16 @@
 //! DMA memory, as a bounds-checked view rather than a raw pointer; [`DmaPool`] owns the pages, and [`Dma`] is the only safe way to touch them.
+//!
+//! A view carries two addresses because they are two different things: what the
+//! *device* is programmed with, and where the bytes physically are. They are
+//! equal only on a machine with nothing translating, so there is no `phys()` to
+//! reach for by accident.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::{copy_nonoverlapping, read_unaligned, read_volatile, write_bytes,
                 write_unaligned, write_volatile};
+
+use crate::iommu::DeviceSpace;
 
 use super::pmm::PhysPage;
 use super::DirectMap;
@@ -28,6 +35,9 @@ impl Discipline for Unaligned {}
 /// A bounds-checked, `Copy` view of DMA memory, scoped to its [`DmaPool`]'s lifetime.
 pub struct Dma<'pool, D: Discipline = Volatile> {
     base: *mut u8,
+    /// What the device is programmed with for `base`: an address in its domain,
+    /// or the physical address where nothing translates.
+    device: u64,
     size: usize,
     pool: PhantomData<&'pool DmaPool>,
     how: PhantomData<D>,
@@ -47,8 +57,8 @@ unsafe impl<D: Discipline> Sync for Dma<'_, D> {}
 
 impl<'pool, D: Discipline> Dma<'pool, D> {
     #[inline]
-    fn new(base: *mut u8, size: usize) -> Self {
-        Self { base, size, pool: PhantomData, how: PhantomData }
+    fn new(base: *mut u8, device: u64, size: usize) -> Self {
+        Self { base, device, size, pool: PhantomData, how: PhantomData }
     }
 
     /// How many bytes this view covers.
@@ -57,9 +67,17 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         self.size
     }
 
-    /// The physical address of the first byte.
+    /// The address to program a device with for the first byte. Never a
+    /// physical address once a unit translates this pool's domain.
     #[inline]
-    pub fn phys(self) -> u64 {
+    pub fn device_addr(self) -> u64 {
+        self.device
+    }
+
+    /// Where the first byte physically is: what a page table maps, never what a
+    /// descriptor carries.
+    #[inline]
+    pub fn host_phys(self) -> u64 {
         DirectMap::phys_of(self.base)
     }
 
@@ -68,7 +86,7 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
     pub fn subview(self, offset: usize, size: usize) -> Self {
         self.check(offset, size);
         // SAFETY: `check` refused anything but `offset + size <= self.size`.
-        Self::new(unsafe { self.base.add(offset) }, size)
+        Self::new(unsafe { self.base.add(offset) }, self.device + offset as u64, size)
     }
 
     /// Clear the whole view.
@@ -128,7 +146,7 @@ impl<'pool> Dma<'pool, Volatile> {
     /// Switches to the unaligned discipline; one-way, since nothing here needs both over the same memory.
     #[inline]
     pub fn unaligned(self) -> Dma<'pool, Unaligned> {
-        Dma::new(self.base, self.size)
+        Dma::new(self.base, self.device, self.size)
     }
 
     #[inline]
@@ -173,29 +191,61 @@ pub struct DmaPool {
     pages: Vec<PhysPage>,
     base: DirectMap,
     size: usize,
+    /// Where the pool sits in its device's address space, and the space itself
+    /// — the pages go back to the allocator on drop, so the device loses them first.
+    space: DeviceSpace,
+    device: u64,
 }
 
 impl DmaPool {
-    /// Take enough contiguous 2 MiB pages to cover `size` bytes.
+    /// Take enough contiguous 2 MiB pages to cover `size` bytes. The device
+    /// reaches them at their physical addresses, which is every address in the
+    /// machine: only [`DmaPool::alloc_in`] narrows that.
     pub fn alloc(size: usize) -> Self {
+        Self::take(size, DeviceSpace::Untranslated)
+    }
+
+    /// The same, mapped into `space` and reachable by nothing outside it.
+    pub fn alloc_in(size: usize, space: DeviceSpace) -> Self {
+        Self::take(size, space)
+    }
+
+    fn take(size: usize, space: DeviceSpace) -> Self {
         let pages_2m = size.div_ceil(super::PAGE_2M as usize);
         let pages = super::pmm::alloc_contiguous(pages_2m, super::pmm::Category::Dma)
             .expect("DmaPool: out of physical memory");
         let base = pages[0].direct_map();
-        Self { pages, base, size: pages_2m * super::PAGE_2M as usize }
+        let size = pages_2m * super::PAGE_2M as usize;
+        // A domain this kernel cannot map into is a kernel bug, not a device's
+        // answer: the addresses are the allocator's own and the pages are 2 MiB.
+        let device = space
+            .map(base.phys(), size as u64)
+            .unwrap_or_else(|why| panic!("DmaPool: {why}"));
+        Self { pages, base, size, space, device }
     }
 
     /// The whole pool as a view, borrowed so it cannot outlive `self`.
     pub fn view(&self) -> Dma<'_> {
-        Dma::new(self.base.as_mut_ptr(), self.size)
+        Dma::new(self.base.as_mut_ptr(), self.device, self.size)
     }
 
-    /// Consumes the pool and leaks its pages for a `'static` view; never freed, deliberately.
-    pub fn leak(self) -> Dma<'static> {
-        let Self { pages, base, size } = self;
-        for page in pages {
+    /// Consumes the pool and leaks its pages and its mapping for a `'static` view; never freed, deliberately.
+    pub fn leak(mut self) -> Dma<'static> {
+        let (base, device, size) = (self.base, self.device, self.size);
+        self.space = DeviceSpace::Untranslated;
+        for page in core::mem::take(&mut self.pages) {
             core::mem::forget(page);
         }
-        Dma::new(base.as_mut_ptr(), size)
+        Dma::new(base.as_mut_ptr(), device, size)
+    }
+}
+
+impl Drop for DmaPool {
+    fn drop(&mut self) {
+        // Before the pages go back: a device still holding these addresses
+        // would reach whatever the allocator hands out next.
+        self.space
+            .unmap(self.device, self.size as u64)
+            .unwrap_or_else(|why| panic!("DmaPool: {why}"));
     }
 }

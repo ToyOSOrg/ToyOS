@@ -472,10 +472,13 @@ impl<'pool> Virtqueue<'pool> {
         }
     }
 
-    /// Physical addresses for device register programming.
-    pub fn descs_phys(&self) -> u64 { self.desc.phys() }
-    pub fn avail_phys(&self) -> u64 { self.avail.phys() }
-    pub fn used_phys(&self) -> u64 { self.used.phys() }
+    /// What the device is programmed with for each ring.
+    pub fn descs_addr(&self) -> u64 { self.desc.device_addr() }
+    pub fn avail_addr(&self) -> u64 { self.avail.device_addr() }
+    pub fn used_addr(&self) -> u64 { self.used.device_addr() }
+
+    /// The three rings themselves, for a caller reasoning about where they physically sit.
+    pub fn rings(&self) -> [Dma<'pool>; 3] { [self.desc, self.avail, self.used] }
 
     /// Where in the notification region this queue's doorbell sits; meaningless before `setup_queue` runs.
     pub fn notify_bytes(&self, multiplier: u32) -> u64 {
@@ -694,7 +697,7 @@ pub fn used_selftest() {
     let pool = DmaPool::alloc(0x1000);
     let dma = pool.view();
     let mut q = Virtqueue::new(dma.subview(0, 0x1000), SIZE);
-    q.write_chain(3, &[(dma.phys(), CHAIN, BufDir::Writable)]);
+    q.write_chain(3, &[(dma.device_addr(), CHAIN, BufDir::Writable)]);
 
     // `at` is what the queue's own `last_used_idx` will be when this element is read.
     let publish = Virtqueue::write_used_as_a_device_would;
@@ -765,7 +768,7 @@ pub fn cap_selftest() {
     const WINDOW: u64 = 0x8000;
     // One buffer for both the config space and the BAR window, so a permitted subregion stays inside it.
     let pool = DmaPool::alloc(WINDOW as usize);
-    let phys = pool.view().phys();
+    let phys = pool.view().host_phys();
     // SAFETY: the pool owns this page until it drops at end of function, and no Mmio built over it escapes.
     let cfg = unsafe { Mmio::over_phys(DirectMap::from_phys(phys), WINDOW) };
     let device = PciDevice::over_config(cfg);
@@ -935,9 +938,9 @@ impl VirtioDevice {
         assert!(max_size >= queue.size, "VirtIO: queue {} too small (max={}, need={})", index, max_size, queue.size);
         common.write_u16(COMMON_QUEUE_SIZE, queue.size);
 
-        common.write_u64(COMMON_QUEUE_DESC, queue.descs_phys());
-        common.write_u64(COMMON_QUEUE_DRIVER, queue.avail_phys());
-        common.write_u64(COMMON_QUEUE_DEVICE, queue.used_phys());
+        common.write_u64(COMMON_QUEUE_DESC, queue.descs_addr());
+        common.write_u64(COMMON_QUEUE_DRIVER, queue.avail_addr());
+        common.write_u64(COMMON_QUEUE_DEVICE, queue.used_addr());
 
         queue.notify_offset = common.read_u16(COMMON_QUEUE_NOTIFY_OFF);
     }
