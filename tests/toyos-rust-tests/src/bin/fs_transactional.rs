@@ -202,9 +202,8 @@ fn shrink_unflushed_then_regrow_reads_zeros(dir: &str, seed_len: usize) {
 }
 
 /// The same pair against a file the cache does not hold, which is where a mark
-/// over whole pages says nothing: the page the new end falls inside is half the
-/// file's and half discarded, and only a resident page can be zeroed and
-/// written back. Closed and drained first, so the reopen starts from the device.
+/// over whole pages says nothing: the straddled page is half the file's, and
+/// only a resident page can be zeroed and written back.
 fn shrink_a_reopened_file_reads_zeros(dir: &str, seed_len: usize) {
     let path = format!("{dir}/fstx_reopened.bin");
     let seed = pattern(seed_len);

@@ -35,13 +35,11 @@ fn seed() -> Vec<u8> {
     (0..SHRUNK_LEN).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8 | 1).collect()
 }
 
-/// The third file, shrunk only after it has left the cache, and the file the
-/// bytes it served are copied into; the same mirroring.
+/// The file shrunk only once cold, and where its read lands; same mirroring.
 const REOPENED: &str = "/log/wb-reopened.bin";
 const WITNESS: &str = "/log/wb-served.bin";
 
-/// The file whose second directory-entry write `fat-flush-meta-refuse` refuses.
-/// Its name is mirrored in `kernel/src/fat32_adapter.rs`.
+/// The file `fat-flush-meta-refuse` refuses; mirrored in `kernel/src/fat32_adapter.rs`.
 const RETRY: &str = "/log/wb-retry.bin";
 const RETRY_AT: u64 = 2 * 4096;
 
@@ -112,13 +110,9 @@ fn a_refused_metadata_write_keeps_the_pages_it_wrote() {
     println!("shrank {RETRY} to {CUT}, regrew it, wrote a page at {RETRY_AT}, fsynced through one refusal");
 }
 
-/// The same shrink and regrow over a page the cache does not hold, with the
-/// bytes the kernel *served* carried to the volume for the host to judge.
-///
-/// The volume itself cannot answer this one: `Fat32::set_len` zero-fills from
-/// the old length on every grow, so the device is right whatever the cache
-/// says. What a foreign reader can judge is the answer a reader got, which is
-/// why the read goes to a second file before anything flushes.
+/// The same shrink and regrow over a page the cache does not hold, with what
+/// the kernel *served* carried to the volume for the host to judge — the device
+/// is right either way, because `Fat32::set_len` zero-fills on every grow.
 fn shrink_a_file_the_cache_no_longer_holds() {
     {
         let mut f = fs::File::create(REOPENED).unwrap_or_else(|e| panic!("create {REOPENED}: {e}"));

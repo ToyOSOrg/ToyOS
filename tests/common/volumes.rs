@@ -824,8 +824,7 @@ pub fn writeback_durability(
     fn seed() -> Vec<u8> {
         (0..SHRUNK_LEN).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8 | 1).collect()
     }
-    /// And for the bytes a read got back from the file the guest shrank only
-    /// after it had left the cache.
+    /// And for the bytes a read got back from a file shrunk only once cold.
     const SERVED_NAME: &str = "wb-served.bin";
     /// And for the file whose flush is refused at its directory-entry write.
     const RETRY_NAME: &str = "wb-retry.bin";
@@ -841,9 +840,9 @@ pub fn writeback_durability(
     // with them the drain re-drives the flush and heals it, and the checker below
     // is the independent judge either way. The image is built with the parameter
     // so the guest boots the test kernel that carries the actuator.
-    // The second actuator refuses one file's second directory-entry write, so a
-    // flush fails at its metadata write with its pages already written and
-    // settled. Different file, different site: neither can stand in for the other.
+    // The second refuses one file's second directory-entry write, so a flush
+    // fails at its metadata write with its pages already written and settled.
+    // Different file, different site: neither stands in for the other.
     const PARAMS: &[&str] = &["fat-mirror-write-refuse", "fat-flush-meta-refuse"];
 
     let image_path = test_dir().join("writeback-durability.img");
@@ -993,11 +992,9 @@ pub fn writeback_durability(
         ));
     }
 
-    // The same shrink over a page the cache did not hold — judged through the
-    // bytes a read got back, not the volume's own. `Fat32::set_len` zero-fills
-    // from the old length on every grow, so the device is right whatever the
-    // cache answers; the answer is the only thing that can be wrong, so the
-    // guest copied it here for a reader that is not this kernel.
+    // The same shrink over a page the cache did not hold, judged through the
+    // bytes a read got back: `Fat32::set_len` zero-fills on every grow, so the
+    // volume's own bytes are right whatever the cache answered.
     if served.len() != SHRUNK_LEN {
         return Err(format!(
             "{SERVED_NAME} is {} bytes; the guest read back a file it had regrown to {SHRUNK_LEN}",

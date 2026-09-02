@@ -452,10 +452,7 @@ pub fn set_size(file_id: FileId, new_size: u64) {
 /// A user truncate: [`set_size`], plus marks the file dirty even when no page changed.
 /// The `&mut Vfs` is the witness: every flusher's size-read/`update_metadata`
 /// pair runs under the VFS lock, so a resize outside it could record a stale size.
-///
-/// `Err` means the page the new end falls inside could not be read, and nothing
-/// was resized: half of that page survives the shrink and the rest has to be
-/// zeroed, which is a read-modify-write and not a truncation.
+/// `Err` is the straddled page unreadable, with nothing resized.
 pub fn resize(
     _vfs: &mut crate::vfs::Vfs,
     file_id: FileId,
@@ -479,11 +476,8 @@ pub fn resize(
 
 /// The page a shrink to `new_size` would cut in half and does not hold.
 ///
-/// [`set_size_locked`] zeroes that page's tail and dirties it, which is what
-/// carries the zeros to the device — and it can only do that to a page that is
-/// resident. An absent one leaves the bytes past the new end on the device
-/// under a size that still reaches them, which is the discarded tail served
-/// back. [`discarded`] cannot cover it either: the page is *partly* the file's.
+/// [`set_size_locked`] can only zero and dirty a *resident* page, and
+/// [`discarded`] cannot cover this one: it is partly still the file's.
 fn straddled_by_shrink(file_id: FileId, new_size: u64) -> Option<u32> {
     if new_size.is_multiple_of(PAGE_SIZE as u64) {
         return None;
@@ -519,9 +513,8 @@ fn fault_in(file_id: FileId, page_idx: u32) -> Result<(), block::BlockError> {
         }
     }
     cache.cached_pages += added;
-    // No eviction here: the page it just admitted is clean and unreferenced, so
-    // an over-budget sweep would take it straight back. [`resize`] evicts once
-    // the shrink has dirtied it, and a dirty page is never a candidate.
+    // No eviction here: a clean unreferenced page is what a sweep takes first,
+    // so [`resize`] evicts once the shrink has dirtied this one.
     Ok(())
 }
 
