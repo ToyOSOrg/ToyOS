@@ -2642,6 +2642,31 @@ pub const KNOWN_RED: &[Red] = &[
         source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
         measured: "2026-08-31",
     },
+    // The last sighting before the assertion was deleted, and the one that
+    // makes the CI rate 3 reds of 4 attempts rather than the row above's 1 of 2.
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(2, 2),
+        standing: Standing::Retired(
+            "the assertion it fired on is deleted: the guest binary no longer bounds the run's \
+             wall clock, only its wake count",
+        ),
+        what: "`the 300 rounds took 3.000355515s, past the 3s bound`, then \
+               `3.003595533s` on the harness's own re-run, and \
+               `ALONE poll_wake_pipe: red again, the same failure both times — the defect is \
+               real`. **Still no wake lost, and still the same assertion**: both panics are \
+               `poll_wake_pipe.rs:68:5`, the elapsed bound, 0.36 ms and 3.6 ms over, while the \
+               lost-wake `assert_eq!` at `:63` passed both times. The job priced its host at \
+               `fastest boot 2274 ms against the reference 1320 ms — liveness ceilings paid at \
+               1.72x width` over `4 core(s)`, and that factor reached every host-side ceiling \
+               and not this one. It red a merge queue on a branch of host-side gates.",
+        evidence: "merge-queue `ci` run 33644950006, job 100297692632 (`guest (1)`), headSha \
+                   ae974921, 2026-09-02; the shard was otherwise green at 194 passed, 1 failed, \
+                   195 total (135.0s), 81 held back for the nightly tier",
+        source: "tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs",
+        measured: "2026-09-02",
+    },
     // Found auditing the merge-health backfill
     // (`issues/build/the-eased-merge-law-carries-a-threshold.md`), not by
     // anyone working the diff it rode on.
