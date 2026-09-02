@@ -358,7 +358,7 @@ tests/toyos-rust-tests/src/bin/std_threading.rs 5 0
 tests/toyos-rust-tests/src/bin/std_tls.rs 9 0
 tests/toyos-rust-tests/src/bin/std_tls_cranelift.rs 3 0
 tests/toyos-rust-tests/src/bin/std_tls_dlopen.rs 19 0
-tests/toyos-rust-tests/src/bin/std_tls_multi_crate.rs 9 0
+tests/toyos-rust-tests/src/bin/std_tls_multi_crate.rs 20 0
 tests/toyos-rust-tests/src/bin/std_unwind.rs 4 0
 tests/toyos-rust-tests/src/bin/std_unwind_so.rs 3 0
 tests/toyos-rust-tests/src/bin/syscall_cost.rs 25 0
