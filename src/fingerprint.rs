@@ -17,12 +17,9 @@ use sha2::{Digest, Sha256};
 /// The span one digest covers, and the resolution a difference is reported at.
 pub const BLOCK: u64 = 1024 * 1024;
 
-/// One 32-byte digest per [`BLOCK`], to the end of the file.
-///
-/// **To the end, not to a declared length**: a device that grew past what the
-/// caller expected is a device that was written to, and a fingerprint bounded
-/// by the caller's number could not see it. The last block is short and
-/// digested short, so a size change in either direction moves the fingerprint.
+/// One 32-byte digest per [`BLOCK`], **to the end of the file rather than to a
+/// declared length**: a device that grew was written to, and the last block is
+/// digested short, so a size change either way moves the fingerprint.
 pub fn whole_device(path: &Path) -> Vec<u8> {
     let mut file = std::fs::File::open(path)
         .unwrap_or_else(|e| panic!("open {} to fingerprint: {e}", path.display()));
