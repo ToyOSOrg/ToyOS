@@ -207,10 +207,9 @@ pub fn iommu_interrupt_remapping(
 }
 
 /// Every 128-bit entry of the table at `base`, read out of guest physical
-/// memory over QMP — the same bytes the unit fetches, with no guest involved.
-///
-/// This is the only reading of `SVT`, `SQ` and `SID` that means anything. The
-/// kernel's own line is a claim about what it wrote; this is the memory.
+/// memory — the same bytes the unit fetches, with no guest involved. The only
+/// reading of `SVT`, `SQ` and `SID` that means anything: the kernel's line is a
+/// claim about what it wrote, and this is the memory.
 fn table_over_qmp(socket: &Path, base: u64, count: usize) -> Result<Vec<(u64, u64)>, String> {
     let dump = qemu::QmpMonitor::open(socket).human(&format!("xp/{}xg 0x{base:x}", count * 2));
     let mut words = Vec::new();
@@ -392,10 +391,7 @@ fn interrupt_format(
         if lo & 1 == 0 {
             return Err(format!("{name}: irte{} is not Present in memory", entry.index));
         }
-        // The kernel's line reports what it read back out of the entry; this is
-        // the same entry read by the host. They are two paths to one truth and
-        // a difference between them is a kernel that reported a table it does
-        // not have.
+        // Two paths to one truth: a difference is a kernel reporting a table it does not have.
         if format!("{sid:#06x}") != entry.sid {
             return Err(format!(
                 "{name}: irte{} carries SID {sid:#06x} in memory and the kernel reported {}",
@@ -451,7 +447,6 @@ fn interrupt_format(
     Ok(())
 }
 
-/// The table's physical address, off the line that reported pointing a unit at it.
 fn entries_base(log: &Serial, name: &str) -> Result<u64, String> {
     let line = log.must_say("translating gsts=")?;
     let irt = unit_fields(line)
@@ -462,8 +457,7 @@ fn entries_base(log: &Serial, name: &str) -> Result<u64, String> {
         .map_err(|_| format!("{name}: unreadable irt on {line:?}"))
 }
 
-/// What the kernel reported reading back out of one entry. Every field it
-/// decides is cross-checked against the same entry read over the monitor.
+/// What the kernel reported reading back out of one entry, all of it cross-checked against memory.
 struct Entry {
     index: u16,
     source: String,

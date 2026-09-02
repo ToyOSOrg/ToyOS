@@ -145,9 +145,8 @@ pub fn is_armed() -> bool {
 /// Fills the next free entry for `source` and returns its index.
 ///
 /// What it reports is the entry read back out of the table, never the words it
-/// meant to write: a line that restated the intent would agree with itself
-/// however the entry was composed, and the fields below are the whole of what
-/// keeps one device off another's entry.
+/// meant to write: a line restating the intent agrees with itself however the
+/// entry was composed, and these fields keep one device off another's entry.
 fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16, Refused> {
     let written = {
         let mut remap = REMAP.lock();
