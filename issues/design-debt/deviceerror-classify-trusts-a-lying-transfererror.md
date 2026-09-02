@@ -70,9 +70,16 @@ it calls the trait. A lying `refused_before_attempt` is still possible and is
 not closable by types — the device's word is the definition — but minting a
 verdict with no transfer behind it stops being expressible.
 
-Not attempted here: `DeviceError` threads through `bcachefs/src/fs.rs`,
-`btree.rs` and `alloc_bitmap.rs` and six `BlockIO` implementations across the
-crate, the kernel and the harness, so the change is a filesystem-wide
-refactor and wants the two named checks a filesystem change owes.
+**Not attempted here, and the obstacle is object safety rather than size.**
+`DeviceError` itself is narrow — counted with `grep -c 'DeviceError'` over
+`bcachefs/src/*.rs`: `block_io.rs` 18, `fs.rs` 4, `lib.rs` 1, and **zero** in
+`btree.rs`, `alloc_bitmap.rs` and `superblock.rs`. What threads through those
+files is `&dyn BlockIO`: `grep -o 'dyn BlockIO' | wc -l` gives `btree.rs` 12,
+`alloc_bitmap.rs` 10, `fs.rs` 3, `superblock.rs` 2 — **27 occurrences**. An
+associated `type Error` makes `BlockIO` not object-safe, so every one of those
+27 has to become a generic parameter *before* the exit above can be written at
+all, and that is on top of the six `BlockIO` implementations across the crate,
+the kernel and the harness. It is a filesystem-wide change and wants the two
+named checks a filesystem change owes.
 
 Provenance: adversarial review of PR #343; the seal measured 2026-09-02.

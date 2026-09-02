@@ -27,11 +27,11 @@ of protocol conformance.
    exit. Two shapes exist (the T14's six-device xHCI, and its exact NVMe
    namespace); the rest do not.
 2. **Lifecycle, on one bus.** `QmpDevices` is built
-   (`tests/common/qemu.rs:3479-3510`) and twelve sites use it: eleven in
+   (`tests/common/qemu.rs:3479-3510`) and is opened at eleven call sites in
    `tests/common/usb.rs` — hot-plugged mice, keyboards and `usb-storage` behind
-   a `blockdev_add`, including a replug — and one compositor churn arm in
-   `tests/toyos.rs:12269-12288` that unplugs a mouse while it is delivering
-   motion. Every `add` names `xhci.0` or `xhci1.0`; nothing outside USB arrives
+   a `blockdev_add`, including a replug — and in one arm of `tests/toyos.rs`,
+   the compositor churn loop, which opens it twice per cycle (`:12269`, `:12285`)
+   to unplug a mouse while it is delivering motion. Every `add` names `xhci.0` or `xhci1.0`; nothing outside USB arrives
    or leaves. Still unbuilt: removal under active *storage* I/O, and
    claim-then-die-then-reclaim.
 3. **Storage ground truth.** Started — one test writes a file in-guest, shuts

@@ -37,15 +37,25 @@ follows is the evidence that made it decidable.
 | `drivers/virtio_console.rs` | 221 | the second serial-shaped sink |
 
 **Part of the core half has landed, so that table is a baseline and not a
-description.** There is a `kernel/src/log/` core: eight files, with `mod.rs`
-holding the ring, the per-CPU shards and the record type
-(`kernel/src/log/mod.rs:15-30`), beside `console.rs`, `nested.rs`, `read.rs`,
-`registry.rs`, `shard.rs`, `storm.rs` and `user.rs`. The three files the table
+description.** There is a `kernel/src/log/` core: eight files, `mod.rs` the one
+producer — "`log!`, `alert!` and `boot_phase!` all expand to [`emit`], the only
+entry point, which takes only `fmt::Arguments`, so a partial record is
+untypeable" (`kernel/src/log/mod.rs:1-3`) — declaring the other seven at
+`:8-15`. The ring is per CPU and its own file: "One CPU's ring of whole records:
+writers and readers never observe a torn record"
+(`kernel/src/log/shard.rs:1`). The record type is not the kernel's at all —
+`LogRecord` comes from `toyos_abi::log`, imported at `kernel/src/log/mod.rs:19`
+and filled at `:158`. The three files the table
 calls the log's own are gone: `kernel/src/log.rs`,
 `kernel/src/drivers/log_ring.rs` and `kernel/src/log_file.rs` are none of them
 in the tree. The file sink is not a kernel module at all — `/bin/logd` is an
-ordinary user process that reads records on a cursor and owns `/log`
-(`userland/logd/src/main.rs:1-10`). What has *not* landed is the rest of the
+ordinary user process, and "the kernel keeps the record ring and the console;
+every policy about files — where they go, what they are called, how many there
+are, what happens when the stick stops answering — is here"
+(`userland/logd/src/main.rs:1-10`), on a `SysCap` carrying
+`Rights::LOG | Rights::WAIT` that lets it "read every record every CPU wrote and
+park on the readiness source when there is nothing new" (`:14-16`). What has
+*not* landed is the rest of the
 target shape: `kernel/src/drivers/serial.rs` (433 lines) and
 `kernel/src/drivers/panic_console/mod.rs` (1,112) are still not independent
 sinks carrying explicit backpressure, and the sins below are still patched

@@ -42,9 +42,15 @@ entry (`kernel/src/arch/syscall/machine.rs:84`, `:94`), spelled `roster` in
 
 **Every `kernel/src/arch/syscall.rs:NNN` citation below is a dead pointer.**
 That file is not in the tree; the syscalls are `kernel/src/arch/syscall/`,
-twelve files with `dispatch.rs` decoding every user pointer. The twenty-one
-line references are kept as the sections they were taken from, to be re-taken
-rather than trusted.
+twelve files with `dispatch.rs` decoding every user pointer. Below this
+paragraph the file is named on **20 lines**, carrying **19 fully-spelled
+`kernel/src/arch/syscall.rs:NNN` citations** — the twentieth names the file with
+no line number at all — plus the bare `` `:NNN` `` continuations hanging off
+them, which are deliberately not counted: a bare continuation in this file may
+equally belong to `kernel/src/process.rs` or `kernel/src/object/ops.rs`, so the
+number would need a reading rather than a match. All of them are kept as the
+sections they were taken from, to be re-taken rather than trusted — a split
+moves every line, so re-pointing them needs a re-read, not arithmetic.
 
 ## 1. What constitutes authority? — COMMITTED
 
