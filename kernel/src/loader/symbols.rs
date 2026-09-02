@@ -5,7 +5,7 @@
 //! with the spawn that built them.
 
 use alloc::vec::Vec;
-use hashbrown::HashMap;
+use alloc::collections::BTreeMap;
 
 use super::read_elf_table;
 use crate::file_backing::FileBacking;
@@ -19,13 +19,13 @@ use toyos_elf::Layout;
 
 /// Every defined, named symbol in `.dynsym`, at its runtime address: no
 /// binding filter, since being in `.dynsym` and defined is the export.
-pub fn dynamic_map<'a>(symbols: &SymTab<'a>, base: UserAddr) -> HashMap<&'a str, UserAddr> {
+pub fn dynamic_map<'a>(symbols: &SymTab<'a>, base: UserAddr) -> BTreeMap<&'a str, UserAddr> {
     map(symbols, base, |_| true)
 }
 
 /// The same over `.symtab`, which also holds locals no other module may
 /// bind to.
-pub fn static_map<'a>(symbols: &SymTab<'a>, base: UserAddr) -> HashMap<&'a str, UserAddr> {
+pub fn static_map<'a>(symbols: &SymTab<'a>, base: UserAddr) -> BTreeMap<&'a str, UserAddr> {
     map(symbols, base, |s: &toyos_elf::Sym| s.is_exported())
 }
 
@@ -33,8 +33,8 @@ fn map<'a>(
     symbols: &SymTab<'a>,
     base: UserAddr,
     keep: impl Fn(&toyos_elf::Sym) -> bool,
-) -> HashMap<&'a str, UserAddr> {
-    let mut map = HashMap::with_capacity(symbols.count());
+) -> BTreeMap<&'a str, UserAddr> {
+    let mut map = BTreeMap::new();
     for (i, sym) in symbols.defined() {
         let name = symbols.name(i);
         if !name.is_empty() && keep(&sym) {

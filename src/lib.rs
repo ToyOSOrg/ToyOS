@@ -18,6 +18,10 @@ pub mod image;
 /// read by nothing but its own tests.
 #[cfg(test)]
 pub mod issuegate;
+/// Which kernel containers may be hashed, and by whose keys; read by nothing
+/// but its own tests, like `issuegate` above.
+#[cfg(test)]
+pub mod kernelkeys;
 pub mod libc;
 pub mod mergehealth;
 pub mod pr;

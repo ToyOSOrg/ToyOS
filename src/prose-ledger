@@ -206,7 +206,8 @@ src/forkcheck.rs 176 1
 src/hostws.rs 187 2
 src/image.rs 200 1
 src/issuegate.rs 115 0
-src/lib.rs 49 0
+src/kernelkeys.rs 41 0
+src/lib.rs 51 0
 src/libc.rs 29 0
 src/main.rs 70 0
 src/mergehealth.rs 229 3

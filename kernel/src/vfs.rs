@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
@@ -146,7 +147,7 @@ pub struct Vfs {
     root: Option<Box<dyn FileSystem>>,
     root_commit: Owed,
     mounts: HashMap<String, Mount>,
-    created_dirs: hashbrown::HashSet<String>,
+    created_dirs: BTreeSet<String>,
 }
 
 /// `MAX_PATH` exists because `resolve_absolute` prepends `cwd` before `normalize`, defeating `MAX_USER_STR`'s per-argument bound unless `cwd` is separately bounded.
@@ -200,7 +201,7 @@ impl Vfs {
             root: None,
             root_commit: Owed::new(),
             mounts: HashMap::new(),
-            created_dirs: hashbrown::HashSet::new(),
+            created_dirs: BTreeSet::new(),
         }
     }
 
@@ -310,7 +311,7 @@ impl Vfs {
 
         if mount.is_empty() {
             let mut result = Vec::new();
-            let mut seen_dirs = hashbrown::HashSet::new();
+            let mut seen_dirs = BTreeSet::new();
 
             for name in self.mounts.keys() {
                 let dir_name = format!("{}/", name);
@@ -350,7 +351,7 @@ impl Vfs {
         // Dedup only removes entries, so `matching` is a true upper bound on the final result count.
         let matching = all_files.iter().filter(|(n, _)| under_prefix(n, &prefix).is_some()).count();
         let mut result = Vec::with_capacity(matching);
-        let mut seen_dirs = hashbrown::HashSet::new();
+        let mut seen_dirs = BTreeSet::new();
         let mut saw_self = false;
 
         for (name, size) in &all_files {
