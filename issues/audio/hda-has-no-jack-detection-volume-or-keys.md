@@ -12,11 +12,16 @@ with soundd holding no physical address, and three guest gates stand on it. What
 was staged after that never started, and it is about 850 lines of greenfield
 blocked on nothing:
 
-- **Jack detection and routing.** No pin-sense verb exists anywhere. A poll on
-  the presence bit, a switch between the fixed speaker and the headphone pin,
-  and a ramp across the switch so it is not a click.
+- **Jack detection and routing.** `GET_PIN_SENSE` is spelled
+  (`toyos-hda/src/verb.rs:107`) and nothing issues it — that constant is its
+  only occurrence in the tree. Still wanted: a poll on the presence bit, a
+  switch between the fixed speaker and the headphone pin, and a ramp across the
+  switch so it is not a click.
 - **Master volume and mute**, at the codec rather than in the mixer, and the
-  message to set it.
+  message to set it. Path setup already emits `SET_AMP_GAIN_MUTE` once per pin
+  and once per converter (`toyos-hda/src/config.rs:89`, `:94`, `:109-117`), at
+  the amp's own `zero_db`; what is missing is a level anyone can change after
+  that, not the verb.
 - **Volume keys.** The premise was never established either — the diagnostic
   that would say what the T14's keyboard sends for them was never committed.
 - **Persistence** of the chosen output and level, blocked on the kernel keeping
