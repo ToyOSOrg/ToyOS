@@ -45,13 +45,9 @@
 //! the owner's — and both refuse the undeclared rather than the known-bad,
 //! which is what a scan for a spelling cannot do.
 //!
-//! **The fifth carries a second half because a scan on a spelling has one.** It
-//! reads the text `Command::new(`, which a `use std::process::Command as Cmd`
-//! defeats in one line, and it reads an argument's text, which says nothing at
-//! all when the argument is a local. So a rename of `Command` is refused
-//! outright, and an argument that is not a string literal is pinned to the
-//! sites it is read at — a row for `cmd` is a permission for those lines and
-//! not for the word.
+//! **The fifth carries a second half**, because a scan on a spelling has one: a
+//! rename of `Command` is refused outright, and an argument that is not a
+//! string literal is pinned to the sites it is read at.
 
 use std::path::{Path, PathBuf};
 
@@ -464,13 +460,9 @@ struct Spawn {
     /// The argument text, verbatim.
     arg: &'static str,
     /// `(path relative to the repository root, how many times)`, and **empty
-    /// exactly when [`Spawn::arg`] is a string literal**.
-    ///
-    /// A literal names the binary, so a new one anywhere is a new row and the
-    /// text is the whole check. Anything else names nothing — a local called
-    /// `cmd` says as much about what runs as a blank line — so it is pinned to
-    /// the sites it is read at and a fourteenth `Command::new(cmd)` elsewhere
-    /// is a red rather than a permission this table already gave.
+    /// exactly when [`Spawn::arg`] is a string literal**: a literal names its
+    /// binary, anything else names nothing and is a permission for those lines
+    /// alone.
     sites: &'static [(&'static str, usize)],
     why: &'static str,
 }
@@ -564,22 +556,13 @@ const HOST_SPAWNS: &[Spawn] = &[
     },
 ];
 
-/// Spellings that would let a host binary be spawned past
-/// [`HOST_SPAWNS`](self::HOST_SPAWNS) by renaming the type rather than the
-/// binary, and are refused outright.
-///
-/// The scan reads the text `Command::new(`, so `use std::process::Command as
-/// Cmd` defeats it in one line. Rather than chase every alias a Rust file can
-/// build, this refuses the two that spell one.
+/// The refusal `no_host_file_renames_command` prints.
 const NO_COMMAND_ALIAS: &str =
     "a renamed `Command` spawns past the scan that reads the text `Command::new(`";
 
-/// Whether `code` renames `std::process::Command`, in either of the two forms
-/// one line can take.
-///
-/// A `use` rename and a `type` alias. The second is matched on the item and
-/// not on the substring, because `let mut cmd = std::process::Command::new(…)`
-/// is an ordinary spawn that the scan already reads.
+/// Whether `code` renames `std::process::Command` --- a `use` rename or a `type`
+/// alias, matched on the item so an ordinary
+/// `let c = std::process::Command::new(…)` is untouched.
 #[cfg(test)]
 fn renames_command(code: &str) -> bool {
     let code = code.trim_start();
@@ -1126,18 +1109,10 @@ mod tests {
     }
 
     /// **The dependency bar, made checkable at the one place a host binary can
-    /// be reached from.** Rust and QEMU are the whole of what this project may
-    /// need; the standing failures are declared rather than removed, and a row
-    /// here is that declaration written where something reads it.
-    ///
-    /// Keyed on the argument text rather than on a set of known-bad names: a
-    /// scan for `fsck_msdos` passes the day the call is spelled
-    /// `/sbin/fsck_msdos`, and says nothing at all about the tool that arrives
-    /// next. **An argument that is not a literal is pinned to its sites**, both
-    /// ways: a literal names the binary and needs no site, and an identifier
-    /// names nothing, so a row for one is a permission for those lines and no
-    /// others. Without that, `let cmd = "/sbin/fsck_msdos"` anywhere in host
-    /// code is admitted by a row written about a different file.
+    /// be reached from.** Keyed on the argument text rather than on a set of
+    /// known-bad names: a scan for `fsck_msdos` passes the day the call is
+    /// spelled `/sbin/fsck_msdos`, and says nothing about the tool that arrives
+    /// next.
     #[test]
     fn every_binary_the_host_runs_is_declared() {
         let root = repo_root();
@@ -1217,13 +1192,9 @@ mod tests {
         );
     }
 
-    /// **A renamed `Command` spawns past the scan above in one line.** It reads
-    /// the text `Command::new(`, so `use std::process::Command as Cmd` makes
-    /// every row in [`HOST_SPAWNS`] unreachable and nothing says so. Refusing
-    /// the rename is what makes the scan a check rather than a spelling.
-    ///
-    /// It does not reach a function pointer taken from `Command::new` itself,
-    /// and no shorter rule does; what it closes is the one-line form.
+    /// **A renamed `Command` spawns past the scan above in one line**, which is
+    /// what makes refusing the rename part of the check. It does not reach a
+    /// function pointer taken from `Command::new` itself.
     #[test]
     fn no_host_file_renames_command() {
         let root = repo_root();
@@ -1262,16 +1233,9 @@ mod tests {
 
     /// **Every committed file somebody had to judge is judged here.** `NOTICE`
     /// names each one's upstream, licence and digest; nothing read it, so a new
-    /// one arrived unremarked and a changed one changed silently.
-    ///
-    /// Two populations: everything `git` tracks whose bytes are not text, and
-    /// everything under `assets/` whether they are or not. The second is what
-    /// catches a ninth Phosphor SVG — the eight declared ones are text, so the
-    /// first population never sees them.
-    ///
-    /// The digest is taken from the bytes and held against both the row and, for
-    /// a third-party file, `NOTICE`'s own text — so the obligation and the
-    /// bytes it is an obligation about cannot drift apart.
+    /// one arrived unremarked and a changed one changed silently. The digest is
+    /// taken from the bytes and held against the row and, for a third-party
+    /// file, against `NOTICE` itself.
     #[test]
     fn every_committed_binary_file_is_declared() {
         let root = repo_root();
