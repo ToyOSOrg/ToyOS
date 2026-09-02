@@ -180,13 +180,9 @@ pub fn iommu_discovery(
 /// The two ways an entry can name a CPU, told apart.
 ///
 /// `EIME` puts a 32-bit id at `DST` 63:32 and its absence an 8-bit one at 47:40
-/// (Section 9.9), which are the same bits for APIC 0 — and APIC 0 is where every
-/// interrupt in this kernel goes. So the encodings are indistinguishable on any
-/// machine as it boots, and a gate that compared the field against itself would
-/// pass a kernel that had them backwards. `iommu-dest-apic1` moves the device
-/// messages to APIC 1, where the two encodings differ, and the same id read out
-/// of the same table has to come back `0x1` on one machine and `0x100` on the
-/// other.
+/// (Section 9.9) — the same bits for APIC 0, which is where every interrupt in
+/// this kernel goes, so a kernel with the two backwards boots green everywhere.
+/// `iommu-dest-apic1` moves the device messages to APIC 1, where they differ.
 fn destination_encoding(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -255,12 +251,11 @@ fn table_word(socket: &Path, base: u64, index: u16) -> Result<(u64, u64), String
 /// QEMU delivers it anyway
 /// (`issues/kernel/qemu-passes-compatibility-format-interrupts.md`), so no
 /// behavioural test in this suite can see one and this is the only thing that
-/// can. So it starts from hardware and works outward: `GSTS` and `IRTA_REG` are
-/// read out of the unit's own register window over the monitor, the table is
-/// read at **the address `IRTA_REG` holds** rather than the one the kernel
-/// printed, and every requester id is checked against this machine's own PCI
-/// walk and DMAR scope. The kernel's line is then checked against all of it —
-/// a kernel naming a page the register does not hold is the red.
+/// can. So it starts at hardware: `GSTS` and `IRTA_REG` are read out of the
+/// unit's register window over the monitor, the table is read at **the address
+/// `IRTA_REG` holds** and not the one the kernel printed, and every requester id
+/// is checked against this machine's PCI walk and DMAR scope. The kernel's line
+/// is checked against all of it — naming a page the register does not hold reds.
 ///
 /// [`Profile::Headless`] carries the most sources of both kinds — the i8042's
 /// two pins, and xHCI, virtio-net and virtio-sound over MSI-X.
@@ -283,10 +278,8 @@ pub fn iommu_interrupt_remapping(
 }
 
 /// `count` words of guest *physical* address space at `base`, over the monitor.
-///
-/// `xp` reaches the unit's MMIO window as readily as RAM, which is what lets
-/// the checks below start from a register rather than from a number the guest
-/// printed: the table's address is taken out of `IRTA_REG` itself.
+/// `xp` reaches the unit's MMIO window as readily as RAM, which is what lets the
+/// checks below start at a register rather than at a number the guest printed.
 fn over_qmp(socket: &Path, base: u64, count: usize, width: char) -> Result<Vec<u64>, String> {
     let dump = qemu::QmpMonitor::open(socket).human(&format!("xp/{count}x{width} 0x{base:x}"));
     let mut words = Vec::new();
@@ -325,8 +318,7 @@ fn interrupt_format(
         ));
     }
 
-    // A machine with no unit prints no unit line, and must be one that does not
-    // remap. Everything else below starts at the unit's register window.
+    // A machine with no unit prints no unit line, and must be one that does not remap.
     let sources = source_formats(log, name)?;
     if sources.is_empty() {
         return Err(format!(
@@ -365,9 +357,8 @@ fn interrupt_format(
         .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
         .ok_or_else(|| format!("{name}: no register window on {line:?}"))?;
 
-    // GSTS and IRTA_REG out of that window rather than off the kernel's line.
-    // The line is then checked against them, which is the only direction that
-    // catches a kernel reporting registers it did not write.
+    // GSTS and IRTA_REG out of that window, and the kernel's line checked
+    // against them — the only direction that catches a kernel misreporting them.
     let gsts = over_qmp(socket, window + GSTS_REG, 1, 'w')?[0] as u32;
     let irta = over_qmp(socket, window + IRTA_REG, 1, 'g')?[0];
     let ires = gsts & (1 << 25) != 0;
@@ -392,9 +383,7 @@ fn interrupt_format(
 
     let mut memory = Vec::new();
     if let Some(extended) = mode {
-        // The address the unit walks is IRTA's, never the kernel's `irt=`; the
-        // kernel's is checked against it, so a page it names that the register
-        // does not hold is the red.
+        // The address the unit walks is IRTA's, never the kernel's `irt=`.
         let base = irta & !0xFFF;
         if (irta & (1 << 11) != 0) != extended {
             return Err(format!(
@@ -468,10 +457,8 @@ fn interrupt_format(
         if lo & 1 == 0 {
             return Err(format!("{name}: irte{} is not Present in memory", entry.index));
         }
-        // The kernel reported this entry by reading it back, so agreement here
-        // is not two witnesses — it is the kernel's read against the host's of
-        // the same bytes, which catches a kernel reporting one table while a
-        // register points the unit at another.
+        // Not two witnesses: the kernel's read of these bytes against the
+        // host's, which catches it reporting a table the register does not name.
         if format!("{sid:#06x}") != entry.sid {
             return Err(format!(
                 "{name}: irte{} carries SID {sid:#06x} in memory and the kernel reported {}",
@@ -528,7 +515,6 @@ fn interrupt_format(
     Ok(())
 }
 
-/// The one-line verdict, off the registers the checks above read.
 fn report(log: &Serial, name: &str, mode: Option<bool>, sources: &[Source]) -> Result<(), String> {
     let _ = log;
     match mode {
