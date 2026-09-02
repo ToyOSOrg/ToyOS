@@ -108,13 +108,17 @@ nothing in the tree produces them.
 bound on a correct price is *"about 31 s"* off the widest shard, and its own A/B
 moved the priced metric 147.0 s while moving the phase clock 11.0 s the wrong
 way — so the priced metric is not the verdict and only the twelve hosted shards'
-wall clocks are. Three full `cargo test` runs on this dev host, 2026-09-01, over
-two trees whose diff touches no partitioning: **1012.7 s, 989.3 s and 396.3 s**.
-The spread is 616.4 s against a best case of about 31 s, and almost all of it is
-one test: `sysret_ss_reload` took 971 s, 977 s and 388 s across the same three,
-unchanged and unmodified. A first reading of the middle pair alone said "23.4 s
-from nothing", which is what an instrument looks like when two samples happen to
-agree.
+wall clocks are. Five full `cargo test` runs on this dev host, 2026-09-01 and
+-02, none of whose trees differ in anything that touches partitioning:
+**1012.7 s, 989.3 s, 396.3 s, 214.9 s and 233.5 s**. The spread is 797.8 s
+against a best case of about 31 s, and almost all of it is one test:
+`sysret_ss_reload` took 971 s, 977 s, 388 s, 195 s and 227 s across the same
+five, unmodified throughout. A first reading of the leading pair alone said
+"23.4 s from nothing" and a second of the leading three said 616.4 s; both are
+what an instrument looks like when a few samples happen to agree. (The last two
+runs carry main's `d44b4978`, so they are not the same tree as the first three —
+which is why the claim here is about the instrument's spread and not about any
+tree.)
 
 So a taker needs, in order: the build clock keyed by config rather than by
 thread; a committed per-config profile that only `Shard::keep` reads, merged the
