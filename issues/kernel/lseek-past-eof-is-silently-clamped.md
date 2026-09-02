@@ -7,7 +7,7 @@ opened: 2026-08-28
 # `ops::seek` clamps a seek past EOF to the file size, so an lseek past the end silently lands at EOF and a later write starts there rather than where the caller asked
 
 `ops::seek` computes `position = new_pos.min(size)`
-(`kernel/src/object/ops.rs:449`), so `lseek(fd, offset, SEEK_SET)` with
+(`kernel/src/object/ops.rs:451`), so `lseek(fd, offset, SEEK_SET)` with
 `offset > size` returns `size`, not `offset`. POSIX `lseek(2)` permits a seek
 past the end: the position is set to exactly `offset`, and a later write there
 extends the file, leaving a hole of zeros between the old end and the write — a
@@ -24,6 +24,10 @@ value, so:
 returns 100, not 200; `write` one byte → the byte lands at offset 100 and the
 file is 101 bytes, where POSIX gives a 201-byte file with a 100-byte hole.
 
+**The clamp is the whole behaviour a C program sees.** `userland/libc/src/posix_io.rs:122`'s
+`lseek` passes `syscall::seek`'s answer straight back, so nothing between the
+kernel and a POSIX caller can restore the offset that was asked for.
+
 Found while writing the filesystem transactionality control
 (`tests/toyos-rust-tests/src/bin/fs_transactional.rs`), which sidesteps it by
 regrowing with `ftruncate` before writing into the hole. Orthogonal to the
@@ -36,3 +40,8 @@ day: the test's own filesystem activity left its shared boot wedged in 4 of 5
 full fast-tier runs. Do not re-derive the fix without reading
 `issues/kernel/past-eof-holes-wedge-a-shared-boot.md` first — it carries the
 commit to revert-the-revert of, the measurement table, and where to start.
+
+**Exit condition.** `lseek` past the end returns the offset it was given; a write
+there extends the file; and the bytes between the old end and the write read as
+zeros on every mount — asserted from the device rather than only from the cache,
+because that is where the two mounts have disagreed before.
