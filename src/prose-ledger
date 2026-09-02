@@ -243,7 +243,7 @@ tests/common/stats.rs 44 0
 tests/common/storage.rs 70 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
-tests/common/volumes.rs 625 3
+tests/common/volumes.rs 624 3
 tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
@@ -294,7 +294,7 @@ tests/toyos-rust-tests/src/bin/fpu_isolation.rs 101 0
 tests/toyos-rust-tests/src/bin/fs_dirs_durable.rs 11 0
 tests/toyos-rust-tests/src/bin/fs_large_file.rs 16 0
 tests/toyos-rust-tests/src/bin/fs_rename_durable.rs 4 0
-tests/toyos-rust-tests/src/bin/fs_transactional.rs 57 0
+tests/toyos-rust-tests/src/bin/fs_transactional.rs 55 0
 tests/toyos-rust-tests/src/bin/fs_truncate_persist.rs 20 0
 tests/toyos-rust-tests/src/bin/fsync_flush_failed.rs 3 0
 tests/toyos-rust-tests/src/bin/ftruncate_flush_race.rs 12 0
@@ -373,7 +373,7 @@ tests/toyos-rust-tests/src/bin/window_caps.rs 26 0
 tests/toyos-rust-tests/src/bin/window_child.rs 21 0
 tests/toyos-rust-tests/src/bin/window_drag.rs 30 0
 tests/toyos-rust-tests/src/bin/window_refusal.rs 30 0
-tests/toyos-rust-tests/src/bin/writeback_durability.rs 45 0
+tests/toyos-rust-tests/src/bin/writeback_durability.rs 44 0
 tests/toyos-rust-tests/src/bin/writeback_reopen.rs 22 0
 tests/toyos-rust-tests/src/bin/writeback_spawn.rs 47 0
 tests/toyos-rust-tests/src/tone.rs 12 0

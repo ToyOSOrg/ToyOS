@@ -147,9 +147,8 @@ fn shrink_a_file_the_cache_no_longer_holds() {
 }
 
 
-/// The refused half of the fault a shrink makes. A device that will not give
-/// the straddled page back leaves the file alone: zeroing half a page is a
-/// read-modify-write, and there is nothing to modify.
+/// A device that will not give the straddled page back leaves the file alone:
+/// zeroing half a page is a read-modify-write, with nothing to modify.
 fn a_refused_fault_resizes_nothing() {
     {
         let mut f = fs::File::create(REFUSED).unwrap_or_else(|e| panic!("create {REFUSED}: {e}"));

@@ -239,10 +239,8 @@ fn shrink_a_reopened_file_reads_zeros(dir: &str, seed_len: usize) {
 }
 
 /// The same reopened shrink with a page written above the mark before the
-/// flush. The trim frees the blocks under the hole and the flush writes only
-/// the dirty pages, so a mount that bridges the gap with a freed block and does
-/// not zero it hands the discarded tail back — on the device only, where the
-/// read above cannot see it.
+/// flush: the trim frees the blocks under the hole and only dirty pages are
+/// written, so a mount that bridges it with a freed block leaks on the device.
 fn shrink_then_write_above_the_mark(dir: &str, seed_len: usize) {
     let path = format!("{dir}/fstx_above.bin");
     let seed = pattern(seed_len);

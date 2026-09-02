@@ -845,9 +845,8 @@ pub fn writeback_durability(
     // The second refuses one file's second directory-entry write, so a flush
     // fails at its metadata write with its pages already written and settled.
     // Different file, different site: neither stands in for the other.
-    // The third takes the page the cold shrink just read off the device, in the
-    // window between that read and the lock that spends it: the sweep any other
-    // CPU can run there, since neither `sys_read` nor `sys_write` holds the VFS lock.
+    // The third is the sweep any other CPU can run in the window between that
+    // read and the lock that spends it, holding no VFS lock of its own.
     const PARAMS: &[&str] = &[
         "fat-mirror-write-refuse",
         "fat-flush-meta-refuse",
