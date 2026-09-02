@@ -1,8 +1,19 @@
 use std::thread;
+use std::time::Duration;
+
+/// How long the child stays up, so the parent's first `try_wait` asks about a
+/// process that is still running rather than about a race it lost.
+const LINGER: Duration = Duration::from_millis(200);
+/// The poll after it, and its ceiling — 25x `LINGER`, a liveness margin and not
+/// a threshold.
+const POLL: Duration = Duration::from_millis(10);
+const POLLS: u32 = 500;
 
 fn main() {
-    // When invoked with "exit-fast", just exit immediately (used as a try_wait target)
-    if std::env::args().nth(1).as_deref() == Some("exit-fast") {
+    // The `try_wait` target: alive long enough to be seen running, then gone
+    // with a status to report.
+    if std::env::args().nth(1).as_deref() == Some("linger") {
+        thread::sleep(LINGER);
         return;
     }
 
@@ -26,15 +37,30 @@ fn main() {
     let expected: u64 = (0..1000).sum();
     assert_eq!(total, expected, "partial sums mismatch: {total} != {expected}");
 
-    // Test try_wait on a child process
+    // `try_wait` answers about the child and not about the wait: `None` while
+    // it runs, `Some` once it has exited. Both halves are asserted, because a
+    // `try_wait` stuck on either answer satisfies the other.
     let exe = std::env::current_exe().expect("current_exe failed");
     let mut child = std::process::Command::new(&exe)
-        .arg("exit-fast")
+        .arg("linger")
         .spawn()
         .expect("spawn child failed");
 
-    // Wait for it to finish, then try_wait should return Some
-    let status = child.wait().expect("wait failed");
+    if let Some(early) = child.try_wait().expect("try_wait failed") {
+        panic!("try_wait reported {early} for a child that is still sleeping");
+    }
+
+    let mut exited = None;
+    for _ in 0..POLLS {
+        if let Some(status) = child.try_wait().expect("try_wait failed") {
+            exited = Some(status);
+            break;
+        }
+        thread::sleep(POLL);
+    }
+    let status = exited.unwrap_or_else(|| {
+        panic!("try_wait never reported the exited child within {:?}", POLL * POLLS)
+    });
     assert!(status.success(), "child exited with {status}");
 
     println!("all threading tests passed");
