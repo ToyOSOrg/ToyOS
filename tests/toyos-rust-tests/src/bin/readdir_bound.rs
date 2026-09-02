@@ -34,6 +34,7 @@ fn main() {
     plain_entries_are_all_returned();
     subdirectories_at_the_limit();
     one_past_the_limit_is_refused();
+    a_directory_still_lists_in_a_mount_past_the_bound();
     system_alive();
     println!("all readdir bound tests passed");
 }
@@ -90,6 +91,40 @@ fn one_past_the_limit_is_refused() {
     match fs::read_dir("/tmp") {
         Ok(it) => panic!("listing past the limit returned {} entries", it.count()),
         Err(e) => println!("  PASS: one past the limit refused ({e})"),
+    }
+}
+
+/// The bound belongs to the directory, not to the mount holding it.
+///
+/// Both mounts are over it by now and neither can list its own root, which is
+/// the shape asserted at the end: every directory *in* them still lists,
+/// including one holding nothing — the answer a mount-wide bound cannot give,
+/// an empty listing and a refusal being the same byte to a caller checking
+/// existence. A hash map and an on-disk B+tree, so this is the contract.
+fn a_directory_still_lists_in_a_mount_past_the_bound() {
+    let full = fs::read_dir("/tmp/d0").expect("read_dir of a directory in a full tmpfs");
+    let names: Vec<String> =
+        full.map(|e| e.expect("entry").file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, vec![String::from("f")], "/tmp/d0 listed {names:?}");
+
+    fs::create_dir("/tmp/empty").expect("mkdir failed");
+    let n = fs::read_dir("/tmp/empty").expect("read_dir of an empty directory in a full tmpfs").count();
+    assert_eq!(n, 0, "an empty directory listed {n} entries");
+    println!("  PASS: /tmp serves a directory and an empty one while its own root is refused");
+
+    fs::write("/home/sub/one", b"x").expect("create on /home failed");
+    let n = fs::read_dir("/home/sub").expect("read_dir of a directory in a full bcachefs").count();
+    assert_eq!(n, 1, "/home/sub listed {n} entries");
+    println!("  PASS: /home serves a directory while its own root is refused");
+
+    // The mount roots are directories too, and theirs is still the same bound.
+    match fs::read_dir("/tmp") {
+        Ok(it) => panic!("/tmp listed {} entries after the per-directory bound", it.count()),
+        Err(e) => println!("  PASS: /tmp's own root is still refused ({e})"),
+    }
+    match fs::read_dir("/home") {
+        Ok(it) => panic!("/home listed {} entries after the per-directory bound", it.count()),
+        Err(e) => println!("  PASS: /home's own root is still refused ({e})"),
     }
 }
 

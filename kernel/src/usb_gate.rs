@@ -39,6 +39,20 @@ fn fill(buf: &mut [u8], nonce: u64, block: u64) {
     }
 }
 
+/// FNV-1a over a whole block, mirrored byte-for-byte by the harness.
+///
+/// [`first_bad`] is the guest's own comparator and nothing in the guest can
+/// certify it; this is a number the harness recomputes from the image, so a
+/// comparator that always agreed would be caught by the disagreement here.
+fn digest(buf: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in buf {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Where a block does not match, or `None` if it does.
 fn first_bad(buf: &[u8], nonce: u64, block: u64) -> Option<(usize, u8, u8)> {
     buf.iter().enumerate().find_map(|(i, &got)| {
@@ -102,11 +116,15 @@ fn check(index: usize, disk: &mut usb_storage::UsbBlockDevice) {
             log!("usb-gate: host block {block} could not be read");
             continue;
         }
+        let hash = digest(&buf);
         match first_bad(&buf, nonce, block) {
-            None => log!("usb-gate: host block {block} verified"),
+            None => log!("usb-gate: host block {block} verified digest={hash:#018x}"),
             Some((i, got, want)) => {
                 reads_ok = false;
-                log!("usb-gate: host block {block} differs at byte {i}: {got:#04x} not {want:#04x}");
+                log!(
+                    "usb-gate: host block {block} differs at byte {i}: {got:#04x} not {want:#04x} \
+                     digest={hash:#018x}"
+                );
             }
         }
     }

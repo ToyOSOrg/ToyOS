@@ -624,7 +624,7 @@ mod tests {
             create_esp_volume(b"kernel", b"bootloader", b"initrd", uuid::Uuid::new_v4(), "");
         let mut fs = Fat32::mount(VolumeIo(&mut esp)).expect("mount the ESP we just built");
         let found: Vec<String> =
-            fs.walk(64).expect("walk the ESP").into_iter().map(|(path, _)| path).collect();
+            fs.walk("", 64).expect("walk the ESP").into_iter().map(|(path, _)| path).collect();
         for want in [
             "EFI/BOOT/BOOTx64.EFI",
             "toyos/kernel.elf",

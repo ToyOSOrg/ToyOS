@@ -101,10 +101,13 @@ impl ReplaceRename for TmpFs {
 
 impl FileSystem for TmpFs {
     // Nothing else caps file count here.
-    fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         let mut out = Vec::new();
         for (name, entry) in &self.entries {
             if let Entry::File { id, .. } = entry {
+                if !crate::vfs::under_directory(name, dir) {
+                    continue;
+                }
                 if out.len() == limit {
                     return Err(SyscallError::ResourceExhausted);
                 }
@@ -194,6 +197,11 @@ impl FileSystem for TmpFs {
         Ok(())
     }
 
+    /// Nothing to give back: the pages are the file, and `set_size` dropped them.
+    fn truncate_to(&mut self, _file_id: FileId, _size: u64, _mtime: u64) -> Result<(), SyscallError> {
+        Ok(())
+    }
+
     fn create_symlink(&mut self, name: &str, target: &str) -> Result<(), SyscallError> {
         // Displaces whatever answered to this name: one name, one entry.
         if let Some(Entry::File { id, alive, .. }) =
@@ -215,5 +223,10 @@ impl FileSystem for TmpFs {
             }
             _ => Err(SyscallError::NotFound),
         }
+    }
+
+    /// `TmpfsBacking` reads the file cache, so it is never behind it.
+    fn cached_file_id(&mut self, _name: &str) -> Option<FileId> {
+        None
     }
 }

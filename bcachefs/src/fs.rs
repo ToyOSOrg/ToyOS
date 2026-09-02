@@ -696,15 +696,23 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
         }
     }
 
-    /// Up to `limit` files as (name, size); more is refused before any materialise.
-    pub fn list(&self, limit: usize) -> Result<Vec<(String, u64)>, FsError> {
-        let entries = btree::collect_up_to(&self.io, self.sb.root_node, limit)?;
-        let mut result = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            if let Ok(leaf) = self.decode(&entry.value) {
-                result.push((String::from(leaf.name()), leaf.size()));
+    /// Up to `limit` of the files `keep` accepts, as (name, size); more is
+    /// refused before any materialise. `limit` counts the kept names, so a
+    /// caller listing one directory pays that directory's bound and not the
+    /// volume's.
+    pub fn list(&self, limit: usize, keep: &dyn Fn(&str) -> bool) -> Result<Vec<(String, u64)>, FsError> {
+        let mut result = Vec::new();
+        btree::for_each_live(&self.io, self.sb.root_node, &mut |entry| {
+            let Ok(leaf) = self.decode(&entry.value) else { return Ok(()) };
+            if !keep(leaf.name()) {
+                return Ok(());
             }
-        }
+            if result.len() >= limit {
+                return Err(FsError::ListTooLong { limit });
+            }
+            result.push((String::from(leaf.name()), leaf.size()));
+            Ok(())
+        })?;
         Ok(result)
     }
 
@@ -955,11 +963,21 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
 
         let target = page_idx as u64;
         let mut covered: u64 = extents.iter().map(|e| e.block_count as u64).sum();
+        let hole = covered;
         while covered <= target {
             let want = (target - covered + 1).min(u32::MAX as u64) as u32;
             let run = self.alloc.alloc_up_to(&self.io, want)?;
             push_extent(extents, run.start.raw(), run.len);
             covered += run.len as u64;
+        }
+
+        // The blocks that bridge the gap are the allocator's most recently freed
+        // and still hold what the file that gave them up left there; the caller
+        // overwrites only `page_idx`, so every other one is a hole and reads zero.
+        let zero = BlockBuf::zeroed();
+        for page in hole..target {
+            let block = block_for(extents, page as u32).ok_or(FsError::NotFound)?;
+            self.io.write(BlockNum::new(block), &zero)?;
         }
 
         block_for(extents, page_idx).ok_or(FsError::NotFound)
@@ -1127,14 +1145,14 @@ mod tests {
 
         let mut fs = mount_rw(raw).expect("mount");
         assert!(
-            fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
+            fs.list(usize::MAX, &|_| true).expect("list").iter().any(|(n, _)| n == "victim.txt"),
             "the craft did not leave victim.txt on the volume",
         );
 
         assert!(!fs.delete("ghost").expect("delete"), "nothing on this volume is named ghost");
 
         assert!(
-            fs.list(usize::MAX).expect("list").iter().any(|(n, _)| n == "victim.txt"),
+            fs.list(usize::MAX, &|_| true).expect("list").iter().any(|(n, _)| n == "victim.txt"),
             "deleting a name that does not exist destroyed the entry it collided with",
         );
     }
@@ -1147,7 +1165,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("the volume still describes its device");
-        match fs.list(usize::MAX) {
+        match fs.list(usize::MAX, &|_| true) {
             Err(FsError::TreeTooDeep(_)) => {}
             other => panic!("expected TreeTooDeep, got {other:?}"),
         }
@@ -1161,7 +1179,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("mount");
-        match fs.list(usize::MAX) {
+        match fs.list(usize::MAX, &|_| true) {
             Err(FsError::CorruptedNode(_)) => {}
             other => panic!("expected CorruptedNode, got {other:?}"),
         }
@@ -1175,7 +1193,7 @@ mod tests {
         set_root(&mut raw, blocks, 3);
 
         let fs = mount(raw).expect("mount");
-        match fs.list(usize::MAX) {
+        match fs.list(usize::MAX, &|_| true) {
             Err(FsError::BlockOffDevice { .. }) => {}
             other => panic!("expected BlockOffDevice, got {other:?}"),
         }
@@ -1374,7 +1392,7 @@ mod tests {
         let ceiling = 2 * 1024 * 1024 - 4096; // mm::MAX_HEAP_ALLOC
         let limit = 16_384; // vfs::MAX_LIST_ENTRIES, what the kernel passes down
         let count = 40_000usize;
-        let doubled = 65_536 * core::mem::size_of::<crate::btree::Entry>();
+        let doubled = 65_536 * core::mem::size_of::<(String, u64)>();
         assert!(
             doubled > ceiling,
             "{doubled} bytes is under the ceiling — this test proves nothing",
@@ -1387,7 +1405,7 @@ mod tests {
         let fs = fs.mount();
 
         crate::alloc_probe::take_peak();
-        let listed = fs.list(limit);
+        let listed = fs.list(limit, &|_| true);
         let peak = crate::alloc_probe::take_peak();
 
         // Asserted first: the allocation is the harm, before any return value.
@@ -1402,8 +1420,18 @@ mod tests {
         }
 
         // The legal case the bound must not take with it.
-        let all = fs.list(count).expect("list with room");
+        let all = fs.list(count, &|_| true).expect("list with room");
         assert_eq!(all.len(), count, "a listing with room came back short");
+
+        // What `keep` bounds is the kept set, so one directory in a volume
+        // past the ceiling still lists.
+        let mut fs = fs.into_formatted();
+        fs.create("d/only", &[], 0).expect("create");
+        let fs = fs.mount();
+        let listed = fs
+            .list(limit, &|name| name == "d" || name.starts_with("d/"))
+            .expect("one directory in an over-full volume");
+        assert_eq!(listed.len(), 1, "listing d/ returned {listed:?}");
     }
 
     #[test]
@@ -1541,5 +1569,41 @@ mod tests {
         let (back, size) = fs.file_extents("shrink.bin").expect("file_extents").expect("present");
         assert_eq!(size, 0);
         assert!(back.is_empty(), "an emptied extent list kept blocks: {back:?}");
+    }
+
+    /// A block allocated only to bridge a gap is a hole, and a hole reads zero.
+    ///
+    /// `set_free` walks `next_alloc` down to whatever it just freed, so the
+    /// blocks a shrink gave back are the first ones the next allocation takes:
+    /// a gap bridged with them serves that file's own discarded tail.
+    #[test]
+    fn a_block_allocated_to_bridge_a_gap_reads_as_zeros() {
+        let mut fs = Formatted::format(VecBlockIO::new(64)).expect("format").mount();
+        fs.create("gap.bin", b"", 1).expect("create");
+
+        let mut stamped = BlockBuf::zeroed();
+        stamped.0.fill(0xA7);
+        let mut extents = Vec::new();
+        for page in 0..3u32 {
+            let block = fs.resolve_or_alloc_block(&mut extents, page).expect("allocate");
+            fs.io.write_block(BlockNum::new(block), &stamped).expect("stamp");
+        }
+        let first = extents[0].start_block;
+        fs.free_extents(&[Extent { start_block: first + 1, block_count: 2, _reserved: 0 }])
+            .expect("give the tail back");
+
+        // The shrunk list, then a write that reaches page 2 again: page 1 is
+        // the gap, and the allocator answers with the blocks just freed.
+        let mut short = vec![Extent { start_block: first, block_count: 1, _reserved: 0 }];
+        let target = fs.resolve_or_alloc_block(&mut short, 2).expect("allocate through the gap");
+        assert_eq!(target, first + 2, "the allocator did not reuse the freed tail");
+        let gap = block_for(&short, 1).expect("page 1 resolves");
+        assert_eq!(gap, first + 1, "page 1 is not the block the shrink freed");
+
+        let mut buf = BlockBuf::zeroed();
+        fs.io.read_block(BlockNum::new(gap), &mut buf).expect("read the gap block");
+        if let Some(at) = buf.0.iter().position(|&b| b != 0) {
+            panic!("the gap block holds {:#04x} at byte {at}, not zero", buf.0[at]);
+        }
     }
 }

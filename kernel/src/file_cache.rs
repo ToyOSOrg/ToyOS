@@ -41,6 +41,10 @@ struct CachedFile {
     teardown_owed: bool,
     /// The file, not any one handle, owes a flush; settled only by [`settle_file`] on a flush that succeeded.
     dirt: Owed,
+    /// The smallest size a shrink has taken this file to since the last settled
+    /// metadata write; `None` when none has. Everything at or above it was
+    /// discarded, so a page missing from here is zeros and never the backing's.
+    shrunk_to: Option<u64>,
 }
 
 impl CachedFile {
@@ -95,6 +99,7 @@ pub fn create_file(evictable: bool) -> FileId {
         deleted: false,
         teardown_owed: false,
         dirt: Owed::new(),
+        shrunk_to: None,
     });
     id
 }
@@ -221,6 +226,11 @@ pub fn finish_writeback(file_id: FileId) -> Teardown {
     Teardown::Released
 }
 
+/// Whether a shrink discarded this page, so the backing's copy is no longer the file's.
+fn discarded(file: &CachedFile, page_idx: u32) -> bool {
+    file.shrunk_to.is_some_and(|mark| page_idx as u64 * PAGE_SIZE as u64 >= mark)
+}
+
 /// Read a file page into `buf`; on `Err` the fetch failed and `buf` holds zeros, not the file's bytes.
 pub fn read_page(
     file_id: FileId,
@@ -246,7 +256,7 @@ pub fn read_page(
             copy_page_region_to_buf(&page.data[..], offset, buf, avail);
             return Ok(());
         }
-        backing = file.backing.clone();
+        backing = if discarded(file, page_idx) { None } else { file.backing.clone() };
     }
     // Cache miss: unlock, fetch from backing, re-lock, insert if still absent.
 
@@ -297,6 +307,8 @@ pub fn write_page<S: ByteSource + ?Sized>(
             if file.pages.contains_key(&page_idx) {
                 apply_write(file, page_idx, offset, data);
                 backing = None;
+            } else if discarded(file, page_idx) {
+                backing = Some(None);
             } else {
                 backing = Some(file.backing.clone());
             }
@@ -370,6 +382,8 @@ pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) 
 pub struct FlushPlan {
     pub file: Settlement,
     pub pages: BTreeSet<u32>,
+    /// What the mount has to give back before this flush's pages land on top of it.
+    pub shrunk_to: Option<u64>,
 }
 
 pub fn begin_flush(file_id: FileId) -> FlushPlan {
@@ -378,8 +392,13 @@ pub fn begin_flush(file_id: FileId) -> FlushPlan {
         Some(file) => FlushPlan {
             file: file.dirt.snapshot(),
             pages: file.pages.iter().filter(|(_, p)| p.is_dirty()).map(|(&i, _)| i).collect(),
+            shrunk_to: file.shrunk_to,
         },
-        None => FlushPlan { file: Owed::new().snapshot(), pages: BTreeSet::new() },
+        None => FlushPlan {
+            file: Owed::new().snapshot(),
+            pages: BTreeSet::new(),
+            shrunk_to: None,
+        },
     }
 }
 
@@ -407,6 +426,15 @@ pub fn settle_file(file_id: FileId, upto: Settlement) {
     }
 }
 
+/// Clear the shrink mark: the mount has given the tail back, so nothing above it
+/// is named any more and a second trim would free what the flush then writes.
+/// Sound without a generation because every shrink runs under the VFS lock a flush holds.
+pub fn settle_shrink(file_id: FileId) {
+    if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {
+        file.shrunk_to = None;
+    }
+}
+
 /// Get the authoritative file size.
 pub fn size(file_id: FileId) -> u64 {
     FILE_CACHE.lock().files.get(&file_id).map_or(0, |f| f.size)
@@ -416,17 +444,139 @@ pub fn size(file_id: FileId) -> u64 {
 pub fn set_size(file_id: FileId, new_size: u64) {
     let mut cache = FILE_CACHE.lock();
     set_size_locked(&mut cache, file_id, new_size);
+    if let Some(file) = cache.files.get_mut(&file_id) {
+        file.shrunk_to = None;
+    }
 }
 
 /// A user truncate: [`set_size`], plus marks the file dirty even when no page changed.
 /// The `&mut Vfs` is the witness: every flusher's size-read/`update_metadata`
 /// pair runs under the VFS lock, so a resize outside it could record a stale size.
-pub fn resize(_vfs: &mut crate::vfs::Vfs, file_id: FileId, new_size: u64) {
+/// `Err` is the straddled page unreadable, with nothing resized.
+pub fn resize(
+    _vfs: &mut crate::vfs::Vfs,
+    file_id: FileId,
+    new_size: u64,
+) -> Result<(), block::BlockError> {
+    // Fetched outside the lock because it is a device read, and admitted below
+    // under the same hold that spends it: a page admitted and released again is
+    // clean and unreferenced, which is what a sweep takes at or after its hand —
+    // and `sys_read`/`sys_write` sweep holding no VFS lock, so they run here.
+    let straddled = straddled_by_shrink(file_id, new_size);
+    #[cfg(feature = "boot-actuators")]
+    if straddled.is_some() && refuse_fault(new_size) {
+        return Err(block::BlockError::Device);
+    }
+    let fetched = match straddled {
+        Some(page_idx) => fetch_page(file_id, page_idx)?.map(|page| (page_idx, page)),
+        None => None,
+    };
+    #[cfg(feature = "boot-actuators")]
+    swept_fault_window(file_id, fetched.as_ref().map(|&(idx, _)| idx));
+
     let mut cache = FILE_CACHE.lock();
+    if let Some((page_idx, page)) = fetched {
+        admit_locked(&mut cache, file_id, page_idx, page);
+    }
+    let shrank = cache.files.get(&file_id).is_some_and(|f| new_size < f.size);
     set_size_locked(&mut cache, file_id, new_size);
     if let Some(file) = cache.files.get_mut(&file_id) {
         file.dirt.record_write();
+        if shrank {
+            file.shrunk_to = Some(file.shrunk_to.map_or(new_size, |mark| mark.min(new_size)));
+        }
     }
+    // Safe on the page just admitted: `set_size_locked` dirtied it, and
+    // `evict_one` never takes a dirty page.
+    evict_if_needed(&mut cache);
+    Ok(())
+}
+
+/// The `resize-fault-refuse` actuator: the device read a shrink makes for its
+/// straddled page, refused. Keyed on the staged length, so no other shrink in
+/// the boot can spend it.
+#[cfg(feature = "boot-actuators")]
+fn refuse_fault(new_size: u64) -> bool {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/writeback_durability.rs`.
+    const STAGED: u64 = 133;
+    let refuse = crate::actuator::resize_fault_refuse() && new_size == STAGED;
+    if refuse {
+        log!("file cache: resize-fault-refuse: refusing the straddled read of a shrink to {STAGED}");
+    }
+    refuse
+}
+
+/// The `resize-evict-window` actuator: one other CPU's CLOCK sweep, landing in
+/// the window between the fault's device read and the lock that spends it.
+#[cfg(feature = "boot-actuators")]
+fn swept_fault_window(file_id: FileId, page_idx: Option<u32>) {
+    let Some(page_idx) = page_idx.filter(|_| crate::actuator::resize_evict_window()) else {
+        return;
+    };
+    let mut cache = FILE_CACHE.lock();
+    let mut taken = false;
+    if let Some(file) = cache.files.get_mut(&file_id) {
+        let is_cache = file.is_cache();
+        if file.pages.get(&page_idx).is_some_and(|p| !p.is_dirty()) {
+            file.pages.remove(&page_idx);
+            taken = is_cache;
+        }
+    }
+    cache.cached_pages -= usize::from(taken);
+    drop(cache);
+    log!("file cache: resize-evict-window swept page {page_idx} of file {file_id}: took it = {taken}");
+}
+
+/// The page a shrink to `new_size` would cut in half and does not hold.
+///
+/// [`set_size_locked`] can only zero and dirty a *resident* page, and
+/// [`discarded`] cannot cover this one: it is partly still the file's.
+fn straddled_by_shrink(file_id: FileId, new_size: u64) -> Option<u32> {
+    if new_size.is_multiple_of(PAGE_SIZE as u64) {
+        return None;
+    }
+    let idx = (new_size / PAGE_SIZE as u64) as u32;
+    let cache = FILE_CACHE.lock();
+    let file = cache.files.get(&file_id)?;
+    (new_size < file.size && !file.pages.contains_key(&idx) && file.backing.is_some())
+        .then_some(idx)
+}
+
+/// Read `page_idx` through the backing, holding no lock across the device.
+/// `None` is nothing to admit: the page arrived, or the mark now covers it.
+fn fetch_page(
+    file_id: FileId,
+    page_idx: u32,
+) -> Result<Option<Box<[u8; PAGE_SIZE]>>, block::BlockError> {
+    let backing = {
+        let cache = FILE_CACHE.lock();
+        let Some(file) = cache.files.get(&file_id) else { return Ok(None) };
+        if file.pages.contains_key(&page_idx) || discarded(file, page_idx) {
+            return Ok(None);
+        }
+        file.backing.clone()
+    };
+    let mut fetched = blank_page();
+    if let Some(backing) = &backing {
+        backing.read_page(page_idx as u64 * PAGE_SIZE as u64, &mut fetched)?;
+    }
+    Ok(Some(fetched))
+}
+
+/// Insert a fetched page if the file still wants it, under the caller's lock.
+/// Re-checked here because the fetch above released the lock across a device read.
+fn admit_locked(cache: &mut FileCache, file_id: FileId, page_idx: u32, page: Box<[u8; PAGE_SIZE]>) {
+    let mut added = 0;
+    if let Some(file) = cache.files.get_mut(&file_id) {
+        let is_cache = file.is_cache();
+        if !discarded(file, page_idx) {
+            if let Entry::Vacant(slot) = file.pages.entry(page_idx) {
+                slot.insert(CachedPage::new(page));
+                added = usize::from(is_cache);
+            }
+        }
+    }
+    cache.cached_pages += added;
 }
 
 fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {

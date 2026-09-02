@@ -76,6 +76,6 @@ pub use boot::{Cluster, Geometry, MIN_FAT32_CLUSTERS};
 pub use device::{BlockAccess, IoError};
 pub use dir::MAX_DIR_ENTRIES;
 pub use error::Error;
-pub use fs::{DirEntry, Extent, Fat32, File, Metadata, Replaced};
+pub use fs::{DirEntry, Extent, Fat32, File, Metadata, ReplaceFailed, Replaced};
 pub use name::MAX_LFN_CHARS;
 pub use time::FatTime;

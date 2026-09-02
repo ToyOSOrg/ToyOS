@@ -468,7 +468,7 @@ pub fn mount_err<D: BlockAccess>(dev: D) -> toyos_fat32::Error {
 }
 
 pub fn sorted_walk<D: BlockAccess>(fs: &mut toyos_fat32::Fat32<D>) -> Vec<(String, u64)> {
-    let mut v = fs.walk(4096).expect("walk");
+    let mut v = fs.walk("", 4096).expect("walk");
     v.sort();
     v
 }

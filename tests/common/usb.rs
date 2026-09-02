@@ -43,6 +43,17 @@ fn pattern(nonce: u64, block: u64, i: usize) -> u8 {
     n ^ b.wrapping_mul(37) ^ (i as u8).wrapping_mul(101)
 }
 
+/// FNV-1a, mirrored byte-for-byte from `kernel/src/usb_gate.rs`: the guest's
+/// comparator says a block matched, and this says which bytes it read.
+fn digest(buf: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in buf {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 fn block_of(blocks: u64, index: i64) -> u64 {
     if index >= 0 {
         index as u64
@@ -266,6 +277,26 @@ pub fn usb_storage_gate(
              refused as a fact about the disk\n{log}"
         ));
     }
+    // What the guest read, and not that it approved of it: `first_bad` is one
+    // in-guest comparator, and this is the same bytes hashed off the image.
+    let mut staged = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&image)
+        .expect("open the USB image to digest");
+    for index in HOST_BLOCKS {
+        let block = block_of(bytes / BLOCK, index);
+        let want = digest(&read_block(&mut staged, block));
+        let line = format!("usb-gate: host block {block} verified digest={want:#018x}");
+        if !log.contains(&line) {
+            return Err(format!(
+                "the guest did not report {line:?}; what it read is not what the image holds, \
+                 whatever its own comparator said\n{log}"
+            ));
+        }
+    }
+    drop(staged);
+
     verify(&image, bytes, nonce)?;
     serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
     let _ = std::fs::remove_file(&image);
@@ -300,6 +331,48 @@ pub fn usb_storage_gate(
     }
     let _ = std::fs::remove_file(&foreign);
 
+    // The stamp's *geometry* guard, which nothing staged before this: a stamp
+    // written for another block count makes every offset in it name another block.
+    let blocks = bytes / BLOCK;
+    let claimed = blocks + 1;
+    let mis_stamped = test_dir().join("usb-gate-misstamped.img");
+    stage(&mis_stamped, bytes);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&mis_stamped)
+            .expect("open the mis-stamped image");
+        let mut head = read_block(&mut file, 0);
+        head[AT_BLOCKS..AT_BLOCKS + 8].copy_from_slice(&claimed.to_le_bytes());
+        write_block(&mut file, 0, &head);
+        file.sync_all().expect("sync the mis-stamped image");
+    }
+    let before = fingerprint(&mis_stamped, bytes);
+    let log = boot_and_shutdown(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::UsbDisk,
+            kernel_params: GATE,
+            usb_images: vec![mis_stamped.clone()],
+            ..Default::default()
+        },
+    )?;
+    gate_ran(&log, 2)?;
+    let refusal = format!("is stamped for {claimed} blocks and has {blocks}");
+    if !log.contains(&refusal) {
+        return Err(format!("the gate did not refuse a stamp for {claimed} blocks\n{log}"));
+    }
+    if log.contains(" designated, blocks=") {
+        return Err(format!("the gate claimed a disk whose stamp is for another one\n{log}"));
+    }
+    if fingerprint(&mis_stamped, bytes) != before {
+        return Err("the guest wrote to a disk whose stamp is for another geometry".to_string());
+    }
+    let _ = std::fs::remove_file(&mis_stamped);
+
     // And absence. The claim is about the bus, so it is checked against argv:
     // no console line can tell "the driver bound one disk" from "only one disk
     // was ever attached".
@@ -322,8 +395,9 @@ pub fn usb_storage_gate(
         return Err(format!("the driver did not bind exactly the boot stick\n{log}"));
     }
 
-    eprintln!("  [usb] {bytes} B / {lba} B sectors: host bytes read, guest bytes verified \
-               host-side; unstamped disk untouched; one disk on metal-sim");
+    eprintln!("  [usb] {bytes} B / {lba} B sectors: host bytes read and their digests \
+               recomputed host-side, guest bytes verified host-side; unstamped and \
+               mis-stamped disks untouched; one disk on metal-sim");
     Ok(())
 }
 
