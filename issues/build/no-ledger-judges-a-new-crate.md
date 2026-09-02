@@ -6,16 +6,35 @@ opened: 2026-09-01
 
 # A crate arriving in this tree is judged by nobody
 
-Part of two of the dependency bar's clauses is now measured: `src/sourcegate.rs`
-reds on an undeclared `Command::new` argument in **Rust** host code, and on an
-undeclared committed file that is either not text or under `assets/`. Two halves
-of those two clauses are not built and are
-`issues/build/nothing-reads-the-workflows-for-a-binary.md` and
-`issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md`. The third
-clause has nothing at all. *"Only general and widely used crates --- one that
-does our job we write ourselves, and a driver crate never"* (`CLAUDE.md`,
-"Dependencies") is a rule about arrivals, and a crate still arrives with nobody
-asked.
+**What `src/sourcegate.rs` closes, stated as what it closes.** Two scans landed
+and each is a spelling, not a rule:
+
+- `every_binary_the_host_runs_is_declared` refuses an undeclared argument to the
+  text `Command::new(` in host Rust, with every non-literal argument pinned to a
+  file and a count. Beside it, a **one-line** `use`/`type` rename of `Command`,
+  after any visibility, is refused.
+- `every_committed_binary_file_is_declared` refuses an undeclared committed file
+  that carries a NUL in its first 8000 bytes, plus anything under `assets/`.
+
+Everything else the two clauses asked for is an entry, not a silence:
+`nothing-reads-the-workflows-for-a-binary.md`,
+`the-third-party-corpus-is-in-no-machine-read-ledger.md`,
+`the-one-line-alias-rule-does-not-reach-a-brace-group.md` and
+`a-spawn-that-is-not-command-is-in-no-ledger.md`. A text scan over Rust source
+cannot be hardened into a rule — three rounds of one-token variants said so —
+and the exit named in those entries is one scan that resolves names the way the
+compiler does.
+
+**One hole is inside the gate's own table rather than in the language.** A
+`Spawn::sites` row naming a file that does not exist, at count 0, satisfies both
+directions of the site check and admits nothing and refuses nothing — measured
+2026-09-02, green. It is one `assert` away from closed and is left here so the
+next reader can spend it deliberately.
+
+The third clause has nothing at all. *"Only general and widely used crates ---
+one that does our job we write ourselves, and a driver crate never"*
+(`CLAUDE.md`, "Dependencies") is a rule about arrivals, and a crate still
+arrives with nobody asked.
 
 The shape that was proposed on 2026-08-08 and never built: a committed file
 naming every third-party crate the tree may resolve, with a one-line reason,

@@ -9,8 +9,15 @@ opened: 2026-09-01
 `src/sourcegate.rs`'s `every_binary_the_host_runs_is_declared` reads every
 `Command::new` argument in host Rust and refuses one no row declares. The clause
 it half-closes was written over *"every `.rs` file **and every
-`.github/workflows/*.yml`**"*, and the second half is not built. Nothing reads a
-workflow, a composite action or a container recipe for a binary.
+`.github/workflows/*.yml`**"*, and the second half is not built.
+
+**Something does read them, and it is not this.** `src/ci.rs` reads the gate
+workflows for the lines that install QEMU (`every_gate_that_boots_a_guest_installs_from_the_snapshot`,
+`every_gate_that_boots_a_guest_names_its_instrument`) and reads
+`.github/ci-image/Dockerfile` itself for the snapshot date
+(`every_snapshot_url_names_the_declared_date`). What none of them does is hold
+what a workflow or an image installs against a ledger of declared binaries: they
+check one package's provenance, not the set.
 
 What that misses today, and it is not hypothetical:
 `.github/ci-image/Dockerfile` installs `build-essential`, `ca-certificates`,

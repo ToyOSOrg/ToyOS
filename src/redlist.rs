@@ -2251,6 +2251,26 @@ pub const KNOWN_RED: &[Red] = &[
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
         standing: Standing::Stands,
+        what: "`the close probe exited Some(1)`, and the probe's own line: `log-close: FAILED: \
+               the poll outlived the close and then never completed on a record either, so what \
+               it outlived may have been its own arming`. `ALONE … GREEN`, so the harness \
+               classifies it as `Sched::Parallel` and the run stays red on that. **A second row \
+               under this name and not a correction of the first**: the row above is a \
+               `DOUBLE PANIC` and nothing disputes it, while this is the probe returning a \
+               verdict the guest survived. It also spends the other row's retirement clause — \
+               `three loaded suites of the fixed tree with no red under this name` — because \
+               this loaded suite went red under it",
+        evidence: "one full `cargo test` on the dev host 2026-09-01, `w5b5-host-build` at \
+                   2617bab9, host at 1.05x width; 300 passed, 1 failed, 301 total (396.3s), and \
+                   the harness's own `ALONE` re-run green",
+        source: "issues/panic-path/a-double-panic-at-boots-edge-says-nothing-but-its-name.md",
+        measured: "2026-09-01",
+    },
+    Red {
+        test: "log_poll_outlives_a_close",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
         what: "`kernel panic: DOUBLE PANIC — the guest went quiet because every CPU is halted, \
                not because it was still working. The panic is the finding and the guard never \
                got to be one`. The kernel's complete last words were `[kernel 0.991 cpu0] DOUBLE \
@@ -2577,6 +2597,23 @@ pub const KNOWN_RED: &[Red] = &[
     // A rate on a shared shard, adjudicated here rather than re-run away. Not
     // the typing family: it shares a day and an `ALONE: GREEN` with the two
     // rows above and nothing else.
+    Red {
+        test: "poll_wake_pipe",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`the 300 rounds took 3.010175191s, past the 3s bound` — the row above's own \
+               message, 10.2 ms over where CI was 7.2 ms over, and `ALONE … GREEN`. **A second \
+               instrument and not a second defect**: the row above is `Instrument::Ci`, which \
+               sees one guest per machine, so it could not have said whether a loaded dev host \
+               produces the same overshoot. It does, at 1.02x width, which is a quiet host — so \
+               the bound is not a contention ceiling either",
+        evidence: "one full `cargo test` on the dev host 2026-09-02, `w5b5-host-build` at \
+                   71f25c0a, `fastest boot 1353 ms against the reference 1320 ms`; 299 passed, \
+                   1 failed, 300 total (214.9s)",
+        source: "issues/build/poll-wake-pipe-bound-is-a-host-of-the-day-number.md",
+        measured: "2026-09-02",
+    },
     Red {
         test: "poll_wake_pipe",
         instrument: Instrument::Ci,
