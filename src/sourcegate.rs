@@ -17,6 +17,9 @@
 //! lifetime out of its `Arc`'s hands — `Arc::into_raw`, `Arc::from_raw`, the
 //! two strong-count adjusters — and `mem::forget`. It runs in
 //! `cargo test --lib`, on every machine that builds this tree, in milliseconds.
+//! Beside the counts it refuses a one-line `use … as …` of a name those
+//! needles spell, because one such line puts every row that names it out of
+//! reach at once; that is the whole of the spelling it closes.
 //!
 //! The exceptions are per file and per line count, so an *added* `forget`
 //! beside a permitted one is a red rather than a silence.
@@ -569,6 +572,10 @@ const HOST_SPAWNS: &[Spawn] = &[
 const NO_COMMAND_ALIAS: &str =
     "a renamed `Command` spawns past the scan that reads the text `Command::new(`";
 
+/// The refusal `nothing_in_the_kernel_counts_a_reference_by_hand` prints.
+const NO_BAN_ALIAS: &str = "these trees may not count a reference by hand, and a one-line \
+                            rename of a name the bans spell hides every row that names it";
+
 
 /// Every committed file whose terms somebody had to establish, with the digest
 /// of what is committed and where the terms are recorded.
@@ -708,6 +715,23 @@ fn is_binary(bytes: &[u8]) -> bool {
 #[cfg(test)]
 const NOT_OURS: &str = "rust";
 
+/// `code` with any visibility on the front of it removed, so that the item it
+/// begins with is the first word.
+#[cfg(test)]
+fn after_visibility(code: &str) -> &str {
+    let code = code.trim_start();
+    let Some(rest) = code.strip_prefix("pub") else { return code };
+    let rest = match rest.strip_prefix('(') {
+        Some(group) => group.split_once(')').map_or("", |(_, after)| after),
+        None => rest,
+    };
+    if rest.starts_with(char::is_whitespace) {
+        rest.trim_start()
+    } else {
+        code
+    }
+}
+
 /// Whether `code` renames `std::process::Command` on one line, after any
 /// visibility on the front of it.
 ///
@@ -717,18 +741,49 @@ const NOT_OURS: &str = "rust";
 /// is what it does not reach.
 #[cfg(test)]
 fn renames_command(code: &str) -> bool {
-    let mut code = code.trim_start();
-    if let Some(rest) = code.strip_prefix("pub") {
-        let rest = match rest.strip_prefix('(') {
-            Some(group) => group.split_once(')').map_or("", |(_, after)| after),
-            None => rest,
-        };
-        if rest.starts_with(char::is_whitespace) {
-            code = rest.trim_start();
-        }
-    }
+    let code = after_visibility(code);
     (code.starts_with("use ") && code.contains("Command as "))
         || (code.starts_with("type ") && code.contains("Command"))
+}
+
+/// Whether `code` is a one-line `use` that renames `item`, after any
+/// visibility — **exactly one spelling and no other**. A brace group, a
+/// multi-line `use`, a plain re-import and a `type` alias all walk past it,
+/// and `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+/// carries them with the exit condition. The `type` half of `renames_command`
+/// is deliberately absent: `type PageTables = Arc<…>` is ordinary here.
+#[cfg(test)]
+fn use_renames(code: &str, item: &str) -> bool {
+    let code = after_visibility(code);
+    if !code.starts_with("use ") {
+        return false;
+    }
+    let mark = format!("{item} as ");
+    let bytes = code.as_bytes();
+    code.match_indices(&mark).any(|(at, _)| {
+        !at.checked_sub(1)
+            .and_then(|j| bytes.get(j))
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    })
+}
+
+/// Every identifier a path needle above spells: the names one rename hides the
+/// whole table behind.
+#[cfg(test)]
+fn banned_path_names() -> std::collections::BTreeSet<&'static str> {
+    let ident = |s: &str| {
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !s.starts_with(|c: char| c.is_ascii_digit())
+    };
+    let mut out = std::collections::BTreeSet::new();
+    for ban in BANS {
+        let parts: Vec<&str> = ban.needle.split("::").collect();
+        if parts.len() > 1 && parts.iter().all(|p| ident(p)) {
+            out.extend(parts);
+        }
+    }
+    out
 }
 
 /// Every path a `build = "…"` key names, repository-relative.
@@ -1007,8 +1062,13 @@ mod tests {
         );
     }
 
+    /// The bans are text, so a one-line `use … as …` of a name one of them
+    /// spells takes every row that names it out of reach at once, and is
+    /// refused here beside the counts. `use_renames` says what it does not
+    /// reach.
     #[test]
     fn nothing_in_the_kernel_counts_a_reference_by_hand() {
+        let root = repo_root();
         let mut complaints = Vec::new();
         for ban in BANS {
             for (file, count) in occurrences(ban.needle) {
@@ -1025,7 +1085,45 @@ mod tests {
                 }
             }
         }
-        assert!(complaints.is_empty(), "{NO_COMMAND_ALIAS}:\n{}", complaints.join("\n"));
+
+        let names = banned_path_names();
+        assert!(names.contains("Arc") && names.contains("forget"), "{names:?}");
+        let mut files = Vec::new();
+        for tree in TREES {
+            rust_files(&root.join(tree), &mut files);
+        }
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (n, line) in text.lines().enumerate() {
+                let code = code_only(line);
+                for item in &names {
+                    if use_renames(&code, item) {
+                        complaints.push(format!(
+                            "{}:{}: renames `{item}` — {}",
+                            rel(&root, &path),
+                            n + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(complaints.is_empty(), "{NO_BAN_ALIAS}:\n{}", complaints.join("\n"));
+    }
+
+    /// What the rename scan reads, stated as cases, including the two shapes it
+    /// deliberately lets past.
+    #[test]
+    fn the_rename_scan_reads_one_line_after_visibility() {
+        assert!(use_renames("use alloc::sync::Arc as A;", "Arc"));
+        assert!(use_renames("pub use core::mem as m;", "mem"));
+        assert!(use_renames("pub(crate) use core::mem::forget as leak;", "forget"));
+        assert!(!use_renames("use alloc::sync::Arc;", "Arc"));
+        // A longer name that ends in the guarded one is a different name.
+        assert!(!use_renames("use crate::PageArc as A;", "Arc"));
+        // Neither reached, and both are the filed weakness rather than a claim.
+        assert!(!use_renames("    Arc as A,", "Arc"));
+        assert!(!use_renames("type PageTables = Arc<Lock<AddressSpace>>;", "Arc"));
     }
 
     /// Both directions: a resurrected early enable reds, and so does a stale row.

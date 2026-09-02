@@ -40,5 +40,17 @@ that `Cmd2::new("…")` and `Command::new("…")` are the same call to it. A
 replaces the text scan rather than adding to it, and takes
 `issues/build/a-spawn-that-is-not-command-is-in-no-ledger.md` with it.
 
-Until then the rule closes the one-line form and the module header and the test
-doc say exactly that.
+**Two gates now, not one.**
+`src/sourcegate.rs`'s `nothing_in_the_kernel_counts_a_reference_by_hand` refuses
+the same shape over `kernel/src` and `toyos-sched/src`, for the names its ban
+table spells — `Arc`, `mem`, `forget`, the two strong-count adjusters and the
+two raw-pointer converters — because one `use alloc::sync::Arc as A;` hides
+every row in that table at once. It closes the one-line `use … as …` after
+visibility and nothing else: a brace group, a multi-line `use`, a plain
+re-import (`use core::mem::forget;` then `forget(x)`) and a `type` alias all
+walk past it. The `type` half is deliberately absent there — `type PageTables =
+Arc<…>` is ordinary and `kernel/src/process.rs:43` writes one — so
+`PageTables::increment_strong_count` is a spelling neither gate reads.
+
+Until then the rules close the one-line form and the module headers and the test
+docs say exactly that.
