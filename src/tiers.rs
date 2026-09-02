@@ -1153,6 +1153,20 @@ pub const RELEGATED: &[Relegated] = &[
                  with 565 ms of test, so what would return this name is the boot's cost and \
                  nothing in the test.",
     },
+    Relegated {
+        test: "writeback_durability",
+        ci_ms: 8_888,
+        why: Why::Cost,
+        guards: "The shrink's device-side witnesses, each read off the raw volume by a second \
+                 FAT reader and `toyos-fat32-check`: a shrunk page the cache does not hold reads \
+                 back as zeros, a flush retried after a refused metadata write keeps the page \
+                 written above the mark, and a refused straddled-page fault refuses the \
+                 truncate. What still runs per pull request: `fs_transactional` asserts the \
+                 same POSIX rule in memory on both mounts and the bcachefs gap-block zeroing; \
+                 `writeback_reopen` and `writeback_spawn` cover backing derivation. The three \
+                 device-side arms have no other gate. Priced at 5,883 ms with two arms; 8,888 \
+                 with five, over `FAST_COMMIT_MS`.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own

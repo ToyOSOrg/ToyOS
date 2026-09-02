@@ -152,6 +152,35 @@ impl Replaced {
     }
 }
 
+/// A replacing rename that did not commit.
+///
+/// `stranded` is the whole reason this is not a bare [`Error`]: a rollback that
+/// fails too leaves the destination alive under a staging name that nothing on
+/// the volume records and no fsck pass can see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceFailed {
+    /// What refused the move of the source onto the destination.
+    pub cause: Error,
+    /// The staging name the destination is still under, or `None` when the
+    /// rollback put it back where it was.
+    pub stranded: Option<String>,
+}
+
+impl From<Error> for ReplaceFailed {
+    fn from(cause: Error) -> Self {
+        ReplaceFailed { cause, stranded: None }
+    }
+}
+
+impl core::fmt::Display for ReplaceFailed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self.stranded {
+            Some(name) => write!(f, "{}; the destination is under {name}", self.cause),
+            None => self.cause.fmt(f),
+        }
+    }
+}
+
 fn components(path: &str) -> impl Iterator<Item = &str> {
     path.split('/').filter(|c| !c.is_empty())
 }
@@ -342,24 +371,49 @@ impl<D: BlockAccess> Fat32<D> {
         Ok(out)
     }
 
-    /// Every file in the volume, as a path relative to the root, paired with
-    /// its size.
+    /// Every file at or under `under` — `""` for the volume root — as a path
+    /// relative to the root, paired with its size.
     ///
     /// A directory appears as its own entry — the path with a trailing `/`
     /// and size 0 — as well as a prefix on the paths inside it, so an empty
     /// directory is a visible entry rather than an absence ToyOS's VFS
-    /// `list` cannot tell from a name that was never there.
+    /// `list` cannot tell from a name that was never there. `under` is
+    /// descended to, not filtered for, so `limit` bounds that directory's
+    /// subtree and never the volume.
     ///
     /// Iterative, with a visited set of directory clusters and a depth bound,
     /// because the tree is on-disk data and a crafted volume can make it a
     /// graph. `limit` bounds files and directories alike; either exceeding it
     /// abandons the whole listing.
-    pub fn walk(&mut self, limit: usize) -> Result<Vec<(String, u64)>, Error> {
+    pub fn walk(&mut self, under: &str, limit: usize) -> Result<Vec<(String, u64)>, Error> {
         let mut out = Vec::new();
         let mut visited = BTreeSet::new();
         let mut queue: Vec<(Cluster, String, usize)> = Vec::new();
-        queue.push((self.geom.root(), String::new(), 0));
-        visited.insert(self.geom.root());
+
+        let (start, start_prefix) = if under.is_empty() {
+            (self.geom.root(), String::new())
+        } else {
+            let node = self.resolve(under)?;
+            // Before the cluster is asked for: an empty file's first cluster is
+            // `None`, which is what having no data looks like and not a corrupt
+            // directory.
+            if !node.raw.is_dir() {
+                if limit == 0 {
+                    return Err(Error::LimitExceeded);
+                }
+                return Ok(vec![(String::from(under), node.raw.size() as u64)]);
+            }
+            let first = node.first_cluster.ok_or(Error::CorruptDirectory)?;
+            let mut prefix = String::from(under);
+            prefix.push('/');
+            if limit == 0 {
+                return Err(Error::LimitExceeded);
+            }
+            out.push((prefix.clone(), 0));
+            (first, prefix)
+        };
+        queue.push((start, start_prefix, 0));
+        visited.insert(start);
 
         while let Some((cluster, prefix, depth)) = queue.pop() {
             let mut scan = DirScan::new(cluster);
@@ -900,7 +954,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// The staged name costs four directory entries, claimed in `to`'s directory
     /// before anything is freed: an overwrite refuses on a full directory or
     /// volume where freeing the destination first would have made its own room.
-    pub fn replace_rename(&mut self, from: &str, to: &str) -> Result<Replaced, Error> {
+    pub fn replace_rename(&mut self, from: &str, to: &str) -> Result<Replaced, ReplaceFailed> {
         if !self.exists(to)? {
             self.rename(from, to)?;
             return Ok(Replaced { temporary: None });
@@ -909,8 +963,12 @@ impl<D: BlockAccess> Fat32<D> {
         let temporary = self.replacement_temporary(to)?;
         self.rename(to, &temporary)?;
         if let Err(cause) = self.rename(from, to) {
-            let _ = self.rename(&temporary, to);
-            return Err(cause);
+            // The restore is the only thing that can put `to` back, so discarding
+            // its failure leaves a destination nothing can name.
+            return Err(match self.rename(&temporary, to) {
+                Ok(()) => ReplaceFailed { cause, stranded: None },
+                Err(_) => ReplaceFailed { cause, stranded: Some(temporary) },
+            });
         }
         Ok(Replaced { temporary: Some(temporary) })
     }

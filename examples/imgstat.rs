@@ -80,7 +80,7 @@ fn main() {
             println!("      not a FAT32 volume");
             continue;
         };
-        let Ok(entries) = fs.walk(64) else {
+        let Ok(entries) = fs.walk("", 64) else {
             println!("      unreadable directory tree");
             continue;
         };
@@ -121,7 +121,7 @@ fn report_initrd(image: Vec<u8>) {
     let volume_bytes = image.len() as u64;
     let fs: Mounted<VecBlockIO, bcachefs::ReadOnly> =
         Mounted::open(VecBlockIO::from_vec(image)).expect("open the initrd's bcachefs");
-    let entries = fs.list(usize::MAX).expect("list the initrd");
+    let entries = fs.list(usize::MAX, &|_| true).expect("list the initrd");
 
     let mut groups: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
     let mut content = 0u64;

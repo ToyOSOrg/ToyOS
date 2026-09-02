@@ -86,6 +86,15 @@ actuators! {
     /// Refuse the first two FAT-1 mirror writes of a write-back drain flush; two, not one, because the retry ladder parks only at attempt 2.
     fat_mirror_write_refuse = "fat-mirror-write-refuse";
 
+    /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
+    fat_flush_meta_refuse = "fat-flush-meta-refuse";
+
+    /// Take the page a shrink has just read off the device, in the window between that read and the lock that spends it — one other CPU's CLOCK sweep, which needs no VFS lock and so runs there.
+    resize_evict_window = "resize-evict-window";
+
+    /// Refuse the device read a shrink makes for the page its new end falls inside, for one staged length only; the one failure on that path QEMU will not produce.
+    resize_fault_refuse = "resize-fault-refuse";
+
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
 

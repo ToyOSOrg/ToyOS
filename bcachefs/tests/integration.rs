@@ -7,7 +7,7 @@ fn format_and_mount_empty() {
     let io = VecBlockIO::new(128);
     let fs = Formatted::format(io).expect("format");
     let mounted = fs.mount_readonly();
-    let files = mounted.list(usize::MAX).expect("list failed");
+    let files = mounted.list(usize::MAX, &|_| true).expect("list failed");
     assert!(files.is_empty(), "expected empty filesystem, got {:?}", files);
 }
 
@@ -18,7 +18,7 @@ fn create_single_small_file() {
     fs.create("hello.txt", b"Hello, world!", 42).expect("create failed");
     let mounted = fs.mount_readonly();
 
-    let files = mounted.list(usize::MAX).expect("list failed");
+    let files = mounted.list(usize::MAX, &|_| true).expect("list failed");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0, "hello.txt");
     assert_eq!(files[0].1, 13);
@@ -40,7 +40,7 @@ fn create_multiple_files() {
 
     let mounted = fs.mount_readonly();
 
-    let files = mounted.list(usize::MAX).expect("list failed");
+    let files = mounted.list(usize::MAX, &|_| true).expect("list failed");
     assert_eq!(files.len(), 3, "expected 3 files, got: {:?}", files);
 
     assert_eq!(mounted.read_file("bin/shell").unwrap(), b"shell-binary-data");
@@ -99,7 +99,7 @@ fn list_includes_symlinks() {
     fs.create_symlink("link.txt", "file.txt", 0).expect("create symlink");
 
     let mounted = fs.mount_readonly();
-    let files = mounted.list(usize::MAX).expect("list");
+    let files = mounted.list(usize::MAX, &|_| true).expect("list");
     assert_eq!(files.len(), 2, "expected 2 entries (file + symlink), got: {:?}", files);
 
     let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
@@ -131,7 +131,7 @@ fn empty_file() {
     fs.create("empty", b"", 0).expect("create empty file");
 
     let mounted = fs.mount_readonly();
-    let files = mounted.list(usize::MAX).expect("list");
+    let files = mounted.list(usize::MAX, &|_| true).expect("list");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].0, "empty");
     assert_eq!(files[0].1, 0);
@@ -216,7 +216,7 @@ fn duplicate_filename_overwrites() {
     fs.create("test.txt", b"version 2", 20).expect("create v2");
 
     let mounted = fs.mount_readonly();
-    let files = mounted.list(usize::MAX).expect("list");
+    let files = mounted.list(usize::MAX, &|_| true).expect("list");
     assert_eq!(files.len(), 1, "duplicate filename should overwrite, not create second entry");
     assert_eq!(mounted.read_file("test.txt").unwrap(), b"version 2");
     assert_eq!(mounted.file_mtime("test.txt").expect("mtime").unwrap_or(0), 20);
@@ -278,7 +278,7 @@ fn many_files_with_large_data() {
     }
 
     let mounted = fs.mount_readonly();
-    let files = mounted.list(usize::MAX).expect("list");
+    let files = mounted.list(usize::MAX, &|_| true).expect("list");
     assert_eq!(files.len(), 50);
 
     for (name, data) in &expected {
@@ -312,10 +312,10 @@ fn mounted_readwrite_delete() {
 
     mounted.create("a.txt", b"aaa", 0).expect("create a");
     mounted.create("b.txt", b"bbb", 0).expect("create b");
-    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 2);
+    assert_eq!(mounted.list(usize::MAX, &|_| true).unwrap().len(), 2);
 
     assert!(mounted.delete("a.txt").expect("delete"));
-    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 1);
+    assert_eq!(mounted.list(usize::MAX, &|_| true).unwrap().len(), 1);
     assert!(mounted.read_file("a.txt").is_err());
     assert_eq!(mounted.read_file("b.txt").unwrap(), b"bbb");
 
@@ -334,7 +334,7 @@ fn mounted_readwrite_overwrite_file() {
     mounted.create("test.txt", b"version 2 is longer", 20).expect("create v2");
     assert_eq!(mounted.read_file("test.txt").unwrap(), b"version 2 is longer");
     assert_eq!(mounted.file_mtime("test.txt").expect("mtime").unwrap_or(0), 20);
-    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 1);
+    assert_eq!(mounted.list(usize::MAX, &|_| true).unwrap().len(), 1);
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn mounted_readwrite_double_roundtrip() {
 
     // Final read-only verification
     let m = Mounted::<_, ReadOnly>::open(VecBlockIO::from_vec(raw)).expect("reopen ro");
-    assert_eq!(m.list(usize::MAX).unwrap().len(), 2);
+    assert_eq!(m.list(usize::MAX, &|_| true).unwrap().len(), 2);
     assert_eq!(m.read_file("round1.txt").unwrap(), b"first round");
     assert_eq!(m.read_file("round2.txt").unwrap(), b"second round");
     assert_eq!(m.file_mtime("round1.txt").expect("mtime").unwrap_or(0), 10);
@@ -412,7 +412,7 @@ fn mounted_readwrite_overwrite_with_smaller_data() {
     // Overwrite with tiny data — should free the 10 blocks
     m.create("big.bin", b"tiny", 0).expect("overwrite with smaller");
     assert_eq!(m.read_file("big.bin").unwrap(), b"tiny");
-    assert_eq!(m.list(usize::MAX).unwrap().len(), 1);
+    assert_eq!(m.list(usize::MAX, &|_| true).unwrap().len(), 1);
 
     // The freed blocks should be reusable — create another large file
     let big2 = vec![0xCCu8; 40 * 1024];
@@ -526,7 +526,7 @@ fn format_mount_unmount_create_mount_roundtrip() {
 
     // Mount readonly, verify, unmount back to Formatted
     let mounted = fs.mount_readonly();
-    assert_eq!(mounted.list(usize::MAX).unwrap().len(), 1);
+    assert_eq!(mounted.list(usize::MAX, &|_| true).unwrap().len(), 1);
     assert_eq!(mounted.read_file("phase1.txt").unwrap(), b"created during format");
     fs = mounted.into_formatted();
 
@@ -535,7 +535,7 @@ fn format_mount_unmount_create_mount_roundtrip() {
 
     // Mount readonly again, verify both files exist
     let mounted = fs.mount_readonly();
-    let files = mounted.list(usize::MAX).unwrap();
+    let files = mounted.list(usize::MAX, &|_| true).unwrap();
     assert_eq!(files.len(), 2, "expected 2 files after round-trip, got: {:?}", files);
     assert_eq!(mounted.read_file("phase1.txt").unwrap(), b"created during format");
     assert_eq!(mounted.read_file("phase2.txt").unwrap(), b"created after round-trip");
@@ -637,7 +637,7 @@ fn runs(extents: &[bcachefs::Extent]) -> Vec<(u64, u32)> {
 
 /// Every name on the volume, sorted.
 fn names(fs: &Mounted<VecBlockIO, ReadWrite>) -> Vec<String> {
-    let mut names: Vec<String> = fs.list(usize::MAX).expect("list").into_iter().map(|(n, _)| n).collect();
+    let mut names: Vec<String> = fs.list(usize::MAX, &|_| true).expect("list").into_iter().map(|(n, _)| n).collect();
     names.sort();
     names
 }
@@ -775,7 +775,7 @@ fn a_file_renamed_onto_a_symlink_leaves_one_entry() {
 fn a_rename_with_no_source_touches_nothing() {
     let mut empty = Formatted::format(VecBlockIO::new(128)).expect("format").mount();
     assert!(matches!(empty.rename("a", "b"), Err(bcachefs::FsError::NotFound)));
-    assert!(empty.list(usize::MAX).expect("list").is_empty(), "a rename created an entry from nothing");
+    assert!(empty.list(usize::MAX, &|_| true).expect("list").is_empty(), "a rename created an entry from nothing");
 
     let mut fs = Formatted::format(VecBlockIO::new(128)).expect("format").mount();
     fs.create("bystander.bin", b"not part of this", 6).expect("create");
@@ -1084,7 +1084,7 @@ fn a_btree_node_the_device_refuses_is_not_a_node_of_zeros() {
     let root = u64::from_le_bytes(raw[24..32].try_into().unwrap());
 
     let fs = Mounted::<_, ReadOnly>::open(Refuses::read(raw, root)).expect("open");
-    match fs.list(usize::MAX) {
+    match fs.list(usize::MAX, &|_| true) {
         Err(FsError::DeviceRead(block, _)) => assert_eq!(block.raw(), root),
         other => panic!("expected DeviceRead, got {other:?}"),
     }

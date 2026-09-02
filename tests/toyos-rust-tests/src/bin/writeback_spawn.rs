@@ -29,11 +29,13 @@
 //! header and nothing after it.
 
 use std::fs;
+use std::io::Write;
 use std::process::Command;
 
 const DIR: &str = "/home/writeback_spawn";
 const IN_INITRD: &str = "/bin/test_rs_writeback_spawn";
 const ON_DISK: &str = "/home/writeback_spawn/child";
+const STILL_OPEN: &str = "/home/writeback_spawn/held";
 /// What tells this binary it is the copy being run rather than the test.
 const CHILD: &str = "spawned-from-disk";
 
@@ -82,5 +84,38 @@ fn main() {
     }
 
     println!("  PASS: spawned {ON_DISK} before its write-back drained, {} bytes verified off the device", back.len());
+
+    still_open_and_dirty(&image);
+
     println!("writeback spawn test passed");
+}
+
+/// The same race with the handle still held, which no queue knows about.
+///
+/// A closed file is on the write-back queue and `Vfs::open_backing` drains it;
+/// a file still open is on no queue, so its bytes are cache pages and the
+/// mount's record is what `create` wrote. Handle reads answered from the cache
+/// and a spawn's device view did not, so which of two readers of one file a
+/// caller got was decided by which syscall it used.
+fn still_open_and_dirty(image: &[u8]) {
+    let mut held = fs::File::create(STILL_OPEN).unwrap_or_else(|e| panic!("create {STILL_OPEN}: {e}"));
+    held.write_all(image).unwrap_or_else(|e| panic!("write {STILL_OPEN}: {e}"));
+
+    let status = Command::new(STILL_OPEN)
+        .arg(CHILD)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn {STILL_OPEN}: {e}"));
+    assert!(
+        status.success(),
+        "the child spawned off a still-open dirty file exited {:?}",
+        status.code()
+    );
+
+    drop(held);
+    let back = fs::read(STILL_OPEN).unwrap_or_else(|e| panic!("read back {STILL_OPEN}: {e}"));
+    assert_eq!(back.len(), image.len(), "read back {} bytes, wrote {}", back.len(), image.len());
+    if let Some(at) = back.iter().zip(image).position(|(a, b)| a != b) {
+        panic!("what the device holds differs from what was written at byte {at}");
+    }
+    println!("  PASS: spawned {STILL_OPEN} while its writer still held it, {} bytes verified", back.len());
 }

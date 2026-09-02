@@ -409,6 +409,27 @@ mod mirror_refuse {
     }
 }
 
+/// The `fat-flush-meta-refuse` actuator: refuses one file's second
+/// directory-entry write, which is the last step of a flush and the one whose
+/// failure leaves the pages before it already written and settled. The second
+/// and not the first, because the first is that file's seed being made durable.
+#[cfg(feature = "boot-actuators")]
+mod meta_refuse {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/writeback_durability.rs`.
+    const STAGED: &str = "wb-retry.bin";
+    /// Which of this file's metadata writes is refused, counting from zero.
+    const AT: u32 = 1;
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+
+    pub fn should_refuse(name: &str) -> bool {
+        crate::actuator::fat_flush_meta_refuse()
+            && name.ends_with(STAGED)
+            && SEEN.fetch_add(1, Ordering::Relaxed) == AT
+    }
+}
+
 /// Mark that a write-back drain flush is in progress, so the mirror-refuse
 /// actuator targets the drain path and not `SYS_FSYNC`.
 #[cfg(feature = "boot-actuators")]
@@ -634,10 +655,14 @@ impl ReplaceRename for FatFs {
     ) -> Result<Committed<Self::Displaced>, SyscallError> {
         let role = self.role;
         let displaced = self.by_name.get(new).copied();
-        let replaced = self
-            .fs
-            .replace_rename(old, new)
-            .map_err(|e| refused(role, "replace rename", old, e))?;
+        let replaced = self.fs.replace_rename(old, new).map_err(|e| {
+            // Nothing on the volume names it, so this line is the only record
+            // that the destination's data is alive and unreachable.
+            if let Some(stranded) = &e.stranded {
+                log!("{role}-volume: {new} could not be put back and is under {stranded}");
+            }
+            refused(role, "replace rename", old, e.cause)
+        })?;
         Ok(Committed::new((replaced, displaced)))
     }
 
@@ -683,9 +708,9 @@ impl ReplaceRename for FatFs {
 impl FileSystem for FatFs {
     /// The `limit` bound is honoured before each push, not after — unlike the
     /// bcachefs adapters.
-    fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         let role = self.role;
-        self.fs.walk(limit).map_err(|e| refused(role, "list", "/", e))
+        self.fs.walk(dir, limit).map_err(|e| refused(role, "list", dir, e))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
@@ -793,6 +818,23 @@ impl FileSystem for FatFs {
         }
     }
 
+    /// `set_len` frees the clusters and the cell stops naming them, so a later
+    /// grow zero-fills what it takes back rather than serving the old tail.
+    fn truncate_to(&mut self, file_id: FileId, size: u64, _mtime: u64) -> Result<(), SyscallError> {
+        let role = self.role;
+        let known = self.open.get(&file_id).ok_or(SyscallError::NotFound)?;
+        let (name, was) = (known.name.clone(), known.file.len());
+        if was <= size {
+            return Ok(());
+        }
+        if let Some(cell) = self.live_extents(&name) {
+            cell.truncate_to(size);
+        }
+        let Self { fs, open, .. } = self;
+        let info = open.get_mut(&file_id).ok_or(SyscallError::NotFound)?;
+        fs.set_len(&mut info.file, size).map_err(|e| refused(role, "set_len", &name, e))
+    }
+
     /// Record the real length and re-derive the backing; a shrink truncates
     /// the extent list before `set_len` frees the tail, so no backing ever
     /// names a reissued cluster.
@@ -817,6 +859,17 @@ impl FileSystem for FatFs {
             if info.file.len() != size {
                 fs.set_len(&mut info.file, size)
                     .map_err(|e| refused(role, "set_len", &info.name, e))?;
+            }
+            // Refused before the entry is written, like a spent `block::OPERATION`:
+            // the pages this flush already wrote and settled stay where they are.
+            #[cfg(feature = "boot-actuators")]
+            if meta_refuse::should_refuse(&info.name) {
+                log!(
+                    "{role}-volume: fat-flush-meta-refuse: refusing the directory-entry write \
+                     of {} as a budget expiry",
+                    info.name
+                );
+                return Err(SyscallError::WouldBlock);
             }
             fs.flush_meta(&mut info.file, time)
                 .map_err(|e| refused(role, "flush_meta", &info.name, e))?;
@@ -844,6 +897,10 @@ impl FileSystem for FatFs {
 
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         self.backing(name)
+    }
+
+    fn cached_file_id(&mut self, name: &str) -> Option<FileId> {
+        self.by_name.get(name).copied()
     }
 }
 

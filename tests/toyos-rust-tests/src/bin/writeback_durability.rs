@@ -14,17 +14,42 @@
 //! logic — so the bytes on the device and the structure around them are judged
 //! by something that is not the code under test.
 
-use std::fs;
-use std::io::{Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::thread;
 use std::time::Duration;
 
 /// Mirrored in `tests/common/volumes.rs::writeback_durability`.
 const PATH: &str = "/log/wb-durable.bin";
 const LEN: usize = 5 * 4096 + 91;
+/// The second file, and the same mirroring.
+const SHRUNK: &str = "/log/wb-shrunk.bin";
+const SHRUNK_LEN: usize = 3 * 4096;
+pub const CUT: u64 = 100;
 
 fn blob() -> Vec<u8> {
     (0..LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
+}
+
+fn seed() -> Vec<u8> {
+    (0..SHRUNK_LEN).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8 | 1).collect()
+}
+
+/// The file shrunk only once cold, and where its read lands; same mirroring.
+const REOPENED: &str = "/log/wb-reopened.bin";
+const WITNESS: &str = "/log/wb-served.bin";
+
+/// The file `fat-flush-meta-refuse` refuses; mirrored in `kernel/src/fat32_adapter.rs`.
+const RETRY: &str = "/log/wb-retry.bin";
+const RETRY_AT: u64 = 2 * 4096;
+
+/// The file whose straddled read `resize-fault-refuse` refuses; the length is
+/// what keys the actuator, and is mirrored in `kernel/src/file_cache.rs`.
+const REFUSED: &str = "/log/wb-refused.bin";
+const REFUSED_CUT: u64 = 133;
+
+fn kept() -> Vec<u8> {
+    (0..4096usize).map(|i| (i.wrapping_mul(53) ^ 0xC3) as u8).collect()
 }
 
 fn main() {
@@ -60,5 +85,108 @@ fn main() {
         panic!("{PATH} differs from what was written at byte {at}: the write-back did not reach the device");
     }
 
+    shrink_unflushed_then_regrow();
+    shrink_a_file_the_cache_no_longer_holds();
+    a_refused_metadata_write_keeps_the_pages_it_wrote();
+    a_refused_fault_resizes_nothing();
+
     println!("wrote {LEN} bytes, closed without fsync, and read them back after the write-back drained");
+}
+
+/// A flush that trims a shrink, writes a page above the mark, and is then
+/// refused at its metadata write. The retry has no dirty pages left, so a mark
+/// that outlived the trim would trim a second time and free the page the first
+/// attempt wrote. The volume is where that shows, and the host reads it.
+fn a_refused_metadata_write_keeps_the_pages_it_wrote() {
+    let mut f = OpenOptions::new()
+        .read(true).write(true).create(true).truncate(true)
+        .open(RETRY)
+        .unwrap_or_else(|e| panic!("create {RETRY}: {e}"));
+    f.write_all(&seed()).expect("write the seed");
+    f.sync_all().expect("fsync the seed");
+    f.set_len(CUT).expect("shrink into the first page");
+    f.set_len(SHRUNK_LEN as u64).expect("regrow");
+    f.seek(SeekFrom::Start(RETRY_AT)).expect("seek above the mark");
+    f.write_all(&kept()).expect("write a page above the mark");
+
+    // Refused once by the actuator and retried by `SYS_FSYNC` itself, so this
+    // returning is the retry having succeeded, not the first attempt.
+    f.sync_all().expect("the fsync whose second metadata write is refused");
+    drop(f);
+    println!("shrank {RETRY} to {CUT}, regrew it, wrote a page at {RETRY_AT}, fsynced through one refusal");
+}
+
+/// The same shrink and regrow over a page the cache does not hold, with what
+/// the kernel *served* carried to the volume for the host to judge — the device
+/// is right either way, because `Fat32::set_len` zero-fills on every grow.
+fn shrink_a_file_the_cache_no_longer_holds() {
+    {
+        let mut f = fs::File::create(REOPENED).unwrap_or_else(|e| panic!("create {REOPENED}: {e}"));
+        f.write_all(&seed()).expect("write the seed");
+        f.sync_all().expect("fsync the seed");
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    let mut f = OpenOptions::new()
+        .read(true).write(true)
+        .open(REOPENED)
+        .unwrap_or_else(|e| panic!("reopen {REOPENED}: {e}"));
+    f.set_len(CUT).expect("shrink into a page the cache does not hold");
+    f.set_len(SHRUNK_LEN as u64).expect("regrow");
+    let mut served = Vec::new();
+    f.read_to_end(&mut served).expect("read the regrown file back");
+    drop(f);
+
+    let mut w = fs::File::create(WITNESS).unwrap_or_else(|e| panic!("create {WITNESS}: {e}"));
+    w.write_all(&served).expect("write what the read served");
+    w.sync_all().expect("fsync the witness");
+    drop(w);
+
+    thread::sleep(Duration::from_millis(200));
+    println!("shrank a cold {REOPENED} to {CUT}, regrew it, and wrote the {} bytes it served to {WITNESS}", served.len());
+}
+
+
+/// A device that will not give the straddled page back leaves the file alone:
+/// zeroing half a page is a read-modify-write, with nothing to modify.
+fn a_refused_fault_resizes_nothing() {
+    {
+        let mut f = fs::File::create(REFUSED).unwrap_or_else(|e| panic!("create {REFUSED}: {e}"));
+        f.write_all(&seed()).expect("write the seed");
+        f.sync_all().expect("fsync the seed");
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    let f = OpenOptions::new()
+        .read(true).write(true)
+        .open(REFUSED)
+        .unwrap_or_else(|e| panic!("reopen {REFUSED}: {e}"));
+    let err = f.set_len(REFUSED_CUT).expect_err("a refused fault must refuse the truncate");
+    let len = f.metadata().expect("stat").len();
+    assert_eq!(len, SHRUNK_LEN as u64, "{REFUSED} is {len} bytes after a truncate that was refused");
+    drop(f);
+
+    thread::sleep(Duration::from_millis(200));
+    println!("the refused straddled read left {REFUSED} whole: {err}");
+}
+
+/// A durable file shrunk and regrown with nothing flushed between the two, and
+/// then only closed. The drain's single `update_metadata` carries the final
+/// size alone, so the volume the host judges is the only place the dropped
+/// clusters can still be named — and the checker cannot see the harm, because
+/// a file naming its own old clusters is a structurally valid file.
+fn shrink_unflushed_then_regrow() {
+    let want = seed();
+    let mut f = OpenOptions::new()
+        .read(true).write(true).create(true).truncate(true)
+        .open(SHRUNK)
+        .unwrap_or_else(|e| panic!("create {SHRUNK}: {e}"));
+    f.write_all(&want).expect("write the seed");
+    f.sync_all().expect("fsync the seed");
+    f.set_len(CUT).expect("shrink into the first page");
+    f.set_len(SHRUNK_LEN as u64).expect("regrow");
+    drop(f);
+
+    thread::sleep(Duration::from_millis(200));
+    println!("shrank {SHRUNK} to {CUT} and regrew it to {SHRUNK_LEN}, closed without fsync");
 }

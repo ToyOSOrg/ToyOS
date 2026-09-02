@@ -449,34 +449,33 @@ pub fn delete(io: &dyn BlockIO, root: BlockNum, key: &Key) -> Result<Option<Vec<
     }
 }
 
-/// At most `limit` live leaf entries, refusing *before* the over-bound entry
-/// lands: the tree's claim about its size never reaches the allocator.
-pub fn collect_up_to(io: &dyn BlockIO, root: BlockNum, limit: usize) -> Result<Vec<Entry>, FsError> {
-    let mut results = Vec::new();
-    collect_recursive(io, root, Depth::ROOT, limit, &mut results)?;
-    Ok(results)
+/// Every live leaf entry, one at a time, in tree order. Nothing accumulates
+/// here: what a caller keeps is the only allocation the tree's size can drive,
+/// so a bound applied inside `visit` is applied before the entry lands.
+pub fn for_each_live(
+    io: &dyn BlockIO,
+    root: BlockNum,
+    visit: &mut dyn FnMut(Entry) -> Result<(), FsError>,
+) -> Result<(), FsError> {
+    walk_recursive(io, root, Depth::ROOT, visit)
 }
 
-fn collect_recursive(
+fn walk_recursive(
     io: &dyn BlockIO,
     block: BlockNum,
     depth: Depth,
-    limit: usize,
-    results: &mut Vec<Entry>,
+    visit: &mut dyn FnMut(Entry) -> Result<(), FsError>,
 ) -> Result<(), FsError> {
     match Node::read(io, block)? {
         Node::Leaf(entries) => {
             for entry in entries.into_iter().filter(|e| e.key.key_type != KeyType::Deleted) {
-                if results.len() >= limit {
-                    return Err(FsError::ListTooLong { limit });
-                }
-                results.push(entry);
+                visit(entry)?;
             }
         }
         Node::Interior { children, .. } => {
             let deeper = depth.descend(block)?;
             for child in children {
-                collect_recursive(io, child.block, deeper, limit, results)?;
+                walk_recursive(io, child.block, deeper, visit)?;
             }
         }
     }

@@ -221,9 +221,9 @@ impl ReplaceRename for BcacheFsAdapter {
 }
 
 impl FileSystem for BcacheFsAdapter {
-    fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
         // An empty listing on error would be a lie indistinguishable from an empty directory.
-        mapped("list", "/", self.fs.list(limit))
+        mapped("list", dir, self.fs.list(limit, &|name| crate::vfs::under_directory(name, dir)))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
@@ -328,6 +328,21 @@ impl FileSystem for BcacheFsAdapter {
         })
     }
 
+    /// Same order as [`BcacheFsAdapter::update_metadata`]'s own trim, for the
+    /// same reason: the shortened list is recorded before the blocks are freed.
+    fn truncate_to(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError> {
+        let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
+        let name = info.name.clone();
+        let blocks = Arc::clone(&info.blocks);
+        let dropped = blocks.truncate_to_blocks(size.div_ceil(crate::mm::PAGE_SIZE));
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        let extents = blocks.with(|extents| extents.clone()).ok_or(SyscallError::NotFound)?;
+        mapped("truncate_to", &name, self.fs.update_metadata(&name, &extents, size, mtime))?;
+        mapped("free of a shrunk tail", &name, self.fs.free_extents(&dropped))
+    }
+
     fn update_metadata(&mut self, file_id: FileId, size: u64, mtime: u64) -> Result<(), SyscallError> {
         let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
         let name = info.name.clone();
@@ -360,6 +375,10 @@ impl FileSystem for BcacheFsAdapter {
         let blocks = self.blocks_for(name, extents);
         Ok(Arc::new(NvmeBacking::new(blocks, size)))
     }
+
+    fn cached_file_id(&mut self, name: &str) -> Option<FileId> {
+        self.name_to_id.get(name).copied()
+    }
 }
 
 /// VFS adapter for read-only bcachefs (initrd mounted in memory).
@@ -378,8 +397,8 @@ impl ReadOnlyBcacheFsAdapter {
 }
 
 impl FileSystem for ReadOnlyBcacheFsAdapter {
-    fn list(&mut self, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
-        mapped("list", "/", self.fs.list(limit))
+    fn list(&mut self, dir: &str, limit: usize) -> Result<Vec<(String, u64)>, SyscallError> {
+        mapped("list", dir, self.fs.list(limit, &|name| crate::vfs::under_directory(name, dir)))
     }
 
     fn file_mtime(&mut self, name: &str) -> Result<u64, SyscallError> {
@@ -447,6 +466,10 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
         Err(SyscallError::PermissionDenied)
     }
 
+    fn truncate_to(&mut self, _file_id: FileId, _size: u64, _mtime: u64) -> Result<(), SyscallError> {
+        Err(SyscallError::PermissionDenied)
+    }
+
     fn create_symlink(&mut self, _name: &str, _target: &str) -> Result<(), SyscallError> {
         Err(SyscallError::PermissionDenied)
     }
@@ -458,6 +481,10 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         let (extents, size) = present("open_backing", name, self.fs.file_extents(name))?;
         Ok(Arc::new(InitrdBacking::new(self.image, extents, size)))
+    }
+
+    fn cached_file_id(&mut self, name: &str) -> Option<FileId> {
+        self.name_to_id.get(name).copied()
     }
 }
 
