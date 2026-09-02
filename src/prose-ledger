@@ -202,7 +202,7 @@ src/clippy.rs 35 0
 src/day.rs 16 1
 src/durations.rs 384 6
 src/fingerprint.rs 23 0
-src/forkcheck.rs 165 1
+src/forkcheck.rs 177 1
 src/hostws.rs 187 2
 src/image.rs 200 1
 src/issuegate.rs 114 0
