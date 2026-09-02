@@ -9578,11 +9578,17 @@ fn run_machine_test(
                 ready_marker: REFUSAL,
                 ..Default::default()
             };
-            let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            /// How long the refusal is watched for work it must not have done.
+            const AFTER_REFUSAL: Duration = Duration::from_secs(2);
+            let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             // It dies before virtio-console exists, so the 16550 file is the
-            // only record — which is also the T14's situation exactly.
+            // only record — which is also the T14's situation exactly. The
+            // drain is the rest of the window: `boot_log` ends at the refusal,
+            // so a driver that names the sector size and then builds the block
+            // device anyway would be judged on a capture that stops before it.
             let mut log = serial::Serial::boot(&qemu);
             log.push(&qemu.uart_log());
+            log.push(&qemu.drain_serial(AFTER_REFUSAL));
 
             // Named, not just refused: the value the device reported is the
             // whole diagnostic on a machine that will not boot again without
@@ -10221,7 +10227,9 @@ fn run_machine_test(
             // the CPU: the branch printed no `RECURSIVE` and ran the whole
             // second report. `test-late-panic` is the first crash and
             // `fault-in-report` is the wild read inside its report.
-            let qemu = QemuInstance::boot_with_options(
+            /// How long a second report is watched for after the marker.
+            const AFTER_RECURSIVE: Duration = Duration::from_secs(1);
+            let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
@@ -10244,8 +10252,20 @@ fn run_machine_test(
             // And the branch bounds what it claims to: the arm that fires skips
             // `crash_report`, so the nested fault writes no second report. The
             // first panic's report never ran either — the wild read is at its
-            // head — so a stack scan anywhere in the capture is the second one.
-            nested.must_not_say("Scanning kernel stack at")?;
+            // head — so either needle anywhere in the capture is the second
+            // one. `KERNEL PANIC:` is `crash_report_exception`'s own header for
+            // a kernel-blamed fault and names the report itself; the stack scan
+            // belongs to `double_fault_handler` and names the escalation
+            // instead, which is a different way for the branch to be wrong.
+            //
+            // Drained past the marker first: `boot_log` stops at `RECURSIVE`
+            // and the report would follow it in the same call, so without the
+            // window the absence is asserted where it could not have appeared.
+            // The immediate UART snapshot is the bootloader's, not this.
+            nested.push(&qemu.drain_serial(AFTER_RECURSIVE));
+            for report in ["KERNEL PANIC:", "Scanning kernel stack at"] {
+                nested.must_not_say(report)?;
+            }
             eprintln!("  [nested] the recursive arm bounded the report: no second crash report");
             Ok(())
         }
@@ -10267,7 +10287,9 @@ fn run_machine_test(
             // which lines arrived, from the first phase to the wedge, and that
             // the phase after it never did.
             const WEDGE: &str = "pre-idle-wedge: the boot stops here";
-            let qemu = QemuInstance::boot_with_options(
+            /// How long the wedge is watched for the phase it must not reach.
+            const STAYED_WEDGED: Duration = Duration::from_secs(3);
+            let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
@@ -10287,7 +10309,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let boot = serial::Serial::boot(&qemu);
+            let mut boot = serial::Serial::boot(&qemu);
             // Every phase up to the wedge, oldest first — the first line the
             // machine ever logs, both boot checkpoints before phase 3, and a
             // phase-3 line from between them and the wedge.
@@ -10301,7 +10323,12 @@ fn run_machine_test(
                 boot.must_say(needle)?;
             }
             // And nothing from after it, which is what says the machine really
-            // is wedged rather than slow.
+            // is wedged rather than slow — asserted over a window the later
+            // phases could have reached. `boot_log` ends at the marker and the
+            // marker *is* the wedge line, so without this drain a machine that
+            // logged it and carried straight on would be judged on a capture
+            // that stops before the phase it must not have reached.
+            boot.push(&qemu.drain_serial(STAYED_WEDGED));
             for needle in ["Boot: peripherals ready", "Boot: complete"] {
                 boot.must_not_say(needle)?;
             }
