@@ -538,7 +538,38 @@ fn the_caller_limit_is_the_named_directorys_and_not_the_volumes() {
         fs.walk("plain.txt", 1).expect("walk a file"),
         vec![(String::from("plain.txt"), 12)],
     );
+    // A file's own entry is an entry, so the caller's bound governs it too.
+    assert_eq!(fs.walk("plain.txt", 0).unwrap_err(), Error::LimitExceeded);
     assert_eq!(fs.walk("nope", 64).unwrap_err(), Error::NotFound);
+}
+
+/// A zero-length file has no first cluster, which is what no data looks like.
+///
+/// The three mounts answer one contract, and tmpfs and bcachefs hand back the
+/// file's own entry here; a `CorruptDirectory` would reach `Vfs::list` as `Io`
+/// with a kernel line calling a healthy volume corrupt.
+#[test]
+fn an_empty_file_is_not_a_corrupt_directory() {
+    let image = Image::new("empty-file", 64 * 1024 * 1024, 1);
+    image.with_mount(|mount| {
+        std::fs::write(mount.join("empty.txt"), b"").expect("write");
+        std::fs::write(mount.join("full.txt"), b"twelve bytes").expect("write");
+    });
+    image.fsck();
+    let mut fs = Fat32::mount(SparseDevice::from_prefix(&image.bytes(PREFIX_BYTES), image.size()))
+        .expect("mount");
+
+    let mut whole = fs.walk("", 64).expect("walk the volume");
+    whole.sort();
+    assert_eq!(
+        whole,
+        vec![(String::from("empty.txt"), 0), (String::from("full.txt"), 12)],
+    );
+    assert_eq!(
+        fs.walk("empty.txt", 64).expect("walk the empty file"),
+        vec![(String::from("empty.txt"), 0)],
+    );
+    assert_eq!(fs.metadata("empty.txt").expect("metadata").len, 0);
 }
 
 // -------------------------------------------------------------- long names

@@ -394,10 +394,16 @@ impl<D: BlockAccess> Fat32<D> {
             (self.geom.root(), String::new())
         } else {
             let node = self.resolve(under)?;
-            let first = node.first_cluster.ok_or(Error::CorruptDirectory)?;
+            // Before the cluster is asked for: an empty file's first cluster is
+            // `None`, which is what having no data looks like and not a corrupt
+            // directory.
             if !node.raw.is_dir() {
+                if limit == 0 {
+                    return Err(Error::LimitExceeded);
+                }
                 return Ok(vec![(String::from(under), node.raw.size() as u64)]);
             }
+            let first = node.first_cluster.ok_or(Error::CorruptDirectory)?;
             let mut prefix = String::from(under);
             prefix.push('/');
             if limit == 0 {

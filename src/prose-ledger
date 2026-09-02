@@ -466,14 +466,14 @@ toyos-fat32/src/device.rs 42 0
 toyos-fat32/src/dir.rs 72 0
 toyos-fat32/src/error.rs 33 0
 toyos-fat32/src/fat.rs 127 0
-toyos-fat32/src/fs.rs 218 0
+toyos-fat32/src/fs.rs 221 0
 toyos-fat32/src/lib.rs 59 0
 toyos-fat32/src/name.rs 104 0
 toyos-fat32/src/time.rs 40 0
 toyos-fat32/tests/common/mod.rs 105 0
 toyos-fat32/tests/host_read.rs 26 0
 toyos-fat32/tests/host_write.rs 86 1
-toyos-fat32/tests/hostile.rs 195 3
+toyos-fat32/tests/hostile.rs 201 3
 toyos-fat32/tests/replace_rename.rs 11 0
 toyos-gpt/src/crc32.rs 13 0
 toyos-gpt/src/guid.rs 19 0
