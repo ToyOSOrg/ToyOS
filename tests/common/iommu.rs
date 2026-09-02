@@ -113,9 +113,8 @@ pub fn iommu_discovery(
         // requester ids that look like addresses and match no device.
         let scopes = scope_check(&log, name)?;
 
-        // The fourth machine is the one that makes this mean something: its unit
-        // is identical but for `intremap=off`, so the same parser reading the
-        // same lines has to reach the opposite verdict on it.
+        // The `intremap=off` machine is what makes this mean something: the same
+        // parser over the same lines has to reach the opposite verdict on it.
         interrupt_format(&log, name, unit.intremap)?;
 
         eprintln!(
@@ -169,24 +168,21 @@ pub fn iommu_discovery(
 
 /// Every interrupt source in the machine, in the format the hardware holds it.
 ///
-/// Stage I3. The trap here is a source nobody moved: with `IRE` set and `CFI`
-/// clear the unit blocks a compatibility-format message, so a source left
-/// behind is a device that has silently stopped — and a gate reading the
-/// kernel's own summary of what it meant to write would not see one.
-///
-/// So nothing below is read off a claim the kernel makes about itself. The
+/// Stage I3, and the trap is a source nobody moved. The specification blocks a
+/// compatibility-format message under `IRE` with `CFI` clear, so on real
+/// hardware a source left behind is a device that has silently stopped — but
+/// QEMU delivers it anyway
+/// (`issues/kernel/qemu-passes-compatibility-format-interrupts.md`), so no
+/// behavioural test in this suite can see one and this is the only thing that
+/// can. It therefore reads no claim the kernel makes about itself: the
 /// redirection entry is the word `route` read back out of the I/O APIC, the MSI
-/// address is the word read back out of the device's own table, the requester
-/// id in every table entry is checked against this machine's PCI walk and DMAR
-/// scope rather than against the kernel's idea of them, and the handle each
-/// source carries has to name an entry the kernel really wrote.
+/// address the word read back out of the device's own table, and every
+/// requester id is checked against this machine's own PCI walk and DMAR scope.
 ///
-/// [`Profile::Headless`] and not [`Profile::Metal`], because it carries the
-/// most sources of both kinds: the i8042's two pins over the I/O APIC, and
-/// xHCI, virtio-net and virtio-sound over MSI-X. The same check runs on all
-/// four of [`iommu_discovery`]'s machines, where the one with `intremap=off`
-/// is what stops it being one machine's tautology — every verdict below flips
-/// with `remapping` there.
+/// [`Profile::Headless`] carries the most sources of both kinds — the i8042's
+/// two pins, and xHCI, virtio-net and virtio-sound over MSI-X. The same check
+/// runs on all four of [`iommu_discovery`]'s machines, where the one with
+/// `intremap=off` is what stops it being one machine's tautology.
 pub fn iommu_interrupt_remapping(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -236,8 +232,7 @@ fn interrupt_format(log: &Serial, name: &str, remapping: bool) -> Result<(), Str
                     "{name}: GSTS.IRES is {ires} where the unit remaps = {remapping}\n{line}"
                 ));
             }
-            // Never, on any machine: `CFI` is the bit that would let a
-            // compatibility message through, and the kernel writes it on none.
+            // `CFI` is the bit that would let a compatibility message through.
             if cfis {
                 return Err(format!(
                     "{name}: GSTS.CFIS is set, so the unit passes compatibility-format interrupts \
@@ -355,7 +350,6 @@ fn interrupt_format(log: &Serial, name: &str, remapping: bool) -> Result<(), Str
     Ok(())
 }
 
-/// One entry the kernel reported writing.
 struct Entry {
     index: u16,
     source: String,
@@ -387,7 +381,6 @@ fn table_entries(log: &Serial, name: &str) -> Result<Vec<Entry>, String> {
     Ok(entries)
 }
 
-/// Who the unit will see as the originator of a source's message.
 enum Requester {
     /// A PCI function, which the walk printed as `bb:dd.f`.
     Function(String),
@@ -395,7 +388,6 @@ enum Requester {
     Controller(String),
 }
 
-/// One armed source, read back out of the register that carries its message.
 struct Source {
     who: String,
     requester: Requester,

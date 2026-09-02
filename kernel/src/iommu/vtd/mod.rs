@@ -3,9 +3,10 @@
 //! `SourceId`.
 //!
 //! Finds units, decodes capabilities, gives every enumerated PCI function a
-//! context entry naming one identity-mapped domain, and turns translation on.
-//! A capability the kernel cannot use leaves the unit switched off rather than
-//! halting, logged by register value rather than a bare "unsupported".
+//! context entry naming one identity-mapped domain, turns translation on, and
+//! points every unit at one interrupt remapping table. A capability the kernel
+//! cannot use leaves the unit switched off rather than halting, logged by
+//! register value rather than a bare "unsupported".
 
 pub mod dmar;
 pub mod fault;
@@ -159,14 +160,13 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     }
 }
 
-/// Whether every interrupt source in this machine may be moved to the
-/// remappable format, and with `EIME` if so. `None` leaves every source in
-/// compatibility format, which is the machine exactly as it boots with no unit.
+/// Whether every interrupt source may be moved to the remappable format, and
+/// with `EIME` if so; `None` leaves the machine exactly as it boots with no unit.
 ///
-/// A source writes one address, so a unit left without `IRE` beside one that
-/// has it would read that address as a compatibility message and deliver the
-/// interrupt to whatever the handle bits happen to spell. Every condition below
-/// therefore refuses for the machine, not for the unit that failed it.
+/// A source writes one address, so a unit left without `IRE` beside one that has
+/// it would read that address as a compatibility message and deliver the
+/// interrupt to whatever the handle bits spell. Every condition below therefore
+/// refuses for the machine, not for the unit that failed it.
 fn remappable(ready: &[(Unit, Plan)], described: usize) -> Option<bool> {
     if ready.is_empty() {
         return None;

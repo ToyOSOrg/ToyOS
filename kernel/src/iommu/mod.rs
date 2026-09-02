@@ -1,6 +1,6 @@
 //! The unit that decides what a device may reach.
 //!
-//! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, and turns translation on; an unusable unit is logged and left off rather than halting boot, and interrupt remapping and per-driver domains are not yet built (`issues/kernel/the-iommu-stops-at-translation.md`). Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
+//! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, turns translation on, and remaps every interrupt source through a source-id-verified table entry; an unusable unit is logged and left off rather than halting boot, and per-driver domains are not yet built (`issues/kernel/the-iommu-stops-at-translation.md`). Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
 //!
 //! The refusal is deliberately not yet built: landing it before any userspace driver exists would cost every machine and protect nothing.
 //!
@@ -105,22 +105,18 @@ pub enum Delivery<T> {
     Refused,
 }
 
-/// The address and data a PCI function writes into its MSI or MSI-X registers.
 pub struct MsiMessage {
     pub address: u32,
     pub data: u32,
 }
 
-/// What a pin's redirection entry carries in place of a destination.
 pub struct PinRedirect {
     pub low: u32,
     pub high: u32,
 }
 
-/// Where `bus:device.function`'s message-signalled interrupt must point.
-///
-/// Takes the triple rather than a [`StreamId`], which no driver can build: what
-/// a requester id is stays inside this module.
+/// Where `bus:device.function`'s message-signalled interrupt must point. Takes
+/// the triple, not a [`StreamId`]: what a requester id is stays in this module.
 pub fn remap_msi(
     bus: u8,
     device: u8,
@@ -137,7 +133,6 @@ pub fn remap_msi(
     }
 }
 
-/// Where a pin on the interrupt controller with `apic_id` must send `vector`.
 pub fn remap_pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Delivery<PinRedirect> {
     if !vtd::interrupt::is_armed() {
         return Delivery::Direct;

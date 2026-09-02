@@ -234,11 +234,8 @@ pub fn gsi_for_isa_irq(irq: u8) -> Option<IsaLine> {
     )
 }
 
-/// Every chip this machine routes pins through, by MADT id.
-///
-/// The IOMMU needs the whole set before it can decide anything: a chip whose
-/// requester id firmware never named cannot be remapped, and that is a decision
-/// about the machine, taken before the first entry is written.
+/// Every chip this machine routes pins through, by MADT id: the IOMMU needs the
+/// whole set before it can decide anything, and decides once for the machine.
 pub fn ids() -> Vec<u8> {
     TOPOLOGY.lock().units.iter().map(|u| u.id).collect()
 }
@@ -254,11 +251,9 @@ fn locate(topology: &Topology, gsi: Gsi) -> Result<(&Unit, u32), RouteError> {
 
 /// Point `gsi` at `vector` on one CPU, fixed delivery, physical destination; the entry is left masked.
 ///
-/// Under interrupt remapping the entry names a table slot instead of a
-/// destination, and the destination lives in that slot — but the id still has to
-/// fit whatever names it, so `DestTooWide` moves rather than disappearing: the
-/// IOMMU refuses an id an entry cannot hold and the refusal arrives as
-/// [`Delivery::Refused`].
+/// Under remapping the entry names a table slot and the destination lives in
+/// that slot — but the id must still fit whatever names it, so `DestTooWide`
+/// moves rather than disappearing and arrives as [`Delivery::Refused`].
 pub fn route(
     gsi: Gsi,
     vector: u8,

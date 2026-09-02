@@ -38,12 +38,9 @@ use super::table::{Table, Tables};
 
 pub const IRTA_REG: u64 = 0xB8;
 
-/// `GCMD.IRE`; `GSTS.IRES` confirms it at the same bit position.
 pub const INTERRUPT_REMAPPING_ENABLE: u32 = 1 << 25;
-/// `GCMD.SIRTP`; `GSTS.IRTPS` confirms it at the same bit position.
 pub const SET_TABLE_POINTER: u32 = 1 << 24;
-/// `GSTS.CFIS`. Set means compatibility-format messages bypass remapping; this
-/// kernel never writes `GCMD.CFI`, so it reads clear and they are blocked.
+/// Set means compatibility-format messages bypass remapping; `GCMD.CFI` is never written, so it reads clear.
 pub const COMPATIBILITY_FORMAT: u32 = 1 << 23;
 
 /// `2^(7+1)` entries of 128 bits is exactly the 4 KiB [`Tables::alloc`] hands out.
@@ -58,33 +55,28 @@ const VECTOR_SHIFT: u64 = 16;
 const DESTINATION_SHIFT: u64 = 32;
 /// `SVT=01b` over `SQ=00b`: a message reaching this entry carries `SID` in all sixteen bits or is refused.
 const VERIFY_SOURCE_ID: u64 = 1 << 18;
-/// Without `EIME` a destination is the eight bits at `DST` 47:40, and `0xFF` there is broadcast rather than a CPU.
+/// Without `EIME`, `DST` 47:40 holds eight bits and `0xFF` there is broadcast, not a CPU.
 const NARROW_DESTINATION_SHIFT: u64 = 8;
 const NARROW_DESTINATIONS: u32 = 0xFF;
 
-/// The interrupt address range, which a remappable message shares with the compatibility one it replaces.
 const MESSAGE_BASE: u32 = 0xFEE0_0000;
 const MESSAGE_REMAPPABLE: u32 = 1 << 4;
 const MESSAGE_SUBHANDLE_VALID: u32 = 1 << 3;
 const PIN_REMAPPABLE: u32 = 1 << 16;
 
-/// The address and data a message-signalled source writes once it has an entry.
 pub struct Msi {
     pub address: u32,
     pub data: u32,
 }
 
-/// What a pin's redirection entry carries in place of a destination.
 pub struct Pin {
     pub low: u32,
     pub high: u32,
 }
 
-/// The one table, and what every unit was told about it.
 struct Remap {
-    /// `None` until a unit is armed, which is also what "no source may use the remappable format" means.
+    /// `None` until a unit is armed, which is what "no source may use the remappable format" means.
     table: Option<Table>,
-    /// Entries handed out; never reused, since a source holds its entry for the machine's life.
     used: u16,
     /// `ECAP.EIM` on every unit. Clear bounds a destination to the eight bits `DST` then holds.
     extended: bool,
@@ -97,12 +89,10 @@ struct Remap {
 static REMAP: Lock<Remap> =
     Lock::new(Remap { table: None, used: 0, extended: false, apics: Vec::new(), units: Vec::new() });
 
-/// Record the requester id a DMAR device scope gave the I/O APIC with this id.
 pub fn describe_apic(apic_id: u8, source: StreamId) {
     REMAP.lock().apics.push((apic_id, source));
 }
 
-/// Whether firmware named a requester id for every one of `apics`.
 pub fn apics_are_named(apics: &[u8]) -> bool {
     let remap = REMAP.lock();
     apics.iter().all(|id| remap.apics.iter().any(|(named, _)| named == id))
@@ -121,36 +111,29 @@ pub fn arm(tables: &mut Tables, extended: bool) -> u64 {
 
 /// Take over a remapping unit's invalidation queue, once `IRE` is confirmed.
 ///
-/// Every later entry this module writes is invalidated on every queue held
-/// here. `CAP.CM` is set on the units this boots, and Section 6.4 says a unit
-/// reporting it may cache the entry a fault was taken on — including the
-/// not-present one — so an entry filled in later is not visible until its cache
-/// is told, and a stale entry is a misdelivered interrupt.
+/// Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the entry a
+/// fault was taken on — including a not-present one — so an entry filled in
+/// later is invisible until its cache is told, and a stale entry misdelivers.
 pub fn adopt(regs: Mmio, queue: Queue) {
     REMAP.lock().units.push((regs, queue));
 }
 
-/// The table's physical address, for the line reporting what a unit was pointed at.
 pub fn table_address() -> u64 {
     REMAP.lock().table.map_or(0, Table::phys)
 }
 
-/// Whether a unit is remapping, which is what obliges every source to change format.
 pub fn is_armed() -> bool {
     REMAP.lock().table.is_some()
 }
 
-/// Fill the next free entry for `source` and return its index.
-///
-/// `None` refuses rather than mis-delivers: the table is full, or the
-/// destination is wider than an entry can name on a unit without `EIME`.
+/// Fills the next free entry for `source`; `None` refuses rather than
+/// mis-delivers — the table is full, or the destination is too wide for `DST`.
 fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Option<u16> {
     let index = {
         let mut remap = REMAP.lock();
         let table = remap.table?;
-        if !remap.extended && dest >= NARROW_DESTINATIONS {
-            None
-        } else if remap.used == ENTRIES {
+        let too_wide = !remap.extended && dest >= NARROW_DESTINATIONS;
+        if too_wide || remap.used == ENTRIES {
             None
         } else {
             let index = remap.used;
@@ -175,7 +158,6 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Option<u16>
             Some(index)
         }
     };
-    // Outside the lock: the log's readiness path is not something to re-enter holding one.
     match index {
         Some(index) => log!(
             "iommu: irte{index} source={source} sid={:#06x} svt=1 sq=0 vector={vector:#04x} \
@@ -190,7 +172,6 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Option<u16>
     index
 }
 
-/// The message `source`'s MSI or MSI-X registers take to reach `vector` on `dest`.
 pub fn msi(source: StreamId, vector: u8, dest: u32) -> Option<Msi> {
     let index = allocate(source, vector, dest, false)? as u32;
     Some(Msi {
@@ -203,14 +184,13 @@ pub fn msi(source: StreamId, vector: u8, dest: u32) -> Option<Msi> {
     })
 }
 
-/// The redirection-entry bits the I/O APIC with `apic_id` takes for one of its pins.
 pub fn pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Option<Pin> {
     let source = apic_source(apic_id)?;
     let index = allocate(source, vector, dest, level)? as u32;
     Some(Pin { low: (index >> 15) << 11, high: PIN_REMAPPABLE | ((index & 0x7FFF) << 17) })
 }
 
-/// Locked apart from [`allocate`], which takes the same lock: it is not reentrant.
+/// Locked apart from [`allocate`]: the lock is not reentrant.
 fn apic_source(apic_id: u8) -> Option<StreamId> {
     let remap = REMAP.lock();
     remap.apics.iter().find(|(id, _)| *id == apic_id).map(|(_, source)| *source)
