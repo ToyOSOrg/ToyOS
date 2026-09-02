@@ -297,6 +297,14 @@ pub fn route(
             read: u64::from(read_high) << 32 | u64::from(read_low),
         });
     }
+    // The entry as the chip holds it, which is the only evidence of what format
+    // a pin is really in — what the kernel meant to write is not the same claim.
+    log!(
+        "ioapic: gsi {} on id={} rte={:#018x}",
+        gsi.0,
+        unit.id,
+        u64::from(read_high) << 32 | u64::from(read_low)
+    );
     Ok(())
 }
 

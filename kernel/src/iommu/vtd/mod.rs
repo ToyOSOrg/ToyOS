@@ -372,7 +372,7 @@ fn enable(
     let index = unit.index;
     let Plan { width, records } = plan;
 
-    let root = {
+    let (root, queue) = {
         let mut tables = TABLES.lock();
         let domain = match domains[domain_slot(width)] {
             Some(domain) => domain,
@@ -441,7 +441,7 @@ fn enable(
             queue.invalidate_interrupts(unit.regs);
         }
         queue.invalidate_all(unit.regs);
-        root
+        (root, queue)
     };
 
     unit.command(TRANSLATION_ENABLE, true, TRANSLATION_ENABLE, "translation");
@@ -455,6 +455,8 @@ fn enable(
             interrupt::INTERRUPT_REMAPPING_ENABLE,
             "interrupt remapping",
         );
+        // After `IRE`, so nothing is invalidated on a unit that is not yet reading the table.
+        interrupt::adopt(unit.regs, queue);
     }
 
     let gsts = unit.regs.read_u32(GSTS_REG);

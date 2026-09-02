@@ -75,13 +75,13 @@ kernel/src/drivers/gop.rs 11 0
 kernel/src/drivers/hda.rs 70 0
 kernel/src/drivers/i8042/mod.rs 250 0
 kernel/src/drivers/i8042/tally.rs 16 0
-kernel/src/drivers/ioapic.rs 43 0
+kernel/src/drivers/ioapic.rs 45 0
 kernel/src/drivers/mod.rs 5 0
 kernel/src/drivers/nvme.rs 131 0
 kernel/src/drivers/panic_console/access.rs 6 0
 kernel/src/drivers/panic_console/latch.rs 9 0
 kernel/src/drivers/panic_console/mod.rs 215 0
-kernel/src/drivers/pci.rs 29 0
+kernel/src/drivers/pci.rs 30 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
 kernel/src/drivers/virtio.rs 118 0
@@ -117,8 +117,8 @@ kernel/src/iod.rs 10 0
 kernel/src/iommu/mod.rs 46 0
 kernel/src/iommu/vtd/dmar.rs 33 0
 kernel/src/iommu/vtd/fault.rs 34 0
-kernel/src/iommu/vtd/interrupt.rs 58 0
-kernel/src/iommu/vtd/mod.rs 93 0
+kernel/src/iommu/vtd/interrupt.rs 68 0
+kernel/src/iommu/vtd/mod.rs 97 0
 kernel/src/iommu/vtd/queue.rs 22 0
 kernel/src/iommu/vtd/table.rs 37 0
 kernel/src/irq_census.rs 38 0
@@ -231,7 +231,7 @@ tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 85 0
 tests/common/hostload.rs 48 1
-tests/common/iommu.rs 157 0
+tests/common/iommu.rs 202 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2

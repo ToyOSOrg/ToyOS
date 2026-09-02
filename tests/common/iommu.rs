@@ -52,6 +52,7 @@ pub fn iommu_discovery(
         log.must_say("Boot: complete")?;
 
         let Some(unit) = profile.iommu() else {
+            interrupt_format(&log, name, false)?;
             // `Absent` is firmware answering the question, and the answer is
             // one a user can act on — so the line names the firmware setting
             // as well as the hardware. What makes this assertion mean
@@ -112,6 +113,11 @@ pub fn iommu_discovery(
         // requester ids that look like addresses and match no device.
         let scopes = scope_check(&log, name)?;
 
+        // The fourth machine is the one that makes this mean something: its unit
+        // is identical but for `intremap=off`, so the same parser reading the
+        // same lines has to reach the opposite verdict on it.
+        interrupt_format(&log, name, unit.intremap)?;
+
         eprintln!(
             "  [iommu] {name}: aw={} ir={} cap={} ecap={} — {scopes} PCI scopes matched",
             field("aw")?,
@@ -159,6 +165,311 @@ pub fn iommu_discovery(
     }
 
     Ok(())
+}
+
+/// Every interrupt source in the machine, in the format the hardware holds it.
+///
+/// Stage I3. The trap here is a source nobody moved: with `IRE` set and `CFI`
+/// clear the unit blocks a compatibility-format message, so a source left
+/// behind is a device that has silently stopped — and a gate reading the
+/// kernel's own summary of what it meant to write would not see one.
+///
+/// So nothing below is read off a claim the kernel makes about itself. The
+/// redirection entry is the word `route` read back out of the I/O APIC, the MSI
+/// address is the word read back out of the device's own table, the requester
+/// id in every table entry is checked against this machine's PCI walk and DMAR
+/// scope rather than against the kernel's idea of them, and the handle each
+/// source carries has to name an entry the kernel really wrote.
+///
+/// [`Profile::Headless`] and not [`Profile::Metal`], because it carries the
+/// most sources of both kinds: the i8042's two pins over the I/O APIC, and
+/// xHCI, virtio-net and virtio-sound over MSI-X. The same check runs on all
+/// four of [`iommu_discovery`]'s machines, where the one with `intremap=off`
+/// is what stops it being one machine's tautology — every verdict below flips
+/// with `remapping` there.
+pub fn iommu_interrupt_remapping(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions { profile: Profile::Headless, ..Default::default() };
+    let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let log = Serial::boot(&qemu);
+    log.must_be_clean()?;
+    log.must_say("Boot: complete")?;
+    interrupt_format(&log, "headless", true)
+}
+
+/// One machine's sources, judged against whether its unit remaps at all.
+fn interrupt_format(log: &Serial, name: &str, remapping: bool) -> Result<(), String> {
+    let entries = table_entries(log, name)?;
+    if remapping != !entries.is_empty() {
+        return Err(format!(
+            "{name}: the unit remaps interrupts = {remapping}, and the kernel wrote {} table \
+             entries. Neither number is allowed to move without the other",
+            entries.len()
+        ));
+    }
+
+    // GSTS, decoded here rather than believed off the kernel's own `ires=` and
+    // `cfis=` fields — which are then checked against it, because a field
+    // printed as a constant would agree with itself on every machine. A machine
+    // with no unit prints no such line, and must be one that does not remap.
+    match log.text().lines().find(|l| l.contains("translating gsts=")) {
+        None if remapping => {
+            return Err(format!("{name}: no unit is translating, so none can be remapping"))
+        }
+        None => {}
+        Some(line) => {
+            let fields = unit_fields(line);
+            let field = |k: &str| -> Result<String, String> {
+                fields.get(k).cloned().ok_or_else(|| format!("{name}: no {k}= on {line:?}"))
+            };
+            let gsts = u32::from_str_radix(field("gsts")?.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable gsts on {line:?}"))?;
+            let ires = gsts & (1 << 25) != 0;
+            let cfis = gsts & (1 << 23) != 0;
+            expect(&field("ires")?, if ires { "y" } else { "n" }, "ires", name, line)?;
+            expect(&field("cfis")?, if cfis { "y" } else { "n" }, "cfis", name, line)?;
+            if ires != remapping {
+                return Err(format!(
+                    "{name}: GSTS.IRES is {ires} where the unit remaps = {remapping}\n{line}"
+                ));
+            }
+            // Never, on any machine: `CFI` is the bit that would let a
+            // compatibility message through, and the kernel writes it on none.
+            if cfis {
+                return Err(format!(
+                    "{name}: GSTS.CFIS is set, so the unit passes compatibility-format interrupts \
+                     through unremapped\n{line}"
+                ));
+            }
+        }
+    }
+
+    let sources = source_formats(log, name)?;
+    if sources.is_empty() {
+        return Err(format!(
+            "{name}: this machine armed no interrupt source at all, so there is nothing here to \
+             be in the right format"
+        ));
+    }
+    for source in &sources {
+        if source.remappable != remapping {
+            return Err(format!(
+                "{name}: {} is in {} format and the unit remaps = {remapping}. Under IRE with \
+                 CFI clear a compatibility-format message is blocked, so this source has stopped",
+                source.who,
+                if source.remappable { "remappable" } else { "compatibility" }
+            ));
+        }
+    }
+
+    if !remapping {
+        eprintln!("  [iommu] {name}: no remapping, and all {} source(s) in compatibility format",
+            sources.len());
+        return Ok(());
+    }
+
+    // Two requester ids that no single source could produce: a PCI function's,
+    // which the walk printed, and the I/O APIC's, which sits on a pseudo-bus no
+    // walk reaches and exists only in the DMAR scope.
+    let functions = enumerated_functions(log);
+    let apics = scope_sources(log);
+    if apics.is_empty() {
+        return Err(format!("{name}: the unit named no I/O APIC scope to take a source id from"));
+    }
+
+    // The handle a source carries has to reach the entry that verifies *its
+    // own* requester id. A source pointed at somebody else's entry would be
+    // refused by the unit for source-id verification, and a gate that only
+    // asked whether the entry existed would call that correct.
+    for source in &sources {
+        let want = match &source.requester {
+            Requester::Function(bdf) => bdf.clone(),
+            Requester::Controller(id) => apics.get(id).cloned().ok_or_else(|| {
+                format!("{name}: {} sits on a chip the unit's scopes never named", source.who)
+            })?,
+        };
+        let Some(entry) = entries.iter().find(|e| e.index == source.handle) else {
+            return Err(format!(
+                "{name}: {} carries handle {}, and the kernel wrote no table entry with that \
+                 index — the unit would refuse it as out of bounds",
+                source.who, source.handle
+            ));
+        };
+        if entry.source != want {
+            return Err(format!(
+                "{name}: {} carries handle {}, and irte{} is verified against {} rather than \
+                 {want} — the unit refuses that message for source-id verification",
+                source.who, source.handle, entry.index, entry.source
+            ));
+        }
+    }
+
+    let mut from_pci = 0usize;
+    let mut from_apic = 0usize;
+    for entry in &entries {
+        if entry.svt != "1" || entry.sq != "0" {
+            return Err(format!(
+                "{name}: irte{} has svt={} sq={}, so a message carrying any other requester id \
+                 would be remapped through it. Every entry is verified against all sixteen bits \
+                 of one source id",
+                entry.index, entry.svt, entry.sq
+            ));
+        }
+        if apics.values().any(|sid| *sid == entry.source) {
+            from_apic += 1;
+        } else if functions.contains(&entry.source) {
+            from_pci += 1;
+        } else {
+            return Err(format!(
+                "{name}: irte{} is verified against {}, which is neither a function this machine \
+                 enumerated ({functions:?}) nor an I/O APIC the unit scoped ({apics:?})",
+                entry.index, entry.source
+            ));
+        }
+    }
+    if from_pci == 0 || from_apic == 0 {
+        return Err(format!(
+            "{name}: {from_pci} entries name a PCI function and {from_apic} name the I/O APIC. \
+             Both paths into the unit have to be covered or half of this gate is vacuous"
+        ));
+    }
+    let indices: BTreeSet<u16> = entries.iter().map(|e| e.index).collect();
+    if indices.len() != entries.len() {
+        return Err(format!(
+            "{name}: {} entries over {} distinct indices — two sources share a handle, so one \
+             of them is delivered as the other",
+            entries.len(),
+            indices.len()
+        ));
+    }
+
+    eprintln!(
+        "  [iommu] {name}: IRES=1 CFIS=0, {} entries ({from_pci} pci, {from_apic} ioapic) all \
+         svt=1 sq=0, {} source(s) remappable",
+        entries.len(),
+        sources.len()
+    );
+    Ok(())
+}
+
+/// One entry the kernel reported writing.
+struct Entry {
+    index: u16,
+    source: String,
+    svt: String,
+    sq: String,
+}
+
+fn table_entries(log: &Serial, name: &str) -> Result<Vec<Entry>, String> {
+    let mut entries = Vec::new();
+    for line in log.text().lines() {
+        let Some(rest) = line.split("iommu: irte").nth(1) else { continue };
+        let (index, _) = rest
+            .split_once(' ')
+            .ok_or_else(|| format!("{name}: unreadable table entry line: {line:?}"))?;
+        let index: u16 = index
+            .parse()
+            .map_err(|_| format!("{name}: {index:?} is not an entry index: {line:?}"))?;
+        let fields = unit_fields(line);
+        let field = |k: &str| -> Result<String, String> {
+            fields.get(k).cloned().ok_or_else(|| format!("{name}: no {k}= on {line:?}"))
+        };
+        entries.push(Entry {
+            index,
+            source: field("source")?,
+            svt: field("svt")?,
+            sq: field("sq")?,
+        });
+    }
+    Ok(entries)
+}
+
+/// Who the unit will see as the originator of a source's message.
+enum Requester {
+    /// A PCI function, which the walk printed as `bb:dd.f`.
+    Function(String),
+    /// An interrupt controller, by MADT id: its requester id exists only in the DMAR.
+    Controller(String),
+}
+
+/// One armed source, read back out of the register that carries its message.
+struct Source {
+    who: String,
+    requester: Requester,
+    remappable: bool,
+    handle: u16,
+}
+
+fn source_formats(log: &Serial, name: &str) -> Result<Vec<Source>, String> {
+    let mut sources = Vec::new();
+    for line in log.text().lines() {
+        let fields = unit_fields(line);
+        if let Some(rest) = line.split("ioapic: gsi ").nth(1) {
+            let gsi = rest.split(' ').next().unwrap_or_default();
+            let (Some(id), Some(rte)) = (fields.get("id"), fields.get("rte")) else {
+                return Err(format!("{name}: unreadable redirection entry line: {line:?}"));
+            };
+            let rte = u64::from_str_radix(rte.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable rte on {line:?}"))?;
+            // Figure 5-3: format bit 48, index 63:49, index[15] at bit 11.
+            sources.push(Source {
+                who: format!("the pin on GSI {gsi}"),
+                requester: Requester::Controller(id.clone()),
+                remappable: rte & (1 << 48) != 0,
+                handle: ((rte >> 49) & 0x7FFF) as u16 | (((rte >> 11) & 1) as u16) << 15,
+            });
+        } else if line.contains(": msix address=") || line.contains(": msi address=") {
+            let (Some(address), Some(data)) = (fields.get("address"), fields.get("data")) else {
+                return Err(format!("{name}: unreadable message line: {line:?}"));
+            };
+            let Some(who) = line
+                .split("PCI ")
+                .nth(1)
+                .and_then(|r| r.split_whitespace().next())
+                .map(|bdf| bdf.trim_end_matches(':'))
+            else {
+                return Err(format!("{name}: a message line naming no function: {line:?}"));
+            };
+            let address = u32::from_str_radix(address.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable message address on {line:?}"))?;
+            let data = u32::from_str_radix(data.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable message data on {line:?}"))?;
+            // Figure 5-4: format bit 4, SHV bit 3, handle 19:5, handle[15] at bit 2.
+            let remappable = address & (1 << 4) != 0;
+            let handle = ((address >> 5) & 0x7FFF) as u16 | (((address >> 2) & 1) as u16) << 15;
+            if remappable && (address & (1 << 3) == 0 || data != 0) {
+                return Err(format!(
+                    "{name}: {who} writes a remappable message with SHV={} and data={data:#x}; \
+                     Figure 5-4 sets SHV and programs the data register to 0h, and the index the \
+                     unit computes is handle plus subhandle",
+                    (address >> 3) & 1
+                ));
+            }
+            sources.push(Source {
+                who: format!("the message-signalled interrupt of {who}"),
+                requester: Requester::Function(who.to_string()),
+                remappable,
+                handle,
+            });
+        }
+    }
+    Ok(sources)
+}
+
+/// The requester id the unit's scopes give each interrupt controller, by MADT id.
+fn scope_sources(log: &Serial) -> BTreeMap<String, String> {
+    let mut named = BTreeMap::new();
+    for line in log.text().lines() {
+        let Some(rest) = line.split("scope ioapic ").nth(1) else { continue };
+        let Some(sid) = rest.split(' ').next() else { continue };
+        if let Some(id) = unit_fields(line).get("id") {
+            named.insert(id.clone(), sid.to_string());
+        }
+    }
+    named
 }
 
 /// The needle that says the unit blocked something, and the marker both gates

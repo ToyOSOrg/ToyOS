@@ -221,6 +221,7 @@ ioapic_topology 3142 shards=12
 iommu_context_absent 5731 shards=12
 iommu_discovery 18600 shards=12
 iommu_empty_domain 5691 shards=12
+iommu_interrupt_remapping 18446744073709551615 shards=none
 irq_census_conservation 5056 shards=12
 kernel_heartbeat 5634 shards=12
 kernel_log_file 13152 shards=12

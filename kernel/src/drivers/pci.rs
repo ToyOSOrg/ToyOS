@@ -214,7 +214,18 @@ impl PciDevice {
         table.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_UNMASKED);
 
         cap.write_u16(msix::MESSAGE_CONTROL, msix::Msix::enabled(control));
+        self.report_message(
+            "msix",
+            table.read_u32(msix::ENTRY_ADDRESS_LO),
+            table.read_u32(msix::ENTRY_DATA),
+        );
         true
+    }
+
+    /// The message as the device's own registers hold it, read back rather than restated.
+    fn report_message(&self, kind: &str, address: u32, data: u32) {
+        log!("PCI {:02x}:{:02x}.{}: {kind} address={address:#010x} data={data:#010x}",
+            self.bus, self.dev, self.func);
     }
 
     /// The address and data this function's interrupt registers take for `vector`.
@@ -255,6 +266,11 @@ impl PciDevice {
             cap.write_u32(mask, 0);
         }
         cap.write_u16(msi::MESSAGE_CONTROL, msi::Msi::enabled(control));
+        self.report_message(
+            "msi",
+            cap.read_u32(msi.address_lo()),
+            cap.read_u16(msi.data()) as u32,
+        );
         true
     }
 

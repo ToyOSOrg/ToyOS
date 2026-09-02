@@ -30,8 +30,10 @@
 use alloc::vec::Vec;
 
 use crate::iommu::StreamId;
+use crate::mm::Mmio;
 use crate::sync::Lock;
 
+use super::queue::Queue;
 use super::table::{Table, Tables};
 
 pub const IRTA_REG: u64 = 0xB8;
@@ -88,10 +90,12 @@ struct Remap {
     extended: bool,
     /// Requester ids firmware gave this machine's I/O APICs, which Section 8.3.1.1 requires it to name.
     apics: Vec<(u8, StreamId)>,
+    /// Every unit that is remapping, with the queue an entry's write is invalidated through.
+    units: Vec<(Mmio, Queue)>,
 }
 
 static REMAP: Lock<Remap> =
-    Lock::new(Remap { table: None, used: 0, extended: false, apics: Vec::new() });
+    Lock::new(Remap { table: None, used: 0, extended: false, apics: Vec::new(), units: Vec::new() });
 
 /// Record the requester id a DMAR device scope gave the I/O APIC with this id.
 pub fn describe_apic(apic_id: u8, source: StreamId) {
@@ -113,6 +117,17 @@ pub fn arm(tables: &mut Tables, extended: bool) -> u64 {
         None => *remap.table.insert(tables.alloc()),
     };
     table.phys() | if extended { EXTENDED_INTERRUPT_MODE } else { 0 } | SIZE_FIELD
+}
+
+/// Take over a remapping unit's invalidation queue, once `IRE` is confirmed.
+///
+/// Every later entry this module writes is invalidated on every queue held
+/// here. `CAP.CM` is set on the units this boots, and Section 6.4 says a unit
+/// reporting it may cache the entry a fault was taken on — including the
+/// not-present one — so an entry filled in later is not visible until its cache
+/// is told, and a stale entry is a misdelivered interrupt.
+pub fn adopt(regs: Mmio, queue: Queue) {
+    REMAP.lock().units.push((regs, queue));
 }
 
 /// The table's physical address, for the line reporting what a unit was pointed at.
@@ -152,6 +167,11 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Option<u16>
                     | (destination << DESTINATION_SHIFT),
                 VERIFY_SOURCE_ID | source.requester() as u64,
             );
+            // Under the same lock as the write, so no other entry can be
+            // written between an entry and the invalidation that publishes it.
+            for (regs, queue) in &mut remap.units {
+                queue.invalidate_interrupts(*regs);
+            }
             Some(index)
         }
     };
