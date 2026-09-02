@@ -409,6 +409,27 @@ mod mirror_refuse {
     }
 }
 
+/// The `fat-flush-meta-refuse` actuator: refuses one file's second
+/// directory-entry write, which is the last step of a flush and the one whose
+/// failure leaves the pages before it already written and settled. The second
+/// and not the first, because the first is that file's seed being made durable.
+#[cfg(feature = "boot-actuators")]
+mod meta_refuse {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/writeback_durability.rs`.
+    const STAGED: &str = "wb-retry.bin";
+    /// Which of this file's metadata writes is refused, counting from zero.
+    const AT: u32 = 1;
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+
+    pub fn should_refuse(name: &str) -> bool {
+        crate::actuator::fat_flush_meta_refuse()
+            && name.ends_with(STAGED)
+            && SEEN.fetch_add(1, Ordering::Relaxed) == AT
+    }
+}
+
 /// Mark that a write-back drain flush is in progress, so the mirror-refuse
 /// actuator targets the drain path and not `SYS_FSYNC`.
 #[cfg(feature = "boot-actuators")]
@@ -838,6 +859,17 @@ impl FileSystem for FatFs {
             if info.file.len() != size {
                 fs.set_len(&mut info.file, size)
                     .map_err(|e| refused(role, "set_len", &info.name, e))?;
+            }
+            // Refused before the entry is written, like a spent `block::OPERATION`:
+            // the pages this flush already wrote and settled stay where they are.
+            #[cfg(feature = "boot-actuators")]
+            if meta_refuse::should_refuse(&info.name) {
+                log!(
+                    "{role}-volume: fat-flush-meta-refuse: refusing the directory-entry write \
+                     of {} as a budget expiry",
+                    info.name
+                );
+                return Err(SyscallError::WouldBlock);
             }
             fs.flush_meta(&mut info.file, time)
                 .map_err(|e| refused(role, "flush_meta", &info.name, e))?;

@@ -827,6 +827,12 @@ pub fn writeback_durability(
     /// And for the bytes a read got back from the file the guest shrank only
     /// after it had left the cache.
     const SERVED_NAME: &str = "wb-served.bin";
+    /// And for the file whose flush is refused at its directory-entry write.
+    const RETRY_NAME: &str = "wb-retry.bin";
+    const RETRY_AT: usize = 2 * 4096;
+    fn kept() -> Vec<u8> {
+        (0..4096usize).map(|i| (i.wrapping_mul(53) ^ 0xC3) as u8).collect()
+    }
 
     // Stage the one failure QEMU will not produce: a budget expiry on the FAT-1
     // mirror write of the blob's cluster allocation, on the write-back drain path
@@ -835,7 +841,10 @@ pub fn writeback_durability(
     // with them the drain re-drives the flush and heals it, and the checker below
     // is the independent judge either way. The image is built with the parameter
     // so the guest boots the test kernel that carries the actuator.
-    const PARAMS: &[&str] = &["fat-mirror-write-refuse"];
+    // The second actuator refuses one file's second directory-entry write, so a
+    // flush fails at its metadata write with its pages already written and
+    // settled. Different file, different site: neither can stand in for the other.
+    const PARAMS: &[&str] = &["fat-mirror-write-refuse", "fat-flush-meta-refuse"];
 
     let image_path = test_dir().join("writeback-durability.img");
     let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
@@ -947,7 +956,8 @@ pub fn writeback_durability(
 
     // Ground truth: the bytes on the device, against the bytes the guest wrote,
     // read by the host's own FAT implementation and never by the kernel.
-    let mut files = read_files(volume, &[BLOB_NAME, SHRUNK_NAME, SERVED_NAME])?;
+    let mut files = read_files(volume, &[BLOB_NAME, SHRUNK_NAME, SERVED_NAME, RETRY_NAME])?;
+    let retried = need(files.pop().flatten(), RETRY_NAME)?;
     let served = need(files.pop().flatten(), SERVED_NAME)?;
     let shrunk = need(files.pop().flatten(), SHRUNK_NAME)?;
     let got = need(files.pop().flatten(), BLOB_NAME)?;
@@ -1006,11 +1016,50 @@ pub fn writeback_durability(
         ));
     }
 
+    // The retry gate. The actuator must have fired, or the flush never failed
+    // and this proves nothing; then the page written above the mark has to be
+    // on the volume, which a second trim would have freed.
+    const META_REFUSED: &str = "fat-flush-meta-refuse: refusing the directory-entry write";
+    let meta_fired = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
+        .iter()
+        .map(|cap| cap.matches(META_REFUSED).count())
+        .sum::<usize>();
+    if meta_fired != 1 {
+        return Err(format!(
+            "the fat-flush-meta-refuse actuator fired {meta_fired} time(s), not the 1 that makes \
+             the flush fail at its metadata write — the retry this gate is about never \
+             happened\nkernel log:\n{}{}\nshutdown:\n{}",
+            result.before, result.serial, tail
+        ));
+    }
+    if retried.len() != SHRUNK_LEN {
+        return Err(format!(
+            "{RETRY_NAME} is {} bytes on the volume; the guest regrew it to {SHRUNK_LEN}",
+            retried.len()
+        ));
+    }
+    if retried[RETRY_AT..] != kept()[..] {
+        let at = retried[RETRY_AT..].iter().zip(kept()).position(|(a, b)| *a != b);
+        return Err(format!(
+            "{RETRY_NAME} byte {:?} of the page written above the shrink is not what the guest \
+             wrote — the flush's retry trimmed a second time and freed it",
+            at.map(|i| RETRY_AT + i),
+        ));
+    }
+    if let Some(at) = retried[CUT..RETRY_AT].iter().position(|&b| b != 0) {
+        return Err(format!(
+            "{RETRY_NAME} byte {} between the shrink and the rewritten page is {:#04x}, not zero",
+            CUT + at,
+            retried[CUT + at],
+        ));
+    }
+
     let _ = std::fs::remove_file(&image_path);
     eprintln!(
         "  [wb] {BLOB_LEN} bytes closed without fsync reached the log volume through the \
          write-back queue and the shutdown drain; {SHRUNK_NAME}'s regrown tail is zeros and so \
-         is what a cold shrink served into {SERVED_NAME}; the checker is silent"
+         is what a cold shrink served into {SERVED_NAME}; {RETRY_NAME} kept the page it wrote \
+         through a refused metadata write; the checker is silent"
     );
     Ok(())
 }

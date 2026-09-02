@@ -86,6 +86,9 @@ actuators! {
     /// Refuse the first two FAT-1 mirror writes of a write-back drain flush; two, not one, because the retry ladder parks only at attempt 2.
     fat_mirror_write_refuse = "fat-mirror-write-refuse";
 
+    /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
+    fat_flush_meta_refuse = "fat-flush-meta-refuse";
+
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
 

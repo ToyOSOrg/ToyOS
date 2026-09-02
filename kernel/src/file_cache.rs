@@ -426,7 +426,8 @@ pub fn settle_file(file_id: FileId, upto: Settlement) {
     }
 }
 
-/// Clear the shrink mark: the flush's metadata write is what the mount records now.
+/// Clear the shrink mark: the mount has given the tail back, so nothing above it
+/// is named any more and a second trim would free what the flush then writes.
 /// Sound without a generation because every shrink runs under the VFS lock a flush holds.
 pub fn settle_shrink(file_id: FileId) {
     if let Some(file) = FILE_CACHE.lock().files.get_mut(&file_id) {

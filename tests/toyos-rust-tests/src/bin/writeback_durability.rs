@@ -15,7 +15,7 @@
 //! by something that is not the code under test.
 
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::thread;
 use std::time::Duration;
 
@@ -39,6 +39,15 @@ fn seed() -> Vec<u8> {
 /// bytes it served are copied into; the same mirroring.
 const REOPENED: &str = "/log/wb-reopened.bin";
 const WITNESS: &str = "/log/wb-served.bin";
+
+/// The file whose second directory-entry write `fat-flush-meta-refuse` refuses.
+/// Its name is mirrored in `kernel/src/fat32_adapter.rs`.
+const RETRY: &str = "/log/wb-retry.bin";
+const RETRY_AT: u64 = 2 * 4096;
+
+fn kept() -> Vec<u8> {
+    (0..4096usize).map(|i| (i.wrapping_mul(53) ^ 0xC3) as u8).collect()
+}
 
 fn main() {
     let want = blob();
@@ -75,8 +84,32 @@ fn main() {
 
     shrink_unflushed_then_regrow();
     shrink_a_file_the_cache_no_longer_holds();
+    a_refused_metadata_write_keeps_the_pages_it_wrote();
 
     println!("wrote {LEN} bytes, closed without fsync, and read them back after the write-back drained");
+}
+
+/// A flush that trims a shrink, writes a page above the mark, and is then
+/// refused at its metadata write. The retry has no dirty pages left, so a mark
+/// that outlived the trim would trim a second time and free the page the first
+/// attempt wrote. The volume is where that shows, and the host reads it.
+fn a_refused_metadata_write_keeps_the_pages_it_wrote() {
+    let mut f = OpenOptions::new()
+        .read(true).write(true).create(true).truncate(true)
+        .open(RETRY)
+        .unwrap_or_else(|e| panic!("create {RETRY}: {e}"));
+    f.write_all(&seed()).expect("write the seed");
+    f.sync_all().expect("fsync the seed");
+    f.set_len(CUT).expect("shrink into the first page");
+    f.set_len(SHRUNK_LEN as u64).expect("regrow");
+    f.seek(SeekFrom::Start(RETRY_AT)).expect("seek above the mark");
+    f.write_all(&kept()).expect("write a page above the mark");
+
+    // Refused once by the actuator and retried by `SYS_FSYNC` itself, so this
+    // returning is the retry having succeeded, not the first attempt.
+    f.sync_all().expect("the fsync whose second metadata write is refused");
+    drop(f);
+    println!("shrank {RETRY} to {CUT}, regrew it, wrote a page at {RETRY_AT}, fsynced through one refusal");
 }
 
 /// The same shrink and regrow over a page the cache does not hold, with the

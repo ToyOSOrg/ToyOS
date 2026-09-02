@@ -454,8 +454,12 @@ impl Vfs {
         if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
 
         // Before the pages: a page rewritten above the mark must outlive the trim.
+        // Settled by the trim itself and not by the metadata write below, which
+        // may refuse: past this point the device names nothing above the mark,
+        // and a retry that trimmed again would free the pages it just wrote.
         if let Some(mark) = plan.shrunk_to {
             fs.truncate_to(file_id, mark, mtime)?;
+            crate::file_cache::settle_shrink(file_id);
         }
 
         // On the heap: the idle loop's 16 KiB stack has no guard page.
@@ -476,7 +480,6 @@ impl Vfs {
         stalled_metadata_window(path, file_id, size);
         fs.update_metadata(file_id, size, mtime)?;
         crate::file_cache::settle_file(file_id, plan.file);
-        crate::file_cache::settle_shrink(file_id);
 
         // A refusal is logged, not returned: the bytes are on the device; only evictability is lost.
         if !crate::file_cache::has_backing(file_id) {
