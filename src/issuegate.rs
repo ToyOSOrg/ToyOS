@@ -264,12 +264,13 @@ fn citation_refusals(
                 continue;
             }
             let cited = format!("issues/{area}/{slug}.md");
-            // The area list is closed (`issues/README.md`), so a claim under a
-            // name outside it resolves to nothing whether the slug does or not.
+            // `areas` is the set of directories under `issues/` that hold a
+            // file, so the tracker on disk is the authority here and
+            // `issues/README.md`'s closed list is read by nothing.
             if !areas.contains(&area) {
                 bad.push(format!(
-                    "{path}:{n}: cites `{cited}`, and `{area}` is no area this tracker holds — \
-                     the list is closed and a citation under a name outside it resolves to \
+                    "{path}:{n}: cites `{cited}`, and no directory under `issues/` is named \
+                     `{area}` — a claim under an area the tracker does not hold resolves to \
                      nothing"
                 ));
             } else if !issue_files.contains(&cited) {
@@ -458,9 +459,9 @@ mod tests {
         assert!(
             judge(&format!("see {}", at("area", "bare")))[0].contains("no such file exists")
         );
-        // An area outside the closed list is itself a dangling claim.
+        // An area the tracker does not hold is itself a dangling claim.
         assert!(judge(&format!("see {}", at("other", "bare")))[0]
-            .contains("no area this tracker holds"));
+            .contains("no directory under `issues/` is named"));
         assert!(judge("the fix `a-name-the-tracker-dropped` took")[0].contains("deleted issue"));
         assert!(judge("`a-name-the-tracker-kept`").is_empty());
         // A dead slug inside a longer token is that token, not a mention.
