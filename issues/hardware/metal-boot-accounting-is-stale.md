@@ -11,9 +11,8 @@ re-measured.** Six of its healthy boots report `Boot: complete` at 1148, 1148,
 1149, 1150, 1151 and 1154 ms; the seventh is 755 ms and is the control boot whose
 keyboard was refused, so its peripherals phase is 448 ms instead of 842. The QEMU
 figure for the comparable shape is `Boot: complete (196ms)` on the
-`metal_sim_compositor` boot
-(`kernel-log-unreadable-once-userland-owns-the-screen` records the
-measurement), and `(234ms)` for the diag artifact booted
+`metal_sim_compositor` boot, taken with
+`cargo test --test toyos-build -- metal_sim --nocapture`, and `(234ms)` for the diag artifact booted
 headless. **So metal is ~5.9× QEMU, not the ~17× the hardware inventory
 computed** — that ratio is against `(3422ms)`, and 2.30 s of those 3.42 s were
 the six `boot_checkpoint` framebuffer repaints, which #138's write-combining

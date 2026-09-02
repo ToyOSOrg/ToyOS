@@ -22,8 +22,8 @@ items whose QEMU-versus-hardware divergence it noticed — TCG always reports
 FSGSBASE, and QEMU's `stride == width` — both explicitly recorded as
 read-verified because QEMU cannot exercise them. The i8042 has **more** such
 branches than either, every one of them silent
-(`kernel-log-unreadable-once-userland-owns-the-screen`), and no item asks about
-any of them.
+(`issues/hardware/t14-hands-over-an-uninitialised-8042.md`), and no item asks
+about any of them.
 
 What was actually established, and what was not:
 
