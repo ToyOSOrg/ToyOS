@@ -645,8 +645,8 @@ fn arm_interrupt(pci: &PciDevice) -> bool {
         return true;
     }
     log!(
-        "hda: {:02x}:{:02x}.{} offers neither MSI-X nor MSI, and this driver has no other way to \
-         be told a period completed — NOT INITIALISED",
+        "hda: {:02x}:{:02x}.{} has no interrupt this driver can arm — the line above says whether \
+         a capability was missing or a message was refused — NOT INITIALISED",
         pci.bus,
         pci.dev,
         pci.func

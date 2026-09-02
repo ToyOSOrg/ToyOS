@@ -63,8 +63,8 @@ pub enum RouteError {
     NoUnit(Gsi),
     /// Destination APIC id does not fit the 8-bit field (0xFF is broadcast).
     DestTooWide(u32),
-    /// The IOMMU remaps interrupts and had no entry to give this pin.
-    NotRemappable(Gsi),
+    /// The IOMMU remaps interrupts and had no entry to give this pin, and why.
+    NotRemappable(Gsi, crate::iommu::Refused),
     /// The written redirection entry did not read back unchanged.
     Readback { wrote: u64, read: u64 },
 }
@@ -75,9 +75,7 @@ impl core::fmt::Debug for RouteError {
         match self {
             Self::NoUnit(gsi) => write!(f, "no I/O APIC covers GSI {}", gsi.0),
             Self::DestTooWide(id) => write!(f, "apic id {id:#x} does not fit an 8-bit destination"),
-            Self::NotRemappable(gsi) => {
-                write!(f, "the IOMMU has no remapping entry for GSI {}", gsi.0)
-            }
+            Self::NotRemappable(gsi, why) => write!(f, "GSI {} cannot be remapped: {why}", gsi.0),
             Self::Readback { wrote, read } => {
                 write!(f, "wrote {wrote:#018x}, read back {read:#018x}")
             }
@@ -273,7 +271,7 @@ pub fn route(
                 (0, dest_apic_id << 24)
             }
             Delivery::Remapped(pin) => (pin.low, pin.high),
-            Delivery::Refused => return Err(RouteError::NotRemappable(gsi)),
+            Delivery::Refused(why) => return Err(RouteError::NotRemappable(gsi, why)),
         };
     let low = vector as u32
         | index

@@ -1305,6 +1305,13 @@ pub enum Profile {
     /// refusals, because a platform that declares it cannot remap and a unit
     /// that cannot are different facts a user can act on differently.
     IommuNoIntremap,
+    /// metal-sim whose unit advertises Extended Interrupt Mode.
+    ///
+    /// The only machine here that does. QEMU's `eim` default is `auto`, which
+    /// resolves to off without an in-kernel irqchip, so without this profile
+    /// the guest's 32-bit-destination entry format — the one every real
+    /// machine with more than 255 CPUs takes — is written by no boot.
+    IommuEim,
     /// [`Profile::Headless`] with its virtio sound card replaced by an Intel
     /// HDA controller and one codec — the machine soundd drives itself.
     ///
@@ -1345,11 +1352,16 @@ pub struct Iommu {
     pub aw_bits: u8,
     /// Interrupt remapping. Off is a platform declaring it cannot remap.
     pub intremap: bool,
+    /// `ECAP.EIM`. QEMU's own default is `auto`, which is off without an
+    /// in-kernel irqchip and so off on every guest this host boots — leaving
+    /// the 32-bit-destination half of the guest's entry format unreachable
+    /// unless a profile asks for it by name.
+    pub eim: bool,
 }
 
-/// What every profile but the three that vary it declares: the widest address
+/// What every profile but the four that vary it declares: the widest address
 /// width QEMU offers and interrupt remapping on.
-pub const IOMMU_DEFAULT: Iommu = Iommu { aw_bits: 48, intremap: true };
+pub const IOMMU_DEFAULT: Iommu = Iommu { aw_bits: 48, intremap: true, eim: false };
 
 /// The controller every profile but [`Profile::MetalUsb`] gets. `nec-usb-xhci`
 /// registers `MAX(p2, p3)` attachable USB ports over `p2 + p3` port registers —
@@ -2011,6 +2023,10 @@ impl Profile {
                 usb_disks: &[],
                 hda: &[],
                 iommu: Some(Iommu { intremap: false, ..IOMMU_DEFAULT }),
+            },
+            Self::IommuEim => Shape {
+                iommu: Some(Iommu { eim: true, ..IOMMU_DEFAULT }),
+                ..Self::Metal.shape()
             },
             Self::Hda => Shape {
                 virtio: Virtio::WithoutSound,
@@ -3608,9 +3624,10 @@ fn qemu_command(
     // decodes nothing — the vacuity trap, in its harness-side form.
     if let Some(unit) = shape.iommu {
         qemu.arg("-device").arg(format!(
-            "intel-iommu,intremap={},caching-mode=on,aw-bits={}",
+            "intel-iommu,intremap={},caching-mode=on,aw-bits={},eim={}",
             if unit.intremap { "on" } else { "off" },
-            unit.aw_bits
+            unit.aw_bits,
+            if unit.eim { "on" } else { "off" }
         ));
     }
 

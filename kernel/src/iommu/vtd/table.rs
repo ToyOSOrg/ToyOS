@@ -103,6 +103,12 @@ impl Table {
         self.write(index * 2, lo);
     }
 
+    /// The 16-byte entry at `index`, back out of memory: `write` flushed the
+    /// line, so this refetches rather than reading the cache it was written to.
+    pub fn read_pair(self, index: usize) -> (u64, u64) {
+        (self.read(index * 2), self.read(index * 2 + 1))
+    }
+
     fn flush_all(self) {
         let base = self.window().addr() as usize;
         for offset in (0..TABLE_BYTES).step_by(LINE_BYTES) {

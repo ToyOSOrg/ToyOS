@@ -21,13 +21,17 @@ set, `CFI` is never written, and every table entry is source-id-verified against
 the requester id its one source really carries. Per-driver domains and the
 refusal are not. They land in this order and each leaves the tree green.
 
-Two things the first boot answered rather than assumed. The unit's own
-fault-event MSI **is** exempt, as Section 5.1.6 says — the two actuator gates
-provoke a real fault under `IRE` and the fault line still arrives. QEMU does
-**not** block a compatibility-format message once `CFI` is clear, which the
-specification requires and which means a source nobody moved goes on working
-here and black-screens on real hardware
-(`issues/kernel/qemu-passes-compatibility-format-interrupts.md`).
+Both things this stage was told to verify rather than assume turned out to be
+undecidable on the harness, which is itself the answer. QEMU does **not** block
+a compatibility-format message once `CFI` is clear, though the specification
+requires it — so a source nobody moved goes on working here and black-screens on
+real hardware. And whether the unit's own fault-event MSI is exempt is settled
+by nothing in reach, the green fault gates included: QEMU sends that event
+straight to the APIC without consulting the remapping path at all, so those
+gates are consistent with the exemption holding and with the model blocking
+nothing. Both, with the interrupt-cache invalidation that is unmeasurable for a
+third reason, are recorded in
+`issues/kernel/qemu-passes-compatibility-format-interrupts.md` as T14 questions.
 
 **Domains, mapping, invalidation, faults.** Create/attach/map/unmap/flush, an
 IOVA allocator, and the half of the fault handler that kills a process instead

@@ -237,9 +237,8 @@ impl PciDevice {
         match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, MSG_DEST) {
             crate::iommu::Delivery::Direct => Some((MSG_ADDR, vector as u32)),
             crate::iommu::Delivery::Remapped(m) => Some((m.address, m.data)),
-            crate::iommu::Delivery::Refused => {
-                log!("PCI {:02x}:{:02x}.{}: no interrupt remapping entry, not armed",
-                    self.bus, self.dev, self.func);
+            crate::iommu::Delivery::Refused(why) => {
+                log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);
                 None
             }
         }

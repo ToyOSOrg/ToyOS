@@ -107,16 +107,19 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     for structure in dmar.structures() {
         match structure {
             Ok(Structure::Drhd(drhd)) => {
-                if units == MAX_UNITS {
+                // Counted before the ceiling refuses it, so a unit left
+                // uninventoried leaves `units` above `ready`, which is what
+                // stops `remappable` arming a machine it cannot see all of.
+                units += 1;
+                if units > MAX_UNITS {
                     log!("iommu: more than {MAX_UNITS} units described; the rest are not inventoried");
                     break;
                 }
-                if let Some(unit) = describe_unit(units, &drhd) {
+                if let Some(unit) = describe_unit(units - 1, &drhd) {
                     if let Some(plan) = plan(&unit) {
                         ready.push((unit, plan));
                     }
                 }
-                units += 1;
             }
             // Kernel devices get RMRR regions for free and userspace handoff of
             // one is refused elsewhere; QEMU publishes none, so this arm is
@@ -462,13 +465,14 @@ fn enable(
     let gsts = unit.regs.read_u32(GSTS_REG);
     log!(
         "iommu: unit{index} @{:#x} translating gsts={gsts:#010x} tes={} qies={} ires={} cfis={} \
-         irt={:#x} eime={} root={:#x} domain={} aw={} streams={}",
+         irt={:#x} irta={:#x} eime={} root={:#x} domain={} aw={} streams={}",
         unit.base,
         yn(gsts & TRANSLATION_ENABLE != 0),
         yn(gsts & QUEUED_INVALIDATION_ENABLE != 0),
         yn(gsts & interrupt::INTERRUPT_REMAPPING_ENABLE != 0),
         yn(gsts & interrupt::COMPATIBILITY_FORMAT != 0),
         interrupt::table_address(),
+        interrupt::pointer(),
         yn(remap == Some(true)),
         root.phys(),
         table::KERNEL_DOMAIN,

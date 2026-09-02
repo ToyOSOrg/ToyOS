@@ -29,7 +29,7 @@
 
 use alloc::vec::Vec;
 
-use crate::iommu::StreamId;
+use crate::iommu::{Refused, StreamId};
 use crate::mm::Mmio;
 use crate::sync::Lock;
 
@@ -80,6 +80,8 @@ struct Remap {
     used: u16,
     /// `ECAP.EIM` on every unit. Clear bounds a destination to the eight bits `DST` then holds.
     extended: bool,
+    /// The word `IRTA_REG` was given, kept so the boot line can report it.
+    pointer: u64,
     /// Requester ids firmware gave this machine's I/O APICs, which Section 8.3.1.1 requires it to name.
     apics: Vec<(u8, StreamId)>,
     /// Every unit that is remapping, with the queue an entry's write is invalidated through.
@@ -87,7 +89,14 @@ struct Remap {
 }
 
 static REMAP: Lock<Remap> =
-    Lock::new(Remap { table: None, used: 0, extended: false, apics: Vec::new(), units: Vec::new() });
+    Lock::new(Remap {
+        table: None,
+        used: 0,
+        extended: false,
+        pointer: 0,
+        apics: Vec::new(),
+        units: Vec::new(),
+    });
 
 pub fn describe_apic(apic_id: u8, source: StreamId) {
     REMAP.lock().apics.push((apic_id, source));
@@ -106,7 +115,14 @@ pub fn arm(tables: &mut Tables, extended: bool) -> u64 {
         Some(table) => table,
         None => *remap.table.insert(tables.alloc()),
     };
-    table.phys() | if extended { EXTENDED_INTERRUPT_MODE } else { 0 } | SIZE_FIELD
+    let pointer = table.phys() | if extended { EXTENDED_INTERRUPT_MODE } else { 0 } | SIZE_FIELD;
+    remap.pointer = pointer;
+    pointer
+}
+
+/// The word `IRTA_REG` was given, whose bit 11 is what selects the entry format.
+pub fn pointer() -> u64 {
+    REMAP.lock().pointer
 }
 
 /// Take over a remapping unit's invalidation queue, once `IRE` is confirmed.
@@ -126,15 +142,22 @@ pub fn is_armed() -> bool {
     REMAP.lock().table.is_some()
 }
 
-/// Fills the next free entry for `source`; `None` refuses rather than
-/// mis-delivers — the table is full, or the destination is too wide for `DST`.
-fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Option<u16> {
-    let index = {
+/// Fills the next free entry for `source` and returns its index.
+///
+/// What it reports is the entry read back out of the table, never the words it
+/// meant to write: a line that restated the intent would agree with itself
+/// however the entry was composed, and the fields below are the whole of what
+/// keeps one device off another's entry.
+fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16, Refused> {
+    let written = {
         let mut remap = REMAP.lock();
-        let table = remap.table?;
-        let too_wide = !remap.extended && dest >= NARROW_DESTINATIONS;
-        if too_wide || remap.used == ENTRIES {
-            None
+        let Some(table) = remap.table else {
+            return Err(Refused::TableFull);
+        };
+        if !remap.extended && dest >= NARROW_DESTINATIONS {
+            Err(Refused::DestinationTooWide(dest))
+        } else if remap.used == ENTRIES {
+            Err(Refused::TableFull)
         } else {
             let index = remap.used;
             remap.used += 1;
@@ -155,26 +178,35 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Option<u16>
             for (regs, queue) in &mut remap.units {
                 queue.invalidate_interrupts(*regs);
             }
-            Some(index)
+            let (lo, hi) = table.read_pair(index as usize);
+            Ok((index, lo, hi))
         }
     };
-    match index {
-        Some(index) => log!(
-            "iommu: irte{index} source={source} sid={:#06x} svt=1 sq=0 vector={vector:#04x} \
-             dest={dest} trigger={}",
-            source.requester(),
-            if level { "level" } else { "edge" }
-        ),
-        None => log!(
-            "iommu: no interrupt remapping entry for {source} at vector {vector:#04x} on apic {dest}"
-        ),
+    match written {
+        Ok((index, lo, hi)) => {
+            log!(
+                "iommu: irte{index} source={source} p={} sid={:#06x} svt={} sq={} \
+                 vector={:#04x} dest={:#x} trigger={}",
+                lo & PRESENT,
+                hi & 0xFFFF,
+                (hi >> 18) & 0x3,
+                (hi >> 16) & 0x3,
+                (lo >> VECTOR_SHIFT) & 0xFF,
+                lo >> DESTINATION_SHIFT,
+                if lo & TRIGGER_LEVEL != 0 { "level" } else { "edge" }
+            );
+            Ok(index)
+        }
+        Err(why) => {
+            log!("iommu: no remapping entry for {source} at vector {vector:#04x}: {why}");
+            Err(why)
+        }
     }
-    index
 }
 
-pub fn msi(source: StreamId, vector: u8, dest: u32) -> Option<Msi> {
+pub fn msi(source: StreamId, vector: u8, dest: u32) -> Result<Msi, Refused> {
     let index = allocate(source, vector, dest, false)? as u32;
-    Some(Msi {
+    Ok(Msi {
         address: MESSAGE_BASE
             | ((index & 0x7FFF) << 5)
             | MESSAGE_REMAPPABLE
@@ -184,10 +216,12 @@ pub fn msi(source: StreamId, vector: u8, dest: u32) -> Option<Msi> {
     })
 }
 
-pub fn pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Option<Pin> {
-    let source = apic_source(apic_id)?;
+pub fn pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Result<Pin, Refused> {
+    // `remappable` refused the whole machine unless firmware named every chip,
+    // so an unnamed one here is a table with no entry to give.
+    let source = apic_source(apic_id).ok_or(Refused::TableFull)?;
     let index = allocate(source, vector, dest, level)? as u32;
-    Some(Pin { low: (index >> 15) << 11, high: PIN_REMAPPABLE | ((index & 0x7FFF) << 17) })
+    Ok(Pin { low: (index >> 15) << 11, high: PIN_REMAPPABLE | ((index & 0x7FFF) << 17) })
 }
 
 /// Locked apart from [`allocate`]: the lock is not reentrant.

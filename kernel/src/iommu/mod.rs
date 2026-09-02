@@ -102,7 +102,29 @@ pub enum Delivery<T> {
     /// Write this instead — the interrupt now reaches its destination through the unit.
     Remapped(T),
     /// The unit remaps and this source has no entry; the caller refuses the device.
-    Refused,
+    Refused(Refused),
+}
+
+/// Why a source could not be given an entry. Carried rather than collapsed:
+/// the two have different exits, and one message for both sends whoever reads
+/// it looking in the wrong place.
+#[derive(Clone, Copy)]
+pub enum Refused {
+    /// Wider than the destination an entry holds without extended interrupt mode.
+    DestinationTooWide(u32),
+    /// Every entry in the table is already spoken for.
+    TableFull,
+}
+
+impl core::fmt::Display for Refused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DestinationTooWide(id) => {
+                write!(f, "apic id {id:#x} does not fit a remapping entry's destination")
+            }
+            Self::TableFull => write!(f, "the interrupt remapping table is full"),
+        }
+    }
 }
 
 pub struct MsiMessage {
@@ -128,8 +150,8 @@ pub fn remap_msi(
         return Delivery::Direct;
     }
     match vtd::interrupt::msi(StreamId::pci(bus, device, function), vector, dest) {
-        Some(msi) => Delivery::Remapped(MsiMessage { address: msi.address, data: msi.data }),
-        None => Delivery::Refused,
+        Ok(msi) => Delivery::Remapped(MsiMessage { address: msi.address, data: msi.data }),
+        Err(why) => Delivery::Refused(why),
     }
 }
 
@@ -138,8 +160,8 @@ pub fn remap_pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Delivery<Pi
         return Delivery::Direct;
     }
     match vtd::interrupt::pin(apic_id, vector, dest, level) {
-        Some(pin) => Delivery::Remapped(PinRedirect { low: pin.low, high: pin.high }),
-        None => Delivery::Refused,
+        Ok(pin) => Delivery::Remapped(PinRedirect { low: pin.low, high: pin.high }),
+        Err(why) => Delivery::Refused(why),
     }
 }
 

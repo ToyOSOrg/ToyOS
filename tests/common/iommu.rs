@@ -22,14 +22,19 @@ use std::time::Duration;
 use super::qemu::{self, BootOptions, Profile, QemuInstance};
 use super::serial::Serial;
 
-/// The four machines, and what each one moves.
+/// The five machines, and what each one moves.
 ///
 /// [`Profile::Metal`] is the reference: the configuration every other profile
 /// in the suite runs, so a difference below is a difference the profile made
-/// and not one the shape did — all four are metal-sim and differ in the unit
+/// and not one the shape did — all five are metal-sim and differ in the unit
 /// alone.
-const MACHINES: &[Profile] =
-    &[Profile::Metal, Profile::NoIommu, Profile::IommuNarrow, Profile::IommuNoIntremap];
+const MACHINES: &[Profile] = &[
+    Profile::Metal,
+    Profile::NoIommu,
+    Profile::IommuNarrow,
+    Profile::IommuNoIntremap,
+    Profile::IommuEim,
+];
 
 pub fn iommu_discovery(
     test_config: &Path,
@@ -40,7 +45,7 @@ pub fn iommu_discovery(
 
     for &profile in MACHINES {
         let name = profile_name(profile);
-        let options = BootOptions { profile, ..Default::default() };
+        let options = BootOptions { profile, qmp: true, ..Default::default() };
         argv_check(profile, &qemu::profile_argv(&options))?;
 
         let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
@@ -52,7 +57,7 @@ pub fn iommu_discovery(
         log.must_say("Boot: complete")?;
 
         let Some(unit) = profile.iommu() else {
-            interrupt_format(&log, name, false)?;
+            interrupt_format(&log, name, None, None)?;
             // `Absent` is firmware answering the question, and the answer is
             // one a user can act on — so the line names the firmware setting
             // as well as the hardware. What makes this assertion mean
@@ -89,6 +94,7 @@ pub fn iommu_discovery(
         // The decode, against what the profile asked QEMU for.
         expect(&field("aw")?, &unit.aw_bits.to_string(), "aw", name, line)?;
         expect(&field("ir")?, if unit.intremap { "y" } else { "n" }, "ir", name, line)?;
+        expect(&field("eim")?, if unit.eim { "y" } else { "n" }, "eim", name, line)?;
         // Not a profile dimension, and asserted because the whole suite rests
         // on it: `caching-mode=on` is what makes QEMU's IOTLB a real cache and
         // the map-side invalidation load-bearing, and 2 MiB
@@ -115,7 +121,7 @@ pub fn iommu_discovery(
 
         // The `intremap=off` machine is what makes this mean something: the same
         // parser over the same lines has to reach the opposite verdict on it.
-        interrupt_format(&log, name, unit.intremap)?;
+        interrupt_format(&log, name, Some(qemu.qmp_socket()), unit.intremap.then_some(unit.eim))?;
 
         eprintln!(
             "  [iommu] {name}: aw={} ir={} cap={} ecap={} — {scopes} PCI scopes matched",
@@ -127,13 +133,14 @@ pub fn iommu_discovery(
         decoded.insert(name, fields);
     }
 
-    // The negative control, and the reason this test boots four machines
+    // The negative control, and the reason this test boots five machines
     // instead of one. Each pair below differs in one QEMU knob, so a decode
     // that reports the same value for both is a decode that is not reading the
     // register the knob moves.
     for (a, b, key) in [
         (profile_name(Profile::Metal), profile_name(Profile::IommuNarrow), "aw"),
         (profile_name(Profile::Metal), profile_name(Profile::IommuNoIntremap), "ir"),
+        (profile_name(Profile::Metal), profile_name(Profile::IommuEim), "eim"),
     ] {
         let (Some(left), Some(right)) = (decoded.get(a), decoded.get(b)) else {
             return Err(format!("{a} or {b} produced no unit line to compare"));
@@ -180,24 +187,59 @@ pub fn iommu_discovery(
 /// requester id is checked against this machine's own PCI walk and DMAR scope.
 ///
 /// [`Profile::Headless`] carries the most sources of both kinds — the i8042's
-/// two pins, and xHCI, virtio-net and virtio-sound over MSI-X. The same check
-/// runs on all four of [`iommu_discovery`]'s machines, where the one with
-/// `intremap=off` is what stops it being one machine's tautology.
+/// two pins, and xHCI, virtio-net and virtio-sound over MSI-X.
+///
+/// **Per pull request this is the one machine that runs.** The machines that
+/// make the verdict move — `intremap=off`, and `eim=on` for the other entry
+/// format — are [`iommu_discovery`]'s, and that is nightly, so a change that
+/// broke only the not-remapping arm would land and be caught the next night.
 pub fn iommu_interrupt_remapping(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let options = BootOptions { profile: Profile::Headless, ..Default::default() };
+    let options = BootOptions { profile: Profile::Headless, qmp: true, ..Default::default() };
     let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
     let log = Serial::boot(&qemu);
     log.must_be_clean()?;
     log.must_say("Boot: complete")?;
-    interrupt_format(&log, "headless", true)
+    interrupt_format(&log, "headless", Some(qemu.qmp_socket()), Some(false))
 }
 
-/// One machine's sources, judged against whether its unit remaps at all.
-fn interrupt_format(log: &Serial, name: &str, remapping: bool) -> Result<(), String> {
+/// Every 128-bit entry of the table at `base`, read out of guest physical
+/// memory over QMP — the same bytes the unit fetches, with no guest involved.
+///
+/// This is the only reading of `SVT`, `SQ` and `SID` that means anything. The
+/// kernel's own line is a claim about what it wrote; this is the memory.
+fn table_over_qmp(socket: &Path, base: u64, count: usize) -> Result<Vec<(u64, u64)>, String> {
+    let dump = qemu::QmpMonitor::open(socket).human(&format!("xp/{}xg 0x{base:x}", count * 2));
+    let mut words = Vec::new();
+    for token in dump.split_whitespace() {
+        let Some(hex) = token.strip_prefix("0x") else { continue };
+        let hex = hex.trim_end_matches(|c: char| !c.is_ascii_hexdigit());
+        words.push(
+            u64::from_str_radix(hex, 16)
+                .map_err(|_| format!("unreadable word {token:?} in\n{dump}"))?,
+        );
+    }
+    if words.len() != count * 2 {
+        return Err(format!(
+            "the monitor returned {} words for {count} entries at {base:#x}:\n{dump}",
+            words.len()
+        ));
+    }
+    Ok(words.chunks(2).map(|pair| (pair[0], pair[1])).collect())
+}
+
+/// One machine's sources, judged against whether its unit remaps at all and,
+/// if it does, whether its entries name a 32-bit destination.
+fn interrupt_format(
+    log: &Serial,
+    name: &str,
+    socket: Option<&Path>,
+    mode: Option<bool>,
+) -> Result<(), String> {
+    let remapping = mode.is_some();
     let entries = table_entries(log, name)?;
     if remapping != !entries.is_empty() {
         return Err(format!(
@@ -233,11 +275,35 @@ fn interrupt_format(log: &Serial, name: &str, remapping: bool) -> Result<(), Str
                 ));
             }
             // `CFI` is the bit that would let a compatibility message through.
+            // It cannot fail here — QEMU defines VTD_GCMD_CFI and VTD_GSTS_CFIS
+            // and references neither — so it is a statement about the kernel
+            // for whoever reads it on hardware, not an instrument.
             if cfis {
                 return Err(format!(
                     "{name}: GSTS.CFIS is set, so the unit passes compatibility-format interrupts \
                      through unremapped\n{line}"
                 ));
+            }
+            // `IRTA_REG` bit 11 is what picks the entry format, so the profile's
+            // `eim` has to reach it and the pointer has to name the table.
+            let irta = u64::from_str_radix(field("irta")?.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable irta on {line:?}"))?;
+            if let Some(extended) = mode {
+                if (irta & (1 << 11) != 0) != extended {
+                    return Err(format!(
+                        "{name}: IRTA_REG is {irta:#x}, whose EIME is {} where this unit's ECAP.EIM \
+                         says {extended}\n{line}",
+                        irta & (1 << 11) != 0
+                    ));
+                }
+                let table = u64::from_str_radix(field("irt")?.trim_start_matches("0x"), 16)
+                    .map_err(|_| format!("{name}: unreadable irt on {line:?}"))?;
+                if irta & !0xFFF != table {
+                    return Err(format!(
+                        "{name}: IRTA_REG {irta:#x} points at {:#x} and the table is at {table:#x}",
+                        irta & !0xFFF
+                    ));
+                }
             }
         }
     }
@@ -302,15 +368,49 @@ fn interrupt_format(log: &Serial, name: &str, remapping: bool) -> Result<(), Str
         }
     }
 
+    // Everything above reads the kernel's account of the table. This reads the
+    // table: the bytes at the `irt=` address, over the monitor, decoded here.
+    let socket = socket.ok_or_else(|| format!("{name}: this gate needs BootOptions {{ qmp }}"))?;
+    let base = entries_base(log, name)?;
+    let highest = entries.iter().map(|e| e.index).max().unwrap_or(0) as usize;
+    let memory = table_over_qmp(socket, base, highest + 1)?;
+
     let mut from_pci = 0usize;
     let mut from_apic = 0usize;
     for entry in &entries {
-        if entry.svt != "1" || entry.sq != "0" {
+        let (lo, hi) = memory[entry.index as usize];
+        // Section 9.9: P bit 0, V 23:16, DST 63:32, SID 79:64, SQ 81:80, SVT 83:82.
+        let (svt, sq, sid) = ((hi >> 18) & 0x3, (hi >> 16) & 0x3, hi & 0xFFFF);
+        if svt != 1 || sq != 0 {
             return Err(format!(
-                "{name}: irte{} has svt={} sq={}, so a message carrying any other requester id \
-                 would be remapped through it. Every entry is verified against all sixteen bits \
-                 of one source id",
-                entry.index, entry.svt, entry.sq
+                "{name}: irte{} is SVT={svt} SQ={sq} in the memory the unit reads, so a message \
+                 carrying any other requester id would be remapped through it. Every entry is \
+                 verified against all sixteen bits of one source id",
+                entry.index
+            ));
+        }
+        if lo & 1 == 0 {
+            return Err(format!("{name}: irte{} is not Present in memory", entry.index));
+        }
+        // The kernel's line reports what it read back out of the entry; this is
+        // the same entry read by the host. They are two paths to one truth and
+        // a difference between them is a kernel that reported a table it does
+        // not have.
+        if format!("{sid:#06x}") != entry.sid {
+            return Err(format!(
+                "{name}: irte{} carries SID {sid:#06x} in memory and the kernel reported {}",
+                entry.index, entry.sid
+            ));
+        }
+        let dest = lo >> 32;
+        let want = if mode == Some(true) { entry.dest } else { entry.dest << 8 };
+        if dest != want {
+            return Err(format!(
+                "{name}: irte{} names destination {dest:#x} where APIC {:#x} in {} mode encodes \
+                 as {want:#x}",
+                entry.index,
+                entry.dest,
+                if mode == Some(true) { "extended" } else { "xAPIC" }
             ));
         }
         if apics.values().any(|sid| *sid == entry.source) {
@@ -342,19 +442,33 @@ fn interrupt_format(log: &Serial, name: &str, remapping: bool) -> Result<(), Str
     }
 
     eprintln!(
-        "  [iommu] {name}: IRES=1 CFIS=0, {} entries ({from_pci} pci, {from_apic} ioapic) all \
-         svt=1 sq=0, {} source(s) remappable",
+        "  [iommu] {name}: IRES=1 CFIS=0 EIME={}, {} entries in guest memory ({from_pci} pci, \
+         {from_apic} ioapic) all SVT=1 SQ=0 Present, {} source(s) remappable",
+        u8::from(mode == Some(true)),
         entries.len(),
         sources.len()
     );
     Ok(())
 }
 
+/// The table's physical address, off the line that reported pointing a unit at it.
+fn entries_base(log: &Serial, name: &str) -> Result<u64, String> {
+    let line = log.must_say("translating gsts=")?;
+    let irt = unit_fields(line)
+        .get("irt")
+        .cloned()
+        .ok_or_else(|| format!("{name}: no irt= on {line:?}"))?;
+    u64::from_str_radix(irt.trim_start_matches("0x"), 16)
+        .map_err(|_| format!("{name}: unreadable irt on {line:?}"))
+}
+
+/// What the kernel reported reading back out of one entry. Every field it
+/// decides is cross-checked against the same entry read over the monitor.
 struct Entry {
     index: u16,
     source: String,
-    svt: String,
-    sq: String,
+    sid: String,
+    dest: u64,
 }
 
 fn table_entries(log: &Serial, name: &str) -> Result<Vec<Entry>, String> {
@@ -374,8 +488,9 @@ fn table_entries(log: &Serial, name: &str) -> Result<Vec<Entry>, String> {
         entries.push(Entry {
             index,
             source: field("source")?,
-            svt: field("svt")?,
-            sq: field("sq")?,
+            sid: field("sid")?,
+            dest: u64::from_str_radix(field("dest")?.trim_start_matches("0x"), 16)
+                .map_err(|_| format!("{name}: unreadable dest on {line:?}"))?,
         });
     }
     Ok(entries)
@@ -786,6 +901,7 @@ fn profile_name(profile: Profile) -> &'static str {
         Profile::NoIommu => "no-iommu",
         Profile::IommuNarrow => "narrow",
         Profile::IommuNoIntremap => "no-intremap",
+        Profile::IommuEim => "eim",
         _ => "unexpected",
     }
 }
@@ -829,6 +945,7 @@ fn argv_check(profile: Profile, argv: &[String]) -> Result<(), String> {
             for field in [
                 format!("aw-bits={}", want.aw_bits),
                 format!("intremap={}", if want.intremap { "on" } else { "off" }),
+                format!("eim={}", if want.eim { "on" } else { "off" }),
                 String::from("caching-mode=on"),
             ] {
                 if !d.contains(&field) {
