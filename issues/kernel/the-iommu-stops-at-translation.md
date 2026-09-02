@@ -3,11 +3,6 @@ status: open
 kind: track
 opened: 2026-08-02
 ---
-What the gate still takes from the kernel is the unit's register-window address
-(the `iommu: unit0 @0x…` line); a kernel lying there would have the gate read
-some other page, where `GSTS` would not show `IRES`, so the lie is not free but
-it is not closed either — closing it means the gate parsing the DMAR itself.
-
 
 # The IOMMU translates, and does none of what it exists for
 
@@ -25,6 +20,11 @@ Interrupt remapping is built: every source is in the remappable format, `IRE` is
 set, `CFI` is never written, and every table entry is source-id-verified against
 the requester id its one source really carries. Per-driver domains and the
 refusal are not. They land in this order and each leaves the tree green.
+
+What the gate still takes from the kernel is the unit's register-window address
+(the `iommu: unit0 @0x…` line); a kernel lying there would have the gate read
+some other page, where `GSTS` would not show `IRES`, so the lie is not free but
+it is not closed either — closing it means the gate parsing the DMAR itself.
 
 Of the two things this stage was told to verify rather than assume, one was
 decided and one cannot be. QEMU does **not** block a compatibility-format
