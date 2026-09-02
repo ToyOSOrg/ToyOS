@@ -43,6 +43,41 @@ anything touching the boot path.
    is driven by a timer rather than a keypress — input may be dead on the
    machine. *False pass:* the late-panic gate passes with the capture routine's
    body replaced by a bare return, so these cover rendering, not capture.
+5. **Input, which is the milestone and which a verdict once omitted entirely.**
+   The 2026-08-01 verdict recorded GO over six sections and a seventeen-row
+   table with no input row at all, and input appeared only under "what this gate
+   does NOT cover" — so a section is owed here rather than left to whoever
+   remembers. `metal_sim_input` passes and certifies i8042-to-userland delivery
+   on *QEMU's* i8042: its guest prints only bytes it read from the two device
+   fds, the assertions are `typed.contains("hello")` and an exact
+   `(DX*scale_x, DY*scale_y)` delta with the scale read out of the kernel's own
+   boot line, and `metal_sim_argv_check` rules out QEMU routing injected input
+   to a USB HID handler. It says nothing about Lenovo's EC.
+   *False passes, each of which has to be answered:* the test has never been
+   shown red since the pixel-to-event rewrite, so its teeth are assumed rather
+   than demonstrated — the three recorded negative demonstrations (`i8042::init`
+   returning immediately, the aux port never enabled, the keyboard GSI never
+   unmasked) were against the deleted pixel version. Every `BootOptions` defaults
+   to `smp: 2` (`tests/common/qemu.rs:2142`) and no input test overrides it,
+   while the T14's own boot line reads `MADT cpus=[0, 2, 4, 6, 1, 3, 5, 7]`. And
+   every test that injects i8042 input drives a guest that busy-polls
+   `read_nonblock` (`i8042_keyboard.rs`, `input_events.rs`); none blocks in
+   `sys_read` or `Poller::wait`, which is what the compositor — the flashed
+   machine's only consumer — actually does. The wake path from
+   `sched/driver.rs:drain_irqs` onward is shared with the xHCI HID path and is
+   exercised by every usb-kbd boot, so this is a coverage gap and not a suspected
+   defect.
+   *What can be downgraded rather than assumed:* the interrupt topology, from the
+   T14's own first-boot photograph — `ioapic: id=2 at 0xfec00000 ver=0x20 gsi
+   0..119 masked 120/120` and `ioapic: iso bus:irq->gsi [0:0->2 edge/high,
+   0:9->9 level/high]`. No override covers IRQ 1 or IRQ 12, so `gsi_for_isa_irq`
+   returns identity/edge/high exactly as under QEMU, and 120/120 masked
+   read-backs prove the MMIO window is a real redirection table.
+   *And what to establish about the artifact itself:* that the flashed kernel is
+   the tested kernel, by reading the built image for the actuator strings a
+   default-feature kernel does not carry — `i8042: fault injection armed`,
+   `i8042: drain bytes=`, `test-late-panic`, `test-runner`, `debug-wait` — which
+   is how the last two artifacts were cleared.
 
 **State to the owner before he boots**, because it is the difference between a
 diagnosis and an afternoon: a refusal to attach to the keyboard is the driver
@@ -70,8 +105,6 @@ and what a flashed image depends on. The 115200-baud arm needs a machine with a
 real port and stays open until there is one; the arithmetic for it — ~40 KB at
 ~87 µs/byte, so seconds — is a prediction and says so.
 
-`issues/hardware/pre-flash-gate-missed-the-milestone.md` records that the last
-verdict certified everything except input.
 
 ## What a metal boot costs, so a session does not re-derive it
 

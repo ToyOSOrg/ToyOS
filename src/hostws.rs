@@ -505,9 +505,9 @@ mod tests {
     ///
     /// The files scanned are the ones that *act* on a path: the workflows, this
     /// build system, and every `build.rs` in the tree. Prose is left alone —
-    /// `issues/hardware/pre-flash-gate-missed-the-milestone.md` records a
-    /// flashed artifact built when `toyos-ld/target` was a real directory, and
-    /// that record is not made truer by editing it.
+    /// the tracker records a flashed artifact built when `toyos-ld/target` was
+    /// a real directory, and a record of what once was is not made truer by
+    /// editing it.
     #[test]
     fn nothing_that_runs_names_a_target_directory_a_member_does_not_have() {
         let root = repo_root();
