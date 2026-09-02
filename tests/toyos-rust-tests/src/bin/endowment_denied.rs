@@ -48,12 +48,11 @@
 //! assertions, it powers off the boot they run on, which is the loudest red
 //! this suite can produce and exactly the defect being denied.
 //!
-//! **The applets nobody compared.** A `[programs]` row's granularity is the
-//! binary and `/bin/toybox` is many programs behind many links, so every applet
-//! is endowed the union of what any of them needs. The last half enumerates the
-//! links off the image and reads the rendered manifest with a parser that is
-//! not init's, then holds each applet against a policy table: what the row
-//! hands an applet that has no use for it is written down rather than absorbed.
+//! **The applets nobody compared.** A row's granularity is the binary and
+//! `/bin/toybox` is many programs behind many links, so every applet is endowed
+//! the union. The last half enumerates the links off the image, reads the
+//! rendered manifest with a parser that is not init's, and holds each applet
+//! against a policy table.
 //!
 //! **A wrong-typed handle is refused with a word here, and that is a property of
 //! the check rather than an exception to the policy.** The table resolves rights
@@ -97,8 +96,7 @@ const ONE_ENTRY: usize = SYSINFO_HEADER_SIZE + SYSINFO_ENTRY_SIZE;
 /// `process::HANDLE_FAULT_EXIT_CODE`.
 const HANDLE_FAULT: i32 = 139;
 
-/// The rendered manifest and the link inventory this image actually carries —
-/// the artifacts, not the `system.toml` that produced them.
+/// The artifacts this image carries, not the `system.toml` that produced them.
 const MANIFEST: &str = "/etc/system.manifest";
 const BIN: &str = "/bin";
 const MULTICALL: &str = "/bin/toybox";
@@ -127,14 +125,9 @@ const APPLET_NEEDS: &[(&str, &[&str])] = &[
     ("tone", &["receive soundd"]),
 ];
 
-/// Every authority this image hands an applet that has no use for it, measured
-/// and written down so a fourteenth cannot arrive unremarked.
-///
-/// A row's granularity is the binary and `/bin/toybox` is fourteen programs, so
-/// the row is the union of what any of them needs and every one of them is
-/// endowed all of it — `issues/isolation/toybox-is-one-row-for-nineteen-applets.md`.
-/// This list is that defect's exact size in this image. It shrinks when the row
-/// is split per authority class and never grows.
+/// Every authority this image hands an applet that has no use for it: the exact
+/// size of `issues/isolation/toybox-is-one-row-for-nineteen-applets.md` here. It
+/// shrinks when the row is split per authority class and never grows.
 const DECLARED_OVER_GRANTS: &[&str] = &[
     "cat: receive soundd",
     "cp: receive soundd",
@@ -501,11 +494,9 @@ fn the_shipped_applet_reaches_both_answers() {
 }
 
 /// The authority records each `program` row grants, keyed by the binary path
-/// its own line names.
-///
-/// **Its own parse, not `toyos_manifest`'s.** A checker that reads the manifest
-/// through init's parser and resolves links through init's resolver agrees with
-/// init by construction and can only ever find a bug in the manifest.
+/// its own line names. **Its own parse, not `toyos_manifest`'s**: a checker that
+/// reads the manifest through init's parser and resolves links through init's
+/// resolver agrees with init by construction.
 fn manifest_rows(text: &str) -> BTreeMap<String, Vec<String>> {
     let mut rows: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut current = String::new();
@@ -529,13 +520,10 @@ fn manifest_rows(text: &str) -> BTreeMap<String, Vec<String>> {
 
 /// Every applet behind one binary, held against what each of them needs.
 ///
-/// **The two sides come from different places on purpose.** The links are read
-/// off the image with `read_dir`/`read_link` and the rows off the rendered
-/// manifest, neither through `declared`; the policy is [`APPLET_NEEDS`], which
-/// nothing in the build wrote. The arms above are the allowed-and-forbidden
-/// pair for each class this finds — `only_what_was_given` for a namespace
-/// name, `the_shipped_applet_reaches_both_answers` for `roster`,
-/// `a_right_the_capability_lacks_is_a_word` for `power`, `device` and `rt`.
+/// **The two sides come from different places on purpose**: the links off the
+/// image, the rows off the rendered manifest, neither through `declared`, and
+/// the policy from [`APPLET_NEEDS`], which nothing in the build wrote. The arms
+/// above are the allowed-and-forbidden pair for every class this finds.
 fn every_applet_holds_only_what_its_policy_names() {
     let manifest = std::fs::read_to_string(MANIFEST).expect("the image carries its own manifest");
     let rows = manifest_rows(&manifest);

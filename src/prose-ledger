@@ -285,7 +285,7 @@ tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 16 0
 tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 34 0
-tests/toyos-rust-tests/src/bin/endowment_denied.rs 194 2
+tests/toyos-rust-tests/src/bin/endowment_denied.rs 182 2
 tests/toyos-rust-tests/src/bin/esp_files.rs 50 0
 tests/toyos-rust-tests/src/bin/exit_wait_storm.rs 36 0
 tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs 56 0
