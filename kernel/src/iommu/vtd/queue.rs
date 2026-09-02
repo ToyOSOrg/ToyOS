@@ -16,8 +16,7 @@ const QUEUE_ENTRIES: usize = 256;
 
 const CONTEXT_CACHE: u64 = 0x1;
 const IOTLB: u64 = 0x2;
-/// Type 4h, Section 6.5.2.7. Its granularity bit is inverted against the two
-/// above: clear is global, set is index-selective.
+/// Type 4h, Section 6.5.2.7 — granularity inverted against the two above: clear is global.
 const INTERRUPT_ENTRY_CACHE: u64 = 0x4;
 const WAIT: u64 = 0x5;
 
