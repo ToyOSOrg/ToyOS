@@ -184,9 +184,8 @@ fn preempted_producer_strands_suffix() {
 #[cfg(not(feature = "no-preempt-guard"))]
 const VICTIM_RETIRES: bool = cfg!(feature = "victim-retires-mid-probe");
 
-/// The stranded-probe verdict, in one place: the assertion prints it and the
-/// control below refuses a caught panic that is not it, so the control cannot
-/// read a different failure as the defect reproducing.
+/// The stranded-probe verdict in one place: the control below refuses a caught
+/// panic that is not this one, so it cannot read another failure as the defect.
 #[cfg(not(feature = "no-preempt-guard"))]
 const STRANDED: &str = "the victim retired with a probe still linked in its queue";
 
@@ -272,14 +271,11 @@ fn steal_probe_node_is_never_double_linked() {
 /// other features model a rule away to show the model catches the lie; this one
 /// changes nothing and lets the victim do what a stopped CPU does, and the
 /// model must then fail — `issues/kernel/steal-probe-node-dies-with-its-victim.md`
-/// reproduced instead of argued. `TOYOS_LOOM_RAW=1` skips the catch and prints
-/// loom's offending execution.
+/// reproduced instead of argued. `TOYOS_LOOM_RAW=1` skips the catch.
 ///
 /// **The exit is deletion, not a green run.** The feature *defines* every
-/// post-join pop as stranded, so no fix to the mailbox can turn this case
-/// green; whatever closes the record removes this case and the feature with it,
-/// in the same commit. What a green run here would mean is that the model
-/// stopped reaching the state at all.
+/// post-join pop as stranded, so no fix can turn this case green; whatever
+/// closes the record removes the case and the feature with it.
 #[cfg(all(feature = "victim-retires-mid-probe", not(feature = "no-preempt-guard")))]
 #[test]
 fn a_probe_outstanding_when_its_victim_retires_is_never_reclaimed() {

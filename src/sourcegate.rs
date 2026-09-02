@@ -57,17 +57,13 @@
 //! re-imported. An arrival, a deletion and that name are what it closes; no
 //! file's provenance is what it does not.
 //!
-//! The eighth and ninth are the same bar over `.github/`, where the other half
-//! of what runs on a machine this project's verdicts are measured on lives: one
-//! cuts every workflow, script and container recipe into shell commands and
-//! refuses a package no row declares, the other reads the `uses:` key and
-//! refuses an action no row declares. `src/ci.rs` reads these same files for
-//! one package's provenance; these hold the whole set.
+//! The eighth and ninth are the same bar over `.github/`: one cuts every
+//! workflow, script and container recipe into shell commands and refuses a
+//! package no row declares, the other reads `uses:`. `src/ci.rs` reads these
+//! files for one package's provenance; these hold the whole set.
 //!
-//! **What none of them reaches is filed rather than implied**: an alias split
-//! across lines, a spawn that is not `Command` at all, a binary a third-party
-//! crate runs, a binary a `run:` step downloads, and the bytes behind an
-//! action's moving tag. The entries under `issues/build/` say so.
+//! **What none of them reaches is filed rather than implied**, and each table's
+//! own doc names its half: the entries under `issues/build/` say so.
 
 use std::path::{Path, PathBuf};
 
@@ -591,10 +587,9 @@ struct Package {
 
 /// Every package `.github/` installs, and what it is.
 ///
-/// **A sibling of [`HOST_SPAWNS`] rather than a row in it**, because a
-/// `HOST_SPAWNS` row's `sites` field is empty *exactly when* its `arg` is a
-/// string literal, and a package name is always one — the field would be dead
-/// in every row, and a package appears at eight sites across six files.
+/// **A sibling of [`HOST_SPAWNS`] rather than a row in it**: that table's
+/// `sites` is empty *exactly when* its `arg` is a string literal, and a package
+/// name always is, so the field would be dead in every row here.
 ///
 /// **What this closes is a spelling**, and each form it walks past is a case in
 /// `the_package_scan_reads_the_install_command_and_not_the_shell` asserting that
@@ -703,21 +698,17 @@ struct Action {
     why: &'static str,
 }
 
-/// Every action `.github/workflows/` pulls, and what it is.
-///
-/// The other half of what [`CI_PACKAGES`] holds: a `uses:` step runs somebody
-/// else's code on the machine a verdict is measured on. One naming a path in
-/// this repository is not a row — it is a file, and the check is that it
-/// resolves.
+/// Every action `.github/workflows/` pulls: the other half of what
+/// [`CI_PACKAGES`] holds, since a `uses:` runs somebody else's code on the
+/// machine a verdict is measured on. One naming a path in this repository is
+/// not a row but a file, and the check is that it resolves.
 ///
 /// **A row pins a name and a tag, not bytes.** `@v4` is a branch its publisher
 /// moves, so this refuses an undeclared action and an unmoved row and claims
 /// nothing about the code behind the tag —
-/// `issues/build/an-action-tag-pins-a-name-and-not-bytes.md` is that gap.
-///
-/// The walk reads `.github/workflows/` only, so a composite action's own
-/// `uses:` — an `action.yml` elsewhere under `.github/` — is unread. This tree
-/// holds no such file.
+/// `issues/build/an-action-tag-pins-a-name-and-not-bytes.md` is that gap. The
+/// walk also reads `.github/workflows/` only, so a composite action's own
+/// `uses:` is unread; this tree holds no `action.yml`.
 const CI_ACTIONS: &[Action] = &[
     Action {
         name: "actions/checkout@v4",
@@ -739,12 +730,11 @@ const CI_ACTIONS: &[Action] = &[
     },
 ];
 
-/// The `(manager, subcommands)` pairs [`installed_packages`] understands: the
-/// four `.github/` uses (`apt-get`, `apt`, `brew`, and `npm` for its subcommand
-/// set) plus `apk`, `dnf`, `yum`, `pacman`, `zypper`, `snap`, `pip`, `pip3`,
-/// `yarn`, `pnpm`, `gem` and `cargo`, so those arrive by name rather than
-/// silently. `pipx`, `uv`, `go` and `add-apt-repository` are **not** here and
-/// are part of [`CI_PACKAGES`]'s stated non-reach.
+/// The `(manager, subcommands)` pairs [`installed_packages`] understands —
+/// `apt-get`, `apt` and `brew`, which `.github/` uses, plus `apk`, `dnf`,
+/// `yum`, `pacman`, `zypper`, `snap`, `pip`, `pip3`, `npm`, `yarn`, `pnpm`,
+/// `gem` and `cargo`, so those arrive by name. `pipx`, `uv`, `go` and
+/// `add-apt-repository` are **not** here: they are [`CI_PACKAGES`]'s non-reach.
 const INSTALLERS: &[(&str, &[&str])] = &[
     ("apt-get", &["install"]),
     ("apt", &["install"]),

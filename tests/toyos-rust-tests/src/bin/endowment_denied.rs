@@ -50,9 +50,7 @@
 //!
 //! **The applets nobody compared.** A row's granularity is the binary and
 //! `/bin/toybox` is many programs behind many links, so every applet is endowed
-//! the union. The last half enumerates the links off the image, reads the
-//! rendered manifest with a parser that is not init's, and holds each applet
-//! against a policy table.
+//! the union; the last half holds each against a policy table.
 //!
 //! **A wrong-typed handle is refused with a word here, and that is a property of
 //! the check rather than an exception to the policy.** The table resolves rights
@@ -520,8 +518,8 @@ fn manifest_rows(text: &str) -> BTreeMap<String, Vec<String>> {
 ///
 /// **The two sides come from different places on purpose**: the links off the
 /// image, the rows off the rendered manifest, neither through `declared`, and
-/// the policy from [`APPLET_NEEDS`], which nothing in the build wrote. The arms
-/// above are the allowed-and-forbidden pair for every class this finds.
+/// the policy from [`APPLET_NEEDS`]. The arms above are the
+/// allowed-and-forbidden pair for every class this finds.
 fn every_applet_holds_only_what_its_policy_names() {
     let manifest = std::fs::read_to_string(MANIFEST).expect("the image carries its own manifest");
     let rows = manifest_rows(&manifest);
