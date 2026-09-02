@@ -335,7 +335,7 @@ tests/toyos-rust-tests/src/bin/null_sink_client_exits.rs 18 0
 tests/toyos-rust-tests/src/bin/nvme_home_roundtrip.rs 7 0
 tests/toyos-rust-tests/src/bin/panic_recovery.rs 13 0
 tests/toyos-rust-tests/src/bin/pipe_flag_forgery.rs 15 0
-tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs 11 0
+tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs 12 0
 tests/toyos-rust-tests/src/bin/poller_capacity.rs 33 0
 tests/toyos-rust-tests/src/bin/port_poll_churn.rs 49 0
 tests/toyos-rust-tests/src/bin/process_lifecycle.rs 94 0

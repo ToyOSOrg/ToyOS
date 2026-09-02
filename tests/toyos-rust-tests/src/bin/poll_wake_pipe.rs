@@ -17,6 +17,7 @@ use toyos::poller::{Poller, READABLE};
 const ROUNDS: u32 = 300;
 
 /// The pacing spin's escape, so a lost wake reds as a short count, not a hang.
+/// Past it the writer stops pacing, so the edges are no longer distinct and the verdict is only the count.
 const PACE_ESCAPE: Duration = Duration::from_secs(3);
 
 /// Per-round patience, far above a live wake's latency, so only an absent completion trips it.
