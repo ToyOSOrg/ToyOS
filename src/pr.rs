@@ -49,8 +49,39 @@ use crate::buildlock;
 /// flag could never be, because CI has no command line from the author.
 const ABI_INSEPARABLE: &str = "Abi-Inseparable:";
 
-pub fn dispatch_pr(root: &Path) {
-    report(prepare(root));
+/// The flag that says the caller will re-run the gates on the merged shape.
+const ACCEPTS_MERGE: &str = "--gates-after-merge";
+
+/// What `--pr` says last, and exits non-zero on, when it merged `origin/main`
+/// in: every gate the agent ran before this ran on a tree that no longer
+/// exists, and nothing else in the workflow says so.
+const MERGED_SHAPE: &str = "[pr] origin/main was merged in: re-run cargo test --lib, --clippy \
+                            and --build-only on this shape before you rely on any earlier run.\n\
+                            [pr] Pass --gates-after-merge to --pr once you have, or to say up \
+                            front that you will.";
+
+/// Whether this run owes a re-run: it merged, and nothing on the command line
+/// says the caller will gate the shape the merge made.
+fn owes_a_rerun(merged: bool, args: &[String]) -> bool {
+    merged && !args.iter().any(|a| a == ACCEPTS_MERGE)
+}
+
+pub fn dispatch_pr(root: &Path, args: &[String]) {
+    match prepare(root) {
+        Err(refusal) => {
+            eprintln!("{refusal}");
+            std::process::exit(1);
+        }
+        Ok(done) => {
+            println!("{}", done.text);
+            if done.merged {
+                println!("{MERGED_SHAPE}");
+            }
+            if owes_a_rerun(done.merged, args) {
+                std::process::exit(1);
+            }
+        }
+    }
 }
 
 pub fn dispatch_sync(root: &Path) {
@@ -120,15 +151,15 @@ fn report(outcome: Result<String, String>) {
 ///
 /// The order is the one that costs least when it refuses: the local questions
 /// first, then one fetch, then the merge, then the push.
-fn prepare(root: &Path) -> Result<String, String> {
+fn prepare(root: &Path) -> Result<Prepared, String> {
     let branch = preflight(root)?;
     let mut lines = vec![sync(root)?];
 
     abi_lands_alone(root, "origin/main")?;
     lines.push(crate::writinglaw::judge(root, "origin/main")?);
 
-    let merged = merge_base_into_branch(root, &branch)?;
-    lines.push(merged);
+    let (merged, line) = merge_base_into_branch(root, &branch)?;
+    lines.push(line);
 
     let carried = git(root, &["rev-list", "--count", "origin/main..HEAD"])?;
     if carried.trim() == "0" {
@@ -154,16 +185,26 @@ fn prepare(root: &Path) -> Result<String, String> {
     lines.push(format!("pushed {branch} to origin"));
 
     let head = git(root, &["rev-parse", "--short", "HEAD"])?;
-    Ok(format!(
-        "[pr] {}\n\
-         [pr] {branch} is at {head} on origin.\n\
-         [pr]\n\
-         {}\n\
-         [pr] main must be *in* this branch for the merge button to unlock, which is what the \
-         merge above is for. If main moves again, re-run `cargo run -- --pr`.",
-        lines.join("\n[pr] "),
-        if first_push { open_it_now(&branch) } else { finish_it(&branch) },
-    ))
+    Ok(Prepared {
+        merged,
+        text: format!(
+            "[pr] {}\n\
+             [pr] {branch} is at {head} on origin.\n\
+             [pr]\n\
+             {}\n\
+             [pr] main must be *in* this branch for the merge button to unlock, which is what \
+             the merge above is for. If main moves again, re-run `cargo run -- --pr`.",
+            lines.join("\n[pr] "),
+            if first_push { open_it_now(&branch) } else { finish_it(&branch) },
+        ),
+    })
+}
+
+/// What `--pr` did: `merged` is whether this run brought `origin/main` into the
+/// branch, which is what the exit code turns on.
+struct Prepared {
+    merged: bool,
+    text: String,
 }
 
 /// **The first push is where the draft belongs, and a branch's first `--pr` is
@@ -342,10 +383,10 @@ fn stranded(primary: &Path) -> String {
 /// A conflict is left in the working tree rather than aborted: the index git has
 /// already built and the markers it has already written are exactly what the
 /// agent resolves against, and an abort deletes them.
-fn merge_base_into_branch(root: &Path, branch: &str) -> Result<String, String> {
+fn merge_base_into_branch(root: &Path, branch: &str) -> Result<(bool, String), String> {
     let base = git(root, &["rev-parse", "--short", "origin/main"])?;
     match git(root, &["merge", "--no-ff", "--no-commit", "origin/main"]) {
-        Ok(_) if !merging(root) => Ok(format!("origin/main {base} is already in {branch}")),
+        Ok(_) if !merging(root) => Ok((false, format!("origin/main {base} is already in {branch}"))),
         Ok(_) => {
             let message = format!(
                 "{branch}: merged main {base} before the pull request\n\n\
@@ -360,7 +401,7 @@ fn merge_base_into_branch(root: &Path, branch: &str) -> Result<String, String> {
                 .map_err(|e| format!("[pr] write {}: {e}", file.display()))?;
             git(root, &["commit", "-q", "-F", &file.to_string_lossy()])?;
             let _ = fs::remove_file(&file);
-            Ok(format!("merged origin/main {base} into {branch}"))
+            Ok((true, format!("merged origin/main {base} into {branch}")))
         }
         Err(e) if merging(root) => Err(format!(
             "{e}\n\
@@ -593,6 +634,9 @@ pub(crate) mod tests {
         sh(&seed, &["add", "f", ".gitignore"]);
         sh(&seed, &["commit", "-qm", "base"]);
         sh(&seed, &["clone", "-q", "--bare", ".", origin.to_str().unwrap()]);
+        // The remote records every value a ref takes, which is the only way a
+        // test on this side can see the *order* a push happened in.
+        sh(&origin, &["config", "core.logAllRefUpdates", "true"]);
 
         sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), work.to_str().unwrap()]);
         identify(&work);
@@ -687,6 +731,11 @@ pub(crate) mod tests {
 
     /// The whole point of `--pr`: main is *in* the branch before GitHub is asked
     /// to merge it, so the checks that run are checks on the merged result.
+    ///
+    /// **Read off the remote, because the merge helper cannot say it.** A
+    /// `prepare` that pushed, merged and pushed again calls that helper too and
+    /// leaves the same end state; only the sequence of values the branch ref
+    /// took on the remote tells them apart.
     #[test]
     fn the_branch_gets_main_before_it_is_pushed() {
         let (origin, wt) = repo("merge-first");
@@ -700,10 +749,13 @@ pub(crate) mod tests {
         identify(&theirs);
         commit(&theirs, "h", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
+        // This fixture is its own primary and on a branch, so `main` is put
+        // where `sync` would have put it.
+        sh(&wt, &["fetch", "-q", "origin", "main:main"]);
 
-        sh(&wt, &["fetch", "-q", "origin", "main"]);
-        let line = merge_base_into_branch(&wt, "wt").expect("the merge should have gone through");
-        assert!(line.contains("merged origin/main"), "{line}");
+        let done = prepare(&wt).expect("--pr should merge origin/main in and push");
+        assert!(done.merged, "{}", done.text);
+        assert!(done.text.contains("merged origin/main"), "{}", done.text);
         assert!(fs::read_to_string(wt.join("h")).is_ok(), "main's file did not arrive");
         let subject = git(&wt, &["log", "-1", "--format=%s"]).unwrap();
         assert!(subject.starts_with("wt: merged main"), "{subject}");
@@ -711,10 +763,43 @@ pub(crate) mod tests {
             !subject.contains("Merge branch 'main' into"),
             "git's own direction is still what the history records: {subject}"
         );
+
+        let main = git(&origin, &["rev-parse", "refs/heads/main"]).unwrap();
+        let pushed = git(&origin, &["reflog", "show", "--format=%H", "refs/heads/wt"]).unwrap();
+        let pushes: Vec<&str> = pushed.lines().filter(|l| !l.is_empty()).collect();
+        for at in &pushes {
+            assert!(
+                git(&origin, &["merge-base", "--is-ancestor", &main, at]).is_ok(),
+                "{at} was pushed without origin/main {main} in it, so CI would have gated a \
+                 shape nobody is going to merge:\n{pushed}"
+            );
+        }
+        assert_eq!(pushes.len(), 1, "one push is what a --pr is:\n{pushed}");
+
         // A second run is a no-op and says so, rather than making an empty
         // merge commit every time an agent re-runs it.
-        let again = merge_base_into_branch(&wt, "wt").expect("a second merge must be a no-op");
-        assert!(again.contains("already in wt"), "{again}");
+        let again = prepare(&wt).expect("a second --pr must be a no-op");
+        assert!(!again.merged, "{}", again.text);
+        assert!(again.text.contains("already in wt"), "{}", again.text);
+    }
+
+    /// **`--pr` is never the last gate when it merged anything**, and the tool
+    /// is the only place that can be said: every gate run before it ran on a
+    /// tree that is now history. It exits non-zero unless the caller has said
+    /// it will re-run them.
+    #[test]
+    fn a_pr_that_merged_says_the_gates_ran_on_another_shape() {
+        assert!(MERGED_SHAPE.contains("re-run cargo test --lib, --clippy and --build-only"));
+        assert!(MERGED_SHAPE.contains(ACCEPTS_MERGE));
+        assert!(owes_a_rerun(true, &["--pr".to_string()]));
+        assert!(!owes_a_rerun(true, &["--pr".to_string(), ACCEPTS_MERGE.to_string()]));
+        assert!(!owes_a_rerun(false, &["--pr".to_string()]));
+
+        let (_origin, wt) = repo("merged-notice");
+        commit(&wt, "g", "mine\n", "work");
+        let quiet = prepare(&wt).expect("nothing to merge");
+        assert!(!quiet.merged, "{}", quiet.text);
+        assert!(quiet.text.contains("is already in wt"), "{}", quiet.text);
     }
 
     /// A conflict is left where the agent can resolve it, and the *next* run
@@ -770,7 +855,7 @@ pub(crate) mod tests {
         assert!(before.trim().is_empty(), "the branch is not on the remote yet");
         assert!(open_it_now("wt").contains("gh pr create --draft"));
 
-        let first = prepare(&wt).expect("the first --pr should push and print");
+        let first = prepare(&wt).expect("the first --pr should push and print").text;
         assert!(first.contains("Open it as a draft now"), "{first}");
         assert!(
             !first.contains("create --fill"),
@@ -781,7 +866,7 @@ pub(crate) mod tests {
         assert!(!after.trim().is_empty(), "the push happened");
 
         commit(&wt, "g2", "more\n", "more work");
-        let later = prepare(&wt).expect("a later --pr should push and print");
+        let later = prepare(&wt).expect("a later --pr should push and print").text;
         assert!(later.contains("gh pr ready"), "{later}");
         assert!(!later.contains("Open it as a draft now"), "{later}");
         assert!(!later.contains("create --fill"), "{later}");
