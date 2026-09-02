@@ -1,16 +1,12 @@
 //! What a disk this system was not given is compared against, before and after
 //! a boot.
 //!
-//! **The whole device, not the places a format is expected to write.** The
-//! reading it replaced took the first 1 MiB and the last 4 KiB, which is where
-//! a bcachefs format puts its superblock, bitmap and backup — so a gate named
-//! `foreign_disk_untouched` was green over every byte between them. A write is
-//! a write wherever it lands, and a kernel that stepped on one sector of
-//! somebody's partition table would have passed.
+//! **The whole device, not the places a format is expected to write.** A write
+//! is a write wherever it lands, and a fingerprint of the two ends is green
+//! over every byte between them.
 //!
 //! One SHA-256 per [`BLOCK`] rather than one over the file, so a difference
-//! still says where: the failure names the byte range, which is what makes a
-//! red legible. The images are ~128 MiB and sparse, so the cost is a
+//! still says where. The images are ~128 MiB and sparse, so the cost is one
 //! sequential read of a file the test just wrote.
 
 use std::io::Read;
