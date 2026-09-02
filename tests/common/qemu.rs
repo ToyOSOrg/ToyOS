@@ -1074,6 +1074,14 @@ pub fn await_marker_new(
 #[derive(Clone, Copy, PartialEq)]
 pub enum Profile {
     Headless,
+    /// [`Profile::Headless`] with no unit on the machine at all.
+    ///
+    /// The negative control for whether a virtio function is behind one. QEMU
+    /// offers `VIRTIO_F_ACCESS_PLATFORM` only for a function created with
+    /// `iommu_platform=on`, and the harness sets that only where there is a
+    /// unit — so the guest's own negotiation has to come out the other way
+    /// here, and a kernel printing a constant fails on one of the pair.
+    HeadlessNoIommu,
     /// [`Profile::Headless`] with the NIC's MSI-X capability taken away.
     ///
     /// The one configuration in this suite where a device the kernel has
@@ -1628,6 +1636,7 @@ impl Profile {
                 hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
             },
+            Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::VirtioNetNoMsix => Shape {
                 vga: "none",
                 vgamem_mb: None,
@@ -3625,6 +3634,11 @@ fn qemu_command(
             if unit.eim { "on" } else { "off" }
         ));
     }
+    // A virtio function reaches memory through `vdev->dma_as`, which stays the
+    // machine's own address space — the unit bypassed entirely — unless the
+    // function is created with this. The other half of the vacuity trap: a unit
+    // that decodes every function on the bus except the ones a test drives.
+    let platform = if shape.iommu.is_some() { ",iommu_platform=on" } else { "" };
 
     for controller in shape.xhci {
         qemu.arg("-device").arg(*controller);
@@ -3684,7 +3698,7 @@ fn qemu_command(
             shape.vga, "none",
             "a declared adapter beside a `-vga` one gives the guest two displays"
         );
-        qemu.arg("-device").arg(gpu);
+        qemu.arg("-device").arg(format!("{gpu}{platform}"));
     }
     qemu.arg("-vga")
         .arg(shape.vga)
@@ -3761,8 +3775,10 @@ fn qemu_command(
             .arg("user,id=net0")
             .arg("-device")
             .arg(match shape.virtio {
-                Virtio::NicWithoutMsix => "virtio-net-pci-non-transitional,netdev=net0,vectors=0",
-                _ => "virtio-net-pci-non-transitional,netdev=net0",
+                Virtio::NicWithoutMsix => {
+                    format!("virtio-net-pci-non-transitional,netdev=net0,vectors=0{platform}")
+                }
+                _ => format!("virtio-net-pci-non-transitional,netdev=net0{platform}"),
             });
         if shape.virtio.sound() {
             // virtio-sound records everything the guest plays into a per-boot
@@ -3774,7 +3790,7 @@ fn qemu_command(
                     audio_wav.display()
                 ))
                 .arg("-device")
-                .arg("virtio-sound-pci,audiodev=audio0,streams=1");
+                .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
         }
         qemu
             // virtio-console on stdio is the primary I/O channel; UART goes to
@@ -3785,7 +3801,9 @@ fn qemu_command(
             .arg("-chardev")
             .arg("stdio,id=cs0,signal=off")
             .arg("-device")
-            .arg("virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1")
+            .arg(format!(
+                "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
+            ))
             .arg("-device")
             .arg("virtconsole,chardev=cs0,id=console0");
     } else if options.mute {

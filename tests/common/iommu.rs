@@ -648,6 +648,146 @@ fn scope_sources(log: &Serial) -> BTreeMap<String, String> {
     named
 }
 
+/// Whether this machine's virtio functions are behind the unit at all.
+///
+/// The vacuity trap the two fault gates cannot see. QEMU keeps a virtio
+/// function on `&address_space_memory` — the unit bypassed, whatever the tables
+/// say — unless it is created with `iommu_platform=on`
+/// (`hw/virtio/virtio-bus.c:86-99`, `hw/virtio/virtio-pci.c:1400-1405` at
+/// v11.1.0), and under identity mapping the two are indistinguishable. So a
+/// host flag is not enough: the argv says which functions were created behind a
+/// unit, the console says which ones the guest negotiated
+/// `VIRTIO_F_ACCESS_PLATFORM` for, and [`Profile::HeadlessNoIommu`] is the same
+/// machine with the unit taken away, where every answer comes out the other
+/// way. A kernel printing a constant fails one of the two.
+pub fn iommu_virtio_platform(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    for profile in [Profile::Headless, Profile::HeadlessNoIommu] {
+        let name = if profile.iommu().is_some() { "headless" } else { "headless-no-iommu" };
+        let behind_unit = profile.iommu().is_some();
+        let options = BootOptions { profile, ..Default::default() };
+
+        // The host side: every virtio function this machine creates, and
+        // whether it was created behind the unit.
+        let argv = qemu::profile_argv(&options);
+        let created: Vec<&str> = argv
+            .windows(2)
+            .filter(|w| w[0] == "-device")
+            .map(|w| w[1].as_str())
+            .filter(|d| d.starts_with("virtio-") && d.contains("-pci"))
+            .collect();
+        if created.is_empty() {
+            return Err(format!("{name}: this machine creates no virtio function at all"));
+        }
+        for device in &created {
+            if device.contains("iommu_platform=on") != behind_unit {
+                return Err(format!(
+                    "{name}: the machine has a unit = {behind_unit} and QEMU is given {device}. \
+                     A virtio function without iommu_platform=on keeps the address space the \
+                     unit does not decode"
+                ));
+            }
+        }
+
+        let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+        let log = Serial::boot(&qemu);
+        log.must_be_clean()?;
+        log.must_say("Boot: complete")?;
+
+        // The guest side, off the negotiation each driver reports.
+        let mut negotiated = Vec::new();
+        for line in log.text().lines() {
+            let Some(rest) = line.split("VirtIO: PCI ").nth(1) else { continue };
+            let Some((who, _)) = rest.split_once(' ') else {
+                return Err(format!("{name}: unreadable feature line: {line:?}"));
+            };
+            let fields = unit_fields(line);
+            let Some(accepted) = fields.get("access_platform") else { continue };
+            negotiated.push((who.to_string(), accepted == "y"));
+        }
+        if negotiated.len() != created.len() {
+            return Err(format!(
+                "{name}: QEMU created {} virtio function(s) and the guest negotiated features \
+                 with {} — {negotiated:?} against {created:?}",
+                created.len(),
+                negotiated.len()
+            ));
+        }
+        let enumerated = enumerated_functions(&log);
+        for (who, accepted) in &negotiated {
+            if *accepted != behind_unit {
+                return Err(format!(
+                    "{name}: {who} negotiated VIRTIO_F_ACCESS_PLATFORM = {accepted} on a machine \
+                     whose unit exists = {behind_unit}. A virtio function that did not accept it \
+                     is a function this unit never sees"
+                ));
+            }
+            if !enumerated.contains(who) {
+                return Err(format!(
+                    "{name}: {who} negotiated features and the PCI walk enumerated \
+                     {enumerated:?} — the driver is naming a function this machine does not have"
+                ));
+            }
+        }
+        eprintln!(
+            "  [iommu] {name}: {} virtio function(s), iommu_platform={behind_unit}, \
+             ACCESS_PLATFORM negotiated={behind_unit}",
+            negotiated.len()
+        );
+    }
+    declining_is_not_free(test_config, c_bins, rust_bins)
+}
+
+/// The control that makes the two arms above mean something: a guest that
+/// declines the feature its host offered gets no device, not a bypassing one.
+/// `virtio_validate_features` returns `-EFAULT` and `virtio_set_status` returns
+/// before it stores the status (`hw/virtio/virtio.c:2270-2276` and `:2292-2299`
+/// at v11.1.0), so `FEATURES_OK` never sticks. The actuator withholds the bit
+/// from every virtio device but the console.
+fn declining_is_not_free(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::Headless,
+            kernel_params: &["virtio-no-access-platform"],
+            ..Default::default()
+        },
+    );
+    let log = Serial::boot(&qemu);
+    log.must_be_clean()?;
+    log.must_say("Boot: complete")?;
+
+    let refused: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| l.contains("refused the feature set"))
+        .collect();
+    if refused.len() < 2 {
+        return Err(format!(
+            "the actuator withheld VIRTIO_F_ACCESS_PLATFORM from every virtio device but the \
+             console and {} of them were refused for it. A device the host offered it on and \
+             the guest declined has to lose FEATURES_OK, and this machine went on as though \
+             the negotiation were free\n{}",
+            refused.len(),
+            log.text()
+        ));
+    }
+    // The console kept it, so the capture channel is the one device that
+    // proves the boot above is not simply a machine with no virtio at all.
+    log.must_say("access_platform=y")?;
+    eprintln!("  [iommu] declined: {}", refused.join("\n  [iommu] declined: "));
+    Ok(())
+}
+
 /// The needle that says the unit blocked something, and the marker both gates
 /// below boot to. A boot that never produces it times out, which is what a
 /// unit that is not translating looks like from here.

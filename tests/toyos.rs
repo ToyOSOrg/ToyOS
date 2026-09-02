@@ -1007,6 +1007,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
+    ("iommu_virtio_platform", Sched::Parallel, Tier::Fast),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -8665,6 +8666,9 @@ fn run_machine_test(
         "iommu_empty_domain" => common::iommu::iommu_empty_domain(test_config, c_bins, rust_bins),
         "iommu_interrupt_remapping" => {
             common::iommu::iommu_interrupt_remapping(test_config, c_bins, rust_bins)
+        }
+        "iommu_virtio_platform" => {
+            common::iommu::iommu_virtio_platform(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),

@@ -191,6 +191,9 @@ actuators! {
     /// Blind init's read of the reset handshake, staging virtio devices that never answer; the console — the staged boot's capture channel — is spared.
     virtio_reset_stuck = "virtio-reset-stuck";
 
+    /// Withhold `VIRTIO_F_ACCESS_PLATFORM` from every virtio device but the console, staging a function whose addresses the unit never translates.
+    virtio_no_access_platform = "virtio-no-access-platform";
+
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
 
