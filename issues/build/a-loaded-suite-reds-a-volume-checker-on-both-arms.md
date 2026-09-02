@@ -69,7 +69,7 @@ The two mechanisms worth naming before anybody measures again:
   that read a volume back *after* QEMU has gone, so anything that shortens the
   guest's shutdown under load reaches all of them the same way.
 
-## A fourth name, and one more both-arms pair
+## A fourth name of the shape, on one arm of a two-arm pair
 
 **2026-09-01, `w5b5-host-build` at `dbc7d610` against `627e5f0f`**, two full
 `cargo test` runs on this dev host, one an arm, back to back. Each arm reported
@@ -101,7 +101,7 @@ independent format faults --- which is the first of the two mechanisms this
 entry already names, seen from a fourth angle.
 
 One run an arm decides nothing about a rate, and neither arm was quiet in the
-same way, so this is a sighting and not a measurement. What it adds is that the
-class is still both-arms: `i8042_undecoded_bytes` is not a volume checker at
-all, so the base arm produced the *parallel-classification* red without
-producing this one.
+same way, so this is a sighting and not a measurement. **It is not a both-arms
+pair for this name**: the volume checker reds on the branch arm only, and what
+the base arm produced is the wider *parallel-classification* red under a name
+that is not a volume checker at all. Two runs cannot tell the two apart.

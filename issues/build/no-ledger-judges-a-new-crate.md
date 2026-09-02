@@ -6,12 +6,16 @@ opened: 2026-09-01
 
 # A crate arriving in this tree is judged by nobody
 
-Two of the dependency bar's clauses are now measured: `src/sourcegate.rs` reds
-on an undeclared `Command::new` argument in host code and on a committed binary
-file `NOTICE` does not carry the digest of. The third is not. *"Only general and
-widely used crates — one that does our job we write ourselves, and a driver
-crate never"* (`CLAUDE.md`, "Dependencies") is a rule about arrivals, and a
-crate still arrives with nobody asked.
+Part of two of the dependency bar's clauses is now measured: `src/sourcegate.rs`
+reds on an undeclared `Command::new` argument in **Rust** host code, and on an
+undeclared committed file that is either not text or under `assets/`. Two halves
+of those two clauses are not built and are
+`issues/build/nothing-reads-the-workflows-for-a-binary.md` and
+`issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md`. The third
+clause has nothing at all. *"Only general and widely used crates --- one that
+does our job we write ourselves, and a driver crate never"* (`CLAUDE.md`,
+"Dependencies") is a rule about arrivals, and a crate still arrives with nobody
+asked.
 
 The shape that was proposed on 2026-08-08 and never built: a committed file
 naming every third-party crate the tree may resolve, with a one-line reason,
@@ -24,8 +28,14 @@ which is the step that is missing.
 that day's three, accepting only `cargo run -- --check-forks`. The other two
 have since become buildable without deciding anything: `NOTICE` was written and
 `CLAUDE.md` now declares the standing failures, so seeding those two ledgers is
-transcription. This one is not in that position. Seeding it is 471 names, 43 of
-them direct, and every one of the 471 is an acceptance nobody has recorded.
+transcription. This one is not in that position. Measured 2026-09-01 by the
+procedure the shape above states --- the union of the `name = ` lines of every
+tracked `Cargo.lock` --- **12 lockfiles and 484 unique names, 419 of them
+third-party** once the 65 this repository publishes itself are removed. (The
+figure carried here until now was "471 names, 43 of them direct", from a
+2026-08-08 source that also said "all 28 `Cargo.lock` files"; there are 12, and
+neither number reproduces.) Every one of the 419 is an acceptance nobody has
+recorded.
 Whether that is a decision worth making is the owner's, and it is what stands
 between this entry and the same `#[test]` the other two already are.
 

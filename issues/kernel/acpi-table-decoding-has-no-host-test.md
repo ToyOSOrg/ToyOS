@@ -13,8 +13,13 @@ There is no `toyos-acpi`, no fixture, and no crafted-input corpus; the whole of
 what exercises the decoder is a boot that happens to work, plus
 `kernel/src/iommu/vtd/dmar.rs`, which parses DMAR through the same
 `Table::open` and is reached only on a machine that has one. Measured
-2026-09-01: `git grep -l acpi` over `*.rs` outside `rust/` names twelve files,
-every one of them kernel code, and `tests/` names it in one comment.
+2026-09-01, `git grep -lie acpi` over `*.rs` outside `rust/`: fourteen files,
+eleven of them kernel code, one the bootloader, and two in `tests/` ---
+`tests/toyos.rs` in a comment, and `tests/common/wallclock.rs:479`, which waits
+on a kernel line an ACPI decode produced (*"ACPI: the FADT names no RTC century
+register"*). That last one is the nearest thing to coverage that exists, and it
+reads a log line rather than a decode. Case-sensitively the same grep names
+twelve, which is the figure this entry carried until the sentence was checked.
 
 What is decoded there is what SMP is built out of — `arch/smp.rs` takes its APIC
 IDs from `parse_madt`, `drivers/ioapic.rs` its windows and overrides — so a
