@@ -824,6 +824,9 @@ pub fn writeback_durability(
     fn seed() -> Vec<u8> {
         (0..SHRUNK_LEN).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8 | 1).collect()
     }
+    /// And for the bytes a read got back from the file the guest shrank only
+    /// after it had left the cache.
+    const SERVED_NAME: &str = "wb-served.bin";
 
     // Stage the one failure QEMU will not produce: a budget expiry on the FAT-1
     // mirror write of the blob's cluster allocation, on the write-back drain path
@@ -944,7 +947,8 @@ pub fn writeback_durability(
 
     // Ground truth: the bytes on the device, against the bytes the guest wrote,
     // read by the host's own FAT implementation and never by the kernel.
-    let mut files = read_files(volume, &[BLOB_NAME, SHRUNK_NAME])?;
+    let mut files = read_files(volume, &[BLOB_NAME, SHRUNK_NAME, SERVED_NAME])?;
+    let served = need(files.pop().flatten(), SERVED_NAME)?;
     let shrunk = need(files.pop().flatten(), SHRUNK_NAME)?;
     let got = need(files.pop().flatten(), BLOB_NAME)?;
     if got.len() != BLOB_LEN {
@@ -979,11 +983,34 @@ pub fn writeback_durability(
         ));
     }
 
+    // The same shrink over a page the cache did not hold — judged through the
+    // bytes a read got back, not the volume's own. `Fat32::set_len` zero-fills
+    // from the old length on every grow, so the device is right whatever the
+    // cache answers; the answer is the only thing that can be wrong, so the
+    // guest copied it here for a reader that is not this kernel.
+    if served.len() != SHRUNK_LEN {
+        return Err(format!(
+            "{SERVED_NAME} is {} bytes; the guest read back a file it had regrown to {SHRUNK_LEN}",
+            served.len()
+        ));
+    }
+    if served[..CUT] != seed()[..CUT] {
+        return Err(format!("{SERVED_NAME}'s surviving head changed across the shrink and regrow"));
+    }
+    if let Some(at) = served[CUT..].iter().position(|&b| b != 0) {
+        return Err(format!(
+            "{SERVED_NAME} byte {} is {:#04x}, not zero — a read of a file shrunk after it left \
+             the cache was served the discarded tail",
+            CUT + at,
+            served[CUT + at],
+        ));
+    }
+
     let _ = std::fs::remove_file(&image_path);
     eprintln!(
         "  [wb] {BLOB_LEN} bytes closed without fsync reached the log volume through the \
-         write-back queue and the shutdown drain; {SHRUNK_NAME}'s regrown tail is zeros; \
-         the checker is silent"
+         write-back queue and the shutdown drain; {SHRUNK_NAME}'s regrown tail is zeros and so \
+         is what a cold shrink served into {SERVED_NAME}; the checker is silent"
     );
     Ok(())
 }

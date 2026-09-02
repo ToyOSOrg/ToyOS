@@ -35,6 +35,11 @@ fn seed() -> Vec<u8> {
     (0..SHRUNK_LEN).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8 | 1).collect()
 }
 
+/// The third file, shrunk only after it has left the cache, and the file the
+/// bytes it served are copied into; the same mirroring.
+const REOPENED: &str = "/log/wb-reopened.bin";
+const WITNESS: &str = "/log/wb-served.bin";
+
 fn main() {
     let want = blob();
 
@@ -69,8 +74,43 @@ fn main() {
     }
 
     shrink_unflushed_then_regrow();
+    shrink_a_file_the_cache_no_longer_holds();
 
     println!("wrote {LEN} bytes, closed without fsync, and read them back after the write-back drained");
+}
+
+/// The same shrink and regrow over a page the cache does not hold, with the
+/// bytes the kernel *served* carried to the volume for the host to judge.
+///
+/// The volume itself cannot answer this one: `Fat32::set_len` zero-fills from
+/// the old length on every grow, so the device is right whatever the cache
+/// says. What a foreign reader can judge is the answer a reader got, which is
+/// why the read goes to a second file before anything flushes.
+fn shrink_a_file_the_cache_no_longer_holds() {
+    {
+        let mut f = fs::File::create(REOPENED).unwrap_or_else(|e| panic!("create {REOPENED}: {e}"));
+        f.write_all(&seed()).expect("write the seed");
+        f.sync_all().expect("fsync the seed");
+    }
+    thread::sleep(Duration::from_millis(200));
+
+    let mut f = OpenOptions::new()
+        .read(true).write(true)
+        .open(REOPENED)
+        .unwrap_or_else(|e| panic!("reopen {REOPENED}: {e}"));
+    f.set_len(CUT).expect("shrink into a page the cache does not hold");
+    f.set_len(SHRUNK_LEN as u64).expect("regrow");
+    let mut served = Vec::new();
+    f.read_to_end(&mut served).expect("read the regrown file back");
+    drop(f);
+
+    let mut w = fs::File::create(WITNESS).unwrap_or_else(|e| panic!("create {WITNESS}: {e}"));
+    w.write_all(&served).expect("write what the read served");
+    w.sync_all().expect("fsync the witness");
+    drop(w);
+
+    thread::sleep(Duration::from_millis(200));
+    println!("shrank a cold {REOPENED} to {CUT}, regrew it, and wrote the {} bytes it served to {WITNESS}", served.len());
 }
 
 /// A durable file shrunk and regrown with nothing flushed between the two, and

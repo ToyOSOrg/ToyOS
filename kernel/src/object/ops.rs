@@ -579,7 +579,15 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     {
         // The VFS lock outside `FileObject`'s (fsync's order) is `resize`'s witness.
         let mut vfs = crate::vfs::lock();
-        file_cache::resize(&mut vfs, file_id, size);
+        // A refused resize changed nothing, so the size and the position below stay as they were.
+        // A budget expiry is the caller's own bound and not a fact about the device: retryable.
+        if let Err(e) = file_cache::resize(&mut vfs, file_id, size) {
+            return match e {
+                crate::block::BlockError::BudgetExpired => SyscallError::WouldBlock,
+                crate::block::BlockError::Device => SyscallError::Io,
+            }
+            .to_u64();
+        }
     }
     file.with(|state| {
         if state.position > size as usize {

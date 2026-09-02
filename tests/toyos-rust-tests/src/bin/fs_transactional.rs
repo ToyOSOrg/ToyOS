@@ -192,15 +192,57 @@ fn shrink_unflushed_then_regrow_reads_zeros(dir: &str, seed_len: usize) {
         f.sync_all().expect("fsync the pair");
     }
 
-    // A spawn settles the write-back queue, so the file has left the cache and
-    // this read is the device's answer rather than the pages that were just in it.
-    let echo = Command::new("/bin/echo").arg("drained").output().expect("run echo");
-    assert!(echo.status.success());
+    // The read below is the device's answer rather than the pages that were just in it.
+    drained();
 
     let back = fs::read(&path).unwrap_or_else(|e| panic!("reread {path}: {e}"));
     assert_eq!(back.len(), seed_len, "{dir}: the regrown length did not survive the close");
     check_hole(dir, &back, &seed, CUT as usize);
     fs::remove_file(&path).expect("cleanup");
+}
+
+/// The same pair against a file the cache does not hold, which is where a mark
+/// over whole pages says nothing: the page the new end falls inside is half the
+/// file's and half discarded, and only a resident page can be zeroed and
+/// written back. Closed and drained first, so the reopen starts from the device.
+fn shrink_a_reopened_file_reads_zeros(dir: &str, seed_len: usize) {
+    let path = format!("{dir}/fstx_reopened.bin");
+    let seed = pattern(seed_len);
+    const CUT: u64 = 100;
+
+    {
+        let mut f = File::create(&path).unwrap_or_else(|e| panic!("create {path}: {e}"));
+        f.write_all(&seed).expect("write the seed");
+        f.sync_all().expect("fsync the seed");
+    }
+    drained();
+
+    let mut f = OpenOptions::new()
+        .read(true).write(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("reopen {path}: {e}"));
+    f.set_len(CUT).expect("shrink into a page the cache does not hold");
+    f.set_len(seed_len as u64).expect("regrow");
+
+    let mut got = vec![0u8; seed_len];
+    f.seek(SeekFrom::Start(0)).expect("rewind");
+    f.read_exact(&mut got).expect("read the whole file back");
+    check_hole(dir, &got, &seed, CUT as usize);
+
+    f.sync_all().expect("fsync the pair");
+    drop(f);
+    drained();
+
+    let back = fs::read(&path).unwrap_or_else(|e| panic!("reread {path}: {e}"));
+    assert_eq!(back.len(), seed_len, "{dir}: the regrown length did not survive the close");
+    check_hole(dir, &back, &seed, CUT as usize);
+    fs::remove_file(&path).expect("cleanup");
+}
+
+/// A spawn settles the write-back queue, so a just-closed file has left the cache.
+fn drained() {
+    let echo = Command::new("/bin/echo").arg("drained").output().expect("run echo");
+    assert!(echo.status.success());
 }
 
 fn check_hole(dir: &str, got: &[u8], seed: &[u8], cut: usize) {
@@ -271,6 +313,9 @@ fn main() {
     // And the same pair with no flush between them, on both device mounts.
     shrink_unflushed_then_regrow_reads_zeros("/home", 3 * PAGE);
     shrink_unflushed_then_regrow_reads_zeros("/log", 3 * PAGE);
+    // And the same pair on a file that is on the device and in no page of the cache.
+    shrink_a_reopened_file_reads_zeros("/home", 3 * PAGE);
+    shrink_a_reopened_file_reads_zeros("/log", 3 * PAGE);
     write_into_hole_reads_zeros("/tmp");
     write_into_hole_reads_zeros("/home");
 
