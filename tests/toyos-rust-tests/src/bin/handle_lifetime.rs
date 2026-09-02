@@ -171,18 +171,22 @@ fn kill_releases_acceptor() {
 }
 
 /// A ring's pages are its own and no second name reaches them, so the witness
-/// is the kernel's own count of live `Inbox` objects. The holder makes
+/// is the kernel's own count of live objects. The holder makes
 /// [`HOLDER_RINGS`] of them.
 ///
 /// **Per kind, and not the machine's free memory.** `SYS_SYSINFO` answers for
 /// the whole machine, so a verdict taken from it is sound only while nothing
 /// else in the guest holds or releases a page across the window — and nothing
-/// orders that: every Rust guest binary shares this boot, and the object
-/// layer's release queue drains at syscall exit, `do_schedule` entry and the
-/// idle loop, none of which any of them can order against another's exit. A
-/// live-`Inbox` count moves only when somebody makes or releases an inbox, and
-/// it is exact: one leaked ring is `+1`, where 2 MiB fitted inside the 6 MiB
-/// margin free memory needed and passed.
+/// orders that: the object layer's release queue drains at syscall exit,
+/// `do_schedule` entry and the idle loop, none of which a killer can order
+/// against another process's exit. A count of live objects moves only when
+/// somebody makes or releases one, and it is exact: a leak of one is `+1`.
+///
+/// **Every kind and not the one this arm is about**, because the arrival check
+/// is what says the rings were seen and the reclaim check is about everything
+/// the dead process held: a `SharedMem` or a `File` it kept would otherwise be
+/// a green run. `Census::grown_since` is the comparison the census header asks
+/// for.
 ///
 /// **Both readings are [`settled_census`] and not [`Census::now`], because the
 /// release does not finish inside the killing syscall** — see that function.
@@ -202,11 +206,16 @@ fn kill_releases_ring() {
     );
 
     kill_and_reap(&mut child);
+    // Dropped before the reading, not after: a live `Child` holds the read end
+    // of the pipe it was spawned with, so a census taken over one counts a
+    // `PipeRead` this arm made and blames the kill for it.
+    drop(child);
+
     let after = settled_census();
-    assert_eq!(
-        after.kind("Inbox"),
-        before.kind("Inbox"),
-        "a killed process kept its io_urings: first {before}, then {after}"
+    let grown: Vec<_> = after.grown_since(&before).collect();
+    assert!(
+        grown.is_empty(),
+        "a killed process kept what it held: {grown:?} — first {before}, then {after}"
     );
 }
 

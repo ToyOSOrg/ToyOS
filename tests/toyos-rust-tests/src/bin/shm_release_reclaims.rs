@@ -71,10 +71,8 @@ fn main() {
     // **Per kind, and not the machine's free memory.** `SYS_SYSINFO` answers
     // for the whole machine, so a verdict taken from it is sound only while
     // nothing else in the guest holds or releases a page across the window, and
-    // nothing orders that: every Rust guest binary shares this boot. A live
-    // `SharedMem` count moves only when somebody makes or releases a region,
-    // and it is exact — one leaked region is `+1`, where 2 MiB fitted inside
-    // the 8 MiB margin free memory needed and passed.
+    // nothing orders that. A live object count moves only when somebody makes
+    // or releases one, and it is exact: a leak of one region is `+1`.
     let start = settled_census();
 
     let mut regions = Vec::new();
@@ -97,11 +95,11 @@ fn main() {
 
     drop(regions);
     let after = settled_census();
-    assert_eq!(
-        after.kind("SharedMem"),
-        start.kind("SharedMem"),
-        "{ROUNDS} regions were allocated, mapped and dropped, and were not released: \
-         first {start}, then {after}"
+    let grown: Vec<_> = after.grown_since(&start).collect();
+    assert!(
+        grown.is_empty(),
+        "{ROUNDS} regions were allocated, mapped and dropped, and this was not released: \
+         {grown:?} --- first {start}, then {after}"
     );
     // The other direction. The donor makes a region, sends it here, and drops
     // its own handle before this process has mapped anything — nobody has the
