@@ -161,5 +161,5 @@ owns "every policy about files — where they go, what they are called, how many
 there are, what happens when the stick stops answering"
 (`userland/logd/src/main.rs:1-10`). Gated by `esp_filesystem`,
 `kernel_log_file`, `log_backing_read_error`,
-`boot_volume_metadata_error`, `log_partition_automount`, `log_partition_identity`
+`boot_volume_metadata_error`, `log_partition_layout`, `log_partition_identity`
 and `wall_clock_file`, plus `toybox_cp_volume`.
