@@ -470,7 +470,7 @@ fn enable(
         yn(gsts & interrupt::INTERRUPT_REMAPPING_ENABLE != 0),
         yn(gsts & interrupt::COMPATIBILITY_FORMAT != 0),
         interrupt::table_address(),
-        interrupt::pointer(),
+        unit.regs.read_u64(interrupt::IRTA_REG),
         yn(remap == Some(true)),
         root.phys(),
         table::KERNEL_DOMAIN,

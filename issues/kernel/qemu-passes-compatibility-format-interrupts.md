@@ -102,12 +102,13 @@ All three are answerable on the T14 and nowhere in reach:
    delivered;
 3. an entry rewritten under load with and without the invalidation.
 
-A fourth, smaller, belongs with them: **the entry's destination encoding is
-exercised but not discriminated.** With `ECAP.EIM` set the kernel writes the
-APIC id at `DST` 63:32 and without it at 47:40, and
-`Profile::IommuEim` now boots the first branch — but every interrupt on every
-machine here targets APIC 0, and 0 encodes identically either way. A non-zero
-destination is what would tell them apart, and nothing here has one.
+Not a fourth: the entry's destination encoding **is** decided here.
+`iommu-dest-apic1` moves the device messages to APIC 1, where the two encodings
+differ, and `iommu_discovery` reads the same id back out of the table on both
+machines — `0x100` at `DST` 47:40 without `EIME` and `0x1` at 63:32 with it.
+What stays undecided is only whether a destination too wide for the 8-bit field
+is refused, which needs more than 255 vCPUs
+(`issues/kernel/interrupt-remapping-refusals-are-unreachable.md`).
 
 What is owed meanwhile is that no gate is written as though the harness could
 decide any of this.

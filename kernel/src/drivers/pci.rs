@@ -234,8 +234,11 @@ impl PciDevice {
     /// function has no entry, so the message it would otherwise write is one the
     /// unit blocks.
     fn message(&self, vector: u8) -> Option<(u32, u32)> {
-        match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, MSG_DEST) {
-            crate::iommu::Delivery::Direct => Some((MSG_ADDR, vector as u32)),
+        let dest = if crate::actuator::iommu_dest_apic1() { 1 } else { MSG_DEST };
+        match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, dest) {
+            // Destination id at address bits 19:12, so the compatibility message
+            // names the same CPU the remappable one would.
+            crate::iommu::Delivery::Direct => Some((MSG_ADDR | (dest << 12), vector as u32)),
             crate::iommu::Delivery::Remapped(m) => Some((m.address, m.data)),
             crate::iommu::Delivery::Refused(why) => {
                 log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);

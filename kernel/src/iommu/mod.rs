@@ -105,13 +105,15 @@ pub enum Delivery<T> {
 }
 
 /// Why a source could not be given an entry. Carried rather than collapsed:
-/// one message for both sends whoever reads it looking in the wrong place.
+/// one message for all three sends whoever reads it looking in the wrong place.
 #[derive(Clone, Copy)]
 pub enum Refused {
     /// Wider than the destination an entry holds without extended interrupt mode.
     DestinationTooWide(u32),
     /// Every entry in the table is already spoken for.
     TableFull,
+    /// Firmware's device scopes named no requester id for this interrupt controller.
+    ControllerUnnamed(u8),
 }
 
 impl core::fmt::Display for Refused {
@@ -121,6 +123,9 @@ impl core::fmt::Display for Refused {
                 write!(f, "apic id {id:#x} does not fit a remapping entry's destination")
             }
             Self::TableFull => write!(f, "the interrupt remapping table is full"),
+            Self::ControllerUnnamed(id) => {
+                write!(f, "firmware named no requester id for interrupt controller {id}")
+            }
         }
     }
 }

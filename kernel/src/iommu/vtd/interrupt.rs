@@ -80,8 +80,6 @@ struct Remap {
     used: u16,
     /// `ECAP.EIM` on every unit. Clear bounds a destination to the eight bits `DST` then holds.
     extended: bool,
-    /// The word `IRTA_REG` was given, kept so the boot line can report it.
-    pointer: u64,
     /// Requester ids firmware gave this machine's I/O APICs, which Section 8.3.1.1 requires it to name.
     apics: Vec<(u8, StreamId)>,
     /// Every unit that is remapping, with the queue an entry's write is invalidated through.
@@ -93,7 +91,6 @@ static REMAP: Lock<Remap> =
         table: None,
         used: 0,
         extended: false,
-        pointer: 0,
         apics: Vec::new(),
         units: Vec::new(),
     });
@@ -115,14 +112,7 @@ pub fn arm(tables: &mut Tables, extended: bool) -> u64 {
         Some(table) => table,
         None => *remap.table.insert(tables.alloc()),
     };
-    let pointer = table.phys() | if extended { EXTENDED_INTERRUPT_MODE } else { 0 } | SIZE_FIELD;
-    remap.pointer = pointer;
-    pointer
-}
-
-/// The word `IRTA_REG` was given, whose bit 11 is what selects the entry format.
-pub fn pointer() -> u64 {
-    REMAP.lock().pointer
+    table.phys() | if extended { EXTENDED_INTERRUPT_MODE } else { 0 } | SIZE_FIELD
 }
 
 /// Take over a remapping unit's invalidation queue, once `IRE` is confirmed.
@@ -149,6 +139,7 @@ pub fn is_armed() -> bool {
 fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16, Refused> {
     let written = {
         let mut remap = REMAP.lock();
+        // Unreachable behind `is_armed`, which every caller passes first.
         let Some(table) = remap.table else {
             return Err(Refused::TableFull);
         };
@@ -183,13 +174,17 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16,
     match written {
         Ok((index, lo, hi)) => {
             log!(
+                // `apic=` is the id this was asked for, `dst=` the field it
+                // encoded into; printing only the second leaves the encoding
+                // compared against itself.
                 "iommu: irte{index} source={source} p={} sid={:#06x} svt={} sq={} \
-                 vector={:#04x} dest={:#x} trigger={}",
+                 vector={:#04x} apic={:#x} dst={:#x} trigger={}",
                 lo & PRESENT,
                 hi & 0xFFFF,
                 (hi >> 18) & 0x3,
                 (hi >> 16) & 0x3,
                 (lo >> VECTOR_SHIFT) & 0xFF,
+                dest,
                 lo >> DESTINATION_SHIFT,
                 if lo & TRIGGER_LEVEL != 0 { "level" } else { "edge" }
             );
@@ -215,9 +210,7 @@ pub fn msi(source: StreamId, vector: u8, dest: u32) -> Result<Msi, Refused> {
 }
 
 pub fn pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Result<Pin, Refused> {
-    // `remappable` refused the whole machine unless firmware named every chip,
-    // so an unnamed one here is a table with no entry to give.
-    let source = apic_source(apic_id).ok_or(Refused::TableFull)?;
+    let source = apic_source(apic_id).ok_or(Refused::ControllerUnnamed(apic_id))?;
     let index = allocate(source, vector, dest, level)? as u32;
     Ok(Pin { low: (index >> 15) << 11, high: PIN_REMAPPABLE | ((index & 0x7FFF) << 17) })
 }
