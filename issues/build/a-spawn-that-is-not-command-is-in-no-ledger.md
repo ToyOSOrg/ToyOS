@@ -37,6 +37,6 @@ file already uses. That still leaves a hand-rolled `syscall!` and every crate
 that spawns for us.
 
 **Exit condition** is the one in
-`issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`: a scan
+`issues/build/an-alias-split-across-lines-escapes-both-scans.md`: a scan
 that resolves names the way the compiler does, over the whole set of spawn
 entry points rather than one spelling of one of them.

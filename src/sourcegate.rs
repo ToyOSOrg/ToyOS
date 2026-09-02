@@ -18,8 +18,8 @@
 //! two strong-count adjusters — and `mem::forget`. It runs in
 //! `cargo test --lib`, on every machine that builds this tree, in milliseconds.
 //! Beside the counts it refuses a one-line `use … as …` of a name those
-//! needles spell, because one such line puts every row that names it out of
-//! reach at once; that is the whole of the spelling it closes.
+//! needles spell — a brace group on that line included — because one such line
+//! puts every row that names it out of reach at once.
 //!
 //! The exceptions are per file and per line count, so an *added* `forget`
 //! beside a permitted one is a red rather than a silence.
@@ -50,8 +50,8 @@
 //! row unreachable at once. The sixth reads every committed file that carries
 //! a NUL, plus everything under `assets/`, against the digest `NOTICE` records.
 //!
-//! **What neither reaches is filed rather than implied**: a brace-group or
-//! multi-line alias, a spawn that is not `Command` at all, a binary a
+//! **What neither reaches is filed rather than implied**: an alias split across
+//! lines, a spawn that is not `Command` at all, a binary a
 //! third-party crate or a workflow runs. The exit from all of it is one scan
 //! that resolves names the way the compiler does; the entries under
 //! `issues/build/` say so and this does not pretend otherwise.
@@ -492,7 +492,7 @@ struct Spawn {
 /// `CLAUDE.md` declares. A workflow or a container image, which is
 /// `issues/build/nothing-reads-the-workflows-for-a-binary.md`. And an alias no
 /// one line spells, which is
-/// `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`.
+/// `issues/build/an-alias-split-across-lines-escapes-both-scans.md`.
 const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "\"cargo\"",
@@ -737,7 +737,7 @@ fn after_visibility(code: &str) -> &str {
 ///
 /// A `use` rename and a `type` alias, and only where the item begins the line.
 /// Rather than chase every alias a Rust file can build, this refuses the forms
-/// that spell one on a single line; `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+/// that spell one on a single line; `issues/build/an-alias-split-across-lines-escapes-both-scans.md`
 /// is what it does not reach.
 #[cfg(test)]
 fn renames_command(code: &str) -> bool {
@@ -747,11 +747,12 @@ fn renames_command(code: &str) -> bool {
 }
 
 /// Whether `code` is a one-line `use` that renames `item`, after any
-/// visibility — **exactly one spelling and no other**. A brace group, a
-/// multi-line `use`, a plain re-import and a `type` alias all walk past it,
-/// and `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
-/// carries them with the exit condition. The `type` half of `renames_command`
-/// is deliberately absent: `type PageTables = Arc<…>` is ordinary here.
+/// visibility — **exactly one spelling and no other**, a brace group on that
+/// line included. A `use` split across lines, a plain re-import and a `type`
+/// alias walk past it, and
+/// `issues/build/an-alias-split-across-lines-escapes-both-scans.md` carries
+/// them with the exit condition. The `type` half of `renames_command` is
+/// deliberately absent: `type PageTables = Arc<…>` is ordinary here.
 #[cfg(test)]
 fn use_renames(code: &str, item: &str) -> bool {
     let code = after_visibility(code);
@@ -1140,6 +1141,10 @@ mod tests {
         // A longer name that ends in the guarded one is a different name.
         assert!(!use_renames("use crate::PageArc as A;", "Arc"));
         // Neither reached, and both are the filed weakness rather than a claim.
+        assert!(use_renames("use alloc::sync::{Arc as C, Weak};", "Arc"));
+        assert!(use_renames("pub(crate) use alloc::sync::{Weak, Arc as C};", "Arc"));
+        assert!(renames_command("use std::process::{Command as Cmd, Stdio};"));
+        assert!(renames_command("pub use std::process::{Stdio, Command as Cmd};"));
         assert!(!use_renames("    Arc as A,", "Arc"));
         assert!(!use_renames("type PageTables = Arc<Lock<AddressSpace>>;", "Arc"));
     }
@@ -1412,7 +1417,7 @@ mod tests {
     /// alias a Rust file can build, this refuses the forms that spell one on a
     /// single line, and no shorter rule does; what it closes is the one-line
     /// form after any visibility, and
-    /// `issues/build/the-one-line-alias-rule-does-not-reach-a-brace-group.md`
+    /// `issues/build/an-alias-split-across-lines-escapes-both-scans.md`
     /// is the rest. It does not reach a function pointer taken from
     /// `Command::new` itself either.
     #[test]

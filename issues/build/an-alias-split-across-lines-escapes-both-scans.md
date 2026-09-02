@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-09-02
 ---
 
-# A `Command` alias spelled over two lines walks past the rule that refuses one
+# An alias split across lines walks past both scans that refuse a one-line one
 
 `src/sourcegate.rs`'s `no_host_file_renames_command` refuses a `use` rename and
 a `type` alias of `std::process::Command`, after any visibility, **on one line**.
@@ -46,10 +46,22 @@ the same shape over `kernel/src` and `toyos-sched/src`, for the names its ban
 table spells — `Arc`, `mem`, `forget`, the two strong-count adjusters and the
 two raw-pointer converters — because one `use alloc::sync::Arc as A;` hides
 every row in that table at once. It closes the one-line `use … as …` after
-visibility and nothing else: a brace group, a multi-line `use`, a plain
-re-import (`use core::mem::forget;` then `forget(x)`) and a `type` alias all
-walk past it. The `type` half is deliberately absent there — `type PageTables =
-Arc<…>` is ordinary and `kernel/src/process.rs:43` writes one — so
+visibility and nothing else.
+
+**A brace group on one line is closed, by both scans.** Measured on this tree:
+
+```
+use_renames("use alloc::sync::{Arc as C, Weak};", "Arc")            = true
+use_renames("pub(crate) use alloc::sync::{Weak, Arc as C};", "Arc") = true
+renames_command("use std::process::{Command as Cmd, Stdio};")       = true
+renames_command("pub use std::process::{Stdio, Command as Cmd};")   = true
+```
+
+What escapes is a `use` **split across lines** — the block quoted above, whose
+rename does not begin an item on its own line. Beside it: a plain re-import
+(`use core::mem::forget;` then `forget(x)`) and a `type` alias. The `type` half
+is deliberately absent from the kernel scan — `type PageTables = Arc<…>` is
+ordinary and `kernel/src/process.rs:43` writes one — so
 `PageTables::increment_strong_count` is a spelling neither gate reads.
 
 Until then the rules close the one-line form and the module headers and the test
