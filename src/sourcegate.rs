@@ -67,8 +67,7 @@
 //! **What none of them reaches is filed rather than implied**: an alias split
 //! across lines, a spawn that is not `Command` at all, a binary a third-party
 //! crate runs, a binary a `run:` step downloads, and the bytes behind an
-//! action's moving tag. The entries under `issues/build/` say so and this does
-//! not pretend otherwise.
+//! action's moving tag. The entries under `issues/build/` say so.
 
 use std::path::{Path, PathBuf};
 
@@ -584,9 +583,8 @@ const HOST_SPAWNS: &[Spawn] = &[
 /// One package a CI image or workflow installs on a machine this project's
 /// verdicts are measured on.
 struct Package {
-    /// The token the install line spells, verbatim once its quotes are off.
-    /// A shell expansion is left as written: `qemu@$want` names no version
-    /// this gate can read, and a row that pretended otherwise would be false.
+    /// The token the install line spells, verbatim once its quotes are off. A
+    /// shell expansion stays as written: `qemu@$want` names no version.
     name: &'static str,
     why: &'static str,
 }
@@ -702,8 +700,8 @@ struct Action {
 /// Every action `.github/workflows/` pulls, and what it is.
 ///
 /// The other half of what [`CI_PACKAGES`] holds: a `uses:` step runs somebody
-/// else's code on the machine a verdict is measured on. A `uses:` naming a path
-/// in this repository is not a row — it is a file, and the check is that it
+/// else's code on the machine a verdict is measured on. One naming a path in
+/// this repository is not a row — it is a file, and the check is that it
 /// resolves.
 ///
 /// **A row pins a name and a tag, not bytes.** `@v4` is a branch its publisher
@@ -1151,15 +1149,14 @@ fn shell_tokens(line: &str) -> Vec<String> {
     spaced.split_whitespace().map(|t| t.trim_matches(['"', '\'']).to_string()).collect()
 }
 
-/// True where `token` is a separator [`shell_tokens`] stood alone, so a command
-/// ends at it.
+/// True where `token` is a separator [`shell_tokens`] stood alone.
 #[cfg(test)]
 fn ends_a_command(token: &str) -> bool {
     matches!(token, ";" | "|" | "&" | "<" | ">" | "(" | ")" | "{" | "}")
 }
 
-/// True where `token` is a word that stands in front of a command rather than
-/// being one: a Dockerfile verb, a shell keyword, or an environment assignment.
+/// True where `token` stands in front of a command rather than being one: a
+/// Dockerfile verb, a shell keyword, or an environment assignment.
 #[cfg(test)]
 fn precedes_a_command(token: &str) -> bool {
     if matches!(
@@ -1182,14 +1179,13 @@ fn precedes_a_command(token: &str) -> bool {
 /// Every package `text` installs, as `(name, the line the install began on)`.
 ///
 /// **The spelling, stated so the closure is readable.** A `\`-continued run of
-/// lines is one logical line; a `#` that begins a token starts a comment and
-/// ends the line there; the logical line is cut into commands at each shell
-/// separator; a command's head word — after the Dockerfile verb, `sudo`, a
-/// shell keyword or an environment assignment — must be a manager
-/// [`INSTALLERS`] names, and the command must carry that manager's subcommand
-/// as a whole token; every non-option token after it is a package. An option's
-/// *argument* is therefore read as a package (`apt-get install -t sid foo`
-/// declares `sid`), which is a red naming a name rather than a silence.
+/// lines is one logical line; a `#` that begins a token ends it; the line is
+/// cut into commands at each shell separator; a command's head word — after the
+/// Dockerfile verb, `sudo`, a keyword or an environment assignment — must be a
+/// manager [`INSTALLERS`] names, and the command must carry that manager's
+/// subcommand as a whole token; every non-option token after it is a package.
+/// An option's *argument* is therefore read as a package (`apt-get install -t
+/// sid foo` declares `sid`), which is a red naming a name rather than a silence.
 #[cfg(test)]
 fn installed_packages(text: &str) -> Vec<(String, usize)> {
     let lines: Vec<&str> = text.lines().collect();

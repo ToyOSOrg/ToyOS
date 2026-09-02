@@ -22,24 +22,42 @@ effective-authority side is a shipped syscall too — `SYS_ENDOWMENTS`
 (`toyos-abi/src/syscall.rs:173`, wrapper at `:849`) lets a process read its own
 endowment table back.
 
-**What is missing is everything around it.** That comparison is hand-written for
-one class on one applet; nothing enumerates the nineteen links; no other
-authority class is covered; and the question the union raises — what can `echo`
-reach that `echo` has no business reaching, because `hexdump` needed it — is
-unanswered for eighteen of them.
+**The enumeration exists now, and it reds on the image that boots.**
+`endowment_denied`'s `every_applet_holds_only_what_its_policy_names` reads the
+links off `/bin` with `read_dir`/`read_link`, parses `/etc/system.manifest` with
+a parser that is neither init's nor `toyos_manifest`'s, and holds each applet
+against `APPLET_NEEDS`. With its declared list empty, the guest answers:
 
-**What to build.** Enumerate the installed links, resolve each through the real
-init lookup, and compare effective authority against an explicit per-applet
-policy table. Then exercise one allowed and one forbidden operation per distinct
-authority *class* — classes, not applets, because nineteen applets do not have
-nineteen distinct authorities, and `endowment_denied` already covers one of them.
+```
+assertion `left == right` failed: the authority /bin/toybox's one row hands
+applets that have no use for it is not the list this test declares
+  left: ["cat: receive soundd", "cp: receive soundd", "echo: receive soundd",
+         "free: receive soundd", "grep: receive soundd", "hexdump: receive soundd",
+         "ls: receive soundd", "mkdir: receive soundd", "mv: receive soundd",
+         "ps: receive soundd", "pwd: receive soundd", "rm: receive soundd",
+         "shutdown: receive soundd"]
+ right: []
+```
 
-**The circularity to avoid, and it is the strongest reason to build this.** A
-checker that reimplements init's resolver agrees with init by construction. Parse
-the manifest and the symlink inventory independently and compare *their* outputs
-against the resolver's; the differential is the oracle. Nothing in `src/build.rs`
-does this today — its manifest gates check the manifest's internal consistency
-and say nothing about per-applet effective authority.
+Thirteen of the fourteen applets in the test image hold a connector to soundd
+because `tone` needs one. That list is now `DECLARED_OVER_GRANTS`, so the size
+of the defect cannot grow without a red naming what grew.
+
+**What is still missing is the shipped image.** A guest test boots
+`tests/testcases/system.toml`, whose `toybox` row is `receives = ["soundd"]` and
+carries no `syscap` at all. The row this record opened on — `system.toml:99`,
+`syscap = ["power", "roster"]` across nineteen links — is measured by nothing:
+the differential that would see `/bin/echo` holding `Rights::POWER` has to read
+`system.toml` and the initrd's link list on the host, in `cargo test --lib`,
+because no boot carries that manifest.
+
+**The circularity that was avoided, and it is the strongest reason this shape is
+the shape.** A checker that reimplements init's resolver agrees with init by
+construction. The two sides above come from different places — the links off the
+image, the rows off the rendered manifest, the policy from a table nothing in
+the build wrote. Nothing in `src/build.rs` does this either: its manifest gates
+check the manifest's internal consistency and say nothing about per-applet
+effective authority.
 
 **Reuse.** Every multicall binary and every manifest audit wants it; toybox is
 merely the first place one row grants many programs.
