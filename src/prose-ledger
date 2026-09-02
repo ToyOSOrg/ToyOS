@@ -221,7 +221,7 @@ src/tiers.rs 336 26
 src/toolchain.rs 780 29
 src/wallpaper.rs 124 0
 src/worktree.rs 74 0
-src/writinglaw.rs 21 0
+src/writinglaw.rs 24 0
 tests/common/audio.rs 397 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
