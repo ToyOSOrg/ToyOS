@@ -2133,10 +2133,8 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         );
         return false;
     }
-    // And the workload happened. `SYS_CLOCK` is 8, and `kernel/src/process.rs`
-    // writes one ` <num>=<count>` field per used syscall at process exit — a
-    // counter this test cannot reach, so a printed pair no loop produced fails
-    // here however plausible the numbers are.
+    // And the workload happened, against a counter this test cannot reach:
+    // `SYS_CLOCK` is 8 in the kernel's per-syscall accounting at process exit.
     let Some(claimed) = result.stdout.lines().find_map(|l| {
         let (reps, per) = l.split_once(" over ")?.1.split_once('x')?;
         Some(reps.trim().parse::<u64>().ok()? * per.trim().parse::<u64>().ok()?)
@@ -9603,8 +9601,7 @@ fn run_machine_test(
                 ready_marker: REFUSAL,
                 ..Default::default()
             };
-            /// A liveness margin over the work that follows the refusal in the
-            /// same call, never a threshold.
+            /// A liveness margin over the work that follows the refusal, never a bound.
             const AFTER_REFUSAL: Duration = Duration::from_secs(2);
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             // This profile has no virtio-serial, so stdio *is* the 16550 and
@@ -10250,8 +10247,7 @@ fn run_machine_test(
             // the CPU: the branch printed no `RECURSIVE` and ran the whole
             // second report. `test-late-panic` is the first crash and
             // `fault-in-report` is the wild read inside its report.
-            /// A liveness margin over the report that follows the alert in the
-            /// same call, never a threshold.
+            /// A liveness margin over the report that follows the alert, never a bound.
             const AFTER_RECURSIVE: Duration = Duration::from_secs(1);
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
@@ -10305,8 +10301,7 @@ fn run_machine_test(
             // which lines arrived, from the first phase to the wedge, and that
             // the phase after it never did.
             const WEDGE: &str = "pre-idle-wedge: the boot stops here";
-            /// A liveness margin over the phase that follows the wedge line,
-            /// never a threshold.
+            /// A liveness margin over the phase after the wedge line, never a bound.
             const STAYED_WEDGED: Duration = Duration::from_millis(1500);
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,

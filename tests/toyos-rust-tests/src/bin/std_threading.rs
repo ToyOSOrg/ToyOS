@@ -2,8 +2,7 @@ use std::thread;
 use std::time::Duration;
 
 /// The child's life on the first attempt; a lost race quadruples it. **A host
-/// fact, not a bound**: winning it means being scheduled between the spawn and
-/// the question, which a twelve-wide TCG suite can take away.
+/// fact, not a bound** — winning it means being asked before the child ends.
 const LINGER: Duration = Duration::from_millis(200);
 /// Attempts at the running answer. Three covers a 64x slower host.
 const TRIES: u32 = 3;
@@ -39,8 +38,7 @@ fn main() {
     assert_eq!(total, expected, "partial sums mismatch: {total} != {expected}");
 
     // Both answers, because a `try_wait` stuck on either satisfies the other.
-    // The running answer re-arms with a longer child rather than reding the
-    // first time this process loses the race to be asked.
+    // The running answer re-arms with a longer child rather than reding a lost race.
     let exe = std::env::current_exe().expect("current_exe failed");
     let mut running = None;
     for attempt in 0..TRIES {

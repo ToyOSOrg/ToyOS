@@ -353,7 +353,7 @@ tests/toyos-rust-tests/src/bin/std_io.rs 0 0
 tests/toyos-rust-tests/src/bin/std_mmap.rs 0 0
 tests/toyos-rust-tests/src/bin/std_process.rs 10 0
 tests/toyos-rust-tests/src/bin/std_sync.rs 1 0
-tests/toyos-rust-tests/src/bin/std_threading.rs 11 0
+tests/toyos-rust-tests/src/bin/std_threading.rs 9 0
 tests/toyos-rust-tests/src/bin/std_tls.rs 9 0
 tests/toyos-rust-tests/src/bin/std_tls_cranelift.rs 3 0
 tests/toyos-rust-tests/src/bin/std_tls_dlopen.rs 19 0
@@ -382,7 +382,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5092 23
+tests/toyos.rs 5087 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
