@@ -974,7 +974,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // guest down and reads `/log` back with `toyos-fat32-check`.
     ("writeback_reopen", Sched::Parallel, Tier::Fast),
     ("writeback_spawn", Sched::Parallel, Tier::Nightly),
-    ("writeback_durability", Sched::Parallel, Tier::Fast),
+    ("writeback_durability", Sched::Parallel, Tier::Nightly),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
