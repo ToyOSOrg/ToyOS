@@ -1,20 +1,20 @@
-//! The one `BuildHasher` a kernel hash container may use, seeded from `RDRAND`
-//! before any container exists. `kernel/Cargo.toml` takes hashbrown without
-//! `default-hasher`, so `HashMap::new` / `with_capacity` do not exist and every
-//! spelling of a container stops compiling until it names this.
+//! The `BuildHasher` every kernel hash container is built on, seeded from
+//! `RDRAND` before any container exists — `kernel/Cargo.toml` takes hashbrown
+//! without `default-hasher`, so a container must name a hasher.
 //!
-//! **A container built before [`seed`] is the one wrong answer that would be
-//! silent**, because it would work: it hashes alike on every boot of an image,
-//! the property a `BTreeMap` is chosen over for a boundary-crossing key. So
-//! [`KernelHashState::new`] panics by name. Key origins: `src/kernelkeys.rs`.
+//! **A container built before [`seed`], or on a constant, is the wrong answer
+//! that would be silent** — it works, and hashes alike on every boot of an
+//! image, the fixed order a `BTreeMap` is chosen over for a boundary-crossing
+//! key. Every way that can happen panics by name. Not a HashDoS defence, though:
+//! [`mix`] is splitmix64's finalizer XOR-keyed, so one observed hash of a known
+//! key recovers the seed.
 
 use core::hash::{BuildHasher, Hasher};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::cpu;
 
-/// `0` until [`seed`] runs — the one value it refuses to draw, so it means
-/// "not seeded" and nothing else.
+/// `0` until [`seed`] runs, and a value it refuses to draw.
 static SEED: AtomicU64 = AtomicU64::new(0);
 
 pub const UNSEEDED: &str =
@@ -24,12 +24,21 @@ pub const UNSEEDED: &str =
 /// Two seeds in one boot means a container was built against the first.
 const RESEEDED: &str = "kernel hasher: seed() ran twice in one boot";
 
-/// Draw the boot's seed. Called once, before any container is built.
+pub const NO_RDRAND: &str =
+    "kernel hasher: CPUID.01H:ECX[30] is clear, so this CPU has no RDRAND and the seed has no \
+     source";
+
+pub const NO_ENTROPY: &str =
+    "kernel hasher: RDRAND gave no usable value, so the seed would be a constant on every boot";
+
+/// Called once, before any container. `0` and all-ones are what a failing
+/// `RDRAND` leaves behind, so neither may become a seed.
 pub fn seed() {
-    let mut drawn = cpu::rdrand();
-    while drawn == 0 {
-        drawn = cpu::rdrand();
-    }
+    assert!(cpu::has_rdrand(), "{NO_RDRAND}");
+    let drawn = (0..cpu::RDRAND_ATTEMPTS)
+        .filter_map(|_| cpu::rdrand())
+        .find(|&v| v != 0 && v != u64::MAX)
+        .unwrap_or_else(|| panic!("{NO_ENTROPY}"));
     assert_eq!(SEED.swap(drawn, Ordering::Release), 0, "{RESEEDED}");
 }
 
@@ -108,8 +117,8 @@ impl Hasher for KernelHasher {
     }
 }
 
-/// The only `HashMap` `kernel/src` may name; a site reads `default()` because
-/// `new` belongs to the default hasher this kernel does not have.
+/// A site reads `default()` because `new` belongs to a default hasher this
+/// kernel does not have.
 pub type HashMap<K, V> = hashbrown::HashMap<K, V, KernelHashState>;
 
 /// Build a container before [`seed`]: the panic is the point.
@@ -117,4 +126,25 @@ pub type HashMap<K, V> = hashbrown::HashMap<K, V, KernelHashState>;
 pub fn probe_before_seed() {
     let mut probe: HashMap<u64, u64> = HashMap::default();
     probe.insert(0, 0);
+}
+
+/// **What the feature drop does not close**, as code so that closing either
+/// stops this compiling: a foreign `BuildHasher`, and `hashbrown::HashTable`,
+/// which needs none. Which hasher a container gets is held by review.
+#[allow(dead_code)]
+#[cfg(feature = "boot-actuators")]
+pub fn spellings_the_compiler_still_admits() {
+    #[derive(Default)]
+    struct Unseeded;
+    impl BuildHasher for Unseeded {
+        type Hasher = KernelHasher;
+        fn build_hasher(&self) -> KernelHasher {
+            KernelHasher(0)
+        }
+    }
+    let mut foreign: hashbrown::HashMap<u64, u64, Unseeded> = hashbrown::HashMap::default();
+    foreign.insert(0, 0);
+
+    let mut table: hashbrown::HashTable<u64> = hashbrown::HashTable::new();
+    table.insert_unique(0, 0, |v| *v);
 }

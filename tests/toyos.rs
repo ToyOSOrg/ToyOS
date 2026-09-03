@@ -424,7 +424,7 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
     // The other half of the recovery branch: the test above reads the screen
     // either side of a survived panic, which holds whether or not the discard
-    // did anything. Carrying `UNMEASURED_MS` until the shards price it.
+    // did anything. `UNMEASURED_MS` until the shards price it.
     ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Fast),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
@@ -705,7 +705,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // clock in any of it.
     ("reentry_names_the_first_panic", Sched::Parallel, Tier::Fast),
     // The kernel hasher's boot-order obligation, in the row above's shape and
-    // for its reasons. Carrying `UNMEASURED_MS` until the shards price it.
+    // for its reasons. `UNMEASURED_MS` until the shards price it.
     ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
     // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
     // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
@@ -4849,8 +4849,7 @@ fn run_screen_test(
             // `discard_capture` told from a no-op: `capture` freezes a report on
             // every panic and the recovery branch drops it, so two deaths in one
             // boot and the panel must name the second. Action 0 panics in
-            // syscall context, which the handler recovers from, so `capture` ran
-            // and only `discard_capture` can drop what it froze.
+            // syscall context, which the handler recovers from.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -10179,10 +10178,11 @@ fn run_machine_test(
             Ok(())
         }
         "hash_seed_precedes_every_map" => {
-            // The compiler cannot reach a container built *before*
-            // `hasher::seed()`: it works, and hashes alike on every boot of the
-            // image. This is the constructor's refusal executed. The text is
-            // `kernel/src/hasher.rs`'s `UNSEEDED`, matched as a prefix.
+            // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
+            // the compiler cannot reach, because the container works. Its other
+            // two are unrepresented here — both CPU models carry `+rdrand`
+            // (`src/lib.rs:73-76`) and QEMU's DRNG always answers — so
+            // `NO_RDRAND` and `NO_ENTROPY` are mutation-measured.
             const UNSEEDED: &str = "kernel hasher: a hash container was built before hasher::seed()";
             let qemu = QemuInstance::boot_with_options(
                 test_config,

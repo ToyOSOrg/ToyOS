@@ -788,11 +788,9 @@ pub(crate) mod tests {
         assert!(again.text.contains("already in wt"), "{}", again.text);
     }
 
-    /// `sync` asks which branch the primary has out whether or not the primary
-    /// is this checkout. A fixture clone is its own primary, the shape the
-    /// question used to be skipped for: the fast-forward then ran on whatever
-    /// branch was out, git refused it, and `sync` reported lost commits about a
-    /// `main` that is a plain ancestor of `origin/main`.
+    /// A fixture clone is its own primary, the shape the branch question used
+    /// to be skipped for: the fast-forward ran on whatever branch was out, git
+    /// refused it, and `sync` reported lost commits about an ancestor.
     #[test]
     fn a_primary_on_a_branch_is_left_where_it_is() {
         let (origin, wt) = repo("sync-on-a-branch");
@@ -810,7 +808,7 @@ pub(crate) mod tests {
         let said = sync(&wt).expect("a primary on a branch is reported, never refused");
         assert!(said.contains("is on wt, so this host's main was left where it is"), "{said}");
         assert!(!said.contains("carries commits origin/main has not got"), "{said}");
-        // Left where it is means left, and main is still strictly behind.
+        // Left where it is, and main still strictly behind.
         assert_eq!(git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "wt");
         assert_eq!(git(&wt, &["rev-list", "--count", "main..origin/main"]).unwrap(), "1");
     }

@@ -700,7 +700,7 @@ struct Action {
 
 /// Whether a `uses:` value names bytes: `@` and a lowercase 40-hex commit. A
 /// tag is a ref its publisher moves, so a row over one declares a repository
-/// and not the code that runs on the machine a verdict is measured on.
+/// and not the code a verdict is measured on.
 fn pins_bytes(name: &str) -> bool {
     name.rsplit_once('@').is_some_and(|(owner, at)| {
         !owner.is_empty()
@@ -714,12 +714,14 @@ fn pins_bytes(name: &str) -> bool {
 /// machine a verdict is measured on. One naming a path in this repository is
 /// not a row but a file, and the check is that it resolves.
 ///
-/// **A row pins bytes**, the shape [`COMMITTED_FILES`] already is: the tag a
-/// commit came from is a trailing comment, so a publisher moving `v4` cannot
-/// change what runs here — and a security release then arrives only when
-/// somebody moves the digest, which is the point (`route.yml:128-130` argues
-/// it for the T14's image). The walk reads `.github/workflows/` only, so a
-/// composite action's own `uses:` is unread; this tree holds no `action.yml`.
+/// **A row pins bytes**, the shape [`COMMITTED_FILES`] already is: the tag is a
+/// trailing comment, so a publisher moving `v4` cannot change what runs here,
+/// and a security release arrives only when somebody moves the digest
+/// (`route.yml:128-130` argues it for the T14's image). What a pin is *not*
+/// checked against is
+/// `tests::the_pin_is_not_checked_against_the_repository_or_the_tag`. The walk
+/// reads `.github/workflows/` only, so a composite action's own `uses:` is
+/// unread; this tree holds no `action.yml`.
 const CI_ACTIONS: &[Action] = &[
     Action {
         name: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
@@ -1271,8 +1273,7 @@ fn used_actions(text: &str) -> Vec<(String, usize)> {
         .filter_map(|(n, line)| {
             let trimmed = line.trim_start().trim_start_matches("- ").trim_start();
             let value = trimmed.strip_prefix("uses:")?.trim();
-            // The tag a pin came from rides in a trailing comment, and it is a
-            // note to the reader rather than part of what runs.
+            // The tag rides in a trailing comment; only the pin is what runs.
             let value = value.split('#').next().unwrap_or(value).trim();
             (!value.is_empty()).then(|| (value.to_string(), n + 1))
         })
@@ -1969,6 +1970,24 @@ mod tests {
         // The tag rides in a trailing comment and is not part of the value.
         let read = used_actions(&format!("      - uses: actions/checkout@{sha} # v4.4.0\n"));
         assert_eq!(read, [(format!("actions/checkout@{sha}"), 1)]);
+    }
+
+    /// `actions/cache`'s commit wearing `actions/checkout`'s name, over a tag
+    /// comment that is neither's: both per-value checks pass it. Resolving
+    /// either needs the publisher's git database, which a self-hosted gate
+    /// cannot reach, so the exit is a vendored action — and a check added to
+    /// `pins_bytes` before then reds here.
+    #[test]
+    fn the_pin_is_not_checked_against_the_repository_or_the_tag() {
+        let cache = "0057852bfaa89a56745cba8c7296529d2fc39830";
+        let swapped = format!("actions/checkout@{cache}");
+        assert!(pins_bytes(&swapped));
+        let declared = [swapped.clone()];
+        assert!(declared.contains(&swapped));
+        assert_eq!(
+            used_actions(&format!("      - uses: {swapped} # v9.9.9\n")),
+            [(swapped, 1)]
+        );
     }
 
     /// What the package walk can and cannot read, stated as cases.

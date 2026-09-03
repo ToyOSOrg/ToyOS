@@ -248,14 +248,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         .expect("the boot parameter is not UTF-8")
     });
 
-    // Before mm::init, whose address space is the first hash container this boot
-    // builds; `hasher::KernelHashState::new` refuses one built any earlier.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_hash_before_seed() {
-        hasher::probe_before_seed();
-    }
-    hasher::seed();
-
     // Before pat::init, which restores whatever CR0 it found — a firmware CD would ride straight through otherwise.
     arch::control_regs::init_cr0(0);
 
@@ -325,6 +317,15 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         mm::Region { start: kernel_args.kernel_stack_addr, end: kernel_args.kernel_stack_addr + kernel_args.kernel_stack_size },
         mm::Region { start: 0x8000, end: 0x9000 }, // AP trampoline page
     ];
+
+    // The last point before the first hash container (`mm::init`'s address
+    // space), and not earlier: seeding fails only by panicking, and a panic
+    // before the boot's own log lines reaches no channel at all.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::test_hash_before_seed() {
+        hasher::probe_before_seed();
+    }
+    hasher::seed();
 
     mm::init(maps, &reserved);
     drivers::panic_console::remap();

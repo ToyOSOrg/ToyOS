@@ -23,8 +23,7 @@
 //! prose is exactly the artifact an owner ruling deleted. The README says what
 //! the fields *mean*; this says what a file may hold, and this is what reds.
 //! **The area list is the exception**, read out of the README because an area
-//! is a *directory*: that claim resolves against the tree both ways, so there
-//! the README is an artifact and not prose.
+//! is a *directory*: that claim resolves against the tree both ways.
 //!
 //! Cheap on purpose — 363 files read and parsed is milliseconds, so it runs in
 //! `cargo test --lib` on every machine that builds the tree rather than in a
@@ -64,10 +63,9 @@ const README: &str = "issues/README.md";
 
 const AREAS: &str = "\n## Areas\n";
 
-/// The area names [`README`] closes, read out of it rather than restated —
-/// `redlist::Registry::read`'s rule, for its reason: a restatement drifts. One
-/// paragraph of backticked names follows [`AREAS`], and the prose after carries
-/// backticks of its own, so the paragraph is where the list ends.
+/// The area names [`README`] closes, read rather than restated —
+/// `redlist::Registry::read`'s rule. One paragraph of backticked names follows
+/// [`AREAS`], and the prose after has backticks of its own, so it ends there.
 fn declared_areas(root: &Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(root.join(README))
         .unwrap_or_else(|e| panic!("{README} closes the area list: {e}"));
@@ -314,8 +312,7 @@ fn citation_refusals(
                 continue;
             }
             let cited = format!("issues/{area}/{slug}.md");
-            // `areas` is the README's closed list, which `the_readme_closes_the_area_list`
-            // holds the directories to.
+            // `areas` is the README's closed list.
             if !areas.contains(&area) {
                 bad.push(format!(
                     "{path}:{n}: cites `{cited}`, and `{area}` is not one of the areas \
@@ -477,8 +474,8 @@ mod tests {
         );
     }
 
-    /// The closed list against the directories. A parse that found the wrong
-    /// paragraph reds here: nothing restates the ten names, so the disk checks.
+    /// The closed list against the directories. Nothing restates the ten names,
+    /// so a parse that found the wrong paragraph reds against the disk.
     #[test]
     fn the_readme_closes_the_area_list() {
         let root = repo_root();
