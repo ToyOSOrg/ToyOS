@@ -1,0 +1,471 @@
+//! The boundary half: bytes no firmware would publish.
+//!
+//! Every case here is an input the decoder must **refuse by name** — or, where
+//! an 8-bit sum genuinely cannot tell, accept and say so. The claim being held
+//! is the crate's own: no panic on any input path, no walk that does not
+//! terminate, and one [`TableError`] per reason so the caller's log line names
+//! what was wrong rather than "malformed".
+//!
+//! What this corpus does **not** reach is stated at the bottom in tests rather
+//! than in prose, so extending the decoder reds the statement with it.
+
+mod common;
+
+use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
+use toyos_acpi::{
+    dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, rtc_century,
+    Century, MadtEntry, MadtHalt, Phys, Table, TableError, MADT_ENTRIES, MAX_TABLE_LEN,
+};
+
+const RSDP_AT: u64 = 0x1_0000;
+const XSDT_AT: u64 = 0x2_0000;
+const TABLE_AT: u64 = 0x3_0000;
+
+
+// ---- lengths ----
+
+/// A header whose declared length cannot hold the fields the caller asked for.
+#[test]
+fn a_length_shorter_than_the_fixed_part_is_refused_with_both_numbers() {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let mut t = sdt(b"MCFG", 1, &[0u8; 24]);
+    declare_len(&mut t, 40);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let m = Machine { regions };
+
+    assert_eq!(
+        ecam_base(m, RSDP_AT).err(),
+        Some(TableError::Length { declared: 40, needed: 60 }),
+        "the walk stops at a table of the right signature it cannot use, and says why"
+    );
+    assert_eq!(
+        Table::open(m, TABLE_AT, b"MCFG", 60).err(),
+        Some(TableError::Length { declared: 40, needed: 60 })
+    );
+}
+
+/// A length under the header itself: the floor is the header, never the
+/// caller's `needed`, or the signature read would already be out of bounds.
+#[test]
+fn a_length_under_the_header_is_refused_even_when_the_caller_needs_nothing() {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let mut t = sdt(b"HPET", 1, &[0u8; 20]);
+    declare_len(&mut t, 8);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    assert_eq!(
+        Table::open(Machine { regions }, TABLE_AT, b"HPET", 0).err(),
+        Some(TableError::Length { declared: 8, needed: 36 })
+    );
+}
+
+/// A length that runs past the memory the reader can reach.
+#[test]
+fn a_length_longer_than_the_mapping_is_refused_before_a_byte_is_read() {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let mut t = sdt(b"HPET", 1, &[0u8; 20]);
+    declare_len(&mut t, 4096);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let m = Machine { regions };
+
+    assert_eq!(
+        Table::open(m, TABLE_AT, b"HPET", 36).err(),
+        Some(TableError::Unmapped { at: TABLE_AT, len: 4096 })
+    );
+    // The walk skips it rather than ending: an unreadable entry is one entry.
+    assert_eq!(hpet_base(m, RSDP_AT).err(), Some(TableError::Absent));
+}
+
+/// A length above the crate's own ceiling, which is what bounds the checksum walk.
+#[test]
+fn a_length_over_the_ceiling_is_refused_without_walking_it() {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let mut t = sdt(b"HPET", 1, &[0u8; 20]);
+    let over = MAX_TABLE_LEN as u32 + 1;
+    declare_len(&mut t, over);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    assert_eq!(
+        Table::open(Machine { regions }, TABLE_AT, b"HPET", 36).err(),
+        Some(TableError::Length { declared: over, needed: 36 })
+    );
+}
+
+// ---- checksums ----
+
+#[test]
+fn a_table_that_does_not_sum_to_zero_is_refused() {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let mut t = sdt(b"HPET", 1, &[0u8; 20]);
+    t[9] = t[9].wrapping_add(1);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    assert_eq!(
+        Table::open(Machine { regions }, TABLE_AT, b"HPET", 36).err(),
+        Some(TableError::Checksum)
+    );
+}
+
+/// **The non-detection, stated as a test.** An 8-bit sum cannot see two edits
+/// that cancel, so a table corrupted that way is accepted and decodes to the
+/// corrupted value. Nothing in this crate can do better; a caller that needs
+/// more needs a different check.
+#[test]
+fn two_edits_that_cancel_pass_the_checksum_and_decode_to_the_lie() {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let mut t = sdt(b"HPET", 1, &[0u8; 20]);
+    // The HPET's 64-bit base address, and a byte elsewhere paying for it.
+    t[44] = t[44].wrapping_add(0x40);
+    t[36] = t[36].wrapping_sub(0x40);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    assert_eq!(
+        hpet_base(Machine { regions }, RSDP_AT),
+        Ok(0x40),
+        "the sum is intact and the address is not"
+    );
+}
+
+// ---- MADT entry counts ----
+
+/// The infinite-loop shape: an entry declaring zero bytes.
+#[test]
+fn a_madt_entry_of_zero_length_halts_the_walk_instead_of_looping() {
+    let mut list = entry(0, 8, &[0, 0, 1, 0, 0, 0]);
+    list.extend(entry(0, 0, &[]));
+    list.extend(entry(0, 8, &[0, 9, 1, 0, 0, 0]));
+    let t = madt(&list);
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let table = find_table(Machine { regions }, RSDP_AT, b"APIC", MADT_ENTRIES).expect("MADT");
+
+    assert_eq!(
+        madt_entries(&table).collect::<Vec<_>>(),
+        [
+            Ok(MadtEntry::LocalApic { apic_id: 0, enabled: true }),
+            Err(MadtHalt { at: 8, declared: 0, list_len: 18 }),
+        ],
+        "the entry after the halt is unreachable: a list that lied cannot be resynchronised"
+    );
+}
+
+/// An entry whose declared length runs past the end of the structure list.
+#[test]
+fn a_madt_entry_running_past_the_list_halts_the_walk() {
+    let mut list = entry(1, 12, &[0, 0, 0x00, 0x00, 0xc0, 0xfe, 0, 0, 0, 0]);
+    list.extend(entry(0, 200, &[]));
+    let t = madt(&list);
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let table = find_table(Machine { regions }, RSDP_AT, b"APIC", MADT_ENTRIES).expect("MADT");
+
+    let walk: Vec<_> = madt_entries(&table).collect();
+    assert_eq!(walk.len(), 2);
+    assert_eq!(walk[1], Err(MadtHalt { at: 12, declared: 200, list_len: 14 }));
+}
+
+/// A type this kernel acts on, declared too short to hold the fields it acts
+/// on: skipped as unknown rather than read past its own length.
+#[test]
+fn a_madt_entry_too_short_for_its_own_type_is_not_decoded_as_that_type() {
+    let t = madt(&entry(1, 6, &[0, 0, 0xff, 0xff]));
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let table = find_table(Machine { regions }, RSDP_AT, b"APIC", MADT_ENTRIES).expect("MADT");
+    assert_eq!(madt_entries(&table).collect::<Vec<_>>(), [Ok(MadtEntry::Other(1))]);
+}
+
+/// A MADT whose declared length leaves a one-byte tail: a structure header
+/// needs two, so the walk ends without a halt.
+#[test]
+fn a_trailing_byte_that_cannot_be_an_entry_header_ends_the_walk_quietly() {
+    let mut list = entry(0, 8, &[0, 3, 1, 0, 0, 0]);
+    list.push(0);
+    let t = madt(&list);
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let table = find_table(Machine { regions }, RSDP_AT, b"APIC", MADT_ENTRIES).expect("MADT");
+    assert_eq!(
+        madt_entries(&table).collect::<Vec<_>>(),
+        [Ok(MadtEntry::LocalApic { apic_id: 3, enabled: true })]
+    );
+}
+
+// ---- the root pointers ----
+
+#[test]
+fn an_xsdt_entry_pointing_at_nothing_is_skipped_and_the_next_one_is_read() {
+    let hpet = sdt(b"HPET", 1, &[0u8; 20]);
+    let head = rsdp(XSDT_AT, 2, 36);
+    // Address 0, an address no region holds, and the real table.
+    let root = xsdt(&[0, 0xdead_0000, TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &hpet)];
+    assert_eq!(hpet_base(Machine { regions }, RSDP_AT), Ok(0));
+
+    let empty = xsdt(&[0, 0xdead_0000]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &empty)];
+    assert_eq!(hpet_base(Machine { regions }, RSDP_AT).err(), Some(TableError::Absent));
+}
+
+#[test]
+fn the_root_pointer_is_refused_one_reason_at_a_time() {
+    let root = xsdt(&[]);
+    let good = rsdp(XSDT_AT, 2, 36);
+
+    let mut wrong_signature = good.clone();
+    wrong_signature[0] = b'X';
+    let mut broken_v1 = good.clone();
+    broken_v1[8] = broken_v1[8].wrapping_add(1);
+    let mut broken_extended = good;
+    broken_extended[32] = broken_extended[32].wrapping_add(1);
+    let acpi_1_0 = rsdp(XSDT_AT, 1, 36);
+    let short = rsdp(XSDT_AT, 2, 20);
+    let null_xsdt = rsdp(0, 2, 36);
+
+    for (name, head, want) in [
+        ("a signature that is not RSD PTR ", &wrong_signature, TableError::BadRsdp),
+        ("an ACPI 1.0 part that does not sum", &broken_v1, TableError::BadRsdp),
+        ("an extended part that does not sum", &broken_extended, TableError::BadRsdp),
+        ("revision 1, which names no XSDT", &acpi_1_0, TableError::NoXsdt),
+        (
+            "a length that cannot hold XsdtAddress",
+            &short,
+            TableError::Length { declared: 20, needed: 36 },
+        ),
+        ("an XSDT address of zero", &null_xsdt, TableError::NoXsdt),
+    ] {
+        let regions: &[(u64, &[u8])] = &[(RSDP_AT, head), (XSDT_AT, &root)];
+        assert_eq!(hpet_base(Machine { regions }, RSDP_AT).err(), Some(want), "{name}");
+    }
+}
+
+/// The RSDP is the one structure read before anything has bounded it, so an
+/// address the reader cannot reach at all is refused there.
+#[test]
+fn an_rsdp_address_the_reader_cannot_reach_is_refused() {
+    let regions: &[(u64, &[u8])] = &[];
+    assert_eq!(hpet_base(Machine { regions }, RSDP_AT).err(), Some(TableError::BadRsdp));
+}
+
+// ---- the FADT's optional tail ----
+
+/// An ACPI 1.0-length FADT: 116 bytes, no `X_DSDT`, and the century byte still
+/// inside it. The 32-bit `DSDT` is what such a table names.
+#[test]
+fn a_fadt_of_the_acpi_1_0_length_is_read_without_its_x_fields() {
+    let mut body = vec![0u8; 80];
+    body[40 - 36..44 - 36].copy_from_slice(&0x7ffb_9000u32.to_le_bytes());
+    body[108 - 36] = 0x32;
+    let t = sdt(b"FACP", 1, &body);
+    assert_eq!(t.len(), 116);
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let m = Machine { regions };
+
+    let fadt = find_table(m, RSDP_AT, b"FACP", 109).expect("FADT");
+    assert_eq!(dsdt_address(&fadt), 0x7ffb_9000);
+    assert_eq!(rtc_century(m, RSDP_AT), Ok(Century::At(0x32)));
+    // The flags word at 109 is inside 116 bytes, so it is *read* — and it comes
+    // back with revision 1 beside it, which is the whole of what tells the
+    // caller that bit 1 means nothing on this firmware.
+    assert_eq!(iapc_boot_arch(m, RSDP_AT), Ok((1, 0)));
+}
+
+/// A FADT that stops before the flags word: a refusal, never a zero.
+#[test]
+fn a_fadt_too_short_for_the_boot_architecture_flags_is_refused() {
+    let t = sdt(b"FACP", 1, &[0u8; 73]);
+    assert_eq!(t.len(), 109);
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let m = Machine { regions };
+    assert_eq!(
+        iapc_boot_arch(m, RSDP_AT).err(),
+        Some(TableError::Length { declared: 109, needed: 111 }),
+        "a FADT too short for the flags is not a FADT the i8042 driver may read"
+    );
+    // The century byte at 108 is the last one it does hold.
+    assert_eq!(rtc_century(m, RSDP_AT), Ok(Century::Absent));
+}
+
+/// A revision claiming 2.0 over a table too short to hold `X_DSDT`: the length
+/// decides, never the revision.
+#[test]
+fn a_revision_that_promises_x_dsdt_over_a_table_that_cannot_hold_it_falls_back() {
+    let mut body = vec![0u8; 80];
+    body[40 - 36] = 0x11;
+    let t = sdt(b"FACP", 3, &body);
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let fadt = find_table(Machine { regions }, RSDP_AT, b"FACP", 109).expect("FADT");
+    assert_eq!(dsdt_address(&fadt), 0x11);
+}
+
+/// A century byte outside CMOS RAM is a distinct answer from "names none":
+/// the caller ignores it, and says which of the two it saw.
+#[test]
+fn a_century_register_outside_cmos_ram_is_told_apart_from_none() {
+    for (byte, want) in [
+        (0u8, Century::Absent),
+        (0x0d, Century::OutOfRange(0x0d)),
+        (0x80, Century::OutOfRange(0x80)),
+        (0xff, Century::OutOfRange(0xff)),
+        (0x0e, Century::At(0x0e)),
+        (0x7f, Century::At(0x7f)),
+    ] {
+        let mut body = vec![0u8; 80];
+        body[108 - 36] = byte;
+        let t = sdt(b"FACP", 1, &body);
+        let head = rsdp(XSDT_AT, 2, 36);
+        let root = xsdt(&[TABLE_AT]);
+        let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+        assert_eq!(rtc_century(Machine { regions }, RSDP_AT), Ok(want), "century byte {byte:#04x}");
+    }
+}
+
+// ---- the whole claim, over every single-byte mutation ----
+
+/// Every table this crate decodes, at the address it sat at on the boot the
+/// fixtures came off.
+const FIXTURES: &[(&str, &[u8], u64)] = &[
+    ("rsdp", include_bytes!("../fixtures/rsdp.bin"), 0x7fb7_e014),
+    ("xsdt", include_bytes!("../fixtures/xsdt.bin"), 0x7fb7_d0e8),
+    ("facp", include_bytes!("../fixtures/facp.bin"), 0x7fb7_9000),
+    ("apic", include_bytes!("../fixtures/apic.bin"), 0x7fb7_8000),
+    ("hpet", include_bytes!("../fixtures/hpet.bin"), 0x7fb7_7000),
+    ("mcfg", include_bytes!("../fixtures/mcfg.bin"), 0x7fb7_6000),
+    ("dmar", include_bytes!("../fixtures/dmar.bin"), 0x7fb7_5000),
+    ("waet", include_bytes!("../fixtures/waet.bin"), 0x7fb7_4000),
+];
+
+/// **No panic and no unbounded walk, over every byte of every table this crate
+/// decodes.** Each byte of each fixture takes each of its 255 other values in
+/// turn and the whole decode runs: `find_table` for each signature, the MADT
+/// walk to exhaustion, and each accessor. A panic anywhere — including the
+/// reader's own, which fires on a read no bound accepted — reds this.
+///
+/// **Both arms, and the second is the one that reaches the decode.** A raw
+/// single-byte edit breaks the table's own 8-bit sum, so the checksum refuses
+/// it before any field is read: measured, that arm walked *no* MADT at all and
+/// the counter below is what says so. The resealed arm re-sums the table after
+/// the edit — which is what a hostile firmware would do — and is the only way
+/// a length, a count or an entry header under test is ever reached.
+#[test]
+fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
+    let rsdp_at = FIXTURES[0].2;
+    let mut mutations = 0u64;
+    let mut walked = [0u64; 2];
+    let mut halts = [0u64; 2];
+
+    for reseal in [false, true] {
+        let arm = usize::from(reseal);
+        for (i, (which, original, _)) in FIXTURES.iter().enumerate() {
+            for offset in 0..original.len() {
+                for value in 0..=255u8 {
+                    if original[offset] == value {
+                        continue;
+                    }
+                    let mut mutated = original.to_vec();
+                    mutated[offset] = value;
+                    if reseal {
+                        if *which == "rsdp" {
+                            common::reseal_rsdp(&mut mutated);
+                        } else {
+                            common::reseal(&mut mutated);
+                        }
+                    }
+                    let regions: Vec<(u64, &[u8])> = FIXTURES
+                        .iter()
+                        .enumerate()
+                        .map(|(j, (_, b, at))| (*at, if j == i { mutated.as_slice() } else { *b }))
+                        .collect();
+                    let m = Machine { regions: &regions };
+
+                    let _ = ecam_base(m, rsdp_at);
+                    let _ = hpet_base(m, rsdp_at);
+                    let _ = rtc_century(m, rsdp_at);
+                    let _ = iapc_boot_arch(m, rsdp_at);
+                    if let Ok(t) = find_table(m, rsdp_at, b"APIC", MADT_ENTRIES) {
+                        // Bounded by the table's own length, so a walk that has
+                        // stopped advancing reds here instead of hanging: every
+                        // entry is at least two bytes.
+                        let mut seen = 0usize;
+                        for item in madt_entries(&t) {
+                            seen += 1;
+                            assert!(
+                                seen <= t.len(),
+                                "{which}[{offset}]={value:#04x}: the MADT walk is not advancing"
+                            );
+                            if item.is_err() {
+                                halts[arm] += 1;
+                                break;
+                            }
+                        }
+                        walked[arm] += seen as u64;
+                    }
+                    mutations += 1;
+                }
+            }
+        }
+    }
+    assert!(mutations > 300_000, "only {mutations} mutations were run");
+    assert_eq!(
+        halts[0], 0,
+        "an unsealed single-byte edit reached a MADT walk, so the checksum is not refusing it \
+         first and the second arm is measuring nothing new"
+    );
+    assert!(walked[1] > walked[0], "the resealed arm walked no further than the raw one");
+    assert!(halts[1] > 0, "no resealed mutation halted a walk, so that arm is untested here");
+}
+
+// ---- what this corpus does not reach ----
+
+/// **Stated as tests, so extending the decoder reds the statement.** Nothing in
+/// this crate reads what is *inside* a DSDT — `find_s5_slp_typ` scans AML and
+/// stays in the kernel — and the XSDT walk deliberately returns the first
+/// signature match's verdict rather than trying a second table of the same name.
+#[test]
+fn the_two_things_the_corpus_does_not_cover_are_the_two_the_crate_does_not_do() {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let dsdt = sdt(b"DSDT", 2, &[0u8; 8]);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &dsdt)];
+    let m = Machine { regions };
+    // A DSDT opens like any other table; its contents are nothing this crate
+    // reads, so no case here covers `\_S5_`.
+    assert!(Table::open(m, TABLE_AT, b"DSDT", 36).is_ok());
+    assert_eq!(hpet_base(m, RSDP_AT).err(), Some(TableError::Absent));
+
+    let mut broken = sdt(b"HPET", 1, &[0u8; 20]);
+    broken[9] = broken[9].wrapping_add(1);
+    let good = sdt(b"HPET", 1, &[0u8; 20]);
+    let root = xsdt(&[TABLE_AT, TABLE_AT + 0x1000]);
+    let regions: &[(u64, &[u8])] =
+        &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &broken), (TABLE_AT + 0x1000, &good)];
+    assert_eq!(
+        hpet_base(Machine { regions }, RSDP_AT).err(),
+        Some(TableError::Checksum),
+        "the second HPET is never reached, and that is the decode's choice"
+    );
+}
+
+/// The shared reader is itself an instrument, so its bounds are checked here.
+#[test]
+fn the_shared_reader_refuses_what_it_does_not_hold() {
+    let bytes = [1u8, 2, 3, 4];
+    let regions: &[(u64, &[u8])] = &[(0x100, &bytes)];
+    let m = Machine { regions };
+    assert!(m.readable(0x100, 4));
+    assert!(!m.readable(0x100, 5));
+    assert!(!m.readable(0xff, 1));
+    assert_eq!(m.byte(0x102), 3);
+}
