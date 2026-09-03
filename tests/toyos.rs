@@ -706,6 +706,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // every verdict is a substring of a report the guest wrote, and there is no
     // clock in any of it.
     ("reentry_names_the_first_panic", Sched::Parallel, Tier::Fast),
+    // The kernel hasher's boot-order obligation, and the same shape: one boot
+    // that dies inside the boot phases at the marker the harness waits for, so
+    // it pays for no userland, and the verdict is a substring of what the guest
+    // wrote. Carrying `UNMEASURED_MS` until the shards price it.
+    ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
     // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
     // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
     ("double_panic_names_the_fault", Sched::Parallel, Tier::Nightly),
@@ -10181,6 +10186,37 @@ fn run_machine_test(
             survived.push(&qemu.drain_serial(CARRIED_ON));
             survived.must_say(qemu::DEFAULT_READY)?;
             eprintln!("  [usbd] a kernel thread's panic killed the thread and the machine booted");
+            Ok(())
+        }
+        "hash_seed_precedes_every_map" => {
+            // Dropping hashbrown's `default-hasher` makes the compiler hold that
+            // every kernel container names the kernel's own `BuildHasher`. The
+            // one wrong answer it cannot reach is a container built *before*
+            // `hasher::seed()` — that container works, and orders alike on every
+            // boot of the image, which is exactly the property a `BTreeMap` was
+            // chosen over for a key that crossed the boundary. So the
+            // constructor refuses, and this is that refusal executed.
+            //
+            // The text is `kernel/src/hasher.rs`'s `UNSEEDED`, matched as a
+            // prefix; the kernel constant carries the rest of the sentence.
+            const UNSEEDED: &str = "kernel hasher: a hash container was built before hasher::seed()";
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["test-hash-before-seed"],
+                    ready_marker: UNSEEDED,
+                    ..Default::default()
+                },
+            );
+            let mut said = serial::Serial::boot(&qemu);
+            said.push(&qemu.uart_log());
+            let line = said.must_say(UNSEEDED)?;
+            eprintln!("  [hasher] {}", line.trim());
+            // Before `mm::init`, which is what makes this a boot-order
+            // obligation rather than a late mistake: the boot does not finish.
+            said.must_not_say(qemu::DEFAULT_READY)?;
             Ok(())
         }
         "reentry_names_the_first_panic" => {

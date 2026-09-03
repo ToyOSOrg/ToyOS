@@ -7,7 +7,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use hashbrown::HashMap;
+use crate::hasher::HashMap;
 use toyos_sched::fair::{ShareState, QUANTUM_NS};
 use toyos_sched::hw::{CpuId, Machine, Nanos};
 use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
@@ -250,7 +250,7 @@ impl core::fmt::Display for TaskId {
 static SHARES: Lock<Option<HashMap<Pid, Arc<KShare>>>> = Lock::new(None);
 
 pub fn init() {
-    *SHARES.lock() = Some(HashMap::new());
+    *SHARES.lock() = Some(HashMap::default());
     driver::init();
 }
 

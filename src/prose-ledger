@@ -25,7 +25,7 @@ kernel-loom/tests/sleep_lock.rs 80 1
 kernel-loom/tests/smp_bringup.rs 11 0
 kernel-loom/tests/ticket_lock.rs 35 1
 kernel-loom/tests/tlb_shootdown.rs 93 2
-kernel/src/actuator.rs 103 0
+kernel/src/actuator.rs 104 0
 kernel/src/arch/apic.rs 56 0
 kernel/src/arch/control_regs.rs 66 0
 kernel/src/arch/cpu.rs 60 0
@@ -108,6 +108,7 @@ kernel/src/file_cache.rs 111 0
 kernel/src/fs_rename.rs 18 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
+kernel/src/hasher.rs 40 0
 kernel/src/heartbeat.rs 24 0
 kernel/src/hw.rs 83 0
 kernel/src/id_map.rs 5 0
@@ -137,7 +138,7 @@ kernel/src/log/registry.rs 12 0
 kernel/src/log/shard.rs 55 0
 kernel/src/log/storm.rs 15 0
 kernel/src/log/user.rs 16 0
-kernel/src/main.rs 74 0
+kernel/src/main.rs 77 0
 kernel/src/mm/alloc.rs 89 0
 kernel/src/mm/dma.rs 34 0
 kernel/src/mm/mmio.rs 18 0
@@ -207,7 +208,7 @@ src/forkcheck.rs 176 1
 src/hostws.rs 187 2
 src/image.rs 200 1
 src/issuegate.rs 131 0
-src/kernelkeys.rs 55 0
+src/kernelkeys.rs 36 0
 src/lib.rs 51 0
 src/libc.rs 29 0
 src/main.rs 70 0
@@ -385,7 +386,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5106 23
+tests/toyos.rs 5122 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

@@ -9,7 +9,7 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
+use crate::hasher::HashMap;
 
 use toyos_pcid::{Alloc, Pcid, PcidPool};
 
@@ -467,7 +467,7 @@ impl AddressSpace {
         Some(Self {
             root: pml4,
             children: Vec::new(),
-            pages: HashMap::new(),
+            pages: HashMap::default(),
             regions: BTreeMap::new(),
             pcid: PcidHandle::User(pcid),
         })
@@ -1001,7 +1001,7 @@ pub(super) fn init(memory_map: &[MemoryMapEntry]) {
     let mut kernel = AddressSpace {
         root: Box::new(PageTablePage([0; 512])),
         children: Vec::new(),
-        pages: HashMap::new(),
+        pages: HashMap::default(),
         regions: BTreeMap::new(),
         pcid: PcidHandle::Kernel,
     };

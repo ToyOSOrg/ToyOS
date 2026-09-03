@@ -1,6 +1,6 @@
 use core::hash::Hash;
 use core::ops::Add;
-use hashbrown::HashMap;
+use crate::hasher::HashMap;
 
 /// Map with auto-incrementing, never-reused keys.
 pub struct IdMap<K, V> {
@@ -26,7 +26,7 @@ impl IdKey for toyos_abi::Tid {
 impl<K: IdKey, V> IdMap<K, V> {
     pub fn new() -> Self {
         Self {
-            map: HashMap::new(),
+            map: HashMap::default(),
             next: K::ZERO,
         }
     }

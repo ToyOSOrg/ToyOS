@@ -195,6 +195,7 @@ handle_basic 19 shards=12
 handle_kill_policy 515 shards=12
 handle_lifetime 33 shards=12
 handle_transfer 66 shards=12
+hash_seed_precedes_every_map 18446744073709551615 shards=none
 hda_client_stall 19047 shards=12
 hda_tone 13389 shards=12
 hda_two_live_refused 4848 shards=12

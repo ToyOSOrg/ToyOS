@@ -206,6 +206,9 @@ actuators! {
     /// Shrink each process's VA arena from ~1015GB to 256MiB.
     test_tiny_va = "test-tiny-va";
 
+    /// Build a hash container before `hasher::seed()`, so the refusal that stops a seedless container from being silent is executed.
+    test_hash_before_seed = "test-hash-before-seed";
+
     /// Panic once boot phases are done, with no thread current.
     test_late_panic = "test-late-panic";
 

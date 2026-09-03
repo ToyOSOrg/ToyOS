@@ -2,7 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use hashbrown::HashMap;
+use crate::hasher::HashMap;
 
 use bcachefs::{BlockIO, BlockBuf, BlockNum, DeviceError, FsError, Mounted, ReadWrite, ReadOnly, Formatted, SliceBlockIO, Extent};
 use crate::file_backing::{FileBacking, FileBlocks, NvmeBacking, InitrdBacking};
@@ -138,7 +138,7 @@ impl BcacheFsAdapter {
     pub fn new(fs: Mounted<PageCacheBlockIO, ReadWrite>) -> Self {
         Self {
             fs,
-            open_files: HashMap::new(),
+            open_files: HashMap::default(),
             name_to_id: BTreeMap::new(),
             blocks: BTreeMap::new(),
         }

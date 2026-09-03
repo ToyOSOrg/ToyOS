@@ -16,6 +16,7 @@ mod shootdown;
 mod sleeplock;
 mod smp_roster;
 mod sync;
+mod hasher;
 mod id_map;
 
 // No `mod` line below carries an `#[allow(clippy::undocumented_unsafe_blocks)]`.
@@ -246,6 +247,15 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         ))
         .expect("the boot parameter is not UTF-8")
     });
+
+    // Before mm::init: the kernel address space is the first hash container
+    // this boot builds, and one built on no seed orders alike on every boot of
+    // the image. `hasher::KernelHashState::new` refuses rather than allowing it.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::test_hash_before_seed() {
+        hasher::probe_before_seed();
+    }
+    hasher::seed();
 
     // Before pat::init, which restores whatever CR0 it found — a firmware CD would ride straight through otherwise.
     arch::control_regs::init_cr0(0);

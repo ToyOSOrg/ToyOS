@@ -3,7 +3,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
+use crate::hasher::HashMap;
 
 use core::ops::{Deref, DerefMut};
 use toyos_abi::syscall::SyscallError;
@@ -200,7 +200,7 @@ impl Vfs {
         Self {
             root: None,
             root_commit: Owed::new(),
-            mounts: HashMap::new(),
+            mounts: HashMap::default(),
             created_dirs: BTreeSet::new(),
         }
     }
