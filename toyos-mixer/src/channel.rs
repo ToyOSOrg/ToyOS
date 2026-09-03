@@ -22,7 +22,7 @@ pub fn channel_convert_mono_to_stereo(src: &[f32], dst: &mut [f32]) {
 /// scale rather than to twice it.
 pub fn channel_convert_stereo_to_mono(src: &[f32], dst: &mut [f32]) {
     for i in 0..dst.len() {
-        dst[i] = (src[i * 2] + src[i * 2 + 1]) * 0.5;
+        dst[i] = f32::midpoint(src[i * 2], src[i * 2 + 1]);
     }
 }
 
@@ -50,7 +50,7 @@ pub fn append_planar(decoded: &[f32], client_channels: usize, accum: &mut [Vec<f
         }
         (2, 1) => {
             for frame in 0..frames {
-                accum[0].push((decoded[frame * 2] + decoded[frame * 2 + 1]) * 0.5);
+                accum[0].push(f32::midpoint(decoded[frame * 2], decoded[frame * 2 + 1]));
             }
         }
         (c, d) => panic!("soundd: unsupported channel conversion {c}→{d}"),
