@@ -931,9 +931,6 @@ pub fn iommu_empty_domain(
     Ok(())
 }
 
-/// A device with an address space of its own reaches what is in it and faults
-/// on everything else, and the memory it was aimed at is untouched.
-///
 /// The actuator points the NIC's first RX buffer at the physical bytes NVMe's
 /// admin completion queue page ends with — a page the NIC's domain does not map.
 /// Three things then hold at once and no two come from the same place: the unit
@@ -996,8 +993,6 @@ pub fn iommu_domain_isolation(
         ));
     }
 
-    // The victim's address out of the victim's own register and the unit's own
-    // tables: `ACQ` is what NVMe programmed, in whatever space NVMe is in.
     let window = register_window(socket, &log, "isolation")?;
     let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
     let victim = translate(socket, window, &nvme, acq)?;
