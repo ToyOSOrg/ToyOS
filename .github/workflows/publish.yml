@@ -72,11 +72,11 @@ jobs:
           # Whether the index holds <name> at <version>. A 404 is a crate that
           # has never been published, which is "no" and not an error.
           published() {
-            body=$(curl -sS -o /tmp/index.json -w '%{http_code}' "$(index_url "$1")")
-            case "$body" in
+            code=$(curl -sS -o /tmp/index.json -w '%{http_code}' "$(index_url "$1")")
+            case "$code" in
               404) return 1 ;;
               200) ;;
-              *) echo "::error::the crates.io index answered $body for $1"; exit 1 ;;
+              *) echo "::error::the crates.io index answered $code for $1"; exit 1 ;;
             esac
             jq -e --arg v "$2" -s 'any(.[]; .vers == $v and (.yanked | not))' \
               /tmp/index.json > /dev/null
@@ -92,7 +92,7 @@ jobs:
             # The next crate resolves this one from the index, so the run waits
             # for it to be readable rather than assuming it is.
             for _ in $(seq 1 60); do
-              published "$name" "$version" && break
+              if published "$name" "$version"; then break; fi
               sleep 5
             done
             published "$name" "$version" \
