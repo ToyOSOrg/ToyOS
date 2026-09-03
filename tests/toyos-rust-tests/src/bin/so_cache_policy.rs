@@ -140,7 +140,6 @@ fn load_in_child(path: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// The child: load `path` and say what happened.
 fn load_in_this_process(path: &str) {
     match syscall::dl_open(path.as_bytes()) {
         Ok(handle) => {

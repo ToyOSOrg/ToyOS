@@ -678,7 +678,6 @@ fn build_and_assemble(
 /// What `tests/common/qemu.rs` prefixes every binary it injects with.
 const HARNESS_PREFIXES: [&str; 2] = ["bin/test_rs_", "bin/test_c_"];
 
-/// A `[symlinks]` target as the inventory names it: `/bin/toybox` is `bin/toybox`.
 fn symlink_target_name(to: &str) -> &str {
     to.trim_start_matches('/')
 }
