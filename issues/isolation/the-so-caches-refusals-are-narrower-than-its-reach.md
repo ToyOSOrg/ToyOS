@@ -20,7 +20,7 @@ is `nanos_since_boot` at the flush, so two writes are always apart —
 
 `/log` is FAT32, mounted `UserAccess::ReadWrite` (`kernel/src/main.rs:461`), and
 **FAT stores seconds in units of two**: `toyos-fat32/src/time.rs:5-15` states
-the encoding's three lossy properties, `dir.rs:88` passes 0 for the tenths
+the encoding's three lossy properties, `dir.rs:92` passes 0 for the tenths
 field, and `kernel/src/fat32_adapter.rs:849` stamps whatever `now()` gives. So
 two writes of the same length inside one 2-second bucket carry one mtime, and
 the second load is served the first image — the staleness the refusal exists to
