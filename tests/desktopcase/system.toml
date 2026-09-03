@@ -35,8 +35,15 @@ devices = ["framebuffer", "keyboard", "mouse"]
 provides = ["surface"]
 receives = ["compositor", "launcher"]
 
+# `compositor` is here and not in the shipping `system.toml`'s shell row, and
+# it is what endows `test_rs_window_child`. A harness-injected binary is no
+# `[programs]` key, so init can build it nothing; what it gets is what its
+# parent moved into it, and a child spawned directly inherits the spawner's
+# namespace. So the authority travels with the spawn, which is how a real shell
+# will launch a real program — and giving it to the shell here widens exactly
+# this config's shell and no other.
 [programs.shell]
-receives = ["surface", "launcher"]
+receives = ["compositor", "surface", "launcher"]
 
 [programs.toybox]
 receives = ["compositor", "surface"]

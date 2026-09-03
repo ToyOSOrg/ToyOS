@@ -208,27 +208,26 @@ clear from one halted with its kick undelivered from one wedged below the
 interrupt layer. Take `info registers -a` over QMP before pressing Ctrl+Alt+D,
 which destroys what it reports on.
 
-## And the reproduction is unreachable again, for a reason nobody chose
+## The reproduction was unreachable for a year of runs, and is not any more
 
-Measured 2026-08-27, four runs on the placement branch and one on `origin/main`
-at `16c05999`, identical in all five: the test stops at its **first** probe. The
-windowed child asks for a window, is answered `NotEndowed`, prints
-`WINDOW-CHILD-REFUSED this program was given no compositor` and exits `code=1`
-eight milliseconds after it is spawned. Serial flows for the whole drain and the
-dump answers `8/8 cpu(s) answered` every time, so by this entry's own
-discriminator it is not the freeze and it never gets near one.
+For a long stretch the test stopped at its **first** probe: the windowed child
+asked for a window, was answered `NotEndowed`, printed `WINDOW-CHILD-REFUSED
+this program was given no compositor` and exited `code=1` eight milliseconds
+after it was spawned — while `EXPECTED_FAILURES`'s `the windowed child never
+reported leaving` absorbed it, so no run said so. The client is a harness
+binary, no `[programs]` row can name one, and `/bin/init` endows a name the
+manifest does not carry with nothing.
 
-The cause is not in this file's subject at all and is filed as its own:
-`issues/build/a-harness-injected-program-can-be-endowed-with-nothing.md`. The
-harness's guest binaries enter an image as extra files, a `[programs.<name>]`
-row demands a crate at `userland/<name>`, and `/bin/init` endows a name the
-manifest does not carry with nothing. The one-row experiment was run and refused
-by the build before any guest booted.
+**The endowment travels with the spawn, and that closed it.**
+`tests/desktopcase/system.toml`'s `[programs.shell]` receives `compositor`, and
+a child the shell spawns directly inherits the shell's namespace — so the client
+gets its window from the process that started it, which is the whole of "a
+process holds exactly what its parent moved into it". Every probe this test was
+written for now runs.
 
-**So this entry's `EXPECTED_FAILURES` declaration is currently absorbing a
-failure it was not written about** — `the windowed child never reported leaving`
-is one of its six, and it has been meaning "the client was given no compositor"
-rather than "the desktop stopped answering". Nothing that reads a run can tell
-the two apart. Until the endowment is restored, no occurrence of the freeze can
-be produced here at all, and this entry's review date will arrive against a test
-that has not reached its own venue since the endowment work landed.
+**So a green run here is a sample again, and it is still only one.** On the run
+that restored it the whole test passed — a windowed child and three snakes each
+left both ways and the shell kept its prompt — which is the outcome this entry
+calls "#156 did not fire this run, which proves nothing". What changed is that a
+red now means the desktop stopped answering, which is what the declaration was
+written about.
