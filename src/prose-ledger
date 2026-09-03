@@ -108,7 +108,7 @@ kernel/src/file_cache.rs 111 0
 kernel/src/fs_rename.rs 18 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
-kernel/src/hasher.rs 27 0
+kernel/src/hasher.rs 25 0
 kernel/src/heartbeat.rs 24 0
 kernel/src/hw.rs 83 0
 kernel/src/id_map.rs 5 0
@@ -207,8 +207,8 @@ src/fingerprint.rs 18 0
 src/forkcheck.rs 176 1
 src/hostws.rs 187 2
 src/image.rs 200 1
-src/issuegate.rs 129 0
-src/kernelkeys.rs 36 0
+src/issuegate.rs 127 0
+src/kernelkeys.rs 27 0
 src/lib.rs 51 0
 src/libc.rs 29 0
 src/main.rs 70 0
@@ -386,7 +386,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5108 23
+tests/toyos.rs 5106 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

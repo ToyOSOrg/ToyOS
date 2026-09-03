@@ -92,8 +92,7 @@ fn area_directories(issue_files: &BTreeSet<String>) -> BTreeSet<String> {
     issue_files.iter().filter_map(|p| Some(p.split('/').nth(1)?.to_string())).collect()
 }
 
-/// Every disagreement between the closed list and the directories, one line
-/// each — both directions, because each is a different silent falsehood.
+/// Every disagreement between the closed list and the directories, both ways.
 fn area_refusals(declared: &BTreeSet<String>, on_disk: &BTreeSet<String>) -> Vec<String> {
     let mut bad = Vec::new();
     for area in on_disk.difference(declared) {
@@ -479,9 +478,8 @@ mod tests {
         );
     }
 
-    /// The closed list against the directories, both ways. A parse that found
-    /// the wrong paragraph fails here rather than passing quietly: nothing
-    /// restates the ten names, so the disk is what checks them.
+    /// The closed list against the directories. A parse that found the wrong
+    /// paragraph reds here: nothing restates the ten names, so the disk checks.
     #[test]
     fn the_readme_closes_the_area_list() {
         let root = repo_root();

@@ -3,24 +3,22 @@
 //!
 //! `kernel/Cargo.toml` takes hashbrown without `default-hasher`, so
 //! `DefaultHashBuilder` has no `BuildHasher` impl and `HashMap::new` /
-//! `HashMap::with_capacity` do not exist: every spelling of a container — an
-//! import alias, a turbofish, a type inferred from its constructor — stops
+//! `HashMap::with_capacity` do not exist: every spelling of a container stops
 //! compiling until it names this hasher.
 //!
 //! **A container built before [`seed`] is the one wrong answer that would be
 //! silent**, because it would work: it hashes alike on every boot of an image,
-//! the property a `BTreeMap` is chosen over for a key that crossed the
-//! boundary. So [`KernelHashState::new`] panics by name instead.
-//!
-//! The origin of a key is not held here. `src/kernelkeys.rs` keeps that.
+//! the property a `BTreeMap` is chosen over for a boundary-crossing key. So
+//! [`KernelHashState::new`] panics by name instead. Key origins are
+//! `src/kernelkeys.rs`.
 
 use core::hash::{BuildHasher, Hasher};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::cpu;
 
-/// The seed, and `0` until [`seed`] has run — the one value [`seed`] refuses to
-/// draw, so it means "not seeded" and nothing else.
+/// `0` until [`seed`] has run — the one value it refuses to draw, so it means
+/// "not seeded" and nothing else.
 static SEED: AtomicU64 = AtomicU64::new(0);
 
 pub const UNSEEDED: &str =

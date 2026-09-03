@@ -4847,9 +4847,11 @@ fn run_screen_test(
             Ok(())
         }
         "screen_survived_panic_not_blamed" => {
-            // `discard_capture` told from a no-op. `capture` freezes a report on
+            // `discard_capture` told from a no-op: `capture` freezes a report on
             // every panic and the recovery branch drops it, so two deaths in one
-            // boot and the panel must name the second.
+            // boot and the panel must name the second. Action 0 panics in
+            // syscall context, which the handler recovers from, so `capture` ran
+            // and only `discard_capture` can drop what it froze.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -4861,8 +4863,6 @@ fn run_screen_test(
                     ..Default::default()
                 },
             );
-            // Action 0 panics in syscall context, which the handler recovers
-            // from, so `capture` ran and only `discard_capture` can drop it.
             const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
             let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
             if let Some(err) = &survived.error {
@@ -10180,11 +10180,9 @@ fn run_machine_test(
             Ok(())
         }
         "hash_seed_precedes_every_map" => {
-            // The compiler holds that every kernel container names the kernel's
-            // own `BuildHasher`; the one wrong answer it cannot reach is one
-            // built *before* `hasher::seed()`, which works and hashes alike on
-            // every boot of the image. This is that refusal executed.
-            //
+            // The compiler cannot reach a container built *before*
+            // `hasher::seed()`: it works, and hashes alike on every boot of the
+            // image. This is the constructor's refusal executed. The text is
             // `kernel/src/hasher.rs`'s `UNSEEDED`, matched as a prefix.
             const UNSEEDED: &str = "kernel hasher: a hash container was built before hasher::seed()";
             let qemu = QemuInstance::boot_with_options(

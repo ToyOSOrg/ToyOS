@@ -1,27 +1,19 @@
 //! Whose keys a kernel hash container holds.
 //!
-//! **The scan is gone and the compiler holds its rule.** `kernel/Cargo.toml`
-//! takes hashbrown without `default-hasher`, so `DefaultHashBuilder` has no
-//! `BuildHasher` impl and neither `HashMap::new` nor `HashMap::with_capacity`
-//! exists; every container in `kernel/src` names `kernel/src/hasher.rs`'s
-//! `KernelHashState`, seeded once from `RDRAND` before any of them is built.
-//! That closes every spelling at once — an import alias, a turbofish, a type
-//! inferred from its constructor — where the text scan that stood here closed
-//! four measured forms and walked past four more.
+//! **The scan is gone and the compiler holds its rule**: `kernel/src/hasher.rs`
+//! is the only `BuildHasher` a container can name, so every spelling closes at
+//! once where a text scan closed four forms and walked past four more.
 //!
 //! **[`DECLARED`] stays, because the origin of a key is what no compiler holds.**
-//! A container whose keys crossed the user/kernel boundary is a collision flood
-//! away from a linear probe under whatever lock it sits behind — a seed the
-//! flooder cannot read raises the price of finding one and does not bound the
-//! worst case — so it is a `BTreeMap`/`BTreeSet`: logarithmic whatever the keys
-//! are. This table is what is left hashed, and every row says who mints its
-//! keys.
+//! A container whose keys crossed the boundary is a collision flood away from a
+//! linear probe under whatever lock it sits behind — a seed the flooder cannot
+//! read raises the price of finding one and does not bound the worst case — so
+//! it is a `BTreeMap`/`BTreeSet`. This table is what is left hashed.
 //!
-//! **A row's `keys` sentence is a human assertion and nothing checks it.** The
-//! origin of a key is a whole-program question; the only test over that column
-//! asks that it is not empty. So **whoever reviews a new row owes the trace of
-//! that key across the boundary** — and there is no longer a red here that
-//! adding a row is the cheapest way to close.
+//! **A row's `keys` sentence is a human assertion and nothing checks it**: the
+//! origin of a key is a whole-program question, so **whoever reviews a new row
+//! owes the trace of that key across the boundary** — and there is no longer a
+//! red here that adding a row is the cheapest way to close.
 
 /// One hashed container the kernel keeps, and why its keys cannot be chosen
 /// across the boundary.
@@ -87,9 +79,8 @@ mod tests {
         }
     }
 
-    /// A row names a file the tree holds, and names the hasher's own module
-    /// once. Not a scan over the sources — the compiler holds the containers —
-    /// but a path nobody moved when the code moved is a row about nothing.
+    /// A row names a file the tree holds, and the hasher's module exists. Not a
+    /// scan: a path nobody moved when the code moved is a row about nothing.
     #[test]
     fn every_declared_row_names_a_file_that_exists() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
