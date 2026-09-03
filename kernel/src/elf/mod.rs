@@ -14,7 +14,7 @@ mod cache;
 mod index;
 mod reloc;
 
-pub use cache::{cache_loaded_lib, try_clone_cached, CachedRelocs};
+pub use cache::{cache_loaded_lib, try_clone_cached, Cached, CachedRelocs};
 pub use index::{parse_rela_entries, ParsedRelaEntries, RelocationIndex};
 pub use reloc::{
     apply_dtpmod_relocs, apply_tpoff_relocs, defining_module, rebase_relative_relocs,

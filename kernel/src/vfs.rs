@@ -702,6 +702,16 @@ impl Vfs {
 
     /// The write-back queue is drained whole, not filtered by path, because it is keyed by the name a handle was opened under, and a symlink, rename, or relative open names the same file differently.
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
+        self.open_backing_identified(path).map(|(backing, _)| backing)
+    }
+
+    /// [`open_backing`](Self::open_backing) plus what the mount says about the
+    /// file right now, for a caller that keeps something derived from the
+    /// bytes and has to know later whether the file behind the path moved.
+    pub fn open_backing_identified(
+        &mut self,
+        path: &str,
+    ) -> Result<(alloc::sync::Arc<dyn crate::file_backing::FileBacking>, BackingId), SyscallError> {
         crate::writeback::drain_held(self);
         let target = self.resolve_for_open(path, ResolveIntent::KernelOrRead)?;
         // A file still open is on no write-back queue, so the drain above cannot
@@ -717,6 +727,24 @@ impl Vfs {
             self.flush_file(&owner, file_id, mtime)?;
         }
         let (fs, fs_path) = self.fs_for_target(&target)?;
-        fs.open_backing(&fs_path)
+        // Read after the flush above, so the identity is the file as this call
+        // leaves it rather than as it was before the pending writes landed.
+        let mtime = fs.file_mtime(&fs_path)?;
+        let backing = fs.open_backing(&fs_path)?;
+        let id = BackingId { size: backing.file_size(), mtime };
+        Ok((backing, id))
     }
+}
+
+/// What a mount said about a file when its backing was opened.
+///
+/// Metadata the open had already reached, so asking for it reads no page of
+/// the file. **It refuses a rewrite; it does not identify a file** — two
+/// different files can carry the same size and the same mtime, and a mount
+/// whose mtime does not move under a same-size write hides one from this
+/// entirely.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct BackingId {
+    pub size: u64,
+    pub mtime: u64,
 }

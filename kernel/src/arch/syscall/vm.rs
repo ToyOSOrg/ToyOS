@@ -205,18 +205,28 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         return idx as u64;
     }
 
-    let lib = crate::elf::try_clone_cached(&resolved);
-    let mut lib = match lib {
-        Some(lib) => lib,
-        None => {
-            let backing = match vfs::lock().open_backing(&resolved) {
-                Ok(b) => b,
-                Err(e) => {
-                    log!("dlopen: {}: {e}", resolved);
-                    return e.to_u64();
-                }
-            };
-
+    // Opened before the cache is consulted, not after: the cache is keyed by a
+    // path and the answer depends on what that path holds *now*, which only the
+    // open can say. The repeat-load fast path above is what keeps a `dlopen`
+    // loop from paying for it.
+    let (backing, id) = match vfs::lock().open_backing_identified(&resolved) {
+        Ok(pair) => pair,
+        Err(e) => {
+            log!("dlopen: {}: {e}", resolved);
+            return e.to_u64();
+        }
+    };
+    let mut lib = match crate::elf::try_clone_cached(&resolved, id) {
+        crate::elf::Cached::Fresh(lib) => lib,
+        crate::elf::Cached::Stale => {
+            log!(
+                "dlopen: {}: the cached image is stale — the file behind this path changed since \
+                 it was loaded, and the image cannot be replaced while a process has it mapped",
+                resolved
+            );
+            return SyscallError::NotSupported.to_u64();
+        }
+        crate::elf::Cached::Absent => {
             let (lib, rw_offset, rw_size) = match crate::elf::load_shared_lib(backing.as_ref()) {
                 Ok(result) => result,
                 Err(msg) => {
@@ -225,7 +235,10 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
                 }
             };
 
-            crate::elf::cache_loaded_lib(&resolved, lib, rw_offset, rw_size)
+            match crate::elf::cache_loaded_lib(&resolved, id, lib, rw_offset, rw_size) {
+                Ok(lib) => lib,
+                Err(e) => return e.to_u64(),
+            }
         }
     };
 

@@ -702,25 +702,26 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
     out.paths.reserve_exact(distinct.len());
 
     for lib_name in distinct {
-        let lib_path = alloc::format!("{}/{}", exe_dir, lib_name);
         let t_load0 = crate::clock::nanos_since_boot();
 
-        if let Some(lib) = elf::try_clone_cached(&lib_path) {
-            out.paths.push(lib_path);
-            out.libs.push(lib);
-            continue;
-        }
-
+        // Which spelling opens is decided before the cache is consulted, and
+        // that spelling is the key from here on. Keyed by the exe-dir string it
+        // never found, a library loaded through the fallback was cached under a
+        // name no later `dlopen("/lib/…")` asks for, so the same library was
+        // mapped a second time — and `out.paths` fed the same wrong name to the
+        // per-process dedup.
+        //
         // Fallback only for NotFound: any other error would repeat on `/lib`
         // too and produce a misleading second log line.
-        let so_backing = {
-            let b = vfs::lock().open_backing(&lib_path);
-            match b {
-                Ok(b) => b,
+        let (so_backing, id, lib_path) = {
+            let in_exe_dir = alloc::format!("{}/{}", exe_dir, lib_name);
+            let opened = vfs::lock().open_backing_identified(&in_exe_dir);
+            match opened {
+                Ok((b, id)) => (b, id, in_exe_dir),
                 Err(SyscallError::NotFound) => {
                     let fallback = alloc::format!("/lib/{}", lib_name);
-                    match vfs::lock().open_backing(&fallback) {
-                        Ok(b) => b,
+                    match vfs::lock().open_backing_identified(&fallback) {
+                        Ok((b, id)) => (b, id, fallback),
                         Err(e) => {
                             log!("spawn: {}: failed to load {}: {e}", path, lib_name);
                             return Err(e);
@@ -734,12 +735,30 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
             }
         };
 
+        match elf::try_clone_cached(&lib_path, id) {
+            elf::Cached::Fresh(lib) => {
+                out.paths.push(lib_path);
+                out.libs.push(lib);
+                continue;
+            }
+            elf::Cached::Stale => {
+                log!(
+                    "spawn: {}: {}: the cached image is stale — the file behind this path changed \
+                     since it was loaded, and the image cannot be replaced while a process has it \
+                     mapped",
+                    path, lib_path
+                );
+                return Err(SyscallError::NotSupported);
+            }
+            elf::Cached::Absent => {}
+        }
+
         match elf::load_shared_lib(so_backing.as_ref()) {
             Ok((lib, rw_offset, rw_size)) => {
                 let t_load1 = crate::clock::nanos_since_boot();
                 log!("dynamic: loaded {} base={:#x} ({} syms, {}ms)",
                     lib_name, lib.phys_base, lib.sym_count(), (t_load1 - t_load0) / 1_000_000);
-                out.libs.push(elf::cache_loaded_lib(&lib_path, lib, rw_offset, rw_size));
+                out.libs.push(elf::cache_loaded_lib(&lib_path, id, lib, rw_offset, rw_size)?);
                 out.paths.push(lib_path);
             }
             Err(e) => {

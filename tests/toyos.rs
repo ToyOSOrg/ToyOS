@@ -349,6 +349,11 @@ const RUST_SKIP: &[&str] = &[
     // Needs `fsync-budget-spent` and the NVMe `/home`; unstaged it passes
     // vacuously. `home_budget_refusal_retried` boots it with both.
     "home_fsync_budget",
+    // Needs `so-cache-tiny` and the NVMe `/home`: on the shipped 256 MiB budget
+    // its budget arm would have to load 256 MiB of distinct libraries, and on a
+    // tmpfs `/home` the host has no device to read the replaced file off.
+    // `so_cache_refusals` boots it with both.
+    "so_cache_policy",
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
     "redirty_mid_flush",
@@ -556,6 +561,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
     ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
+    // The shared-object cache's two refusals, the replaced library's bytes then
+    // read off the NVMe image by the host's own bcachefs reader. Body in
+    // `tests/common/storage.rs`.
+    ("so_cache_refusals", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
@@ -2102,8 +2111,34 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "null_sink_client_exits" => check_null_sink_client_exits,
         "fault_gates" => check_fault_gates,
         "debug_trap" => check_debug_trap,
+        "dlopen_dedup" => check_dlopen_dedup,
         _ => check_rust_result,
     }
+}
+
+/// The spelling a loader writes when it caches a library under the directory it
+/// searched and did not find it in. `dlopen_dedup`'s last arm stages it; only
+/// that arm can produce this string, so the whole verdict is its absence.
+const FALLBACK_MISCACHED: &str = "dlopen: cached /tmp/dlopen-dedup/libtls_lib.so";
+
+/// `dlopen_dedup` plus the half of its last arm no guest can see: one library
+/// reached two ways is one physical image, which the kernel says by caching it
+/// once — under the path it actually opened.
+fn check_dlopen_dedup(result: &TestResult) -> bool {
+    if !check_rust_result(result) {
+        return false;
+    }
+    let log = format!("{}{}", result.before, result.serial);
+    if log.contains(FALLBACK_MISCACHED) {
+        eprintln!(
+            "FAIL rs::dlopen_dedup: {FALLBACK_MISCACHED:?} — the library was cached under the \
+             directory the loader searched and did not find it in, so a later dlopen of its own \
+             path mapped it a second time{}",
+            kernel_account(result)
+        );
+        return false;
+    }
+    true
 }
 
 /// Minimum active (non-silent) playback the 3s test tone must produce.
@@ -8174,6 +8209,7 @@ fn run_machine_test(
         "home_budget_refusal_retried" => {
             storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
         }
+        "so_cache_refusals" => storage::so_cache_refusals(test_config, c_bins, rust_bins),
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
