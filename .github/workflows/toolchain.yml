@@ -50,6 +50,12 @@ jobs:
     needs: [route]
     runs-on: ${{ needs.route.outputs.runner }}
     timeout-minutes: 350
+    env:
+      # The oldest glibc a consumer of this toolchain needs, which is the
+      # `ubuntu-24.04` image the hosted lane builds the host half on. The `glibc
+      # floor` step refuses to publish binaries that name a newer one, so the
+      # number the release notes carry is measured rather than promised.
+      GLIBC_FLOOR: "2.39"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -203,6 +209,96 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Every `GLIBC_x.y` the shipped host binaries name, against what this
+      # release states. A grep over the dynamic string table and not `objdump`:
+      # the answer is the same (checked against `readelf --dyn-syms` on the
+      # published asset) and it adds no tool to the machine's provisioning. It
+      # can only over-report, so the failure direction is a refused publish.
+      - name: glibc floor
+        if: steps.have.outputs.build == 'yes'
+        run: |
+          host=x86_64-unknown-linux-gnu
+          need=$(grep -ao 'GLIBC_[0-9]\+\.[0-9]\+' \
+                   "rust/build/$host/stage2/bin"/* "rust/build/$host/stage2/lib"/*.so* \
+                 | sed 's/.*GLIBC_//' | sort -V | tail -1)
+          echo "the host half names up to GLIBC_$need; this release states $GLIBC_FLOOR"
+          if [ "$(printf '%s\n%s\n' "$need" "$GLIBC_FLOOR" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]
+          then
+            echo "::error::the host half needs GLIBC_$need and this release states"
+            echo "::error::$GLIBC_FLOOR, so a consumer on the stated floor cannot run it. It was"
+            echo "::error::built on a machine with a newer glibc than the floor allows: build the"
+            echo "::error::host half on the oldest supported one, or move GLIBC_FLOOR deliberately."
+            exit 1
+          fi
+
+      # **The pin a consumer writes down, and what it gets.** `TOOLCHAIN` goes
+      # inside the tarball and is the alias release's own asset, so the toolchain
+      # a tag names can be read without a 401 MiB download. `--sdk-versions` is
+      # asked of the build system for `publish.yml`'s reason: the set of
+      # published crates and their order live in `src/sdkversion.rs` alone.
+      - name: manifest and notes
+        if: steps.have.outputs.build == 'yes' || github.event_name != 'pull_request'
+        run: |
+          tag=${{ steps.key.outputs.tag }}
+          url=https://github.com/${{ github.repository }}/releases/download/$tag/toyos-toolchain.tar.zst
+          {
+            echo "toolchain $tag"
+            echo "toyos ${{ github.sha }}"
+            echo "rust $(git rev-parse HEAD:rust)"
+            echo "host x86_64-unknown-linux-gnu"
+            echo "glibc $GLIBC_FLOOR"
+            cargo run --quiet -- --sdk-versions
+          } > /tmp/TOOLCHAIN
+          cat /tmp/TOOLCHAIN
+
+          {
+            cat <<EOF
+          The \`x86_64-unknown-linux-gnu\` toolchain that cross-compiles for
+          \`x86_64-unknown-toyos\`, from ToyOS \`${{ github.sha }}\`.
+
+          ## Install
+
+              mkdir -p toyos-toolchain
+              curl -sSL $url | tar --zstd -x -C toyos-toolchain
+              rustup toolchain link toyos toyos-toolchain/x86_64-unknown-linux-gnu/stage2
+              ln -s "\$(rustup which cargo)" toyos-toolchain/x86_64-unknown-linux-gnu/stage2/bin/cargo
+              export PATH="\$PWD/toyos-toolchain/x86_64-unknown-linux-gnu/stage2/bin:\$PATH"
+              cargo +toyos build --target x86_64-unknown-toyos
+
+          The last two commands before the build are not decoration. rustc's ToyOS
+          target names its linker \`toyos-ld\` and finds it on \`PATH\`; the tarball
+          carries one in that same \`bin/\`. The \`cargo\` symlink is not shipped
+          because its path would be the publisher's, and rustup narrates a fallback
+          on every invocation without it.
+
+          ## glibc
+
+          The host binaries name **GLIBC_$GLIBC_FLOOR** at most, so any distribution
+          with glibc $GLIBC_FLOOR or newer runs them — Ubuntu 24.04, Debian 13,
+          Fedora 40. A build that needed more is refused rather than published.
+
+          ## What this is, and the SDK crates that go with it
+
+          EOF
+            sed 's/^/    /' /tmp/TOOLCHAIN
+            cat <<EOF
+
+          The five crate versions are the ones on crates.io this toolchain's std was
+          built from; \`sdk-<toyos-abi's version>\` is the release tag that names
+          them. The same lines are the file \`TOOLCHAIN\` inside the tarball.
+
+          ## raw-window-handle
+
+          Until [rust-windowing/raw-window-handle#223](https://github.com/rust-windowing/raw-window-handle/pull/223)
+          is released, a program that opens a window carries this patch, because the
+          ToyOS window handle is in no published raw-window-handle yet:
+
+              [patch.crates-io]
+              $(grep '^raw-window-handle = ' userland/Cargo.toml)
+          EOF
+          } > /tmp/notes.md
+          cat /tmp/notes.md
+
       # `lib/rustlib/<host>` and `<host>/stage2/bin/cargo` are symlinks into
       # whatever toolchain this runner has, which is not a path any artifact can
       # carry. `Owner::Installed` recreates both —
@@ -216,10 +312,18 @@ jobs:
         run: |
           host=x86_64-unknown-linux-gnu
           t0=$(date +%s)
+          # rustc's ToyOS target spec names the linker `toyos-ld` and finds it on
+          # PATH, so a consumer with only this tarball has to be given one — the
+          # host binary the `build` step above already made. `toyos-ld-witness`
+          # says which sources it is, because this tag is a function of four
+          # trees and `toyos-ld` is not among them.
+          cp "target/$host/release/toyos-ld" "rust/build/$host/stage2/bin/toyos-ld"
+          cp /tmp/TOOLCHAIN rust/build/TOOLCHAIN
           tar -C rust/build \
               --exclude="x86_64-unknown-toyos/stage2/lib/rustlib/$host" \
               --exclude="$host/stage2/bin/cargo" \
               -c "$host/stage2" x86_64-unknown-toyos/stage2 toyos-sysroot-witness \
+                 toyos-ld-witness TOOLCHAIN \
             | zstd -T0 -3 -o /tmp/toyos-toolchain.tar.zst
           echo "PACKAGE-SECONDS: $(( $(date +%s) - t0 ))"
           ls -l /tmp/toyos-toolchain.tar.zst
@@ -228,7 +332,7 @@ jobs:
           # otherwise fail having produced the same bytes.
           gh release create "${{ steps.key.outputs.tag }}" \
             --title "${{ steps.key.outputs.tag }}" \
-            --notes "x86_64-unknown-linux-gnu toolchain for rust $(git rev-parse HEAD:rust), built from ${{ github.sha }}." \
+            --notes-file /tmp/notes.md \
             /tmp/toyos-toolchain.tar.zst \
             || gh release view "${{ steps.key.outputs.tag }}"
 
@@ -255,3 +359,27 @@ jobs:
           echo "::error::toyos-toolchain.tar.zst. Nothing can install this toolchain, and a"
           echo "::error::green here is what lets ci.yml start thirteen shards."
           exit 1
+
+      # **The SDK version names the ABI; the toolchain that goes with it carries
+      # the same number.** The content hash above makes a publish idempotent and
+      # is no name a consumer can write down, so `sdk-<toyos-abi's version>` is
+      # the one it pins, and it moves to whatever toolchain this tree's ABI
+      # belongs to.
+      #
+      # A second release and not a copy of the asset: an asset belongs to one
+      # release and GitHub can neither share nor move one, so the alias carries
+      # the manifest — a few hundred bytes — and its notes name the tag the
+      # 401 MiB tarball is on. Never on a `pull_request`, whose head is
+      # somebody's branch and not what a consumer should be handed.
+      - name: sdk alias
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(grep '^toyos-abi ' /tmp/TOOLCHAIN | cut -d' ' -f2)
+          alias=toolchain-linux-x86_64-sdk-$v
+          gh release create "$alias" --title "$alias" --notes-file /tmp/notes.md \
+               /tmp/TOOLCHAIN \
+            || { gh release edit "$alias" --notes-file /tmp/notes.md
+                 gh release upload "$alias" /tmp/TOOLCHAIN --clobber; }
+          gh release view "$alias"
