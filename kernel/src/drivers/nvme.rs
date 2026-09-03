@@ -243,11 +243,9 @@ const OFF_DATA: usize       = 0x6000;
 const MAX_DATA_PAGES: usize  = 32;
 const DMA_SIZE: usize        = OFF_DATA + MAX_DATA_PAGES * 0x1000;
 
-/// The upper half of the admin completion queue's page: `init` zeroes the whole
-/// page and the controller writes only the first `QUEUE_DEPTH` 16-byte entries,
-/// so nothing ever writes here and "unchanged" is "still zero". An isolation
-/// actuator aims another device's DMA at it, and its address is one the gate can
-/// read back out of `REG_ACQ` rather than off a console line.
+/// The upper half of the admin completion queue's page: `init` zeroes it all and
+/// the controller writes only the first `QUEUE_DEPTH` entries, so "unchanged" is
+/// "still zero" here, and the address is one the gate reads back out of `REG_ACQ`.
 #[cfg(feature = "boot-actuators")]
 pub(super) const PROBE_OFF: usize = OFF_ADMIN_CQ + 0x800;
 #[cfg(feature = "boot-actuators")]
@@ -255,9 +253,8 @@ pub(super) const PROBE_LEN: usize = 0x800;
 #[cfg(feature = "boot-actuators")]
 const _: () = assert!(QUEUE_DEPTH * core::mem::size_of::<CqEntry>() <= PROBE_OFF - OFF_ADMIN_CQ);
 
-/// Physical, not the address this controller is programmed with: what the
-/// actuator hands another device has to be an address that device's own domain
-/// does not map.
+/// Physical, not what this controller is programmed with: the actuator has to
+/// hand another device an address that device's own domain does not map.
 #[cfg(feature = "boot-actuators")]
 pub(super) static FOREIGN_PROBE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
@@ -768,12 +765,10 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
         }
     }
 
-    // An address space of this controller's own, holding one pool and nothing
-    // else; attached before a single address is written to a register.
-    //
-    // Both isolation actuators mis-program *this* function's context entry by
-    // hand, and attaching it to a domain would write a good one over the
-    // staging, so a staged boot leaves the controller where the actuator put it.
+    // An address space of this controller's own, attached before an address is
+    // written to a register. Both isolation actuators mis-program *this*
+    // function's context entry by hand, and attaching it would write a good one
+    // over the staging.
     let space = if crate::actuator::iommu_context_absent()
         || crate::actuator::iommu_empty_domain()
     {

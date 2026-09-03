@@ -71,10 +71,8 @@ pub(super) const MAX_UNITS: usize = 16;
 /// Remapping tables outlive `init`: the unit keeps reading them while it is on.
 static TABLES: Lock<Tables> = Lock::new(Tables::new());
 
-/// Every unit that is translating, in the order they were enabled.
-///
-/// The single owner of a unit's invalidation queue: a queue has one tail, so a
-/// second holder would submit into the same ring behind the first's back.
+/// Every translating unit, and the single owner of each one's invalidation
+/// queue: a queue has one tail, so a second holder would submit behind its back.
 static UNITS: Lock<Vec<Live>> = Lock::new(Vec::new());
 
 /// A unit past `enable`: its window, its queue, and the root table its context

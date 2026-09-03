@@ -95,11 +95,8 @@ impl PciDevice {
         Self { mmio, bus: 0, dev: 0, func: 0 }
     }
 
-    /// This function's whole config-space window.
-    ///
-    /// For the DMA-fault handler, which has a requester id, no `PciDevice`, and
-    /// no lock it may take: it publishes these at boot and clears Bus Master
-    /// Enable through the one that matches.
+    /// The whole window, for the DMA-fault handler: it publishes these at boot
+    /// and clears Bus Master Enable through the one whose requester id matches.
     pub fn config_window(&self) -> Mmio {
         self.mmio
     }
