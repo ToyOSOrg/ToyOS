@@ -116,8 +116,8 @@ dependencies = [
  "bitflags 2.11.0",
  "cc",
  "cesu8",
- "jni",
- "jni-sys",
+ "jni 0.21.1",
+ "jni-sys 0.3.0",
  "libc",
  "log",
  "ndk",
@@ -524,9 +524,9 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "coreaudio-rs"
-version = "0.14.0"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d15c3c3cee7c087938f7ad1c3098840b3ef1f1bdc7f6e496336c3b1e7a6f3914"
+checksum = "7d5d7dca3ebcf65a035582c9ad4385371a9d9ee6537474d2a278f4e1e475bb58"
 dependencies = [
  "bitflags 2.11.0",
  "libc",
@@ -539,12 +539,13 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.0"
-source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos#40fe997922c9ab30a8647e54cf23c4b07197732c"
+source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#d1a79049c15903d1dd21f920ad9243f0ae97d48a"
 dependencies = [
  "alsa",
+ "block2",
  "coreaudio-rs",
  "dasp_sample",
- "jni",
+ "jni 0.22.4",
  "js-sys",
  "libc",
  "mach2",
@@ -561,10 +562,9 @@ dependencies = [
  "objc2-foundation",
  "toyos",
  "toyos-abi",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
  "windows",
+ "windows-core",
 ]
 
 [[package]]
@@ -899,7 +899,7 @@ dependencies = [
 [[package]]
 name = "dpi"
 version = "0.1.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 
 [[package]]
 name = "ecdsa"
@@ -1058,7 +1058,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1610,7 +1610,7 @@ dependencies = [
  "cesu8",
  "cfg-if",
  "combine",
- "jni-sys",
+ "jni-sys 0.3.0",
  "log",
  "thiserror 1.0.69",
  "walkdir",
@@ -1618,10 +1618,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "jni"
+version = "0.22.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498"
+dependencies = [
+ "cfg-if",
+ "combine",
+ "jni-macros",
+ "jni-sys 0.4.1",
+ "log",
+ "simd_cesu8",
+ "thiserror 2.0.18",
+ "walkdir",
+ "windows-link",
+]
+
+[[package]]
+name = "jni-macros"
+version = "0.22.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00109accc170f0bdb141fed3e393c565b6f5e072365c3bd58f5b062591560a3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "simd_cesu8",
+ "syn",
+]
+
+[[package]]
 name = "jni-sys"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8eaf4bc02d17cbdd7ff4c7438cafcdf7fb9a4613313ad11b4f8fefe7d3fa0130"
+
+[[package]]
+name = "jni-sys"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6377a88cb3910bee9b0fa88d4f42e1d2da8e79915598f65fb0c7ee14c878af2"
+dependencies = [
+ "jni-sys-macros",
+]
+
+[[package]]
+name = "jni-sys-macros"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
+dependencies = [
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "jobserver"
@@ -1756,12 +1805,9 @@ dependencies = [
 
 [[package]]
 name = "mach2"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a1b95cd5421ec55b445b5ae102f5ea0e768de1f82bd3001e11f426c269c3aea"
-dependencies = [
- "libc",
-]
+checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "managed"
@@ -1834,7 +1880,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3f42e7bbe13d351b6bead8286a43aac9534b82bd3cc43e47037f012ebfd62d4"
 dependencies = [
  "bitflags 2.11.0",
- "jni-sys",
+ "jni-sys 0.3.0",
  "log",
  "ndk-sys",
  "num_enum",
@@ -1854,7 +1900,7 @@ version = "0.6.0+11769913"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
- "jni-sys",
+ "jni-sys 0.3.0",
 ]
 
 [[package]]
@@ -2009,6 +2055,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
 dependencies = [
+ "bitflags 2.11.0",
  "objc2",
  "objc2-foundation",
 ]
@@ -2652,16 +2699,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redox_event"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ea3e412d205440c7b0218af26247226f979ed1201674cda7a33cc70609084b5"
-dependencies = [
- "bitflags 2.11.0",
- "libredox",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2940,7 +2977,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3240,6 +3277,22 @@ name = "simd-adler32"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
+
+[[package]]
+name = "simd_cesu8"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11031e251abf8611c80f460e19dbdeb54a66db918e49c65a7065b46ac7aec520"
+dependencies = [
+ "rustc_version",
+ "simdutf8",
+]
+
+[[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "simplecss"
@@ -3987,7 +4040,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4105,6 +4158,15 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]
@@ -4251,7 +4313,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "bitflags 2.11.0",
  "cfg_aliases",
@@ -4276,7 +4338,7 @@ dependencies = [
 [[package]]
 name = "winit-android"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "android-activity",
  "bitflags 2.11.0",
@@ -4291,7 +4353,7 @@ dependencies = [
 [[package]]
 name = "winit-appkit"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "bitflags 2.11.0",
  "block2",
@@ -4313,12 +4375,10 @@ dependencies = [
 [[package]]
 name = "winit-common"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
- "block2",
  "objc2",
  "objc2-core-foundation",
- "objc2-foundation",
  "smol_str",
  "tracing",
  "winit-core",
@@ -4328,7 +4388,7 @@ dependencies = [
 [[package]]
 name = "winit-core"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "bitflags 2.11.0",
  "cursor-icon",
@@ -4342,14 +4402,13 @@ dependencies = [
 [[package]]
 name = "winit-orbital"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "bitflags 2.11.0",
  "dpi",
- "libredox",
  "orbclient",
  "raw-window-handle",
- "redox_event",
+ "redox_syscall 0.5.18",
  "smol_str",
  "tracing",
  "winit-core",
@@ -4358,7 +4417,7 @@ dependencies = [
 [[package]]
 name = "winit-toyos"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "bitflags 2.11.0",
  "dpi",
@@ -4372,7 +4431,7 @@ dependencies = [
 [[package]]
 name = "winit-uikit"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "bitflags 2.11.0",
  "block2",
@@ -4392,7 +4451,7 @@ dependencies = [
 [[package]]
 name = "winit-web"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "atomic-waker",
  "bitflags 2.11.0",
@@ -4414,7 +4473,7 @@ dependencies = [
 [[package]]
 name = "winit-win32"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#69ee7eef7c21cbd1f344f2508f8965d83693cb02"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.31.0-beta.2#6956ef1b7f49bb02254b6f2953883493b86fcdeb"
 dependencies = [
  "bitflags 2.11.0",
  "cursor-icon",
@@ -4423,7 +4482,7 @@ dependencies = [
  "smol_str",
  "tracing",
  "unicode-segmentation",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
  "winit-core",
 ]
 
