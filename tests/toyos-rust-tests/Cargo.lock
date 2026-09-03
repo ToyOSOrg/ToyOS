@@ -147,10 +147,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "font"
-version = "0.1.0"
-
-[[package]]
 name = "futures-core"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -612,6 +608,10 @@ name = "toyos-abi"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-font"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-keymap"
 version = "0.1.0"
 
@@ -623,7 +623,17 @@ dependencies = [
  "libloading",
  "toyos",
  "toyos-abi",
- "window",
+ "toyos-window",
+]
+
+[[package]]
+name = "toyos-window"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-font",
+ "toyos-keymap",
 ]
 
 [[package]]
@@ -714,16 +724,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "window"
-version = "0.1.0"
-dependencies = [
- "font",
- "toyos",
- "toyos-abi",
- "toyos-keymap",
 ]
 
 [[package]]
