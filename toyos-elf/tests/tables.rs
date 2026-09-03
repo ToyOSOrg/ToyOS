@@ -173,7 +173,7 @@ fn a_read_table_inside_the_write_window_is_refused_by_name() {
         ..Default::default()
     };
     assert_eq!(rela::tables_outside_window(&abutting, exact), Ok(()));
-    assert_eq!(rela::tables_outside_window(&Default::default(), exact), Ok(()));
+    assert_eq!(rela::tables_outside_window(&rela::ReadTables::default(), exact), Ok(()));
     assert_eq!(rela::tables_outside_window(&shell, (0x145000, 0x145000)), Ok(()));
 }
 
