@@ -140,7 +140,7 @@ audio_tone (smp=1) 8450 shards=12
 audio_tone (smp=8) 8471 shards=12
 audio_tone_load (smp=1) 18139 shards=12
 audio_tone_load (smp=8) 16048 shards=12
-block_duplicate_id 18446744073709551615 shards=none
+block_duplicate_id 6997 shards=12
 blocked_dump 3400 shards=12
 blocking_read_stress 41 shards=12
 boot_partition_identity 5519 shards=12
@@ -219,7 +219,7 @@ idle_stack_guard 9601 shards=12
 inbox_cancel_wakes 543 shards=12
 input_claim_absent 2565 shards=12
 input_merge 3326 shards=12
-internal_disk_boot 18446744073709551615 shards=none
+internal_disk_boot 4729 shards=12
 ioapic_topology 3142 shards=12
 iommu_context_absent 7382 shards=12
 iommu_discovery 18600 shards=12
