@@ -164,7 +164,17 @@ base — every one completing in 305-349 s.
 
 The base arm reproduces both names at the branch's rate, so neither is the
 branch's — which is the first time `main` alone has produced `redirty_mid_flush`
-here. Every failing run in both arms carries exactly one
-`usb-storage: … no answer in the data phase in 2000 ms` and the fully green runs
-carry none, so on this host the class tracks a spent `block::OPERATION` on the
-boot stick rather than anything in the tree.
+here.
+
+**The same pair again against `072df47c`, and it takes the USB stall out of the
+story.** One run an arm at 335.8 s and 382.2 s:
+
+| arm | reds, every one in this entry's family |
+|---|---|
+| `rootfs-page-cache` | `toybox_cp_volume`, `redirty_mid_flush`, `fat_backing_revoked`, `ftruncate_flush_race`, `fs_rename_durable` — all five `ALONE … GREEN` |
+| `072df47c` | `toybox_cp_volume`, `log_flush_retry`, `redirty_mid_flush`, `fat_backing_revoked` |
+
+The base run carries **zero** `usb-storage: … no answer in the data phase in
+2000 ms` and reds four of the family anyway, so the stall is one way into the
+class and not the class itself. Seven names have now shown it and `main` has
+produced six of them alone.
