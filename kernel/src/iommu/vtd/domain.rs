@@ -1,22 +1,17 @@
 //! Address spaces a device is put in, and the invalidation that publishes a
 //! change to one.
 //!
-//! Every layout and rule here is quoted from Intel VT-d Rev. 4.0, order number
-//! D51397-015:
-//!
-//! - **Second-level entry**, 9.8 and Table 27: `R` bit 0, `W` bit 1, page-size
-//!   bit 7 at a page-directory level, address 51:12; the walk ANDs `R`/`W` down
-//!   the levels (3.7.1), so a leaf grants no more than what is above it.
-//! - **Context entry**, 9.3 Figure 9-3: `P` bit 0, `T` 3:2 with `00b` naming
-//!   the second-level table, `SLPTPTR` 51:12, `AW` 66:64 as levels minus two,
-//!   `DID` 87:72.
-//! - **Invalidation descriptors**, 6.5.2.1 Figure 6-8 and 6.5.2.2 Figure 6-9:
-//!   context cache type `1h` with `G` 5:4 = `11b` device-selective, `DID`
-//!   31:16, `SID` 47:32; IOTLB type `2h` with `G` = `10b` domain-selective,
-//!   `DR` bit 7, `DW` bit 6. A context-entry change takes the first and then
-//!   the second, in that order.
-//! - **`CAP.CM`**, 6.1: with caching mode reported, software invalidates after
-//!   *every* change, a mapping becoming present included.
+//! Every layout and rule here is quoted from Intel VT-d Rev. 4.0, D51397-015.
+//! **Second-level entry**, 9.8 and Table 27: `R` bit 0, `W` bit 1, page-size bit
+//! 7 at a page-directory level, address 51:12, and the walk ANDs `R`/`W` down
+//! the levels (3.7.1). **Context entry**, 9.3 Figure 9-3: `P` bit 0, `T` 3:2 =
+//! `00b` naming that table, `SLPTPTR` 51:12, `AW` 66:64 as levels minus two,
+//! `DID` 87:72. **Invalidation**, 6.5.2.1 Figure 6-8 and 6.5.2.2 Figure 6-9:
+//! context cache type `1h`, `G` 5:4 = `11b` device-selective, `DID` 31:16, `SID`
+//! 47:32; IOTLB type `2h`, `G` = `10b` domain-selective, `DR` bit 7, `DW` bit 6;
+//! a context-entry change takes the first and then the second. **`CAP.CM`**,
+//! 6.1: with caching mode reported, software invalidates after *every* change,
+//! a mapping becoming present included.
 //!
 //! Lock order here is `DOMAINS`, `REMAP`, `UNITS`, `TABLES`, never the reverse.
 
@@ -28,8 +23,6 @@ use crate::sync::Lock;
 use super::table::{self, Domain};
 use super::{TABLES, UNITS};
 
-/// The first id a driver's domain can take: `table::KERNEL_DOMAIN` is the
-/// identity domain every driver that has not moved is still on.
 const FIRST: u16 = table::KERNEL_DOMAIN + 1;
 
 /// What every enabled unit agreed on, which is what a domain can be built to.
@@ -42,8 +35,8 @@ enum Agreement {
 
 struct Domains {
     agreement: Agreement,
-    /// Indexed by id minus [`FIRST`]; never shrinks, since a released id would
-    /// name a domain some unit may still have cached.
+    /// By id minus [`FIRST`]; never shrinks, since a released id would name a
+    /// domain some unit may still have cached.
     live: Vec<Domain>,
 }
 
@@ -93,8 +86,6 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
         .reserve(bytes)
         .ok_or(IommuError::AddressesExhausted(domain.width().bits()))?;
     let (did, domain) = (domain.id(), *domain);
-    // `CAP.CM` is set on every unit here, so a mapping is not live until the
-    // absence the unit may have cached is invalidated.
     let mut units = UNITS.lock();
     table::map(&mut TABLES.lock(), &domain, at, phys, bytes);
     for unit in units.iter_mut() {
@@ -120,8 +111,6 @@ pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {
     Ok(())
 }
 
-/// Rewrite `stream`'s context entry in every unit, then its caches in Section
-/// 6.5.2.1's order: context cache, then IOTLB.
 pub fn attach(stream: StreamId, id: DomainId) {
     let mut domains = DOMAINS.lock();
     let domain = *domains.at(id);

@@ -1074,13 +1074,11 @@ pub fn await_marker_new(
 #[derive(Clone, Copy, PartialEq)]
 pub enum Profile {
     Headless,
-    /// [`Profile::Headless`] with no unit on the machine at all.
-    ///
-    /// The negative control for whether a virtio function is behind one. QEMU
-    /// offers `VIRTIO_F_ACCESS_PLATFORM` only for a function created with
-    /// `iommu_platform=on`, and the harness sets that only where there is a
-    /// unit — so the guest's own negotiation has to come out the other way
-    /// here, and a kernel printing a constant fails on one of the pair.
+    /// [`Profile::Headless`] with no unit at all: the negative control for
+    /// whether a virtio function is behind one. QEMU offers
+    /// `VIRTIO_F_ACCESS_PLATFORM` only for a function created with
+    /// `iommu_platform=on`, and the harness sets that only where a unit exists,
+    /// so the guest's own negotiation comes out the other way here.
     HeadlessNoIommu,
     /// [`Profile::Headless`] with the NIC's MSI-X capability taken away.
     ///
@@ -3634,10 +3632,9 @@ fn qemu_command(
             if unit.eim { "on" } else { "off" }
         ));
     }
-    // A virtio function reaches memory through `vdev->dma_as`, which stays the
-    // machine's own address space — the unit bypassed entirely — unless the
-    // function is created with this. The other half of the vacuity trap: a unit
-    // that decodes every function on the bus except the ones a test drives.
+    // A virtio function reaches memory through `vdev->dma_as`, the machine's own
+    // address space with the unit bypassed, unless it is created with this — the
+    // other half of the trap: a unit that decodes every function but these.
     let platform = if shape.iommu.is_some() { ",iommu_platform=on" } else { "" };
 
     for controller in shape.xhci {

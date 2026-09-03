@@ -673,8 +673,6 @@ pub fn iommu_virtio_platform(
         let behind_unit = profile.iommu().is_some();
         let options = BootOptions { profile, ..Default::default() };
 
-        // The host side: every virtio function this machine creates, and
-        // whether it was created behind the unit.
         let argv = qemu::profile_argv(&options);
         let created: Vec<&str> = argv
             .windows(2)
@@ -784,8 +782,7 @@ fn declining_is_not_free(
             log.text()
         ));
     }
-    // The console kept it, so the capture channel is the one device that
-    // proves the boot above is not simply a machine with no virtio at all.
+    // The console kept the bit, so this is not simply a machine with no virtio.
     log.must_say("access_platform=y")?;
     eprintln!("  [iommu] declined: {}", refused.join("\n  [iommu] declined: "));
     Ok(())
@@ -1012,9 +1009,6 @@ pub fn iommu_domain_isolation(
         ));
     }
 
-    // 2 KiB the NVMe driver zeroed and nothing writes: an incoming frame
-    // landing here would be twelve bytes of virtio-net header and an Ethernet
-    // frame, and the first word alone is enough to see it.
     let probe = victim + 0x800;
     let words = over_qmp(socket, probe, PROBE_WORDS, 'g')?;
     if let Some((i, word)) = words.iter().enumerate().find(|(_, w)| **w != 0) {
@@ -1026,9 +1020,7 @@ pub fn iommu_domain_isolation(
             PROBE_WORDS * 8
         ));
     }
-    // The handler's own half, read out of the offending function's `COMMAND`
-    // rather than off the line the handler printed: a device that cannot master
-    // the bus raises no second fault, which is what bounds the handler.
+    // Out of the function's own `COMMAND` rather than off the line the handler printed.
     let command = over_qmp(socket, config_space(&log, &nic)? + PCI_COMMAND, 1, 'w')?[0] as u16;
     if command & PCI_BUS_MASTER != 0 {
         return Err(format!(
@@ -1050,10 +1042,7 @@ pub fn iommu_domain_isolation(
         blocked.reason,
         PROBE_WORDS * 8
     );
-    // A second boot, and it has to be a clean one: the fault above halts the
-    // machine part-way through the driver list, so the domains that exist on
-    // that boot are only the ones bound before it. The first guest goes first —
-    // QEMU holds an exclusive write lock on the NVMe image.
+    // The first guest goes first: QEMU holds an exclusive lock on the NVMe image.
     let lane = qemu.shutdown();
     let clean =
         QemuInstance::boot_with_options(test_config, c_bins, rust_bins, BootOptions {

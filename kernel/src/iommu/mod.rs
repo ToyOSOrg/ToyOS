@@ -100,9 +100,9 @@ impl core::fmt::Display for DomainId {
     }
 }
 
-/// Why a device got no address space of its own, or nothing put in one. Carried
-/// rather than collapsed: one message for all of them sends whoever reads it
-/// looking in the wrong place.
+/// Why a device got no address space of its own, or nothing put in one; carried
+/// rather than collapsed, since one message for all of them sends whoever reads
+/// it looking in the wrong place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IommuError {
     NoUnit,
@@ -134,9 +134,8 @@ impl core::fmt::Display for IommuError {
     }
 }
 
-/// Where a device's addresses come from. Not a bare `DomainId`: a machine with
-/// no unit has to be something this type can say, or every driver grows the
-/// same branch.
+/// Where a device's addresses come from. Not a bare `DomainId`: a machine with no
+/// unit has to be something this type can say, or every driver grows the branch.
 #[derive(Clone, Copy)]
 pub enum DeviceSpace {
     /// Nothing translates here, so a device address is a physical address.
@@ -146,8 +145,7 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One of a device's own, or the machine's own with the reason — the same
-    /// policy an unusable unit gets.
+    /// One of a device's own, or the machine's own with the reason.
     pub fn create() -> Self {
         match vtd::domain::create() {
             Ok(id) => Self::Own(id),
@@ -158,8 +156,8 @@ impl DeviceSpace {
         }
     }
 
-    /// Put `bytes` of physical memory at `phys` in this space and return the
-    /// address the device must be programmed with.
+    /// Put `bytes` at `phys` in this space; returns what to program the device
+    /// with.
     ///
     /// Read and write both, always: nothing here can give a permission set a
     /// second value. The only leaf is 2 MiB, coarser than any split a driver's
@@ -180,8 +178,8 @@ impl DeviceSpace {
         }
     }
 
-    /// Move `bus:device.function` onto this space; every mapping it needs is in
-    /// place first, since the device is translating the moment this returns.
+    /// Move `bus:device.function` onto this space, every mapping it needs already
+    /// in place: the device is translating the moment this returns.
     pub fn attach(self, bus: u8, device: u8, function: u8) {
         if let Self::Own(id) = self {
             vtd::domain::attach(StreamId::pci(bus, device, function), id);
