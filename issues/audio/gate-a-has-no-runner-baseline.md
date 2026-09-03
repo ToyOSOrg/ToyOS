@@ -1,6 +1,6 @@
 ---
 status: open
-kind: defect
+kind: tooling
 opened: 2026-08-10
 ---
 
