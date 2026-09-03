@@ -698,12 +698,9 @@ struct Action {
     why: &'static str,
 }
 
-/// Whether a `uses:` value names bytes rather than a name: `@` followed by a
-/// lowercase 40-hex commit.
-///
-/// A tag is a ref its publisher moves, so a row over one declares a repository
-/// and says nothing about the code that will run on the machine every verdict
-/// here is measured on.
+/// Whether a `uses:` value names bytes: `@` and a lowercase 40-hex commit. A
+/// tag is a ref its publisher moves, so a row over one declares a repository
+/// and not the code that runs on the machine a verdict is measured on.
 fn pins_bytes(name: &str) -> bool {
     name.rsplit_once('@').is_some_and(|(owner, at)| {
         !owner.is_empty()
@@ -717,15 +714,12 @@ fn pins_bytes(name: &str) -> bool {
 /// machine a verdict is measured on. One naming a path in this repository is
 /// not a row but a file, and the check is that it resolves.
 ///
-/// **A row pins bytes**, the shape [`COMMITTED_FILES`] already is: every
-/// `uses:` is a commit and the tag it came from is a trailing comment, so a
-/// publisher moving `v4` cannot change what runs here. The price is that a
-/// security release no longer arrives by itself — somebody moves the digest,
-/// which is the point. `route.yml:128-130` already argues this for the T14's
-/// container image; an action is the same argument.
-///
-/// The walk reads `.github/workflows/` only, so a composite action's own
-/// `uses:` is unread; this tree holds no `action.yml`.
+/// **A row pins bytes**, the shape [`COMMITTED_FILES`] already is: the tag a
+/// commit came from is a trailing comment, so a publisher moving `v4` cannot
+/// change what runs here — and a security release then arrives only when
+/// somebody moves the digest, which is the point (`route.yml:128-130` argues
+/// it for the T14's image). The walk reads `.github/workflows/` only, so a
+/// composite action's own `uses:` is unread; this tree holds no `action.yml`.
 const CI_ACTIONS: &[Action] = &[
     Action {
         name: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
@@ -1967,8 +1961,7 @@ mod tests {
         assert!(!pins_bytes("actions/checkout@main"));
         assert!(!pins_bytes("actions/checkout"));
         assert!(!pins_bytes(&format!("@{sha}")));
-        // A short, a long and an upper-case digest are each not the ref git
-        // would resolve, so none of them is a pin either.
+        // Short, long and upper-case are each not a ref git would resolve.
         assert!(!pins_bytes(&format!("actions/checkout@{}", &sha[..39])));
         assert!(!pins_bytes(&format!("actions/checkout@{sha}0")));
         assert!(!pins_bytes(&format!("actions/checkout@{}", sha.to_uppercase())));

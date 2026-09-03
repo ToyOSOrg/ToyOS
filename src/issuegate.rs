@@ -22,9 +22,9 @@
 //! documentation carries no gates in this tree (`src/CLAUDE.md`): a test over
 //! prose is exactly the artifact an owner ruling deleted. The README says what
 //! the fields *mean*; this says what a file may hold, and this is what reds.
-//! **The area list is the exception**, and is read out of the README because an
-//! area is a *directory*: the claim resolves against the tree in both
-//! directions, so there the README is an artifact and not prose.
+//! **The area list is the exception**, read out of the README because an area
+//! is a *directory*: that claim resolves against the tree both ways, so there
+//! the README is an artifact and not prose.
 //!
 //! Cheap on purpose — 363 files read and parsed is milliseconds, so it runs in
 //! `cargo test --lib` on every machine that builds the tree rather than in a
@@ -67,9 +67,8 @@ const AREAS: &str = "\n## Areas\n";
 
 /// The area names [`README`] closes, read out of it rather than restated —
 /// `redlist::Registry::read`'s rule, for its reason: a restatement drifts.
-///
-/// [`AREAS`] is followed by one paragraph of backticked names; the prose after
-/// it carries backticks of its own, so the paragraph is where the list ends.
+/// [`AREAS`] is followed by one paragraph of backticked names, and the prose
+/// after it carries backticks of its own, so the paragraph is where it ends.
 fn declared_areas(root: &Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(root.join(README))
         .unwrap_or_else(|e| panic!("{README} closes the area list: {e}"));
@@ -480,10 +479,9 @@ mod tests {
         );
     }
 
-    /// The closed list against the directories, in both directions.
-    ///
-    /// A parse that found the wrong paragraph fails here rather than passing
-    /// quietly: nothing restates the ten names, so the disk is what checks them.
+    /// The closed list against the directories, both ways. A parse that found
+    /// the wrong paragraph fails here rather than passing quietly: nothing
+    /// restates the ten names, so the disk is what checks them.
     #[test]
     fn the_readme_closes_the_area_list() {
         let root = repo_root();

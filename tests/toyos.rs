@@ -422,11 +422,9 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // so it is timer-anchored despite being a screendump-content check.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
     ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
-    // The other half of the recovery branch: `screen_recoverable_untouched`
-    // reads the screen either side of a survived panic, which holds whether or
-    // not the discard did anything. This boots one guest, survives a panic and
-    // then kills the machine, and reads the panel for the second. Carrying
-    // `UNMEASURED_MS` until the shards price it.
+    // The other half of the recovery branch: the test above reads the screen
+    // either side of a survived panic, which holds whether or not the discard
+    // did anything. Carrying `UNMEASURED_MS` until the shards price it.
     ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Fast),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
@@ -706,10 +704,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // every verdict is a substring of a report the guest wrote, and there is no
     // clock in any of it.
     ("reentry_names_the_first_panic", Sched::Parallel, Tier::Fast),
-    // The kernel hasher's boot-order obligation, and the same shape: one boot
-    // that dies inside the boot phases at the marker the harness waits for, so
-    // it pays for no userland, and the verdict is a substring of what the guest
-    // wrote. Carrying `UNMEASURED_MS` until the shards price it.
+    // The kernel hasher's boot-order obligation, in the same shape as the row
+    // above and for its reasons. Carrying `UNMEASURED_MS` until the shards
+    // price it.
     ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
     // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
     // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
@@ -4851,10 +4848,8 @@ fn run_screen_test(
         }
         "screen_survived_panic_not_blamed" => {
             // `discard_capture` told from a no-op. `capture` freezes a report on
-            // every panic; the recovery branch drops it, so the *next* fatal
-            // path paints what is live rather than the panic the machine walked
-            // away from. Two deaths in one boot, and the panel must name the
-            // second.
+            // every panic and the recovery branch drops it, so two deaths in one
+            // boot and the panel must name the second.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -4867,8 +4862,7 @@ fn run_screen_test(
                 },
             );
             // Action 0 panics in syscall context, which the handler recovers
-            // from, so `capture` ran and `discard_capture` is the only thing
-            // that can have dropped what it froze.
+            // from, so `capture` ran and only `discard_capture` can drop it.
             const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
             let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
             if let Some(err) = &survived.error {
@@ -4884,8 +4878,7 @@ fn run_screen_test(
                     survived.serial
                 ));
             }
-            // The machine walked away from it, which is what makes the second
-            // death a second one.
+            // The machine walked away from it: that is what makes this a second death.
             if !qemu.command_until(
                 "run test_rs_test_panic_child 3",
                 FATAL_HALT_NONCE,
@@ -4900,9 +4893,7 @@ fn run_screen_test(
             let text = dump.text();
             print_screen(name, &text);
             // The nonce is logged after the first panic's snapshot was frozen,
-            // so a snapshot the discard failed to drop cannot carry it: the
-            // panel would be the survived panic's report, standing as the cause
-            // of a death it did not cause.
+            // so a snapshot the discard failed to drop cannot carry it.
             if !text.contains(FATAL_HALT_NONCE) {
                 return Err(format!(
                     "the panel does not name the fatal halt: the survived panic's frozen \
@@ -10189,16 +10180,12 @@ fn run_machine_test(
             Ok(())
         }
         "hash_seed_precedes_every_map" => {
-            // Dropping hashbrown's `default-hasher` makes the compiler hold that
-            // every kernel container names the kernel's own `BuildHasher`. The
-            // one wrong answer it cannot reach is a container built *before*
-            // `hasher::seed()` — that container works, and orders alike on every
-            // boot of the image, which is exactly the property a `BTreeMap` was
-            // chosen over for a key that crossed the boundary. So the
-            // constructor refuses, and this is that refusal executed.
+            // The compiler holds that every kernel container names the kernel's
+            // own `BuildHasher`; the one wrong answer it cannot reach is one
+            // built *before* `hasher::seed()`, which works and hashes alike on
+            // every boot of the image. This is that refusal executed.
             //
-            // The text is `kernel/src/hasher.rs`'s `UNSEEDED`, matched as a
-            // prefix; the kernel constant carries the rest of the sentence.
+            // `kernel/src/hasher.rs`'s `UNSEEDED`, matched as a prefix.
             const UNSEEDED: &str = "kernel hasher: a hash container was built before hasher::seed()";
             let qemu = QemuInstance::boot_with_options(
                 test_config,
@@ -10214,8 +10201,7 @@ fn run_machine_test(
             said.push(&qemu.uart_log());
             let line = said.must_say(UNSEEDED)?;
             eprintln!("  [hasher] {}", line.trim());
-            // Before `mm::init`, which is what makes this a boot-order
-            // obligation rather than a late mistake: the boot does not finish.
+            // Before `mm::init`, so the boot does not finish.
             said.must_not_say(qemu::DEFAULT_READY)?;
             Ok(())
         }

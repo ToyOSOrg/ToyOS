@@ -1,41 +1,33 @@
 //! The one `BuildHasher` a kernel hash container may use, seeded once from
 //! `RDRAND` before any container exists.
 //!
-//! **The compiler holds the rule that `src/kernelkeys.rs` used to scan for.**
 //! `kernel/Cargo.toml` takes hashbrown without `default-hasher`, so
 //! `DefaultHashBuilder` has no `BuildHasher` impl and `HashMap::new` /
-//! `HashMap::with_capacity` do not exist (hashbrown 0.16.1, `src/hasher.rs:19`
-//! and `src/map.rs:261`). Every spelling at once — an import alias, a
-//! turbofish, a type inferred from its constructor — stops compiling until it
-//! names this hasher, which no text scan could reach.
+//! `HashMap::with_capacity` do not exist: every spelling of a container — an
+//! import alias, a turbofish, a type inferred from its constructor — stops
+//! compiling until it names this hasher.
 //!
-//! **A container built before [`seed`] is the one silent wrong answer left**,
-//! so it is not left silent: [`KernelHashState::new`] panics by name. An
-//! unseeded state would hash identically on every boot of an image, which is
-//! the property `BTreeMap` was chosen over for a key that crossed the
-//! boundary — and it would be invisible, because the map would work.
+//! **A container built before [`seed`] is the one wrong answer that would be
+//! silent**, because it would work: it hashes alike on every boot of an image,
+//! the property a `BTreeMap` is chosen over for a key that crossed the
+//! boundary. So [`KernelHashState::new`] panics by name instead.
 //!
-//! What is *not* held here is the origin of a key. `src/kernelkeys.rs`'s
-//! `DECLARED` table stays for that: whether a key is the kernel's own is a
-//! whole-program question and a reviewer's obligation.
+//! The origin of a key is not held here. `src/kernelkeys.rs` keeps that.
 
 use core::hash::{BuildHasher, Hasher};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::cpu;
 
-/// The seed, and `0` until [`seed`] has run — the value [`seed`] refuses to
+/// The seed, and `0` until [`seed`] has run — the one value [`seed`] refuses to
 /// draw, so it means "not seeded" and nothing else.
 static SEED: AtomicU64 = AtomicU64::new(0);
 
-/// The refusal a container built too early earns.
 pub const UNSEEDED: &str =
     "kernel hasher: a hash container was built before hasher::seed(), so its order is fixed \
      across every boot of this image";
 
-/// The refusal a second [`seed`] earns: two seeds in one boot means some
-/// container was built against the first, which is the boot-order bug above
-/// wearing a different face.
+/// Two seeds in one boot means a container was built against the first.
 const RESEEDED: &str = "kernel hasher: seed() ran twice in one boot";
 
 /// Draw the boot's seed. Called once, before any container is built.
@@ -47,9 +39,7 @@ pub fn seed() {
     assert_eq!(SEED.swap(drawn, Ordering::Release), 0, "{RESEEDED}");
 }
 
-/// splitmix64's finalizer: one input bit changed moves half the output bits, so
-/// keys the caller cannot choose still spread and keys it can are not worth
-/// choosing.
+/// splitmix64's finalizer: one input bit changed moves half the output bits.
 const fn mix(mut x: u64) -> u64 {
     x ^= x >> 30;
     x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -58,8 +48,7 @@ const fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// The kernel's `BuildHasher`. Carries the seed by value, so a container built
-/// after [`seed`] keeps hashing the same way for its whole life.
+/// Carries the seed by value, so a container keeps hashing alike for its life.
 #[derive(Clone, Copy, Debug)]
 pub struct KernelHashState(u64);
 
@@ -101,8 +90,8 @@ impl Hasher for KernelHasher {
             last[..tail.len()].copy_from_slice(tail);
             self.0 = mix(self.0 ^ u64::from_le_bytes(last));
         }
-        // The length too: without it `b"ab"` and `b"ab\0"` differ only in a
-        // zero byte the padding above already wrote.
+        // The length too: `b"ab"` and `b"ab\0"` otherwise differ only in a zero
+        // byte the padding above already wrote.
         self.0 = mix(self.0 ^ bytes.len() as u64);
     }
 
@@ -127,13 +116,11 @@ impl Hasher for KernelHasher {
     }
 }
 
-/// The only `HashMap` `kernel/src` may name, and the reason a construction site
-/// reads `HashMap::default()`: `new` belongs to the default hasher this kernel
-/// does not have.
+/// The only `HashMap` `kernel/src` may name; a site reads `HashMap::default()`
+/// because `new` belongs to the default hasher this kernel does not have.
 pub type HashMap<K, V> = hashbrown::HashMap<K, V, KernelHashState>;
 
-/// Build a container before [`seed`] — the actuator that proves the refusal
-/// above is live rather than a sentence in a header. The panic is the point.
+/// Build a container before [`seed`]: the panic is the point.
 #[cfg(feature = "boot-actuators")]
 pub fn probe_before_seed() {
     let mut probe: HashMap<u64, u64> = HashMap::default();
