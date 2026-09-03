@@ -39,7 +39,7 @@ jobs:
     steps:
       # Full history: the issue tracker's citation gate derives deleted slugs
       # from `git log` and refuses to run over a shallow clone.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -55,7 +55,7 @@ jobs:
       # were 133 s, 184 s and 48 s of it. A cache written on `main` is readable
       # from every branch, which is the only reason this helps a branch's first
       # run at all.
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           # One `target` per workspace, which is all there is: a member builds
           # into its workspace root's `target`, never its own. The sixteen
@@ -892,7 +892,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: file or update "nightly is red"
         env:
