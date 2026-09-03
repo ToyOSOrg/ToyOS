@@ -51,7 +51,6 @@ pub struct MadtHalt {
     pub list_len: usize,
 }
 
-/// Every interrupt controller structure, in firmware's order.
 pub struct MadtEntries<P> {
     table: Table<P>,
     offset: usize,

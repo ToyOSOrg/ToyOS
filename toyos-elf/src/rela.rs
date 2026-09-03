@@ -231,6 +231,47 @@ impl core::fmt::Display for RelocError {
     }
 }
 
+/// The tables a loader reads *while* it is writing relocations, as
+/// image-relative `[start, end)`. An absent table is an empty range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadTables {
+    pub dynsym: (u64, u64),
+    pub dynstr: (u64, u64),
+    pub rela: (u64, u64),
+    pub jmprel: (u64, u64),
+}
+
+/// Refuse an image that puts a table the loader reads inside the window
+/// relocations may write into.
+///
+/// A loader resolving symbols holds a `&[u8]` over `.dynsym` and `.dynstr`, and
+/// one over each relocation table it is iterating, across writes into the same
+/// allocation. Disjointness is what makes those borrows sound, and this is
+/// where it is decided rather than argued: a `.so` is untrusted input and
+/// chooses its own layout.
+///
+/// **A conforming image never triggers this.** The ELF gABI gives `.dynsym`,
+/// `.dynstr`, `.rela.dyn` and `.rela.plt` `SHF_ALLOC` without `SHF_WRITE`, so a
+/// linker places them in a non-writable segment and no part of them can be
+/// inside the writable window.
+pub fn tables_outside_window(
+    tables: &ReadTables,
+    window: (u64, u64),
+) -> Result<(), &'static str> {
+    for (range, refusal) in [
+        (tables.dynsym, "ELF: .dynsym lies inside the module's writable window"),
+        (tables.dynstr, "ELF: .dynstr lies inside the module's writable window"),
+        (tables.rela, "ELF: .rela.dyn lies inside the module's writable window"),
+        (tables.jmprel, "ELF: .rela.plt lies inside the module's writable window"),
+    ] {
+        let both_hold_bytes = range.1 > range.0 && window.1 > window.0;
+        if both_hold_bytes && range.0 < window.1 && window.0 < range.1 {
+            return Err(refusal);
+        }
+    }
+    Ok(())
+}
+
 /// Check every entry the loader will ever write against the window it may write
 /// into and the symbol table it may resolve through.
 ///

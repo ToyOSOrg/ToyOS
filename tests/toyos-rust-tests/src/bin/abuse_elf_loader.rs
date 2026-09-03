@@ -270,6 +270,20 @@ fn dlopen_survives(name: &str, bytes: &[u8]) {
     drop(unsafe { libloading::Library::new(&path) });
 }
 
+/// `dlopen` must refuse this file. A success is the defect: each case here is
+/// an image whose relocations would be written through a range the loader is
+/// at that moment holding a `&[u8]` over, or into a page it maps `ReadExec`.
+fn dlopen_refused(name: &str, bytes: &[u8]) {
+    let path = write_file(name, bytes);
+    match unsafe { libloading::Library::new(&path) } {
+        Ok(lib) => {
+            drop(lib);
+            panic!("{name}: dlopen loaded an image the loader must refuse");
+        }
+        Err(e) => assert!(!format!("{e}").is_empty(), "{name}: dlopen error message"),
+    }
+}
+
 /// A minimal, honest exe: one PT_LOAD covering the whole file at vaddr 0.
 fn base_exe(size: usize) -> Elf {
     Elf::new(size).ph(Phdr::load(0, 0, size as u64, size as u64, PF_R | PF_X)).entry(0)
@@ -502,6 +516,17 @@ fn main() {
             .build(),
     );
 
+    // 15. `.dynsym`, `.dynstr` and `.rela.dyn` placed inside the module's own
+    //     writable window. The loader holds a `&[u8]` over each across the
+    //     writes, and the window relocations were bounded to began 2 MiB-rounded
+    //     *down* from the first writable byte — so this image loaded, and the
+    //     borrow and the write covered the same bytes.
+    dlopen_refused("tables_in_write_window.so", &so_with_tables_in_write_window());
+
+    // 16. The other half of that rounding: a RELATIVE write below the first
+    //     writable byte, which `page_prot` maps `ReadExec` in every process.
+    dlopen_refused("reloc_below_writable.so", &so_with_reloc_below_writable());
+
     // 14. A cross-module initial-exec TLS reference resolves to `S + A - tp`.
     f13_cross_module_addend_is_kept();
 
@@ -555,6 +580,52 @@ fn so_with_dtpmod() -> Vec<u8> {
         .poke(0x3001, b"tls_nowhere\0")
         .rela(0x2800, 0x20_0000, (1u64 << 32) | R_X86_64_DTPMOD64, 0)
         .shdr(0x3800, SHT_DYNSYM, 0x2000, 48, 24)
+        .build()
+}
+
+/// Text at `[0, 0x1000)`, writable data at `[0x1000, 0x5000)`, and every table
+/// the loader reads inside that writable range. `rw_lo & !(2 MiB - 1)` is 0, so
+/// the window the old bound permitted was the whole image.
+fn so_with_tables_in_write_window() -> Vec<u8> {
+    Elf::new(0x5000)
+        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
+        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x1000, vaddr: 0x1000, filesz: 0x200, memsz: 0x200, align: 8 })
+        .sections(0x3800, 1, 64)
+        .dynamic(0x1000, &[
+            (DT_SYMTAB, 0x2000),
+            (DT_STRTAB, 0x3000),
+            (DT_STRSZ, 0x100),
+            (DT_RELA, 0x2800),
+            (DT_RELASZ, 24),
+        ])
+        .sym(0x2018, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
+        .poke(0x3001, b"in_the_window\0")
+        // Inside the writable range either way, so the refusal is the tables'.
+        .rela(0x2800, 0x1400, R_X86_64_RELATIVE, 0)
+        .shdr(0x3800, SHT_DYNSYM, 0x2000, 48, 24)
+        .build()
+}
+
+/// The same shape with its tables in the text segment, and one RELATIVE write
+/// at `0x100` — below `rw_lo`, inside what the rounded-down window permitted.
+fn so_with_reloc_below_writable() -> Vec<u8> {
+    Elf::new(0x5000)
+        .ph(Phdr::load(0, 0, 0x1000, 0x1000, PF_R | PF_X))
+        .ph(Phdr::load(0x1000, 0x1000, 0x4000, 0x4000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x600, filesz: 0x200, memsz: 0x200, align: 8 })
+        .sections(0x900, 1, 64)
+        .dynamic(0x600, &[
+            (DT_SYMTAB, 0x200),
+            (DT_STRTAB, 0x300),
+            (DT_STRSZ, 0x100),
+            (DT_RELA, 0x800),
+            (DT_RELASZ, 24),
+        ])
+        .sym(0x218, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
+        .poke(0x301, b"below_the_window\0")
+        .rela(0x800, 0x100, R_X86_64_RELATIVE, 0)
+        .shdr(0x900, SHT_DYNSYM, 0x200, 48, 24)
         .build()
 }
 

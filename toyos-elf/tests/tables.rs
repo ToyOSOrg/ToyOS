@@ -127,6 +127,56 @@ fn validation_refuses_a_write_outside_the_window_by_name() {
     assert_eq!(rela::validate(RelaTable::new(&fits).iter(), window, 4, None), Ok(()));
 }
 
+/// A table the loader reads while it writes must not lie inside the range it
+/// writes, and the refusal names which one.
+///
+/// The window is `/bin/shell`'s own, `(0x145000, 0x155000)` — the number
+/// `real.rs` reads off the committed `toyos-ld` header fixture — against the
+/// range the loader used to permit, which is that window's start rounded down
+/// to the 2 MiB page: `[0, 0x200000)`. That file's `.rela.dyn` sits at
+/// `0x166490`, outside the first and inside the second.
+#[test]
+fn a_read_table_inside_the_write_window_is_refused_by_name() {
+    let exact = (0x145000u64, 0x155000u64);
+    let rounded = (0u64, 0x200000u64);
+
+    let shell = rela::ReadTables { rela: (0x166490, 0x1664f0), ..Default::default() };
+    assert_eq!(rela::tables_outside_window(&shell, exact), Ok(()));
+    assert_eq!(
+        rela::tables_outside_window(&shell, rounded),
+        Err("ELF: .rela.dyn lies inside the module's writable window"),
+        "the rounded-down window is what covered a conforming image's own tables"
+    );
+
+    for (tables, refusal) in [
+        (
+            rela::ReadTables { dynsym: (0x146000, 0x146030), ..Default::default() },
+            "ELF: .dynsym lies inside the module's writable window",
+        ),
+        (
+            rela::ReadTables { dynstr: (0x144ff0, 0x145010), ..Default::default() },
+            "ELF: .dynstr lies inside the module's writable window",
+        ),
+        (
+            rela::ReadTables { jmprel: (0x154ff8, 0x155018), ..Default::default() },
+            "ELF: .rela.plt lies inside the module's writable window",
+        ),
+    ] {
+        assert_eq!(rela::tables_outside_window(&tables, exact), Err(refusal));
+    }
+
+    // Touching at an edge is not overlapping; an absent table is an empty range
+    // and intersects nothing, and neither does an empty window.
+    let abutting = rela::ReadTables {
+        dynsym: (0x144000, 0x145000),
+        dynstr: (0x155000, 0x156000),
+        ..Default::default()
+    };
+    assert_eq!(rela::tables_outside_window(&abutting, exact), Ok(()));
+    assert_eq!(rela::tables_outside_window(&Default::default(), exact), Ok(()));
+    assert_eq!(rela::tables_outside_window(&shell, (0x145000, 0x145000)), Ok(()));
+}
+
 /// psABI oracle: every entry is applied or the object rejected. An 8-byte write
 /// in a page's last 7 bytes is refused for a chunked writer, accepted for `None`.
 #[test]

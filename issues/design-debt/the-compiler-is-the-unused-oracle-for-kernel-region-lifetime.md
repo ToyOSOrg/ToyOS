@@ -9,13 +9,9 @@ opened: 2026-09-01
 `kernel/src/mm/region.rs:1` already says it: "`KernelSlice` is `Copy`, carries
 no lifetime, and can outlive its `Allocation`". The type is declared at
 `region.rs:15` with a base and a size in the two fields under it, and hands out
-a real slice at `region.rs:68`. Two records turn on that:
-
-- `issues/design-debt/kernelslice-outlives-its-allocation.md` — the allocation
-  can be gone.
-- `issues/isolation/kernelslice-over-user-memory.md` — the allocation can be a
-  page userland still writes, so a shared Rust reference claims an exclusivity
-  the mapping does not give.
+a real slice at `region.rs:68`. One record turns on that:
+`issues/design-debt/kernelslice-outlives-its-allocation.md` — the allocation can
+be gone.
 
 **The shape of the answer is already written down, in the first of those.** It
 names `mm::Dma` as the precedent — `Dma<'pool>` borrows the pool it came out of,

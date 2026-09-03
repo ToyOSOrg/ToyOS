@@ -1,12 +1,5 @@
 //! The differential: QEMU's own tables, decoded here, against what the kernel
 //! printed on the boot they were taken off.
-//!
-//! `fixtures/*.bin` is every table QEMU 11.1.0 published to a `Profile::Headless`
-//! guest, read out of guest physical memory over the monitor's `xp` — the
-//! host's read, not the guest's, so nothing in this file came through the
-//! decoder it judges. The expectations are the lines that boot's kernel logged
-//! with the decoder that lived in `kernel/src/drivers/acpi.rs`; the commit that
-//! added this file carries both.
 
 mod common;
 
@@ -110,16 +103,12 @@ fn the_fadt_names_the_power_block_and_the_dsdt() {
     assert_eq!(dsdt_address(&fadt), 0x7fb7_a000);
 }
 
-/// The FADT this machine publishes is revision 3, so the i8042 driver's
-/// firmware claim is the one it reads and not the "too old to say" arm.
 #[test]
 fn the_boot_architecture_flags_come_off_a_revision_that_defines_them() {
     let (revision, flags) = iapc_boot_arch(machine(), RSDP).expect("FADT");
     assert_eq!((revision, flags), (3, 0x2));
 }
 
-/// The walk skips the entries it is not looking for and finds the one it is,
-/// wherever in the XSDT it sits: DMAR is the fifth of six.
 #[test]
 fn the_xsdt_walk_reaches_every_entry() {
     let m = machine();

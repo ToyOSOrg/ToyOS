@@ -5,9 +5,6 @@
 //! is the crate's own: no panic on any input path, no walk that does not
 //! terminate, and one [`TableError`] per reason so the caller's log line names
 //! what was wrong rather than "malformed".
-//!
-//! What this corpus does **not** reach is stated at the bottom in tests rather
-//! than in prose, so extending the decoder reds the statement with it.
 
 mod common;
 
@@ -22,9 +19,7 @@ const XSDT_AT: u64 = 0x2_0000;
 const TABLE_AT: u64 = 0x3_0000;
 
 
-// ---- lengths ----
 
-/// A header whose declared length cannot hold the fields the caller asked for.
 #[test]
 fn a_length_shorter_than_the_fixed_part_is_refused_with_both_numbers() {
     let head = rsdp(XSDT_AT, 2, 36);
@@ -60,7 +55,6 @@ fn a_length_under_the_header_is_refused_even_when_the_caller_needs_nothing() {
     );
 }
 
-/// A length that runs past the memory the reader can reach.
 #[test]
 fn a_length_longer_than_the_mapping_is_refused_before_a_byte_is_read() {
     let head = rsdp(XSDT_AT, 2, 36);
@@ -78,7 +72,6 @@ fn a_length_longer_than_the_mapping_is_refused_before_a_byte_is_read() {
     assert_eq!(hpet_base(m, RSDP_AT).err(), Some(TableError::Absent));
 }
 
-/// A length above the crate's own ceiling, which is what bounds the checksum walk.
 #[test]
 fn a_length_over_the_ceiling_is_refused_without_walking_it() {
     let head = rsdp(XSDT_AT, 2, 36);
@@ -93,7 +86,6 @@ fn a_length_over_the_ceiling_is_refused_without_walking_it() {
     );
 }
 
-// ---- checksums ----
 
 #[test]
 fn a_table_that_does_not_sum_to_zero_is_refused() {
@@ -128,9 +120,7 @@ fn two_edits_that_cancel_pass_the_checksum_and_decode_to_the_lie() {
     );
 }
 
-// ---- MADT entry counts ----
 
-/// The infinite-loop shape: an entry declaring zero bytes.
 #[test]
 fn a_madt_entry_of_zero_length_halts_the_walk_instead_of_looping() {
     let mut list = entry(0, 8, &[0, 0, 1, 0, 0, 0]);
@@ -152,7 +142,6 @@ fn a_madt_entry_of_zero_length_halts_the_walk_instead_of_looping() {
     );
 }
 
-/// An entry whose declared length runs past the end of the structure list.
 #[test]
 fn a_madt_entry_running_past_the_list_halts_the_walk() {
     let mut list = entry(1, 12, &[0, 0, 0x00, 0x00, 0xc0, 0xfe, 0, 0, 0, 0]);
@@ -168,8 +157,6 @@ fn a_madt_entry_running_past_the_list_halts_the_walk() {
     assert_eq!(walk[1], Err(MadtHalt { at: 12, declared: 200, list_len: 14 }));
 }
 
-/// A type this kernel acts on, declared too short to hold the fields it acts
-/// on: skipped as unknown rather than read past its own length.
 #[test]
 fn a_madt_entry_too_short_for_its_own_type_is_not_decoded_as_that_type() {
     let t = madt(&entry(1, 6, &[0, 0, 0xff, 0xff]));
@@ -180,8 +167,6 @@ fn a_madt_entry_too_short_for_its_own_type_is_not_decoded_as_that_type() {
     assert_eq!(madt_entries(&table).collect::<Vec<_>>(), [Ok(MadtEntry::Other(1))]);
 }
 
-/// A MADT whose declared length leaves a one-byte tail: a structure header
-/// needs two, so the walk ends without a halt.
 #[test]
 fn a_trailing_byte_that_cannot_be_an_entry_header_ends_the_walk_quietly() {
     let mut list = entry(0, 8, &[0, 3, 1, 0, 0, 0]);
@@ -197,7 +182,6 @@ fn a_trailing_byte_that_cannot_be_an_entry_header_ends_the_walk_quietly() {
     );
 }
 
-// ---- the root pointers ----
 
 #[test]
 fn an_xsdt_entry_pointing_at_nothing_is_skipped_and_the_next_one_is_read() {
@@ -245,15 +229,12 @@ fn the_root_pointer_is_refused_one_reason_at_a_time() {
     }
 }
 
-/// The RSDP is the one structure read before anything has bounded it, so an
-/// address the reader cannot reach at all is refused there.
 #[test]
 fn an_rsdp_address_the_reader_cannot_reach_is_refused() {
     let regions: &[(u64, &[u8])] = &[];
     assert_eq!(hpet_base(Machine { regions }, RSDP_AT).err(), Some(TableError::BadRsdp));
 }
 
-// ---- the FADT's optional tail ----
 
 /// An ACPI 1.0-length FADT: 116 bytes, no `X_DSDT`, and the century byte still
 /// inside it. The 32-bit `DSDT` is what such a table names.
@@ -296,8 +277,6 @@ fn a_fadt_too_short_for_the_boot_architecture_flags_is_refused() {
     assert_eq!(rtc_century(m, RSDP_AT), Ok(Century::Absent));
 }
 
-/// A revision claiming 2.0 over a table too short to hold `X_DSDT`: the length
-/// decides, never the revision.
 #[test]
 fn a_revision_that_promises_x_dsdt_over_a_table_that_cannot_hold_it_falls_back() {
     let mut body = vec![0u8; 80];
@@ -310,8 +289,6 @@ fn a_revision_that_promises_x_dsdt_over_a_table_that_cannot_hold_it_falls_back()
     assert_eq!(dsdt_address(&fadt), 0x11);
 }
 
-/// A century byte outside CMOS RAM is a distinct answer from "names none":
-/// the caller ignores it, and says which of the two it saw.
 #[test]
 fn a_century_register_outside_cmos_ram_is_told_apart_from_none() {
     for (byte, want) in [
@@ -332,10 +309,7 @@ fn a_century_register_outside_cmos_ram_is_told_apart_from_none() {
     }
 }
 
-// ---- the whole claim, over every single-byte mutation ----
 
-/// Every table this crate decodes, at the address it sat at on the boot the
-/// fixtures came off.
 const FIXTURES: &[(&str, &[u8], u64)] = &[
     ("rsdp", include_bytes!("../fixtures/rsdp.bin"), 0x7fb7_e014),
     ("xsdt", include_bytes!("../fixtures/xsdt.bin"), 0x7fb7_d0e8),
@@ -427,7 +401,6 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
     assert!(halts[1] > 0, "no resealed mutation halted a walk, so that arm is untested here");
 }
 
-// ---- what this corpus does not reach ----
 
 /// **Stated as tests, so extending the decoder reds the statement.** Nothing in
 /// this crate reads what is *inside* a DSDT — `find_s5_slp_typ` scans AML and
@@ -458,7 +431,6 @@ fn the_two_things_the_corpus_does_not_cover_are_the_two_the_crate_does_not_do() 
     );
 }
 
-/// The shared reader is itself an instrument, so its bounds are checked here.
 #[test]
 fn the_shared_reader_refuses_what_it_does_not_hold() {
     let bytes = [1u8, 2, 3, 4];

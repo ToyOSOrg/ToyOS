@@ -122,7 +122,6 @@ impl<P: Phys> Table<P> {
         self.len == 0
     }
 
-    /// The physical address the table starts at.
     pub fn base(&self) -> u64 {
         self.base
     }
@@ -131,7 +130,6 @@ impl<P: Phys> Table<P> {
         self.phys
     }
 
-    /// One byte at `offset`, or `None` when the table is not that long.
     pub fn byte(&self, offset: usize) -> Option<u8> {
         (offset < self.len).then(|| self.phys.byte(self.base + offset as u64))
     }
