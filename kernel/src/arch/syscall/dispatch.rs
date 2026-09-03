@@ -275,7 +275,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             },
         ),
         SYS_CLOCK_EPOCH => {
-            crate::clock::utc_secs().map_or(SyscallError::NotSupported.to_u64(), |secs| secs)
+            crate::clock::utc_secs().unwrap_or(SyscallError::NotSupported.to_u64())
         }
         // The header is ambient like SYS_CPU_COUNT; the roster after it costs
         // Rights::ROSTER because it is every process in the machine by name.
