@@ -78,21 +78,16 @@ impl FileBlocks {
     }
 }
 
-/// Attempts one block read may make before its refusal is the caller's answer.
-///
-/// A `BudgetExpired` is a claim about the caller's clock and not about the
-/// disk, so it is never a loss and never an answer — `kernel/CLAUDE.md` states
-/// the rule. Each attempt here is above `block::Partition`'s device lock, so it
-/// queues afresh with a whole `block::OPERATION` to spend; four of them bound
-/// what a page fault can cost while the shared controller is busy.
+/// Attempts one block read may make before its refusal is the caller's answer;
+/// four of them bound what a page fault costs while the controller is busy.
 const BUDGET_ATTEMPTS: u32 = 4;
 
-/// One block of `cache`, retried while the refusal is the budget's.
-///
-/// It cannot park between attempts, unlike every other retry ladder in this
-/// kernel: a demand-paging fill runs under the process-data lock, and a park
-/// there is the runtime panic `kernel/CLAUDE.md` names. Re-acquiring the device
-/// lock is the wait.
+/// One block of `cache`, retried while the refusal is the budget's — a
+/// `BudgetExpired` is the caller's clock and never a loss, and each attempt
+/// here is above the device lock, so it queues afresh with a whole
+/// `block::OPERATION`. It cannot park between attempts, unlike every other
+/// retry ladder here: a demand-paging fill runs under the process-data lock,
+/// where a park is the runtime panic `kernel/CLAUDE.md` names.
 fn read_block_retrying(
     cache: &page_cache::Cached,
     block: u64,

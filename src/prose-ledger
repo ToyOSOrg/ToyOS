@@ -103,7 +103,7 @@ kernel/src/elf/index.rs 23 0
 kernel/src/elf/mod.rs 108 0
 kernel/src/elf/reloc.rs 38 0
 kernel/src/fat32_adapter.rs 183 0
-kernel/src/file_backing.rs 31 0
+kernel/src/file_backing.rs 39 0
 kernel/src/file_cache.rs 113 0
 kernel/src/fs_rename.rs 18 0
 kernel/src/gpt.rs 49 0
@@ -250,7 +250,7 @@ tests/common/stats.rs 44 0
 tests/common/storage.rs 99 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
-tests/common/volumes.rs 626 3
+tests/common/volumes.rs 628 3
 tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
