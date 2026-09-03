@@ -43,6 +43,16 @@ fn main() {
                 eprintln!("toyos-ld: cannot write {}: {e}", tmp.display());
                 process::exit(1);
             });
+            // The output is a program, and `fs::write` creates at the umask —
+            // 0644 under the usual one. The rename carries this inode.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| {
+                    eprintln!("toyos-ld: cannot make {} executable: {e}", tmp.display());
+                    process::exit(1);
+                });
+            }
             fs::rename(&tmp, &args.output).unwrap_or_else(|e| {
                 eprintln!("toyos-ld: cannot rename {} -> {}: {e}", tmp.display(), args.output.display());
                 process::exit(1);
