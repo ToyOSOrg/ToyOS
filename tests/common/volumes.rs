@@ -2177,6 +2177,17 @@ pub fn boot_volume_metadata_error(
                  refused read into NotFound.\n{log}"
             ));
         }
+        // The class and not merely "not NotFound": a refused read is
+        // `IoError::Device`, then `SyscallError::Io`, then `ErrorKind::Other`.
+        if !said.contains("kind=Other") {
+            return Err(format!(
+                "{what} of a volume that refused every read answered {said}\n\
+                 A device that would not answer has to reach the caller as the I/O class \
+                 (`SyscallError::Io`, `ErrorKind::Other`). That spelling is owed a change and \
+                 this site moves with it — the record is\n\
+issues/design-debt/std-maps-a-device-error-to-other-not-uncategorized.md\n{log}"
+            ));
+        }
     }
 
     // 4. And it is this volume's refusal and not the machine's. The other FAT
