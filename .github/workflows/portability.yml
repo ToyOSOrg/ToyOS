@@ -121,7 +121,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # `actions/checkout` does add this — into a *temporary* global git config
       # it then takes away again ("Temporarily overriding HOME" in its own log),
@@ -267,7 +267,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: the declared QEMU, pinned via brew where brew can honor it
         run: |
@@ -347,7 +347,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: rust
         run: rustc -vV
@@ -403,7 +403,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: file or update "nightly is red"
         env:

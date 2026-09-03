@@ -425,6 +425,10 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // so it is timer-anchored despite being a screendump-content check.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
     ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
+    // The other half of the recovery branch: the test above reads the screen
+    // either side of a survived panic, which holds whether or not the discard
+    // did anything. Nightly at 8,477 ms, over `FAST_COMMIT_MS`: two guests.
+    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
     ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
@@ -705,6 +709,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // every verdict is a substring of a report the guest wrote, and there is no
     // clock in any of it.
     ("reentry_names_the_first_panic", Sched::Parallel, Tier::Fast),
+    // The kernel hasher's boot-order obligation, in the row above's shape and
+    // for its reasons.
+    ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
     // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
     // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
     ("double_panic_names_the_fault", Sched::Parallel, Tier::Nightly),
@@ -5049,6 +5056,68 @@ fn run_screen_test(
             print_screen(name, &text);
             if !text.contains("Boot: complete") {
                 return Err(format!("nothing on screen to preserve\ndecoded screen:\n{text}"));
+            }
+            Ok(())
+        }
+        "screen_survived_panic_not_blamed" => {
+            // `discard_capture` told from a no-op: `capture` freezes a report on
+            // every panic and the recovery branch drops it, so two deaths in one
+            // boot and the panel must name the second. Action 0 panics in
+            // syscall context, which the handler recovers from.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Gop,
+                    qmp: true,
+                    kernel_features: ACTUATOR_KERNEL,
+                    ..Default::default()
+                },
+            );
+            const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
+            let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
+            if let Some(err) = &survived.error {
+                return Err(format!("the survivable panic never completed: {err}"));
+            }
+            if survived.exit_code == Some(0) {
+                return Err("the survivable panic did not kill the child".to_string());
+            }
+            if !survived.serial.contains(USERSPACE_PANIC) {
+                return Err(format!(
+                    "no kernel panic in the child's output, so there is no capture to \
+                     discard and the rest of this test would pass vacuously\nserial:\n{}",
+                    survived.serial
+                ));
+            }
+            // The machine walked away from it: that is what makes this a second death.
+            if !qemu.command_until(
+                "run test_rs_test_panic_child 3",
+                FATAL_HALT_NONCE,
+                Duration::from_secs(15),
+            ) {
+                return Err(format!(
+                    "{FATAL_HALT_NONCE:?} never reached the console, so the guest did not \
+                     survive the first panic and there is no second death to read"
+                ));
+            }
+            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
+            let text = dump.text();
+            print_screen(name, &text);
+            // The nonce is logged after the first panic's snapshot was frozen,
+            // so a snapshot the discard failed to drop cannot carry it.
+            if !text.contains(FATAL_HALT_NONCE) {
+                return Err(format!(
+                    "the panel does not name the fatal halt: the survived panic's frozen \
+                     report was painted as the cause of death, so `discard_capture` did not \
+                     drop it\ndecoded screen:\n{text}"
+                ));
+            }
+            if dump.fill() != FILL_FATAL {
+                return Err(format!(
+                    "the report is on screen but the fill is {:?}, not the fatal {FILL_FATAL:?}",
+                    dump.fill()
+                ));
             }
             Ok(())
         }
@@ -10327,6 +10396,31 @@ fn run_machine_test(
             survived.push(&qemu.drain_serial(CARRIED_ON));
             survived.must_say(qemu::DEFAULT_READY)?;
             eprintln!("  [usbd] a kernel thread's panic killed the thread and the machine booted");
+            Ok(())
+        }
+        "hash_seed_precedes_every_map" => {
+            // `kernel/src/hasher.rs`'s `UNSEEDED`, as a prefix: the wrong seed
+            // the compiler cannot reach, because the container works. Its other
+            // two are unrepresented here — both CPU models carry `+rdrand`
+            // (`src/lib.rs:73-76`) and QEMU's DRNG always answers — so
+            // `NO_RDRAND` and `NO_ENTROPY` are mutation-measured.
+            const UNSEEDED: &str = "kernel hasher: a hash container was built before hasher::seed()";
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    kernel_params: &["test-hash-before-seed"],
+                    ready_marker: UNSEEDED,
+                    ..Default::default()
+                },
+            );
+            let mut said = serial::Serial::boot(&qemu);
+            said.push(&qemu.uart_log());
+            let line = said.must_say(UNSEEDED)?;
+            eprintln!("  [hasher] {}", line.trim());
+            // Before `mm::init`, so the boot does not finish.
+            said.must_not_say(qemu::DEFAULT_READY)?;
             Ok(())
         }
         "reentry_names_the_first_panic" => {

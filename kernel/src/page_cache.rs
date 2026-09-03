@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
+use crate::hasher::{HashMap, KernelHashState};
 
 use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId};
 use crate::mm::PAGE_BYTES;
@@ -114,7 +114,7 @@ impl PageCache {
         let max_slots = block::metadata_cache_blocks();
         Self {
             // Reserved up front so `index_capacity` reports the real ceiling immediately.
-            block_to_slot: HashMap::with_capacity(max_slots),
+            block_to_slot: HashMap::with_capacity_and_hasher(max_slots, KernelHashState::new()),
             slot_to_block: Vec::with_capacity(max_slots),
             dirty: Vec::with_capacity(max_slots),
             referenced: Vec::with_capacity(max_slots),

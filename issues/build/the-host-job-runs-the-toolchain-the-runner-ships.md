@@ -62,8 +62,9 @@ default 1.97.1 after the fix.
 
 ## The decision this tree has not made for the compiler the way it made it for everything else that moves
 
-`issues/build/an-action-tag-pins-a-name-and-not-bytes.md` (still open) already
-names the pattern: `route.yml:131` pins the T14's image to a digest — "a
+`issues/build/two-container-images-one-unpinned-and-one-unconsumed.md` (still
+open) already names the pattern: `route.yml:131` pins the T14's image to a
+digest — "a
 rebuild must not be able to change the QEMU or Rust a recorded number was taken
 on" — specifically because a moving input under every verdict is a supply-chain
 decision, not a convenience. The `CLAUDE.md` principle for `rust/`, this

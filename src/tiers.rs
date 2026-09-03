@@ -310,7 +310,7 @@ pub const RELEGATED: &[Relegated] = &[
     },
     Relegated {
         test: "readdir_bound",
-        ci_ms: 8_578,
+        ci_ms: 19_823,
         why: Why::Cost,
         guards: "`read_dir` returning every entry or an error, never a short listing: a \
                  directory pushed past `vfs::MAX_LIST_ENTRIES` must be refused where 32,769 \
@@ -1194,6 +1194,21 @@ pub const RELEGATED: &[Relegated] = &[
                  function on the unit and no-unit machines, the audio function's \
                  declared exception, and the NIC declining the bit and losing the \
                  device. Three boots: 17,259 ms on the hosted shard.",
+    },
+    Relegated {
+        test: "screen_survived_panic_not_blamed",
+        ci_ms: 8_477,
+        why: Why::Cost,
+        guards: "`panic_console::discard_capture` told from a no-op, which is the only reading \
+                 of it there is: one boot survives a panic and then kills the machine, and the \
+                 panel must carry a record written after the first panic's snapshot was frozen \
+                 — which a snapshot the discard failed to drop cannot hold. What still runs per \
+                 pull request: `screen_recoverable_untouched`, which compares two screendumps \
+                 either side of the recovered panic and so holds whether or not the discard did \
+                 anything — measured green on a kernel with `discard_capture` stubbed out — and \
+                 `screen_late_panic`, which covers `capture` and not the discard. So the \
+                 recovery branch's wiring has no other gate. Two guests in one boot: 8,477 ms \
+                 on the hosted shard, over `FAST_COMMIT_MS`.",
     },
     Relegated {
         test: "screen_gop_firmware_mode",

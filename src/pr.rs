@@ -308,14 +308,17 @@ fn sync(root: &Path) -> Result<String, String> {
         .map_err(|e| format!("{e}\n[pr] `git fetch origin main` failed, so nothing below could \
                               be judged against what GitHub has."))?;
 
+    // The fast-forward runs on whatever branch the primary has out, so the
+    // question is about that checkout and not about which checkout is asking.
+    let on = git(&primary, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if on != "main" {
+        return Ok(format!(
+            "fetched origin; {} is on {on}, so this host's main was left where it is",
+            primary.display()
+        ));
+    }
+
     if canonical(root) != canonical(&primary) {
-        let on = git(&primary, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-        if on != "main" {
-            return Ok(format!(
-                "fetched origin; {} is on {on}, so this host's main was left where it is",
-                primary.display()
-            ));
-        }
         let dirty = git(&primary, &["status", "--porcelain"])?;
         if !dirty.is_empty() {
             return Ok(format!(
@@ -754,9 +757,6 @@ pub(crate) mod tests {
         identify(&theirs);
         commit(&theirs, "h", "theirs\n", "meanwhile");
         sh(&theirs, &["push", "-q", "origin", "main"]);
-        // This fixture is its own primary and on a branch, so `main` is put
-        // where `sync` would have put it.
-        sh(&wt, &["fetch", "-q", "origin", "main:main"]);
 
         let done = prepare(&wt).expect("--pr should merge origin/main in and push");
         assert!(done.merged, "{}", done.text);
@@ -786,6 +786,31 @@ pub(crate) mod tests {
         let again = prepare(&wt).expect("a second --pr must be a no-op");
         assert!(!again.merged, "{}", again.text);
         assert!(again.text.contains("already in wt"), "{}", again.text);
+    }
+
+    /// A fixture clone is its own primary, the shape the branch question used
+    /// to be skipped for: the fast-forward ran on whatever branch was out, git
+    /// refused it, and `sync` reported lost commits about an ancestor.
+    #[test]
+    fn a_primary_on_a_branch_is_left_where_it_is() {
+        let (origin, wt) = repo("sync-on-a-branch");
+        commit(&wt, "g", "mine\n", "work");
+
+        // Someone else lands, so this host's main is behind origin/main.
+        let theirs = std::env::temp_dir()
+            .join(format!("toyos-pr-sync-on-a-branch-theirs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&theirs);
+        sh(&std::env::temp_dir(), &["clone", "-q", origin.to_str().unwrap(), theirs.to_str().unwrap()]);
+        identify(&theirs);
+        commit(&theirs, "h", "theirs\n", "meanwhile");
+        sh(&theirs, &["push", "-q", "origin", "main"]);
+
+        let said = sync(&wt).expect("a primary on a branch is reported, never refused");
+        assert!(said.contains("is on wt, so this host's main was left where it is"), "{said}");
+        assert!(!said.contains("carries commits origin/main has not got"), "{said}");
+        // Left where it is, and main still strictly behind.
+        assert_eq!(git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), "wt");
+        assert_eq!(git(&wt, &["rev-list", "--count", "main..origin/main"]).unwrap(), "1");
     }
 
     /// **`--pr` is never the last gate when it merged anything**, and the tool

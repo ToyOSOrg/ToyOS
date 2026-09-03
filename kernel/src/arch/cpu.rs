@@ -39,19 +39,41 @@ pub fn rdtsc() -> u64 {
     (hi as u64) << 32 | lo as u64
 }
 
+/// `CPUID.01H:ECX[30]`; without it `RDRAND` is `#UD`, so [`rdrand`] may not be
+/// reached at all.
 #[inline]
-pub fn rdrand() -> u64 {
-    let val: u64;
-    // SAFETY: writes one register and CF; the retry loop waits for CF set, and there is no caller-chosen value.
-    unsafe {
-        asm!(
-            "2: rdrand {val}",
-            "jnc 2b",
-            val = out(reg) val,
-            options(nomem, nostack),
-        );
+pub fn has_rdrand() -> bool {
+    cpuid(1, 0).2 & (1 << 30) != 0
+}
+
+/// Attempts before reporting no data: the Intel SDM's own example figure
+/// (Vol. 1, "Random Number Generator Instructions"), quoted and not measured.
+pub const RDRAND_ATTEMPTS: u32 = 10;
+
+/// One drawn `u64`, or `None` after [`RDRAND_ATTEMPTS`] reported no data.
+/// **Never spins**: a CPU whose CF stays clear would otherwise wedge the
+/// machine wherever this was called, and no caller chooses to wait.
+#[inline]
+pub fn rdrand() -> Option<u64> {
+    for _ in 0..RDRAND_ATTEMPTS {
+        let val: u64;
+        let ok: u8;
+        // SAFETY: writes one register and CF, which `setc` reads back into the
+        // second declared output; there is no caller-chosen value.
+        unsafe {
+            asm!(
+                "rdrand {val}",
+                "setc {ok}",
+                val = out(reg) val,
+                ok = out(reg_byte) ok,
+                options(nomem, nostack),
+            );
+        }
+        if ok != 0 {
+            return Some(val);
+        }
     }
-    val
+    None
 }
 
 #[inline]
