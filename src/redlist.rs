@@ -3156,6 +3156,26 @@ pub const KNOWN_RED: &[Red] = &[
         source: "tests/toyos.rs",
         measured: "2026-08-29",
     },
+    // The judge read the exit accounting line off a capture that closes at the
+    // guest runner's exit report, and nothing waited for it.
+    Red {
+        test: "syscall_cost",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(3, 5),
+        standing: Standing::Stands,
+        what: "the run claims 180000 SYS_CLOCK transitions and the kernel counted 0 — no \
+               `syscalls: pid=` line for the process reached the capture",
+        // Every hosted run of the name there has been; the three reds are this
+        // branch's, each red twice and ALONE in its own job.
+        evidence: "red: `ci` 33727591910, 33731006452, 33733759354, `guest`, #380, 2026-09-03. \
+                   green: `ci` 33701834606 (main, the push landing #373) `[syscall] 658 cycles \
+                   per SYS_CLOCK over 277969 of them`; `ci` 33728852421 (schedule, ubuntu-24) \
+                   `563 cycles … over 286777`. The wait is built on this branch and has no \
+                   hosted run yet, so this stands until one is green. \
+                   issues/build/syscall-cost-reads-the-exit-line-off-a-capture-that-can-close-first.md",
+        source: "tests/toyos.rs",
+        measured: "2026-09-03",
+    },
 ];
 
 // ---------------------------------------------------------------------------

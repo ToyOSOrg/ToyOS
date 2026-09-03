@@ -243,6 +243,96 @@ fn front(path: &Path, n: usize) -> Vec<u8> {
     head
 }
 
+/// The shared-object cache's two refusals, judged in
+/// `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`. The independent oracle
+/// is the NVMe image: after the shutdown the replaced library's bytes are read
+/// off the device through this crate's own build of the `bcachefs` reader over a
+/// plain seek-and-read file, so the claim rests on nothing the guest says.
+pub fn so_cache_refusals(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Without it the budget arm would have to load 256 MiB of libraries.
+    const PARAMS: &[&str] = &["so-cache-tiny"];
+    /// Mirrored in the guest binary, on the mount root the host reader sees.
+    const STALE: &str = "so-cache-stale.so";
+    const SECOND: &str = "libtls_dlopen_lib.so";
+
+    let want = rust_bins
+        .iter()
+        .find(|(name, _)| name == SECOND)
+        .map(|(_, data)| data.clone())
+        .ok_or_else(|| format!("{SECOND} was not built, so there is nothing to compare against"))?;
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::MetalDisk,
+            kernel_params: PARAMS,
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    if boot.contains("/home is a tmpfs") {
+        return Err(format!(
+            "/home fell back to tmpfs, so the readback below would judge no device:\n{boot}"
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_so_cache_policy", Duration::from_secs(60));
+    let log = format!("{boot}\n{}{}{}", result.before, result.stdout, result.serial);
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "so_cache_policy guest failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+    // Stated by the kernel too: an arm reporting a refusal nobody made would pass.
+    for said in ["the cached image is stale", "byte budget; refused"] {
+        if !log.contains(said) {
+            return Err(format!("no {said:?} line — the kernel refused nothing:\n{log}"));
+        }
+    }
+
+    let image = qemu.nvme_image().to_path_buf();
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let io = FileBlocks::open(&image)?;
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
+        .map_err(|e| format!("the NVMe image does not mount on the host: {e:?}"))?;
+    let got = fs
+        .read_file(STALE)
+        .map_err(|e| format!("reading {STALE} off the image: {e:?}"))?;
+    if got != want {
+        let at = got.iter().zip(&want).position(|(a, b)| a != b);
+        return Err(format!(
+            "{STALE} on the device is {} bytes against {SECOND}'s {}, first differing at {at:?} \
+             — the guest's second write did not reach the device, so the refusal above was \
+             about a file that had not changed",
+            got.len(),
+            want.len()
+        ));
+    }
+
+    eprintln!(
+        "  [so-cache] {} bytes of {SECOND} byte-identical at {STALE} off the NVMe image via the \
+         host's own bcachefs reader",
+        want.len()
+    );
+    Ok(())
+}
+
 /// F9's negative control: an fsync on `/home` whose first attempt is
 /// budget-refused (`fsync-budget-spent`) must be retried to durable — on the
 /// erasing adapter the `BudgetExpired` came back as `Io` and the guest's
