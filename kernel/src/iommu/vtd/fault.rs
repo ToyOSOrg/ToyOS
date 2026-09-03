@@ -254,8 +254,7 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
              reason={reason:#04x} domain={} bme={} unitfaults={count} streamfaults={seen_here} \
              first={} {}",
             if high & (1u64 << 62) != 0 { "read" } else { "write" },
-            find(u32::from(stream.requester()))
-                .map_or(0, |f| f.domain.load(Ordering::Relaxed)),
+            blamed(stream),
             if stopped { "cleared" } else { "unknown-function" },
             yn(FIRST.who.load(Ordering::Relaxed) == u32::from(stream.requester())),
             reason_name(reason),
@@ -285,6 +284,35 @@ fn stop(stream: StreamId) -> bool {
 fn note(stream: StreamId) -> u32 {
     find(u32::from(stream.requester()))
         .map_or(0, |slot| slot.faults.fetch_add(1, Ordering::Relaxed) + 1)
+}
+
+/// Which address space the faulting function was in. Three answers and not two
+/// numbers: a function still on the identity domain and one this machine never
+/// enumerated both carry domain id 0, and they are not the same finding.
+enum Blamed {
+    Own(u32),
+    Identity,
+    Unknown,
+}
+
+impl core::fmt::Display for Blamed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Own(id) => write!(f, "{id}"),
+            Self::Identity => write!(f, "identity"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+fn blamed(stream: StreamId) -> Blamed {
+    match find(u32::from(stream.requester())) {
+        None => Blamed::Unknown,
+        Some(slot) => match slot.domain.load(Ordering::Relaxed) {
+            0 => Blamed::Identity,
+            id => Blamed::Own(id),
+        },
+    }
 }
 
 /// Take the first fault whole, once: a second finds `who` taken and leaves it.

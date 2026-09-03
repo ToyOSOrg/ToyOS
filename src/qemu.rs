@@ -157,7 +157,8 @@ pub fn launch(opts: &Options) {
             .arg("intel-iommu,intremap=on,caching-mode=on,aw-bits=48");
     }
     // Without this a virtio function keeps the machine's own address space and
-    // the unit never sees it, whatever the tables say.
+    // the unit never sees it, whatever the tables say. virtio-sound is left off
+    // it by owner ruling until gate A has judged that shape.
     let platform = if shape.iommu { ",iommu_platform=on" } else { "" };
 
     qemu.arg("-device")
@@ -214,7 +215,7 @@ pub fn launch(opts: &Options) {
             ));
         }
         qemu.arg("-device")
-            .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
+            .arg("virtio-sound-pci,audiodev=audio0,streams=1");
 
         // Console wiring: virtio-console on stdio is the primary I/O channel
         // (the kernel switches to it once virtio-console init completes —

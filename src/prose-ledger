@@ -117,7 +117,7 @@ kernel/src/iod.rs 10 0
 kernel/src/iommu/mod.rs 67 0
 kernel/src/iommu/vtd/dmar.rs 33 0
 kernel/src/iommu/vtd/domain.rs 21 0
-kernel/src/iommu/vtd/fault.rs 62 0
+kernel/src/iommu/vtd/fault.rs 65 0
 kernel/src/iommu/vtd/interrupt.rs 53 0
 kernel/src/iommu/vtd/mod.rs 112 0
 kernel/src/iommu/vtd/queue.rs 31 0
@@ -215,7 +215,7 @@ src/main.rs 70 0
 src/mergehealth.rs 229 3
 src/pr.rs 207 5
 src/prosegate.rs 128 0
-src/qemu.rs 115 0
+src/qemu.rs 116 0
 src/redlist.rs 529 25
 src/soundfont.rs 133 0
 src/sourcegate.rs 461 1
@@ -234,13 +234,13 @@ tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 85 0
 tests/common/hostload.rs 48 1
-tests/common/iommu.rs 283 0
+tests/common/iommu.rs 346 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/qemu.rs 1640 11
+tests/common/qemu.rs 1645 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
