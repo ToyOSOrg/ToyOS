@@ -200,10 +200,10 @@ src/actuatorgate.rs 67 0
 src/assets.rs 123 0
 src/build.rs 703 3
 src/buildlock.rs 378 5
-src/ci.rs 137 1
+src/ci.rs 117 0
 src/clippy.rs 35 0
 src/day.rs 16 1
-src/durations.rs 384 6
+src/durations.rs 370 4
 src/fingerprint.rs 18 0
 src/forkcheck.rs 176 1
 src/hostws.rs 187 2
@@ -217,10 +217,10 @@ src/mergehealth.rs 229 3
 src/pr.rs 212 5
 src/prosegate.rs 128 0
 src/qemu.rs 115 0
-src/redlist.rs 534 25
+src/redlist.rs 517 23
 src/sdkversion.rs 80 0
 src/soundfont.rs 133 0
-src/sourcegate.rs 479 1
+src/sourcegate.rs 478 1
 src/stamps.rs 3 0
 src/testargs.rs 97 0
 src/tiers.rs 336 26

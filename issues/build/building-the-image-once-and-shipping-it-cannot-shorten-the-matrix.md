@@ -55,7 +55,7 @@ attempts of run `31389081797`.
 package install repeated in every guest job on every run, and it is not a build
 at all: `.github/ci-image/Dockerfile` bakes those packages into a published
 image, and the cutover retires the step once the first published digest exists
-for `route.yml` to pin.
+for the guest workflows to pin.
 
 Rejected on measurement, 2026-08-15, by the CI wall-clock task that was sent to
 build it.

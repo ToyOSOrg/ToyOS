@@ -89,7 +89,6 @@ pub fn qemu_version_note(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     fn repo_root() -> PathBuf {
@@ -280,152 +279,83 @@ mod tests {
         assert_eq!(jobs(bad).iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "b"]);
     }
 
-    /// The other declaration a workflow matches on by hand.
-    ///
-    /// `ci.yml`'s `durations` job renders the price verdict only where the
-    /// profile was measured: on a T14 lane it matches
-    /// [`crate::durations::TIER_DISAGREEMENT`] in the merge output, prints it
-    /// as a warning and exits 0, and every other way `--merge-durations` can
-    /// refuse still reds. That telling-apart is a string in a shell script
-    /// against a string in Rust, and the failure mode is silent in exactly one
-    /// direction — reword the panic and the workflow stops recognising the one
-    /// verdict it is allowed to soften, while both files still read perfectly.
-    /// So the two are held together here.
-    ///
-    /// The job's own guard is the same shape: `route.yml`'s `trusted` output is
-    /// what says where the lane ran, and `runner.name` would answer about the
-    /// hosted machine this job itself runs on.
-    #[test]
-    fn the_softened_duration_verdict_is_the_one_the_merge_actually_raises() {
-        let path = repo_root().join(".github/workflows/ci.yml");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} is a gate and is not readable: {e}", path.display()));
-        assert!(
-            text.contains(crate::durations::TIER_DISAGREEMENT),
-            "ci.yml no longer matches {:?}, so its `durations` job either fails a T14 lane on \
-             a verdict that instrument cannot render, or softens a refusal that is not the \
-             price verdict",
-            crate::durations::TIER_DISAGREEMENT
-        );
-        let (_, durations) = jobs(&text)
-            .into_iter()
-            .find(|(name, _)| name == "durations")
-            .expect("ci.yml renders the duration verdict in a job called `durations`");
-        assert!(
-            durations.contains("needs.route.outputs.trusted"),
-            "the `durations` job stopped reading where the guest lane ran, so it renders the \
-             price verdict against a profile the measuring machine may never have taken"
-        );
-        assert!(
-            !text.contains("${{ runner.name"),
-            "where a lane ran is `route.yml`'s answer, not the name of the runner reading it"
-        );
-    }
-
-    /// `route.yml`'s `HOSTED` expression, as one whitespace-normalised line.
+    /// Every `runs-on:` value a workflow declares, in source order.
     ///
     /// Not a YAML parser, for the reason [`jobs`] is not one: the shape is
-    /// fixed — a `HOSTED: >-` key and a folded block indented under it — and
-    /// anything else is a file to name rather than a shape to accommodate.
-    fn hosted_expression(text: &str) -> String {
-        let mut lines = text.lines().skip_while(|l| !l.trim_start().starts_with("HOSTED:"));
-        let head = lines.next().expect("route.yml declares HOSTED");
-        let indent = head.len() - head.trim_start().len();
-        let mut expr = String::new();
-        for line in lines {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if line.len() - line.trim_start().len() <= indent {
-                break;
-            }
-            expr.push(' ');
-            expr.push_str(line.trim());
-        }
-        expr.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-
-    /// Every event name `route.yml`'s `HOSTED` expression tests for.
-    fn hosted_events(expr: &str) -> BTreeSet<String> {
-        expr.split("github.event_name == '")
-            .skip(1)
-            .filter_map(|rest| rest.split('\'').next())
-            .map(str::to_string)
+    /// fixed — a `runs-on:` key and the rest of its line, a bare label or a
+    /// flow sequence — and anything else is a file to name rather than a shape
+    /// to accommodate. What this closes is that one spelling; a block sequence
+    /// under `runs-on:` is the form it walks past, and
+    /// [`the_runner_scan_reads_the_key_and_not_the_prose_around_it`] asserts
+    /// that it does.
+    fn runs_on(text: &str) -> Vec<String> {
+        text.lines()
+            .filter_map(|l| l.trim_start().strip_prefix("runs-on:"))
+            .map(|v| v.trim().to_string())
             .collect()
     }
 
-    /// Where a Linux job runs is one expression in one file, and this is what
-    /// it has to say.
-    ///
-    /// `route.yml`'s `HOSTED` decides the whole repository's routing and every
-    /// consumer reads the answer back through `needs.route.outputs.trusted`, so
-    /// a clause dropped from it is invisible in every other file. The direction
-    /// that hurts is the one that puts branch traffic back on the T14: that
-    /// machine has one runner with one worker, and on 2026-08-22T05:03Z
-    /// thirteen runs — seven `toolchain`, five `ci`, one `landing`, all of them
-    /// `pull_request` or `push` from this repository's own branches — were
-    /// queued behind one scheduled gate A, while `toolchain.yml`'s `build`, a
-    /// required check, spent 57 minutes in that queue and then failed in nine
-    /// seconds (run 32549542807).
-    ///
-    /// So the events are pinned as a set rather than as four `contains` calls:
-    /// a clause added here is as much a routing change as one removed, and the
-    /// set is what says which.
+    /// **No workflow names a self-hosted label.** The owner decommissioned the
+    /// T14 as a runner, so every lane is GitHub-hosted and there is no machine
+    /// behind `self-hosted` or `toyos` to answer one — a job that named either
+    /// would queue until it timed out, silently, since a label nothing offers
+    /// is not an error to Actions.
     #[test]
-    fn every_pull_request_and_push_routes_to_the_hosted_lane() {
-        let path = repo_root().join(".github/workflows/route.yml");
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} decides where CI runs: {e}", path.display()));
-        let expr = hosted_expression(&text);
+    fn no_workflow_asks_for_a_runner_this_project_does_not_have() {
+        let dir = repo_root().join(".github/workflows");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect(".github/workflows is not readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "yml"))
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "the workflow scan found no workflow, so it is wrong");
 
-        assert_eq!(
-            hosted_events(&expr),
-            ["merge_group", "pull_request", "push", "schedule"]
-                .into_iter()
-                .map(str::to_string)
-                .collect::<BTreeSet<_>>(),
-            "route.yml's HOSTED names a different set of events than the routing rule: \
-             {expr:?}"
-        );
+        let mut bad = Vec::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("{} decides where CI runs: {e}", path.display()));
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            for label in self_hosted(&text) {
+                bad.push(format!("{name}: runs-on: {label}"));
+            }
+        }
         assert!(
-            expr.contains("github.event_name == 'schedule' && github.workflow == 'ci'"),
-            "the `schedule` clause has to stay `ci.yml`'s alone — gate A's and \
-             portability's schedules are the T14's: {expr:?}"
-        );
-        assert!(
-            !expr.contains("head.repo"),
-            "HOSTED tells a pull request apart by where its head is, so a same-repo pull \
-             request is on the T14 again — which is the queue this rule was rewritten to \
-             empty: {expr:?}"
-        );
-        assert!(
-            !expr.contains("workflow_dispatch"),
-            "a dispatch is the T14's manual lane, and this expression naming it means \
-             nothing routes to the machine but a schedule: {expr:?}"
+            bad.is_empty(),
+            "every lane is GitHub-hosted and these name a runner nothing offers, so they \
+             would queue until they timed out:\n  {}",
+            bad.join("\n  ")
         );
     }
 
-    /// The scan, shown refusing the shape it is written against.
+    /// The `runs-on:` values naming a runner this project does not have.
+    fn self_hosted(text: &str) -> Vec<String> {
+        runs_on(text)
+            .into_iter()
+            .filter(|v| v.contains("self-hosted") || v.contains("toyos"))
+            .collect()
+    }
+
+    /// The scan, shown refusing the shape it is written against, and shown
+    /// walking past the block sequence it does not read.
     #[test]
-    fn the_hosted_scan_reads_the_clauses_and_not_the_prose_around_them() {
-        let file = concat!(
-            "        env:\n",
-            "          # push is a comment here and not a clause\n",
-            "          HOSTED: >-\n",
-            "            ${{ github.event_name == 'merge_group'\n",
-            "                || github.event_name == 'pull_request' }}\n",
-            "        run: |\n",
-            "          echo github.event_name == 'schedule'\n",
+    fn the_runner_scan_reads_the_key_and_not_the_prose_around_it() {
+        let good = concat!(
+            "jobs:\n",
+            "  # runs-on: [self-hosted, toyos] is a comment and not a key\n",
+            "  a:\n    runs-on: ubuntu-24.04\n",
+            "  b:\n    runs-on: macos-latest\n",
         );
-        let expr = hosted_expression(file);
-        assert_eq!(
-            expr,
-            "${{ github.event_name == 'merge_group' || github.event_name == 'pull_request' }}"
-        );
-        assert_eq!(
-            hosted_events(&expr),
-            ["merge_group", "pull_request"].into_iter().map(str::to_string).collect()
-        );
+        assert_eq!(runs_on(good), ["ubuntu-24.04", "macos-latest"]);
+        assert!(self_hosted(good).is_empty());
+
+        let bad = concat!("jobs:\n", "  a:\n    runs-on: [self-hosted, Linux, X64, toyos]\n");
+        assert_eq!(self_hosted(bad), ["[self-hosted, Linux, X64, toyos]"]);
+
+        // The form this spelling does not reach, asserted so that widening the
+        // scan reds here instead of leaving this sentence unchecked.
+        let walked = concat!("jobs:\n", "  a:\n    runs-on:\n      - self-hosted\n      - toyos\n");
+        assert!(self_hosted(walked).is_empty());
     }
 
     /// The second axis of the same job, held together for the same reason.

@@ -1,14 +1,16 @@
 # The hosted guest image's publisher — the only workflow that may write it.
 #
-# `ci.yml`'s hosted `guest`, `tcg` and `cache-writer` jobs each open a bare
+# `ci.yml`'s `guest`, `tcg` and `cache-writer` jobs each open a bare
 # `debian:sid` and apt-get the same eight packages, 52-59 s on every job's
 # critical path (run 31896922288). `.github/ci-image/Dockerfile` bakes them
 # once; this publishes it to ghcr on a landing that moves the Dockerfile, the
-# declared QEMU, or this file — and prints the digest, because a consumer
-# pins the digest and never the tag, `route.yml`'s rule for the T14 image.
+# declared QEMU, or this file — and prints the digest, because a consumer pins
+# the digest and never the tag: a rebuild must not be able to change the QEMU
+# or Rust a recorded number was taken on.
 #
-# Not a gate: nothing required runs here, and the cutover in `route.yml` is a
-# separate deliberate act taken against a printed digest.
+# Not a gate: nothing required runs here, and the cutover — a workflow naming
+# that digest as its `image:` — is a separate deliberate act taken against a
+# printed digest.
 name: ci-image
 
 on:
@@ -52,6 +54,7 @@ jobs:
             echo '```'
             echo "$digest"
             echo '```'
-            echo "Cut over by putting this digest in route.yml's HOSTED arm and"
-            echo "retiring the per-job deps step."
+            echo "Cut over by putting this digest in the container image: of"
+            echo "ci.yml, gate-a.yml and probe-green.yml, and retiring the"
+            echo "per-job deps step."
           } >> "$GITHUB_STEP_SUMMARY"
