@@ -152,7 +152,9 @@ impl Superblock {
     fn check(&self, device_blocks: u64) -> Result<(), FsError> {
         let bad = |field| Err(FsError::BadSuperblock { field });
 
-        if self.block_count == 0 || self.block_count > device_blocks {
+        // Exact, not a bound: `format` writes the device's own block count, so a
+        // volume naming any other number did not come from this device.
+        if self.block_count != device_blocks {
             return bad("block_count");
         }
         if self.root_node.raw() >= self.block_count {

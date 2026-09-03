@@ -25,7 +25,7 @@ The original question, recorded verbatim because it was the owner asking:
 file/folder structure of the kernel makes sense?"* (`kernel/src/log.rs`). What
 follows is the evidence that made it decidable.
 
-**The log subsystem, as it exists.** Six places, no core:
+**The log subsystem, as it was when this was written.** Six places, no core:
 
 | File | Lines | What it is |
 |---|---|---|
@@ -35,6 +35,31 @@ follows is the evidence that made it decidable.
 | `drivers/serial.rs` | 467 | the 16550 sink |
 | `drivers/panic_console/mod.rs` | 1,188 | the screen sink, panic-only |
 | `drivers/virtio_console.rs` | 221 | the second serial-shaped sink |
+
+**Part of the core half has landed, so that table is a baseline and not a
+description.** There is a `kernel/src/log/` core: eight files, `mod.rs` the one
+producer — "`log!`, `alert!` and `boot_phase!` all expand to [`emit`], the only
+entry point, which takes only `fmt::Arguments`, so a partial record is
+untypeable" (`kernel/src/log/mod.rs:1-3`) — declaring the other seven at
+`:8-15`. The ring is per CPU and its own file: "One CPU's ring of whole records:
+writers and readers never observe a torn record"
+(`kernel/src/log/shard.rs:1`). The record type is not the kernel's at all —
+`LogRecord` comes from `toyos_abi::log`, imported at `kernel/src/log/mod.rs:19`
+and filled at `:158`. The three files the table
+calls the log's own are gone: `kernel/src/log.rs`,
+`kernel/src/drivers/log_ring.rs` and `kernel/src/log_file.rs` are none of them
+in the tree. The file sink is not a kernel module at all — `/bin/logd` is an
+ordinary user process, and "the kernel keeps the record ring and the console;
+every policy about files — where they go, what they are called, how many there
+are, what happens when the stick stops answering — is here"
+(`userland/logd/src/main.rs:1-10`), on a `SysCap` carrying
+`Rights::LOG | Rights::WAIT` that lets it "read every record every CPU wrote and
+park on the readiness source when there is nothing new" (`:14-16`). What has
+*not* landed is the rest of the
+target shape: `kernel/src/drivers/serial.rs` (433 lines) and
+`kernel/src/drivers/panic_console/mod.rs` (1,112) are still not independent
+sinks carrying explicit backpressure, and the sins below are still patched
+rather than designed away.
 
 Its known sins were the argument for the question, and this records them as the
 subsystem above had them: the flush was unbounded, uninterruptible and in front
@@ -54,9 +79,12 @@ context stamping, once) with serial, file and screen as independent sinks
 carrying explicit backpressure — a slow sink drops-and-counts, never blocks,
 does no unbounded work in a scheduler-adjacent path, and fails alone.
 
-**The layout half.** `kernel/src` is **39 flat `.rs` files** beside seven
-directories (`arch/`, `drivers/`, `elf/`, `iommu/`, `loader/`, `mm/`,
-`sched/`). Three of those seven were flat files a month ago — `elf.rs` and
+**The layout half, re-measured.** `kernel/src` is **50 flat `.rs` files**
+(`ls kernel/src/*.rs | wc -l`) beside ten directories — `arch/`, `completion/`,
+`drivers/`, `elf/`, `iommu/`, `loader/`, `log/`, `mm/`, `object/`, `sched/`.
+The 39-beside-seven figure this entry opened with is three directories and
+eleven files out of date; `log/` is one of the six the review named as the
+target and it exists. `elf.rs` and
 `loader.rs` became directories in `42b29c9`, which is the precedent. The flat
 set mixes a filesystem adapter, an IPC primitive, two input devices, a page
 cache, io_uring, the process table and two cfg-gated test actuators at one
@@ -67,9 +95,10 @@ Cost, so the question is priced: a directory move is `git mv` plus `mod` lines,
 it touches no logic, and it collides with every worktree in flight — which is
 why it is a scheduling decision and not a technical one.
 
-Two smaller layout items ride the same answer. `usb_gate.rs` (225 lines) and
-`input_merge_test.rs` (202) are correctly `#[cfg]`-gated at declaration and
-call (`main.rs:27-30`, `:446`, `:566`) and are never in an ordinary build, but
+Two smaller layout items ride the same answer. `usb_gate.rs` (242 lines) and
+`input_merge_test.rs` (178) are correctly `#[cfg]`-gated at declaration and
+call (`kernel/src/main.rs:34`, `:36`, `:408`, `:537`) and are never in an
+ordinary build, but
 they sit interleaved with production sources; the review's target is one
 `kernel/src/gates/` directory so that what test machinery exists is auditable
 in one listing. And `input_merge_test` is the tell that pure logic is trapped

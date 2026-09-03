@@ -4,26 +4,17 @@ kind: track
 opened: 2026-09-01
 ---
 
-# Two lifetime edges the loom models stop short of: the probe node's victim-retire, and nested crash entry
+# Crash entry under preemption has no loom model, and a Boolean one would pass
 
 The rule that a model must import its subject rather than transliterate it is
 already this tree's, and already enforced. `toyos-sched/loom/src/lib.rs` pulls
 every scheduler source in by `#[path]` (`:26-49`), and its header at `:6-8` says
 why: "loom explores the interleavings of the *real* primitives, not of a
 re-implementation — a re-implementation is exactly the divergence risk this
-crate is meant to remove." What is owed is not the principle. It is two edges.
-
-**The steal probe's node — the model exists and stops one edge short.**
-`toyos-sched/loom/tests/loom_mailbox.rs:186`,
-`steal_probe_node_is_never_double_linked`, already drives the real
-`MailboxNode`/`MailboxConsumer` through claim, post, pop and repost, and asserts
-exactly-once consumption plus `!in_flight()` at the end.
-`loom_retire.rs:163` models node reuse under a racing migration. Neither crosses
-what `issues/kernel/steal-probe-node-dies-with-its-victim.md` is actually about:
-the victim being **retired** while a probe is outstanding, and the node's
-**drop** on that path. The existing model's victim always drains. Extend it —
-do not write a second model, and do not restate the principle the crate header
-already states.
+crate is meant to remove." What is owed is not the principle. It is one edge:
+the steal probe's victim-retire is modelled now, and
+`issues/kernel/steal-probe-node-dies-with-its-victim.md` carries the command
+that reproduces it.
 
 **Crash entry under preemption — no model at all.** Real preemption state is two
 words, not one: `kernel/src/preempt.rs` carries a `preempt_count` and a separate

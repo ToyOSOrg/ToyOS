@@ -156,7 +156,10 @@ the adapter's author did not have to rediscover it.
 
 **`boot-media`** — `/boot` and `/log` are both `kernel/src/fat32_adapter.rs` over
 `toyos-fat32`, mounted from `gpt::boot_volume()` and `gpt::log_volume()`;
-`kernel/src/log_file.rs` writes one file per boot to `/log`, named for the wall
-clock. Gated by `esp_filesystem`, `kernel_log_file`, `log_backing_read_error`,
-`boot_volume_metadata_error`, `log_partition_automount`, `log_partition_identity`
+the kernel writes no log file — `/bin/logd` does, an ordinary user process that
+owns "every policy about files — where they go, what they are called, how many
+there are, what happens when the stick stops answering"
+(`userland/logd/src/main.rs:1-10`). Gated by `esp_filesystem`,
+`kernel_log_file`, `log_backing_read_error`,
+`boot_volume_metadata_error`, `log_partition_layout`, `log_partition_identity`
 and `wall_clock_file`, plus `toybox_cp_volume`.

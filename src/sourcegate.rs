@@ -50,11 +50,20 @@
 //! row unreachable at once. The sixth reads every committed file that carries
 //! a NUL, plus everything under `assets/`, against the digest `NOTICE` records.
 //!
-//! **What neither reaches is filed rather than implied**: an alias split across
-//! lines, a spawn that is not `Command` at all, a binary a
-//! third-party crate or a workflow runs. The exit from all of it is one scan
-//! that resolves names the way the compiler does; the entries under
-//! `issues/build/` say so and this does not pretend otherwise.
+//! The seventh is the third-party C corpus, and it is a text scan over one
+//! licence file rather than over Rust: it reads the per-population counts
+//! `tests/testcases/LICENSE` states, counts what `git` tracks under each
+//! population, and refuses the one case `NOTICE` names as not to be
+//! re-imported. An arrival, a deletion and that name are what it closes; no
+//! file's provenance is what it does not.
+//!
+//! The eighth and ninth are the same bar over `.github/`: one cuts every
+//! workflow, script and container recipe into shell commands and refuses a
+//! package no row declares, the other reads `uses:`. `src/ci.rs` reads these
+//! files for one package's provenance; these hold the whole set.
+//!
+//! **What none of them reaches is filed rather than implied**, and each table's
+//! own doc names its half: the entries under `issues/build/` say so.
 
 use std::path::{Path, PathBuf};
 
@@ -489,10 +498,9 @@ struct Spawn {
 /// A binary a third-party crate runs for us: `userland/doom/build.rs` drives
 /// `cc::Build`, which compiles and archives with whatever `cc` and `ar` it
 /// finds in `PATH`, and the `cc` half is one of the three standing failures
-/// `CLAUDE.md` declares. A workflow or a container image, which is
-/// `issues/build/nothing-reads-the-workflows-for-a-binary.md`. And an alias no
-/// one line spells, which the same record carries under its own
-/// heading.
+/// `CLAUDE.md` declares. And an alias no one line spells, which the
+/// not-`Command` record carries under its own heading. A workflow or a
+/// container image is [`CI_PACKAGES`] and [`CI_ACTIONS`], not this.
 const HOST_SPAWNS: &[Spawn] = &[
     Spawn {
         arg: "\"cargo\"",
@@ -568,6 +576,184 @@ const HOST_SPAWNS: &[Spawn] = &[
     },
 ];
 
+/// One package a CI image or workflow installs on a machine this project's
+/// verdicts are measured on.
+struct Package {
+    /// The token the install line spells, verbatim once its quotes are off. A
+    /// shell expansion stays as written: `qemu@$want` names no version.
+    name: &'static str,
+    why: &'static str,
+}
+
+/// Every package `.github/` installs, and what it is.
+///
+/// **A sibling of [`HOST_SPAWNS`] rather than a row in it**: that table's
+/// `sites` is empty *exactly when* its `arg` is a string literal, and a package
+/// name always is, so the field would be dead in every row here.
+///
+/// **What this closes is a spelling**, and each form it walks past is a case in
+/// `the_package_scan_reads_the_install_command_and_not_the_shell` asserting that
+/// it does, so widening the scan reds that test instead of growing a regex
+/// quietly. Walked past: a YAML **folded scalar** (`run: >-`, which
+/// `.github/workflows/ci-image.yml:34` is today), whose lines YAML joins where
+/// this joins only on a trailing `\`; an install behind an **interpreter head
+/// word** — `bash -c`, `sh -c`, `python3 -m pip` — because the command's first
+/// word is then the interpreter and not a manager; a **manager [`INSTALLERS`]
+/// does not list**, `pipx` among them; a binary a `run:` step downloads and
+/// runs (every workflow here fetches `rustup-init.sh` over `curl`); and a
+/// binary a third-party `uses:` action runs inside itself — the class
+/// `cc::Build`'s host `ar` is in, which the Rust scan does not reach either.
+///
+/// A name a shell variable holds is *not* on that list: `$PKG` is a token like
+/// any other and reds under its own spelling, which is why `qemu@$want` is a row.
+const CI_PACKAGES: &[Package] = &[
+    Package {
+        name: "build-essential",
+        why: "`cc` for every host link, the standing failure CLAUDE.md:56 declares, wearing a \
+              package name. issues/build/python-and-cc-are-declared.md is the entry, and no \
+              guest binary links through it",
+    },
+    Package {
+        name: "ca-certificates",
+        why: "the trust store `apt` and `curl` verify the snapshot archive and sh.rustup.rs \
+              against. It carries no binary anything here runs",
+    },
+    Package {
+        name: "cmake",
+        why: "outside the bar: upstream bootstrap's build dependency for LLVM, in \
+              toolchain.yml alone. Not our code and not in any guest's path",
+    },
+    Package {
+        name: "curl",
+        why: "outside the bar, and declared by nothing else: it fetches rustup-init.sh and \
+              the toolchain release asset (.github/install-toolchain.sh)",
+    },
+    Package {
+        name: "git",
+        why: "the version control this repository is, and `REQUIRED` in src/main.rs",
+    },
+    Package {
+        name: "jq",
+        why: "outside the bar: it reads GitHub's JSON in landing.yml's protection readback and \
+              in .github/install-toolchain.sh. A JSON reader is our job by CLAUDE.md's crate \
+              rule, and nothing in-tree does it",
+    },
+    Package {
+        name: "libssl-dev",
+        why: "outside the bar: upstream bootstrap links against it, in toolchain.yml alone",
+    },
+    Package {
+        name: "ninja-build",
+        why: "outside the bar: upstream bootstrap's LLVM generator, in toolchain.yml alone",
+    },
+    Package {
+        name: "ovmf",
+        why: "the UEFI firmware a QEMU guest boots. This tree commits its own under ovmf/ \
+              (NOTICE names them); toolchain.yml installs the package and asserts \
+              /usr/share/OVMF exists for `check_prerequisites`",
+    },
+    Package {
+        name: "pkg-config",
+        why: "outside the bar: how upstream bootstrap finds libssl, in toolchain.yml alone",
+    },
+    Package {
+        name: "python3",
+        why: "the Python standing failure CLAUDE.md:56 declares, wearing a package name — \
+              `rust/x` searches for one. issues/build/python-and-cc-are-declared.md is the \
+              entry, and portability.yml is the one workflow that names it as a package",
+    },
+    Package {
+        name: "qemu",
+        why: "QEMU, the other half of the bar, under Homebrew's unpinned formula. \
+              portability.yml's macOS job falls back to it because homebrew-core keeps no \
+              versioned formula, and prints what it resolved to rather than assuming",
+    },
+    Package {
+        name: "qemu@$want",
+        why: "the same, pinned to `.github/qemu-version` where brew can honor it. The version \
+              is a shell expansion, so this row declares the attempt and not a version — \
+              src/ci.rs is what holds the instrument itself",
+    },
+    Package {
+        name: "qemu-system-x86",
+        why: "QEMU, the other half of the bar, and the Debian package the declared instrument \
+              comes out of (.github/qemu-version, src/ci.rs)",
+    },
+    Package {
+        name: "xz-utils",
+        why: "outside the bar: upstream ships its prebuilt LLVM and stage artifacts as \
+              `.tar.xz`, which bootstrap unpacks",
+    },
+    Package {
+        name: "zstd",
+        why: "outside the bar: the compression the cached toolchain release asset is built and \
+              unpacked with (toolchain.yml, .github/install-toolchain.sh)",
+    },
+];
+
+/// One third-party action a workflow runs, in the `owner/repo[/path]@ref`
+/// spelling the `uses:` key gives it.
+struct Action {
+    name: &'static str,
+    why: &'static str,
+}
+
+/// Every action `.github/workflows/` pulls: the other half of what
+/// [`CI_PACKAGES`] holds, since a `uses:` runs somebody else's code on the
+/// machine a verdict is measured on. One naming a path in this repository is
+/// not a row but a file, and the check is that it resolves.
+///
+/// **A row pins a name and a tag, not bytes.** `@v4` is a branch its publisher
+/// moves, so this refuses an undeclared action and an unmoved row and claims
+/// nothing about the code behind the tag —
+/// `issues/build/an-action-tag-pins-a-name-and-not-bytes.md` is that gap. The
+/// walk also reads `.github/workflows/` only, so a composite action's own
+/// `uses:` is unread; this tree holds no `action.yml`.
+const CI_ACTIONS: &[Action] = &[
+    Action {
+        name: "actions/checkout@v4",
+        why: "GitHub's own checkout: how every job gets this tree at all",
+    },
+    Action {
+        name: "actions/cache@v4",
+        why: "GitHub's own cache: the cargo registry and target trees the hosted lanes reuse",
+    },
+    Action { name: "actions/cache/restore@v4", why: "the read half of the same action" },
+    Action { name: "actions/cache/save@v4", why: "the write half of the same action" },
+    Action {
+        name: "actions/upload-artifact@v4",
+        why: "how a shard hands its duration files and boot logs to the job that reads them",
+    },
+    Action {
+        name: "actions/download-artifact@v4",
+        why: "the other end of that hand-off, in the job that merges the shards",
+    },
+];
+
+/// The `(manager, subcommands)` pairs [`installed_packages`] understands —
+/// `apt-get`, `apt` and `brew`, which `.github/` uses, plus `apk`, `dnf`,
+/// `yum`, `pacman`, `zypper`, `snap`, `pip`, `pip3`, `npm`, `yarn`, `pnpm`,
+/// `gem` and `cargo`, so those arrive by name. `pipx`, `uv`, `go` and
+/// `add-apt-repository` are **not** here: they are [`CI_PACKAGES`]'s non-reach.
+const INSTALLERS: &[(&str, &[&str])] = &[
+    ("apt-get", &["install"]),
+    ("apt", &["install"]),
+    ("brew", &["install"]),
+    ("apk", &["add"]),
+    ("dnf", &["install"]),
+    ("yum", &["install"]),
+    ("pacman", &["-S"]),
+    ("zypper", &["install"]),
+    ("snap", &["install"]),
+    ("pip", &["install"]),
+    ("pip3", &["install"]),
+    ("npm", &["install", "i", "add"]),
+    ("yarn", &["add"]),
+    ("pnpm", &["add", "install"]),
+    ("gem", &["install"]),
+    ("cargo", &["install"]),
+];
+
 /// The refusal `no_host_file_renames_command` prints.
 const NO_COMMAND_ALIAS: &str =
     "a renamed `Command` spawns past the scan that reads the text `Command::new(`";
@@ -589,9 +775,9 @@ const NO_BAN_ALIAS: &str = "these trees may not count a reference by hand, and a
 /// a file nobody can read in review; and everything under `assets/`, text or
 /// not, because that directory is where third-party material arrives. A
 /// third-party *text* file anywhere else — a ninth Phosphor SVG one directory
-/// over, `tests/testcases/`'s corpus — is reached by neither;
+/// over — is reached by neither, and the corpus by count alone and no digest;
 /// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
-/// that gap.
+/// what is left of that gap.
 const COMMITTED_FILES: &[(&str, &str, &str)] = &[
     (
         "assets/DOOM1.WAD",
@@ -921,6 +1107,156 @@ fn spawn_arguments(text: &str) -> Vec<String> {
     out
 }
 
+/// Every file under `.github/` that can install a package: a workflow, a shell
+/// script, or a container recipe. A walk and not a list, so an arrival is read
+/// on its first commit.
+#[cfg(test)]
+fn ci_install_files(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+                continue;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let name = path.file_name().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "yml" | "yaml" | "sh") || name == "Dockerfile" {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&root.join(".github"), &mut out);
+    out.sort();
+    out
+}
+
+/// `line` cut into whitespace tokens, with every shell separator and redirect
+/// standing alone and every token's quotes stripped — so that
+/// `qemu-system-x86 > /dev/null; then` ends a package list three times over.
+#[cfg(test)]
+fn shell_tokens(line: &str) -> Vec<String> {
+    let mut spaced = String::new();
+    for c in line.chars() {
+        if matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')' | '{' | '}') {
+            spaced.push(' ');
+            spaced.push(c);
+            spaced.push(' ');
+        } else {
+            spaced.push(c);
+        }
+    }
+    spaced.split_whitespace().map(|t| t.trim_matches(['"', '\'']).to_string()).collect()
+}
+
+/// True where `token` is a separator [`shell_tokens`] stood alone.
+#[cfg(test)]
+fn ends_a_command(token: &str) -> bool {
+    matches!(token, ";" | "|" | "&" | "<" | ">" | "(" | ")" | "{" | "}")
+}
+
+/// True where `token` stands in front of a command rather than being one: a
+/// Dockerfile verb, a shell keyword, or an environment assignment.
+#[cfg(test)]
+fn precedes_a_command(token: &str) -> bool {
+    if matches!(
+        token,
+        "RUN" | "sudo" | "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "time"
+            | "env" | "exec" | "command"
+    ) {
+        return true;
+    }
+    match token.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
+    }
+}
+
+/// Every package `text` installs, as `(name, the line the install began on)`.
+///
+/// **The spelling, stated so the closure is readable.** A `\`-continued run of
+/// lines is one logical line; a `#` that begins a token ends it; the line is
+/// cut into commands at each shell separator; a command's head word — after the
+/// Dockerfile verb, `sudo`, a keyword or an environment assignment — must be a
+/// manager [`INSTALLERS`] names, and the command must carry that manager's
+/// subcommand as a whole token; every non-option token after it is a package.
+/// An option's *argument* is therefore read as a package (`apt-get install -t
+/// sid foo` declares `sid`), which is a red naming a name rather than a silence.
+#[cfg(test)]
+fn installed_packages(text: &str) -> Vec<(String, usize)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let began = i + 1;
+        let mut joined = String::new();
+        loop {
+            let stripped: String = {
+                let mut keep = String::new();
+                for word in lines[i].split_inclusive(char::is_whitespace) {
+                    if word.trim_start().starts_with('#') {
+                        break;
+                    }
+                    keep.push_str(word);
+                }
+                keep
+            };
+            let trimmed = stripped.trim_end();
+            i += 1;
+            match trimmed.strip_suffix('\\') {
+                Some(head) if i < lines.len() => {
+                    joined.push_str(head);
+                    joined.push(' ');
+                }
+                _ => {
+                    joined.push_str(trimmed);
+                    break;
+                }
+            }
+        }
+        for command in shell_tokens(&joined).split(|t| ends_a_command(t)) {
+            let words: Vec<&String> =
+                command.iter().skip_while(|t| precedes_a_command(t)).collect();
+            let Some(head) = words.first() else { continue };
+            let Some((_, subcommands)) = INSTALLERS.iter().find(|(m, _)| *m == head.as_str())
+            else {
+                continue;
+            };
+            let Some(at) = words.iter().position(|t| subcommands.contains(&t.as_str())) else {
+                continue;
+            };
+            for word in &words[at + 1..] {
+                if !word.starts_with('-') {
+                    out.push((word.to_string(), began));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every `uses:` value in `text`, as `(what it names, its line)`. Unambiguous
+/// where the `run:` shell is not: the whole value is one action reference. A
+/// `${{ … }}` expression is left as written and would be a row nobody could
+/// resolve; no workflow here has one.
+#[cfg(test)]
+fn used_actions(text: &str) -> Vec<(String, usize)> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(n, line)| {
+            let trimmed = line.trim_start().trim_start_matches("- ").trim_start();
+            let value = trimmed.strip_prefix("uses:")?.trim();
+            (!value.is_empty()).then(|| (value.to_string(), n + 1))
+        })
+        .collect()
+}
+
 /// Every `.rs` file `git` tracks under `tree`, repository-relative — the list
 /// the walks above are held against, read from something that is not a walk.
 #[cfg(test)]
@@ -937,6 +1273,38 @@ fn tracked_rust_files(root: &Path, tree: &str) -> std::collections::BTreeSet<Str
         .filter(|p| p.ends_with(".rs"))
         .map(str::to_string)
         .collect()
+}
+
+/// The third-party C corpus, whose attribution is per *population* rather than
+/// per file: `tests/testcases/LICENSE` states how many files each of these
+/// directories holds, and `NOTICE` points at that file for the terms.
+#[cfg(test)]
+const CORPUS: &str = "tests/testcases";
+
+/// The populations that licence attributes, each the directory its count counts.
+#[cfg(test)]
+const CORPUS_POPULATIONS: &[&str] = &["tinycc", "pp_tcc"];
+
+/// The corpus files that are this repository's own, so a tracked file under
+/// [`CORPUS`] that is in no population and is none of these is an arrival.
+#[cfg(test)]
+const CORPUS_OURS: &[&str] = &["tests/testcases/LICENSE", "tests/testcases/system.toml"];
+
+/// `NOTICE`: "Do not re-import it." A re-import arrives as new bytes under a new
+/// digest, so the file name is the thing that can be refused.
+#[cfg(test)]
+const NOT_RE_IMPORTED: &str = "46_grep.c";
+
+/// The count `tests/testcases/LICENSE` states for one population, read off its
+/// own `<population>/ N files:` line.
+#[cfg(test)]
+fn declared_corpus_count(licence: &str, population: &str) -> Option<usize> {
+    let head = format!("{population}/");
+    licence.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix(&head)?;
+        let (count, _) = rest.trim_start().split_once(" files:")?;
+        count.trim().parse().ok()
+    })
 }
 
 /// `bytes` as lower-case hex SHA-256, the spelling `NOTICE` records.
@@ -1446,6 +1814,146 @@ mod tests {
         assert!(complaints.is_empty(), "{NO_COMMAND_ALIAS}:\n{}", complaints.join("\n"));
     }
 
+    /// **The dependency bar at the other place a host binary arrives.**
+    /// `src/ci.rs` reads these files for one package's provenance; this holds
+    /// the whole *set*, so a ninth package in the image reds by name.
+    #[test]
+    fn every_package_ci_installs_is_declared() {
+        let root = repo_root();
+        let files = ci_install_files(&root);
+        assert!(
+            files.iter().any(|p| rel(&root, p) == ".github/ci-image/Dockerfile"),
+            "the walk did not reach the hosted guests' container recipe"
+        );
+        assert!(
+            files.iter().any(|p| rel(&root, p) == ".github/workflows/ci.yml"),
+            "the walk did not reach ci.yml, so it is reading no workflow"
+        );
+
+        let mut found: Vec<(String, String, usize)> = Vec::new();
+        for path in &files {
+            let Ok(text) = std::fs::read_to_string(path) else { continue };
+            for (name, line) in installed_packages(&text) {
+                found.push((name, rel(&root, path), line));
+            }
+        }
+        assert!(
+            found.iter().any(|(name, file, _)| name == "qemu-system-x86"
+                && file == ".github/ci-image/Dockerfile"),
+            "the walk read the image without finding the QEMU it installs, so it is parsing \
+             no install line at all"
+        );
+
+        let mut complaints = Vec::new();
+        for (name, file, line) in &found {
+            if !CI_PACKAGES.iter().any(|p| p.name == *name) {
+                complaints.push(format!("{file}:{line}: installs `{name}`, which nothing declares"));
+            }
+        }
+        for row in CI_PACKAGES {
+            if !found.iter().any(|(name, _, _)| name == row.name) {
+                complaints.push(format!(
+                    "nothing under .github/ installs `{}` any more, so the row saying it is {} is \
+                     a permission nobody re-argued",
+                    row.name, row.why
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "only Rust and QEMU are in the bar, and what CI installs outside it is declared:\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// **Somebody else's code, run on the machine a verdict is measured on.**
+    /// A `uses:` step is the one thing in a workflow that is neither this
+    /// repository's own nor a package, so the set of them is held against a
+    /// ledger the same way; one naming a path in this tree must resolve.
+    #[test]
+    fn every_action_a_workflow_uses_is_declared() {
+        let root = repo_root();
+        let mut found: Vec<(String, String, usize)> = Vec::new();
+        for path in ci_install_files(&root) {
+            if !path.starts_with(root.join(".github/workflows")) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (name, line) in used_actions(&text) {
+                found.push((name, rel(&root, &path), line));
+            }
+        }
+        assert!(
+            found.iter().any(|(name, _, _)| name == "actions/checkout@v4"),
+            "the walk found no checkout step, so it is reading no workflow"
+        );
+
+        let mut complaints = Vec::new();
+        for (name, file, line) in &found {
+            if let Some(local) = name.strip_prefix("./") {
+                if !root.join(local).is_file() {
+                    complaints.push(format!(
+                        "{file}:{line}: `uses: {name}` names a path this tree does not hold"
+                    ));
+                }
+                continue;
+            }
+            if !CI_ACTIONS.iter().any(|a| a.name == *name) {
+                complaints
+                    .push(format!("{file}:{line}: `uses: {name}`, which nothing declares"));
+            }
+        }
+        for row in CI_ACTIONS {
+            if !found.iter().any(|(name, _, _)| name == row.name) {
+                complaints.push(format!(
+                    "no workflow uses `{}` any more, so the row saying it is {} is a permission \
+                     nobody re-argued",
+                    row.name, row.why
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "an action runs somebody else's code on the machine a verdict is measured on:\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// What the package walk can and cannot read, stated as cases.
+    #[test]
+    fn the_package_scan_reads_the_install_command_and_not_the_shell() {
+        let one = |text: &str| -> Vec<String> {
+            installed_packages(text).into_iter().map(|(n, _)| n).collect()
+        };
+        assert_eq!(one("apt-get install -y jq zstd"), ["jq", "zstd"]);
+        assert_eq!(one("RUN apt-get update -qq && apt-get install -y curl > /dev/null"), ["curl"]);
+        assert_eq!(one("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ovmf"), ["ovmf"]);
+        assert_eq!(one("apt-get install -y \\\n    git \\\n    jq \\\n    > /dev/null"), ["git", "jq"]);
+        assert_eq!(one("if brew install \"qemu@$want\"; then"), ["qemu@$want"]);
+        assert_eq!(one("  # a comment saying apt-get install curl"), Vec::<String>::new());
+        assert_eq!(one("echo 'apt-get install curl'"), Vec::<String>::new());
+        assert_eq!(one("apt-get -o Acquire::Check-Valid-Until=false update -qq"), Vec::<String>::new());
+        assert_eq!(one("apt-get clean"), Vec::<String>::new());
+        assert_eq!(one("command -v cmake"), Vec::<String>::new());
+        // A manager nothing uses today is still read, so its arrival reds.
+        assert_eq!(one("npm i left-pad"), ["left-pad"]);
+        // A shell variable is a token like any other: it reds under its own
+        // spelling rather than being walked past.
+        assert_eq!(one("apt-get install -y $PKG"), ["$PKG"]);
+
+        // **The forms this walks past, asserted as misses.** Each is a hole
+        // `CI_PACKAGES`'s doc names; widening the scan to catch one reds here,
+        // which is what stops the scan being iterated against a reviewer's
+        // plants until the record and the code disagree.
+        let missed = |text: &str| assert_eq!(one(text), Vec::<String>::new(), "{text:?}");
+        // A YAML folded scalar: YAML joins the two lines, this does not.
+        missed("run: >-\n  apt-get install -y\n  folded-scalar-pkg");
+        missed("bash -c \"apt-get install -y bash-dash-c-pkg\"");
+        missed("sh -c 'apt-get install -y sh-dash-c-pkg'");
+        missed("python3 -m pip install pythonm-pip-pkg");
+        missed("pipx install pipx-pkg");
+    }
+
     /// What the walk can and cannot read, stated as cases.
     #[test]
     fn the_spawn_scan_reads_the_argument_and_not_the_call() {
@@ -1519,6 +2027,74 @@ mod tests {
             complaints.is_empty(),
             "a committed binary is a file somebody had to judge, and NOTICE is where the \
              judgement is:\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// **What the scan closes**: an arrival and a deletion under either
+    /// population, a tracked file under the corpus that no population
+    /// attributes, and the one name `NOTICE` says is not to come back. **What
+    /// it does not**: any one file's provenance — a substituted file of the same
+    /// count passes, which is
+    /// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md`'s
+    /// remaining half and wants a walk keyed on content rather than on path.
+    #[test]
+    fn the_corpus_matches_the_counts_its_own_licence_declares() {
+        let root = repo_root();
+        let licence_path = format!("{CORPUS}/LICENSE");
+        let licence = std::fs::read_to_string(root.join(&licence_path))
+            .unwrap_or_else(|e| panic!("{licence_path}: {e}"));
+        let out = std::process::Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("git ls-files: {e}"));
+        assert!(out.status.success(), "git ls-files failed");
+        let listing = String::from_utf8(out.stdout).expect("git ls-files is not UTF-8");
+        let tracked: Vec<&str> = listing.split('\0').filter(|s| !s.is_empty()).collect();
+        let under_corpus: Vec<&&str> =
+            tracked.iter().filter(|f| f.starts_with(&format!("{CORPUS}/"))).collect();
+        assert!(
+            under_corpus.len() > CORPUS_OURS.len(),
+            "the walk found {} tracked files under {CORPUS}, so it is not reading the tracked tree",
+            under_corpus.len()
+        );
+
+        let mut complaints = Vec::new();
+        for population in CORPUS_POPULATIONS {
+            let prefix = format!("{CORPUS}/{population}/");
+            let held = under_corpus.iter().filter(|f| f.starts_with(&prefix)).count();
+            let Some(declared) = declared_corpus_count(&licence, population) else {
+                complaints.push(format!("{licence_path} states no count for {population}/"));
+                continue;
+            };
+            if held != declared {
+                complaints.push(format!(
+                    "{prefix} holds {held} tracked files where {licence_path} attributes {declared}"
+                ));
+            }
+        }
+        for file in &under_corpus {
+            let attributed = CORPUS_OURS.contains(file)
+                || CORPUS_POPULATIONS
+                    .iter()
+                    .any(|p| file.starts_with(&format!("{CORPUS}/{p}/")));
+            if !attributed {
+                complaints
+                    .push(format!("{file} is under {CORPUS} and no population attributes it"));
+            }
+        }
+        for file in &tracked {
+            if file.rsplit('/').next() == Some(NOT_RE_IMPORTED) {
+                complaints.push(format!(
+                    "{file} is {NOT_RE_IMPORTED}, which NOTICE says is not to be re-imported"
+                ));
+            }
+        }
+        assert!(
+            complaints.is_empty(),
+            "the corpus is attributed by the counts in {licence_path}, and a count nothing holds \
+             is a sentence that was true once:\n{}",
             complaints.join("\n"),
         );
     }

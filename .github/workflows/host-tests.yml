@@ -93,7 +93,7 @@ jobs:
       # set is default clippy everywhere, plus a short, individually-adopted list from
       # `pedantic`/`nursery` — never the groups themselves, and never
       # `restriction` as a group.
-      # `issues/build/clippy-has-never-run-here.md` carries the full ledger:
+      # `issues/build/clippy-stage-two-is-lints-one-at-a-time.md` carries the full ledger:
       # every `pedantic`/`nursery` lint measured, each adoption or rejection
       # with its count and reason (`pedantic` + `nursery` together were 1,684
       # findings on the kernel alone — almost all of it stayed rejected).
@@ -134,7 +134,7 @@ jobs:
       # custom `rustup toolchain link` target can't `rustup component add` one,
       # it would need building from `rust/` by hand — so userland's
       # `undocumented_unsafe_blocks` count is still unmeasured, not measured
-      # and deferred (`issues/build/clippy-has-never-run-here.md`).
+      # and deferred (`issues/build/clippy-stage-two-is-lints-one-at-a-time.md`).
       #
       # `--all-targets` on the workspace and *not* on the other two: it is what
       # reaches `tests/`, `examples/` and every crate's test targets, and on the
@@ -154,7 +154,7 @@ jobs:
       #
       # `undocumented_unsafe_blocks` (a `restriction` lint, cherry-picked, never
       # the group) is adopted per area as each area's justifications land — the
-      # plan `issues/build/clippy-has-never-run-here.md` records. The bootloader
+      # plan `issues/build/clippy-stage-two-is-lints-one-at-a-time.md` records. The bootloader
       # (10 blocks) is documented and gated below, inline. `toyos-abi` (19
       # blocks) is documented too, but gated as its own `-p` invocation rather
       # than folded into the workspace one: the workspace command lints every
@@ -178,7 +178,7 @@ jobs:
       # beside `main.rs` is gated the day it appears. To read *through* whatever
       # `allow`s are left and re-measure what is owed, add
       # `--force-warn clippy::undocumented_unsafe_blocks`;
-      # `issues/build/clippy-has-never-run-here.md` carries the per-area ledger
+      # `issues/build/clippy-stage-two-is-lints-one-at-a-time.md` carries the per-area ledger
       # and the counts. **They are not restated here**, and that is the point:
       # this comment kept a per-area list twice and both copies went stale
       # inside a day, because an area's status changes on somebody else's
@@ -674,6 +674,43 @@ jobs:
           fi
           if ! grep -q 'published and no push behind it' /tmp/push-fence-relaxed.log; then
             echo "the fence-relaxed build failed without a_cpu_that_halts_without_seeing_the_surplus_was_pushed reaching its verdict: this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+
+      # **The one control here that models nothing away.** Its three siblings
+      # relax an ordering or delete a guard and demand that the model catches
+      # the lie. `victim-retires-mid-probe` changes no rule: it lets the mailbox
+      # model's victim stop taking passes, which is what a CPU that stops does,
+      # and the model must then fail because `MailboxNode::in_flight` is the
+      # consumer's to clear and a retired consumer clears nothing.
+      #
+      # So it reproduces an open defect —
+      # `issues/kernel/steal-probe-node-dies-with-its-victim.md` — rather than
+      # proving a lie is caught, and this step and its feature go away with the
+      # fix. Its shape is `no-preempt-guard`'s: the case catches its own panic
+      # and turns it into an assertion, so the step's teeth are a green run.
+      #
+      # **The verdict is grepped, not the `... ok` line**, for the reason the two
+      # red-expecting steps above grep theirs: a different panic inside the same
+      # case is caught by the same `catch_unwind` and would read as the control
+      # passing. The case refuses a payload that is not the stranded probe and
+      # prints what it caught, which `--nocapture` is here to let out.
+      - name: toyos-sched-loom probe-outlives-its-victim reproduces
+        run: |
+          set -o pipefail
+          echo "=== toyos-sched-loom --features victim-retires-mid-probe --test loom_mailbox (must pass — it catches its own red)" \
+            | tee -a /tmp/host.log
+          if ! cargo test -p toyos-sched-loom --features victim-retires-mid-probe \
+               --test loom_mailbox -- --nocapture 2>&1 \
+               | tee /tmp/victim-retires.log | tee -a /tmp/host.log; then
+            echo "loom_mailbox failed with the victim retiring: either the internal catch itself failed or something else broke, so this step proved nothing" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          if ! grep -q 'caught the verdict: the victim retired with a probe still linked in its queue' \
+               /tmp/victim-retires.log; then
+            echo "loom_mailbox passed without a_probe_outstanding_when_its_victim_retires_is_never_reclaimed catching the stranded-probe verdict: this step proved nothing" \
               | tee -a /tmp/host.log
             exit 1
           fi

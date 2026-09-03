@@ -14,9 +14,23 @@ use crate::{log, process, vfs};
 
 use toyos_abi::syscall::*;
 
+/// Every bit `MmapProt` defines; `NONE` is the empty word and needs no bit.
+///
+/// **Hand-copied from `toyos-abi` and nothing checks the copy**: a bit added
+/// there and not here is refused although the ABI defines it, measured in
+/// `issues/kernel/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md`.
+const MMAP_PROT_KNOWN: u64 = MmapProt::READ.0 | MmapProt::WRITE.0;
+/// Every bit `MmapFlags` defines; hand-copied, as `MMAP_PROT_KNOWN` says.
+const MMAP_FLAGS_KNOWN: u64 = MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0;
+
 /// Map anonymous memory honouring `prot`; `MmapFlags::FIXED` places it at
 /// exactly `req_addr`, replacing at most one whole mapping this process made.
 pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlags) -> u64 {
+    // First, so the answer is the bit and not whichever other refusal came
+    // first: a bit this kernel does not define is a request it cannot serve.
+    if prot.0 & !MMAP_PROT_KNOWN != 0 || flags.0 & !MMAP_FLAGS_KNOWN != 0 {
+        return SyscallError::InvalidArgument.to_u64();
+    }
     // `size` crossed the trust boundary: zero, and a size whose 2 MiB rounding
     // would wrap, are refused rather than silently turned into a small request.
     // No cap beyond that: the PMM's own `free_count` check is the physical limit.
@@ -254,7 +268,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
 
     let lib_has_tls = lib.tls_memsz > 0;
     let data_arc = process::process_data();
-    let (init_info, tls_module) = {
+    let init_info = {
         let data = data_arc.lock();
         crate::elf::resolve_dlopen_relocs(&lib, &data.elf.loaded_libs);
 
@@ -266,31 +280,11 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             crate::elf::apply_tpoff_relocs(&lib, 0, data.elf.tls_total_memsz, &tls_info);
         }
 
-        // Read here and bumped only at the registration below, so nothing reserves it
-        // against a sibling load of another name
-        // (`issues/kernel/two-dlopens-of-different-names-share-one-tls-module-id.md`).
-        let tls_module = lib_has_tls.then(|| {
-            let module_id = data.elf.next_tls_module_id;
-            let tls_info = crate::elf::TlsModuleInfo {
-                libs: &data.elf.loaded_libs,
-                modules: &data.elf.tls_modules,
-            };
-            crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
-            crate::elf::TlsModule {
-                template: lib.tls_template,
-                memsz: lib.tls_memsz,
-                base_offset: 0,
-                module_id,
-                is_static: false,
-            }
-        });
-
         // init_info layout: [init_array_vaddr, init_array_count], vaddr rebased to user_base.
-        let init_info = [
+        [
             if lib.init_array_vaddr != 0 { lib.user_base.raw() + lib.init_array_vaddr } else { 0 },
             lib.init_array_size / 8,
-        ];
-        (init_info, tls_module)
+        ]
     };
 
     // The point of no return: copy the init info out first, then register. A
@@ -318,9 +312,24 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     mapping.commit();
 
     let idx = data.elf.loaded_libs.len();
-    if let Some(module) = tls_module {
-        data.elf.next_tls_module_id = module.module_id + 1;
-        data.elf.tls_modules.push(module);
+    // Taken and bumped under the guard that registers, so two names loading at
+    // once are two modules: the id a library's `DTPMOD64` relocations carry is
+    // no other library's, and `dynamic_tls_blocks` is keyed on it.
+    if lib_has_tls {
+        let module_id = data.elf.next_tls_module_id;
+        data.elf.next_tls_module_id = module_id + 1;
+        let tls_info = crate::elf::TlsModuleInfo {
+            libs: &data.elf.loaded_libs,
+            modules: &data.elf.tls_modules,
+        };
+        crate::elf::apply_dtpmod_relocs(&lib, module_id, &tls_info);
+        data.elf.tls_modules.push(crate::elf::TlsModule {
+            template: lib.tls_template,
+            memsz: lib.tls_memsz,
+            base_offset: 0,
+            module_id,
+            is_static: false,
+        });
     }
     data.elf.lib_paths.push(resolved);
     data.elf.loaded_libs.push(lib);

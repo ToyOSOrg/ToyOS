@@ -6,9 +6,12 @@ opened: 2026-09-01
 
 # Exactly one allocation can be made to fail, at exactly one site, and there is no `alloc_error_handler`
 
-`git grep alloc_error_handler -- kernel/` returns nothing: the kernel has no
-allocation-error handler at all, which is what
-`issues/kernel/no-alloc-error-handler.md` records. That half is simply true.
+`git grep alloc_error_handler -- kernel/` returns nothing, and that costs the
+report nothing: a failed kernel allocation takes `alloc`'s no_std default —
+`handle_alloc_error` into `__rdl_alloc_error_handler` into `panic_nounwind_fmt`
+into the kernel's own `#[panic_handler]` — and panics with the size, the layer
+and the call site all named. Measured rather than reasoned. The absent attribute
+is not the gap; the gap is below.
 
 **What exists, and why it is not enough.** `debug_action::HEAP_AT_CEILING_PAGE_ALIGNED`
 (a `pub const` in `toyos-abi/src/syscall.rs`'s `debug_action` module, `:709` and `:723`;
@@ -41,7 +44,7 @@ not perturb allocator order — proved by showing that with the countdown
 disabled the allocator's behaviour is byte-for-byte what it was. The result
 channel is preallocated at arm time, before the failure it exists to report.
 
-`issues/kernel/nothing-charges-kernel-memory-to-a-process.md` ends by naming
-`no-alloc-error-handler` as the terminal state every unbounded grower closes
-into. Whichever of the two lands first, the other's closure runs through this
+`issues/kernel/nothing-charges-kernel-memory-to-a-process.md` holds the terminal
+state every unbounded grower closes into — who dies when the heap gives out.
+Whichever of the two lands first, the other's closure runs through this
 actuator; they are not two answers to one question.

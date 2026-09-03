@@ -9,6 +9,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -515,10 +516,10 @@ pub struct FatFs {
     role: Role,
     fs: Fat32<FatVolume>,
     open: HashMap<FileId, OpenFile>,
-    by_name: HashMap<String, FileId>,
+    by_name: BTreeMap<String, FileId>,
     /// The one [`FatExtents`] every backing for a name shares; keyed by name
     /// because `open_backing` hands one out without opening a file.
-    extents: HashMap<String, Weak<FatExtents>>,
+    extents: BTreeMap<String, Weak<FatExtents>>,
 }
 
 /// What to stamp on an entry: reads `clock` directly, in local time as FAT
@@ -571,8 +572,8 @@ impl FatFs {
             role,
             fs,
             open: HashMap::new(),
-            by_name: HashMap::new(),
-            extents: HashMap::new(),
+            by_name: BTreeMap::new(),
+            extents: BTreeMap::new(),
         }
     }
 

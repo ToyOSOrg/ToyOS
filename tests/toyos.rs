@@ -551,6 +551,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("netd_hostile_peer", Sched::Serial, Tier::Nightly),
     ("launcher_refusals", Sched::Parallel, Tier::Fast),
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
+    ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
     // F9's negative control: a budget-refused /home fsync retried to durable,
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
@@ -8169,6 +8170,9 @@ fn run_machine_test(
         // Body in `tests/common/storage.rs`, so the hunk in this shared file
         // stays one line.
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
+        "volume_from_another_disk" => {
+            storage::volume_from_another_disk(test_config, c_bins, rust_bins)
+        }
         "home_budget_refusal_retried" => {
             storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
         }

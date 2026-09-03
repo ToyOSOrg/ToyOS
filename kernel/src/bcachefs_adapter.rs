@@ -1,3 +1,4 @@
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -126,11 +127,11 @@ struct OpenFileInfo {
 pub struct BcacheFsAdapter {
     fs: Mounted<PageCacheBlockIO, ReadWrite>,
     open_files: HashMap<FileId, OpenFileInfo>,
-    name_to_id: HashMap<String, FileId>,
+    name_to_id: BTreeMap<String, FileId>,
     /// The `FileBlocks` every backing for a name shares; keyed by name because
     /// `open_backing` hands one out without opening a file at all. `Weak` so the
     /// entry costs nothing once the last backing drops.
-    blocks: HashMap<String, Weak<FileBlocks>>,
+    blocks: BTreeMap<String, Weak<FileBlocks>>,
 }
 
 impl BcacheFsAdapter {
@@ -138,8 +139,8 @@ impl BcacheFsAdapter {
         Self {
             fs,
             open_files: HashMap::new(),
-            name_to_id: HashMap::new(),
-            blocks: HashMap::new(),
+            name_to_id: BTreeMap::new(),
+            blocks: BTreeMap::new(),
         }
     }
 
@@ -387,12 +388,12 @@ impl FileSystem for BcacheFsAdapter {
 pub struct ReadOnlyBcacheFsAdapter {
     fs: Mounted<SliceBlockIO, ReadOnly>,
     image: SliceBlockIO,
-    name_to_id: HashMap<String, FileId>,
+    name_to_id: BTreeMap<String, FileId>,
 }
 
 impl ReadOnlyBcacheFsAdapter {
     pub fn new(fs: Mounted<SliceBlockIO, ReadOnly>, image: SliceBlockIO) -> Self {
-        Self { fs, image, name_to_id: HashMap::new() }
+        Self { fs, image, name_to_id: BTreeMap::new() }
     }
 }
 

@@ -57,6 +57,7 @@ fn main() {
 }
 
 fn test() {
+    an_undefined_open_flag_bit_is_refused();
     file_survives_one_close();
     acceptor_survives_one_close();
     ring_survives_one_close();
@@ -66,6 +67,29 @@ fn test() {
     kill_flushes_file();
 
     println!("file, acceptor and ring each outlive the first close and are released by kill");
+}
+
+/// A bit `OpenFlags` does not define is a caller asking for an openness this
+/// kernel has no name for, so the open is refused before the path is resolved.
+/// The differential is the bit: the same open without it is the handle below.
+fn an_undefined_open_flag_bit_is_refused() {
+    const UNDEFINED: u64 = 32;
+    const KNOWN: u64 = OpenFlags::READ.0
+        | OpenFlags::WRITE.0
+        | OpenFlags::CREATE.0
+        | OpenFlags::TRUNCATE.0
+        | OpenFlags::APPEND.0;
+    const _: () = assert!(UNDEFINED & KNOWN == 0);
+
+    let asked = OpenFlags(OpenFlags::WRITE.0 | OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+    assert_eq!(
+        syscall::open(PATH, OpenFlags(asked.0 | UNDEFINED)).err(),
+        Some(SyscallError::InvalidArgument),
+        "an open carrying a flag bit this ABI does not define was served",
+    );
+    let handle = syscall::open(PATH, asked).expect("the same open without the bit");
+    syscall::close(handle);
+    println!("  an undefined OpenFlags bit is InvalidArgument, and without it the same open works");
 }
 
 fn file_survives_one_close() {
