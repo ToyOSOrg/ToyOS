@@ -17,11 +17,9 @@ VFS lock a flush holds.
 Nothing in the tree pays it today. Every writer this kernel has appends
 sequentially, so `covered` reaches `target` in one block and the zeroing loop
 does not run — `fs_large_file` writes 1024 pages and allocates one block per
-page with no gap. The path that pays is a `lseek` past the end followed by a
-write, which
-`issues/kernel/lseek-past-eof-is-silently-clamped.md`
-currently makes unreachable, and a shrink-then-write-above-the-mark, whose gap
-is bounded by the file.
+page with no gap. The paths that pay are a `lseek` past the end followed by a
+write, and a shrink-then-write-above-the-mark, whose gap is bounded by the
+file.
 
 The reason it is linear is the representation: `block_for` walks the extent list
 accumulating `block_count`, so page K's block is decided by how many blocks
