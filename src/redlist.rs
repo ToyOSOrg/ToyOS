@@ -3156,6 +3156,21 @@ pub const KNOWN_RED: &[Red] = &[
         source: "tests/toyos.rs",
         measured: "2026-08-29",
     },
+    // The judge reads the exit accounting line off the capture and nothing waits
+    // for it; on a host where a spawn's layout took 2855 ms the count read as zero.
+    Red {
+        test: "syscall_cost",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "the run claims 180000 SYS_CLOCK transitions and the kernel counted 0 — no \
+               `syscalls: pid=` line for the process reached the capture",
+        evidence: "`ci` run 33731006452, `guest (2)`, 2026-09-03, red twice and red ALONE in \
+                   the same job; the dev host passes the same tree. \
+                   issues/build/syscall-cost-reads-the-exit-line-off-a-capture-that-can-close-first.md",
+        source: "tests/toyos.rs",
+        measured: "2026-09-03",
+    },
 ];
 
 // ---------------------------------------------------------------------------
