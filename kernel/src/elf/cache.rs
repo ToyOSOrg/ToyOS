@@ -177,12 +177,10 @@ fn held_bytes(cache: &[(String, CachedLib)]) -> usize {
 }
 
 /// What the cache holds for `path`, judged against the file `id` came from.
-///
 /// **The lookup and the publish-time recheck both ask here**, so the two cannot
-/// disagree about what still matches. They did: the recheck cloned the winner's
-/// entry without comparing anything, so two loaders whose opens straddled a
-/// rewrite both missed, both loaded, and the loser was handed an image of a
-/// file it never opened — the staleness the lookup refuses, served silently.
+/// disagree about what still matches — and the recheck once compared nothing,
+/// handing a loader whose open straddled a rewrite an image of a file it never
+/// opened.
 fn entry_for<'a>(
     cache: &'a [(String, CachedLib)],
     path: &str,

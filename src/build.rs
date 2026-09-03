@@ -662,9 +662,8 @@ fn build_and_assemble(
         // `collect_hosted_rustc` puts it there and no row can.
         programs.insert("rustc");
     }
-    // A symlink's target is a name in the same namespace, so it is inventoried
-    // beside the files: `bin/ls -> /bin/ghost` reaches a program as surely as a
-    // file of that name would, and the files alone would walk past it.
+    // Targets are inventoried beside the files: `bin/ls -> /bin/ghost` reaches a
+    // program as surely as a file would, and the files alone walk past it.
     let targets: Vec<String> =
         symlinks.iter().map(|(_, to)| symlink_target_name(to).to_string()).collect();
     let mut names: Vec<&str> = initrd_files.iter().map(|(name, _)| name.as_str()).collect();
@@ -701,8 +700,7 @@ fn unnamed_program(
             continue;
         }
         if HARNESS_PREFIXES.iter().any(|p| name.starts_with(p)) {
-            // A start list of names no row declares runs nothing, so it is the
-            // empty list for this purpose.
+            // A start list of names no row declares runs nothing, so it is empty.
             if !start.iter().any(|s| programs.contains(s.as_str())) {
                 return Err(format!(
                     "the image carries {name} and this config's `[boot] start` names no \
@@ -2294,7 +2292,7 @@ mod tests {
         let why = unnamed_program(&["bin/test_rs_window_child"], &programs, &ghosts).unwrap_err();
         assert!(why.contains("names no `[programs]` row"), "{why}");
         // The other half of the symlink closure: the target as the inventory
-        // names it, and then judged like any other name.
+        // names it, then judged like any other name.
         assert_eq!(symlink_target_name("/bin/toybox"), "bin/toybox");
         let linked = symlink_target_name("/bin/ghost");
         assert!(unnamed_program(&[linked], &programs, &started).is_err());

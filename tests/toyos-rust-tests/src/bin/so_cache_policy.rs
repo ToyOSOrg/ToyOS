@@ -85,11 +85,9 @@ fn a_changed_file_is_refused() -> Result<String, String> {
 }
 
 /// The same library written over itself: same bytes, same length, new mtime.
-///
-/// **This is the arm a partial fix fails.** The one above changes the file's
-/// size as well as its contents, so an identity keyed on size alone refuses it
-/// and looks correct; here only the mtime moves. No symbol can tell the two
-/// writes apart — the refusal itself is the whole verdict.
+/// **This is the arm a partial fix fails** — the one above also changes the
+/// size, so an identity keyed on size alone passes it. No symbol can tell these
+/// two writes apart, so the refusal itself is the whole verdict.
 fn a_same_size_rewrite_is_refused() -> Result<String, String> {
     copy(FIRST, SAME_SIZE);
     let first = load_in_child(SAME_SIZE);
