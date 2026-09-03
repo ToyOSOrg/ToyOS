@@ -18,10 +18,13 @@
 //! because `.github/` holds citations too and a dotfile directory is what a
 //! checkout scan silently skipped when this was first measured by hand.
 //!
-//! **The two lists live here and not in a scan over the README**, because
+//! **The two field lists live here and not in a scan over the README**, because
 //! documentation carries no gates in this tree (`src/CLAUDE.md`): a test over
 //! prose is exactly the artifact an owner ruling deleted. The README says what
 //! the fields *mean*; this says what a file may hold, and this is what reds.
+//! **The area list is the exception**, and is read out of the README because an
+//! area is a *directory*: the claim resolves against the tree in both
+//! directions, so there the README is an artifact and not prose.
 //!
 //! Cheap on purpose — 363 files read and parsed is milliseconds, so it runs in
 //! `cargo test --lib` on every machine that builds the tree rather than in a
@@ -58,6 +61,56 @@ const ALLOWED_STATUS: &[(&str, &[&str])] = &[
 
 /// The one file in `issues/` that is not an issue.
 const README: &str = "issues/README.md";
+
+/// The heading that opens the closed area list.
+const AREAS: &str = "\n## Areas\n";
+
+/// The area names [`README`] closes, read out of it rather than restated —
+/// `redlist::Registry::read`'s rule, for its reason: a restatement drifts.
+///
+/// [`AREAS`] is followed by one paragraph of backticked names; the prose after
+/// it carries backticks of its own, so the paragraph is where the list ends.
+fn declared_areas(root: &Path) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(root.join(README))
+        .unwrap_or_else(|e| panic!("{README} closes the area list: {e}"));
+    let at = text.find(AREAS).unwrap_or_else(|| panic!("{README} has no `{AREAS}` section"));
+    let body = text[at + AREAS.len()..].trim_start_matches('\n');
+    let end = body.find("\n\n").unwrap_or(body.len());
+    let names: BTreeSet<String> =
+        body[..end].split('`').skip(1).step_by(2).map(str::to_string).collect();
+    assert!(!names.is_empty(), "{README}'s area section names nothing");
+    for name in &names {
+        assert!(
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+            "{README}'s area section names `{name}`, which is not a directory name"
+        );
+    }
+    names
+}
+
+/// The area directories the tracker holds: every issue path's second segment.
+fn area_directories(issue_files: &BTreeSet<String>) -> BTreeSet<String> {
+    issue_files.iter().filter_map(|p| Some(p.split('/').nth(1)?.to_string())).collect()
+}
+
+/// Every disagreement between the closed list and the directories, one line
+/// each — both directions, because each is a different silent falsehood.
+fn area_refusals(declared: &BTreeSet<String>, on_disk: &BTreeSet<String>) -> Vec<String> {
+    let mut bad = Vec::new();
+    for area in on_disk.difference(declared) {
+        bad.push(format!(
+            "issues/{area}/ holds a file and {README} does not name it — the list is closed, and \
+             a directory that becomes an area by existing splits the query surface silently"
+        ));
+    }
+    for area in declared.difference(on_disk) {
+        bad.push(format!(
+            "{README} names `{area}` and no directory under `issues/` holds a file for it — a \
+             stale row, and an area is a directory so that every cross-reference resolves"
+        ));
+    }
+    bad
+}
 
 /// Every refusal the tracker's frontmatter earns, one line each.
 ///
@@ -264,14 +317,12 @@ fn citation_refusals(
                 continue;
             }
             let cited = format!("issues/{area}/{slug}.md");
-            // `areas` is the set of directories under `issues/` that hold a
-            // file, so the tracker on disk is the authority here and
-            // `issues/README.md`'s closed list is read by nothing.
+            // `areas` is the README's closed list, which `the_readme_closes_the_area_list`
+            // holds the directories to.
             if !areas.contains(&area) {
                 bad.push(format!(
-                    "{path}:{n}: cites `{cited}`, and no directory under `issues/` is named \
-                     `{area}` — a claim under an area the tracker does not hold resolves to \
-                     nothing"
+                    "{path}:{n}: cites `{cited}`, and `{area}` is not one of the areas \
+                     {README} closes — a claim under an area nobody declared resolves to nothing"
                 ));
             } else if !issue_files.contains(&cited) {
                 bad.push(format!(
@@ -413,11 +464,8 @@ mod tests {
         assert!(scanned.len() > 500, "only {} tracked text file(s) read", scanned.len());
         let issue_files: BTreeSet<String> = tracker(&root).into_iter().map(|(p, _)| p).collect();
         assert!(issue_files.len() > 100, "only {} issue file(s) found", issue_files.len());
-        let areas: BTreeSet<String> = issue_files
-            .iter()
-            .filter_map(|p| Some(p.split('/').nth(1)?.to_string()))
-            .collect();
-        assert!(areas.len() >= 8, "only {} area directorie(s) found", areas.len());
+        let areas = declared_areas(&root);
+        assert!(areas.len() >= 8, "only {} declared area(s) read", areas.len());
         let live: BTreeSet<&str> = issue_files
             .iter()
             .filter_map(|p| p.rsplit('/').next()?.strip_suffix(".md"))
@@ -430,6 +478,37 @@ mod tests {
             "a citation of a deleted issue reads as checked and teaches nothing:\n  {}",
             bad.join("\n  ")
         );
+    }
+
+    /// The closed list against the directories, in both directions.
+    ///
+    /// A parse that found the wrong paragraph fails here rather than passing
+    /// quietly: nothing restates the ten names, so the disk is what checks them.
+    #[test]
+    fn the_readme_closes_the_area_list() {
+        let root = repo_root();
+        let declared = declared_areas(&root);
+        assert!(declared.len() >= 8, "only {} declared area(s) read", declared.len());
+        let issue_files: BTreeSet<String> = tracker(&root).into_iter().map(|(p, _)| p).collect();
+        assert!(issue_files.len() > 100, "only {} issue file(s) found", issue_files.len());
+        let bad = area_refusals(&declared, &area_directories(&issue_files));
+        assert!(
+            bad.is_empty(),
+            "{README} closes the area list and the tracker is held to it:\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
+    /// The area gate's teeth, one per direction.
+    #[test]
+    fn an_undeclared_directory_and_a_name_with_no_directory_both_red() {
+        let declared: BTreeSet<String> = ["kernel".to_string(), "audio".to_string()].into();
+        let on_disk: BTreeSet<String> = ["kernel".to_string(), "networking".to_string()].into();
+        let bad = area_refusals(&declared, &on_disk);
+        assert_eq!(bad.len(), 2, "{bad:?}");
+        assert!(bad.iter().any(|b| b.contains("issues/networking/ holds a file")), "{bad:?}");
+        assert!(bad.iter().any(|b| b.contains("names `audio`")), "{bad:?}");
+        assert!(area_refusals(&declared, &declared).is_empty());
     }
 
     /// A tracker path built rather than typed: a literal one is a citation this
@@ -459,9 +538,9 @@ mod tests {
         assert!(
             judge(&format!("see {}", at("area", "bare")))[0].contains("no such file exists")
         );
-        // An area the tracker does not hold is itself a dangling claim.
+        // An area nobody declared is itself a dangling claim.
         assert!(judge(&format!("see {}", at("other", "bare")))[0]
-            .contains("no directory under `issues/` is named"));
+            .contains("is not one of the areas"));
         assert!(judge("the fix `a-name-the-tracker-dropped` took")[0].contains("deleted issue"));
         assert!(judge("`a-name-the-tracker-kept`").is_empty());
         // A dead slug inside a longer token is that token, not a mention.
