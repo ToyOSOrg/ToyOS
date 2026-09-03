@@ -1,8 +1,8 @@
 name: toolchain
 
-# A toolchain is a function of the rust fork plus the three trees that end up
-# in the sysroot — `toolchain::witness`'s own question, asked of git so a
-# shell can ask it too. Nearly every branch changes none of them and this
+# A toolchain is a function of the rust fork, the three sysroot trees, the
+# linker and this workflow — `toolchain::witness`'s own question, asked of git
+# so a shell can ask it too. Nearly every branch changes none of them and this
 # workflow does nothing.
 #
 # Its own workflow because it must never be cancelled: `ci.yml` cancels a
@@ -244,14 +244,16 @@ jobs:
               curl -sSL $url | tar --zstd -x -C toyos-toolchain
               rustup toolchain link toyos toyos-toolchain/x86_64-unknown-linux-gnu/stage2
               ln -s "\$(rustup which cargo)" toyos-toolchain/x86_64-unknown-linux-gnu/stage2/bin/cargo
-              export PATH="\$PWD/toyos-toolchain/x86_64-unknown-linux-gnu/stage2/bin:\$PATH"
+              export PATH="\$PATH:\$PWD/toyos-toolchain/x86_64-unknown-linux-gnu/stage2/bin"
               cargo +toyos build --target x86_64-unknown-toyos
 
           The last two commands before the build are not decoration. rustc's ToyOS
           target names its linker \`toyos-ld\` and finds it on \`PATH\`; the tarball
-          carries one in that same \`bin/\`. The \`cargo\` symlink is not shipped
-          because its path would be the publisher's, and rustup narrates a fallback
-          on every invocation without it.
+          carries one in that same \`bin/\`, which goes LAST on \`PATH\`: first, it
+          shadows rustup's \`cargo\` proxy with the real binary and \`+toyos\` fails.
+          The \`cargo\` symlink is not shipped because its path would be the
+          publisher's, and rustup narrates a fallback on every invocation without it.
+          Leaving \`PATH\` alone: \`CARGO_TARGET_X86_64_UNKNOWN_TOYOS_LINKER=<that bin>/toyos-ld\`.
 
           ## glibc
 
