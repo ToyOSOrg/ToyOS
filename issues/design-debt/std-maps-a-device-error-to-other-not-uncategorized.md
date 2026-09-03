@@ -25,11 +25,15 @@ header and the code it describes is worse than a non-idiomatic arm.
 
 ## Exit condition
 
-One change that moves all three together: `Io => ErrorKind::Uncategorized` in
+One change that moves all four together: `Io => ErrorKind::Uncategorized` in
 the fork's map, `userland/logd/src/policy.rs`'s header reworded to name the new
-spelling, and its test's constructed kind moved with it. It is closed when
-`rg 'ErrorKind::Other'` over `userland/` returns nothing that means "the device
-refused".
+spelling, its test's constructed kind moved with it, and
+`boot_volume_metadata_error` in `tests/common/volumes.rs`, which requires the
+guest to print `kind=Other` for a boot volume that refused every read — a fourth
+site outside `userland/` and spelled `kind=Other`, so the grep below misses it
+twice over and it is named here instead. It is closed when `rg
+'ErrorKind::Other'` over `userland/` returns nothing that means "the device
+refused" and that gate requires the new word.
 
 Owned by whoever next touches either side; neither half is worth a landing on
 its own, and the fork's upstream-mergeability argument is the thing that will
