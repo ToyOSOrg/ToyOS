@@ -2981,12 +2981,18 @@ fn run_screen_test(
             Ok(())
         }
         "screen_gop_firmware_mode" => {
-            // Three readings of one number on each of two machines advertising
-            // different panels: QMP's `screendump` is the geometry QEMU scans
+            // Four of `GopInfo`'s six fields, on two machines advertising
+            // different panels. QMP's `screendump` is the geometry QEMU scans
             // out, the kernel's `GOP:` line is what the bootloader handed it,
-            // and `Profile::panel` is what the machine advertises. A loader
-            // that picks a mode lands on the largest one both offer.
-            let mode_of = |qemu: &mut QemuInstance, label: &str| -> Result<(u32, u32), String> {
+            // and `Profile::panel` is what the machine advertises: a loader
+            // that picks a mode lands on the largest one both offer. Stride and
+            // pixel format ride the same line because neither shows in a
+            // geometry — a halved stride shears the picture, a swapped channel
+            // order recolours it, and both leave `WxH` agreeing with the
+            // scanout. **Not reached**: `framebuffer` and `framebuffer_size`.
+            let mode_of = |qemu: &mut QemuInstance,
+                           label: &str|
+             -> Result<(u32, u32, u32, u32), String> {
                 let console = qemu.boot_log().to_string();
                 // `at 0x` picks the kernel's line; the bootloader's says `fb=`.
                 let Some(line) =
@@ -2997,6 +3003,13 @@ fn run_screen_test(
                          framebuffer at all\nboot console:\n{console}"
                     ));
                 };
+                let field = |key: &str| -> Result<u32, String> {
+                    line.split(key)
+                        .nth(1)
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| format!("{label}: no `{key}` in {line:?}"))
+                };
                 let geometry = line
                     .split("GOP: ")
                     .nth(1)
@@ -3006,14 +3019,21 @@ fn run_screen_test(
                 let kernel = (
                     geometry.0.parse::<u32>().map_err(|e| format!("{label}: {line:?}: {e}"))?,
                     geometry.1.parse::<u32>().map_err(|e| format!("{label}: {line:?}: {e}"))?,
+                    field("stride=")?,
+                    field("format=")?,
                 );
                 let dump = qemu.screendump();
                 let scanout = (dump.width as u32, dump.height as u32);
-                eprintln!("  [gop] {label}: kernel says {kernel:?}, QEMU scans out {scanout:?}");
-                if kernel != scanout {
+                eprintln!(
+                    "  [gop] {label}: kernel says {}x{} stride={} format={}, QEMU scans out \
+                     {scanout:?}",
+                    kernel.0, kernel.1, kernel.2, kernel.3
+                );
+                if (kernel.0, kernel.1) != scanout {
                     return Err(format!(
-                        "{label}: the kernel was handed {kernel:?} and the scanout QEMU is \
-                         driving is {scanout:?}"
+                        "{label}: the kernel was handed {:?} and the scanout QEMU is \
+                         driving is {scanout:?}",
+                        (kernel.0, kernel.1)
                     ));
                 }
                 Ok(kernel)
@@ -3034,19 +3054,48 @@ fn run_screen_test(
 
             // The largest mode `-vga std` offers on QEMU's default 16 MiB.
             const LARGEST: (u32, u32) = (2048, 2048);
+            // What QEMU's stdvga publishes, measured off these two boots and
+            // off a third at 1600x900: it pads no scan line, and its pixels are
+            // `PixelBlueGreenRedReserved8BitPerColor`, which `query_gop`
+            // encodes as 1.
+            const BGR: u32 = 1;
             for (profile, label, mode) in [
                 (qemu::Profile::Gop, "Gop", gop),
                 (qemu::Profile::Metal, "metal-sim", metal),
             ] {
                 let panel = profile.panel().expect("both machines have a VGA adapter");
-                if mode != panel {
+                if (mode.0, mode.1) != panel {
                     return Err(format!(
-                        "{label} advertises a {panel:?} panel and booted into {mode:?}{} — an \
+                        "{label} advertises a {panel:?} panel and booted into {:?}{} — an \
                          OS inherits the mode its firmware set and does not choose one",
-                        if mode == LARGEST { ", the largest mode the machine offers" } else { "" }
+                        (mode.0, mode.1),
+                        if (mode.0, mode.1) == LARGEST {
+                            ", the largest mode the machine offers"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+                if mode.2 != panel.0 {
+                    return Err(format!(
+                        "{label}: the kernel was handed stride={} for a {panel:?} panel this \
+                         adapter does not pad — every row it paints would land {} pixels off \
+                         the last",
+                        mode.2,
+                        mode.2 as i64 - panel.0 as i64
+                    ));
+                }
+                if mode.3 != BGR {
+                    return Err(format!(
+                        "{label}: the kernel was handed format={} for a display that publishes \
+                         BGR ({BGR}) — the geometry is right and every colour is wrong",
+                        mode.3
                     ));
                 }
             }
+            // Non-vacuity for the two panel checks above: they compare the
+            // guest against a harness constant, so a run in which both machines
+            // were handed the same constant would pass them both.
             if gop == metal {
                 return Err(format!(
                     "two machines advertising different panels booted into the same {gop:?}"
