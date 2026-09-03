@@ -208,12 +208,16 @@ clear from one halted with its kick undelivered from one wedged below the
 interrupt layer. Take `info registers -a` over QMP before pressing Ctrl+Alt+D,
 which destroys what it reports on.
 
-## The reproduction was unreachable for a year of runs, and is not any more
+## The reproduction was unreachable from 2026-08-27 to 2026-09-03, and is not any more
 
-For a long stretch the test stopped at its **first** probe: the windowed child
-asked for a window, was answered `NotEndowed`, printed `WINDOW-CHILD-REFUSED
-this program was given no compositor` and exited `code=1` eight milliseconds
-after it was spawned — while `EXPECTED_FAILURES`'s `the windowed child never
+The test dates from 2026-08-06 (`d49883e8`). The refusal below was measured on
+2026-08-27 and was still the outcome on 2026-09-03, when it was closed; how far
+back before the first of those readings it went is not recorded, so the span
+above is the measured one and not the whole of it.
+
+The test stopped at its **first** probe: the windowed child asked for a window,
+was answered `NotEndowed`, and printed `WINDOW-CHILD-REFUSED this program was
+given no compositor` — while `EXPECTED_FAILURES`'s `the windowed child never
 reported leaving` absorbed it, so no run said so. The client is a harness
 binary, no `[programs]` row can name one, and `/bin/init` endows a name the
 manifest does not carry with nothing.
