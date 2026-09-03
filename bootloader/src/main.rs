@@ -422,8 +422,14 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let pixel_format = match mode.pixel_format() {
         PixelFormat::Rgb => 0,
         PixelFormat::Bgr => 1,
-        // Refused by name and not answered with another mode: the mode is not
-        // this loader's to pick, so there is nothing here to fall back to.
+        // UEFI 2.11 §12.9.2: `PixelBltOnly` "does not support a physical frame
+        // buffer", so this display has no scanout for the kernel to inherit.
+        PixelFormat::BltOnly => {
+            println!("GOP: {}x{} is Blt-only, so this display publishes no framebuffer", width, height);
+            return None;
+        }
+        // A framebuffer the kernel cannot scan out: refused by name, because
+        // the mode is not this loader's to pick.
         other => panic!(
             "GOP: the firmware's mode is {width}x{height} {other:?}, and the kernel \
              scans out RGB or BGR only"
