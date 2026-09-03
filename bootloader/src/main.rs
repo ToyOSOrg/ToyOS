@@ -428,8 +428,7 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
             println!("GOP: {}x{} is Blt-only, so this display publishes no framebuffer", width, height);
             return None;
         }
-        // A framebuffer the kernel cannot scan out: refused by name, because
-        // the mode is not this loader's to pick.
+        // Refused by name, not swapped: the mode is not this loader's to pick.
         other => panic!(
             "GOP: the firmware's mode is {width}x{height} {other:?}, and the kernel \
              scans out RGB or BGR only"
