@@ -2983,13 +2983,11 @@ fn run_screen_test(
             // Three readings of one number on each of two machines advertising
             // different panels: QMP's `screendump` is the geometry QEMU scans
             // out, the kernel's `GOP:` line is what the bootloader handed it,
-            // and `Profile::panel` is what the machine was built to advertise.
-            // A loader that picks a mode lands on the largest one both offer
-            // and matches neither panel.
+            // and `Profile::panel` is what the machine advertises. A loader
+            // that picks a mode lands on the largest one both offer.
             let mode_of = |qemu: &mut QemuInstance, label: &str| -> Result<(u32, u32), String> {
                 let console = qemu.boot_log().to_string();
-                // `at 0x` is the kernel's line, not the bootloader's — that one
-                // prints the same geometry with `fb=`.
+                // `at 0x` picks the kernel's line; the bootloader's says `fb=`.
                 let Some(line) =
                     console.lines().find(|l| l.contains("GOP: ") && l.contains(" at 0x"))
                 else {
@@ -3033,8 +3031,7 @@ fn run_screen_test(
             let mut qemu = boot(qemu::Profile::Metal, free);
             let metal = mode_of(&mut qemu, "metal-sim")?;
 
-            // The largest mode `-vga std` offers on QEMU's default 16 MiB, and
-            // what both machines booted into while the loader was choosing.
+            // The largest mode `-vga std` offers on QEMU's default 16 MiB.
             const LARGEST: (u32, u32) = (2048, 2048);
             for (profile, label, mode) in [
                 (qemu::Profile::Gop, "Gop", gop),
