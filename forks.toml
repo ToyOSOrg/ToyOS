@@ -116,22 +116,8 @@ why = "Adds the winit-toyos sibling crate — the model case for this tier."
 pr = "none — winit-toyos must be published before upstream can depend on it by version"
 followup = "winit-toyos is ToyOS's own code still living inside the fork; move it to the monorepo once published"
 owed = """
-`winit-toyos/Cargo.toml:21` says `window = "0.1"` and must say
-`toyos-window = "0.1"`: `window` is another crate on crates.io, which is why the
-monorepo renamed the package. No source edit goes with it — `toyos-window`'s lib
-target is still `window`, and `winit-toyos/src/window.rs:6` already spells
-`use window as toyos_window;`.
-
-**This edit and the monorepo's rename are one change across two repositories.**
-Until it is pushed, the monorepo cannot build at all: `[patch.crates-io] window`
-is gone, so `window = "0.1"` resolves to the unrelated registry crate and fails
-to compile. Cargo offers no bridge — a `[patch]` entry whose replacement carries
-a different package name is not applied (cargo 1.97.1: "patch `toyos-window
-v0.1.0` was not used in the crate graph"). Pushing it first is safe, because
-main's lockfiles pin a revision and do not follow a branch.
-
-`winit/Cargo.toml:101` also patches `raw-window-handle` from `Japabu/`, the
-account name this estate left; `ToyOSOrg/` is where it lives now and GitHub is
+`winit/Cargo.toml:101` patches `raw-window-handle` from `Japabu/`, the account
+name this estate left; `ToyOSOrg/` is where it lives now and GitHub is
 redirecting.
 """
 
