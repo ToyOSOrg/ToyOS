@@ -422,6 +422,12 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // so it is timer-anchored despite being a screendump-content check.
     ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
     ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
+    // The other half of the recovery branch: `screen_recoverable_untouched`
+    // reads the screen either side of a survived panic, which holds whether or
+    // not the discard did anything. This boots one guest, survives a panic and
+    // then kills the machine, and reads the panel for the second. Carrying
+    // `UNMEASURED_MS` until the shards price it.
+    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Fast),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
     ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
@@ -4835,6 +4841,75 @@ fn run_screen_test(
             print_screen(name, &text);
             if !text.contains("Boot: complete") {
                 return Err(format!("nothing on screen to preserve\ndecoded screen:\n{text}"));
+            }
+            Ok(())
+        }
+        "screen_survived_panic_not_blamed" => {
+            // `discard_capture` told from a no-op. `capture` freezes a report on
+            // every panic; the recovery branch drops it, so the *next* fatal
+            // path paints what is live rather than the panic the machine walked
+            // away from. Two deaths in one boot, and the panel must name the
+            // second.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    profile: qemu::Profile::Gop,
+                    qmp: true,
+                    kernel_features: ACTUATOR_KERNEL,
+                    ..Default::default()
+                },
+            );
+            // Action 0 panics in syscall context, which the handler recovers
+            // from, so `capture` ran and `discard_capture` is the only thing
+            // that can have dropped what it froze.
+            const USERSPACE_PANIC: &str = "SYS_DEBUG: kernel panic triggered by userspace";
+            let survived = qemu.run_test("test_rs_test_panic_child", Duration::from_secs(15));
+            if let Some(err) = &survived.error {
+                return Err(format!("the survivable panic never completed: {err}"));
+            }
+            if survived.exit_code == Some(0) {
+                return Err("the survivable panic did not kill the child".to_string());
+            }
+            if !survived.serial.contains(USERSPACE_PANIC) {
+                return Err(format!(
+                    "no kernel panic in the child's output, so there is no capture to \
+                     discard and the rest of this test would pass vacuously\nserial:\n{}",
+                    survived.serial
+                ));
+            }
+            // The machine walked away from it, which is what makes the second
+            // death a second one.
+            if !qemu.command_until(
+                "run test_rs_test_panic_child 3",
+                FATAL_HALT_NONCE,
+                Duration::from_secs(15),
+            ) {
+                return Err(format!(
+                    "{FATAL_HALT_NONCE:?} never reached the console, so the guest did not \
+                     survive the first panic and there is no second death to read"
+                ));
+            }
+            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
+            let text = dump.text();
+            print_screen(name, &text);
+            // The nonce is logged after the first panic's snapshot was frozen,
+            // so a snapshot the discard failed to drop cannot carry it: the
+            // panel would be the survived panic's report, standing as the cause
+            // of a death it did not cause.
+            if !text.contains(FATAL_HALT_NONCE) {
+                return Err(format!(
+                    "the panel does not name the fatal halt: the survived panic's frozen \
+                     report was painted as the cause of death, so `discard_capture` did not \
+                     drop it\ndecoded screen:\n{text}"
+                ));
+            }
+            if dump.fill() != FILL_FATAL {
+                return Err(format!(
+                    "the report is on screen but the fill is {:?}, not the fatal {FILL_FATAL:?}",
+                    dump.fill()
+                ));
             }
             Ok(())
         }
