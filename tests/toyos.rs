@@ -9505,7 +9505,7 @@ fn run_machine_test(
             // MSI-X table would make this whole test a re-run of the happy
             // path under a different name.
             let controllers = xhci_argv(&argv);
-            let [storage, hid] = controllers[..] else {
+            let [refused, hid] = controllers[..] else {
                 return Err(format!("this profile is two controllers; argv has {controllers:?}"));
             };
             if !hid.contains("msix=off") {
@@ -9517,20 +9517,25 @@ fn run_machine_test(
                      driver is expected to refuse it — that is xhci_no_interrupt"
                 ));
             }
-            // And the boot stick's controller has nothing at all, so the guest
-            // does no USB storage I/O. Without this the test cannot fail:
-            // `wait_transfer` drains the entire event ring and dispatches
-            // every HID report in it, so the ESP log's idle-loop writes
-            // deliver a keyboard's reports with no interrupt anywhere. That is
-            // measured, not feared — the first shape of this profile passed
-            // with MSI deliberately left disabled.
+            // And the other controller has no interrupt mechanism, so the
+            // driver refuses it and never polls it. Without this the test
+            // cannot fail: `wait_transfer` drains the entire event ring and
+            // dispatches every HID report in it, so a transfer on any polled
+            // controller delivers a keyboard's reports with no interrupt
+            // anywhere. Measured, not feared — the first shape of this profile
+            // passed with MSI deliberately left disabled.
             for want in ["msix=off", "msi=off"] {
-                if !storage.contains(want) {
+                if !refused.contains(want) {
                     return Err(format!(
-                        "{storage} carries the boot stick and still has {want}'s mechanism, so \
-                         storage I/O would drain the HID controller's ring for free"
+                        "{refused} still has {want}'s mechanism, so a transfer on it would drain \
+                         the HID controller's ring for free"
                     ));
                 }
+            }
+            // Nothing rides USB but the two HID devices; the boot volume is on
+            // this profile's NVMe, so no storage transfer can drain a ring.
+            if argv.iter().any(|a| a.starts_with("usb-storage")) {
+                return Err(format!("a USB disk on a machine that must do no USB storage I/O: {argv:?}"));
             }
             let usb = usb_argv(&argv);
             for want in ["usb-kbd", "usb-mouse"] {

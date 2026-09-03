@@ -2235,8 +2235,7 @@ pub fn log_partition_layout(
     /// is why the log moved off the ESP.
     const BASIC_DATA: &str = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7";
     const ESP_TYPE: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
-    /// TOYOS-ROOT, written out for the same reason: this is the value the
-    /// kernel selects its ROOT candidates on.
+    /// TOYOS-ROOT, the value the kernel selects its candidates on.
     const ROOT_TYPE: &str = "B350BC93-BB6A-4C5E-9589-A5C3CFD555FD";
 
     let image_path = test_dir().join("log-layout.img");
@@ -2255,13 +2254,39 @@ pub fn log_partition_layout(
 
     let types = [
         (esp.part_type_guid.guid.to_uppercase(), ESP_TYPE, "ESP"),
-        (root.part_type_guid.guid.to_uppercase(), ROOT_TYPE, "root partition"),
         (log.part_type_guid.guid.to_uppercase(), BASIC_DATA, "log partition"),
     ];
     for (got, want, what) in types {
         if got != want {
             return Err(format!("the {what} is typed {got}, wanted {want}"));
         }
+    }
+    // ROOT's type is read with the kernel's parser: the `gpt` crate answers the
+    // all-zero GUID for a type its own table does not name.
+    let mut found = [toyos_gpt::Partition {
+        index: 0,
+        type_guid: toyos_gpt::Guid::ZERO,
+        unique_guid: toyos_gpt::Guid::ZERO,
+        first_lba: 0,
+        last_lba: 0,
+    }; 4];
+    let scan = toyos_gpt::locate_type(
+        &mut ImageSectors { bytes: &image },
+        toyos_gpt::Guid::TOYOS_ROOT,
+        &mut found,
+    )
+    .map_err(|e| format!("the kernel's own GPT parser cannot read this table: {e:?}"))?;
+    if (scan.matched, scan.listed) != (1, 1) {
+        return Err(format!(
+            "the built image carries {} partitions typed {ROOT_TYPE}, wanted one",
+            scan.matched
+        ));
+    }
+    if found[0].first_lba != root.first_lba || found[0].last_lba != root.last_lba {
+        return Err(format!(
+            "the kernel's parser puts ROOT at LBA {}..{} and the table says {}..{}",
+            found[0].first_lba, found[0].last_lba, root.first_lba, root.last_lba
+        ));
     }
 
     // The attribute field, spelled out. Bit 0 marks a partition the firmware
