@@ -656,16 +656,13 @@ fn scope_sources(log: &Serial) -> BTreeMap<String, String> {
 
 /// Whether this machine's virtio functions are behind the unit at all.
 ///
-/// The vacuity trap the two fault gates cannot see. QEMU keeps a virtio
-/// function on `&address_space_memory` — the unit bypassed, whatever the tables
-/// say — unless it is created with `iommu_platform=on`
+/// QEMU keeps a virtio function on `&address_space_memory` — the unit bypassed,
+/// whatever the tables say — unless it is created with `iommu_platform=on`
 /// (`hw/virtio/virtio-bus.c:86-99`, `hw/virtio/virtio-pci.c:1400-1405` at
-/// v11.1.0), and under identity mapping the two are indistinguishable. So a
-/// host flag is not enough: the argv says which functions were created behind a
-/// unit, the console says which ones the guest negotiated
-/// `VIRTIO_F_ACCESS_PLATFORM` for, and [`Profile::HeadlessNoIommu`] is the same
-/// machine with the unit taken away, where every answer comes out the other
-/// way. A kernel printing a constant fails one of the two.
+/// v11.1.0), and under identity mapping the two are indistinguishable. So the
+/// argv says which functions were created behind a unit, the console says which
+/// negotiated `VIRTIO_F_ACCESS_PLATFORM`, and [`Profile::HeadlessNoIommu`] is
+/// the same machine without one, where both answers invert.
 pub fn iommu_virtio_platform(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -932,19 +929,15 @@ pub fn iommu_empty_domain(
 /// on everything else, and the memory it was aimed at is untouched.
 ///
 /// The actuator points the NIC's first RX buffer at the physical bytes NVMe's
-/// admin completion queue page ends with — a page the NIC's domain does not map
-/// at all. Three things then have to be true at once, and no two of them come
-/// from the same place: the unit blocks the transaction and names the NIC and
-/// that address; the address is the one NVMe's own `ACQ` register holds,
-/// translated through the tables the unit walks rather than taken off a console
-/// line; and every byte of the 2 KiB there is still zero.
+/// admin completion queue page ends with — a page the NIC's domain does not map.
+/// Three things then hold at once, and no two come from the same place: the unit
+/// blocks it and names the NIC and that address; the address is the one NVMe's
+/// own `ACQ` register holds, resolved through the tables the unit walks rather
+/// than taken off a console line; and every byte of the 2 KiB is still zero.
 ///
-/// The oracle is Intel VT-d Rev. 4.0 Section 9.8, which [`translate`]
-/// implements independently, and QEMU's `vtd_iova_to_sspte`
-/// (`hw/i386/intel_iommu.c:1146-1210` at v11.1.0), which is the model that
-/// produced the fault. The negative control is the whole of the NIC's move
-/// reverted: on the identity domain that physical address *is* mapped, the
-/// frame lands, and the zeros go.
+/// Oracle: VT-d Rev. 4.0 Section 9.8, which [`translate`] implements
+/// independently, and QEMU's `vtd_iova_to_sspte`
+/// (`hw/i386/intel_iommu.c:1146-1210` at v11.1.0).
 pub fn iommu_domain_isolation(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -1002,8 +995,8 @@ pub fn iommu_domain_isolation(
         ));
     }
 
-    // The victim's address, from the victim's own register and the unit's own
-    // tables. `ACQ` is what NVMe programmed, in whatever space NVMe is in.
+    // The victim's address out of the victim's own register and the unit's own
+    // tables: `ACQ` is what NVMe programmed, in whatever space NVMe is in.
     let window = register_window(&log, "isolation")?;
     let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
     let victim = translate(socket, window, &nvme, acq)?;
@@ -1057,23 +1050,42 @@ pub fn iommu_domain_isolation(
         blocked.reason,
         PROBE_WORDS * 8
     );
-    domains_are_disjoint(socket, &log, window, victim)
+    // A second boot, and it has to be a clean one: the fault above halts the
+    // machine part-way through the driver list, so the domains that exist on
+    // that boot are only the ones bound before it. The first guest goes first —
+    // QEMU holds an exclusive write lock on the NVMe image.
+    let lane = qemu.shutdown();
+    let clean =
+        QemuInstance::boot_with_options(test_config, c_bins, rust_bins, BootOptions {
+            profile: Profile::Headless,
+            qmp: true,
+            ..Default::default()
+        });
+    drop(lane);
+    let log = Serial::boot(&clean);
+    log.must_be_clean()?;
+    log.must_say("Boot: complete")?;
+    let socket = clean.qmp_socket();
+    let window = register_window(&log, "isolation")?;
+    let nvme = class_function(&log, "0108")
+        .ok_or_else(|| format!("this machine enumerated no NVMe controller\n{}", log.text()))?;
+    let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
+    let owned = translate(socket, window, &nvme, acq)?;
+    domains_are_disjoint(socket, &log, window, owned, &nvme)
 }
 
-/// Every function the kernel says it moved is in a domain of its own, and none
-/// of those domains maps the page the NIC was aimed at.
+/// Every function the kernel says it moved is in a domain of its own, and only
+/// the owner reaches the owner's pool.
 ///
-/// One boot can only take one fault, so the behavioural arm above covers one
-/// driver. This covers all of them, out of the same tables the unit walks: the
-/// context entry each function really has, its `DID` and its second-level root,
-/// and the walk for the victim page in each. A driver moved into somebody
-/// else's domain, or into one that still reaches the identity domain's pages,
-/// fails here without needing a boot of its own.
+/// One boot takes one fault, so the arm above covers one driver and this covers
+/// all of them, out of the tables the unit walks: each function's real context
+/// entry, its `DID`, its second-level root, and the walk for `owned` in each.
 fn domains_are_disjoint(
     socket: &Path,
     log: &Serial,
     window: u64,
-    victim: u64,
+    owned: u64,
+    owner: &str,
 ) -> Result<(), String> {
     let mut seen: BTreeMap<String, u64> = BTreeMap::new();
     for line in log.text().lines() {
@@ -1109,16 +1121,19 @@ fn domains_are_disjoint(
                  one address space wearing two domain ids"
             ));
         }
-        if let Ok(at) = translate(socket, window, bdf, victim) {
+        if bdf == owner {
+            continue;
+        }
+        if let Ok(at) = translate(socket, window, bdf, owned) {
             return Err(format!(
-                "{bdf}'s domain {did} translates {victim:#x} to {at:#x}, and that page belongs \
-                 to another driver's pool"
+                "{bdf}'s domain {did} translates {owned:#x} to {at:#x}, and that address is \
+                 {owner}'s admin completion queue"
             ));
         }
     }
     eprintln!(
-        "  [iommu] {} function(s) in {} domains over {} distinct second-level tables, none of \
-         which maps {victim:#x}: {seen:?}",
+        "  [iommu] {} function(s) in {} domains over {} distinct second-level tables, and only \
+         {owner} reaches {owned:#x}: {seen:?}",
         seen.len(),
         seen.values().collect::<BTreeSet<_>>().len(),
         roots.len()
@@ -1147,7 +1162,7 @@ fn context_of(socket: &Path, window: u64, bdf: &str) -> Result<(u64, u64), Strin
 const PCI_COMMAND: u64 = 0x04;
 const PCI_BUS_MASTER: u16 = 0x04;
 
-/// One function's config space in ECAM, over the monitor.
+/// One function's config space in ECAM.
 fn config_space(log: &Serial, bdf: &str) -> Result<u64, String> {
     let line = log.must_say("ACPI: ECAM base address: ")?;
     let ecam = line
@@ -1159,15 +1174,13 @@ fn config_space(log: &Serial, bdf: &str) -> Result<u64, String> {
     Ok(ecam + (u64::from(bus) << 20) + (u64::from(dev) << 15) + (u64::from(func) << 12))
 }
 
-/// How much of the untouched half of NVMe's admin completion queue page the
-/// gate reads back; a frame is 1526 bytes at most, so this covers the whole of
-/// one landing there.
+/// The untouched half of NVMe's admin completion queue page: a frame is 1526
+/// bytes at most, so this covers the whole of one landing there.
 const PROBE_WORDS: usize = 256;
 
 /// `REG_ACQ`, NVMe 2.0 Figure 41.
 const NVME_ACQ: u64 = 0x30;
 
-/// The unit's register window, off the line that says it is translating.
 fn register_window(log: &Serial, name: &str) -> Result<u64, String> {
     let line = log.must_say("translating gsts=")?;
     line.split(" @")
@@ -1177,8 +1190,7 @@ fn register_window(log: &Serial, name: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{name}: no register window on {line:?}"))
 }
 
-/// A function's memory BAR 0, read out of ECAM over the monitor rather than
-/// taken from anything the guest printed about it.
+/// A function's memory BAR 0, out of ECAM rather than off a console line.
 fn nvme_bar(socket: &Path, log: &Serial, bdf: &str) -> Result<u64, String> {
     let config = config_space(log, bdf)?;
     // A window that decodes at all: an ECAM base the kernel invented would read

@@ -79,9 +79,7 @@ impl Iova {
     }
 }
 
-/// A device address space. Never 0: an all-zero context entry names domain 0,
-/// so a fault record and a domain-selective invalidation could not tell a
-/// domain apart from an entry nobody wrote.
+/// A device address space. Never 0, which an all-zero context entry also names.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct DomainId(u16);
 
@@ -102,9 +100,9 @@ impl core::fmt::Display for DomainId {
     }
 }
 
-/// Why a device could not be given an address space of its own, or something
-/// put in one. Carried rather than collapsed: one message for all of them
-/// sends whoever reads it looking in the wrong place.
+/// Why a device got no address space of its own, or nothing put in one. Carried
+/// rather than collapsed: one message for all of them sends whoever reads it
+/// looking in the wrong place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IommuError {
     NoUnit,
@@ -136,8 +134,8 @@ impl core::fmt::Display for IommuError {
     }
 }
 
-/// Where a device's addresses come from. Not a `DomainId` on its own: a machine
-/// with no unit has to be a thing this type can say, or every driver grows the
+/// Where a device's addresses come from. Not a bare `DomainId`: a machine with
+/// no unit has to be something this type can say, or every driver grows the
 /// same branch.
 #[derive(Clone, Copy)]
 pub enum DeviceSpace {
@@ -148,8 +146,8 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// An address space of a device's own, or the machine's own with the
-    /// register value that decided it — the same policy an unusable unit gets.
+    /// One of a device's own, or the machine's own with the reason — the same
+    /// policy an unusable unit gets.
     pub fn create() -> Self {
         match vtd::domain::create() {
             Ok(id) => Self::Own(id),
@@ -163,12 +161,10 @@ impl DeviceSpace {
     /// Put `bytes` of physical memory at `phys` in this space and return the
     /// address the device must be programmed with.
     ///
-    /// Read and write both, always. A permission set is not a type here yet
-    /// because nothing in this kernel can give it a second value: the only
-    /// leaf is 2 MiB, which is coarser than any split a driver's pools offer,
-    /// and QEMU drops an access its cached translation denies rather than
-    /// recording a fault, so a narrowed mapping is unobservable as well as
-    /// unexpressible.
+    /// Read and write both, always: nothing here can give a permission set a
+    /// second value. The only leaf is 2 MiB, coarser than any split a driver's
+    /// pools offer, and QEMU drops an access its cached translation denies
+    /// rather than recording a fault — unexpressible and unobservable both.
     pub fn map(self, phys: u64, bytes: u64) -> Result<u64, IommuError> {
         match self {
             Self::Untranslated => Ok(phys),

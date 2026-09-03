@@ -12749,7 +12749,9 @@ fn run_machine_test(
                 ..Default::default()
             };
             let argv = qemu::profile_argv(&options);
-            if !argv.windows(2).any(|w| w[0] == "-device" && w[1] == "virtio-gpu-pci") {
+            // Prefix, not equality: a virtio function on a machine with a unit
+            // carries `iommu_platform=on` behind its name.
+            if !argv.windows(2).any(|w| w[0] == "-device" && w[1].starts_with("virtio-gpu-pci")) {
                 return Err(format!("the profile stages no virtio-gpu: {argv:?}"));
             }
             // A `-vga` adapter beside it is a second display, and firmware

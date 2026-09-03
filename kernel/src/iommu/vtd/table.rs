@@ -180,10 +180,9 @@ pub struct Domain {
 }
 
 impl Domain {
-    /// The lowest address a domain hands out: a quarter of the way up what it
-    /// can express, which is far above any physical address these machines
-    /// have. A descriptor still carrying a physical address therefore names
-    /// nothing this domain maps, and faults instead of landing somewhere.
+    /// A quarter of the way up what the width can express — far above any
+    /// physical address these machines have, so a descriptor still carrying one
+    /// names nothing this domain maps and faults rather than landing.
     fn first_address(width: AddressWidth) -> u64 {
         1 << (width.bits() - 2)
     }
@@ -214,8 +213,8 @@ impl Domain {
     pub fn reserve(&mut self, bytes: u64) -> Option<Iova> {
         let span = bytes.next_multiple_of(PAGE_2M);
         let end = self.next.checked_add(span)?;
-        // `CAP.MGAW` bounds every address the unit will accept; past it the
-        // request is refused by the unit rather than translated.
+        // The depth these tables were built to: an address past what the top
+        // level reaches has no entry to be written into.
         if end > 1u64 << self.width.bits() {
             return None;
         }

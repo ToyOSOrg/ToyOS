@@ -34,11 +34,9 @@ const FIRST: u16 = table::KERNEL_DOMAIN + 1;
 
 /// What every enabled unit agreed on, which is what a domain can be built to.
 enum Agreement {
-    /// No unit is programmed.
     None,
     /// The width every unit reported, and the smallest `CAP.ND` among them.
     One(AddressWidth, u32),
-    /// Two units want different depths, so no one domain serves both.
     Split,
 }
 
@@ -52,7 +50,6 @@ struct Domains {
 static DOMAINS: Lock<Domains> =
     Lock::new(Domains { agreement: Agreement::None, live: Vec::new() });
 
-/// Record what one enabled unit can do, before any domain is built on it.
 pub fn unit_agrees(width: AddressWidth, ceiling: u32) {
     let mut domains = DOMAINS.lock();
     domains.agreement = match domains.agreement {
@@ -123,8 +120,8 @@ pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {
     Ok(())
 }
 
-/// Rewrite `stream`'s context entry in every unit to name `id`, then tell each
-/// unit's caches — Section 6.5.2.1's order, context cache before IOTLB.
+/// Rewrite `stream`'s context entry in every unit, then its caches in Section
+/// 6.5.2.1's order: context cache, then IOTLB.
 pub fn attach(stream: StreamId, id: DomainId) {
     let mut domains = DOMAINS.lock();
     let domain = *domains.at(id);

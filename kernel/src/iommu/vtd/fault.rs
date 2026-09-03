@@ -2,18 +2,14 @@
 //!
 //! The handler is bounded, allocates nothing and takes no lock; unit and
 //! function state lives in fixed arrays of atomics, written once before the
-//! mask comes off. Every stream is kernel-owned, so the terminal action is
-//! still a halt — a kernel driver reaching outside its domain is a kernel bug —
-//! but the halt is now the last thing that happens rather than the first.
-//!
-//! Before it: Bus Master Enable cleared on the function that faulted, the first
-//! record latched whole, and a count kept per unit and per function. Clearing
-//! `BME` is also the ceiling on a storm, since a function that cannot master
-//! the bus cannot raise a second fault (PCI 3.0 §6.2.2, bit 2 of `COMMAND`).
-//!
-//! The reschedule handoff the track lists is not here: with the terminal action
-//! a halt there is nothing on the other side of it to hand to, and it lands
-//! with the process-kill arm that gives it one.
+//! mask comes off. Every stream is kernel-owned, so the terminal action is a
+//! halt — but it is the last thing that happens rather than the first. Before
+//! it: Bus Master Enable cleared on the function that faulted, the first record
+//! latched whole, and a count kept per unit and per function. Clearing `BME` is
+//! also the ceiling on a storm, since a function that cannot master the bus
+//! cannot raise a second fault (PCI 3.0 §6.2.2, bit 2 of `COMMAND`). The
+//! reschedule handoff has nothing to hand to while the terminal action is a
+//! halt, and lands with the process-kill arm that gives it one.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -66,9 +62,8 @@ impl FaultUnit {
 
 static UNITS: [FaultUnit; MAX_UNITS] = [const { FaultUnit::EMPTY }; MAX_UNITS];
 
-/// Functions the handler can act on. A machine with more than this many
-/// enumerated is told; the ones past it keep bus mastering through a fault,
-/// which is a worse machine than one that is refused a name for it.
+/// Functions the handler can act on; a machine with more is told, and the ones
+/// past it keep bus mastering through a fault.
 const MAX_FUNCTIONS: usize = 64;
 
 /// A requester id no `StreamId::pci` produces: bus/device/function is sixteen bits.
@@ -78,9 +73,7 @@ const NO_FUNCTION: u32 = u32::MAX;
 struct Function {
     // `NO_FUNCTION` while the slot is free; a requester id once taken.
     who: AtomicU32,
-    // Physical base of its 4 KiB config window, the same round trip `regs` takes.
     config: AtomicU64,
-    // The domain it was last attached to, or 0 while it is on the identity domain.
     domain: AtomicU32,
     // Faults the unit has reported against it; non-zero is the per-domain flag.
     faults: AtomicU32,
@@ -98,10 +91,9 @@ impl Function {
 
 static FUNCTIONS: [Function; MAX_FUNCTIONS] = [const { Function::EMPTY }; MAX_FUNCTIONS];
 
-/// The first fault this machine took, whole. Latched rather than only counted:
-/// what a later one says is decided by what the first one already broke.
+/// The first fault this machine took, whole: what a later one says is decided
+/// by what the first one already broke.
 struct FirstFault {
-    // `NO_FUNCTION` until one is taken; the requester id afterwards.
     who: AtomicU32,
     address: AtomicU64,
     reason: AtomicU32,
@@ -115,8 +107,8 @@ static FIRST: FirstFault = FirstFault {
     unit: AtomicU32::new(0),
 };
 
-/// Every function this machine enumerated, before any unit is armed, so the
-/// handler can reach the config space of whoever faults without a lock.
+/// Every function this machine enumerated, before any unit is armed: the
+/// handler reaches a faulting function's config space through this, with no lock.
 pub fn describe(devices: &[PciDevice]) {
     for (slot, device) in FUNCTIONS.iter().zip(devices) {
         let stream = StreamId::pci(device.bus, device.dev, device.func);
@@ -258,8 +250,7 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
         latch(index, stream, address, reason);
         let count = UNITS[index].faults.fetch_add(1, Ordering::Relaxed) + 1;
         log!(
-            // The reason's name stays the last word on the line: it is what
-            // every gate that reads a fault takes the reason from.
+            // The reason's name is the last word: every gate takes it from there.
             "iommu: DMA FAULT unit{index} stream={stream} addr={address:#018x} access={} \
              reason={reason:#04x} domain={} bme={} unitfaults={count} streamfaults={seen_here} \
              first={} {}",
@@ -282,8 +273,7 @@ fn clear_record(regs: Mmio, record: u64) {
 }
 
 /// Clear Bus Master Enable on whoever faulted; `false` where this machine
-/// enumerated no function with that requester id, which is a fault from
-/// something the kernel cannot stop and the line says so.
+/// enumerated no function with that requester id, and the line says so.
 fn stop(stream: StreamId) -> bool {
     let Some(slot) = find(u32::from(stream.requester())) else {
         return false;
@@ -293,14 +283,12 @@ fn stop(stream: StreamId) -> bool {
     true
 }
 
-/// Count this fault against the function, and so against the domain it is in.
 fn note(stream: StreamId) -> u32 {
     find(u32::from(stream.requester()))
         .map_or(0, |slot| slot.faults.fetch_add(1, Ordering::Relaxed) + 1)
 }
 
-/// Take the first fault whole, once. A second one finds `who` taken and leaves
-/// it, so what is latched is the fault that started it rather than the last.
+/// Take the first fault whole, once: a second finds `who` taken and leaves it.
 fn latch(unit: usize, stream: StreamId, address: u64, reason: u8) {
     let taken = FIRST.who.compare_exchange(
         NO_FUNCTION,

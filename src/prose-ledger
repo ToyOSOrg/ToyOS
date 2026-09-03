@@ -87,7 +87,7 @@ kernel/src/drivers/usb_storage.rs 17 0
 kernel/src/drivers/virtio.rs 130 0
 kernel/src/drivers/virtio_console.rs 33 0
 kernel/src/drivers/virtio_gpu.rs 29 0
-kernel/src/drivers/virtio_net.rs 59 0
+kernel/src/drivers/virtio_net.rs 57 0
 kernel/src/drivers/virtio_sound.rs 68 0
 kernel/src/drivers/xhci/device.rs 83 0
 kernel/src/drivers/xhci/hid.rs 26 0
@@ -114,14 +114,14 @@ kernel/src/id_map.rs 5 0
 kernel/src/inbox.rs 94 0
 kernel/src/input_merge_test.rs 18 0
 kernel/src/iod.rs 10 0
-kernel/src/iommu/mod.rs 73 0
+kernel/src/iommu/mod.rs 69 0
 kernel/src/iommu/vtd/dmar.rs 33 0
-kernel/src/iommu/vtd/domain.rs 35 0
-kernel/src/iommu/vtd/fault.rs 75 0
+kernel/src/iommu/vtd/domain.rs 32 0
+kernel/src/iommu/vtd/fault.rs 63 0
 kernel/src/iommu/vtd/interrupt.rs 53 0
 kernel/src/iommu/vtd/mod.rs 114 0
 kernel/src/iommu/vtd/queue.rs 31 0
-kernel/src/iommu/vtd/table.rs 53 0
+kernel/src/iommu/vtd/table.rs 52 0
 kernel/src/irq_census.rs 38 0
 kernel/src/irq_ring.rs 14 0
 kernel/src/keyboard.rs 19 0
@@ -140,7 +140,7 @@ kernel/src/log/storm.rs 15 0
 kernel/src/log/user.rs 16 0
 kernel/src/main.rs 74 0
 kernel/src/mm/alloc.rs 88 0
-kernel/src/mm/dma.rs 53 0
+kernel/src/mm/dma.rs 49 0
 kernel/src/mm/mmio.rs 18 0
 kernel/src/mm/mod.rs 21 0
 kernel/src/mm/paging.rs 215 0
@@ -233,7 +233,7 @@ tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 85 0
 tests/common/hostload.rs 48 1
-tests/common/iommu.rs 303 0
+tests/common/iommu.rs 294 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
@@ -385,7 +385,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5072 23
+tests/toyos.rs 5074 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

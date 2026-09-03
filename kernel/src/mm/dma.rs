@@ -1,9 +1,8 @@
 //! DMA memory, as a bounds-checked view rather than a raw pointer; [`DmaPool`] owns the pages, and [`Dma`] is the only safe way to touch them.
 //!
-//! A view carries two addresses because they are two different things: what the
-//! *device* is programmed with, and where the bytes physically are. They are
-//! equal only on a machine with nothing translating, so there is no `phys()` to
-//! reach for by accident.
+//! A view carries two addresses because they are two different things: what a
+//! *device* is programmed with, and where the bytes are. They are equal only
+//! where nothing translates, so there is no `phys()` to reach for by accident.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -35,8 +34,7 @@ impl Discipline for Unaligned {}
 /// A bounds-checked, `Copy` view of DMA memory, scoped to its [`DmaPool`]'s lifetime.
 pub struct Dma<'pool, D: Discipline = Volatile> {
     base: *mut u8,
-    /// What the device is programmed with for `base`: an address in its domain,
-    /// or the physical address where nothing translates.
+    /// An address in the device's domain, or the physical one where nothing translates.
     device: u64,
     size: usize,
     pool: PhantomData<&'pool DmaPool>,
@@ -67,15 +65,14 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         self.size
     }
 
-    /// The address to program a device with for the first byte. Never a
+    /// The address to program a device with for the first byte; never a
     /// physical address once a unit translates this pool's domain.
     #[inline]
     pub fn device_addr(self) -> u64 {
         self.device
     }
 
-    /// Where the first byte physically is: what a page table maps, never what a
-    /// descriptor carries.
+    /// Where the first byte is: what a page table maps, not what a descriptor carries.
     #[inline]
     pub fn host_phys(self) -> u64 {
         DirectMap::phys_of(self.base)
@@ -191,16 +188,15 @@ pub struct DmaPool {
     pages: Vec<PhysPage>,
     base: DirectMap,
     size: usize,
-    /// Where the pool sits in its device's address space, and the space itself
-    /// — the pages go back to the allocator on drop, so the device loses them first.
+    /// The space and where the pool sits in it: the pages go back to the
+    /// allocator on drop, so the device loses them first.
     space: DeviceSpace,
     device: u64,
 }
 
 impl DmaPool {
-    /// Take enough contiguous 2 MiB pages to cover `size` bytes. The device
-    /// reaches them at their physical addresses, which is every address in the
-    /// machine: only [`DmaPool::alloc_in`] narrows that.
+    /// Take enough contiguous 2 MiB pages to cover `size` bytes; the device
+    /// reaches them at their physical addresses, which is all of memory.
     pub fn alloc(size: usize) -> Self {
         Self::take(size, DeviceSpace::Untranslated)
     }

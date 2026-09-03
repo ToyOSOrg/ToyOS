@@ -82,10 +82,10 @@ struct VirtioNic {
 }
 
 impl VirtioNic {
-    /// Where the device is told to put the next frame. The actuator points the
-    /// first buffer at another driver's pool by its *physical* address, which
-    /// is an address this device's own domain does not map, so a unit really
-    /// translating for it blocks the write instead of letting it land.
+    /// Where the device puts the next frame. The actuator points the first
+    /// buffer at another driver's pool by its *physical* address, which this
+    /// device's own domain does not map, so a unit really translating for it
+    /// blocks the write instead of letting it land.
     fn rx_target(&self, buf_idx: usize) -> u64 {
         #[cfg(feature = "boot-actuators")]
         if buf_idx == 0 && crate::actuator::iommu_nic_foreign_dma() {
@@ -218,12 +218,10 @@ fn assert_queues_are_private(rxq: &Virtqueue<'_>, txq: &Virtqueue<'_>, shared_ph
 }
 
 /// One ARP request for the emulated gateway, so something answers and the
-/// device has a frame to write into the buffer the actuator moved.
-///
-/// The isolation control needs an inbound frame and nothing in this kernel ever
-/// puts one on the wire: no address is configured here, and the only IP stack is
-/// a userland daemon that speaks when spoken to. RFC 826 over Ethernet II, and
-/// the two addresses are QEMU's user-mode network's own.
+/// device has a frame to write into the buffer the actuator moved: nothing else
+/// in this kernel puts a packet on the wire, and the only IP stack is a userland
+/// daemon that speaks when spoken to. RFC 826 over Ethernet II, and the two
+/// addresses are QEMU's user-mode network's own.
 #[cfg(feature = "boot-actuators")]
 fn provoke_a_reply(nic: &mut VirtioNic, shared: Dma<'static>, mac: [u8; 6]) {
     use crate::net::Nic;
@@ -265,8 +263,8 @@ pub fn init(devices: &[PciDevice]) {
     // Exclusive: allocated on the two lines above, nothing else holds a view.
     // Zeroed because these pages held other data before this allocation.
     shared.zero();
-    // Before the device is told a single address, and after every mapping it
-    // will ever be given: the identity domain is what it leaves behind.
+    // Before the device is told an address, and after every mapping it gets:
+    // the identity domain is what it leaves behind.
     space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC) {
