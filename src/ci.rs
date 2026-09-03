@@ -427,6 +427,85 @@ mod tests {
         let _ = meta;
     }
 
+    /// Every file that computes the toolchain release tag. `toolchain.yml`
+    /// mints it; the rest ask for the one it minted.
+    const KEY_SITES: [&str; 5] = [
+        ".github/install-toolchain.sh",
+        ".github/workflows/ci.yml",
+        ".github/workflows/gate-a.yml",
+        ".github/workflows/probe-green.yml",
+        ".github/workflows/toolchain.yml",
+    ];
+
+    /// The `HEAD:<path>` list of every `git rev-parse … | sha256sum` in `text`.
+    ///
+    /// **The spelling this closes** is the pipe written within 300 characters of
+    /// the `rev-parse`, which is every copy the tree has; a `rev-parse HEAD:`
+    /// used for anything else — `toolchain.yml`'s manifest reads `HEAD:rust` on
+    /// its own — is not a key and is not matched.
+    fn key_paths(text: &str) -> Vec<Vec<&str>> {
+        let mut out = Vec::new();
+        for (at, _) in text.match_indices("git rev-parse HEAD:") {
+            let rest = &text[at..];
+            let window = &rest[..rest.len().min(300)];
+            let Some(end) = window.find("sha256sum") else { continue };
+            out.push(
+                window[..end].split_whitespace().filter_map(|t| t.strip_prefix("HEAD:")).collect(),
+            );
+        }
+        out
+    }
+
+    /// **A copy of the key that names other trees asks for a tag nothing
+    /// published**, and every job in CI installs its toolchain by that tag. The
+    /// expression cannot live in one place — `install-toolchain.sh` runs before
+    /// there is anything to read it from — so the copies are held here.
+    #[test]
+    fn every_toolchain_key_names_the_same_trees() {
+        let root = repo_root();
+        let publisher = std::fs::read_to_string(root.join(".github/workflows/toolchain.yml"))
+            .expect("toolchain.yml is what mints the tag and is not readable");
+        let minted = key_paths(&publisher);
+        assert_eq!(minted.len(), 1, "toolchain.yml computes the tag once: {minted:?}");
+        let want = &minted[0];
+        assert!(
+            want.contains(&"toyos-ld/src") && want.contains(&".github/workflows/toolchain.yml"),
+            "the tag is the hash of everything the tarball's bytes depend on, and this names \
+             neither the linker nor the packaging: {want:?}"
+        );
+
+        for site in KEY_SITES {
+            let text = std::fs::read_to_string(root.join(site))
+                .unwrap_or_else(|e| panic!("{site} computes the tag and is not readable: {e}"));
+            let found = key_paths(&text);
+            assert!(!found.is_empty(), "{site} is on the list and computes no tag");
+            for paths in found {
+                assert_eq!(&paths, want, "{site} names other trees than toolchain.yml does");
+            }
+        }
+
+        // A copy elsewhere in `.github` is the same drift, so the list has to be
+        // the whole of it.
+        let mut elsewhere = Vec::new();
+        let mut stack = vec![root.join(".github")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path.strip_prefix(&root).unwrap().to_string_lossy().to_string();
+                if !key_paths(&std::fs::read_to_string(&path).unwrap_or_default()).is_empty()
+                    && !KEY_SITES.contains(&rel.as_str())
+                {
+                    elsewhere.push(rel);
+                }
+            }
+        }
+        assert!(elsewhere.is_empty(), "these compute the tag and are not on KEY_SITES: {elsewhere:?}");
+    }
+
     #[test]
     fn the_version_parser_takes_what_qemu_prints_and_refuses_the_rest() {
         assert_eq!(

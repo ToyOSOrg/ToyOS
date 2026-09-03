@@ -42,10 +42,24 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # **The tag is the content hash of everything the tarball's bytes depend
+      # on**: the compiler's sources, the three trees that end up in the sysroot,
+      # the linker that ships beside them, and this file, which is the packaging.
+      # A key that named less would answer `build=no` for a tree whose tarball
+      # nobody has built — which is exactly what a linker or a packaging change
+      # is. Every copy of this expression is held identical by
+      # `src/ci.rs::every_toolchain_key_names_the_same_trees`; a copy that names
+      # different trees asks for a tag nothing published.
+      #
+      # The price, and it is accepted: a one-line change to `toyos-ld` or to this
+      # file mints a new release and so costs the whole hour-long bootstrap.
       - id: key
         run: |
           sum=$(git rev-parse HEAD:rust HEAD:toyos-abi/src HEAD:toyos/src \
-                              HEAD:userland/libc/src | sha256sum | cut -c1-16)
+                              HEAD:userland/libc/src HEAD:toyos-ld/src \
+                              HEAD:toyos-ld/Cargo.toml \
+                              HEAD:.github/workflows/toolchain.yml \
+                  | sha256sum | cut -c1-16)
           echo "tag=toolchain-linux-x86_64-$sum" >> "$GITHUB_OUTPUT"
 
       - id: have

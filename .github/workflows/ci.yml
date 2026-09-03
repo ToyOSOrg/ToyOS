@@ -55,7 +55,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag=toolchain-linux-x86_64-$(git rev-parse HEAD:rust HEAD:toyos-abi/src \
-                HEAD:toyos/src HEAD:userland/libc/src | sha256sum | cut -c1-16)
+                HEAD:toyos/src HEAD:userland/libc/src HEAD:toyos-ld/src \
+                HEAD:toyos-ld/Cargo.toml HEAD:.github/workflows/toolchain.yml \
+                | sha256sum | cut -c1-16)
           echo "toolchain: $tag"
           # The tag is computed from the merge ref, and this looks the run up
           # by the head sha instead: `toolchain.yml` checks out the same merge
@@ -177,7 +179,9 @@ jobs:
         run: |
           git config --global --add safe.directory "$PWD"
           echo "tag=toolchain-linux-x86_64-$(git rev-parse HEAD:rust HEAD:toyos-abi/src \
-                HEAD:toyos/src HEAD:userland/libc/src | sha256sum | cut -c1-16)" \
+                HEAD:toyos/src HEAD:userland/libc/src HEAD:toyos-ld/src \
+                HEAD:toyos-ld/Cargo.toml HEAD:.github/workflows/toolchain.yml \
+                | sha256sum | cut -c1-16)" \
             >> "$GITHUB_OUTPUT"
 
       - name: rust
@@ -377,7 +381,9 @@ jobs:
         run: |
           git config --global --add safe.directory "$PWD"
           echo "tag=toolchain-linux-x86_64-$(git rev-parse HEAD:rust HEAD:toyos-abi/src \
-                HEAD:toyos/src HEAD:userland/libc/src | sha256sum | cut -c1-16)" \
+                HEAD:toyos/src HEAD:userland/libc/src HEAD:toyos-ld/src \
+                HEAD:toyos-ld/Cargo.toml HEAD:.github/workflows/toolchain.yml \
+                | sha256sum | cut -c1-16)" \
             >> "$GITHUB_OUTPUT"
 
       - name: rust
@@ -466,7 +472,9 @@ jobs:
         run: |
           git config --global --add safe.directory "$PWD"
           echo "tag=toolchain-linux-x86_64-$(git rev-parse HEAD:rust HEAD:toyos-abi/src \
-                HEAD:toyos/src HEAD:userland/libc/src | sha256sum | cut -c1-16)" \
+                HEAD:toyos/src HEAD:userland/libc/src HEAD:toyos-ld/src \
+                HEAD:toyos-ld/Cargo.toml HEAD:.github/workflows/toolchain.yml \
+                | sha256sum | cut -c1-16)" \
             >> "$GITHUB_OUTPUT"
 
       - name: rust

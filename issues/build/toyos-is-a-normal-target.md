@@ -44,7 +44,10 @@ Stages, in order:
        cargo +toyos build --target x86_64-unknown-toyos
 
    `toyos-ld` is in that `bin/` because rustc's ToyOS target names its linker
-   and finds it on `PATH`. The glibc floor is 2.39 — `ubuntu-24.04`'s, the
+   and finds it on `PATH`, and the release tag is the content hash of
+   everything the tarball's bytes depend on — the linker and the packaging
+   among them, so a change to either mints a release rather than reusing one
+   built without it. The glibc floor is 2.39 — `ubuntu-24.04`'s, the
    image the host half is built on — measured over the shipped binaries and
    asserted at publish time, so a build on a newer machine is refused rather
    than published. A program that opens a window also carries a `[patch]` of
