@@ -56,9 +56,6 @@ are open:
   what firmware is supposed to have done), or accepting the skew and saying so
   where records are merged. Not this branch's call.
 
-Filed as a `finding` rather than a `defect` because on the machines this tree
-targets it may never occur; what is certain is that nothing would tell us.
-
 **2026-08-25, promoted to `defect`.** "Nothing would tell us" is the defect:
 `kernel/src/clock.rs` cites this file for the assumption its whole arithmetic
 rests on, and the instrument that would confirm or refute it does not exist —

@@ -71,37 +71,6 @@ beside it. The teardown is not a regression from the deadline fix (`add6aeb`,
 18:05): the paragraph above it was written at 17:32 describing the same three
 exits, and is not a descendant of it.
 
-**CLOSED, and it was the harness closing the desktop twice (2026-08-06).** The
-teardown in the three paragraphs above is not a guest defect at all.
-`close_focused_window` looped on `log[new..]` but waited with `serial_until`,
-which scans the whole capture, so the *previous* probe's `windows=1` answered
-the wait instantly and it re-sent GUI+Q at the speed of a QMP round trip. The
-second one closed the window under the one it meant. The compositor now says so
-itself and the two closes are one line each:
-
-```
-compositor: window closed pid=5 by GUI+Q, 1 left
-exit: test_rs_window_child pid=5 code=0
-compositor: window closed pid=1 by GUI+Q, 0 left     <- the terminal
-exit: shell pid=2 code=60
-exit: terminal pid=1 code=0
-```
-
-Everything after the second close is correct: the terminal breaks on
-`Event::Close`, drops `shell_stdin`, the shell's stdin reaches genuine EOF
-(`60` is `UnexpectedEof`, encoded into the exit status because a diagnostic
-through that pipe is lost with it), the shell leaves and the terminal reaps it.
-So the shell-exit reading below — "the failure is the read after the prompt" —
-was right about the mechanism and wrong about the cause: nothing was wrong with
-the read, its writer had been told to go.
-
-The fix is `note_closed` in the compositor plus a harness that waits on that
-event instead of sampling `windows=N` every two seconds — recorded in the
-scheduler migration log, now git history rather than a live file.
-**`desktop_window_child` now passes end to end,
-alone and in the 12-wide phase** — both windowed-child probes and all three
-snake rounds, snake leaving `code=0` each time.
-
 **What this does *not* settle is the freeze**, and the entry stays. It stays
 `Sched::Parallel` for the same reason as before, `EXPECTED_FAILURES` keeps its
 declaration to its review date, and a green run still proves nothing — the
@@ -117,24 +86,6 @@ if the test *passes* where the entry says a pass is proof, and is red on
 `2026-09-06` regardless — this entry is intermittent, so its own expiry is a
 date rather than a green run. The `--skip` flag that used to be the answer is
 deleted: an exclusion nobody reviews cannot expire, and this one has to.
-
-**CLOSED — a stale `--skip` command line was worse than a refused one, measured
-2026-08-06.** The flag was gone but the words still parsed, and `--land --gate
-cargo test -- --skip desktop_window_child` — the form CLAUDE.md and every
-handover carried until that week — reached the harness as a *filter*.
-It ran exactly one test, `desktop_window_child`, declared it expected, and
-landed on that. `--land` does print `the gate was NOT the default cargo test`,
-which is the only thing that saved it; the run itself looks like a pass.
-
-The asymmetry that entry named — a stale feature name refused against
-`kernel/Cargo.toml` before any lock, a stale gate flag not refused at all — is
-closed. `toyos_build::testargs::parse` holds one table of the flags the suite
-has, refuses anything else by name and by consequence, and returns the filter
-out of the same pass, so no word can be a flag's value to one reader and the
-filter to another. It is the first thing `main` does, before the sysroot lock
-and before anything is compiled. A flag added to the harness and not to that
-table is refused the first time it is typed, which is the direction of drift
-that says so rather than the one that narrows a gate.
 
 **What the declaration will and will not absorb.** Its `says` list covers the
 six of this test's messages whose failure is *the desktop ceasing to answer
