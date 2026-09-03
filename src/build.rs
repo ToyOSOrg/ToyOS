@@ -662,7 +662,13 @@ fn build_and_assemble(
         // `collect_hosted_rustc` puts it there and no row can.
         programs.insert("rustc");
     }
-    let names: Vec<&str> = initrd_files.iter().map(|(name, _)| name.as_str()).collect();
+    // A symlink's target is a name in the same namespace, so it is inventoried
+    // beside the files: `bin/ls -> /bin/ghost` reaches a program as surely as a
+    // file of that name would, and the files alone would walk past it.
+    let targets: Vec<String> =
+        symlinks.iter().map(|(_, to)| symlink_target_name(to).to_string()).collect();
+    let mut names: Vec<&str> = initrd_files.iter().map(|(name, _)| name.as_str()).collect();
+    names.extend(targets.iter().map(String::as_str));
     if let Err(why) = unnamed_program(&names, &programs, &config.boot.start) {
         panic!("{why}");
     }
@@ -672,6 +678,11 @@ fn build_and_assemble(
 
 /// What `tests/common/qemu.rs` prefixes every binary it injects with.
 const HARNESS_PREFIXES: [&str; 2] = ["bin/test_rs_", "bin/test_c_"];
+
+/// A `[symlinks]` target as the inventory names it: `/bin/toybox` is `bin/toybox`.
+fn symlink_target_name(to: &str) -> &str {
+    to.trim_start_matches('/')
+}
 
 /// The converse of the crate assertion above: a `bin/` entry no name reaches.
 /// A name buys authority — `/bin/init` builds a `[programs]` row's namespace and
@@ -690,11 +701,13 @@ fn unnamed_program(
             continue;
         }
         if HARNESS_PREFIXES.iter().any(|p| name.starts_with(p)) {
-            if start.is_empty() {
+            // A start list of names no row declares runs nothing, so it is the
+            // empty list for this purpose.
+            if !start.iter().any(|s| programs.contains(s.as_str())) {
                 return Err(format!(
-                    "the image carries {name} and this config's `[boot] start` is empty, so \
-                     nothing runs that could spawn it — a harness binary is endowed by the \
-                     process that starts it and by nothing else"
+                    "the image carries {name} and this config's `[boot] start` names no \
+                     `[programs]` row, so nothing runs that could spawn it — a harness binary \
+                     is endowed by the process that starts it and by nothing else"
                 ));
             }
             continue;
@@ -2275,6 +2288,16 @@ mod tests {
         assert!(why.contains("bin/ghost") && why.contains("no `[programs]` row"), "{why}");
         let why = unnamed_program(&["bin/test_rs_window_child"], &programs, &[]).unwrap_err();
         assert!(why.contains("nothing runs that could spawn it"), "{why}");
+        // A start list that names only what no row declares runs nothing, so it
+        // is the empty list and not a spawner.
+        let ghosts = ["ghost".to_string()];
+        let why = unnamed_program(&["bin/test_rs_window_child"], &programs, &ghosts).unwrap_err();
+        assert!(why.contains("names no `[programs]` row"), "{why}");
+        // The other half of the symlink closure: the target as the inventory
+        // names it, and then judged like any other name.
+        assert_eq!(symlink_target_name("/bin/toybox"), "bin/toybox");
+        let linked = symlink_target_name("/bin/ghost");
+        assert!(unnamed_program(&[linked], &programs, &started).is_err());
     }
 
     /// **What the check does not reach, as an assertion and not a sentence.** It
