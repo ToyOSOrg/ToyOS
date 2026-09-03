@@ -103,6 +103,16 @@ fn main() {
         toyos_build::pr::dispatch_writing_law_check(&root, &args);
         return;
     }
+    // The published crates' rule, and the list the publish workflow reads. Here
+    // for the same reason: git and five manifests, on a runner with no QEMU.
+    if args.iter().any(|a| a == "--sdk-version-check") {
+        toyos_build::sdkversion::dispatch_check(&root, &args);
+        return;
+    }
+    if args.iter().any(|a| a == "--sdk-versions") {
+        toyos_build::sdkversion::dispatch_versions(&root);
+        return;
+    }
     // Here for the same reason: it reads twelve files a sharded run left and
     // writes one, and it is meant to be run on the machine holding them —
     // which, since the run that produces them is CI's, is a runner with no

@@ -27,9 +27,9 @@
 //! tracker's record (`the-eased-merge-law-carries-a-threshold`); `--pr`
 //! remains the local half either way.
 //!
-//! Two rules gate a branch here and in CI's `abi-split` job alike: the
-//! ABI-first rule ([`abi_lands_alone`]) and the writing law
-//! (`crate::writinglaw`).
+//! Three rules gate a branch here and in CI's `abi-split` job alike: the
+//! ABI-first rule ([`abi_lands_alone`]), the writing law
+//! (`crate::writinglaw`) and the published crates (`crate::sdkversion`).
 //!
 //! Nothing here rewrites history and nothing pushes `main`.
 
@@ -158,6 +158,7 @@ fn prepare(root: &Path) -> Result<Prepared, String> {
 
     abi_lands_alone(root, "origin/main")?;
     lines.push(crate::writinglaw::judge(root, "origin/main")?);
+    lines.push(crate::sdkversion::judge(root, "origin/main")?);
 
     let (merged, line) = merge_base_into_branch(root, &branch)?;
     lines.push(line);

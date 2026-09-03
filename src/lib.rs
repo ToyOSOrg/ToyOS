@@ -29,6 +29,7 @@ pub mod pr;
 /// own tests', the one line classifier also `writinglaw`'s.
 pub mod prosegate;
 pub mod redlist;
+pub mod sdkversion;
 pub mod soundfont;
 /// Nothing outside its own gates reads this, so it is not compiled into the
 /// build system at all.

@@ -1,0 +1,101 @@
+# The five SDK crates' publisher — the only workflow that may write crates.io.
+#
+# ToyOS is a normal target for software: the winit, softbuffer and cpal forks
+# name `toyos-abi`, `toyos` and `toyos-window` by version, because a path
+# escaping a fork's own repository cannot resolve once cargo checks it out
+# alone. Until these are on crates.io a clean clone of any third-party program
+# that targets ToyOS cannot resolve on Linux or macOS at all.
+#
+# **On a landing and on nothing else.** A pull request run must never publish:
+# a version is a name that can be taken once, and a branch that never merges
+# would take it. `src/sdkversion.rs` is the rule that keeps the versions moving
+# and `--sdk-versions` is the list this reads, so the set of published crates
+# and their order live in one place.
+#
+# Each crate is published only where the index does not already hold its
+# version, so a landing that moves none of them publishes nothing and a rerun
+# of a half-finished run finishes it. The order is a dependency order and the
+# wait between two is not optional: crates.io will not resolve `toyos` until
+# `toyos-abi`'s version is readable from the index.
+name: publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Never two publishers, and never cancel one: a cancelled `cargo publish` may
+# have already taken the version.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      # No submodules: `cargo publish` walks the repository's vcs state, and the
+      # `rust` fork is not in any of these crates. An *initialised but empty*
+      # submodule directory is what breaks that walk — which is why this cannot
+      # be run from a `cargo run -- --worktree add` worktree, where `rust/` is a
+      # stub, and why a plain checkout here is right.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # By name, because "publish failed" on a repository whose owner has not
+      # added a token yet is a message that sends somebody to read this file.
+      - name: the token
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set; the owner adds it once under Settings → Secrets"
+            exit 1
+          fi
+
+      - name: publish what the index has not got
+        run: |
+          set -eu -o pipefail
+          cargo run --quiet -- --sdk-versions > /tmp/sdk-versions
+          cat /tmp/sdk-versions
+
+          # The sparse index path: four characters or more is `ab/cd/<name>`,
+          # and every one of these names is longer than that.
+          index_url() {
+            printf 'https://index.crates.io/%s/%s/%s' \
+              "$(printf '%s' "$1" | cut -c1-2)" "$(printf '%s' "$1" | cut -c3-4)" "$1"
+          }
+
+          # Whether the index holds <name> at <version>. A 404 is a crate that
+          # has never been published, which is "no" and not an error.
+          published() {
+            body=$(curl -sS -o /tmp/index.json -w '%{http_code}' "$(index_url "$1")")
+            case "$body" in
+              404) return 1 ;;
+              200) ;;
+              *) echo "::error::the crates.io index answered $body for $1"; exit 1 ;;
+            esac
+            jq -e --arg v "$2" -s 'any(.[]; .vers == $v and (.yanked | not))' \
+              /tmp/index.json > /dev/null
+          }
+
+          while read -r name version manifest; do
+            if published "$name" "$version"; then
+              echo "$name $version is already on crates.io"
+              continue
+            fi
+            echo "publishing $name $version from $manifest"
+            cargo publish --manifest-path "$manifest"
+            # The next crate resolves this one from the index, so the run waits
+            # for it to be readable rather than assuming it is.
+            for _ in $(seq 1 60); do
+              published "$name" "$version" && break
+              sleep 5
+            done
+            published "$name" "$version" \
+              || { echo "::error::$name $version was published and the index did not show it within five minutes"; exit 1; }
+            echo "- \`$name $version\`" >> "$GITHUB_STEP_SUMMARY"
+          done < /tmp/sdk-versions
