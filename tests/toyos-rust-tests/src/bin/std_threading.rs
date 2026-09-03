@@ -1,8 +1,19 @@
 use std::thread;
+use std::time::Duration;
+
+/// The child's life on the first attempt; a lost race quadruples it. **A host
+/// fact, not a bound** — winning it means being asked before the child ends.
+const LINGER: Duration = Duration::from_millis(200);
+/// Attempts at the running answer. Three covers a 64x slower host.
+const TRIES: u32 = 3;
+/// The poll for the exited answer, and its ceiling — a liveness margin.
+const POLL: Duration = Duration::from_millis(10);
+const POLLS: u32 = 500;
 
 fn main() {
-    // When invoked with "exit-fast", just exit immediately (used as a try_wait target)
-    if std::env::args().nth(1).as_deref() == Some("exit-fast") {
+    // The `try_wait` target, told how long to stay up.
+    if let Some(ms) = std::env::args().nth(1).and_then(|a| a.strip_prefix("linger=").map(String::from)) {
+        thread::sleep(Duration::from_millis(ms.parse().expect("linger= wants milliseconds")));
         return;
     }
 
@@ -26,15 +37,41 @@ fn main() {
     let expected: u64 = (0..1000).sum();
     assert_eq!(total, expected, "partial sums mismatch: {total} != {expected}");
 
-    // Test try_wait on a child process
+    // Both answers, because a `try_wait` stuck on either satisfies the other.
+    // The running answer re-arms with a longer child rather than reding a lost race.
     let exe = std::env::current_exe().expect("current_exe failed");
-    let mut child = std::process::Command::new(&exe)
-        .arg("exit-fast")
-        .spawn()
-        .expect("spawn child failed");
+    let mut running = None;
+    for attempt in 0..TRIES {
+        let mut child = std::process::Command::new(&exe)
+            .arg(format!("linger={}", (LINGER * 4u32.pow(attempt)).as_millis()))
+            .spawn()
+            .expect("spawn child failed");
+        match child.try_wait().expect("try_wait failed") {
+            None => {
+                running = Some(child);
+                break;
+            }
+            Some(_) => child.wait().map(|_| ()).expect("reap the raced child"),
+        }
+    }
+    let mut child = running.unwrap_or_else(|| {
+        panic!(
+            "try_wait reported an exited child on all {TRIES} attempts, the last a {:?} sleep",
+            LINGER * 4u32.pow(TRIES - 1)
+        )
+    });
 
-    // Wait for it to finish, then try_wait should return Some
-    let status = child.wait().expect("wait failed");
+    let mut exited = None;
+    for _ in 0..POLLS {
+        if let Some(status) = child.try_wait().expect("try_wait failed") {
+            exited = Some(status);
+            break;
+        }
+        thread::sleep(POLL);
+    }
+    let status = exited.unwrap_or_else(|| {
+        panic!("try_wait never reported the exited child within {:?}", POLL * POLLS)
+    });
     assert!(status.success(), "child exited with {status}");
 
     println!("all threading tests passed");

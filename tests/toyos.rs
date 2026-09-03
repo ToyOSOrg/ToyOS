@@ -2104,8 +2104,69 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "null_sink_client_exits" => check_null_sink_client_exits,
         "fault_gates" => check_fault_gates,
         "debug_trap" => check_debug_trap,
+        "syscall_cost" => check_syscall_cost,
         _ => check_rust_result,
     }
+}
+
+/// The two numbers `syscall_cost` measures, read back and recorded. No
+/// threshold — a TCG cycle count prices nothing; what is owed is that the
+/// measurement happened, which is what its guest header states.
+fn check_syscall_cost(result: &TestResult) -> bool {
+    if !check_rust_result(result) {
+        return false;
+    }
+    let field = |prefix: &str| -> Option<u64> {
+        result.stdout.lines().find_map(|l| {
+            l.trim().strip_prefix(prefix)?.split_whitespace().next()?.parse::<u64>().ok()
+        })
+    };
+    let (Some(cycles), Some(mhz)) = (field("syscall_cost: "), field("syscall_cost: tsc ")) else {
+        eprintln!(
+            "FAIL rs::syscall_cost: the run reported no cycles/syscall and MHz pair\nstdout:\n{}",
+            result.stdout
+        );
+        return false;
+    };
+    // A counter that did not move is what a measurement can be wrong about silently.
+    if cycles == 0 || mhz == 0 {
+        eprintln!(
+            "FAIL rs::syscall_cost: {cycles} cycles/syscall at {mhz} MHz — twenty thousand \
+             transitions cost no cycles on a clock that did not tick\nstdout:\n{}",
+            result.stdout
+        );
+        return false;
+    }
+    // And the workload happened, against a counter this test cannot reach:
+    // `SYS_CLOCK` is 8 in the kernel's per-syscall accounting at process exit.
+    let Some(claimed) = result.stdout.lines().find_map(|l| {
+        let (reps, per) = l.split_once(" over ")?.1.split_once('x')?;
+        Some(reps.trim().parse::<u64>().ok()? * per.trim().parse::<u64>().ok()?)
+    }) else {
+        eprintln!(
+            "FAIL rs::syscall_cost: the run did not say how many syscalls it made\nstdout:\n{}",
+            result.stdout
+        );
+        return false;
+    };
+    let counted = result
+        .serial
+        .lines()
+        .filter(|l| l.contains("syscalls: pid="))
+        .filter_map(|l| l.split(" 8=").nth(1)?.split_whitespace().next()?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    if counted < claimed {
+        eprintln!(
+            "FAIL rs::syscall_cost: the run claims {claimed} SYS_CLOCK transitions and the \
+             kernel counted {counted}\nstdout:\n{}{}",
+            result.stdout,
+            kernel_account(result)
+        );
+        return false;
+    }
+    eprintln!("  [syscall] {cycles} cycles per SYS_CLOCK over {counted} of them, tsc {mhz} MHz");
+    true
 }
 
 /// Minimum active (non-silent) playback the 3s test tone must produce.
@@ -4728,11 +4789,12 @@ fn run_screen_test(
             Ok(())
         }
         "screen_recoverable_untouched" => {
-            // The negative of screen_fatal_halt, and the property that makes
-            // the capture/render split worth having: a panic the kernel
-            // recovers from must not clobber a live display. Action 0 panics
-            // in syscall context, which the handler recovers from, so it
-            // never reaches halt_all_cpus and must leave every pixel alone.
+            // The negative of screen_fatal_halt: a panic the kernel recovers
+            // from must not clobber a live display. Action 0 panics in syscall
+            // context, which the handler recovers from, so it never reaches
+            // halt_all_cpus. **Two endpoints and not an interval** — a paint
+            // made and undone between the screendumps is invisible here, and
+            // observing the middle needs a QMP client of its own.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -9555,11 +9617,14 @@ fn run_machine_test(
                 ready_marker: REFUSAL,
                 ..Default::default()
             };
-            let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // It dies before virtio-console exists, so the 16550 file is the
-            // only record — which is also the T14's situation exactly.
+            /// A liveness margin over the work that follows the refusal, never a bound.
+            const AFTER_REFUSAL: Duration = Duration::from_secs(2);
+            let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            // This profile has no virtio-serial, so stdio *is* the 16550 and
+            // `boot_log` is the whole record. It ends at the refusal, and the
+            // drain is the rest of the window the downstream work would be in.
             let mut log = serial::Serial::boot(&qemu);
-            log.push(&qemu.uart_log());
+            log.push(&qemu.drain_serial(AFTER_REFUSAL));
 
             // Named, not just refused: the value the device reported is the
             // whole diagnostic on a machine that will not boot again without
@@ -10198,7 +10263,9 @@ fn run_machine_test(
             // the CPU: the branch printed no `RECURSIVE` and ran the whole
             // second report. `test-late-panic` is the first crash and
             // `fault-in-report` is the wild read inside its report.
-            let qemu = QemuInstance::boot_with_options(
+            /// A liveness margin over the report that follows the alert, never a bound.
+            const AFTER_RECURSIVE: Duration = Duration::from_secs(1);
+            let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
@@ -10221,8 +10288,14 @@ fn run_machine_test(
             // And the branch bounds what it claims to: the arm that fires skips
             // `crash_report`, so the nested fault writes no second report. The
             // first panic's report never ran either — the wild read is at its
-            // head — so a stack scan anywhere in the capture is the second one.
-            nested.must_not_say("Scanning kernel stack at")?;
+            // head. `KERNEL PANIC:` is `crash_report_exception`'s own header;
+            // the stack scan is `double_fault_handler`'s, which is the
+            // escalation and not the report. Drained past the marker first:
+            // `boot_log` stops at `RECURSIVE` and the report follows it there.
+            nested.push(&qemu.drain_serial(AFTER_RECURSIVE));
+            for report in ["KERNEL PANIC:", "Scanning kernel stack at"] {
+                nested.must_not_say(report)?;
+            }
             eprintln!("  [nested] the recursive arm bounded the report: no second crash report");
             Ok(())
         }
@@ -10244,7 +10317,9 @@ fn run_machine_test(
             // which lines arrived, from the first phase to the wedge, and that
             // the phase after it never did.
             const WEDGE: &str = "pre-idle-wedge: the boot stops here";
-            let qemu = QemuInstance::boot_with_options(
+            /// A liveness margin over the phase after the wedge line, never a bound.
+            const STAYED_WEDGED: Duration = Duration::from_millis(1500);
+            let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
@@ -10264,7 +10339,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let boot = serial::Serial::boot(&qemu);
+            let mut boot = serial::Serial::boot(&qemu);
             // Every phase up to the wedge, oldest first — the first line the
             // machine ever logs, both boot checkpoints before phase 3, and a
             // phase-3 line from between them and the wedge.
@@ -10278,7 +10353,9 @@ fn run_machine_test(
                 boot.must_say(needle)?;
             }
             // And nothing from after it, which is what says the machine really
-            // is wedged rather than slow.
+            // is wedged rather than slow — over a window the later phases could
+            // have reached, the marker here being the wedge line itself.
+            boot.push(&qemu.drain_serial(STAYED_WEDGED));
             for needle in ["Boot: peripherals ready", "Boot: complete"] {
                 boot.must_not_say(needle)?;
             }
