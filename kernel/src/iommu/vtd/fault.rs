@@ -178,7 +178,6 @@ pub fn arm(index: usize, regs: Mmio, found: Records, vector: u8) {
     regs.write_u32(FECTL_REG, 0);
 }
 
-/// One PCI function's config space, ECAM's stride.
 const CONFIG_WINDOW: u64 = crate::mm::PAGE_SIZE;
 
 // The window an armed unit's registers live in, from the address `arm` published.
