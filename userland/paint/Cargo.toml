@@ -6,5 +6,5 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 filepicker-api = { path = "../filepicker-api" }
-font = { path = "../font" }
-window = { path = "../window" }
+toyos-font = { path = "../toyos-font" }
+toyos-window = { path = "../toyos-window" }

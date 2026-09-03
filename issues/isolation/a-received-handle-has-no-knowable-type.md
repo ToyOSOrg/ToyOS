@@ -30,7 +30,7 @@ typed can be ended by whoever sent it.** The sender needs nothing but
   but that is one call site, not the class.
 - An audio client receives two handles from soundd and calls `SYS_SHM_MAP` on
   the first (`toyos/src/audio.rs`). A hostile *server* ends every client.
-- A window client receives its buffer the same way (`userland/window/src/lib.rs`).
+- A window client receives its buffer the same way (`userland/toyos-window/src/lib.rs`).
 
 Nothing in the tree is hostile today, so nothing fails. The property the
 architecture claims — that a process cannot be harmed by what it was not given —

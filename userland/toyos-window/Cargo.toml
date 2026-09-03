@@ -1,0 +1,16 @@
+[package]
+name = "toyos-window"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-font = { path = "../toyos-font" }
+toyos-abi = { path = "../../toyos-abi" }
+toyos-keymap = { path = "../../toyos-keymap" }
+toyos = { path = "../../toyos" }
+
+# `window` is taken on crates.io, so the package is `toyos-window`; the lib
+# target keeps the name every caller spells, `toyos/src`'s citations included.
+[lib]
+name = "window"

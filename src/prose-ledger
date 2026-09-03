@@ -659,7 +659,6 @@ userland/editor/src/main.rs 45 0
 userland/filepicker-api/src/lib.rs 21 0
 userland/filepicker/src/main.rs 46 0
 userland/files/src/main.rs 5 0
-userland/font/src/lib.rs 5 0
 userland/init/src/main.rs 196 0
 userland/input-test/src/main.rs 0 0
 userland/libc/src/ctype.rs 0 0
@@ -721,5 +720,6 @@ userland/toybox/src/shutdown.rs 10 0
 userland/toybox/src/spin.rs 0 0
 userland/toybox/src/stats.rs 2 0
 userland/toybox/src/tone.rs 10 0
-userland/window/src/framebuffer.rs 68 0
-userland/window/src/lib.rs 152 0
+userland/toyos-font/src/lib.rs 5 0
+userland/toyos-window/src/framebuffer.rs 68 0
+userland/toyos-window/src/lib.rs 152 0

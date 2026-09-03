@@ -1,0 +1,11 @@
+[package]
+name = "toyos-font"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# `font` is taken on crates.io, so the package is `toyos-font`; the lib target
+# keeps the name every caller spells, which the sysroot's own `toyos/src`
+# citations are written in and no branch of this shape may edit.
+[lib]
+name = "font"

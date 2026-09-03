@@ -9,7 +9,6 @@ members = [
     "filepicker",
     "filepicker-api",
     "files",
-    "font",
     "init",
     "input-test",
     "logd",
@@ -24,7 +23,8 @@ members = [
     "terminal",
     "test-runner",
     "toybox",
-    "window",
+    "toyos-font",
+    "toyos-window",
 ]
 exclude = [
     # no_std C runtime — uses panic=abort (own Cargo.toml profile)
@@ -39,7 +39,7 @@ exclude = [
 # upstream PRs, not for building here.
 toyos-abi = { path = "../toyos-abi" }
 toyos = { path = "../toyos" }
-window = { path = "window" }
+toyos-window = { path = "toyos-window" }
 
 # Ecosystem forks — see forks.toml for upstream base, tier, and PR status.
 getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2", package = "getrandom" }

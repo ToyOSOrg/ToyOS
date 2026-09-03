@@ -21,8 +21,8 @@
 //! - Forks depend on ToyOS crates by version, never by path: a path outside the
 //!   fork's own repository cannot resolve once cargo checks the fork out alone.
 //!   Local builds resolve those versions through `[patch]`; an upstream PR
-//!   cannot, so `toyos-abi`, `toyos` and `window` have to be published to
-//!   crates.io before one can be opened.
+//!   cannot, so `toyos-abi`, `toyos` and `toyos-window` have to be published
+//!   to crates.io before one can be opened.
 //! - Every change must be upstream-mergeable. ToyOS enters as a *new platform*
 //!   under `#[cfg(target_os = "toyos")]` beside the existing ones, cross-platform
 //!   code is not modified, comments follow upstream's idiom and density, and the
