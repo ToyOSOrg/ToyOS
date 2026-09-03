@@ -310,6 +310,12 @@ pub fn load_shared_lib(
     let layout = parse_layout(&header_data)?;
 
     let (vaddr_min, vaddr_max) = (layout.vaddr_min, layout.vaddr_max);
+    // Every bound below is image-relative and every `r_offset` is a vaddr, so a
+    // non-zero `vaddr_min` shifts the two against each other: a write validated
+    // inside the writable window lands `vaddr_min` bytes lower in the image.
+    if vaddr_min != 0 {
+        return Err("ELF: a shared object must begin at vaddr 0");
+    }
     // No writable segment yields an empty window; no relocation can target it.
     let (rw_lo, rw_hi) = layout.writable_window().unwrap_or((layout.span(), layout.span()));
 
@@ -399,13 +405,8 @@ pub fn load_shared_lib(
     // `r_sym == 0` writes `r_addend` verbatim, an arbitrary 8-byte write.
     // The exact writable extent, not `rw_offset`'s 2 MiB-rounded one: the
     // rounded start is up to 2 MiB below the first writable byte, and the pages
-    // there are mapped `ReadExec` by `page_prot` and hold whatever the module
-    // put in them. `window` is image-relative; the `RELATIVE` pass below applies
-    // through `ModuleImage::slice`, which subtracts `vaddr_min` — the two agree
-    // only when `vaddr_min == 0`, true for every module a linker produces.
+    // there are mapped `ReadExec` by `page_prot`.
     let window = (rw_lo, rw_hi);
-    // Before any borrow: the passes below hold a `&[u8]` over each of these
-    // across writes bounded by `window`, so the disjointness is decided here.
     let extent = |slice: &KernelSlice| {
         let at = (slice.base() as usize - image.base() as usize) as u64;
         (at, at + slice.size() as u64)

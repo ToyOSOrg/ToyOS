@@ -527,6 +527,13 @@ fn main() {
     //     writable byte, which `page_prot` maps `ReadExec` in every process.
     dlopen_refused("reloc_below_writable.so", &so_with_reloc_below_writable());
 
+    // 17. An image whose lowest vaddr is not 0. Every window the loader
+    //     computes is image-relative and every `r_offset` is a vaddr, so the
+    //     two sit `vaddr_min` apart: a relocation validated inside the writable
+    //     window lands that many bytes lower in the image — here inside
+    //     `.dynsym`, inside the borrow, inside a `ReadExec` page.
+    dlopen_refused("vaddr_min_shift.so", &so_with_non_zero_vaddr_min());
+
     // 14. A cross-module initial-exec TLS reference resolves to `S + A - tp`.
     f13_cross_module_addend_is_kept();
 
@@ -626,6 +633,33 @@ fn so_with_reloc_below_writable() -> Vec<u8> {
         .poke(0x301, b"below_the_window\0")
         .rela(0x800, 0x100, R_X86_64_RELATIVE, 0)
         .shdr(0x900, SHT_DYNSYM, 0x200, 48, 24)
+        .build()
+}
+
+/// Text at vaddr `[0x4000, 0x8000)`, data at `[0x8000, 0xa000)`, so the image
+/// begins at `vaddr_min = 0x4000` and the image-relative writable window is
+/// `[0x4000, 0x6000)`. `.dynsym` is at image `[0x100, 0x130)` — outside that
+/// window — and the one RELATIVE entry names vaddr `0x4100`, which is inside
+/// it. `ModuleImage::slice` subtracts `vaddr_min`, so the write lands at image
+/// `0x100`: inside `.dynsym`, and inside a page mapped `ReadExec`.
+fn so_with_non_zero_vaddr_min() -> Vec<u8> {
+    Elf::new(0x6000)
+        .ph(Phdr::load(0, 0x4000, 0x4000, 0x4000, PF_R | PF_X))
+        .ph(Phdr::load(0x4000, 0x8000, 0x2000, 0x2000, PF_R | PF_W))
+        .ph(Phdr { kind: PT_DYNAMIC, flags: PF_R, offset: 0x600, vaddr: 0x4600, filesz: 0x200, memsz: 0x200, align: 8 })
+        .entry(0x4000)
+        .sections(0x900, 1, 64)
+        .dynamic(0x600, &[
+            (DT_SYMTAB, 0x4100),
+            (DT_STRTAB, 0x4300),
+            (DT_STRSZ, 0x100),
+            (DT_RELA, 0x4800),
+            (DT_RELASZ, 24),
+        ])
+        .sym(0x118, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
+        .poke(0x301, b"shifted\0")
+        .rela(0x800, 0x4100, R_X86_64_RELATIVE, 0)
+        .shdr(0x900, SHT_DYNSYM, 0x100, 48, 24)
         .build()
 }
 

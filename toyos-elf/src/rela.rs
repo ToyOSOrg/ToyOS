@@ -246,9 +246,7 @@ pub struct ReadTables {
 ///
 /// A loader resolving symbols holds a `&[u8]` over `.dynsym` and `.dynstr`, and
 /// one over each relocation table it is iterating, across writes into the same
-/// allocation. Disjointness is what makes those borrows sound, and this is
-/// where it is decided rather than argued: a `.so` is untrusted input and
-/// chooses its own layout.
+/// allocation. Disjointness is what makes those borrows sound.
 ///
 /// **A conforming image never triggers this.** The ELF gABI gives `.dynsym`,
 /// `.dynstr`, `.rela.dyn` and `.rela.plt` `SHF_ALLOC` without `SHF_WRITE`, so a

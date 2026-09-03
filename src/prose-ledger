@@ -70,7 +70,7 @@ kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
 kernel/src/completion/mod.rs 45 0
 kernel/src/device.rs 26 0
-kernel/src/drivers/acpi.rs 44 0
+kernel/src/drivers/acpi.rs 39 0
 kernel/src/drivers/gop.rs 11 0
 kernel/src/drivers/hda.rs 70 0
 kernel/src/drivers/i8042/mod.rs 250 0
@@ -100,7 +100,7 @@ kernel/src/drivers/xhci/wait/msc.rs 214 0
 kernel/src/durability.rs 16 0
 kernel/src/elf/cache.rs 50 0
 kernel/src/elf/index.rs 23 0
-kernel/src/elf/mod.rs 110 0
+kernel/src/elf/mod.rs 108 0
 kernel/src/elf/reloc.rs 38 0
 kernel/src/fat32_adapter.rs 181 0
 kernel/src/file_backing.rs 25 0
@@ -250,7 +250,7 @@ tests/common/volumes.rs 626 3
 tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
-tests/toyos-rust-tests/src/bin/abuse_elf_loader.rs 151 0
+tests/toyos-rust-tests/src/bin/abuse_elf_loader.rs 162 0
 tests/toyos-rust-tests/src/bin/abuse_elf_segments.rs 58 0
 tests/toyos-rust-tests/src/bin/abuse_gpu_resolution.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_handle_table.rs 40 0
@@ -403,7 +403,7 @@ toyos-acpi/src/fadt.rs 9 0
 toyos-acpi/src/lib.rs 52 0
 toyos-acpi/src/madt.rs 23 0
 toyos-acpi/tests/common/mod.rs 11 0
-toyos-acpi/tests/corpus.rs 44 0
+toyos-acpi/tests/corpus.rs 51 0
 toyos-acpi/tests/fixtures.rs 15 0
 toyos-cc/src/ast.rs 8 0
 toyos-cc/src/codegen/addr.rs 12 0
@@ -455,7 +455,7 @@ toyos-elf/src/gnu_hash.rs 31 0
 toyos-elf/src/header.rs 42 0
 toyos-elf/src/layout.rs 122 0
 toyos-elf/src/lib.rs 102 0
-toyos-elf/src/rela.rs 86 0
+toyos-elf/src/rela.rs 84 0
 toyos-elf/src/section.rs 24 0
 toyos-elf/src/sym.rs 63 1
 toyos-elf/src/tls.rs 47 0

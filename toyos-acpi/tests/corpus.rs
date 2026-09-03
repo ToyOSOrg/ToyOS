@@ -18,8 +18,6 @@ const RSDP_AT: u64 = 0x1_0000;
 const XSDT_AT: u64 = 0x2_0000;
 const TABLE_AT: u64 = 0x3_0000;
 
-
-
 #[test]
 fn a_length_shorter_than_the_fixed_part_is_refused_with_both_numbers() {
     let head = rsdp(XSDT_AT, 2, 36);
@@ -86,7 +84,6 @@ fn a_length_over_the_ceiling_is_refused_without_walking_it() {
     );
 }
 
-
 #[test]
 fn a_table_that_does_not_sum_to_zero_is_refused() {
     let head = rsdp(XSDT_AT, 2, 36);
@@ -120,7 +117,6 @@ fn two_edits_that_cancel_pass_the_checksum_and_decode_to_the_lie() {
     );
 }
 
-
 #[test]
 fn a_madt_entry_of_zero_length_halts_the_walk_instead_of_looping() {
     let mut list = entry(0, 8, &[0, 0, 1, 0, 0, 0]);
@@ -132,8 +128,10 @@ fn a_madt_entry_of_zero_length_halts_the_walk_instead_of_looping() {
     let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
     let table = find_table(Machine { regions }, RSDP_AT, b"APIC", MADT_ENTRIES).expect("MADT");
 
+    // Bounded, so a walk that stops terminating reds here under this test's
+    // own name instead of being killed as a hung run with nothing attached.
     assert_eq!(
-        madt_entries(&table).collect::<Vec<_>>(),
+        madt_entries(&table).take(8).collect::<Vec<_>>(),
         [
             Ok(MadtEntry::LocalApic { apic_id: 0, enabled: true }),
             Err(MadtHalt { at: 8, declared: 0, list_len: 18 }),
@@ -181,7 +179,6 @@ fn a_trailing_byte_that_cannot_be_an_entry_header_ends_the_walk_quietly() {
         [Ok(MadtEntry::LocalApic { apic_id: 3, enabled: true })]
     );
 }
-
 
 #[test]
 fn an_xsdt_entry_pointing_at_nothing_is_skipped_and_the_next_one_is_read() {
@@ -234,7 +231,6 @@ fn an_rsdp_address_the_reader_cannot_reach_is_refused() {
     let regions: &[(u64, &[u8])] = &[];
     assert_eq!(hpet_base(Machine { regions }, RSDP_AT).err(), Some(TableError::BadRsdp));
 }
-
 
 /// An ACPI 1.0-length FADT: 116 bytes, no `X_DSDT`, and the century byte still
 /// inside it. The 32-bit `DSDT` is what such a table names.
@@ -289,6 +285,34 @@ fn a_revision_that_promises_x_dsdt_over_a_table_that_cannot_hold_it_falls_back()
     assert_eq!(dsdt_address(&fadt), 0x11);
 }
 
+/// The revision gate, over a table long enough for `X_DSDT` to be read if the
+/// gate were not there: `X_DSDT` is defined from FADT revision 2, so at
+/// revision 1 those eight bytes are whatever the firmware left in a reserved
+/// field and the 32-bit `DSDT` is the only address in the table.
+#[test]
+fn a_revision_1_fadt_long_enough_to_hold_x_dsdt_is_still_read_at_its_32_bit_field() {
+    let mut body = vec![0u8; 208];
+    body[40 - 36..44 - 36].copy_from_slice(&0x7ffb_9000u32.to_le_bytes());
+    body[140 - 36..148 - 36].copy_from_slice(&0xdead_beef_0000_u64.to_le_bytes());
+    let t = sdt(b"FACP", 1, &body);
+    assert_eq!(t.len(), 244);
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let fadt = find_table(Machine { regions }, RSDP_AT, b"FACP", 109).expect("FADT");
+    assert_eq!(
+        dsdt_address(&fadt),
+        0x7ffb_9000,
+        "revision 1 does not define X_DSDT, so the qword at 140 is not an address"
+    );
+
+    // The same bytes at revision 2, where the field is defined: now it is read.
+    let t = sdt(b"FACP", 2, &body);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
+    let fadt = find_table(Machine { regions }, RSDP_AT, b"FACP", 109).expect("FADT");
+    assert_eq!(dsdt_address(&fadt), 0xdead_beef_0000);
+}
+
 #[test]
 fn a_century_register_outside_cmos_ram_is_told_apart_from_none() {
     for (byte, want) in [
@@ -309,22 +333,21 @@ fn a_century_register_outside_cmos_ram_is_told_apart_from_none() {
     }
 }
 
-
 const FIXTURES: &[(&str, &[u8], u64)] = &[
-    ("rsdp", include_bytes!("../fixtures/rsdp.bin"), 0x7fb7_e014),
-    ("xsdt", include_bytes!("../fixtures/xsdt.bin"), 0x7fb7_d0e8),
-    ("facp", include_bytes!("../fixtures/facp.bin"), 0x7fb7_9000),
-    ("apic", include_bytes!("../fixtures/apic.bin"), 0x7fb7_8000),
-    ("hpet", include_bytes!("../fixtures/hpet.bin"), 0x7fb7_7000),
-    ("mcfg", include_bytes!("../fixtures/mcfg.bin"), 0x7fb7_6000),
-    ("dmar", include_bytes!("../fixtures/dmar.bin"), 0x7fb7_5000),
-    ("waet", include_bytes!("../fixtures/waet.bin"), 0x7fb7_4000),
+    ("rsdp", include_bytes!("../fixtures/qemu-11.1.0/rsdp.bin"), 0x7fb7_e014),
+    ("xsdt", include_bytes!("../fixtures/qemu-11.1.0/xsdt.bin"), 0x7fb7_d0e8),
+    ("facp", include_bytes!("../fixtures/qemu-11.1.0/facp.bin"), 0x7fb7_9000),
+    ("apic", include_bytes!("../fixtures/qemu-11.1.0/apic.bin"), 0x7fb7_8000),
+    ("hpet", include_bytes!("../fixtures/qemu-11.1.0/hpet.bin"), 0x7fb7_7000),
+    ("mcfg", include_bytes!("../fixtures/qemu-11.1.0/mcfg.bin"), 0x7fb7_6000),
+    ("dmar", include_bytes!("../fixtures/qemu-11.1.0/dmar.bin"), 0x7fb7_5000),
+    ("waet", include_bytes!("../fixtures/qemu-11.1.0/waet.bin"), 0x7fb7_4000),
 ];
 
 /// **No panic and no unbounded walk, over every byte of every table this crate
 /// decodes.** Each byte of each fixture takes each of its 255 other values in
-/// turn and the whole decode runs: `find_table` for each signature, the MADT
-/// walk to exhaustion, and each accessor. A panic anywhere — including the
+/// turn, and `ecam_base`, `hpet_base`, `rtc_century`, `iapc_boot_arch` and the
+/// MADT walk to exhaustion all run over it. A panic anywhere — including the
 /// reader's own, which fires on a read no bound accepted — reds this.
 ///
 /// **Both arms, and the second is the one that reaches the decode.** A raw
@@ -400,7 +423,6 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
     assert!(walked[1] > walked[0], "the resealed arm walked no further than the raw one");
     assert!(halts[1] > 0, "no resealed mutation halted a walk, so that arm is untested here");
 }
-
 
 /// **Stated as tests, so extending the decoder reds the statement.** Nothing in
 /// this crate reads what is *inside* a DSDT — `find_s5_slp_typ` scans AML and

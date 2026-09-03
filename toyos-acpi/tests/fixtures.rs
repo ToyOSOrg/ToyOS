@@ -14,14 +14,14 @@ use toyos_acpi::{
 /// point at these addresses, so the walk under test is the real one.
 const RSDP: u64 = 0x7fb7_e014;
 const REGIONS: &[(u64, &[u8])] = &[
-    (RSDP, include_bytes!("../fixtures/rsdp.bin")),
-    (0x7fb7_d0e8, include_bytes!("../fixtures/xsdt.bin")),
-    (0x7fb7_9000, include_bytes!("../fixtures/facp.bin")),
-    (0x7fb7_8000, include_bytes!("../fixtures/apic.bin")),
-    (0x7fb7_7000, include_bytes!("../fixtures/hpet.bin")),
-    (0x7fb7_6000, include_bytes!("../fixtures/mcfg.bin")),
-    (0x7fb7_5000, include_bytes!("../fixtures/dmar.bin")),
-    (0x7fb7_4000, include_bytes!("../fixtures/waet.bin")),
+    (RSDP, include_bytes!("../fixtures/qemu-11.1.0/rsdp.bin")),
+    (0x7fb7_d0e8, include_bytes!("../fixtures/qemu-11.1.0/xsdt.bin")),
+    (0x7fb7_9000, include_bytes!("../fixtures/qemu-11.1.0/facp.bin")),
+    (0x7fb7_8000, include_bytes!("../fixtures/qemu-11.1.0/apic.bin")),
+    (0x7fb7_7000, include_bytes!("../fixtures/qemu-11.1.0/hpet.bin")),
+    (0x7fb7_6000, include_bytes!("../fixtures/qemu-11.1.0/mcfg.bin")),
+    (0x7fb7_5000, include_bytes!("../fixtures/qemu-11.1.0/dmar.bin")),
+    (0x7fb7_4000, include_bytes!("../fixtures/qemu-11.1.0/waet.bin")),
 ];
 
 fn machine() -> Machine<'static> {

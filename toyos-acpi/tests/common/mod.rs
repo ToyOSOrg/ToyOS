@@ -30,7 +30,7 @@ impl Phys for Machine<'_> {
     fn byte(self, phys: u64) -> u8 {
         match self.at(phys, 1) {
             Some(bytes) => bytes[0],
-            None => panic!("the decoder read {phys:#x}, which no `readable` call accepted"),
+            None => panic!("the decoder read {phys:#x}, an address in no region"),
         }
     }
 }

@@ -2,10 +2,9 @@
 //!
 //! The decode is `toyos-acpi`, pure and host-tested against QEMU's own tables
 //! and a crafted corpus. What stays here is everything that touches the
-//! machine: the direct-map reader the crate decodes through — the only `unsafe`
-//! on this path — the log lines a machine owner reads a refusal off, the
-//! `Vec`s the crate cannot allocate, and the PM1 port writes that turn a
-//! validated FADT into a soft-off.
+//! machine: the direct-map reader the crate decodes through, the log lines a
+//! machine owner reads a refusal off, the `Vec`s the crate cannot allocate, and
+//! the PM1 port writes that turn a validated FADT into a soft-off.
 //!
 //! All input is firmware-supplied and untrusted: no panic on any input path,
 //! every failure is a [`TableError`] and the caller decides what it means.
@@ -31,10 +30,6 @@ pub struct MadtInfo {
 const MAX_PHYS: u64 = 1 << 52;
 
 /// Firmware's physical addresses, read through the direct map.
-///
-/// The whole of the kernel's claim to `toyos_acpi::Phys`: an address below
-/// [`MAX_PHYS`] is one the direct map covers, and every byte the decoder reads
-/// was accepted by [`readable`](Phys::readable) first.
 #[derive(Clone, Copy)]
 pub struct DirectPhys;
 
@@ -44,7 +39,7 @@ impl Phys for DirectPhys {
     }
 
     fn byte(self, phys: u64) -> u8 {
-        // SAFETY: `readable` bounded `phys` below `MAX_PHYS`, where the direct map covers it.
+        // SAFETY: `readable` bounded `phys` below `MAX_PHYS`.
         unsafe { read_volatile(DirectMap::from_phys(phys).as_ptr::<u8>()) }
     }
 }
