@@ -1058,7 +1058,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2687,7 +2687,7 @@ checksum = "0c8d0fd677905edcbeedbf2edb6494d676f0e98d54d5cf9bda0b061cb8fb8aba"
 [[package]]
 name = "raw-window-handle"
 version = "0.6.2"
-source = "git+https://github.com/ToyOSOrg/raw-window-handle?branch=toyos#c39042b5f2780fb02c177a471cfc3e906c6cee23"
+source = "git+https://github.com/ToyOSOrg/raw-window-handle?branch=toyos-0.6.2#2a5d102bdbd5dc987b653a7ffff5bedbbbfc53b3"
 
 [[package]]
 name = "realfft"
@@ -2977,7 +2977,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3370,7 +3370,7 @@ dependencies = [
 [[package]]
 name = "softbuffer"
 version = "0.4.8"
-source = "git+https://github.com/ToyOSOrg/softbuffer?branch=toyos-0.4.8#b6461aebe40648de144ff72ac2d275f04d24dc1d"
+source = "git+https://github.com/ToyOSOrg/softbuffer?branch=toyos-0.4.8#63959966e6d5bdd1d2f2a40f631bc0cdc289405c"
 dependencies = [
  "bytemuck",
  "js-sys",
@@ -4040,7 +4040,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

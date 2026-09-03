@@ -81,8 +81,8 @@ had. They sum to the old number exactly. `late_wakes` counts how many wakes in
 the run were a whole period or more late, so the maximum can be read as one
 stall or as a thousand.
 
-**296 config-runs on the T14 the same evening, 17:26-19:00 UTC, CI image at the
-`route.yml` digest, `--device=/dev/kvm --shard 1/1 --host-slots 0`, no other
+**296 config-runs on the T14 the same evening, 17:26-19:00 UTC, in the CI image
+of the day, `--device=/dev/kvm --shard 1/1 --host-slots 0`, no other
 container up for any boot** — each block samples `docker ps` every five seconds
 and discards and retries itself whole if a CI job appears, which happened three
 times and cost three blocks. Two trees, each carrying only the instrument:
@@ -172,3 +172,17 @@ depth, no margin) and its mixing weight is unexplained across two sessions on
 the same host and tree. Owed to whoever next sees the slow mode, per this
 entry's own "whoever takes it next" section: the host-side schedstat/cpuidle
 capture during a slow session.
+
+## The exit is not the metal loop, and no lane produces the mode any more
+
+The T14 is no longer a CI runner, so nothing schedules a gate A run on it: the
+slow mode can only be sighted by somebody running the gate there by hand, and
+this record waits for that sighting rather than for a nightly.
+
+The metal loop (`issues/hardware/the-t14-boots-toyos-unattended.md`) does not
+take the capture this record is owed. That capture reads a Linux host's
+`schedstat` and `cpuidle` for the QEMU process the guest runs in, and the loop
+boots ToyOS on the bare machine with no host under it and no QEMU process to
+read. What the loop can answer is the adjacent question this record makes worth
+asking — whether the two modes survive with no hypervisor at all — and that is
+a job of the loop, not this exit.

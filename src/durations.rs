@@ -12,22 +12,10 @@
 //! which tests are long, the dev host overwrites every name it measures with its
 //! own, and the file exists for the checkout that has measured nothing.
 //!
-//! **One profile, one instrument, and the profile's instrument is the hosted
-//! shards.** `tests/test-durations` holds what twelve GitHub-hosted shards
-//! measured; a 1/1 partition on the T14 does not price the same tests alike —
-//! `main`'s tip `13953023` measured `xhci_full_speed_device` at 6,845 ms hosted
-//! and 12,156 ms on the T14 the same day, and twenty interleaved reps an arm
-//! cannot tell that tip from the tree the profile was recorded on (p = 0.42).
-//! So the tier verdict is rendered only where the profile was taken:
-//! `.github/workflows/ci.yml`'s `durations` job matches
-//! [`TIER_DISAGREEMENT`] on a T14 lane, prints it as a warning and exits 0.
-//! From `985f3834` (2026-08-20) that softening covered every pull request,
-//! because it had put every trusted event's guest lane on the T14; since
-//! 2026-08-22 `route.yml` routes a pull request, a push, a merge-queue ref and
-//! the nightly to the hosted shards, so the verdict renders for real on the run
-//! that introduces a name and only a `workflow_dispatch` reaches the warning.
-//! Every other refusal raised here is about the tree or the partition, not
-//! about machine speed, and reds on either instrument.
+//! **One profile, one instrument**: `tests/test-durations` holds what twelve
+//! GitHub-hosted shards measured, and every event's guest lane is that same
+//! twelve-shard shape, so the tier verdict is always rendered on the
+//! instrument the profile was taken on.
 //!
 //! Why a command and not a `cat`: the shards are a *partition*, and that is the
 //! property the merged file's usefulness rests on. A repeated name means two
@@ -44,10 +32,8 @@
 //! re-run. Learned on 2026-08-19, when three PRs stalled on exactly this while
 //! everyone read the red as stale noise.
 //!
-//! **Two axes decide whether the price verdict is rendered, and they compose.**
-//! *Which instrument* is the first, above: only the hosted twelve-shard shape
-//! the profile was taken in may render it at all. *Which names* is the second,
-//! and it is the owner's ruling of 2026-08-22: a run measuring a change renders
+//! **Which names decide whether the price verdict is rendered.**
+//! The owner's ruling of 2026-08-22: a run measuring a change renders
 //! the verdict for the names that change registered or re-tiered, and prints
 //! every other one as a `::warning::` naming the name, the price and why this
 //! run does not enforce it. The nightly passes no base, so [`Enforced`] is
