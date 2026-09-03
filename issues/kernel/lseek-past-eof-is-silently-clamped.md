@@ -33,14 +33,6 @@ Found while writing the filesystem transactionality control
 regrowing with `ftruncate` before writing into the hole. Orthogonal to the
 rename/shrink transactionality defects.
 
-## Reopened 2026-08-29: a fix exists and is measured to wedge the machine
-
-A complete fix with its POSIX-oracle test landed and was reverted the same
-day: the test's own filesystem activity left its shared boot wedged in 4 of 5
-full fast-tier runs. Do not re-derive the fix without reading
-`issues/kernel/past-eof-holes-wedge-a-shared-boot.md` first — it carries the
-commit to revert-the-revert of, the measurement table, and where to start.
-
 **Exit condition.** `lseek` past the end returns the offset it was given; a write
 there extends the file; and the bytes between the old end and the write read as
 zeros on every mount — asserted from the device rather than only from the cache,
