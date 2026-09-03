@@ -1,24 +1,22 @@
 //! The five crates ToyOS publishes, and the rule that keeps their versions
 //! moving.
 //!
-//! ToyOS is a normal target for software: the winit, softbuffer and cpal forks
-//! name `toyos-abi`, `toyos` and `toyos-window` **by version**, because a path
-//! escaping a fork's own repository cannot resolve once cargo checks it out
-//! alone. So those crates and the two they pull in are published, and the ABI
-//! they carry is unstable by policy — a built program that breaks, breaks.
+//! The winit, softbuffer and cpal forks name `toyos-abi`, `toyos` and
+//! `toyos-window` **by version**, because a path escaping a fork's own
+//! repository cannot resolve once cargo checks it out alone. So those and the
+//! two they pull in are published, and the ABI they carry is unstable by
+//! policy — a built program that breaks, breaks.
 //!
-//! **That policy is what this gate is for.** Every change to one of the five is
-//! a change a consumer resolves by version, and none of them is
+//! **That policy is what this gate is for.** None of the five is
 //! compatible-by-construction, so a branch that changes a file under one of
-//! these crates bumps its minor — `0.x.0` to `0.(x+1).0` — and every in-tree
-//! dependent's `version` pin with it. A crate published twice under one version
-//! is refused by crates.io; a crate *changed* and not republished is worse,
-//! because the fork that names the version still resolves and silently gets the
-//! old code.
+//! them bumps its minor — `0.x.0` to `0.(x+1).0` — and every in-tree
+//! dependent's `version` pin with it. A crate *changed* and not republished is
+//! worse than one republished under a taken version, which crates.io refuses:
+//! the fork naming the version still resolves, and silently gets the old code.
 //!
-//! The order below is the dependency order, and it is the order
-//! `.github/workflows/publish.yml` publishes in: a crate cannot be published
-//! before the crates.io index holds every version it names.
+//! [`PUBLISHED`]'s order is a dependency order, and it is the order
+//! `.github/workflows/publish.yml` takes: a crate cannot go up before the index
+//! holds every version it names.
 
 use std::path::Path;
 
@@ -90,11 +88,8 @@ pub fn dispatch_check(root: &Path, args: &[String]) {
     }
 }
 
-/// The `version = "…"` of the `[package]` table, which is the only table in
-/// these manifests whose `version` key stands alone at the top level.
-///
-/// A hand walk rather than a parse: the value wanted is one key of one table,
-/// and the manifests it is read from are five files this repository writes.
+/// The `version = "…"` of the `[package]` table. A hand walk and not a parse:
+/// one key of one table, in five manifests this repository writes.
 fn package_version(text: &str) -> Option<String> {
     let mut in_package = false;
     for line in text.lines() {
@@ -115,11 +110,8 @@ fn package_version(text: &str) -> Option<String> {
 }
 
 /// Every `<dep> = { … version = "…" … }` line in `text` naming one of the five,
-/// as `(dependency, version)`.
-///
-/// One line per dependency is the shape every manifest here writes, and a
-/// dependency spelled across lines is not reached — which is why
-/// [`judge`] states the pin it read rather than only that one is stale.
+/// as `(dependency, version)`. One line per dependency is the only spelling
+/// this reaches, which is why [`judge`] states the pin it read.
 fn version_pins(text: &str) -> Vec<(String, String)> {
     let mut pins = Vec::new();
     for line in text.lines() {
@@ -140,11 +132,9 @@ fn version_pins(text: &str) -> Vec<(String, String)> {
     pins
 }
 
-/// A minor bump and nothing else: `0.x.0` becomes `0.(x+1).0`.
-///
-/// Every change may break by policy, so there is no patch level to move and no
-/// judgement about which kind of change this was. A version that is not
-/// `0.x.0` is refused by name rather than guessed at.
+/// A minor bump and nothing else: `0.x.0` becomes `0.(x+1).0`. Every change may
+/// break by policy, so there is no patch level to move and no judgement about
+/// which kind of change this was; anything but `0.x.0` is refused, not guessed.
 fn next_minor(version: &str) -> Option<String> {
     let mut parts = version.split('.');
     let major = parts.next()?;
@@ -283,11 +273,9 @@ mod tests {
         commit(wt, PUBLISHER, "name: publish\n", "publish these");
     }
 
-    /// **The judge, and the partial fix it must not pass**: a branch that
-    /// changes a published crate's source and leaves its version where it was.
-    /// The pin half is the partial fix — a bump with a dependent still naming
-    /// the old version publishes a crate whose dependency the registry has not
-    /// got.
+    /// **The judge, and the partial fix it must not pass**: a bump alone, with
+    /// a dependent still naming the old version, publishes a crate whose
+    /// dependency the registry has not got. That half is the test below.
     #[test]
     fn a_changed_crate_that_did_not_move_its_version_is_refused_by_name() {
         let (_origin, wt) = repo("sdk-unbumped");
@@ -355,9 +343,8 @@ mod tests {
         assert!(verdict.contains("toyos 0.1.0 -> 0.2.0"), "{verdict}");
     }
 
-    /// **The control: the gate reverted.** A branch that touches none of the
-    /// five is what every other branch is, and the same fixture that reds above
-    /// is green when the rule has nothing to say about it.
+    /// A branch that touches none of the five is every other branch, and the
+    /// rule has nothing to say about it.
     #[test]
     fn a_branch_that_changes_none_of_the_five_passes() {
         let (_origin, wt) = repo("sdk-elsewhere");
@@ -416,9 +403,8 @@ mod tests {
         }
     }
 
-    /// Each row names a directory this repository holds, with a manifest whose
-    /// package is the row's name — so a crate renamed or moved reds here rather
-    /// than in a publish run nobody is watching.
+    /// Each row names a directory the tree holds whose package is the row's
+    /// name, so a crate renamed or moved reds here and not in a publish run.
     #[test]
     fn every_row_names_a_crate_the_tree_holds() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

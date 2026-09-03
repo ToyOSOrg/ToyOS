@@ -218,7 +218,7 @@ src/pr.rs 212 5
 src/prosegate.rs 128 0
 src/qemu.rs 116 0
 src/redlist.rs 534 25
-src/sdkversion.rs 94 0
+src/sdkversion.rs 80 0
 src/soundfont.rs 133 0
 src/sourcegate.rs 479 1
 src/stamps.rs 3 0
