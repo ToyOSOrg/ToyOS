@@ -21,12 +21,12 @@ situation exactly.
 
 Recommendation, for the owner to decide:
 
-- **Now, nearly free:** tighten `Superblock::check` from
-  `block_count <= device_blocks` to `==`. `format` already writes the device's
-  own size, so a volume image copied onto a different disk stops mounting, the
-  same property the designation stamp's block count gives a format. It is not
-  authentication — an attacker who knows the disk size writes the right number —
-  but it costs one character and removes the accidental cases.
+- **Done:** `Superblock::check` takes `block_count != device_blocks`, so a
+  volume image copied onto a different disk stops mounting — the same property
+  the designation stamp's block count gives a format. It is not authentication:
+  an attacker who knows the disk size writes the right number. `volume_from_another_disk`
+  is the guest arm and `a_volume_copied_onto_a_larger_device_does_not_mount` the
+  host one.
 - **Done, 2026-08-23:** a file's extents are range-checked against the volume
   in `decode_leaf_value`, so "mounting a hostile volume is merely rude" no
   longer has an unchecked extent reaching a block read — or a bitmap write —
@@ -40,11 +40,10 @@ Recommendation, for the owner to decide:
   TPM support, so this is a metal-track decision, not a patch.
 
 **The owner ruled on 2026-09-01: take the exact check now, authenticate on
-the metal track.** `Superblock::check` goes from `block_count <= device_blocks`
-to `==`, which is the first bullet above and costs one character. It is not
-authentication and the entry must keep saying so: an attacker who knows the
-disk's size writes the right number. What it removes is every case where the
-volume did not come from this disk.
+the metal track.** The exact check is taken and the first bullet above is
+closed. It is not authentication and the entry must keep saying so: an attacker
+who knows the disk's size writes the right number. What it removes is every case
+where the volume did not come from this disk.
 
 Authentication — read-write only for something the attacker cannot compute,
 read-only for everything else — is deferred to the metal track, because it needs

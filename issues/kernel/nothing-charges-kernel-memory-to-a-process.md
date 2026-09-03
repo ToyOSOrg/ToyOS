@@ -34,5 +34,9 @@ both cost a day to discover:
   =`, `drop()` and burial in a collection all pass silently. A drop bomb is the
   state of the art, and `Unmapped<T>` is already exactly such an obligation.
 
-`issues/kernel/no-alloc-error-handler.md` is the terminal state of every
-unbounded grower and closes with this.
+**The terminal state of every unbounded grower is this entry's.** The allocation
+failure itself reports cleanly — a failed kernel allocation takes `alloc`'s
+no_std default handler and panics with the size, the layer and the call site
+named — so what is left at the end of a grower is *who dies*: whichever thread
+happened to allocate, not the one that exhausted the heap. That is what charging
+fixes, and nothing else does.

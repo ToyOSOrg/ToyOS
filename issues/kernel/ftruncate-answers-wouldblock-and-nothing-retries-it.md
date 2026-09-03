@@ -32,8 +32,26 @@ failure, not corruption. It is filed rather than fixed here because the fix is a
 retry ladder in a second syscall, which is a decision about where retries live
 rather than a patch.
 
-**Exit condition.** Either `SYS_FTRUNCATE` retries a budget expiry above its
-lock the way `SYS_FSYNC` does, and reports only what survives the deadman; or
-the mapping stops claiming retryability and the reason is written at the site.
+**`SYS_FTRUNCATE` is not the only one, and one of them has been seen red.**
+`kernel/src/fat32_adapter.rs:546` maps `Error::BudgetExpired` to `WouldBlock`
+for every FAT operation, so a *delete* carries the same status out with nothing
+behind it. #377's adversarial review recorded `fs_transactional` red once in its
+runs on the dev host — `ALONE` pass, 0 of 6 further runs, not on
+`src/redlist.rs`'s list, all twelve CI shards green:
+
+    usb-storage: ... transport broke on SCSI 0x2a: no answer in the status phase in 2000 ms
+    log-volume: delete of fstx_keep_dst.bin: the device would not answer in the caller's own budget
+
+That is the two-deadlines-in-series producer `src/redlist.rs:2994` retired for
+`esp_filesystem` on 2026-08-23 — `USB_TIMEOUT_NS` breached on a WRITE(10) status
+phase, then `block::OPERATION` refusing the retry unissued. The retry that
+retired it lives in `ops::fsync` and covers `SYS_FSYNC` alone, so the class it
+closed still reaches userland on every other path. Whoever fixes this fixes
+both, which is the other half of why the answer is where retries live.
+
+**Exit condition.** Either the budget expiry is retried above the lock the way
+`SYS_FSYNC` does — for the truncate and the delete both — and only what survives
+the deadman is reported; or the mapping stops claiming retryability and the
+reason is written at the site.
 Whichever, the `resize-fault-refuse` actuator already stages the refusal, so the
 chosen answer has an instrument to be measured with.

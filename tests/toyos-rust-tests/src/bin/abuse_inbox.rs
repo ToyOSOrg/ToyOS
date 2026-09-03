@@ -66,6 +66,78 @@ fn watch_reports_only_the_readiness_that_fired() {
     println!("watch result: a two-direction watch reports the direction that fired");
 }
 
+/// Submit one entry and hand back the `result` word of the completion it posts.
+fn one_submission(op: u8, flags: u8, op_flags: u32, handle: toyos_abi::RawHandle) -> i32 {
+    let (inbox, base) = unsafe { syscall::inbox_setup(DEPTH) }.expect("inbox_setup");
+    let ring = unsafe { &*(base.add(SUBMISSION_RING_OFF as usize) as *const RingHeader) };
+    let head = ring.head.load(Ordering::Acquire);
+    let idx = (head & (DEPTH - 1)) as usize;
+    let submission = unsafe {
+        &mut *(base.add(SUBMISSIONS_OFF as usize + idx * core::mem::size_of::<Submission>())
+            as *mut Submission)
+    };
+    *submission = Submission::default();
+    submission.op = op;
+    submission.flags = flags;
+    submission.handle = handle;
+    submission.op_flags = op_flags;
+    submission.token = 0x5EED;
+    ring.tail.store(head.wrapping_add(1), Ordering::Release);
+
+    let completed = syscall::inbox_submit(inbox, 1, 1, 0).expect("the submission");
+    assert_eq!(completed, 1, "the submission did not complete");
+    let cq = unsafe { &*(base.add(COMPLETION_RING_OFF as usize) as *const RingHeader) };
+    let ch = cq.head.load(Ordering::Acquire);
+    assert_ne!(ch, cq.tail.load(Ordering::Acquire), "no completion was posted");
+    let cidx = (ch & (cq.ring_size - 1)) as usize;
+    let completion = unsafe {
+        &*(base.add(COMPLETION_RING_OFF as usize
+            + core::mem::size_of::<RingHeader>()
+            + cidx * core::mem::size_of::<Completion>()) as *const Completion)
+    };
+    assert_eq!(completion.token, 0x5EED, "the completion is for another submission");
+    let result = completion.result;
+    syscall::close(inbox);
+    result
+}
+
+/// Two words of a submission the kernel used to keep whole and answer in part:
+/// an `op_flags` interest outside `READABLE|WRITABLE` was registered for neither
+/// direction, and `Submission::flags` is read by nothing at all. Each is paired
+/// with the same submission without the bit, so the refusal is the bit.
+fn a_submission_word_outside_what_the_abi_defines_is_refused() {
+    const UNDEFINED_INTEREST: u32 = 2;
+    const _: () = assert!(UNDEFINED_INTEREST & (READABLE | WRITABLE) == 0);
+    let invalid = -(SyscallError::InvalidArgument as i32);
+
+    let (read, write) = toyos::pipe_pair().expect("a pipe of our own");
+    write.write_nonblock(b"x").expect("one byte into the write end");
+    let handle = read.as_handle();
+
+    assert_eq!(
+        one_submission(OP_WATCH, 0, READABLE | UNDEFINED_INTEREST, handle),
+        invalid,
+        "a watch asking for an interest this ABI does not define was registered",
+    );
+    assert_eq!(
+        one_submission(OP_WATCH, 0, READABLE, handle),
+        READABLE as i32,
+        "the same watch without the bit did not report the readiness that fired",
+    );
+
+    assert_eq!(
+        one_submission(OP_NOP, 1, 0, toyos_abi::RawHandle(0)),
+        invalid,
+        "a submission setting the flags byte nothing reads was served anyway",
+    );
+    assert_eq!(
+        one_submission(OP_NOP, 0, 0, toyos_abi::RawHandle(0)),
+        0,
+        "the same NOP with a zero flags byte was refused",
+    );
+    println!("submission words: an undefined interest bit and a non-zero flags byte are refused");
+}
+
 fn main() {
     let (inbox, base) = unsafe { syscall::inbox_setup(DEPTH) }.expect("inbox_setup");
     let ring = unsafe { &*(base.add(SUBMISSION_RING_OFF as usize) as *const RingHeader) };
@@ -109,4 +181,5 @@ fn main() {
     println!("submission ring header abuse rejected, inbox still usable");
 
     watch_reports_only_the_readiness_that_fired();
+    a_submission_word_outside_what_the_abi_defines_is_refused();
 }
