@@ -349,10 +349,8 @@ const RUST_SKIP: &[&str] = &[
     // Needs `fsync-budget-spent` and the NVMe `/home`; unstaged it passes
     // vacuously. `home_budget_refusal_retried` boots it with both.
     "home_fsync_budget",
-    // Needs `so-cache-tiny` and the NVMe `/home`: on the shipped 256 MiB budget
-    // its budget arm would have to load 256 MiB of distinct libraries, and on a
-    // tmpfs `/home` the host has no device to read the replaced file off.
-    // `so_cache_refusals` boots it with both.
+    // Needs `so-cache-tiny` and the NVMe `/home`; unstaged its budget arm would
+    // have to load 256 MiB. `so_cache_refusals` boots it with both.
     "so_cache_policy",
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
@@ -561,9 +559,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
     ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
-    // The shared-object cache's two refusals, the replaced library's bytes then
-    // read off the NVMe image by the host's own bcachefs reader. Body in
-    // `tests/common/storage.rs`.
+    // The cache's two refusals, judged off the NVMe image by the host's own
+    // bcachefs reader. Body in `tests/common/storage.rs`.
     ("so_cache_refusals", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
@@ -2117,13 +2114,12 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
 }
 
 /// The spelling a loader writes when it caches a library under the directory it
-/// searched and did not find it in. `dlopen_dedup`'s last arm stages it; only
-/// that arm can produce this string, so the whole verdict is its absence.
+/// searched and did not find it in. Only `dlopen_dedup`.s last arm can produce
+/// this string, so the whole verdict is its absence.
 const FALLBACK_MISCACHED: &str = "dlopen: cached /tmp/dlopen-dedup/libtls_lib.so";
 
-/// `dlopen_dedup` plus the half of its last arm no guest can see: one library
-/// reached two ways is one physical image, which the kernel says by caching it
-/// once — under the path it actually opened.
+/// `dlopen_dedup` plus the half no guest can see: one library reached two ways
+/// is one physical image, cached under the path that was actually opened.
 fn check_dlopen_dedup(result: &TestResult) -> bool {
     if !check_rust_result(result) {
         return false;

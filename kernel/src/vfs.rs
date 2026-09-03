@@ -706,8 +706,7 @@ impl Vfs {
     }
 
     /// [`open_backing`](Self::open_backing) plus what the mount says about the
-    /// file right now, for a caller that keeps something derived from the
-    /// bytes and has to know later whether the file behind the path moved.
+    /// file now, for a caller that keeps something derived from the bytes.
     pub fn open_backing_identified(
         &mut self,
         path: &str,
@@ -727,8 +726,7 @@ impl Vfs {
             self.flush_file(&owner, file_id, mtime)?;
         }
         let (fs, fs_path) = self.fs_for_target(&target)?;
-        // Read after the flush above, so the identity is the file as this call
-        // leaves it rather than as it was before the pending writes landed.
+        // After the flush, so the identity is the file as this call leaves it.
         let mtime = fs.file_mtime(&fs_path)?;
         let backing = fs.open_backing(&fs_path)?;
         let id = BackingId { size: backing.file_size(), mtime };
@@ -738,11 +736,10 @@ impl Vfs {
 
 /// What a mount said about a file when its backing was opened.
 ///
-/// Metadata the open had already reached, so asking for it reads no page of
-/// the file. **It refuses a rewrite; it does not identify a file** — two
-/// different files can carry the same size and the same mtime, and a mount
-/// whose mtime does not move under a same-size write hides one from this
-/// entirely.
+/// Metadata the open had already reached, so it reads no page of the file.
+/// **It refuses a rewrite; it does not identify a file** — two files can carry
+/// the same size and mtime, and a mount whose mtime does not move under a
+/// same-size write hides one entirely.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BackingId {
     pub size: u64,

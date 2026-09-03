@@ -1,18 +1,11 @@
 //! The two refusals the shared-object cache owes, because it never removes an
-//! entry: a path whose file changed, and a load past the cache's byte budget.
+//! entry: a path whose file changed, and a load past its byte budget.
+//! `tests/common/storage.rs::so_cache_refusals` boots and judges this.
 //!
 //! **Both arms need a second process.** `SYS_DLOPEN` answers a name this
 //! process already holds out of its own `lib_paths` before the cache is
-//! consulted at all, so one process can never ask the cache a second question
-//! about one path. Each load below therefore runs in a child of this binary,
-//! which reports the answer on its stdout.
-//!
-//! The stale arm's two libraries export disjoint symbol sets, so the verdict is
-//! not a value but a name: `tls_get_label` exists only in the first, and a
-//! kernel that resolved it after the file became the second served an image the
-//! file no longer holds. `tests/common/storage.rs::so_cache_refusals` boots
-//! this with `so-cache-tiny` and reads the replaced file's bytes off the NVMe
-//! image afterwards.
+//! consulted at all, so one process can never ask the cache twice about one
+//! path. Each load runs in a child, which reports on its stdout.
 
 use std::process::{Command, Stdio};
 
@@ -21,16 +14,14 @@ use toyos_abi::syscall::{self, SyscallError};
 /// Mirrored in `tests/common/storage.rs::so_cache_refusals`, which reads this
 /// path's bytes off the device once the guest is down.
 const STALE: &str = "/home/so-cache-stale.so";
-/// The first library written to [`STALE`]; exports `tls_get_label`.
 const FIRST: &str = "/lib/libtls_lib.so";
-/// The second; a different library, a different size, and no `tls_get_label`.
 const SECOND: &str = "/lib/libtls_dlopen_lib.so";
-/// A symbol `FIRST` exports and `SECOND` does not.
+/// A symbol `FIRST` exports and `SECOND` does not, so the verdict is a name and
+/// not a value.
 const ONLY_IN_FIRST: &[u8] = b"tls_get_label";
 
-/// `TINY_BUDGET_BYTES` is 8 MiB and each copy below is a 2 MiB image, so a
-/// refusal is due within this many. Larger than the four that fit, so a kernel
-/// that never refuses runs out of attempts and says so rather than looping.
+/// The budget is 8 MiB and each copy is a 2 MiB image, so a refusal is due well
+/// inside this — and a kernel that never refuses says so instead of looping.
 const BUDGET_ATTEMPTS: usize = 12;
 
 const SELF_PATH: &str = "/bin/test_rs_so_cache_policy";
@@ -42,9 +33,8 @@ fn main() {
     }
 }
 
-/// Both arms run whatever the first one answers, because on a kernel with
-/// neither refusal both are red and a run that stopped at the first would
-/// report one control and hide the other.
+/// Both arms run whatever the first answers: on a kernel with neither refusal
+/// both are red, and stopping at the first would hide one control.
 fn test() {
     let arms = [
         ("stale", a_changed_file_is_refused()),
@@ -66,10 +56,9 @@ fn test() {
     println!("the shared-object cache refuses a stale path and a full budget");
 }
 
-/// Write one library, load it, write a different one over the same path, and
-/// load again. The second load must be refused: the first image is mapped into
-/// the child that loaded it and nothing here can take it back, so serving it
-/// again is a lie and reloading would map the library twice.
+/// One library, loaded; a different one over the same path, loaded again. The
+/// second must be refused: the first image is mapped into the child that loaded
+/// it, so serving it again is a lie and reloading would map the library twice.
 fn a_changed_file_is_refused() -> Result<String, String> {
     let only = String::from_utf8_lossy(ONLY_IN_FIRST).into_owned();
     copy(FIRST, STALE);
@@ -95,8 +84,7 @@ fn a_changed_file_is_refused() -> Result<String, String> {
 }
 
 /// Distinct paths are distinct entries, so copies of one library fill the
-/// budget as surely as distinct libraries would. The refusal is
-/// `ResourceExhausted` and it arrives before the attempts run out.
+/// budget as surely as distinct libraries would.
 fn the_budget_is_refused() -> Result<String, String> {
     for attempt in 0..BUDGET_ATTEMPTS {
         let path = format!("/home/so-cache-fill-{attempt}.so");
@@ -120,7 +108,6 @@ fn copy(from: &str, to: &str) {
     std::fs::write(to, &bytes).unwrap_or_else(|e| panic!("write {to}: {e}"));
 }
 
-/// One `dlopen` in a child, and what it said.
 fn load_in_child(path: &str) -> String {
     let out = Command::new(SELF_PATH)
         .arg(path)
@@ -132,8 +119,7 @@ fn load_in_child(path: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// The child: load `path`, say what happened, and — on a load that worked —
-/// whether the symbol only the first library carries is there.
+/// The child: load `path` and say what happened.
 fn load_in_this_process(path: &str) {
     match syscall::dl_open(path.as_bytes()) {
         Ok(handle) => {

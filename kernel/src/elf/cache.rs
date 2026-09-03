@@ -5,12 +5,10 @@
 //! it and its base address never moves, so its `R_X86_64_RELATIVE` relocations
 //! need no rework. Only the writable window is copied.
 //!
-//! **Nothing is ever removed, and both refusals here follow from that.** An
-//! entry's pages are live in every process that loaded it and no address space
-//! can be reached from here to unmap one, so the cache cannot answer a changed
-//! file by reloading and cannot answer a full budget by evicting. It refuses
-//! instead: a path whose file no longer matches its image is [`Cached::Stale`],
-//! and a load that would cross [`BUDGET_BYTES`] is `ResourceExhausted`.
+//! **Nothing is ever removed, and both refusals follow from that.** An entry is
+//! mapped into every process that loaded it and no address space is reachable
+//! from here, so a changed file cannot be answered by reloading and a full
+//! budget cannot be answered by evicting. Both are refused instead.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -159,17 +157,13 @@ static SO_CACHE: Lock<Vec<(String, CachedLib)>> = Lock::new(Vec::new());
 
 /// The most physical memory every cached image may hold between them.
 ///
-/// **A policy number**, and the only one here: nothing derives it. Crossing it
-/// refuses the load rather than evicting, because a cached image is mapped
-/// into every process that loaded it and this cache can take none of them
-/// back. For scale, the largest shared object this tree builds loads a span of
-/// 144,760,832 bytes, which is a 146,800,640-byte allocation — so this admits
-/// one of those and refuses a second.
+/// **A policy number**: nothing derives it. For scale, the largest shared
+/// object this tree builds loads a span of 144,760,832 bytes, a 146,800,640
+/// byte allocation — so this admits one of those and refuses a second.
 const BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
-/// `so-cache-tiny`'s number, within reach of the 2 MiB libraries a guest can
-/// build. Only the magnitude moves: the sum, the comparison, the refusal and
-/// the message are the shipped ones on either setting.
+/// `so-cache-tiny`s number, within reach of the 2 MiB libraries a guest can
+/// build. Only the magnitude moves; the comparison and the refusal are shipped.
 const TINY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 fn budget_bytes() -> usize {
@@ -184,12 +178,11 @@ fn budget_bytes() -> usize {
 pub enum Cached {
     /// A clone of the cached image; the file behind the path still matches it.
     Fresh(LoadedLib),
-    /// An image is cached here and the file behind the path no longer matches
-    /// it. The caller refuses by name: reloading would map the library twice,
-    /// since the old image cannot be freed while a process holds it mapped.
+    /// An image is cached here and the file behind the path no longer matches it.
+    /// The caller refuses by name: the old image cannot be freed while a process
+    /// has it mapped, so a reload would map the library twice.
     Stale,
-    /// Nothing usable — no entry, or one whose clone found no memory, which the
-    /// caller's own load path refuses on.
+    /// Nothing usable — no entry, or a clone that found no memory.
     Absent,
 }
 
@@ -248,8 +241,7 @@ pub fn cache_loaded_lib(
     let (held, entries) = (held_bytes(&cache), cache.len());
     let Some(after) = held.checked_add(alloc.size()).filter(|b| *b <= budget) else {
         drop(cache);
-        // Both allocations drop with this return, so the refusal gives the
-        // machine back everything the load took.
+        // Both allocations drop here, so the refusal gives back what the load took.
         log!(
             "dlopen: {} would take the shared-object cache to {} bytes over {} entries, past its \
              {}-byte budget; refused, and nothing is evicted for it",
@@ -280,8 +272,7 @@ pub fn cache_loaded_lib(
     ))
 }
 
-/// Clone the image cached under `path`, if one is there and `id` still
-/// describes the file it was built from.
+/// Clone what is cached under `path`, if `id` still describes the file it came from.
 pub fn try_clone_cached(path: &str, id: BackingId) -> Cached {
     let cache = SO_CACHE.lock();
     let Some(idx) = cache.iter().position(|(p, _)| p == path) else {

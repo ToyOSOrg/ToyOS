@@ -15,14 +15,12 @@ const LIB: &[u8] = b"/lib/libtls_dlopen_lib.so";
 const OTHER_LIB: &[u8] = b"/lib/libtls_multi_crate.so";
 const LOADS: usize = 64;
 
-/// A directory only this test spawns from, so the `DT_NEEDED` fallback below
-/// caches under a spelling nothing else in the machine can produce. Mirrored in
-/// `check_dlopen_dedup` in `tests/toyos.rs`, which holds that verdict.
+/// A directory only this test spawns from, so the `DT_NEEDED` fallback caches
+/// under a spelling nothing else can produce. `check_dlopen_dedup` in
+/// `tests/toyos.rs` holds the verdict.
 const FROM: &str = "/tmp/dlopen-dedup";
-/// A binary whose `DT_NEEDED` names `libtls_lib.so`, which lives in `/lib` and
-/// not beside it — so loading it takes the loader's second path.
+/// Its `DT_NEEDED` names a library in `/lib` and not beside it.
 const NEEDS_A_LIB: &str = "/bin/test_rs_std_tls";
-/// The library that arrives that way, and that the arm then names directly.
 const BY_PATH: &[u8] = b"/lib/libtls_lib.so";
 
 fn main() {
@@ -37,12 +35,10 @@ fn main() {
 /// one module, not two.
 ///
 /// **The verdict is the kernel's and this arm only stages it.** A guest cannot
-/// count the physical images the machine holds, so what it does instead is put
-/// the fallback's spelling somewhere unique: a copy of a `DT_NEEDED`-carrying
-/// binary in [`FROM`], a directory that holds no library. A loader that caches
-/// under the directory it searched and did not find writes
-/// `/tmp/dlopen-dedup/libtls_lib.so` into the kernel log — a string nothing
-/// else can produce — and the `dl_open` below then maps the library again.
+/// count physical images, so it puts the fallback's spelling somewhere unique:
+/// a `DT_NEEDED`-carrying binary in [`FROM`], which holds no library. A loader
+/// that caches under the directory it searched writes that path into the kernel
+/// log, and the `dl_open` below then maps the library again.
 fn one_library_under_two_spellings() {
     let copy = format!("{FROM}/needs-a-lib");
     std::fs::create_dir_all(FROM).unwrap_or_else(|e| panic!("make {FROM}: {e}"));

@@ -659,8 +659,7 @@ fn build_and_assemble(
 
     let mut programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
     if config.hosted_rustc {
-        // `collect_hosted_rustc` puts it there and no row can: it is the
-        // toolchain's own binary, started from a shell like any other.
+        // `collect_hosted_rustc` puts it there and no row can.
         programs.insert("rustc");
     }
     let names: Vec<&str> = initrd_files.iter().map(|(name, _)| name.as_str()).collect();
@@ -676,20 +675,15 @@ const HARNESS_PREFIXES: [&str; 2] = ["bin/test_rs_", "bin/test_c_"];
 
 /// The converse of the crate assertion above: a `bin/` entry no name reaches.
 ///
-/// A config naming a program the image lacks has always been refused. The other
-/// half was not, and it is the same defect class the tests' own `CLAUDE.md`
-/// names — a thing in the image that nothing can start, which every negative
-/// control staged through would prove nothing about. What a name buys is
-/// authority: `/bin/init` builds a `[programs]` row's namespace and device
-/// claims. A harness binary has no row and holds only what the process that
-/// spawned it moved into it, so it is legal exactly when the config starts
-/// something that could spawn it — and a config that starts nothing carries
-/// them for nobody.
+/// What a name buys is authority — `/bin/init` builds a `[programs]` row's
+/// namespace and device claims. A harness binary has no row and holds only what
+/// its spawner moved in, so it is legal exactly when the config starts
+/// something that could spawn it.
 ///
-/// **An inventory over the assembled `bin/` namespace, and not a reachability
-/// proof.** It closes the spelling `bin/<name>`; it cannot say whether the
-/// spawner ever spawns one, and `the_check_does_not_reach_a_spawner_that_never_spawns`
-/// asserts that gap rather than leaving it as a sentence.
+/// **An inventory over the assembled `bin/` namespace, not a reachability
+/// proof**: it closes the spelling `bin/<name>` and cannot say whether the
+/// spawner ever spawns one. `the_check_does_not_reach_a_spawner_that_never_spawns`
+/// asserts that gap.
 fn unnamed_program(
     names: &[&str],
     programs: &BTreeSet<&str>,
@@ -2266,7 +2260,6 @@ mod tests {
     }
 
     fn declared(names: &[&str]) -> BTreeSet<&'static str> {
-        // Leaked so the set can outlive the call; a test's own arena.
         names.iter().map(|n| Box::leak(n.to_string().into_boxed_str()) as &str).collect()
     }
 
@@ -2275,34 +2268,28 @@ mod tests {
     fn a_bin_entry_no_name_reaches_is_refused() {
         let programs = declared(&["shell"]);
         let started = ["shell".to_string()];
-        // What every image carries, and passes.
         assert!(unnamed_program(
             &["bin/init", "bin/shell", "lib/libtls_lib.so", "etc/system.manifest"],
             &programs,
             &started,
         )
         .is_ok());
-        // A harness binary, admitted because something starts that can spawn it.
         assert!(unnamed_program(&["bin/test_rs_window_child"], &programs, &started).is_ok());
 
-        // The two refusals. A binary with no row at all…
+        // The two refusals: no row at all, and no spawner.
         let why = unnamed_program(&["bin/ghost"], &programs, &started).unwrap_err();
         assert!(why.contains("bin/ghost") && why.contains("no `[programs]` row"), "{why}");
-        // …and a harness binary in a config that starts nothing to spawn it.
         let why = unnamed_program(&["bin/test_rs_window_child"], &programs, &[]).unwrap_err();
         assert!(why.contains("nothing runs that could spawn it"), "{why}");
     }
 
     /// **What the check does not reach, as an assertion and not a sentence.**
-    /// It is an inventory over the `bin/` namespace: it reads names, so a
-    /// config that starts a program which never spawns anything passes it, and
-    /// a harness binary nothing ever runs is admitted by the mere existence of
-    /// a `[boot] start` entry. Closing that gap needs reachability, which no
-    /// name in a manifest carries. The day the check learns it, this reds.
+    /// It reads names, so a config that starts a program which never spawns
+    /// anything passes it. Closing that needs reachability, which no name in a
+    /// manifest carries. The day the check learns it, this reds.
     #[test]
     fn the_check_does_not_reach_a_spawner_that_never_spawns() {
-        // `logd` spawns nothing in any config this tree ships, and the harness
-        // binary beside it is admitted anyway.
+        // `logd` spawns nothing in any config this tree ships.
         let programs = declared(&["logd"]);
         assert!(
             unnamed_program(&["bin/test_rs_window_child"], &programs, &["logd".to_string()])

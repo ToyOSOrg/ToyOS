@@ -244,28 +244,22 @@ fn front(path: &Path, n: usize) -> Vec<u8> {
 }
 
 /// The shared-object cache's two refusals: a path whose file changed under a
-/// cached image, and a load past the cache's byte budget.
+/// cached image, and a load past its byte budget. The guest's own verdicts are
+/// in `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`.
 ///
-/// The guest's own verdicts are in
-/// `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`. The independent oracle
-/// is here and it is the NVMe image: after the shutdown the replaced library's
-/// bytes are read off the device through this crate's own build of the
-/// `bcachefs` reader over a plain seek-and-read file, and compared against the
-/// library the harness built. A kernel that served the first image again would
-/// have done so over a file the device says is byte-for-byte the second — which
-/// is the claim, and no part of it is the guest's account of itself.
+/// The independent oracle is here and it is the NVMe image: after the shutdown
+/// the replaced library's bytes are read off the device through this crate's
+/// own build of the `bcachefs` reader over a plain seek-and-read file — so the
+/// claim rests on the device and on no part of the guest's account of itself.
 pub fn so_cache_refusals(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    /// 8 MiB against the 2 MiB images this guest can build; without it the
-    /// budget arm would have to load 256 MiB of distinct libraries.
+    /// Without it the budget arm would have to load 256 MiB of libraries.
     const PARAMS: &[&str] = &["so-cache-tiny"];
-    /// Mirrored in the guest binary: the path it rewrites, on the mount root
-    /// the host reader sees.
+    /// Mirrored in the guest binary, on the mount root the host reader sees.
     const STALE: &str = "so-cache-stale.so";
-    /// The library that ends up there, as `qemu.rs` names it in `rust_bins`.
     const SECOND: &str = "libtls_dlopen_lib.so";
 
     let want = rust_bins
@@ -299,9 +293,8 @@ pub fn so_cache_refusals(
             result.stdout, result.before, result.serial
         ));
     }
-    // Both refusals are stated by the kernel too, not only inferred from what
-    // the guest was told: an arm that reported a refusal nobody made would pass
-    // on the guest's word alone.
+    // Stated by the kernel too: an arm reporting a refusal nobody made would
+    // otherwise pass on the guest's word alone.
     for said in ["the cached image is stale", "byte budget; refused"] {
         if !log.contains(said) {
             return Err(format!("no {said:?} line — the kernel refused nothing:\n{log}"));

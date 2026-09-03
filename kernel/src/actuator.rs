@@ -111,8 +111,7 @@ actuators! {
     usb_reset_break = "usb-reset-break";
 
     /// Put the shared-object cache's byte budget within reach of the small
-    /// libraries a guest can load, so the shipped refusal runs on a machine
-    /// that cannot be given 256 MiB of distinct libraries to load.
+    /// libraries a guest can build, so the shipped refusal runs at all.
     so_cache_tiny = "so-cache-tiny";
 
     /// Run `SYS_FSYNC`'s first attempt under an operation that is already over.
