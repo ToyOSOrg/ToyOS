@@ -22,15 +22,20 @@
 # would have misattributed upstream churn to us. Each base was found by
 # minimising the diff and is recorded here so re-basing is reproducible.
 #
-# `pr` is the upstream pull request, or why there isn't one yet. Most forks are
-# blocked on publishing ToyOS's own crates (toyos-abi, toyos, window): a fork
-# cannot reference them by path once cargo checks it out alone. The exceptions
-# are the forks whose ToyOS code depends on nothing of ours — a target triple, a
-# handle type — and those are the ones already sent. A git dependency on
-# toyos-abi or toyos is the same violation and worse: unlike a path dependency
-# it resolves, silently, against whatever revision the git ref last pointed to
-# — a frozen snapshot standing in for the monorepo's copy rather than a build
-# error.
+# `pr` is the upstream pull request, or why there isn't one yet. Most forks wait
+# on ToyOS's own crates reaching crates.io (toyos-abi, toyos, toyos-window): a
+# fork cannot reference them by path once cargo checks it out alone. The
+# exceptions are the forks whose ToyOS code depends on nothing of ours — a
+# target triple, a handle type — and those are the ones already sent. A git
+# dependency on toyos-abi or toyos is the same violation and worse: unlike a
+# path dependency it resolves, silently, against whatever revision the git ref
+# last pointed to — a frozen snapshot standing in for the monorepo's copy rather
+# than a build error.
+#
+# `.github/workflows/publish.yml` is what unblocks them: it publishes the five
+# on every landing that moves a version, and `src/sdkversion.rs` is the rule
+# that keeps those versions moving. What is left is the owner's crates.io token
+# as a repository secret, then the `owed` edits below, one per fork.
 #
 # A fork being sendable is not the same as it being *worth* sending. See memmap2
 # below: purely additive, unblocked, and still a bad PR.
@@ -64,7 +69,7 @@ base = "v0.6.3"
 delta = "+1293/-11"
 tier = "fork"
 why = "Full socket backend (src/sys/toyos.rs) over the ToyOS network syscalls."
-pr = "none — blocked on publishing toyos-abi/toyos"
+pr = "none — sendable once toyos-abi and toyos are on crates.io"
 
 [mio]
 upstream = "tokio-rs/mio"
@@ -73,7 +78,7 @@ base_note = "two commits past v1.2.0; the tag itself gives a polluted diff"
 delta = "+775/-30"
 tier = "fork"
 why = "io_uring-driven selector, pipe waker, ToyOS TCP types."
-pr = "none — blocked on publishing toyos-abi/toyos"
+pr = "none — sendable once toyos-abi and toyos are on crates.io"
 
 [tokio]
 upstream = "tokio-rs/tokio"
@@ -82,7 +87,7 @@ base_note = "three commits past tokio-1.51.1"
 delta = "+118/-41"
 tier = "fork"
 why = "cfg-gated ToyOS arms in TcpSocket; unsupported APIs disabled."
-pr = "none — blocked on publishing toyos-abi/toyos"
+pr = "none — sendable once toyos-abi and toyos are on crates.io"
 not_pr_content = "The root Cargo.toml carries a `[patch.crates-io] mio = <our fork>` entry. It only affects builds *inside* the tokio repo (consumers resolve via tokio/Cargo.toml), so it may be load-bearing for local dev there — but it is never PR content and needs a decision."
 
 [russh]
@@ -99,7 +104,8 @@ base = "b4ddd28"
 delta = "+327"
 tier = "sibling"
 why = "Pure addition: a ToyOS host backend. Should become a `cpal-toyos` crate."
-pr = "none — blocked on publishing"
+pr = "none — sendable once toyos-abi and toyos are on crates.io"
+owed = "nothing for the rename: Cargo.toml's toyos arm names `toyos-abi = \"0.1\"` and `toyos = \"0.1\"`, both unchanged."
 
 [winit]
 upstream = "rust-windowing/winit"
@@ -109,6 +115,25 @@ tier = "sibling"
 why = "Adds the winit-toyos sibling crate — the model case for this tier."
 pr = "none — winit-toyos must be published before upstream can depend on it by version"
 followup = "winit-toyos is ToyOS's own code still living inside the fork; move it to the monorepo once published"
+owed = """
+`winit-toyos/Cargo.toml:21` says `window = "0.1"` and must say
+`toyos-window = "0.1"`: `window` is another crate on crates.io, which is why the
+monorepo renamed the package. No source edit goes with it — `toyos-window`'s lib
+target is still `window`, and `winit-toyos/src/window.rs:6` already spells
+`use window as toyos_window;`.
+
+**This edit and the monorepo's rename are one change across two repositories.**
+Until it is pushed, the monorepo cannot build at all: `[patch.crates-io] window`
+is gone, so `window = "0.1"` resolves to the unrelated registry crate and fails
+to compile. Cargo offers no bridge — a `[patch]` entry whose replacement carries
+a different package name is not applied (cargo 1.97.1: "patch `toyos-window
+v0.1.0` was not used in the crate graph"). Pushing it first is safe, because
+main's lockfiles pin a revision and do not follow a branch.
+
+`winit/Cargo.toml:101` also patches `raw-window-handle` from `Japabu/`, the
+account name this estate left; `ToyOSOrg/` is where it lives now and GitHub is
+redirecting.
+"""
 
 [softbuffer]
 upstream = "rust-windowing/softbuffer"
@@ -116,7 +141,33 @@ base = "f0d20b9"
 delta = "+155/-5"
 tier = "sibling"
 why = "ToyOS surface backend. The -5 lines track unreleased raw-window-handle renames, not ToyOS work."
-pr = "none — blocked on publishing window"
+pr = "none — sendable once toyos-window is on crates.io"
+owed = """
+`Cargo.toml:150`, under `[target.'cfg(target_os = "toyos")'.dependencies]`, says
+`window = "0.1"` and must say `toyos-window = "0.1"`, for winit's reason and
+with winit's consequence: the monorepo does not build until it is pushed. No
+source edit goes with it; `src/backends/toyos.rs` names `window::Window` and
+the lib target is still `window`. `Cargo.toml:153` patches
+`raw-window-handle` from `Japabu/` and should name `ToyOSOrg/`.
+"""
+rebase = """
+OWED, and the owner ruled it: `base` is 62 upstream commits past the v0.4.8
+release (`rust-windowing/softbuffer` v0.4.8 = d871852, compared 2026-09-03), so
+the branch sits on master and its diff is not a release's. It is to be rebased
+onto v0.4.8. What that needs, measured against the two compares:
+  - The -5 lines go. All five are `Web`/`WebCanvas`/`WebOffscreenCanvas` ->
+    `WasmBindgen*` renames in src/backends/web.rs and src/lib.rs, which exist
+    only because the fork patches an unreleased raw-window-handle. At v0.4.8 the
+    released 0.6 names are the old ones, so the delta becomes purely additive.
+  - Four of the six files the delta touches — Cargo.toml, src/backend_dispatch.rs,
+    src/lib.rs, src/backends/web.rs — also changed in those 62 commits, so each
+    ToyOS hunk is re-applied against the tag's shape rather than cherry-picked.
+    src/backends/mod.rs (+2) and the new src/backends/toyos.rs (+136) did not
+    change upstream and move as they are.
+  - src/backends/toyos.rs names `raw_window_handle::ToyOsWindowHandle`, so the
+    `[patch.crates-io] raw-window-handle` entry stays until PR #223 merges and
+    ships in a release.
+"""
 
 [raw-window-handle]
 upstream = "rust-windowing/raw-window-handle"
@@ -135,7 +186,7 @@ branches = ["toyos-0.2", "toyos-0.3", "toyos-0.4"]
 delta = "+14 / +19 / +19"
 tier = "fork"
 why = "Three major versions are live in the dependency graph simultaneously."
-pr = "none — trivial delta, good early candidate once toyos-abi is published"
+pr = "none — trivial delta, and the first candidate once toyos-abi is on crates.io"
 
 [libloading]
 upstream = "nagisa/rust_libloading"
@@ -144,7 +195,7 @@ base_note = "0.9.0 plus two upstream commits; Cargo.toml version is relabelled 0
 delta = "+341/-4"
 tier = "toolchain"
 why = "dlopen/dlsym over ToyOS."
-pr = "none — blocked on publishing toyos-abi"
+pr = "none — sendable once toyos-abi is on crates.io"
 
 [memmap2]
 upstream = "RazrFalcon/memmap2-rs"
@@ -208,7 +259,7 @@ base = "93c7abc"
 base_note = "0.1.23 was released without a tag"
 delta = "+86/-6"
 tier = "toolchain"
-pr = "none — blocked on publishing toyos-abi"
+pr = "none — sendable once toyos-abi is on crates.io"
 not_pr_content = "`cc` is relaxed 1.2.33 → 1.2.0 in both Cargo.toml and psm/Cargo.toml — a build-dep downgrade with no ToyOS connection, 4 of the 8 files in the delta. Undocumented: find out what forced it (MSRV of the pinned toolchain?) and either justify or drop it."
 
 [ctrlc]
