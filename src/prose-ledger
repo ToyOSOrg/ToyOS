@@ -25,7 +25,7 @@ kernel-loom/tests/sleep_lock.rs 80 1
 kernel-loom/tests/smp_bringup.rs 11 0
 kernel-loom/tests/ticket_lock.rs 35 1
 kernel-loom/tests/tlb_shootdown.rs 93 2
-kernel/src/actuator.rs 103 0
+kernel/src/actuator.rs 104 0
 kernel/src/arch/apic.rs 56 0
 kernel/src/arch/control_regs.rs 66 0
 kernel/src/arch/cpu.rs 60 0
@@ -62,7 +62,7 @@ kernel/src/arch/syscall/ipc.rs 35 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 31 0
-kernel/src/arch/syscall/vm.rs 92 0
+kernel/src/arch/syscall/vm.rs 93 0
 kernel/src/arch/tlb.rs 43 0
 kernel/src/bcachefs_adapter.rs 76 0
 kernel/src/block.rs 33 0
@@ -98,7 +98,7 @@ kernel/src/drivers/xhci/wait/boot.rs 89 0
 kernel/src/drivers/xhci/wait/mod.rs 78 0
 kernel/src/drivers/xhci/wait/msc.rs 214 0
 kernel/src/durability.rs 16 0
-kernel/src/elf/cache.rs 27 0
+kernel/src/elf/cache.rs 50 0
 kernel/src/elf/index.rs 23 0
 kernel/src/elf/mod.rs 110 0
 kernel/src/elf/reloc.rs 38 0
@@ -125,7 +125,7 @@ kernel/src/irq_census.rs 38 0
 kernel/src/irq_ring.rs 14 0
 kernel/src/keyboard.rs 19 0
 kernel/src/leak_selftest.rs 6 0
-kernel/src/loader/mod.rs 129 0
+kernel/src/loader/mod.rs 132 0
 kernel/src/loader/start.rs 45 0
 kernel/src/loader/symbols.rs 18 0
 kernel/src/loader/tls.rs 33 0
@@ -191,12 +191,12 @@ kernel/src/tmpfs.rs 21 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 53 0
 kernel/src/user_ptr.rs 67 0
-kernel/src/vfs.rs 87 0
+kernel/src/vfs.rs 94 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
 src/assets.rs 123 0
-src/build.rs 682 3
+src/build.rs 703 3
 src/buildlock.rs 378 5
 src/ci.rs 123 1
 src/clippy.rs 35 0
@@ -215,7 +215,7 @@ src/mergehealth.rs 229 3
 src/pr.rs 207 5
 src/prosegate.rs 128 0
 src/qemu.rs 113 0
-src/redlist.rs 529 25
+src/redlist.rs 533 25
 src/soundfont.rs 133 0
 src/sourcegate.rs 465 1
 src/stamps.rs 3 0
@@ -243,7 +243,7 @@ tests/common/qemu.rs 1632 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
-tests/common/storage.rs 69 0
+tests/common/storage.rs 77 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
 tests/common/volumes.rs 626 3
@@ -283,7 +283,7 @@ tests/toyos-rust-tests/src/bin/demand_window_race.rs 156 0
 tests/toyos-rust-tests/src/bin/device_claim_lifetime.rs 56 0
 tests/toyos-rust-tests/src/bin/disk_backtrace.rs 18 0
 tests/toyos-rust-tests/src/bin/disk_backtrace_child.rs 7 0
-tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 16 0
+tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 25 0
 tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 34 0
@@ -349,6 +349,7 @@ tests/toyos-rust-tests/src/bin/sched_stress.rs 22 0
 tests/toyos-rust-tests/src/bin/segfault_child.rs 3 0
 tests/toyos-rust-tests/src/bin/shm_release_reclaims.rs 49 0
 tests/toyos-rust-tests/src/bin/smp_hole_shootdown.rs 6 0
+tests/toyos-rust-tests/src/bin/so_cache_policy.rs 22 0
 tests/toyos-rust-tests/src/bin/std_alloc.rs 1 0
 tests/toyos-rust-tests/src/bin/std_fs.rs 11 0
 tests/toyos-rust-tests/src/bin/std_fs_write.rs 0 0
@@ -385,7 +386,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5087 23
+tests/toyos.rs 5102 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

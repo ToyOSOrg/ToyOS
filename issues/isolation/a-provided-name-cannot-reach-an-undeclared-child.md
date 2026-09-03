@@ -34,6 +34,16 @@ tree (the terminal and the console, both transferring `surface` to
 inherit `surface` because init merged it in. That is the kind of safety that
 ends the moment somebody adds a caller.
 
+**And one caller is already past it, masked rather than absent.**
+`build_command` (`userland/shell/src/main.rs:709`) calls `Command::provide` for
+*every* child the shell starts, and `test_rs_window_child` is a harness binary
+no `[programs]` row declares — so that spawn takes the direct path and the
+provided `surface` connector is dropped, exactly as described above. Nothing
+reds: the inherited namespace already carries `surface`, so the child resolves
+the name by the other route and the loss is invisible. The coincidence is not
+that no caller reaches this; it is that the one which does asks for a name its
+inheritance already answers.
+
 ## What closing it takes
 
 `spawn`'s direct path building `keep_all(parent) + add(extras)` and endowing
