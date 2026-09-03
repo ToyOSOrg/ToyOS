@@ -16,10 +16,10 @@ const OTHER_LIB: &[u8] = b"/lib/libtls_multi_crate.so";
 const LOADS: usize = 64;
 
 /// A directory only this test spawns from, so the `DT_NEEDED` fallback caches
-/// under a spelling nothing else can produce. `check_dlopen_dedup` in
-/// `tests/toyos.rs` holds the verdict.
+/// under a spelling nothing else can produce; `check_dlopen_dedup` in
+/// `tests/toyos.rs` holds the verdict. The binary beside it `DT_NEEDED`s a
+/// library that is in `/lib` and not there.
 const FROM: &str = "/tmp/dlopen-dedup";
-/// Its `DT_NEEDED` names a library in `/lib` and not beside it.
 const NEEDS_A_LIB: &str = "/bin/test_rs_std_tls";
 const BY_PATH: &[u8] = b"/lib/libtls_lib.so";
 
@@ -31,14 +31,13 @@ fn main() {
     println!("all dlopen dedup checks passed");
 }
 
-/// A library reached through the `/lib` fallback and then by its own path is
-/// one module, not two.
+/// A library reached through the `/lib` fallback and then by its own path is one
+/// module, not two.
 ///
 /// **The verdict is the kernel's and this arm only stages it.** A guest cannot
-/// count physical images, so it puts the fallback's spelling somewhere unique:
-/// a `DT_NEEDED`-carrying binary in [`FROM`], which holds no library. A loader
-/// that caches under the directory it searched writes that path into the kernel
-/// log, and the `dl_open` below then maps the library again.
+/// count physical images, so it puts the fallback's spelling somewhere unique: a
+/// `DT_NEEDED`-carrying binary in [`FROM`], which holds no library. A loader that
+/// caches under the directory it searched writes that path into the kernel log.
 fn one_library_under_two_spellings() {
     let copy = format!("{FROM}/needs-a-lib");
     std::fs::create_dir_all(FROM).unwrap_or_else(|e| panic!("make {FROM}: {e}"));

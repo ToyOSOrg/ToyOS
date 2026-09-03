@@ -206,8 +206,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     }
 
     // Opened before the cache is consulted: the answer depends on what the path
-    // holds *now*, and only the open can say. The repeat-load fast path above is
-    // what keeps a `dlopen` loop from paying for it.
+    // holds *now*. The fast path above is what keeps a `dlopen` loop from paying.
     let (backing, id) = match vfs::lock().open_backing_identified(&resolved) {
         Ok(pair) => pair,
         Err(e) => {

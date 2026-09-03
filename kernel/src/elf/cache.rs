@@ -5,10 +5,10 @@
 //! it and its base address never moves, so its `R_X86_64_RELATIVE` relocations
 //! need no rework. Only the writable window is copied.
 //!
-//! **Nothing is ever removed, and both refusals follow from that.** An entry is
-//! mapped into every process that loaded it and no address space is reachable
-//! from here, so a changed file cannot be answered by reloading and a full
-//! budget cannot be answered by evicting. Both are refused instead.
+//! **Nothing is ever removed, and both refusals follow from that**, as does
+//! `clone_from_cache`'s SAFETY: no address space is reachable from here, so
+//! neither a changed file nor a full budget can be answered by taking an entry
+//! back, and both are refused instead.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -152,18 +152,15 @@ struct CachedLib {
     id: BackingId,
 }
 
-// Entries are pushed only, never removed: `clone_from_cache`'s SAFETY depends on `cached.alloc` staying live forever.
 static SO_CACHE: Lock<Vec<(String, CachedLib)>> = Lock::new(Vec::new());
 
-/// The most physical memory every cached image may hold between them.
-///
-/// **A policy number**: nothing derives it. For scale, the largest shared
-/// object this tree builds loads a span of 144,760,832 bytes, a 146,800,640
-/// byte allocation — so this admits one of those and refuses a second.
+/// The most physical memory every cached image may hold between them. **A policy
+/// number**: nothing derives it. For scale, the largest shared object this tree
+/// builds loads a span of 144,760,832 bytes — a 146,800,640-byte allocation, so
+/// this admits one of those and refuses a second.
 const BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
-/// `so-cache-tiny`s number, within reach of the 2 MiB libraries a guest can
-/// build. Only the magnitude moves; the comparison and the refusal are shipped.
+/// `so-cache-tiny`'s number, in reach of a guest. Only the magnitude moves.
 const TINY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 fn budget_bytes() -> usize {
@@ -174,13 +171,11 @@ fn budget_bytes() -> usize {
     }
 }
 
-/// What a lookup found under a path.
 pub enum Cached {
     /// A clone of the cached image; the file behind the path still matches it.
     Fresh(LoadedLib),
-    /// An image is cached here and the file behind the path no longer matches it.
-    /// The caller refuses by name: the old image cannot be freed while a process
-    /// has it mapped, so a reload would map the library twice.
+    /// The file no longer matches the image cached under it, and a reload would
+    /// map the library twice: the caller refuses by name.
     Stale,
     /// Nothing usable — no entry, or a clone that found no memory.
     Absent,
@@ -192,7 +187,7 @@ fn held_bytes(cache: &[(String, CachedLib)]) -> usize {
 }
 
 /// Takes ownership of `lib` and returns a clone in `Shared` mode with a private writable window; returns it unchanged if it cannot be cached.
-/// `Err` is the budget alone: an image that merely cannot be cached is still a working image, and only one over the budget is refused outright.
+/// `Err` is the budget alone: an image that merely cannot be cached still works.
 pub fn cache_loaded_lib(
     path: &str,
     id: BackingId,
@@ -235,8 +230,7 @@ pub fn cache_loaded_lib(
         drop(cache);
         return Ok(cloned.unwrap_or_else(|| owned(alloc)));
     }
-    // Under the lock that publishes, so two concurrent loads cannot both find
-    // room for the last image and push anyway.
+    // Under the lock that publishes: two concurrent loads must not both find room.
     let budget = budget_bytes();
     let (held, entries) = (held_bytes(&cache), cache.len());
     let Some(after) = held.checked_add(alloc.size()).filter(|b| *b <= budget) else {

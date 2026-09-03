@@ -243,14 +243,12 @@ fn front(path: &Path, n: usize) -> Vec<u8> {
     head
 }
 
-/// The shared-object cache's two refusals: a path whose file changed under a
-/// cached image, and a load past its byte budget. The guest's own verdicts are
-/// in `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`.
-///
-/// The independent oracle is here and it is the NVMe image: after the shutdown
-/// the replaced library's bytes are read off the device through this crate's
-/// own build of the `bcachefs` reader over a plain seek-and-read file — so the
-/// claim rests on the device and on no part of the guest's account of itself.
+/// The shared-object cache's two refusals, judged in
+/// `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`. The independent oracle
+/// is the NVMe image: after the shutdown the replaced library's bytes are read
+/// off the device through this crate's own build of the `bcachefs` reader over a
+/// plain seek-and-read file, so the claim rests on no part of the guest's own
+/// account of itself.
 pub fn so_cache_refusals(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -293,8 +291,7 @@ pub fn so_cache_refusals(
             result.stdout, result.before, result.serial
         ));
     }
-    // Stated by the kernel too: an arm reporting a refusal nobody made would
-    // otherwise pass on the guest's word alone.
+    // Stated by the kernel too: an arm reporting a refusal nobody made would pass.
     for said in ["the cached image is stale", "byte budget; refused"] {
         if !log.contains(said) {
             return Err(format!("no {said:?} line — the kernel refused nothing:\n{log}"));

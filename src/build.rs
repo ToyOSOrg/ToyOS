@@ -670,20 +670,15 @@ fn build_and_assemble(
     image::create_initrd(&initrd_files, &symlinks, quiet)
 }
 
-/// The prefix `tests/common/qemu.rs` gives every binary it injects.
+/// What `tests/common/qemu.rs` prefixes every binary it injects with.
 const HARNESS_PREFIXES: [&str; 2] = ["bin/test_rs_", "bin/test_c_"];
 
 /// The converse of the crate assertion above: a `bin/` entry no name reaches.
-///
-/// What a name buys is authority — `/bin/init` builds a `[programs]` row's
-/// namespace and device claims. A harness binary has no row and holds only what
-/// its spawner moved in, so it is legal exactly when the config starts
-/// something that could spawn it.
-///
-/// **An inventory over the assembled `bin/` namespace, not a reachability
-/// proof**: it closes the spelling `bin/<name>` and cannot say whether the
-/// spawner ever spawns one. `the_check_does_not_reach_a_spawner_that_never_spawns`
-/// asserts that gap.
+/// A name buys authority — `/bin/init` builds a `[programs]` row's namespace and
+/// device claims — and a harness binary has none, holding only what its spawner
+/// moved in, so it is legal exactly when the config starts something that could
+/// spawn it. **An inventory over the `bin/` namespace, not a reachability
+/// proof**, which `the_check_does_not_reach_a_spawner_that_never_spawns` asserts.
 fn unnamed_program(
     names: &[&str],
     programs: &BTreeSet<&str>,
@@ -2276,17 +2271,16 @@ mod tests {
         .is_ok());
         assert!(unnamed_program(&["bin/test_rs_window_child"], &programs, &started).is_ok());
 
-        // The two refusals: no row at all, and no spawner.
         let why = unnamed_program(&["bin/ghost"], &programs, &started).unwrap_err();
         assert!(why.contains("bin/ghost") && why.contains("no `[programs]` row"), "{why}");
         let why = unnamed_program(&["bin/test_rs_window_child"], &programs, &[]).unwrap_err();
         assert!(why.contains("nothing runs that could spawn it"), "{why}");
     }
 
-    /// **What the check does not reach, as an assertion and not a sentence.**
-    /// It reads names, so a config that starts a program which never spawns
-    /// anything passes it. Closing that needs reachability, which no name in a
-    /// manifest carries. The day the check learns it, this reds.
+    /// **What the check does not reach, as an assertion and not a sentence.** It
+    /// reads names, so a config starting a program that never spawns anything
+    /// passes it; closing that needs reachability, which no manifest name
+    /// carries. The day the check learns it, this reds.
     #[test]
     fn the_check_does_not_reach_a_spawner_that_never_spawns() {
         // `logd` spawns nothing in any config this tree ships.

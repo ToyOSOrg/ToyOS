@@ -2,26 +2,24 @@
 //! entry: a path whose file changed, and a load past its byte budget.
 //! `tests/common/storage.rs::so_cache_refusals` boots and judges this.
 //!
-//! **Both arms need a second process.** `SYS_DLOPEN` answers a name this
-//! process already holds out of its own `lib_paths` before the cache is
-//! consulted at all, so one process can never ask the cache twice about one
-//! path. Each load runs in a child, which reports on its stdout.
+//! **Both arms need a second process.** `SYS_DLOPEN` answers a name this process
+//! holds out of its own `lib_paths` before the cache is consulted, so one
+//! process can never ask the cache twice about one path. Each load runs in a
+//! child, which reports on its stdout.
 
 use std::process::{Command, Stdio};
 
 use toyos_abi::syscall::{self, SyscallError};
 
-/// Mirrored in `tests/common/storage.rs::so_cache_refusals`, which reads this
-/// path's bytes off the device once the guest is down.
+/// Mirrored in `so_cache_refusals`, which reads its bytes off the device.
 const STALE: &str = "/home/so-cache-stale.so";
 const FIRST: &str = "/lib/libtls_lib.so";
 const SECOND: &str = "/lib/libtls_dlopen_lib.so";
-/// A symbol `FIRST` exports and `SECOND` does not, so the verdict is a name and
-/// not a value.
+/// A symbol `FIRST` exports and `SECOND` does not: the verdict is a name.
 const ONLY_IN_FIRST: &[u8] = b"tls_get_label";
 
-/// The budget is 8 MiB and each copy is a 2 MiB image, so a refusal is due well
-/// inside this — and a kernel that never refuses says so instead of looping.
+/// 8 MiB of budget against 2 MiB images: a refusal is due well inside this, and
+/// a kernel that never refuses says so instead of looping.
 const BUDGET_ATTEMPTS: usize = 12;
 
 const SELF_PATH: &str = "/bin/test_rs_so_cache_policy";

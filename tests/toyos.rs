@@ -349,8 +349,7 @@ const RUST_SKIP: &[&str] = &[
     // Needs `fsync-budget-spent` and the NVMe `/home`; unstaged it passes
     // vacuously. `home_budget_refusal_retried` boots it with both.
     "home_fsync_budget",
-    // Needs `so-cache-tiny` and the NVMe `/home`; unstaged its budget arm would
-    // have to load 256 MiB. `so_cache_refusals` boots it with both.
+    // Needs `so-cache-tiny` and the NVMe `/home`. `so_cache_refusals` gives both.
     "so_cache_policy",
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
@@ -559,8 +558,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
     ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
-    // The cache's two refusals, judged off the NVMe image by the host's own
-    // bcachefs reader. Body in `tests/common/storage.rs`.
+    // The shared-object cache's two refusals. Body in `tests/common/storage.rs`.
     ("so_cache_refusals", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
@@ -2113,9 +2111,8 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
     }
 }
 
-/// The spelling a loader writes when it caches a library under the directory it
-/// searched and did not find it in. Only `dlopen_dedup`.s last arm can produce
-/// this string, so the whole verdict is its absence.
+/// What a loader writes when it caches a library under the directory it searched
+/// and did not find it in. Only `dlopen_dedup`'s last arm produces this string.
 const FALLBACK_MISCACHED: &str = "dlopen: cached /tmp/dlopen-dedup/libtls_lib.so";
 
 /// `dlopen_dedup` plus the half no guest can see: one library reached two ways

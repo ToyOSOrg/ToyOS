@@ -705,12 +705,10 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
         let t_load0 = crate::clock::nanos_since_boot();
 
         // Which spelling opens is decided before the cache is consulted, and is
-        // the key from here on. Keyed by the exe-dir string it never found, a
+        // the key from here on: keyed by the exe-dir string it never found, a
         // library loaded through the fallback was mapped a second time by any
-        // later `dlopen("/lib/…")`.
-        //
-        // Fallback only for NotFound: any other error would repeat on `/lib`
-        // too and produce a misleading second log line.
+        // later `dlopen("/lib/…")`. Fallback only for NotFound — any other error
+        // would repeat on `/lib` too and produce a misleading second log line.
         let (so_backing, id, lib_path) = {
             let in_exe_dir = alloc::format!("{}/{}", exe_dir, lib_name);
             let opened = vfs::lock().open_backing_identified(&in_exe_dir);

@@ -734,12 +734,10 @@ impl Vfs {
     }
 }
 
-/// What a mount said about a file when its backing was opened.
-///
-/// Metadata the open had already reached, so it reads no page of the file.
-/// **It refuses a rewrite; it does not identify a file** — two files can carry
-/// the same size and mtime, and a mount whose mtime does not move under a
-/// same-size write hides one entirely.
+/// What a mount said about a file when its backing was opened: metadata the open
+/// had already reached, so it reads no page of the file. **It refuses a rewrite;
+/// it does not identify a file** — two files can carry the same size and mtime,
+/// and a mount whose mtime does not move under a same-size write hides one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BackingId {
     pub size: u64,
