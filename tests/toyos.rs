@@ -426,8 +426,8 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_recoverable_untouched", Sched::Parallel, Tier::Fast),
     // The other half of the recovery branch: the test above reads the screen
     // either side of a survived panic, which holds whether or not the discard
-    // did anything. `UNMEASURED_MS` until the shards price it.
-    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Fast),
+    // did anything. Nightly at 8,477 ms, over `FAST_COMMIT_MS`: two guests.
+    ("screen_survived_panic_not_blamed", Sched::Parallel, Tier::Nightly),
     ("screen_early_panic", Sched::Parallel, Tier::Fast),
     ("screen_late_panic", Sched::Parallel, Tier::Fast),
     ("screen_paged_scrollback", Sched::Parallel, Tier::Nightly),
@@ -709,7 +709,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // clock in any of it.
     ("reentry_names_the_first_panic", Sched::Parallel, Tier::Fast),
     // The kernel hasher's boot-order obligation, in the row above's shape and
-    // for its reasons. `UNMEASURED_MS` until the shards price it.
+    // for its reasons.
     ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
     // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
     // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
@@ -1019,6 +1019,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
+    ("iommu_virtio_platform", Sched::Parallel, Tier::Nightly),
+    ("iommu_domain_isolation", Sched::Parallel, Tier::Nightly),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -8881,6 +8883,12 @@ fn run_machine_test(
         "iommu_interrupt_remapping" => {
             common::iommu::iommu_interrupt_remapping(test_config, c_bins, rust_bins)
         }
+        "iommu_virtio_platform" => {
+            common::iommu::iommu_virtio_platform(test_config, c_bins, rust_bins)
+        }
+        "iommu_domain_isolation" => {
+            common::iommu::iommu_domain_isolation(test_config, c_bins, rust_bins)
+        }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
         "hda_client_stall" => common::hda::hda_client_stall(test_config, c_bins, rust_bins),
@@ -12996,7 +13004,9 @@ fn run_machine_test(
                 ..Default::default()
             };
             let argv = qemu::profile_argv(&options);
-            if !argv.windows(2).any(|w| w[0] == "-device" && w[1] == "virtio-gpu-pci") {
+            // Prefix, not equality: a virtio function on a machine with a unit
+            // carries `iommu_platform=on` behind its name.
+            if !argv.windows(2).any(|w| w[0] == "-device" && w[1].starts_with("virtio-gpu-pci")) {
                 return Err(format!("the profile stages no virtio-gpu: {argv:?}"));
             }
             // A `-vga` adapter beside it is a second display, and firmware

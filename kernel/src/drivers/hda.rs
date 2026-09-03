@@ -406,7 +406,7 @@ pub fn init(devices: &[PciDevice]) {
     bdl_view.zero();
     pcm_view.zero();
 
-    let entries = stream::build_bdl(pcm_view.phys(), PERIOD_BYTES as u32, PERIODS)
+    let entries = stream::build_bdl(pcm_view.device_addr(), PERIOD_BYTES as u32, PERIODS)
         .expect("hda: the pipeline's own shape builds a descriptor list");
     for (i, entry) in entries.iter().enumerate() {
         // `build_bdl` returns exactly `PERIODS` entries, matching the pool's `PERIODS * 16` bytes.
@@ -425,8 +425,8 @@ pub fn init(devices: &[PciDevice]) {
         return;
     }
 
-    stream.write_u32(SD_BDPL, bdl_view.phys() as u32);
-    stream.write_u32(SD_BDPU, (bdl_view.phys() >> 32) as u32);
+    stream.write_u32(SD_BDPL, bdl_view.device_addr() as u32);
+    stream.write_u32(SD_BDPU, (bdl_view.device_addr() >> 32) as u32);
     stream.write_u32(
         SD_CBL,
         stream::cyclic_length(PERIOD_BYTES as u32, PERIODS).expect("fits a u32"),
@@ -449,7 +449,7 @@ pub fn init(devices: &[PciDevice]) {
     regs.write_u32(INTCTL, INTCTL_GIE | (1 << stream_index));
 
     let pcm_region = Region {
-        phys: crate::DirectMap::from_phys(pcm_view.phys()),
+        phys: crate::DirectMap::from_phys(pcm_view.host_phys()),
         size: crate::mm::PAGE_2M,
         cache: CachePolicy::DeferToMtrr,
         pages: None,

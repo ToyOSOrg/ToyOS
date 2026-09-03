@@ -21,9 +21,15 @@ use std::time::Duration;
 
 use super::qemu::{self, BootOptions, Profile, QemuInstance};
 
-/// Offsets into a unit's register window, Sections 11.4.4.2 and 11.4.10.
+/// Offsets into a unit's register window, Sections 11.4.4.2, 11.4.6 and 11.4.10.
 const GSTS_REG: u64 = 0x1C;
+const RTADDR_REG: u64 = 0x20;
 const IRTA_REG: u64 = 0xB8;
+
+/// Bits 51:12 of a root, context or second-level entry, Sections 9.1 to 9.8.
+const ENTRY_ADDR: u64 = 0x000F_FFFF_FFFF_F000;
+/// The one leaf size this kernel writes.
+const PAGE_2M: u64 = 2 * 1024 * 1024;
 use super::serial::Serial;
 
 /// The five machines, and what each one moves.
@@ -228,13 +234,7 @@ fn destination_encoding(
 
 /// The table's address out of `IRTA_REG`, over the monitor.
 fn interrupt_table_base(log: &Serial, name: &str, socket: &Path) -> Result<u64, String> {
-    let line = log.must_say("translating gsts=")?;
-    let window = line
-        .split(" @")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
-        .ok_or_else(|| format!("{name}: no register window on {line:?}"))?;
+    let window = register_window(socket, log, name)?;
     Ok(over_qmp(socket, window + IRTA_REG, 1, 'g')?[0] & !0xFFF)
 }
 
@@ -270,6 +270,7 @@ pub fn iommu_interrupt_remapping(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let options = BootOptions { profile: Profile::Headless, qmp: true, ..Default::default() };
+    unit_is_first(&qemu::profile_argv(&options), "headless")?;
     let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
     let log = Serial::boot(&qemu);
     log.must_be_clean()?;
@@ -349,13 +350,7 @@ fn interrupt_format(
         fields.get(k).cloned().ok_or_else(|| format!("{name}: no {k}= on {line:?}"))
     };
     let socket = socket.ok_or_else(|| format!("{name}: this gate needs BootOptions {{ qmp }}"))?;
-    // `@0xfed90000` carries no `=`, so it is not one of the fields above.
-    let window = line
-        .split(" @")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
-        .ok_or_else(|| format!("{name}: no register window on {line:?}"))?;
+    let window = register_window(socket, log, name)?;
 
     // GSTS and IRTA_REG out of that window, and the kernel's line checked
     // against them — the only direction that catches a kernel misreporting them.
@@ -648,6 +643,160 @@ fn scope_sources(log: &Serial) -> BTreeMap<String, String> {
     named
 }
 
+/// Whether this machine's virtio functions are behind the unit at all.
+///
+/// QEMU keeps a virtio function on `&address_space_memory` — the unit bypassed,
+/// whatever the tables say — unless it is created with `iommu_platform=on`
+/// (`hw/virtio/virtio-bus.c:86-99`, `hw/virtio/virtio-pci.c:1400-1405` at
+/// v11.1.0), and under identity mapping the two are indistinguishable. So the
+/// argv says which functions were created behind a unit and the console says
+/// which negotiated `VIRTIO_F_ACCESS_PLATFORM`. On [`Profile::HeadlessNoIommu`]
+/// the guest reports `n` because QEMU never *offers* the bit
+/// (`hw/virtio/virtio-bus.c:87-94`), not because the driver declined — it offers
+/// blindly; the independence comes from [`declining_is_not_free`].
+///
+/// virtio-sound is a declared exception, asserted rather than tolerated: its
+/// function must be the one that did *not* negotiate
+/// (`issues/kernel/three-devices-still-reach-all-of-memory.md`).
+pub fn iommu_virtio_platform(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    for profile in [Profile::Headless, Profile::HeadlessNoIommu] {
+        let name = if profile.iommu().is_some() { "headless" } else { "headless-no-iommu" };
+        let behind_unit = profile.iommu().is_some();
+        let options = BootOptions { profile, ..Default::default() };
+
+        let argv = qemu::profile_argv(&options);
+        let created: Vec<&str> = argv
+            .windows(2)
+            .filter(|w| w[0] == "-device")
+            .map(|w| w[1].as_str())
+            .filter(|d| d.starts_with("virtio-") && d.contains("-pci"))
+            .collect();
+        if created.is_empty() {
+            return Err(format!("{name}: this machine creates no virtio function at all"));
+        }
+        // Ahead of everything it decodes, or a function created before it keeps
+        // the bypassing address space and `iommu_platform=on` changes nothing
+        // (`hw/virtio/virtio-bus.c:97`).
+        unit_is_first(&argv, name)?;
+        for device in &created {
+            let want = behind_unit && !device.starts_with(SOUND);
+            if device.contains("iommu_platform=on") != want {
+                return Err(format!(
+                    "{name}: the machine has a unit = {behind_unit} and QEMU is given {device}, \
+                     where iommu_platform=on is owed = {want}. A virtio function without it keeps \
+                     the address space the unit does not decode, and virtio-sound is the one \
+                     device ruled to keep it that way"
+                ));
+            }
+        }
+
+        let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+        let log = Serial::boot(&qemu);
+        log.must_be_clean()?;
+        log.must_say("Boot: complete")?;
+
+        let mut negotiated = Vec::new();
+        for line in log.text().lines() {
+            let Some(rest) = line.split("VirtIO: PCI ").nth(1) else { continue };
+            let Some((who, _)) = rest.split_once(' ') else {
+                return Err(format!("{name}: unreadable feature line: {line:?}"));
+            };
+            let fields = unit_fields(line);
+            let Some(accepted) = fields.get("access_platform") else { continue };
+            negotiated.push((who.to_string(), accepted == "y"));
+        }
+        if negotiated.len() != created.len() {
+            return Err(format!(
+                "{name}: QEMU created {} virtio function(s) and the guest negotiated features \
+                 with {} — {negotiated:?} against {created:?}",
+                created.len(),
+                negotiated.len()
+            ));
+        }
+        let sound = class_function(&log, "0401");
+        let enumerated = enumerated_functions(&log);
+        for (who, accepted) in &negotiated {
+            let want = behind_unit && Some(who.clone()) != sound;
+            if *accepted != want {
+                return Err(format!(
+                    "{name}: {who} negotiated VIRTIO_F_ACCESS_PLATFORM = {accepted} where {want} \
+                     is owed — the unit exists = {behind_unit}, and the audio function \
+                     {sound:?} is the one ruled to stay outside it \
+                     (issues/kernel/three-devices-still-reach-all-of-memory.md)"
+                ));
+            }
+            if !enumerated.contains(who) {
+                return Err(format!(
+                    "{name}: {who} negotiated features and the PCI walk enumerated \
+                     {enumerated:?} — the driver is naming a function this machine does not have"
+                ));
+            }
+        }
+        if behind_unit && !negotiated.iter().any(|(who, ok)| Some(who.clone()) == sound && !ok) {
+            return Err(format!(
+                "{name}: no virtio function declined VIRTIO_F_ACCESS_PLATFORM, so the audio \
+                 exception this gate allows is not being exercised: {negotiated:?}"
+            ));
+        }
+        eprintln!(
+            "  [iommu] {name}: {} virtio function(s) behind a unit = {behind_unit}, audio \
+             function {sound:?} outside it by ruling",
+            negotiated.len()
+        );
+    }
+    declining_is_not_free(test_config, c_bins, rust_bins)
+}
+
+/// The control that makes the two arms above mean something: a guest that
+/// declines the feature its host offered gets no device, not a bypassing one.
+/// `virtio_validate_features` returns `-EFAULT` and `virtio_set_status` returns
+/// before it stores the status (`hw/virtio/virtio.c:2270-2276` and `:2292-2299`
+/// at v11.1.0), so `FEATURES_OK` never sticks. The actuator withholds the bit
+/// from every virtio device but the console; virtio-sound is never offered it,
+/// so the NIC is the one device on this machine that can decline.
+fn declining_is_not_free(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::Headless,
+            kernel_params: &["virtio-no-access-platform"],
+            ..Default::default()
+        },
+    );
+    let log = Serial::boot(&qemu);
+    log.must_be_clean()?;
+    log.must_say("Boot: complete")?;
+
+    let refused: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| l.contains("refused the feature set"))
+        .collect();
+    if refused.is_empty() {
+        return Err(format!(
+            "the actuator withheld VIRTIO_F_ACCESS_PLATFORM from every virtio device but the \
+             console and none was refused for it. A device the host offered it on and the guest \
+             declined has to lose FEATURES_OK, and this machine went on as though the \
+             negotiation were free\n{}",
+            log.text()
+        ));
+    }
+    // The console kept the bit, so this is not simply a machine with no virtio.
+    log.must_say("access_platform=y")?;
+    eprintln!("  [iommu] declined: {}", refused.join("\n  [iommu] declined: "));
+    Ok(())
+}
+
 /// The needle that says the unit blocked something, and the marker both gates
 /// below boot to. A boot that never produces it times out, which is what a
 /// unit that is not translating looks like from here.
@@ -780,6 +929,436 @@ pub fn iommu_empty_domain(
         blocked.address, blocked.access, blocked.reason
     );
     Ok(())
+}
+
+/// The actuator points the NIC's first RX buffer at the physical bytes NVMe's
+/// admin completion queue page ends with — a page the NIC's domain does not map.
+/// Three things then hold at once and no two come from the same place: the unit
+/// blocks it and names the NIC and that address; the address is the one NVMe's
+/// own `ACQ` holds, resolved through the tables the unit walks; and every byte
+/// of the 2 KiB is still zero.
+///
+/// Oracle: VT-d Rev. 4.0 Section 9.8, which [`translate`] implements
+/// independently, and QEMU's `vtd_iova_to_sspte`
+/// (`hw/i386/intel_iommu.c:1146-1210` at v11.1.0).
+pub fn iommu_domain_isolation(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions {
+        profile: Profile::Headless,
+        qmp: true,
+        kernel_params: &["iommu-nic-foreign-dma"],
+        ready_marker: FAULT,
+        ..Default::default()
+    };
+    unit_is_first(&qemu::profile_argv(&options), "isolation")?;
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let mut log = Serial::boot(&qemu);
+    log.push(&qemu.drain_serial(Duration::from_secs(2)));
+    let socket = qemu.qmp_socket();
+
+    let line = log.must_say(FAULT)?;
+    let fields = unit_fields(line);
+    let field = |k: &str| -> Result<String, String> {
+        fields.get(k).cloned().ok_or_else(|| format!("the fault line has no {k}=: {line:?}"))
+    };
+    let blocked = Blocked {
+        stream: field("stream")?,
+        address: field("addr")?,
+        access: field("access")?,
+        reason: line
+            .split_whitespace()
+            .last()
+            .ok_or_else(|| format!("the fault line names no reason: {line:?}"))?
+            .to_string(),
+    };
+
+    let nic = class_function(&log, "0200")
+        .ok_or_else(|| format!("this machine enumerated no NIC\n{}", log.text()))?;
+    let nvme = class_function(&log, "0108")
+        .ok_or_else(|| format!("this machine enumerated no NVMe controller\n{}", log.text()))?;
+    if blocked.stream != nic {
+        return Err(format!(
+            "the unit blocked {} and the device aimed at another driver's pool is {nic}",
+            blocked.stream
+        ));
+    }
+    if !SECOND_LEVEL.contains(&blocked.reason.as_str()) {
+        return Err(format!(
+            "the unit blocked {nic} for {:?}, which is not something a second-level page table \
+             walk decides — a domain that does not map an address has to refuse it in the walk",
+            blocked.reason
+        ));
+    }
+
+    let window = register_window(socket, &log, "isolation")?;
+    let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
+    let victim = translate(socket, window, &nvme, acq)?;
+    let at = u64::from_str_radix(blocked.address.trim_start_matches("0x"), 16)
+        .map_err(|_| format!("unreadable faulting address {:?}", blocked.address))?;
+    if at != victim & !0xFFF {
+        return Err(format!(
+            "the unit blocked an access to {}, and the page NVMe's ACQ names — through the \
+             tables the unit walks — is {:#x}. The kernel is not reporting the address the \
+             device was aimed at",
+            blocked.address,
+            victim & !0xFFF
+        ));
+    }
+
+    let probe = victim + 0x800;
+    let words = over_qmp(socket, probe, PROBE_WORDS, 'g')?;
+    if let Some((i, word)) = words.iter().enumerate().find(|(_, w)| **w != 0) {
+        return Err(format!(
+            "the unit reported blocking {nic} at {}, and the {} bytes at {probe:#x} inside \
+             NVMe's pool hold {word:#018x} at word {i} rather than the zero the NVMe driver \
+             left. The write landed anyway",
+            blocked.address,
+            PROBE_WORDS * 8
+        ));
+    }
+    // Out of the function's own `COMMAND` rather than off the line the handler printed.
+    let command = over_qmp(socket, config_space(&log, &nic)? + PCI_COMMAND, 1, 'w')?[0] as u16;
+    if command & PCI_BUS_MASTER != 0 {
+        return Err(format!(
+            "the unit blocked {nic} and its COMMAND is {command:#06x}, so it still masters the \
+             bus and can fault again"
+        ));
+    }
+    let handled = log.must_say(FAULT)?;
+    let nic_domain = context_of(socket, window, &nic)?.0;
+    for field in [
+        "bme=cleared".to_string(),
+        "first=y".to_string(),
+        format!("domain={nic_domain}"),
+        "unitfaults=1".to_string(),
+        "streamfaults=1".to_string(),
+    ] {
+        if !handled.contains(&field) {
+            return Err(format!("the fault line does not say {field}: {handled:?}"));
+        }
+    }
+    eprintln!(
+        "  [iommu] {nic} aimed at {}, inside {nvme}'s pool: blocked on a {} for {}, all {} bytes \
+         there are still zero, and its COMMAND reads {command:#06x} — bus mastering gone",
+        blocked.address,
+        blocked.access,
+        blocked.reason,
+        PROBE_WORDS * 8
+    );
+    // The first guest goes first: QEMU holds an exclusive lock on the NVMe image.
+    let lane = qemu.shutdown();
+    let clean =
+        QemuInstance::boot_with_options(test_config, c_bins, rust_bins, BootOptions {
+            profile: Profile::Headless,
+            qmp: true,
+            ..Default::default()
+        });
+    drop(lane);
+    let log = Serial::boot(&clean);
+    log.must_be_clean()?;
+    log.must_say("Boot: complete")?;
+    let socket = clean.qmp_socket();
+    let window = register_window(socket, &log, "isolation")?;
+    let nvme = class_function(&log, "0108")
+        .ok_or_else(|| format!("this machine enumerated no NVMe controller\n{}", log.text()))?;
+    let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
+    let owned = translate(socket, window, &nvme, acq)?;
+    domains_are_disjoint(socket, &log, window, owned, &nvme)
+}
+
+/// Every moved function is in a domain of its own, and no two of those domains
+/// reach the same physical page. A set comparison and not a spot check: a
+/// domain's addresses start at `1 << (width - 2)`, so asking whether one
+/// translates an address inside RAM misses every populated top-level index by
+/// construction and cannot fail.
+fn domains_are_disjoint(
+    socket: &Path,
+    log: &Serial,
+    window: u64,
+    owned: u64,
+    owner: &str,
+) -> Result<(), String> {
+    let mut seen: BTreeMap<String, u64> = BTreeMap::new();
+    for line in log.text().lines() {
+        let Some(rest) = line.split("iommu: ").nth(1) else { continue };
+        let Some((bdf, tail)) = rest.split_once(' ') else { continue };
+        let Some(id) = tail.strip_prefix("moves to domain") else { continue };
+        let id: u64 = id.trim().parse().map_err(|_| format!("unreadable domain on {line:?}"))?;
+        if seen.insert(bdf.to_string(), id).is_some() {
+            return Err(format!("{bdf} moved twice: {line:?}"));
+        }
+    }
+    if seen.len() < 2 {
+        return Err(format!(
+            "{} function(s) moved to a domain of their own, so there is no pair here to be \
+             disjoint\n{}",
+            seen.len(),
+            log.text()
+        ));
+    }
+
+    let mut roots: BTreeMap<u64, String> = BTreeMap::new();
+    let mut pages: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    for (bdf, want) in &seen {
+        let (did, root, levels) = context_of(socket, window, bdf)?;
+        if did != *want {
+            return Err(format!(
+                "the kernel says {bdf} is in domain {want} and its context entry names domain \
+                 {did}"
+            ));
+        }
+        if let Some(other) = roots.insert(root, bdf.clone()) {
+            return Err(format!(
+                "{bdf} and {other} name the same second-level table at {root:#x}, so they are \
+                 one address space wearing two domain ids"
+            ));
+        }
+        let mine = leaves(socket, root, levels, bdf)?;
+        if mine.is_empty() {
+            return Err(format!("{bdf}'s domain {did} maps nothing at all"));
+        }
+        if mine.contains(&(owned & !(PAGE_2M - 1))) != (bdf == owner) {
+            return Err(format!(
+                "{bdf}'s domain {did} maps the page at {owned:#x} = {}, and that page is \
+                 {owner}'s admin completion queue",
+                mine.contains(&(owned & !(PAGE_2M - 1)))
+            ));
+        }
+        for (other, theirs) in &pages {
+            if let Some(shared) = mine.intersection(theirs).next() {
+                return Err(format!(
+                    "{bdf}'s domain and {other}'s both map the physical page at {shared:#x}, so \
+                     either can reach what the other was given"
+                ));
+            }
+        }
+        pages.insert(bdf.clone(), mine);
+    }
+    eprintln!(
+        "  [iommu] {} function(s) in {} domains over {} distinct second-level tables, mapping {} \
+         pairwise-disjoint 2 MiB pages, and only {owner} maps {owned:#x}: {seen:?}",
+        seen.len(),
+        seen.values().collect::<BTreeSet<_>>().len(),
+        roots.len(),
+        pages.values().map(BTreeSet::len).sum::<usize>()
+    );
+    Ok(())
+}
+
+/// Every physical page one domain's second-level tables reach, Section 9.8's
+/// walk, a whole 4 KiB of entries at a time.
+fn leaves(socket: &Path, root: u64, levels: u64, bdf: &str) -> Result<BTreeSet<u64>, String> {
+    let mut found = BTreeSet::new();
+    let mut level = levels;
+    let mut tables = BTreeSet::from([root]);
+    while level > 2 {
+        let mut next = BTreeSet::new();
+        for table in &tables {
+            for entry in over_qmp(socket, *table, ENTRIES, 'g')? {
+                if entry & 0x3 == 0 {
+                    continue;
+                }
+                // A 1 GiB leaf followed as a pointer reads 512 words out of a data page.
+                if entry & LARGE_PAGE != 0 {
+                    return Err(format!(
+                        "{bdf}: a level-{level} entry {entry:#018x} carries the page-size bit, \
+                         and this kernel writes only 2 MiB leaves"
+                    ));
+                }
+                next.insert(entry & ENTRY_ADDR);
+            }
+        }
+        tables = next;
+        level -= 1;
+    }
+    for table in &tables {
+        for entry in over_qmp(socket, *table, ENTRIES, 'g')? {
+            if entry & 0x3 == 0 {
+                continue;
+            }
+            if entry & LARGE_PAGE == 0 {
+                return Err(format!(
+                    "{bdf}: a page-directory entry {entry:#018x} without the page-size bit, and \
+                     this kernel writes only 2 MiB leaves"
+                ));
+            }
+            found.insert(entry & ENTRY_ADDR & !(PAGE_2M - 1));
+        }
+    }
+    Ok(found)
+}
+
+/// Entries in one 4 KiB second-level table, read in a single monitor command.
+const ENTRIES: usize = 512;
+/// Section 9.8: bit 7 of a page-directory entry, a 2 MiB leaf rather than a pointer.
+const LARGE_PAGE: u64 = 1 << 7;
+
+/// One function's context entry, as `(DID, second-level root, levels)`; Section
+/// 9.3 puts `DID` at 87:72, `SLPTPTR` at 51:12 and `AW` at 66:64 as levels minus two.
+fn context_of(socket: &Path, window: u64, bdf: &str) -> Result<(u64, u64, u64), String> {
+    let (bus, dev, func) = parse_bdf(bdf)?;
+    let root = over_qmp(socket, window + RTADDR_REG, 1, 'g')?[0] & ENTRY_ADDR;
+    let entry = over_qmp(socket, root + u64::from(bus) * 16, 1, 'g')?[0];
+    if entry & 1 == 0 {
+        return Err(format!("{bdf}: the root entry for bus {bus:#04x} is not present"));
+    }
+    let devfn = u64::from(dev) * 8 + u64::from(func);
+    let context = over_qmp(socket, (entry & ENTRY_ADDR) + devfn * 16, 2, 'g')?;
+    if context[0] & 1 == 0 {
+        return Err(format!("{bdf}: its context entry is not present"));
+    }
+    Ok(((context[1] >> 8) & 0xFFFF, context[0] & ENTRY_ADDR, (context[1] & 0x7) + 2))
+}
+
+/// `COMMAND` and its Bus Master Enable bit, PCI 3.0 §6.2.2.
+const PCI_COMMAND: u64 = 0x04;
+const PCI_BUS_MASTER: u16 = 0x04;
+
+/// One function's config space in ECAM.
+fn config_space(log: &Serial, bdf: &str) -> Result<u64, String> {
+    let line = log.must_say("ACPI: ECAM base address: ")?;
+    let ecam = line
+        .split("ACPI: ECAM base address: 0x")
+        .nth(1)
+        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
+        .ok_or_else(|| format!("unreadable ECAM base on {line:?}"))?;
+    let (bus, dev, func) = parse_bdf(bdf)?;
+    Ok(ecam + (u64::from(bus) << 20) + (u64::from(dev) << 15) + (u64::from(func) << 12))
+}
+
+/// The untouched half of NVMe's admin completion queue page: a frame is 1526
+/// bytes at most, so this covers the whole of one landing there.
+const PROBE_WORDS: usize = 256;
+
+/// `REG_ACQ`, NVMe 2.0 Figure 41.
+const NVME_ACQ: u64 = 0x30;
+
+/// Where QEMU puts an `intel-iommu` on q35, which every profile here is: a
+/// constant on the host side, not a number the guest supplies.
+///
+/// `Q35_HOST_BRIDGE_IOMMU_ADDR`, `include/hw/i386/intel_iommu.h:35` at v11.1.0,
+/// mapped at `intel_iommu.c:5635`. The DMAR the guest reads is built from that
+/// same constant (`acpi-build.c:1687`), so this is one source agreeing with
+/// itself and not two: what it catches is a guest reporting something else.
+const UNIT_WINDOW: u64 = 0xfed9_0000;
+
+/// The `-device` name of the audio function that is ruled to stay outside the unit.
+const SOUND: &str = "virtio-sound";
+
+fn unit_is_first(argv: &[String], name: &str) -> Result<(), String> {
+    let devices: Vec<&str> =
+        argv.windows(2).filter(|w| w[0] == "-device").map(|w| w[1].as_str()).collect();
+    let Some(unit) = devices.iter().find(|d| d.starts_with("intel-iommu")) else {
+        return Ok(());
+    };
+    if devices[0] != *unit {
+        return Err(format!(
+            "{name}: the unit is not the first -device ({} is), so every function ahead of it \
+             gets QEMU's bypassing address space",
+            devices[0]
+        ));
+    }
+    Ok(())
+}
+
+/// The unit's register window, and the one thing on the guest's side of this
+/// gate that is checked rather than believed: a kernel that wrote the real
+/// `VER`, `GSTS`, `RTADDR` and `IRTA` into a page of RAM and printed *that*
+/// address satisfied every readback here. One unit, stated rather than assumed —
+/// `must_say` answers with the first match, so a second line is refused.
+fn register_window(socket: &Path, log: &Serial, name: &str) -> Result<u64, String> {
+    let lines: Vec<&str> =
+        log.text().lines().filter(|l| l.contains("translating gsts=")).collect();
+    let [line] = lines[..] else {
+        return Err(format!(
+            "{name}: {} unit(s) are translating and this gate reads one window at \
+             {UNIT_WINDOW:#x}; a second needs the harness to model it\n{lines:?}",
+            lines.len()
+        ));
+    };
+    let printed = line
+        .split(" @")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
+        .ok_or_else(|| format!("{name}: no register window on {line:?}"))?;
+    if printed != UNIT_WINDOW {
+        return Err(format!(
+            "{name}: the kernel says its unit is at {printed:#x} and QEMU puts one at \
+             {UNIT_WINDOW:#x}. Every table this gate walks starts there, so a page of RAM \
+             printed here would be a set of forged registers\n{line}"
+        ));
+    }
+    // A unit, not a page somebody left all-ones: `VER` reads a real version,
+    // which is the same test the kernel makes before programming it.
+    let version = over_qmp(socket, UNIT_WINDOW, 1, 'w')?[0] as u32;
+    if version == u32::MAX || (version >> 4) & 0xF == 0 {
+        return Err(format!(
+            "{name}: {UNIT_WINDOW:#x} reads VER={version:#010x}, so no unit decodes there"
+        ));
+    }
+    Ok(UNIT_WINDOW)
+}
+
+/// A function's memory BAR 0, out of ECAM rather than off a console line.
+fn nvme_bar(socket: &Path, log: &Serial, bdf: &str) -> Result<u64, String> {
+    let config = config_space(log, bdf)?;
+    // A window that decodes at all: an ECAM base the kernel invented would read
+    // back all ones here, which is no vendor id.
+    if over_qmp(socket, config, 1, 'w')?[0] as u32 & 0xFFFF == 0xFFFF {
+        return Err(format!("no PCI function decodes at {config:#x}, so that is not ECAM"));
+    }
+    Ok(over_qmp(socket, config + 0x10, 1, 'g')?[0] & !0xF)
+}
+
+fn parse_bdf(bdf: &str) -> Result<(u8, u8, u8), String> {
+    let (bus, rest) = bdf.split_once(':').ok_or_else(|| format!("not a bdf: {bdf:?}"))?;
+    let (dev, func) = rest.split_once('.').ok_or_else(|| format!("not a bdf: {bdf:?}"))?;
+    let refuse = |_| format!("not a bdf: {bdf:?}");
+    Ok((
+        u8::from_str_radix(bus, 16).map_err(refuse)?,
+        u8::from_str_radix(dev, 16).map_err(refuse)?,
+        func.parse().map_err(refuse)?,
+    ))
+}
+
+/// What the unit itself would translate `at` to for `bdf`, decoded here from
+/// Sections 9.1, 9.3 and 9.8 out of the tables it really walks: `RTADDR_REG`,
+/// then the root entry for the bus, then the context entry for the function,
+/// then the second-level tables the context entry names, at the depth its `AW`
+/// field declares.
+fn translate(socket: &Path, window: u64, bdf: &str, at: u64) -> Result<u64, String> {
+    let (bus, dev, func) = parse_bdf(bdf)?;
+    let root = over_qmp(socket, window + RTADDR_REG, 1, 'g')?[0] & ENTRY_ADDR;
+    let entry = over_qmp(socket, root + u64::from(bus) * 16, 1, 'g')?[0];
+    if entry & 1 == 0 {
+        return Err(format!("{bdf}: the root entry for bus {bus:#04x} is not present"));
+    }
+    let devfn = u64::from(dev) * 8 + u64::from(func);
+    let context = over_qmp(socket, (entry & ENTRY_ADDR) + devfn * 16, 2, 'g')?;
+    if context[0] & 1 == 0 {
+        return Err(format!("{bdf}: its context entry is not present"));
+    }
+    // `AW` is levels minus two, Section 9.3.
+    let mut level = (context[1] & 0x7) + 2;
+    let mut table = context[0] & ENTRY_ADDR;
+    while level > 2 {
+        let index = (at >> (12 + 9 * (level - 1))) & 0x1FF;
+        let next = over_qmp(socket, table + index * 8, 1, 'g')?[0];
+        if next & 0x3 == 0 {
+            return Err(format!("{bdf}: {at:#x} has no level-{level} entry"));
+        }
+        table = next & ENTRY_ADDR;
+        level -= 1;
+    }
+    let leaf = over_qmp(socket, table + ((at >> 21) & 0x1FF) * 8, 1, 'g')?[0];
+    if leaf & 0x3 == 0 {
+        return Err(format!("{bdf}: {at:#x} has no leaf"));
+    }
+    Ok((leaf & ENTRY_ADDR & !(PAGE_2M - 1)) | (at & (PAGE_2M - 1)))
 }
 
 /// What the unit reported when it blocked a transaction.

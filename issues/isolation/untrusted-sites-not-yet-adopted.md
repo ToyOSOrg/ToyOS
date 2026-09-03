@@ -23,52 +23,6 @@ symbol**, so whoever takes this does not have to re-derive which value is meant.
 
 ## The sites, hardest consequence first
 
-- **`kernel/src/arch/syscall.rs`, the dispatch itself — partly done.**
-  `SYS_SET_THREAD_NAME`'s `a2` was the named pattern: it `min`'d against
-  `THREAD_NAME_LEN` and silently set the truncated prefix of a name too long
-  to fit, the one clamp in the file where the rest already refuses. Converted:
-  `a2` is now `Untrusted::new(a2).at_most(THREAD_NAME_LEN)`, refused with
-  `InvalidArgument` rather than truncated. Behaviour change, gated by
-  `tests/toyos-rust-tests/src/bin/abuse_thread_name.rs`
-  (`test_rs_abuse_thread_name`), which reads the name back through
-  `SYS_SYSINFO` and checks a refused call left it exactly as it was rather
-  than silently truncated — not through `toyos_abi::syscall::set_thread_name`'s
-  own return value, which it has always thrown away and which this pass left
-  alone: touching `toyos-abi/src` claims the shared sysroot
-  (`src/CLAUDE.md`'s buildlock section — "a doc-comment change... costs a
-  sysroot claim exactly like a layout change"), and CLAUDE.md's own rule is
-  that an ABI change lands on its own PR first. `set_thread_name`'s doc
-  comment ("up to 28 bytes, truncated") is now stale and is that PR's to fix;
-  nothing in the tree calls it today.
-  **Still open**: the file's other ~31 `as usize` casts. The ones that size an
-  allocation before a copy — `SYS_SPAWN`'s `endow_count`, `labels_len` and
-  `slot_map_count`, `SYS_NAMESPACE_BUILD`'s `keep_n`/`add_n`/`names_len`,
-  `SYS_HANDLE_SEND`/`SYS_HANDLE_RECV`'s count — are already named refusals
-  against `MAX_ENDOWMENTS`/`MAX_LABELS_LEN`/`MAX_NAMESPACE_ENTRIES`/
-  `MAX_TRANSFER_HANDLES` (`env_len` against `MAX_USER_STR` likewise, and is
-  gated by `abuse_spawn_argv.rs`), so converting them is consistency rather
-  than a behaviour fix — mechanical, per the original note, but left here
-  because most have no dedicated over-bound test today and this pass did not
-  want to touch the syscall dispatch's other paths without one.
-
-- **`kernel/src/drivers/xhci/mod.rs`, the event ring — done, with one
-  exception.** `Layout::device`'s hand-rolled `(slot_id as usize).checked_sub(1)?`
-  is now `Untrusted::new(slot_id).map(|v| v.wrapping_sub(1)).index(self.dev_blocks)`
-  — `wrapping_sub` is sound here only because `index` is the exit (slot 0 wraps
-  to `u8::MAX`, never `< dev_blocks`, so it is refused by the same comparison
-  as every slot past the pool). Behaviour-preserving: same `None` for the same
-  inputs, and `xhci_many_devices` (`log.matches("beyond the pool")`) already
-  gates the refusal path.
-  **The `0x1F` scratchpad masking near `Layout::new` resisted the type.** It
-  extracts two 5-bit HCSPARAMS2 fields — a fixed-width hardware bitfield, not a
-  value with an independently-known bound to compare against. The "bound" and
-  the mask are the same operation, so the only available exit would be
-  `.at_most(0x1F)` immediately after a `.map()` that had already produced a
-  value `<= 0x1F` by construction: a check whose `Err` arm is unreachable by
-  construction, which is worse than the plain mask it would replace. Left as a
-  mask, as `& 0x1F` extracting a spec-defined bit field is throughout this
-  driver and the rest of the tree.
-
 - **`kernel/src/drivers/nvme.rs`, the completion queue — converted.**
   `wait_completion` now takes the `cid` this driver put in the command
   (`(cmd.cdw0 >> 16) as u16`, read back out of the command it just submitted,
@@ -91,23 +45,6 @@ symbol**, so whoever takes this does not have to re-derive which value is meant.
   the landing risk was judged not worth it this pass. An
   actuator + self-test mirroring `drivers/virtio.rs`'s `used_selftest` is the
   future work if the owner wants it exercised on every boot.
-
-- **`kernel/src/drivers/acpi.rs` — already fixed, not by this type.** The two
-  underflowing subtractions F5 named are gone: `Table::open` (added since the
-  assessment) validates a table's declared length against its floor and a
-  `MAX_TABLE_LEN` ceiling and its checksum before anything reads out of it, so
-  `xsdt.len - size_of::<SdtHeader>()` and `madt.len - size_of::<Madt>()` are
-  now total by construction — the module doc says so in the past tense
-  ("This is the second underflow that was here"). `TableError` is already a
-  named `Result` refusal, exactly what `Untrusted` would add. Applying
-  `Untrusted` on top would be ceremony over an already-safe abstraction, so
-  nothing changed here. No longer belongs on this list.
-
-- **`bcachefs/src/btree.rs`'s `collect_all`.** Closed: it was not a wrapper
-  fix — it materialised every entry in the tree before anything counted them —
-  so it grew a count primitive of its own, `collect_up_to`, that lets
-  `BcacheFsAdapter::list` refuse *before* it allocates, the way `TmpFs` already
-  does. `/home` was writable by userland, so it was a live panic path.
 
 ## What this type does not answer
 

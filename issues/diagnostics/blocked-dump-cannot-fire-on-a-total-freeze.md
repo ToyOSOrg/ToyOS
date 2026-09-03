@@ -57,9 +57,7 @@ It is dispatched from `drain_irqs` at the top of a pass, so a *partial* wedge
 answers and a *total* freeze is silent — the owner pressed it after pulling the
 USB stick and got nothing, which is itself weak evidence that no CPU was
 passing. Whether an interrupt-dispatched variant can close that is the
-scheduler agent's (the NMI-on-timeout proposal); what follows is what the
-author of this facility established while building it, so nobody rediscovers it
-or removes it by accident.
+scheduler agent's (the NMI-on-timeout proposal).
 
 - **`Lock::lock` disables preemption, not interrupts** (`sync.rs`) — a ticket
   spin after `preempt::disable()`, no `cli`.

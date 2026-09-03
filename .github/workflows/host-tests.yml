@@ -43,10 +43,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # `macos-latest` ships whatever toolchain it ships — this job installs
+      # none — so the version is written to the job summary every run, pass or
+      # red, rather than sitting only in a log nobody opens until it rolls.
       - name: rust
         run: |
           rustc -vV
           cargo -V
+          { echo '```'; rustc -vV; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       # Cold, this job is 398 s and all of it is compilation — 594 s before the
       # host workspace, measured the same way, on the run that introduced it

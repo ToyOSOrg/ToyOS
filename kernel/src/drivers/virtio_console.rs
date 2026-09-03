@@ -83,7 +83,7 @@ fn with_console<R>(f: impl FnOnce(&mut VConsole) -> R) -> Option<R> {
 fn refill_rx(c: &mut VConsole, buf_idx: usize, slot: DescSlot) {
     let desc_id = c.rx.submit(
         slot,
-        &[(c.rx_bufs[buf_idx].phys(), RX_BUF_SIZE, BufDir::Writable)],
+        &[(c.rx_bufs[buf_idx].device_addr(), RX_BUF_SIZE, BufDir::Writable)],
         c.device.notify_mmio(),
         c.device.notify_off_multiplier(),
         0,
@@ -104,7 +104,7 @@ pub fn write_bytes_locked(bytes: &[u8]) {
             let slot = c.tx_slot.take().expect("vconsole: no tx slot");
             c.tx_slot = Some(c.tx.submit_and_wait(
                 slot,
-                &[(c.tx_buf.phys(), n as u32, BufDir::Readable)],
+                &[(c.tx_buf.device_addr(), n as u32, BufDir::Readable)],
                 c.device.notify_mmio(),
                 c.device.notify_off_multiplier(),
                 1,
@@ -154,8 +154,12 @@ pub fn init(devices: &[PciDevice]) -> bool {
     };
     log!("virtio-console: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
 
+    // An address space of this device's own, holding one pool and nothing else.
+    let space = crate::iommu::DeviceSpace::create();
     // Leaked, not held in a `static`: the console is never unbound.
-    let dma = DmaPool::alloc(DMA_SIZE).leak();
+    let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
+    // Before the device is told an address, and after the only mapping it gets.
+    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1) {
         Ok(device) => device,

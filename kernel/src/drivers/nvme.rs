@@ -243,6 +243,22 @@ const OFF_DATA: usize       = 0x6000;
 const MAX_DATA_PAGES: usize  = 32;
 const DMA_SIZE: usize        = OFF_DATA + MAX_DATA_PAGES * 0x1000;
 
+/// The upper half of the admin completion queue's page: `init` zeroes it all and
+/// the controller writes only the first `QUEUE_DEPTH` entries, so "unchanged" is
+/// "still zero" here, and the address is one the gate reads back out of `REG_ACQ`.
+#[cfg(feature = "boot-actuators")]
+pub(super) const PROBE_OFF: usize = OFF_ADMIN_CQ + 0x800;
+#[cfg(feature = "boot-actuators")]
+pub(super) const PROBE_LEN: usize = 0x800;
+#[cfg(feature = "boot-actuators")]
+const _: () = assert!(QUEUE_DEPTH * core::mem::size_of::<CqEntry>() <= PROBE_OFF - OFF_ADMIN_CQ);
+
+/// Physical, not what this controller is programmed with: the actuator has to
+/// hand another device an address that device's own domain does not map.
+#[cfg(feature = "boot-actuators")]
+pub(super) static FOREIGN_PROBE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Fills the PRP list with every data page's address after the first
 /// (NVMe 2.0 §4.1.2) and returns the list's own physical address for `prp2`.
 /// Unaligned discipline: the list is written before the controller can read it.
@@ -253,7 +269,7 @@ fn fill_prp_list(dma: Dma<'static, Unaligned>, pages: usize, data_phys: u64) -> 
     for i in 1..pages {
         list.write::<u64>((i - 1) * core::mem::size_of::<u64>(), data_phys + i as u64 * 0x1000);
     }
-    dma.phys() + OFF_PRP_LIST as u64
+    dma.device_addr() + OFF_PRP_LIST as u64
 }
 
 struct NvmeController {
@@ -370,8 +386,8 @@ impl NvmeController {
         self.io.start_over();
         let aqa = ((QUEUE_DEPTH as u32 - 1) << 16) | (QUEUE_DEPTH as u32 - 1);
         self.bar.write_u32(REG_AQA, aqa);
-        self.bar.write_u64(REG_ASQ, self.dma.phys() + OFF_ADMIN_SQ as u64);
-        self.bar.write_u64(REG_ACQ, self.dma.phys() + OFF_ADMIN_CQ as u64);
+        self.bar.write_u64(REG_ASQ, self.dma.device_addr() + OFF_ADMIN_SQ as u64);
+        self.bar.write_u64(REG_ACQ, self.dma.device_addr() + OFF_ADMIN_CQ as u64);
         self.bar.write_u32(REG_CC, CC_ENABLED);
         if !crate::clock::settles(ready.nanos(), || self.bar.read_u32(REG_CSTS) & 1 != 0) {
             log!("NVMe: reset failed: CSTS.RDY would not set in {ready}");
@@ -423,7 +439,7 @@ impl NvmeController {
         let cid = self.alloc_cid();
         let mut cmd = SqEntry::ZERO;
         cmd.cdw0 = (cid as u32) << 16 | ADMIN_IDENTIFY as u32;
-        cmd.prp1 = dma.phys() + OFF_IDENTIFY as u64;
+        cmd.prp1 = dma.device_addr() + OFF_IDENTIFY as u64;
         cmd.cdw10 = 1;
         self.admin(cmd, "Identify Controller")
     }
@@ -434,7 +450,7 @@ impl NvmeController {
         let cid = self.alloc_cid();
         let mut cmd = SqEntry::ZERO;
         cmd.cdw0 = (cid as u32) << 16 | ADMIN_CREATE_IO_CQ as u32;
-        cmd.prp1 = dma.phys() + OFF_IO_CQ as u64;
+        cmd.prp1 = dma.device_addr() + OFF_IO_CQ as u64;
         cmd.cdw10 = ((QUEUE_DEPTH as u32 - 1) << 16) | 1;
         cmd.cdw11 = 1;
         self.admin(cmd, "Create I/O Completion Queue")
@@ -446,7 +462,7 @@ impl NvmeController {
         let cid = self.alloc_cid();
         let mut cmd = SqEntry::ZERO;
         cmd.cdw0 = (cid as u32) << 16 | ADMIN_CREATE_IO_SQ as u32;
-        cmd.prp1 = dma.phys() + OFF_IO_SQ as u64;
+        cmd.prp1 = dma.device_addr() + OFF_IO_SQ as u64;
         cmd.cdw10 = ((QUEUE_DEPTH as u32 - 1) << 16) | 1;
         cmd.cdw11 = (1 << 16) | 1;
         self.admin(cmd, "Create I/O Submission Queue")
@@ -459,7 +475,7 @@ impl NvmeController {
         let mut cmd = SqEntry::ZERO;
         cmd.cdw0 = (cid as u32) << 16 | ADMIN_IDENTIFY as u32;
         cmd.nsid = 1;
-        cmd.prp1 = dma.phys() + OFF_IDENTIFY as u64;
+        cmd.prp1 = dma.device_addr() + OFF_IDENTIFY as u64;
         cmd.cdw10 = 0;
         if !self.admin(cmd, "Identify Namespace") {
             return false;
@@ -504,7 +520,7 @@ impl NvmeController {
 
         let dma = self.dma;
         let pages = total_bytes.div_ceil(4096);
-        let data_phys = dma.phys() + OFF_DATA as u64;
+        let data_phys = dma.device_addr() + OFF_DATA as u64;
 
         let cid = self.alloc_cid();
         let mut cmd = SqEntry::ZERO;
@@ -554,7 +570,7 @@ impl NvmeController {
 
         let dma = self.dma;
         let pages = total_bytes.div_ceil(4096);
-        let data_phys = dma.phys() + OFF_DATA as u64;
+        let data_phys = dma.device_addr() + OFF_DATA as u64;
 
         // Bounds asserted on entry; exclusive, since the write command naming
         // this window has not been submitted yet.
@@ -749,9 +765,21 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
         }
     }
 
+    // An address space of this controller's own, attached before an address is
+    // written to a register. Both isolation actuators mis-program *this*
+    // function's context entry by hand, and attaching it would write a good one
+    // over the staging.
+    let space = if crate::actuator::iommu_context_absent()
+        || crate::actuator::iommu_empty_domain()
+    {
+        crate::iommu::DeviceSpace::Untranslated
+    } else {
+        crate::iommu::DeviceSpace::create()
+    };
     // Leaked, not held in a `static`; allocated after every refusal above so
     // a declined NVMe function costs no physical memory.
-    let dma = DmaPool::alloc(DMA_SIZE).leak();
+    let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
+    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
     const SQ_PAGE: usize = QUEUE_DEPTH * core::mem::size_of::<SqEntry>();
     const CQ_PAGE: usize = QUEUE_DEPTH * core::mem::size_of::<CqEntry>();
     let admin_sq = dma.subview(OFF_ADMIN_SQ, SQ_PAGE);
@@ -761,11 +789,16 @@ pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
 
     dma.subview(OFF_ADMIN_SQ, 4096).zero();
     dma.subview(OFF_ADMIN_CQ, 4096).zero();
+    #[cfg(feature = "boot-actuators")]
+    FOREIGN_PROBE.store(
+        dma.subview(PROBE_OFF, PROBE_LEN).host_phys(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
 
     let aqa = ((QUEUE_DEPTH as u32 - 1) << 16) | (QUEUE_DEPTH as u32 - 1);
     bar.write_u32(REG_AQA, aqa);
-    bar.write_u64(REG_ASQ, dma.phys() + OFF_ADMIN_SQ as u64);
-    bar.write_u64(REG_ACQ, dma.phys() + OFF_ADMIN_CQ as u64);
+    bar.write_u64(REG_ASQ, dma.device_addr() + OFF_ADMIN_SQ as u64);
+    bar.write_u64(REG_ACQ, dma.device_addr() + OFF_ADMIN_CQ as u64);
 
     bar.write_u32(REG_CC, CC_ENABLED);
 

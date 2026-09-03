@@ -1169,6 +1169,47 @@ pub const RELEGATED: &[Relegated] = &[
                  device-side arms have no other gate. Priced at 5,883 ms with two arms; 8,888 \
                  with five, over `FAST_COMMIT_MS`.",
     },
+    Relegated {
+        test: "iommu_domain_isolation",
+        ci_ms: 15_756,
+        why: Why::Cost,
+        guards: "What still runs per pull request: `iommu_empty_domain` and \
+                 `iommu_context_absent` each stage one function below or above its \
+                 context entry and read the unit's fault record off the console, so a \
+                 unit that stopped translating reds there. What only this name holds: \
+                 the four moved drivers' tables walked host-side out of RTADDR to their \
+                 leaves and required pairwise disjoint, a device aimed at another \
+                 driver's pool blocked with its BME read out of ECAM, and the fault \
+                 record's five fields. Two boots and a table walk: 15,756 ms on the \
+                 hosted shard.",
+    },
+    Relegated {
+        test: "iommu_virtio_platform",
+        ci_ms: 17_259,
+        why: Why::Cost,
+        guards: "What still runs per pull request: the two staging gates above boot the \
+                 same machine, so a virtio function created outside the unit is a \
+                 function whose staged fault never arrives — they red on absence. What \
+                 only this name holds: the ACCESS_PLATFORM negotiation asserted per \
+                 function on the unit and no-unit machines, the audio function's \
+                 declared exception, and the NIC declining the bit and losing the \
+                 device. Three boots: 17,259 ms on the hosted shard.",
+    },
+    Relegated {
+        test: "screen_survived_panic_not_blamed",
+        ci_ms: 8_477,
+        why: Why::Cost,
+        guards: "`panic_console::discard_capture` told from a no-op, which is the only reading \
+                 of it there is: one boot survives a panic and then kills the machine, and the \
+                 panel must carry a record written after the first panic's snapshot was frozen \
+                 — which a snapshot the discard failed to drop cannot hold. What still runs per \
+                 pull request: `screen_recoverable_untouched`, which compares two screendumps \
+                 either side of the recovered panic and so holds whether or not the discard did \
+                 anything — measured green on a kernel with `discard_capture` stubbed out — and \
+                 `screen_late_panic`, which covers `capture` and not the discard. So the \
+                 recovery branch's wiring has no other gate. Two guests in one boot: 8,477 ms \
+                 on the hosted shard, over `FAST_COMMIT_MS`.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own
