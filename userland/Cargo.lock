@@ -1058,7 +1058,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1730,7 +1730,7 @@ dependencies = [
  "bitflags 2.11.0",
  "libc",
  "plain",
- "redox_syscall",
+ "redox_syscall 0.7.3",
 ]
 
 [[package]]
@@ -2663,6 +2663,15 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
+version = "0.5.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags 2.11.0",
+]
+
+[[package]]
+name = "redox_syscall"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce70a74e890531977d37e532c34d45e9055d2409ed08ddba14529471ed0be16"
@@ -2931,7 +2940,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3308,10 +3317,10 @@ dependencies = [
 [[package]]
 name = "softbuffer"
 version = "0.4.8"
-source = "git+https://github.com/ToyOSOrg/softbuffer?branch=toyos#c05053e1bfd02d0665569d3a18485b35cc748cb3"
+source = "git+https://github.com/ToyOSOrg/softbuffer?branch=toyos-0.4.8#b6461aebe40648de144ff72ac2d275f04d24dc1d"
 dependencies = [
+ "bytemuck",
  "js-sys",
- "libc",
  "ndk",
  "objc2",
  "objc2-core-foundation",
@@ -3319,7 +3328,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "raw-window-handle",
- "redox_syscall",
+ "redox_syscall 0.5.18",
  "toyos-window",
  "tracing",
  "wasm-bindgen",
@@ -3978,7 +3987,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

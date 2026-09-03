@@ -3,8 +3,9 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use font::Color;
 use rand::Rng;
-use softbuffer::{Context, Pixel, Surface};
+use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
@@ -15,17 +16,18 @@ const CELL: usize = 16;
 const HEADER: usize = 24;
 const TICK: Duration = Duration::from_millis(75);
 
-const BG: Pixel = Pixel::new_rgb(0x1a, 0x1a, 0x2e);
-const GRID_BG: Pixel = Pixel::new_rgb(0x22, 0x22, 0x38);
-const GRID_LINE: Pixel = Pixel::new_rgb(0x28, 0x28, 0x40);
-const SNAKE_HEAD: Pixel = Pixel::new_rgb(0x50, 0xe0, 0x50);
-const SNAKE_BODY: Pixel = Pixel::new_rgb(0x40, 0xb0, 0x40);
-const FOOD: Pixel = Pixel::new_rgb(0xe0, 0x40, 0x40);
-const TEXT: font::Color = font::Color { r: 0xe0, g: 0xe0, b: 0xe8 };
-const DIM: font::Color = font::Color { r: 0x70, g: 0x70, b: 0x80 };
+const BG: Color = Color { r: 0x1a, g: 0x1a, b: 0x2e };
+const GRID_BG: Color = Color { r: 0x22, g: 0x22, b: 0x38 };
+const GRID_LINE: Color = Color { r: 0x28, g: 0x28, b: 0x40 };
+const SNAKE_HEAD: Color = Color { r: 0x50, g: 0xe0, b: 0x50 };
+const SNAKE_BODY: Color = Color { r: 0x40, g: 0xb0, b: 0x40 };
+const FOOD: Color = Color { r: 0xe0, g: 0x40, b: 0x40 };
+const TEXT: Color = Color { r: 0xe0, g: 0xe0, b: 0xe8 };
+const DIM: Color = Color { r: 0x70, g: 0x70, b: 0x80 };
 
-fn pixel_to_font_color(p: Pixel) -> font::Color {
-    font::Color { r: p.r, g: p.g, b: p.b }
+/// softbuffer's pixel is `0x00RRGGBB`.
+const fn packed(c: Color) -> u32 {
+    ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -60,21 +62,21 @@ impl Dir {
 ///
 /// Uses a raw pointer because `Canvas::put_pixel` takes `&self` but we need mutation.
 struct PixelCanvas {
-    ptr: *mut Pixel,
+    ptr: *mut u32,
     width: usize,
     height: usize,
 }
 
 impl PixelCanvas {
-    fn new(pixels: &mut [Pixel], width: usize, height: usize) -> Self {
+    fn new(pixels: &mut [u32], width: usize, height: usize) -> Self {
         Self { ptr: pixels.as_mut_ptr(), width, height }
     }
 }
 
 impl font::Canvas for PixelCanvas {
-    fn put_pixel(&self, x: usize, y: usize, color: font::Color) {
+    fn put_pixel(&self, x: usize, y: usize, color: Color) {
         if x < self.width && y < self.height {
-            unsafe { *self.ptr.add(y * self.width + x) = Pixel::new_rgb(color.r, color.g, color.b) };
+            unsafe { *self.ptr.add(y * self.width + x) = packed(color) };
         }
     }
 }
@@ -194,10 +196,10 @@ impl Game {
     }
 
     fn redraw(&mut self) {
-        let mut buffer = self.surface.next_buffer().unwrap();
+        let mut buffer = self.surface.buffer_mut().unwrap();
         let w = self.width as usize;
         let h = self.height as usize;
-        let pixels = buffer.pixels();
+        let pixels: &mut [u32] = &mut buffer;
 
         fill_rect(pixels, w, h, 0, 0, w, h, BG);
 
@@ -205,8 +207,7 @@ impl Game {
         {
             let score_str = format!("Score: {}", self.score);
             let canvas = PixelCanvas::new(pixels, w, h);
-            let bg_color = pixel_to_font_color(BG);
-            self.font.draw_string(&canvas, 8, 4, &score_str, TEXT, bg_color);
+            self.font.draw_string(&canvas, 8, 4, &score_str, TEXT, BG);
         }
 
         // Grid
@@ -229,7 +230,6 @@ impl Game {
             }
         }
 
-        // Food
         let (fx, fy) = self.food;
         fill_rect(
             pixels, w, h,
@@ -237,7 +237,6 @@ impl Game {
             CELL - 4, CELL - 4, FOOD,
         );
 
-        // Snake
         for (i, &(sx, sy)) in self.snake.iter().enumerate() {
             let color = if i == 0 { SNAKE_HEAD } else { SNAKE_BODY };
             let inset = if i == 0 { 1 } else { 2 };
@@ -256,21 +255,19 @@ impl Game {
             let oy = grid_y + grid_h.saturating_sub(overlay_h) / 2;
             fill_rect(pixels, w, h, ox, oy, overlay_w, overlay_h, BG);
 
-            let bg_color = pixel_to_font_color(BG);
-            let food_color = pixel_to_font_color(FOOD);
             let canvas = PixelCanvas::new(pixels, w, h);
 
             let msg = "GAME OVER";
             let msg_x = ox + overlay_w.saturating_sub(msg.len() * self.font.width()) / 2;
-            self.font.draw_string(&canvas, msg_x, oy + 8, msg, food_color, bg_color);
+            self.font.draw_string(&canvas, msg_x, oy + 8, msg, FOOD, BG);
 
             let score_msg = format!("Score: {}", self.score);
             let sx = ox + overlay_w.saturating_sub(score_msg.len() * self.font.width()) / 2;
-            self.font.draw_string(&canvas, sx, oy + 24, &score_msg, TEXT, bg_color);
+            self.font.draw_string(&canvas, sx, oy + 24, &score_msg, TEXT, BG);
 
             let restart = "Space to restart";
             let rx = ox + overlay_w.saturating_sub(restart.len() * self.font.width()) / 2;
-            self.font.draw_string(&canvas, rx, oy + 40, restart, DIM, bg_color);
+            self.font.draw_string(&canvas, rx, oy + 40, restart, DIM, BG);
         }
 
         buffer.present().unwrap();
@@ -323,13 +320,13 @@ impl Game {
     }
 }
 
-fn fill_rect(pixels: &mut [Pixel], buf_w: usize, buf_h: usize, x: usize, y: usize, w: usize, h: usize, color: Pixel) {
+fn fill_rect(pixels: &mut [u32], buf_w: usize, buf_h: usize, x: usize, y: usize, w: usize, h: usize, color: Color) {
     let x_end = (x + w).min(buf_w);
     let y_end = (y + h).min(buf_h);
     for row in y..y_end {
         let start = row * buf_w + x;
         let end = row * buf_w + x_end;
-        pixels[start..end].fill(color);
+        pixels[start..end].fill(packed(color));
     }
 }
 

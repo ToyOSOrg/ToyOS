@@ -23,11 +23,11 @@ Stages, in order:
 2. **The owner's.** `CARGO_REGISTRY_TOKEN` as a repository secret, then the
    first publish. Until it is there the publish job fails by name on every
    landing, which is the intended noise.
-3. **The forks.** `forks.toml`'s `owed` per fork: winit and softbuffer must
-   name `toyos-window` instead of `window`, and until they do the monorepo does
-   not build — the two are one change across three repositories. Then softbuffer
-   is rebased off master onto v0.4.8 (`forks.toml`'s `rebase`), and every fork
-   whose `pr` says "sendable once … is on crates.io" becomes sendable.
+3. **The forks.** `forks.toml`'s `owed` per fork. softbuffer names
+   `toyos-window` and sits on the v0.4.8 release, and raw-window-handle sits on
+   v0.6.2, so nothing the window path goes through is based on a master any
+   more. Every fork whose `pr` says "sendable once … is on crates.io" becomes
+   sendable.
 4. **Done.** The toolchain is a release a consumer can name, install and link
    with. `toolchain-linux-x86_64-sdk-<toyos-abi's version>` is the tag it pins —
    the SDK version names the ABI, and the toolchain that goes with it carries

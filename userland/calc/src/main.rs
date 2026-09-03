@@ -18,8 +18,8 @@ use std::sync::Arc;
 use calc::app::{enabled, Action, Button, Calc, Mode};
 use calc::num::APPROX;
 use calc::prog;
-use font::Font;
-use softbuffer::{Context, Pixel, Surface};
+use font::{Color, Font};
+use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -45,36 +45,31 @@ const LEFT_COLS: usize = 3;
 /// The longest key face, in characters — what the key type has to fit.
 const KEY_CHARS: i32 = 3;
 
-// --- the palette, snake's ---
+const BG: Color = Color { r: 0x1a, g: 0x1a, b: 0x2e };
+const PANEL: Color = Color { r: 0x22, g: 0x22, b: 0x38 };
+const SUNKEN: Color = Color { r: 0x18, g: 0x18, b: 0x2a };
+const KEY_DIGIT: Color = Color { r: 0x2e, g: 0x2e, b: 0x48 };
+const KEY_OP: Color = Color { r: 0x34, g: 0x34, b: 0x5c };
+const KEY_FN: Color = Color { r: 0x28, g: 0x28, b: 0x40 };
+const KEY_CLEAR: Color = Color { r: 0x4a, g: 0x2c, b: 0x38 };
+const KEY_EQUALS: Color = Color { r: 0x2e, g: 0x6a, b: 0x3a };
+const KEY_ACTIVE: Color = Color { r: 0x40, g: 0xb0, b: 0x40 };
+const HOVER: Color = Color { r: 0x12, g: 0x12, b: 0x18 };
+const PRESSED: Color = Color { r: 0x24, g: 0x24, b: 0x30 };
+const TEXT: Color = Color { r: 0xe0, g: 0xe0, b: 0xe8 };
+const DIM: Color = Color { r: 0x70, g: 0x70, b: 0x80 };
+const OFF: Color = Color { r: 0x4a, g: 0x4a, b: 0x58 };
+const ERROR: Color = Color { r: 0xe0, g: 0x50, b: 0x50 };
 
-const BG: Pixel = Pixel::new_rgb(0x1a, 0x1a, 0x2e);
-const PANEL: Pixel = Pixel::new_rgb(0x22, 0x22, 0x38);
-const SUNKEN: Pixel = Pixel::new_rgb(0x18, 0x18, 0x2a);
-const KEY_DIGIT: Pixel = Pixel::new_rgb(0x2e, 0x2e, 0x48);
-const KEY_OP: Pixel = Pixel::new_rgb(0x34, 0x34, 0x5c);
-const KEY_FN: Pixel = Pixel::new_rgb(0x28, 0x28, 0x40);
-const KEY_CLEAR: Pixel = Pixel::new_rgb(0x4a, 0x2c, 0x38);
-const KEY_EQUALS: Pixel = Pixel::new_rgb(0x2e, 0x6a, 0x3a);
-const KEY_ACTIVE: Pixel = Pixel::new_rgb(0x40, 0xb0, 0x40);
-const HOVER: Pixel = Pixel::new_rgb(0x12, 0x12, 0x18);
-const PRESSED: Pixel = Pixel::new_rgb(0x24, 0x24, 0x30);
-const TEXT: font::Color = font::Color { r: 0xe0, g: 0xe0, b: 0xe8 };
-const DIM: font::Color = font::Color { r: 0x70, g: 0x70, b: 0x80 };
-const OFF: font::Color = font::Color { r: 0x4a, g: 0x4a, b: 0x58 };
-const ERROR: font::Color = font::Color { r: 0xe0, g: 0x50, b: 0x50 };
-
-fn as_font_color(p: Pixel) -> font::Color {
-    font::Color { r: p.r, g: p.g, b: p.b }
-}
-
-fn as_pixel(c: font::Color) -> Pixel {
-    Pixel::new_rgb(c.r, c.g, c.b)
+/// softbuffer's pixel is `0x00RRGGBB`.
+const fn packed(c: Color) -> u32 {
+    ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32
 }
 
 /// Lighten or darken a key, which is what hovering and pressing it look like.
-fn shade(base: Pixel, by: Pixel, up: bool) -> Pixel {
+fn shade(base: Color, by: Color, up: bool) -> Color {
     let mix = |a: u8, b: u8| if up { a.saturating_add(b) } else { a.saturating_sub(b) };
-    Pixel::new_rgb(mix(base.r, by.r), mix(base.g, by.g), mix(base.b, by.b))
+    Color { r: mix(base.r, by.r), g: mix(base.g, by.g), b: mix(base.b, by.b) }
 }
 
 /// Half-open, like every other rectangle in this repository.
@@ -232,23 +227,23 @@ enum Target {
 /// `font::Canvas::put_pixel` takes `&self`, so the buffer is reached through a
 /// raw pointer — snake does the same, for the same reason.
 struct Canvas {
-    ptr: *mut Pixel,
+    ptr: *mut u32,
     width: usize,
     height: usize,
 }
 
 impl Canvas {
-    fn new(pixels: &mut [Pixel], width: usize, height: usize) -> Canvas {
+    fn new(pixels: &mut [u32], width: usize, height: usize) -> Canvas {
         Canvas { ptr: pixels.as_mut_ptr(), width, height }
     }
 
-    fn set(&self, x: i32, y: i32, color: Pixel) {
+    fn set(&self, x: i32, y: i32, color: Color) {
         if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
-            unsafe { *self.ptr.add(y as usize * self.width + x as usize) = color };
+            unsafe { *self.ptr.add(y as usize * self.width + x as usize) = packed(color) };
         }
     }
 
-    fn fill(&self, r: Rect, color: Pixel) {
+    fn fill(&self, r: Rect, color: Color) {
         for row in 0..r.h {
             for col in 0..r.w {
                 self.set(r.x + col, r.y + row, color);
@@ -257,21 +252,21 @@ impl Canvas {
     }
 
     /// A one-pixel outline, which is how a pressed key says so.
-    fn outline(&self, r: Rect, color: Pixel) {
+    fn outline(&self, r: Rect, color: Color) {
         self.fill(Rect { h: 1, ..r }, color);
         self.fill(Rect { y: r.y + r.h - 1, h: 1, ..r }, color);
         self.fill(Rect { w: 1, ..r }, color);
         self.fill(Rect { x: r.x + r.w - 1, w: 1, ..r }, color);
     }
 
-    fn text(&self, f: &Font, x: i32, y: i32, s: &str, fg: font::Color, bg: Pixel) {
+    fn text(&self, f: &Font, x: i32, y: i32, s: &str, fg: Color, bg: Color) {
         if x < 0 || y < 0 {
             return;
         }
-        f.draw_string(self, x as usize, y as usize, s, fg, as_font_color(bg));
+        f.draw_string(self, x as usize, y as usize, s, fg, bg);
     }
 
-    fn text_centred(&self, f: &Font, r: Rect, s: &str, fg: font::Color, bg: Pixel) {
+    fn text_centred(&self, f: &Font, r: Rect, s: &str, fg: Color, bg: Color) {
         let chars = s.chars().count() as i32;
         let x = r.x + (r.w - chars * f.width() as i32) / 2;
         let y = r.y + (r.h - f.height() as i32) / 2;
@@ -280,8 +275,8 @@ impl Canvas {
 }
 
 impl font::Canvas for Canvas {
-    fn put_pixel(&self, x: usize, y: usize, color: font::Color) {
-        self.set(x as i32, y as i32, Pixel::new_rgb(color.r, color.g, color.b));
+    fn put_pixel(&self, x: usize, y: usize, color: Color) {
+        self.set(x as i32, y as i32, color);
     }
 }
 
@@ -447,8 +442,8 @@ impl Ui {
             hover: self.hover,
             pressed: self.pressed,
         };
-        let mut buffer = self.surface.next_buffer().unwrap();
-        let pixels = buffer.pixels();
+        let mut buffer = self.surface.buffer_mut().unwrap();
+        let pixels: &mut [u32] = &mut buffer;
         let canvas = Canvas::new(pixels, w, h);
         canvas.fill(Rect { x: 0, y: 0, w: w as i32, h: h as i32 }, BG);
 
@@ -526,7 +521,7 @@ impl Scene<'_> {
         let caret_x = inner.x + (caret_at - scroll) as i32 * f.width() as i32;
         canvas.fill(
             Rect { x: caret_x, y: inner.y - 2, w: 2, h: f.height() as i32 + 4 },
-            as_pixel(TEXT),
+            TEXT,
         );
         f.height() as i32
     }
@@ -624,7 +619,7 @@ fn is_on(button: &Button, calc: &Calc) -> bool {
     }
 }
 
-fn key_colour(button: &Button) -> Pixel {
+fn key_colour(button: &Button) -> Color {
     match button.action {
         Action::Equals => KEY_EQUALS,
         Action::Clear | Action::Backspace => KEY_CLEAR,
