@@ -957,7 +957,7 @@ pub(in crate::drivers::xhci) fn bind(
     if !bring_up(ctrl, &mut dev) {
         return false;
     }
-    // Machine-wide index: what `usb_storage::open` looks up by and a mount
+    // Machine-wide index: what `usb_storage::handle` looks up by and a mount
     // holds for life, so it must not move when another controller binds or
     // loses a disk.
     let index = super::super::DISKS_BOUND.fetch_add(1, core::sync::atomic::Ordering::Relaxed);

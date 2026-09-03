@@ -150,3 +150,32 @@ complained, and a passing run reports the same line. So on this name the leak
 follows a *deliberately failed* write rather than a raced one — a staged ENOMEM
 the test arranges — which makes it the cheapest reproducer here and the one a
 fix should be measured against.
+
+## A second both-arms pair, with `main` producing both names
+
+**2026-09-03, `rootfs-page-cache` against `dc6342fd`**, one full `--nightly`
+suite at a time on this dev host, five runs — two on the branch, three on the
+base — every one completing in 305-349 s.
+
+| arm | `redirty_mid_flush` | `toybox_cp_volume` | other `ALONE … GREEN` |
+|---|---|---|---|
+| branch | 2 of 2 | 1 of 2, `ALONE … red again` | — |
+| `dc6342fd` | 2 of 3 | 1 of 3, `ALONE … GREEN` | `kill_while_blocked`, `screen_i8042_health`, `log_flush_retry` |
+
+The base arm reproduces both names at the branch's rate, so neither is the
+branch's — which is the first time `main` alone has produced `redirty_mid_flush`
+here.
+
+**The same pair again against `072df47c`, and it takes the USB stall out of the
+story.** One run an arm at 335.8 s and 382.2 s:
+
+| arm | reds, every one in this entry's family |
+|---|---|
+| `rootfs-page-cache` | `toybox_cp_volume`, `redirty_mid_flush`, `fat_backing_revoked`, `ftruncate_flush_race`, `fs_rename_durable` — all five `ALONE … GREEN` |
+| `072df47c` | `toybox_cp_volume`, `log_flush_retry`, `redirty_mid_flush`, `fat_backing_revoked` |
+
+The base run carries **zero** `usb-storage: … no answer in the data phase in
+2000 ms` and reds four of the family anyway, so the stall is one way into the
+class and not the class itself. `ftruncate_flush_race` and `fs_rename_durable`
+are new names for this entry; `main` alone produced four of the family in one
+run, which no earlier pair here had.

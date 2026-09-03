@@ -1107,6 +1107,11 @@ pub enum Profile {
     /// can ever exist. The boot volume rides a second NVMe controller, which
     /// works because userland runs from the initrd.
     MetalNoUsb,
+    /// The machine whose only disk is the internal one, with the boot image on
+    /// it: no xHCI and so no boot stick, and no second namespace either. Every
+    /// other profile takes `/boot` and `/log` off USB, so none of them can ask
+    /// what happens when the boot medium is the device storage already holds.
+    InternalDisk,
     /// metal-sim with the T14's internal xHCI actually populated: the boot
     /// stick plus five more devices, two of them keyboards. The laptop's
     /// controller carries a camera, Bluetooth and a fingerprint reader
@@ -1720,6 +1725,21 @@ impl Profile {
                 storage_bus: "",
                 usb: &[],
                 nvme_bytes: NVME_SMALL,
+                nvme_lba_bytes: NVME_LBA_DEFAULT,
+                usb_disks: &[],
+                hda: &[],
+                iommu: Some(IOMMU_DEFAULT),
+            },
+            // Zero `nvme_bytes` beside an empty `xhci` is the absence of a second disk, not an empty one.
+            Self::InternalDisk => Shape {
+                vga: "std",
+                panel: None,
+                gpu: None,
+                virtio: Virtio::Absent,
+                xhci: &[],
+                storage_bus: "",
+                usb: &[],
+                nvme_bytes: 0,
                 nvme_lba_bytes: NVME_LBA_DEFAULT,
                 usb_disks: &[],
                 hda: &[],

@@ -167,18 +167,16 @@ both before any lock conversion; the order is forced, not preferred.
   What *does* have to convert is `Lock<ProcessData>`, and wall 5 is why.
 
   **Six, and the count above is the xHCI chunk's rather than the machine's.**
-  Checked 2026-08-20: the four are `vfs::VFS`, `fat32_adapter::VOLUMES`,
-  `xhci::XHCI` and `process::ProcessData`, and that is exact for the USB path,
-  because `FatDevice` owns its `Box<dyn BlockDevice>` outright and a FAT read
-  never touches the page cache. The **NVMe** path is
-  `page_cache::BLOCK_CACHE` → `page_cache::BLOCK_DEV` → `NvmeDisk::read_blocks`,
-  and both of those are `sync::Lock`s held across the whole device round trip
-  (`raw_block_read`, `raw_block_write`, `PageCacheGuard::cache_and_dev`; the
-  order is stated in `page_cache.rs` and never reversed). So whoever converts
-  the NVMe wait inherits two more statics, and neither is a leaf: `BLOCK_CACHE`
-  guards a `HashMap` and a slot vector every btree walk touches, and `BLOCK_DEV`
-  guards the `Box<dyn BlockDevice>` whose trait provably cannot carry a park
-  token. Nobody may read "there is no fifth" as a property of the kernel.
+  The USB path is `vfs::VFS` → `fat32_adapter::VOLUMES` → the disk's
+  `block::Handle` → `xhci::XHCI` → `process::ProcessData`; the NVMe path is a
+  `page_cache::Cached`'s own lock → the same kind of handle lock →
+  `NvmeBlockDevice::read_blocks`. A handle lock is held across the whole device
+  round trip, and the order is stated at `block.rs`, `page_cache.rs` and
+  `fat32_adapter.rs` alike. So whoever converts either wait inherits the cache
+  lock, which guards a `HashMap` and a slot vector every btree walk touches, and
+  the handle lock, which guards the `Box<dyn BlockDevice>` whose trait provably
+  cannot carry a park token. Nobody may read "there is no fifth" as a property
+  of the kernel.
 - **A bulk transfer has zero real cancellers once the transfer bound is
   deleted** — the reset-recovery path's only trigger *is* that bound. So the
   largest open decision is a tripwire on the transfer against a budget at the
@@ -487,9 +485,9 @@ and neither is derivable from the rest of this file.
    demand-paging path. **Ruled 2026-08-23: both** — the fault path drops the
    `ProcessData` guard before the fill, and the baseline is read off what each
    trap entry recorded; the ruling is recorded at wall 5. Once done, this makes
-   `fat32_adapter::VOLUMES` and `page_cache::BLOCK_DEV` — the NVMe pair, behind
-   the same wall by the same route — parkable under from the demand-paging
-   path.
+   `fat32_adapter::VOLUMES` and a `block::Handle`'s device lock — the NVMe pair,
+   behind the same wall by the same route — parkable under from the
+   demand-paging path.
 1. **Wall 2's claim on the pool block**, including the teardown half above.
 2. **Wall 1's session.** Its other half — `Await::Transfer` carrying the TRB
    address — is landed; what is left is the borrow chain.
@@ -519,17 +517,17 @@ not name — is now the paragraph under "Four locks convert and there is no
 fifth", and the deadline half of it landed the same day:
 `nvme::Queue::wait_completion` spun with nothing bounding it at all, and now
 takes `drivers/nvme.rs`'s `COMMAND` inside a command and `block::OPERATION`
-between two, exactly as the USB path does. The **conversion** of `BLOCK_CACHE`
-and `BLOCK_DEV` did not land and is not in the list above; it is the NVMe
-chunk's, and it is owed on top of the four.
+between two, exactly as the USB path does. The **conversion** of the cache lock
+and the device handle's did not land and is not in the list above; it is the
+NVMe chunk's, and it is owed on top of the four.
 
-**And it is behind wall 5 by the same route the USB path is**, checked
-2026-08-20 rather than assumed: `file_backing::NvmeBacking::read_page` reaches
-`page_cache::raw_block_read` (`file_backing.rs:126`), which takes `BLOCK_DEV`
-(`page_cache.rs:63`) — and `read_page` is called from
-`process::handle_page_fault` with `Lock<ProcessData>` held. So the pair is not a
-second, independent piece of work that could go first: whatever answers wall 5
-for `VOLUMES` answers it for `BLOCK_DEV`, and whatever does not, does not.
+**And it is behind wall 5 by the same route the USB path is**:
+`file_backing::NvmeBacking::read_page` reaches `Cached::raw_read`
+(`file_backing.rs:123`), which takes the handle's device lock — and `read_page`
+is called from `process::handle_page_fault` with `Lock<ProcessData>` held. So
+the pair is not a second, independent piece of work that could go first:
+whatever answers wall 5 for `VOLUMES` answers it for the device lock, and
+whatever does not, does not.
 
 `drain_zero_handles`'s derived constraint — none of its three drain sites can
 park, so no `on_zero_handles` hook may take a sleep lock — is **untouched by

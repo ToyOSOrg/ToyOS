@@ -107,6 +107,7 @@ mod late_panic {
 
 use crate::mm::paging::MmioPolicy;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use arch::{apic, cpu, idt, pat, percpu, smp, syscall};
 use drivers::{acpi, gop, i8042, ioapic, nvme, pci, serial, virtio_console, virtio_gpu, virtio_net, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
@@ -379,26 +380,37 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // No controller is a configuration, not a failure — same as a missing xHCI, NIC, or sound device.
     // `None` from open_home means a disk exists but isn't ours; both land on tmpfs.
-    let home_volume = match nvme::init(&pci_devices) {
-        Some(mut nvme_dev) => {
-            // Before page_cache takes the device: only here are blocks still addressed in the device's own numbering.
+    let (home_cache, home_volume) = match nvme::init(&pci_devices) {
+        Some(nvme_dev) => {
             let sector_size = nvme_dev.sector_size();
-            gpt::probe(&mut nvme_dev, sector_size);
-            page_cache::init(Box::new(nvme_dev));
-            // Before anything mounts the device: the block the gate reads is one nothing else is touching yet.
-            #[cfg(feature = "boot-actuators")]
-            if actuator::nvme_spent_budget() {
-                nvme_gate::run();
+            let dev = page_cache::instrumented(Box::new(nvme_dev));
+            match block::register(dev) {
+                Some(handle) => {
+                    gpt::probe(&handle, sector_size);
+                    // Before anything mounts the device: the block the gate reads is one nothing else is touching yet.
+                    #[cfg(feature = "boot-actuators")]
+                    if actuator::nvme_spent_budget() {
+                        nvme_gate::run(&handle);
+                    }
+                    #[cfg(feature = "boot-actuators")]
+                    if actuator::nvme_command_silent() {
+                        nvme_gate::silent_command(&handle);
+                    }
+                    let cache = page_cache::init(block::Partition::whole(handle));
+                    // Before `/home` exists: the device blocks it reads back are ones nothing else has written.
+                    #[cfg(feature = "boot-actuators")]
+                    if actuator::page_cache_partition_offset() {
+                        page_cache::partition_offset_selftest(cache.partition().handle());
+                    }
+                    let fs = bcachefs_adapter::open_home(&cache);
+                    (Some(cache), fs)
+                }
+                None => (None, None),
             }
-            #[cfg(feature = "boot-actuators")]
-            if actuator::nvme_command_silent() {
-                nvme_gate::silent_command();
-            }
-            bcachefs_adapter::open_home()
         }
         None => {
             log!("NVMe: no controller on this machine, storage unavailable");
-            None
+            (None, None)
         }
     };
 
@@ -448,9 +460,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // tmpfs when the NVMe device isn't ours to write: persistence is the only difference, so the earlier refusal doesn't cascade.
     use vfs::UserAccess;
-    match home_volume {
-        Some(fs) => vfs::lock().mount("home", Box::new(bcachefs_adapter::BcacheFsAdapter::new(fs)), UserAccess::ReadWrite),
-        None => {
+    match (home_cache.as_ref(), home_volume) {
+        (Some(cache), Some(fs)) => {
+            let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(cache));
+            vfs::lock().mount("home", Box::new(adapter), UserAccess::ReadWrite)
+        }
+        _ => {
             log!("storage: /home is a tmpfs — it will not survive a reboot");
             vfs::lock().mount("home", Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite)
         }
@@ -491,7 +506,15 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     #[cfg(feature = "boot-actuators")]
     if actuator::pc_unbind_selftest() {
-        page_cache::unbind_selftest();
+        match &home_cache {
+            Some(cache) => page_cache::unbind_selftest(cache),
+            None => log!("pc-unbind-selftest: FAIL (this boot has no metadata page cache)"),
+        }
+    }
+    // After every driver has registered: the number under test is one a real device holds.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::block_duplicate_id() {
+        block::duplicate_id_selftest();
     }
 
     let t_devices = clock::nanos_since_boot();

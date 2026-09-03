@@ -149,8 +149,8 @@ impl NvmeQueue {
     /// Wait for the completion at the head of the queue; refuse it unless its
     /// `cid` is `expected`.
     ///
-    /// Bounded by [`COMMAND`]: callers reach this holding `BLOCK_CACHE` and
-    /// `BLOCK_DEV`, so an unbounded wait would wedge a CPU holding both.
+    /// Bounded by [`COMMAND`]: callers reach this holding a page cache's lock
+    /// and this device's, so an unbounded wait would wedge a CPU holding both.
     ///
     /// Reads the entry twice: the predicate read inside `settles` is not the
     /// read consumed below, sound because one command is outstanding at a
@@ -724,7 +724,7 @@ fn rdy_observed(bar: &crate::mm::Mmio) -> bool {
 }
 
 /// Bring up the machine's first NVMe controller; a second is not served,
-/// since `page_cache::init` takes a single `BlockDevice`.
+/// since the one namespace it returns is hardcoded to `DeviceId` 1 below.
 pub fn init(devices: &[PciDevice]) -> Option<NvmeBlockDevice> {
     let pci_dev = *devices.iter().find(|d| d.matches_class(0x01, 0x08, None))?;
     log!("NVMe: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);

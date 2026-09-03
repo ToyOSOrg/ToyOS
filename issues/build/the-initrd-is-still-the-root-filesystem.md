@@ -17,16 +17,32 @@ still carries only `TOYOS-BOOT` and `TOYOS-LOG`.
 Until it lands, the initrd's reserved region stays reserved for the machine's
 whole life.
 
-**Blocked on the page cache owning exactly one device**
-(`issues/build/page-cache-owns-one-device.md`), which is also why a machine
-booting off an internal disk gets neither `/boot` nor `/log`. The work is therefore
-a page-cache change first: a `BlockIO` over an arbitrary `BlockDevice` at a
-partition offset with a cache of its own. Only then the third GPT partition, the
-root GUID in the kernel arguments, and the deletion of the initrd adapter and
-its slice-backed `BlockIO`. Whatever replaces the medium answers to
-`Profile::Metal` first: its defining claim is that it carries no virtio device
-anywhere (`src/qemu.rs`), so a virtio-blk root is not a shape that profile can
+The block layer this needed is built. A block device is a shared handle
+registered under its `DeviceId`, a second device claiming that number is
+refused, every consumer holds a partition view, and one page cache serves one
+(device, partition) — so `PageCacheBlockIO` is a `BlockIO` over any partition of
+any registered device, which is what a root partition needs. A machine whose
+only disk is the internal one now mounts `/boot` and `/log` off it
+(`internal_disk_boot`).
+
+What is left is the partition itself: a third GPT entry `TOYOS-ROOT` carrying
+the image the initrd carries today, in the tree's **current** format — the
+plumbing is format-agnostic and swapping the format is
+`issues/kernel/bcachefs-crate-is-not-bcachefs.md`'s work, not this one; the root
+GUID in the kernel arguments; and the deletion of the initrd adapter and its
+slice-backed `BlockIO`. Whatever replaces the medium answers to `Profile::Metal`
+first, and its defining claim still holds: it carries no virtio device anywhere
+(`tests/common/qemu.rs`), so a virtio-blk root is not a shape that profile can
 take.
+
+**PR 2 also closes an incoherence PR 1 left unreachable.** On an internal-disk
+boot the page cache is opened over the *whole* device while `/boot` and `/log`
+read the same platter through their own eight-block `FatDevice` caches, so the
+two are mutually incoherent by construction. Nothing reaches it today: the only
+cache reader of that device is `open_home`, which reads block 0 and finds a
+GPT'd image foreign, so `/home` is a tmpfs and no cached page ever falls inside
+a FAT partition. Moving the cache onto ROOT is what makes it unrepresentable
+rather than merely unreached.
 
 Two facts worth keeping when the image is next re-costed:
 

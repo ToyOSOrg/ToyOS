@@ -26,7 +26,7 @@ Everything pipe-shaped in the kernel goes through the same static: `create` (`pi
 
 ## Impact, stated at its real size
 
-This is **not** the device-I/O class. The copy is memory-speed and takes no device round trip, so it does not approach `sync::Lock`'s 500,000,000-spin `DEADLOCK` panic (`sync.rs:72-75`) the way `BLOCK_DEV` and `vfs::VFS` do — that class is tracked in `issues/kernel/every-wait-in-this-kernel-is-a-spin.md` and is not what this file is about.
+This is **not** the device-I/O class. The copy is memory-speed and takes no device round trip, so it does not approach `sync::Lock`'s 500,000,000-spin `DEADLOCK` panic (`sync.rs:72-75`) the way a `block::Handle`'s device lock and `vfs::VFS` do — that class is tracked in `issues/kernel/every-wait-in-this-kernel-is-a-spin.md` and is not what this file is about.
 
 What it is: a global lock held with preemption disabled for a stretch that scales with a userland-chosen length up to 2 MiB, on the path that carries every IPC message in the system. The scheduler's own bar for an uninterruptible stretch is `MAX_PASS_NS = 200_000` ns (`toyos-sched/src/cpu.rs:1235`); a 2 MiB copy plus, on first write, a 2 MiB zeroing and a bitmap scan is on the wrong side of that at any plausible memory bandwidth. **The hold time is not measured and that is the first thing owed** — `io-depth-probe` and the `audio_tone` worst-wake instrument are the tools that would price it, the same pair `issues/audio/disk-wait-pins-a-cpu.md` used for the device path.
 

@@ -428,6 +428,288 @@ pub fn home_budget_refusal_retried(
     Ok(())
 }
 
+/// `/boot` and `/log` off the same NVMe device the page cache serves.
+///
+/// The oracle is outside the guest and outside the kernel's FAT32: `logd`'s
+/// file is read off the image by `fatfs` and the volume judged against
+/// fatgen103 by `toyos-fat32-check`, with the guest already halted.
+pub fn internal_disk_boot(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = || BootOptions {
+        profile: qemu::Profile::InternalDisk,
+        boot_image: None,
+        ..Default::default()
+    };
+
+    // The argv is the only place a device's *absence* is visible.
+    let argv = qemu::profile_argv(&options());
+    for banned in ["usb-storage", "nec-usb-xhci", "usb-kbd", "usb-mouse", "usb-tablet"] {
+        if let Some(a) = argv.iter().find(|a| a.contains(banned)) {
+            return Err(format!("{a:?} on the machine whose point is having no USB disk"));
+        }
+    }
+    let controllers: Vec<&String> =
+        argv.iter().filter(|a| a.starts_with("nvme,serial=")).collect();
+    if controllers != ["nvme,serial=bootdisk,id=nvmebootctl,bootindex=0"] {
+        return Err(format!(
+            "the machine's NVMe controllers are {controllers:?} — this profile's whole shape is \
+             one controller, carrying the boot image"
+        ));
+    }
+
+    // Built here, not by `boot_with_options`: the log partition is read back off this exact file.
+    let dir = super::lane::dir();
+    let image = dir.join("internal-disk-boot.img");
+    let bytes = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    std::fs::write(&image, &bytes).map_err(|e| format!("write the boot image: {e}"))?;
+    let (log_start, log_len) = super::volumes::log_extent(&bytes, &image)?;
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { boot_image: Some(image.clone()), ..options() },
+    );
+    let boot = qemu.boot_log().to_string();
+    for bad in ["PANIC:", "panicked at"] {
+        if boot.contains(bad) {
+            return Err(format!("{bad:?} booting off the internal disk\n{boot}"));
+        }
+    }
+
+    // `1` is NVMe's fixed `DeviceId` and the USB range starts at 16, so naming
+    // it is also the assertion that no stick served either mount.
+    for said in [
+        "gpt: device 1 carries the boot partition",
+        "gpt: device 1 carries the log partition",
+        "boot-volume: partition mounted",
+        "log-volume: partition mounted",
+    ] {
+        if !boot.contains(said) {
+            return Err(format!(
+                "the kernel never said {said:?} — a machine booting off its internal disk got \
+                 no /boot and no /log\n{boot}"
+            ));
+        }
+    }
+    if boot.contains("no driver here can open it") {
+        return Err(format!(
+            "the kernel found the partition and had no second handle to the device carrying \
+             it\n{boot}"
+        ));
+    }
+
+    // Down, not killed: the file logd wrote reaches the device on the way out.
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    drop(qemu);
+
+    let after = std::fs::read(&image).map_err(|e| format!("read the boot image back: {e}"))?;
+    let volume = &after[log_start..log_start + log_len];
+    let complaints = toyos_fat32_check::check(volume);
+    if !complaints.is_empty() {
+        return Err(format!(
+            "the log volume the internal-disk boot left behind is not a FAT32 fatgen103 \
+             recognises:\n{}",
+            toyos_fat32_check::describe(&complaints)
+        ));
+    }
+    let (name, on_device) = super::volumes::newest_log(&image, log_start, log_len)?;
+    if on_device.is_empty() {
+        return Err(format!("/log/{name} on the internal disk is empty"));
+    }
+    let text = String::from_utf8_lossy(&on_device);
+    if !text.contains("Boot: complete") {
+        return Err(format!(
+            "/log/{name} is {} bytes off the device and carries no boot record — logd mounted \
+             nothing worth writing to\nit ends: {:?}",
+            on_device.len(),
+            text.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
+        ));
+    }
+
+    let _ = std::fs::remove_file(&image);
+    eprintln!(
+        "  [internal-disk] /boot and /log both off NVMe device 1, and /log/{name} came back \
+         {} bytes through fatfs on a volume fatgen103 has nothing to say about",
+        on_device.len()
+    );
+    Ok(())
+}
+
+/// A write through a page cache whose view does not begin at block 0 lands at
+/// the device's block, not the view's.
+///
+/// The oracle is the NVMe image after the guest has gone: the mark at
+/// `(FIRST + AT) * 4096` and absent at `AT * 4096` is the partition offset in
+/// `BlockKey` and nothing else. A foreign disk, so the kernel refuses to format
+/// it and the probe's one block is the only byte this boot writes to it.
+pub fn page_cache_partition_offset(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `kernel/src/page_cache.rs::offset_probe`.
+    const FIRST: u64 = 3000;
+    const AT: u64 = 7;
+    const MARK: &[u8] = b"TOYOS-PARTITION-OFFSET";
+    const BYTES: u64 = 128 * 1024 * 1024;
+
+    let dir = super::lane::dir();
+    let image = dir.join("partition-offset.img");
+    foreign_disk_image(&image, BYTES);
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            kernel_params: &["pc-partition-offset"],
+            nvme_image: Some(image.clone()),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    for bad in ["PANIC:", "panicked at"] {
+        if boot.contains(bad) {
+            return Err(format!("{bad:?} with the offset probe armed\n{boot}"));
+        }
+    }
+    let verdict = boot
+        .lines()
+        .find(|l| l.contains("pc-partition-offset: "))
+        .ok_or_else(|| format!("the kernel never ran the offset probe:\n{boot}"))?
+        .trim()
+        .to_string();
+    for want in [
+        format!("landed_at_{}=true", FIRST + AT),
+        format!("at_block_{AT}=false"),
+    ] {
+        if !verdict.contains(&want) {
+            return Err(format!(
+                "a cache over a view at +{FIRST} did not write where the view says — {want:?} is \
+                 missing from: {verdict}"
+            ));
+        }
+    }
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    drop(qemu);
+
+    let after = std::fs::read(&image).map_err(|e| format!("read the image back: {e}"))?;
+    let at = |block: u64| {
+        let start = (block * 4096) as usize;
+        after[start..start + MARK.len()].to_vec()
+    };
+    if at(FIRST + AT) != MARK {
+        return Err(format!(
+            "device block {} holds {:?} on the image, not the mark — the offset never reached \
+             the write",
+            FIRST + AT,
+            String::from_utf8_lossy(&at(FIRST + AT))
+        ));
+    }
+    if at(AT) == MARK {
+        return Err(format!(
+            "the mark is at device block {AT} on the image — the view's own block number went to \
+             the device unchanged"
+        ));
+    }
+
+    let _ = std::fs::remove_file(&image);
+    eprintln!("  [offset] {verdict}, and the image agrees off the device");
+    Ok(())
+}
+
+/// The impostor the actuator offers fills every read with its own mark, so a
+/// registry that took it is caught serving that mark for a device it is not.
+pub fn block_duplicate_id(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const PARAMS: &[&str] = &["block-duplicate-id"];
+
+    let qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            kernel_params: PARAMS,
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    for bad in ["PANIC:", "panicked at"] {
+        if boot.contains(bad) {
+            return Err(format!("{bad:?}: refusing a duplicate id must not be fatal\n{boot}"));
+        }
+    }
+
+    let verdict = boot
+        .lines()
+        .find(|l| l.contains("block-duplicate-id: "))
+        .ok_or_else(|| format!("the kernel never staged the duplicate registration:\n{boot}"))?
+        .trim()
+        .to_string();
+
+    // `by_impostor` catches a table whose insert displaces; the count below
+    // catches one that appends. Both naive registries, both silent.
+    for want in [
+        "refused=true",
+        "block 0 served=true",
+        "by_impostor=false",
+    ] {
+        if !verdict.contains(want) {
+            return Err(format!(
+                "a second device claiming a registered number was not refused — {want:?} is \
+                 missing from: {verdict}"
+            ));
+        }
+    }
+    let counts: Vec<&str> = verdict
+        .split("devices ")
+        .nth(1)
+        .unwrap_or_default()
+        .split(", block 0")
+        .next()
+        .unwrap_or_default()
+        .split(" before and ")
+        .collect();
+    match counts.as_slice() {
+        [before, after] if after.trim_end_matches(" after") == *before => {}
+        _ => {
+            return Err(format!(
+                "the device table changed size across a refused registration: {verdict}"
+            ))
+        }
+    }
+    if !boot.contains("Boot: complete") {
+        return Err(format!("the boot did not complete\n{boot}"));
+    }
+
+    eprintln!("  [block] {verdict}");
+    Ok(())
+}
+
 /// A disk image as a bcachefs block device: plain seek-and-read, no cache and
 /// no kernel code.
 struct FileBlocks {

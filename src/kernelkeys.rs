@@ -65,8 +65,8 @@ pub const DECLARED: &[Declared] = &[
     },
     Declared {
         file: "kernel/src/page_cache.rs",
-        ty: "HashMap<u64, u32>",
-        keys: "a device block number, bounded by the device and by the cache's own slot count",
+        ty: "HashMap<BlockKey, u32>",
+        keys: "`block::BlockKey`, minted only by a `Partition` this kernel opened and bounded by that view",
     },
     Declared {
         file: "kernel/src/scheduler.rs",

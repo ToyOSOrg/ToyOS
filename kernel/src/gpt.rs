@@ -6,7 +6,7 @@
 //! to carry the boot partition, since its GUID names a file on that volume.
 //! Nothing here writes.
 
-use crate::block::{BlockDevice, DeviceId};
+use crate::block::{DeviceId, Handle};
 use crate::sync::Lock;
 use toyos_abi::boot::KernelArgs;
 use toyos_gpt::{GptError, Guid, Sectors};
@@ -91,14 +91,14 @@ pub fn log_volume() -> Option<Volume> {
     }
 }
 
-/// Ask one block device whether it carries the boot partition.
-pub fn probe(dev: &mut dyn BlockDevice, lba_bytes: u32) {
-    let id = dev.device_id();
+/// Ask one registered block device whether it carries the boot partition.
+pub fn probe(handle: &Handle, lba_bytes: u32) {
+    let id = handle.device_id();
     let Some(firmware) = boot_partition() else {
         return;
     };
 
-    let mut sectors = DeviceSectors::new(dev, lba_bytes);
+    let mut sectors = DeviceSectors::new(handle, lba_bytes);
     let found = match toyos_gpt::locate(&mut sectors, firmware.guid) {
         Ok(found) => found,
         Err(GptError::NotFound { used_entries }) => {
@@ -199,7 +199,7 @@ fn locate_log(sectors: &mut DeviceSectors<'_>, id: DeviceId, lba_bytes: u32) -> 
 
 /// The kernel's 4 KiB `BlockDevice`, seen in the device's own logical blocks; caches one block.
 struct DeviceSectors<'a> {
-    dev: &'a mut dyn BlockDevice,
+    dev: &'a Handle,
     lba_bytes: u32,
     lbas_per_block: u64,
     cached: Option<u64>,
@@ -207,7 +207,7 @@ struct DeviceSectors<'a> {
 }
 
 impl<'a> DeviceSectors<'a> {
-    fn new(dev: &'a mut dyn BlockDevice, lba_bytes: u32) -> Self {
+    fn new(dev: &'a Handle, lba_bytes: u32) -> Self {
         // Zero when lba_bytes doesn't divide 4096; that fails every read cleanly.
         let lbas_per_block = if lba_bytes != 0 && 4096 % lba_bytes == 0 {
             (4096 / lba_bytes) as u64
@@ -243,7 +243,7 @@ impl Sectors for DeviceSectors<'_> {
         if self.cached != Some(block) {
             // Must clear `cached` on a failed read too, or the buffer's previous block
             // looks valid for the next LBA in this block.
-            if self.dev.read_blocks(block, 1, &mut self.buf).is_err() {
+            if self.dev.lock().read_blocks(block, 1, &mut self.buf).is_err() {
                 self.cached = None;
                 return false;
             }
