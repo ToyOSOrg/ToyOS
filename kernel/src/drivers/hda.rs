@@ -397,8 +397,12 @@ pub fn init(devices: &[PciDevice]) {
     let stream_offset = STREAM_BASE + stream_index as u64 * STREAM_STRIDE;
     let stream = regs.subregion(stream_offset, STREAM_STRIDE);
 
-    let bdl = super::DmaPool::alloc(PERIODS * 16);
-    let pcm = super::DmaPool::alloc(PERIODS * PERIOD_BYTES);
+    // An address space of this controller's own, holding these two pools and
+    // nothing else; attached before `SD_BDPL` tells the device an address.
+    let space = crate::iommu::DeviceSpace::create();
+    let bdl = super::DmaPool::alloc_in(PERIODS * 16, space);
+    let pcm = super::DmaPool::alloc_in(PERIODS * PERIOD_BYTES, space);
+    space.attach(pci.bus, pci.dev, pci.func);
     // Unaligned: the descriptor layout is the HDA specification's (§3.6.2), not a Rust one.
     let bdl_view = bdl.view().unaligned();
     let pcm_view = pcm.view();

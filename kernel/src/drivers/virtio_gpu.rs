@@ -4,6 +4,7 @@ use super::pci::PciDevice;
 use super::virtio::{BufDir, DescSlot, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
 use super::DmaPool;
 use toyos_abi::syscall::SyscallError;
+use crate::iommu::DeviceSpace;
 use crate::mm::{Dma, Unaligned, PAGE_2M};
 use crate::gpu::{FLAG_HARDWARE_CURSOR, Gpu, GpuInfo};
 use crate::log;
@@ -168,15 +169,55 @@ struct RespEdid {
     edid: [u8; 1024],
 }
 
+/// Pages the device can reach, for as long as it may reach them.
+///
+/// The device address is a property of the attachment and not of the pages: a
+/// `Region`'s `Arc<Pages>` outlives every scanout it was ever used for, so
+/// unmapping on the pages' last drop would leave the device scanning out an
+/// address the unit no longer translates.
+struct AttachedBacking {
+    space: DeviceSpace,
+    at: u64,
+    bytes: u64,
+}
+
+impl AttachedBacking {
+    /// A domain this kernel cannot map into is a kernel bug: the address is the
+    /// allocator's own and the pages are whole 2 MiB frames.
+    fn take(space: DeviceSpace, phys: u64, bytes: u64) -> Self {
+        let at = space.map(phys, bytes).unwrap_or_else(|why| panic!("VirtIO GPU: {why}"));
+        Self { space, at, bytes }
+    }
+}
+
+impl Drop for AttachedBacking {
+    fn drop(&mut self) {
+        self.space
+            .unmap(self.at, self.bytes)
+            .unwrap_or_else(|why| panic!("VirtIO GPU: {why}"));
+    }
+}
+
 /// Ref-counted scanout pages: a resolution change drops this without forcing
 /// existing holders (e.g. a compositor) to unmap.
 struct FbAlloc {
     regions: [Region; 2],
-    phys_addrs: [u64; 2],
+    /// `regions[0]`'s attachment. `regions[1]` is the compositor's other
+    /// buffer and is never given to the device, so it is never mapped.
+    /// `None` only for the placeholder `init` builds before it has a display.
+    backing: Option<AttachedBacking>,
+}
+
+impl FbAlloc {
+    fn device_addr(&self) -> u64 {
+        self.backing.as_ref().expect("VirtIO GPU: a framebuffer the device was never given").at
+    }
 }
 
 struct GpuController {
     device: VirtioDevice,
+    /// Everything this display may reach, and nothing else.
+    space: DeviceSpace,
     controlq: Virtqueue<'static>,
     cursorq: Virtqueue<'static>,
     control_slot: Option<DescSlot>,
@@ -193,6 +234,8 @@ struct GpuController {
     resource: u32,
     fb: FbAlloc,
     cursor: Region,
+    /// The cursor's attachment, taken once and held for the life of the display.
+    cursor_backing: Option<AttachedBacking>,
 }
 
 impl GpuController {
@@ -265,6 +308,13 @@ impl GpuController {
     }
 
     fn attach_backing(&mut self, id: u32, addr: u64, len: u32) {
+        let resp = self.attach_backing_answering(id, addr, len);
+        assert!(resp == RESP_OK_NODATA, "VirtIO GPU: RESOURCE_ATTACH_BACKING failed: {:#x}", resp);
+    }
+
+    /// The response rather than an assertion on it, so the actuator below can
+    /// hand the device an address the unit blocks and still say what happened.
+    fn attach_backing_answering(&mut self, id: u32, addr: u64, len: u32) -> u32 {
         // Variable-length payload: header followed by mem_entry array, written
         // consecutively.
         let cmd = ResourceAttachBacking {
@@ -291,8 +341,7 @@ impl GpuController {
             0,
         ));
 
-        let resp = self.answer::<CtrlHeader>().cmd_type;
-        assert!(resp == RESP_OK_NODATA, "VirtIO GPU: RESOURCE_ATTACH_BACKING failed: {:#x}", resp);
+        self.answer::<CtrlHeader>().cmd_type
     }
 
     fn set_scanout(&mut self, scanout: u32, resource: u32, rect: Rect) {
@@ -374,7 +423,6 @@ impl GpuController {
         let fb_size = fb_size as usize;
         let fb_pages = fb_size.div_ceil(PAGE_2M as usize);
         let fb_aligned = (fb_pages * PAGE_2M as usize) as u64;
-        let mut phys_addrs = [0u64; 2];
         let all_pages =
             [crate::mm::pmm::alloc_contiguous(fb_pages, crate::mm::pmm::Category::Framebuffer)?,
              crate::mm::pmm::alloc_contiguous(fb_pages, crate::mm::pmm::Category::Framebuffer)?];
@@ -387,14 +435,39 @@ impl GpuController {
                 pages: Some(alloc::sync::Arc::new(Pages::new(pages))),
             }
         });
-        for i in 0..2 {
-            phys_addrs[i] = regions[i].phys.phys();
-            log!(
-                "VirtIO GPU: buffer {} at {:?} phys={:#x} ({} bytes)",
-                i, regions[i].phys.as_mut_ptr::<u8>(), phys_addrs[i], fb_size
-            );
-        }
-        Some(FbAlloc { regions, phys_addrs })
+        let backing = AttachedBacking::take(self.space, regions[0].phys.phys(), fb_aligned);
+        log!(
+            "VirtIO GPU: scanout buffer at {:?} phys={:#x} device={:#x} ({} bytes)",
+            regions[0].phys.as_mut_ptr::<u8>(),
+            regions[0].phys.phys(),
+            backing.at,
+            fb_size
+        );
+        Some(FbAlloc { regions, backing: Some(backing) })
+    }
+
+    /// Hand the device a scanout backing in another driver's pool, by its
+    /// *physical* address, which this display's own domain does not map.
+    ///
+    /// The answer is logged rather than asserted: the unit's fault halts every
+    /// CPU from the handler, so which of the halt and the response arrives
+    /// first is a race, and only one of the two outcomes is a passing gate.
+    #[cfg(feature = "boot-actuators")]
+    fn attach_a_foreign_backing(&mut self) {
+        let foreign =
+            super::nvme::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
+        assert!(foreign != 0, "VirtIO GPU: this machine staged no foreign pool to aim at");
+        self.resource += 1;
+        self.create_resource(self.resource, FORMAT_B8G8R8X8_UNORM, CURSOR_SIZE, CURSOR_SIZE);
+        let resp = self.attach_backing_answering(
+            self.resource,
+            foreign,
+            super::nvme::PROBE_LEN as u32,
+        );
+        log!(
+            "VirtIO GPU: a backing at {foreign:#x}, inside another driver's pool, was answered \
+             {resp:#x} (actuator)"
+        );
     }
 
     fn build_gpu_info(&self) -> GpuInfo {
@@ -453,14 +526,17 @@ impl Gpu for GpuController {
         let old_resource = self.resource;
         self.resource += 1;
         self.create_resource(self.resource, FORMAT_B8G8R8X8_UNORM, width, height);
-        self.attach_backing(self.resource, new_fb.phys_addrs[0], fb_size);
+        self.attach_backing(self.resource, new_fb.device_addr(), fb_size);
 
         let rect = Rect { x: 0, y: 0, width, height };
         self.set_scanout(0, self.resource, rect);
 
+        // Every command above went through the control queue's used ring, so
+        // the device has acknowledged the new scanout before the old backing's
+        // address stops translating on the line below.
         self.destroy_resource(old_resource);
         // Old pages free only when the last holder drops them; nothing is
-        // force-revoked.
+        // force-revoked. The old attachment ends here whatever holds the pages.
         drop(core::mem::replace(&mut self.fb, new_fb));
 
         self.width = width;
@@ -486,8 +562,13 @@ fn fb_size_bytes(width: u32, height: u32) -> Option<u32> {
 pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     let pci_dev = *devices.iter().find(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_GPU_DEVICE))?;
     log!("VirtIO GPU: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
+    // An address space of this display's own, holding the command pool and
+    // whatever backing is attached at the time and nothing else.
+    let space = DeviceSpace::create();
     // Leaked rather than held in a `static`: the display is never unbound.
-    let dma = DmaPool::alloc(DMA_SIZE).leak();
+    let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
+    // Before the device is told any address, and after the command pool's mapping.
+    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_GPU_F_EDID) {
         Ok(device) => device,
@@ -521,6 +602,7 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
 
     let mut gpu = GpuController {
         device,
+        space,
         controlq,
         cursorq,
         control_slot: Some(control_slot),
@@ -532,11 +614,9 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
         width: 0,
         height: 0,
         resource: 1,
-        fb: FbAlloc {
-            regions: core::array::from_fn(|_| Region::empty()),
-            phys_addrs: [0; 2],
-        },
+        fb: FbAlloc { regions: core::array::from_fn(|_| Region::empty()), backing: None },
         cursor: Region::empty(),
+        cursor_backing: None,
     };
 
     // EDID's reported resolution is often a stale firmware default; the
@@ -561,7 +641,7 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     gpu.fb = gpu.alloc_framebuffer(fb_size).expect("VirtIO GPU: framebuffer alloc failed");
 
     gpu.create_resource(gpu.resource, FORMAT_B8G8R8X8_UNORM, width, height);
-    gpu.attach_backing(gpu.resource, gpu.fb.phys_addrs[0], fb_size);
+    gpu.attach_backing(gpu.resource, gpu.fb.device_addr(), fb_size);
 
     let rect = Rect { x: 0, y: 0, width, height };
     gpu.set_scanout(0, gpu.resource, rect);
@@ -576,12 +656,24 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
         cache: CachePolicy::DeferToMtrr,
         pages: Some(alloc::sync::Arc::new(Pages::new(cursor_pages))),
     };
+    let cursor_backing = AttachedBacking::take(space, cursor_phys, PAGE_2M);
     gpu.create_resource(CURSOR_RESOURCE_ID, FORMAT_B8G8R8A8_UNORM, CURSOR_SIZE, CURSOR_SIZE);
-    gpu.attach_backing(CURSOR_RESOURCE_ID, cursor_phys, cursor_bytes as u32);
-    log!("VirtIO GPU: cursor resource at {:?} phys={:#x}", cursor_ptr, cursor_phys);
+    gpu.attach_backing(CURSOR_RESOURCE_ID, cursor_backing.at, cursor_bytes as u32);
+    log!(
+        "VirtIO GPU: cursor resource at {:?} phys={:#x} device={:#x}",
+        cursor_ptr,
+        cursor_phys,
+        cursor_backing.at
+    );
+    gpu.cursor_backing = Some(cursor_backing);
 
     gpu.width = width;
     gpu.height = height;
+
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_gpu_foreign_backing() {
+        gpu.attach_a_foreign_backing();
+    }
 
     let info = gpu.build_gpu_info();
 
