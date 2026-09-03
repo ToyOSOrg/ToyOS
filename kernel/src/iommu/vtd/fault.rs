@@ -1,11 +1,19 @@
 //! Vt-d fault interrupt handling: MSI-delivered, never polled.
 //!
-//! The handler is bounded, allocates nothing and takes no lock; unit state
-//! lives in a fixed array of atomics, written once before the mask comes off.
-//! Every stream is kernel-owned, so a fault halts the machine.
+//! The handler is bounded, allocates nothing and takes no lock; unit and
+//! function state lives in fixed arrays of atomics, written once before the
+//! mask comes off. Every stream is kernel-owned, so the terminal action is a
+//! halt — but it is the last thing that happens rather than the first. Before
+//! it: Bus Master Enable cleared on the function that faulted, the first record
+//! latched whole, and a count kept per unit and per function. Clearing `BME` is
+//! also the ceiling on a storm, since a function that cannot master the bus
+//! cannot raise a second fault (PCI 3.0 §6.2.2, bit 2 of `COMMAND`). The
+//! reschedule handoff has nothing to hand to while the terminal action is a
+//! halt, and lands with the process-kill arm that gives it one.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use crate::drivers::pci::{self, PciDevice};
 use crate::iommu::StreamId;
 use crate::mm::{DirectMap, Mmio};
 
@@ -36,17 +44,101 @@ struct FaultUnit {
     // Offset of the first fault recording register within the window (CAP.FRO).
     records: AtomicU64,
     count: AtomicU32,
+    // Faults this unit has reported for the life of the boot.
+    faults: AtomicU32,
 }
 
 impl FaultUnit {
     // EMPTY is copied per use and never written; every real write goes
     // through `UNITS[index]`, the static.
     #[allow(clippy::declare_interior_mutable_const)]
-    const EMPTY: Self =
-        Self { regs: AtomicU64::new(0), records: AtomicU64::new(0), count: AtomicU32::new(0) };
+    const EMPTY: Self = Self {
+        regs: AtomicU64::new(0),
+        records: AtomicU64::new(0),
+        count: AtomicU32::new(0),
+        faults: AtomicU32::new(0),
+    };
 }
 
 static UNITS: [FaultUnit; MAX_UNITS] = [const { FaultUnit::EMPTY }; MAX_UNITS];
+
+/// Functions the handler can act on; a machine with more is told, and the ones
+/// past it keep bus mastering through a fault.
+const MAX_FUNCTIONS: usize = 64;
+
+/// A requester id no `StreamId::pci` produces: bus/device/function is sixteen bits.
+const NO_FUNCTION: u32 = u32::MAX;
+
+/// One enumerated function, published before any unit is armed.
+struct Function {
+    // `NO_FUNCTION` while the slot is free; a requester id once taken.
+    who: AtomicU32,
+    config: AtomicU64,
+    domain: AtomicU32,
+    // Faults the unit has reported against it; non-zero is the per-domain flag.
+    faults: AtomicU32,
+}
+
+impl Function {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const EMPTY: Self = Self {
+        who: AtomicU32::new(NO_FUNCTION),
+        config: AtomicU64::new(0),
+        domain: AtomicU32::new(0),
+        faults: AtomicU32::new(0),
+    };
+}
+
+static FUNCTIONS: [Function; MAX_FUNCTIONS] = [const { Function::EMPTY }; MAX_FUNCTIONS];
+
+/// The first fault this machine took, whole: what a later one says is decided
+/// by what the first one already broke.
+struct FirstFault {
+    who: AtomicU32,
+    address: AtomicU64,
+    reason: AtomicU32,
+    unit: AtomicU32,
+}
+
+static FIRST: FirstFault = FirstFault {
+    who: AtomicU32::new(NO_FUNCTION),
+    address: AtomicU64::new(0),
+    reason: AtomicU32::new(0),
+    unit: AtomicU32::new(0),
+};
+
+/// Every function this machine enumerated, before any unit is armed: the
+/// handler reaches a faulting function's config space through this, with no lock.
+pub fn describe(devices: &[PciDevice]) {
+    for (slot, device) in FUNCTIONS.iter().zip(devices) {
+        let stream = StreamId::pci(device.bus, device.dev, device.func);
+        slot.config.store(
+            DirectMap::phys_of(device.config_window().addr() as *const u8),
+            Ordering::Relaxed,
+        );
+        // Last, with Release: `who` is what the handler tests, so `config` must
+        // already be visible to whoever sees it.
+        slot.who.store(u32::from(stream.requester()), Ordering::Release);
+    }
+    if devices.len() > MAX_FUNCTIONS {
+        log!(
+            "iommu: {} functions enumerated, past the {MAX_FUNCTIONS} the fault handler can \
+             stop — the rest keep bus mastering through a fault",
+            devices.len()
+        );
+    }
+}
+
+/// Record which domain a function moved to, for the flag the handler sets.
+pub fn attached(stream: StreamId, domain: u16) {
+    if let Some(slot) = find(u32::from(stream.requester())) {
+        slot.domain.store(u32::from(domain), Ordering::Relaxed);
+    }
+}
+
+fn find(requester: u32) -> Option<&'static Function> {
+    FUNCTIONS.iter().find(|f| f.who.load(Ordering::Acquire) == requester)
+}
 
 /// A unit's fault-record location and count: `CAP.FRO` and `CAP.NFR`.
 #[derive(Clone, Copy)]
@@ -86,11 +178,18 @@ pub fn arm(index: usize, regs: Mmio, found: Records, vector: u8) {
     regs.write_u32(FECTL_REG, 0);
 }
 
+const CONFIG_WINDOW: u64 = crate::mm::PAGE_SIZE;
+
 // The window an armed unit's registers live in, from the address `arm` published.
 fn window(phys: u64) -> Mmio {
-    // SAFETY: `phys` was mapped at boot by `vtd::window`/`paging::map_mmio`,
-    // REGISTER_WINDOW-sized and never unmapped.
-    unsafe { Mmio::over_phys(DirectMap::from_phys(phys), REGISTER_WINDOW) }
+    window_of(phys, REGISTER_WINDOW)
+}
+
+fn window_of(phys: u64, size: u64) -> Mmio {
+    // SAFETY: `phys` came from `DirectMap::phys_of` over a window
+    // `paging::map_mmio` produced at boot and never unmapped, `size` bytes wide;
+    // this is the same window read back.
+    unsafe { Mmio::over_phys(DirectMap::from_phys(phys), size) }
 }
 
 /// The unit raised its fault event.
@@ -113,7 +212,6 @@ pub fn service() {
         // capture() puts the fault on the panel before the halt takes the
         // machine down.
         crate::drivers::panic_console::capture();
-        // Not clearing Bus Master Enable on the offending device: halting every CPU right after makes it unobservable.
         crate::arch::apic::halt_all_cpus();
     }
     crate::arch::apic::eoi();
@@ -142,10 +240,23 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
             (high & 0x7) as u8,
         );
         let reason = ((high >> 32) & 0xFF) as u8;
+        let address = regs.read_u64(record) & !0xFFF;
+        // First, before anything that can be slow or say no: a function that
+        // cannot master the bus raises no second fault, which is the whole of
+        // the ceiling on a storm.
+        let stopped = stop(stream);
+        let seen_here = note(stream);
+        latch(index, stream, address, reason);
+        let count = UNITS[index].faults.fetch_add(1, Ordering::Relaxed) + 1;
         log!(
-            "iommu: DMA FAULT unit{index} stream={stream} addr={:#018x} access={} reason={reason:#04x} {}",
-            regs.read_u64(record) & !0xFFF,
+            // The reason's name is the last word: every gate takes it from there.
+            "iommu: DMA FAULT unit{index} stream={stream} addr={address:#018x} access={} \
+             reason={reason:#04x} domain={} bme={} unitfaults={count} streamfaults={seen_here} \
+             first={} {}",
             if high & (1u64 << 62) != 0 { "read" } else { "write" },
+            blamed(stream),
+            if stopped { "cleared" } else { "unknown-function" },
+            yn(FIRST.who.load(Ordering::Relaxed) == u32::from(stream.requester())),
             reason_name(reason),
         );
         clear_record(regs, record);
@@ -157,6 +268,75 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
 
 fn clear_record(regs: Mmio, record: u64) {
     regs.write_u32(record + 12, RECORD_FAULT);
+}
+
+/// Clear Bus Master Enable on whoever faulted; `false` where this machine
+/// enumerated no function with that requester id, and the line says so.
+fn stop(stream: StreamId) -> bool {
+    let Some(slot) = find(u32::from(stream.requester())) else {
+        return false;
+    };
+    let config = slot.config.load(Ordering::Relaxed);
+    pci::stop_bus_mastering(window_of(config, CONFIG_WINDOW));
+    true
+}
+
+fn note(stream: StreamId) -> u32 {
+    find(u32::from(stream.requester()))
+        .map_or(0, |slot| slot.faults.fetch_add(1, Ordering::Relaxed) + 1)
+}
+
+/// What the handler can say about the faulting function's address space. The
+/// middle answer is deliberately weak: a function the kernel never attached
+/// carries domain id 0 whether it sits on the identity domain or on one an
+/// actuator bound by hand, so the label claims only that nothing recorded one.
+enum Blamed {
+    Own(u32),
+    Unrecorded,
+    Unknown,
+}
+
+impl core::fmt::Display for Blamed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Own(id) => write!(f, "{id}"),
+            Self::Unrecorded => write!(f, "unrecorded"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+fn blamed(stream: StreamId) -> Blamed {
+    match find(u32::from(stream.requester())) {
+        None => Blamed::Unknown,
+        Some(slot) => match slot.domain.load(Ordering::Relaxed) {
+            0 => Blamed::Unrecorded,
+            id => Blamed::Own(id),
+        },
+    }
+}
+
+/// Take the first fault whole, once: a second finds `who` taken and leaves it.
+fn latch(unit: usize, stream: StreamId, address: u64, reason: u8) {
+    let taken = FIRST.who.compare_exchange(
+        NO_FUNCTION,
+        u32::from(stream.requester()),
+        Ordering::AcqRel,
+        Ordering::Relaxed,
+    );
+    if taken.is_ok() {
+        FIRST.address.store(address, Ordering::Relaxed);
+        FIRST.reason.store(u32::from(reason), Ordering::Relaxed);
+        FIRST.unit.store(unit as u32, Ordering::Relaxed);
+    }
+}
+
+fn yn(v: bool) -> char {
+    if v {
+        'y'
+    } else {
+        'n'
+    }
 }
 
 // Only reasons where Linux's dma_remap_fault_reasons and QEMU's VTD_FR_*

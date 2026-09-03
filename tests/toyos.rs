@@ -1012,6 +1012,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
+    ("iommu_virtio_platform", Sched::Parallel, Tier::Nightly),
+    ("iommu_domain_isolation", Sched::Parallel, Tier::Nightly),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -8812,6 +8814,12 @@ fn run_machine_test(
         "iommu_interrupt_remapping" => {
             common::iommu::iommu_interrupt_remapping(test_config, c_bins, rust_bins)
         }
+        "iommu_virtio_platform" => {
+            common::iommu::iommu_virtio_platform(test_config, c_bins, rust_bins)
+        }
+        "iommu_domain_isolation" => {
+            common::iommu::iommu_domain_isolation(test_config, c_bins, rust_bins)
+        }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
         "hda_client_stall" => common::hda::hda_client_stall(test_config, c_bins, rust_bins),
@@ -12902,7 +12910,9 @@ fn run_machine_test(
                 ..Default::default()
             };
             let argv = qemu::profile_argv(&options);
-            if !argv.windows(2).any(|w| w[0] == "-device" && w[1] == "virtio-gpu-pci") {
+            // Prefix, not equality: a virtio function on a machine with a unit
+            // carries `iommu_platform=on` behind its name.
+            if !argv.windows(2).any(|w| w[0] == "-device" && w[1].starts_with("virtio-gpu-pci")) {
                 return Err(format!("the profile stages no virtio-gpu: {argv:?}"));
             }
             // A `-vga` adapter beside it is a second display, and firmware
