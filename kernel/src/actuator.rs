@@ -194,6 +194,9 @@ actuators! {
     /// Blind init's read of the reset handshake, staging virtio devices that never answer; the console — the staged boot's capture channel — is spared.
     virtio_reset_stuck = "virtio-reset-stuck";
 
+    /// Withhold `VIRTIO_F_ACCESS_PLATFORM` from every virtio device but the console, staging a function whose addresses the unit never translates.
+    virtio_no_access_platform = "virtio-no-access-platform";
+
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
 
@@ -274,6 +277,9 @@ actuators! {
 
     /// Give it a present context entry naming an empty second-level table, distinct from an absent context: passthrough would fault identically to the row above.
     iommu_empty_domain = "iommu-empty-domain";
+
+    /// Point the NIC's first RX buffer at the physical bytes NVMe's admin completion queue page ends with — an address in another driver's pool, which the NIC's own domain does not map.
+    iommu_nic_foreign_dma = "iommu-nic-foreign-dma";
 
     /// Point every device MSI at APIC 1 rather than 0 — the only way to tell the
     /// two remapping-entry destination encodings apart, since 0 encodes alike in both.

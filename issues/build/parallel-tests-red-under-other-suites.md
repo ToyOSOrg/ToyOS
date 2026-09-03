@@ -477,3 +477,15 @@ ends on `GUEST_QUIET` silence — so a still-progressing `smp:2` guest ("still
 talking 1s ago") is called wedged the moment its budgeted wall clock passes;
 making that total silence-aware would catch the `smp:2` case the `vcpus/cores`
 factor cannot.
+
+**`launcher_refusals` has a second red mode, and it is not a wall-clock guard.**
+Twice in one session on 2026-09-03, in the wide phase beside two other
+worktrees' suites, it exited 101 with an assertion rather than a timeout: `16
+more refused launches left more live objects behind: [("PipeWrite", 0, 1),
+("Connection", 0, 1)] … init is keeping the handles a refusal took`, byte-identical
+both times, in 4 s and 5 s — nowhere near the 192 s ceiling the paragraph above
+describes. `ALONE: GREEN` both times, and green again when re-run alone by hand
+(3 s, 2 s). So the name flakes for two different reasons and only one of them
+is the ceiling this section corrects; what a contended host does to `/bin/init`'s
+handle accounting on a *refused* launch is not explained here, and nobody has a
+mechanism for it. `src/redlist.rs` carries the sighting.

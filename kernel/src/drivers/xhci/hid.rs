@@ -95,7 +95,7 @@ impl HidDevice {
 
     pub fn requeue(&mut self, db_base: &Mmio) {
         let mut trb = Trb::ZERO;
-        trb.param = self.report.phys();
+        trb.param = self.report.device_addr();
         trb.status = self.report_size;
         trb.control = TRB_NORMAL | (1 << 5); // IOC
         self.int_ring.enqueue(trb);

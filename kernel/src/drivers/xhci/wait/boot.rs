@@ -309,9 +309,14 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
     }
     log!("xHCI: controller reset");
 
+    // An address space of this controller's own, holding one pool and nothing
+    // else; attached before the first address is written to a register.
+    let space = crate::iommu::DeviceSpace::create();
     // After the reset: a controller refused above never allocates, and
-    // `DmaPool` frees the pool on every refusal below when it drops.
-    let pool = DmaPool::alloc(layout.pool_size);
+    // `DmaPool` frees the pool — and takes it back out of the domain — on every
+    // refusal below when it drops.
+    let pool = DmaPool::alloc_in(layout.pool_size, space);
+    space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     // MaxSlotsEn caps what this driver can track; the controller then refuses
     // Enable Slot past it.
@@ -323,32 +328,32 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
 
         if layout.scratch_count > 0 {
             for i in 0..layout.scratch_count {
-                let buf = dma.phys() + (layout.scratch_buffers + i * PAGE) as u64;
+                let buf = dma.device_addr() + (layout.scratch_buffers + i * PAGE) as u64;
                 // Must run before DCBAA[0] is written below: that's what tells
                 // the controller the scratchpad array exists.
                 dma.write::<u64>(layout.scratch_array + i * core::mem::size_of::<u64>(), buf);
             }
             // DCBAA slot 0 is the scratchpad array pointer, not a device context.
-            super::super::write_dcbaa(dma, 0, dma.phys() + layout.scratch_array as u64);
+            super::super::write_dcbaa(dma, 0, dma.device_addr() + layout.scratch_array as u64);
             log!("xHCI: {} scratchpad buffers configured", layout.scratch_count);
         }
 
-        op_base.write_u64(OP_DCBAAP, dma.phys() + OFF_DCBAA as u64);
+        op_base.write_u64(OP_DCBAAP, dma.device_addr() + OFF_DCBAA as u64);
 
         // CRCR bit 0 is RCS; the pointer is 64-byte aligned so `| 1` only sets
         // that bit (xHCI 1.2 §5.4.5).
-        op_base.write_u64(OP_CRCR, (dma.phys() + OFF_CMD_RING as u64) | 1);
+        op_base.write_u64(OP_CRCR, (dma.device_addr() + OFF_CMD_RING as u64) | 1);
 
         // Must be written before IR0_ERSTBA below: that's what gives the
         // controller the table's address.
         dma.write::<ErstEntry>(OFF_ERST, ErstEntry {
-            ring_base: dma.phys() + OFF_EVT_RING as u64,
+            ring_base: dma.device_addr() + OFF_EVT_RING as u64,
             ring_size: RING_SIZE as u32,
             _reserved: 0,
         });
         rt_base.write_u32(IR0_ERSTSZ, 1);
-        rt_base.write_u64(IR0_ERDP, dma.phys() + OFF_EVT_RING as u64);
-        rt_base.write_u64(IR0_ERSTBA, dma.phys() + OFF_ERST as u64);
+        rt_base.write_u64(IR0_ERDP, dma.device_addr() + OFF_EVT_RING as u64);
+        rt_base.write_u64(IR0_ERSTBA, dma.device_addr() + OFF_ERST as u64);
 
         rt_base.write_u32(IR0_IMOD, 0);
         rt_base.write_u32(IR0_IMAN, 3);

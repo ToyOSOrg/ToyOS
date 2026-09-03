@@ -212,8 +212,8 @@ impl GpuController {
         let returned = self.controlq.submit_and_wait(
             slot,
             &[
-                (self.req.phys(), core::mem::size_of::<Req>() as u32, BufDir::Readable),
-                (self.resp.phys(), core::mem::size_of::<Resp>() as u32, BufDir::Writable),
+                (self.req.device_addr(), core::mem::size_of::<Req>() as u32, BufDir::Readable),
+                (self.resp.device_addr(), core::mem::size_of::<Resp>() as u32, BufDir::Writable),
             ],
             self.device.notify_mmio(),
             self.device.notify_off_multiplier(),
@@ -283,8 +283,8 @@ impl GpuController {
         self.control_slot = Some(self.controlq.submit_and_wait(
             slot,
             &[
-                (self.req.phys(), (cmd_size + entry_size) as u32, BufDir::Readable),
-                (self.resp.phys(), core::mem::size_of::<CtrlHeader>() as u32, BufDir::Writable),
+                (self.req.device_addr(), (cmd_size + entry_size) as u32, BufDir::Readable),
+                (self.resp.device_addr(), core::mem::size_of::<CtrlHeader>() as u32, BufDir::Writable),
             ],
             self.device.notify_mmio(),
             self.device.notify_off_multiplier(),
@@ -335,8 +335,8 @@ impl GpuController {
         self.cursor_slot = Some(self.cursorq.submit_and_wait(
             slot,
             &[
-                (self.cursor_req.phys(), core::mem::size_of::<T>() as u32, BufDir::Readable),
-                (self.cursor_resp.phys(), core::mem::size_of::<CtrlHeader>() as u32, BufDir::Writable),
+                (self.cursor_req.device_addr(), core::mem::size_of::<T>() as u32, BufDir::Readable),
+                (self.cursor_resp.device_addr(), core::mem::size_of::<CtrlHeader>() as u32, BufDir::Writable),
             ],
             self.device.notify_mmio(),
             self.device.notify_off_multiplier(),

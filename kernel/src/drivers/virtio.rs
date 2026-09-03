@@ -26,6 +26,12 @@ const STATUS_FEATURES_OK: u8 = 8;
 
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
+/// Virtio 1.2 §6: the device's buffer addresses are the platform's, so what
+/// translates any other function's translates this one's. A function never
+/// offered it is one no unit sees, so every driver accepts it and the negotiated
+/// set is logged for a gate to read back.
+pub const VIRTIO_F_ACCESS_PLATFORM: u64 = 1 << 33;
+
 pub const COMMON_DEVICE_FEATURE_SELECT: u64 = 0x00;
 pub const COMMON_DEVICE_FEATURE: u64 = 0x04;
 pub const COMMON_DRIVER_FEATURE_SELECT: u64 = 0x08;
@@ -132,6 +138,10 @@ pub enum InitRefusal {
     Cap(MissingCap),
     /// It never acknowledged its reset: `DEVICE_STATUS` stayed non-zero.
     ResetUnanswered,
+    /// `FEATURES_OK` did not stick. Refused, not panicked: this is what a device
+    /// offered [`VIRTIO_F_ACCESS_PLATFORM`] answers a driver that declined it,
+    /// and a kernel that dies on a device's answer is one a device can kill.
+    FeaturesRefused { offered: u64, status: u32 },
 }
 
 impl From<MissingCap> for InitRefusal {
@@ -147,6 +157,11 @@ impl core::fmt::Display for InitRefusal {
             Self::ResetUnanswered => {
                 write!(f, "did not zero DEVICE_STATUS for its reset within {RESET}")
             }
+            Self::FeaturesRefused { offered, status } => write!(
+                f,
+                "refused the feature set {offered:#x} the driver accepted, leaving \
+                 DEVICE_STATUS={status:#x} without FEATURES_OK"
+            ),
         }
     }
 }
@@ -167,6 +182,18 @@ fn reset_acknowledged(common: &Mmio, pci_dev: &PciDevice) -> bool {
     #[cfg(not(feature = "boot-actuators"))]
     let _ = pci_dev;
     common.read_u32(COMMON_DEVICE_STATUS) == 0
+}
+
+/// Every driver's accepted set carries [`VIRTIO_F_ACCESS_PLATFORM`]; the actuator
+/// withholds it to stage a function no unit sees, sparing the console.
+fn platform_addressing(pci_dev: &PciDevice) -> u64 {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::virtio_no_access_platform() && pci_dev.device_id() != 0x1043 {
+        return 0;
+    }
+    #[cfg(not(feature = "boot-actuators"))]
+    let _ = pci_dev;
+    VIRTIO_F_ACCESS_PLATFORM
 }
 
 /// The config sub-window a virtio PCI capability names, or why it names none:
@@ -443,10 +470,12 @@ impl<'pool> Virtqueue<'pool> {
         }
     }
 
-    /// Physical addresses for device register programming.
-    pub fn descs_phys(&self) -> u64 { self.desc.phys() }
-    pub fn avail_phys(&self) -> u64 { self.avail.phys() }
-    pub fn used_phys(&self) -> u64 { self.used.phys() }
+    /// What the device is programmed with for each ring.
+    pub fn descs_addr(&self) -> u64 { self.desc.device_addr() }
+    pub fn avail_addr(&self) -> u64 { self.avail.device_addr() }
+    pub fn used_addr(&self) -> u64 { self.used.device_addr() }
+
+    pub fn rings(&self) -> [Dma<'pool>; 3] { [self.desc, self.avail, self.used] }
 
     /// Where in the notification region this queue's doorbell sits; meaningless before `setup_queue` runs.
     pub fn notify_bytes(&self, multiplier: u32) -> u64 {
@@ -665,7 +694,7 @@ pub fn used_selftest() {
     let pool = DmaPool::alloc(0x1000);
     let dma = pool.view();
     let mut q = Virtqueue::new(dma.subview(0, 0x1000), SIZE);
-    q.write_chain(3, &[(dma.phys(), CHAIN, BufDir::Writable)]);
+    q.write_chain(3, &[(dma.device_addr(), CHAIN, BufDir::Writable)]);
 
     // `at` is what the queue's own `last_used_idx` will be when this element is read.
     let publish = Virtqueue::write_used_as_a_device_would;
@@ -736,7 +765,7 @@ pub fn cap_selftest() {
     const WINDOW: u64 = 0x8000;
     // One buffer for both the config space and the BAR window, so a permitted subregion stays inside it.
     let pool = DmaPool::alloc(WINDOW as usize);
-    let phys = pool.view().phys();
+    let phys = pool.view().host_phys();
     // SAFETY: the pool owns this page until it drops at end of function, and no Mmio built over it escapes.
     let cfg = unsafe { Mmio::over_phys(DirectMap::from_phys(phys), WINDOW) };
     let device = PciDevice::over_config(cfg);
@@ -869,8 +898,15 @@ impl VirtioDevice {
         let device_features_hi = common.read_u32(COMMON_DEVICE_FEATURE);
         let device_features = (device_features_hi as u64) << 32 | device_features_lo as u64;
 
-        let features = device_features & accepted_features;
-        log!("VirtIO: device features={:#x} negotiated={:#x}", device_features, features);
+        let features = device_features & (accepted_features | platform_addressing(pci_dev));
+        log!(
+            "VirtIO: PCI {:02x}:{:02x}.{} features device={device_features:#x} \
+             negotiated={features:#x} access_platform={}",
+            pci_dev.bus,
+            pci_dev.dev,
+            pci_dev.func,
+            if features & VIRTIO_F_ACCESS_PLATFORM != 0 { 'y' } else { 'n' },
+        );
 
         common.write_u32(COMMON_DRIVER_FEATURE_SELECT, 0);
         common.write_u32(COMMON_DRIVER_FEATURE, features as u32);
@@ -880,10 +916,11 @@ impl VirtioDevice {
         let status = STATUS_ACKNOWLEDGE as u32 | STATUS_DRIVER as u32 | STATUS_FEATURES_OK as u32;
         common.write_u32(COMMON_DEVICE_STATUS, status);
 
-        assert!(
-            common.read_u32(COMMON_DEVICE_STATUS) & STATUS_FEATURES_OK as u32 != 0,
-            "VirtIO: device rejected features"
-        );
+        let answered = common.read_u32(COMMON_DEVICE_STATUS);
+        if answered & STATUS_FEATURES_OK as u32 == 0 {
+            pci_dev.disable_bus_master();
+            return Err(InitRefusal::FeaturesRefused { offered: features, status: answered });
+        }
 
         Ok(Self { config })
     }
@@ -898,9 +935,9 @@ impl VirtioDevice {
         assert!(max_size >= queue.size, "VirtIO: queue {} too small (max={}, need={})", index, max_size, queue.size);
         common.write_u16(COMMON_QUEUE_SIZE, queue.size);
 
-        common.write_u64(COMMON_QUEUE_DESC, queue.descs_phys());
-        common.write_u64(COMMON_QUEUE_DRIVER, queue.avail_phys());
-        common.write_u64(COMMON_QUEUE_DEVICE, queue.used_phys());
+        common.write_u64(COMMON_QUEUE_DESC, queue.descs_addr());
+        common.write_u64(COMMON_QUEUE_DRIVER, queue.avail_addr());
+        common.write_u64(COMMON_QUEUE_DEVICE, queue.used_addr());
 
         queue.notify_offset = common.read_u16(COMMON_QUEUE_NOTIFY_OFF);
     }
