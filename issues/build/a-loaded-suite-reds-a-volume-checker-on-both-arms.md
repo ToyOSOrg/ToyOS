@@ -105,3 +105,48 @@ same way, so this is a sighting and not a measurement. **It is not a both-arms
 pair for this name**: the volume checker reds on the branch arm only, and what
 the base arm produced is the wider *parallel-classification* red under a name
 that is not a volume checker at all. Two runs cannot tell the two apart.
+
+
+## A fifth name, and the first real both-arms pair for one of them
+
+**2026-09-03, `w5b13-gop-mode` at `a3f8f689` against `origin/main` `66c26437`**,
+this dev host, one suite at a time. `toybox_cp_volume` red in a full
+`--nightly` run alongside `log_flush_retry` and `redirty_mid_flush`, all three
+saying the sentence this entry is about:
+
+```
+FAIL log_flush_retry: the retried flushes left the log volume breaking the format:
+1 cluster(s) from 78 are marked allocated and no directory entry reaches them
+FAIL redirty_mid_flush: the racing rounds left the log volume breaking the format:
+1 cluster(s) from 737 are marked allocated and no directory entry reaches them
+FAIL toybox_cp_volume: cp left the log volume breaking the format:
+1 cluster(s) from 58952 are marked allocated and no directory entry reaches them
+```
+
+`toybox_cp_volume` then answered the harness's re-run **red**, which none of the
+four names above ever did: `red again, the same failure both times — the defect
+is real`. So it was A/B'd by itself, three runs an arm, arms alternating, in one
+session at 2.13x-2.19x width throughout:
+
+| arm | reds |
+|---|---|
+| `w5b13-gop-mode` | 1 of 3, `ALONE … red again` |
+| `origin/main` | 1 of 3, `ALONE … red again` |
+
+**Same rate, same sentence, same `ALONE` verdict, on a tree carrying none of the
+branch's changes.** That is the both-arms pair this entry's heading claims and
+did not have for any single name: an `ALONE … red again` here is evidence that
+the leak is real and reproducible, and no evidence at all about the branch that
+met it. `cargo run -- --known-red toybox_cp_volume` still answers `NOT ON THE
+LIST`, which is why this is written down.
+
+`redirty_mid_flush` was A/B'd the same way: 1 of 3 on the branch, 0 of 3 on
+`main`, and its one red was `ALONE … GREEN`. Six runs cannot separate that, which
+is the position this entry already records.
+
+One thing the fifth name adds: the guest's own `cp` reported
+`cp: flushing /log/cp-full.bin.8.part: out of memory` before the checker
+complained, and a passing run reports the same line. So on this name the leak
+follows a *deliberately failed* write rather than a raced one — a staged ENOMEM
+the test arranges — which makes it the cheapest reproducer here and the one a
+fix should be measured against.

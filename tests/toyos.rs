@@ -407,6 +407,7 @@ const AUDIO_SMP: &[u32] = &[1, 8];
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_decoder", Sched::Parallel, Tier::Fast),
+    ("screen_gop_firmware_mode", Sched::Parallel, Tier::Nightly),
     // `thread::sleep(5 s)` is the measurement, not a ceiling: the assertion is
     // literally that the log is still on the panel five seconds after the boot
     // finished, so a 2x slower machine changes nothing about the wait but the
@@ -1210,8 +1211,8 @@ const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
 const FILL_BOOT: [u8; 3] = [0x00, 0x00, 0x00];
 
 /// The T14 Gen 2's panel as the console grids it: 1080/16 rows of 1920/8
-/// columns. `Profile::Metal` caps vgamem at 8 MiB, so the most-pixels mode
-/// the bootloader picks *is* this panel — the test's screen and the laptop's
+/// columns. `Profile::Metal`'s display advertises that panel over EDID, so the
+/// mode its firmware sets *is* this panel — the test's screen and the laptop's
 /// share one geometry. Every geometry claim `screen_diag_boot` makes is made
 /// against these two numbers and not against the screen it is reading.
 const T14_ROWS: usize = 1080 / 16;
@@ -3096,9 +3097,18 @@ fn check_wrap(dump: &screen::Ppm) -> Result<(), String> {
             rows[head].len()
         ));
     }
-    if !rows[head..].iter().take(4).any(|r| r.contains("on_screen_console_check")) {
+    // The block this frame wrapped over ends where the next frame's address
+    // begins, and it is searched joined: a row count and a tail landing whole
+    // inside one row are both claims about the panel's width.
+    let end = rows[head + 1..]
+        .iter()
+        .position(|r| r.contains("0xffff"))
+        .map_or(rows.len(), |n| head + 1 + n);
+    if !rows[head..end].concat().contains("on_screen_console_check") {
         return Err(format!(
-            "the tail of the demangled symbol never reached the screen — clipped?\n{}",
+            "the tail of the demangled symbol never reached the screen — clipped? \
+             {} row(s) of wrap before the next frame\n{}",
+            end - head,
             dump.text()
         ));
     }
@@ -3117,6 +3127,128 @@ fn run_screen_test(
     match name {
         "screen_decoder" => {
             screen::self_test();
+            Ok(())
+        }
+        "screen_gop_firmware_mode" => {
+            // Four of `GopInfo`'s six fields, on two machines advertising
+            // different panels. QMP's `screendump` is the geometry QEMU scans
+            // out, the kernel's `GOP:` line is what the bootloader handed it,
+            // and `Profile::panel` is what the machine advertises: a loader
+            // that picks a mode lands on the largest one both offer. Stride and
+            // format ride the same line because neither shows in a geometry — a
+            // halved stride shears the picture and a swapped channel order
+            // recolours it. **Not reached**: `framebuffer`, `framebuffer_size`.
+            let mode_of = |qemu: &mut QemuInstance,
+                           label: &str|
+             -> Result<(u32, u32, u32, u32), String> {
+                let console = qemu.boot_log().to_string();
+                // `at 0x` picks the kernel's line; the bootloader's says `fb=`.
+                let Some(line) =
+                    console.lines().find(|l| l.contains("GOP: ") && l.contains(" at 0x"))
+                else {
+                    return Err(format!(
+                        "{label}: the kernel never logged a GOP line, so it was handed no \
+                         framebuffer at all\nboot console:\n{console}"
+                    ));
+                };
+                let field = |key: &str| -> Result<u32, String> {
+                    line.split(key)
+                        .nth(1)
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| format!("{label}: no `{key}` in {line:?}"))
+                };
+                let geometry = line
+                    .split("GOP: ")
+                    .nth(1)
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|g| g.split_once('x'))
+                    .ok_or_else(|| format!("{label}: no WxH in {line:?}"))?;
+                let kernel = (
+                    geometry.0.parse::<u32>().map_err(|e| format!("{label}: {line:?}: {e}"))?,
+                    geometry.1.parse::<u32>().map_err(|e| format!("{label}: {line:?}: {e}"))?,
+                    field("stride=")?,
+                    field("format=")?,
+                );
+                let dump = qemu.screendump();
+                let scanout = (dump.width as u32, dump.height as u32);
+                eprintln!(
+                    "  [gop] {label}: kernel says {}x{} stride={} format={}, QEMU scans out \
+                     {scanout:?}",
+                    kernel.0, kernel.1, kernel.2, kernel.3
+                );
+                if (kernel.0, kernel.1) != scanout {
+                    return Err(format!(
+                        "{label}: the kernel was handed {:?} and the scanout QEMU is \
+                         driving is {scanout:?}",
+                        (kernel.0, kernel.1)
+                    ));
+                }
+                Ok(kernel)
+            };
+            let boot = |profile, _: qemu::LaneFree| {
+                QemuInstance::boot_with_options(
+                    test_config,
+                    c_bins,
+                    rust_bins,
+                    BootOptions { profile, qmp: true, ..Default::default() },
+                )
+            };
+            let mut qemu = boot(qemu::Profile::Gop, qemu::LaneFree::no_guest_yet());
+            let gop = mode_of(&mut qemu, "Gop")?;
+            let free = qemu.shutdown();
+            let mut qemu = boot(qemu::Profile::Metal, free);
+            let metal = mode_of(&mut qemu, "metal-sim")?;
+
+            // The largest mode `-vga std` offers on QEMU's default 16 MiB.
+            const LARGEST: (u32, u32) = (2048, 2048);
+            // What QEMU's stdvga publishes, measured off these two boots and
+            // off a third at 1600x900: it pads no scan line, and its pixels are
+            // `PixelBlueGreenRedReserved8BitPerColor`, which `query_gop`
+            // encodes as 1.
+            const BGR: u32 = 1;
+            for (profile, label, mode) in [
+                (qemu::Profile::Gop, "Gop", gop),
+                (qemu::Profile::Metal, "metal-sim", metal),
+            ] {
+                let panel = profile.panel().expect("both machines have a VGA adapter");
+                if (mode.0, mode.1) != panel {
+                    return Err(format!(
+                        "{label} advertises a {panel:?} panel and booted into {:?}{} — an \
+                         OS inherits the mode its firmware set and does not choose one",
+                        (mode.0, mode.1),
+                        if (mode.0, mode.1) == LARGEST {
+                            ", the largest mode the machine offers"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+                if mode.2 != panel.0 {
+                    return Err(format!(
+                        "{label}: the kernel was handed stride={} for a {panel:?} panel this \
+                         adapter does not pad — every row it paints would land {} pixels off \
+                         the last",
+                        mode.2,
+                        mode.2 as i64 - panel.0 as i64
+                    ));
+                }
+                if mode.3 != BGR {
+                    return Err(format!(
+                        "{label}: the kernel was handed format={} for a display that publishes \
+                         BGR ({BGR}) — the geometry is right and every colour is wrong",
+                        mode.3
+                    ));
+                }
+            }
+            // Non-vacuity for the two panel checks above: they compare the
+            // guest against a harness constant, so a run in which both machines
+            // were handed the same constant would pass them both.
+            if gop == metal {
+                return Err(format!(
+                    "two machines advertising different panels booted into the same {gop:?}"
+                ));
+            }
             Ok(())
         }
         "screen_diag_boot" => {
@@ -3563,8 +3695,9 @@ fn run_screen_test(
             );
             // Non-vacuity, in the two places it can be lost. A panel that is a
             // whole number of glyph rows tall has no strip at all, and would
-            // make half of what follows assert nothing -- 2048x2048, the
-            // default this profile used to boot, is exactly that panel.
+            // make half of what follows assert nothing -- both 2048x2048, the
+            // mode this profile used to be given, and `DEFAULT_PANEL`, the one
+            // its firmware sets when no panel is declared, are exactly that.
             if margin(&painted_over) == 0 {
                 return Err(format!(
                     "this panel is {}x{}, a whole number of {}px glyph rows, so the strip this \
