@@ -287,6 +287,9 @@ actuators! {
     /// Point the HDA stream's buffer descriptor list at that page and start the stream, so the controller fetches descriptors from memory it does not own.
     iommu_hda_foreign_bdl = "iommu-hda-foreign-bdl";
 
+    /// Point a virtio-sound control answer at that page and submit the chain, so the device writes where it may not.
+    iommu_sound_foreign_dma = "iommu-sound-foreign-dma";
+
     /// Point every device MSI at APIC 1 rather than 0 — the only way to tell the
     /// two remapping-entry destination encodings apart, since 0 encodes alike in both.
     iommu_dest_apic1 = "iommu-dest-apic1";

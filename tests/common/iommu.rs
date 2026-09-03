@@ -654,10 +654,6 @@ fn scope_sources(log: &Serial) -> BTreeMap<String, String> {
 /// the guest reports `n` because QEMU never *offers* the bit
 /// (`hw/virtio/virtio-bus.c:87-94`), not because the driver declined — it offers
 /// blindly; the independence comes from [`declining_is_not_free`].
-///
-/// virtio-sound is a declared exception, asserted rather than tolerated: its
-/// function must be the one that did *not* negotiate
-/// (`issues/kernel/three-devices-still-reach-all-of-memory.md`).
 pub fn iommu_virtio_platform(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -683,13 +679,11 @@ pub fn iommu_virtio_platform(
         // (`hw/virtio/virtio-bus.c:97`).
         unit_is_first(&argv, name)?;
         for device in &created {
-            let want = behind_unit && !device.starts_with(SOUND);
-            if device.contains("iommu_platform=on") != want {
+            if device.contains("iommu_platform=on") != behind_unit {
                 return Err(format!(
                     "{name}: the machine has a unit = {behind_unit} and QEMU is given {device}, \
-                     where iommu_platform=on is owed = {want}. A virtio function without it keeps \
-                     the address space the unit does not decode, and virtio-sound is the one \
-                     device ruled to keep it that way"
+                     where iommu_platform=on is owed = {behind_unit}. A virtio function without \
+                     it keeps the address space the unit does not decode"
                 ));
             }
         }
@@ -717,16 +711,12 @@ pub fn iommu_virtio_platform(
                 negotiated.len()
             ));
         }
-        let sound = class_function(&log, "0401");
         let enumerated = enumerated_functions(&log);
         for (who, accepted) in &negotiated {
-            let want = behind_unit && Some(who.clone()) != sound;
-            if *accepted != want {
+            if *accepted != behind_unit {
                 return Err(format!(
-                    "{name}: {who} negotiated VIRTIO_F_ACCESS_PLATFORM = {accepted} where {want} \
-                     is owed — the unit exists = {behind_unit}, and the audio function \
-                     {sound:?} is the one ruled to stay outside it \
-                     (issues/kernel/three-devices-still-reach-all-of-memory.md)"
+                    "{name}: {who} negotiated VIRTIO_F_ACCESS_PLATFORM = {accepted} where \
+                     {behind_unit} is owed — the unit exists = {behind_unit}"
                 ));
             }
             if !enumerated.contains(who) {
@@ -736,15 +726,17 @@ pub fn iommu_virtio_platform(
                 ));
             }
         }
-        if behind_unit && !negotiated.iter().any(|(who, ok)| Some(who.clone()) == sound && !ok) {
+        let sound = class_function(&log, "0401")
+            .ok_or_else(|| format!("{name}: this machine enumerated no audio function"))?;
+        if !negotiated.iter().any(|(who, _)| *who == sound) {
             return Err(format!(
-                "{name}: no virtio function declined VIRTIO_F_ACCESS_PLATFORM, so the audio \
-                 exception this gate allows is not being exercised: {negotiated:?}"
+                "{name}: the audio function {sound} negotiated nothing, so whether it is behind \
+                 the unit was never asked: {negotiated:?}"
             ));
         }
         eprintln!(
-            "  [iommu] {name}: {} virtio function(s) behind a unit = {behind_unit}, audio \
-             function {sound:?} outside it by ruling",
+            "  [iommu] {name}: {} virtio function(s) behind a unit = {behind_unit}, the audio \
+             function {sound} among them",
             negotiated.len()
         );
     }
@@ -756,8 +748,7 @@ pub fn iommu_virtio_platform(
 /// `virtio_validate_features` returns `-EFAULT` and `virtio_set_status` returns
 /// before it stores the status (`hw/virtio/virtio.c:2270-2276` and `:2292-2299`
 /// at v11.1.0), so `FEATURES_OK` never sticks. The actuator withholds the bit
-/// from every virtio device but the console; virtio-sound is never offered it,
-/// so the NIC is the one device on this machine that can decline.
+/// from every virtio device but the console, and each of them is refused for it.
 fn declining_is_not_free(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -1522,9 +1513,6 @@ const NVME_ACQ: u64 = 0x30;
 /// same constant (`acpi-build.c:1687`), so this is one source agreeing with
 /// itself and not two: what it catches is a guest reporting something else.
 const UNIT_WINDOW: u64 = 0xfed9_0000;
-
-/// The `-device` name of the audio function that is ruled to stay outside the unit.
-const SOUND: &str = "virtio-sound";
 
 fn unit_is_first(argv: &[String], name: &str) -> Result<(), String> {
     let devices: Vec<&str> =
