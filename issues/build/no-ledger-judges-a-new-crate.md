@@ -17,7 +17,6 @@ and each is a spelling, not a rule:
   that carries a NUL in its first 8000 bytes, plus anything under `assets/`.
 
 Everything else the two clauses asked for is an entry, not a silence:
-`nothing-reads-the-workflows-for-a-binary.md`,
 `the-third-party-corpus-is-in-no-machine-read-ledger.md` and
 `a-spawn-that-is-not-command-is-in-no-ledger.md`, which carries the alias half
 too. A text scan over Rust source

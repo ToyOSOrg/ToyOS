@@ -41,6 +41,22 @@ path first (`row(path)` before `read_link`), so a row keyed `shutdown` with
 authority row over an existing binary is the work, and it is worth doing only
 if the union keeps growing.
 
+## Its size is measured now, and it is a number
+
+`endowment_denied`'s `every_applet_holds_only_what_its_policy_names` reads the
+links off `/bin` and the rows off `/etc/system.manifest`, neither through
+`declared`, and holds each applet against a per-applet policy table. On the
+image a guest test boots it answers `14 links behind /bin/toybox, 13 declared
+over-grants` — thirteen applets endowed a connector to soundd because `tone`
+needs one. `DECLARED_OVER_GRANTS` is that list, so the over-grant cannot grow
+without a red naming what grew, and it shrinks when the row is split.
+
+The shipped image is not that image and is still unmeasured: a guest boots
+`tests/testcases/system.toml`, whose `toybox` row carries no `syscap` at all, so
+nothing yet sees `/bin/echo` holding `Rights::POWER`.
+`issues/isolation/one-manifest-row-grants-nineteen-applets-and-one-is-compared.md`
+carries what closing that costs.
+
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). `/bin/echo` in
 the shipped image holds `Rights::POWER` because `/bin/shutdown` is behind the
 same binary — an authority over-grant that is true of the image as built, not a

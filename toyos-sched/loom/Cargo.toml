@@ -56,6 +56,17 @@ doorbell-kick-relaxed = []
 #
 push-fence-relaxed = []
 placement-ignores-staleness = []
+# The one feature here that models nothing away. It lets the mailbox model's
+# victim stop taking passes — what a CPU that stops does — and the model must
+# red, because `MailboxNode::in_flight` is the consumer's to clear and a
+# retired consumer clears nothing. It reproduces an open defect rather than
+# proving a lie is caught, so unlike its siblings it goes away with the fix:
+#
+#   cargo test -p toyos-sched-loom --features victim-retires-mid-probe \
+#     --test loom_mailbox
+#
+# `toyos-sched` declares no twin, because this decides nothing in `../src`.
+victim-retires-mid-probe = []
 
 [dependencies]
 loom = "0.7"

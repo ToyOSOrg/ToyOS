@@ -48,6 +48,10 @@
 //! assertions, it powers off the boot they run on, which is the loudest red
 //! this suite can produce and exactly the defect being denied.
 //!
+//! **The applets nobody compared.** A row's granularity is the binary and
+//! `/bin/toybox` is many programs behind many links, so every applet is endowed
+//! the union; the last half holds each against a policy table.
+//!
 //! **A wrong-typed handle is refused with a word here, and that is a property of
 //! the check rather than an exception to the policy.** The table resolves rights
 //! before type, and `DEVICE`, `RT`, `POWER` and `ROSTER` are bits only a
@@ -57,6 +61,7 @@
 //! it is the answer a caller gets and a test that expected the kill would be
 //! asserting something the design cannot do.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Output, Stdio};
@@ -89,6 +94,52 @@ const ONE_ENTRY: usize = SYSINFO_HEADER_SIZE + SYSINFO_ENTRY_SIZE;
 /// `process::HANDLE_FAULT_EXIT_CODE`.
 const HANDLE_FAULT: i32 = 139;
 
+/// The artifacts this image carries, not the `system.toml` that produced them.
+const MANIFEST: &str = "/etc/system.manifest";
+const BIN: &str = "/bin";
+const MULTICALL: &str = "/bin/toybox";
+
+/// What reaches a spawned process as authority rather than as an argument.
+const AUTHORITY: &[&str] = &["serve", "provide", "receive", "device", "syscap"];
+
+/// What each applet behind [`MULTICALL`] needs, as the manifest record that
+/// would grant it. An applet with no row here is one nobody has spoken for.
+const APPLET_NEEDS: &[(&str, &[&str])] = &[
+    ("cat", &[]),
+    ("cp", &[]),
+    ("echo", &[]),
+    ("free", &[]),
+    ("grep", &[]),
+    ("hexdump", &[]),
+    ("ls", &[]),
+    ("mkdir", &[]),
+    ("mv", &[]),
+    ("ps", &["syscap roster"]),
+    ("pwd", &[]),
+    ("rm", &[]),
+    ("shutdown", &["syscap power"]),
+    ("tone", &["receive soundd"]),
+];
+
+/// Every authority this image hands an applet that has no use for it: the exact
+/// size of `issues/isolation/toybox-is-one-row-for-nineteen-applets.md` here. It
+/// shrinks when the row is split per authority class and never grows.
+const DECLARED_OVER_GRANTS: &[&str] = &[
+    "cat: receive soundd",
+    "cp: receive soundd",
+    "echo: receive soundd",
+    "free: receive soundd",
+    "grep: receive soundd",
+    "hexdump: receive soundd",
+    "ls: receive soundd",
+    "mkdir: receive soundd",
+    "mv: receive soundd",
+    "ps: receive soundd",
+    "pwd: receive soundd",
+    "rm: receive soundd",
+    "shutdown: receive soundd",
+];
+
 /// Presenting no handle at all, each raised in a child of its own because the
 /// kernel's answer to it is to end the caller.
 const NOT_A_HANDLE: &[(&str, &str)] = &[
@@ -118,6 +169,7 @@ fn test() {
     a_right_the_capability_lacks_is_a_word();
     the_roster_is_a_right_and_the_header_is_not();
     the_shipped_applet_reaches_both_answers();
+    every_applet_holds_only_what_its_policy_names();
     for (role, what_would_be_wrong) in NOT_A_HANDLE {
         killed(role, what_would_be_wrong);
     }
@@ -435,6 +487,89 @@ fn the_shipped_applet_reaches_both_answers() {
     );
 
     println!("  ps: {rows} processes with the bit, and a named refusal without it");
+}
+
+/// The authority records each `program` row grants, keyed by the binary path
+/// its own line names. **Its own parse, not `toyos_manifest`'s**: a checker that
+/// reads the manifest through init's parser and resolves links through init's
+/// resolver agrees with init by construction.
+fn manifest_rows(text: &str) -> BTreeMap<String, Vec<String>> {
+    let mut rows: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let (key, rest) = line.split_once(' ').unwrap_or((line, ""));
+        if key == "program" {
+            let (_name, path) = rest.split_once(' ').unwrap_or_else(|| {
+                panic!("a `program` line names a name and a path: {line:?}")
+            });
+            current = path.to_string();
+            rows.entry(current.clone()).or_default();
+        } else if AUTHORITY.contains(&key) {
+            let row = rows.get_mut(&current).unwrap_or_else(|| {
+                panic!("a `{key}` record before any `program` line: {line:?}")
+            });
+            row.push(format!("{key} {rest}"));
+        }
+    }
+    rows
+}
+
+/// Every applet behind one binary, held against what each of them needs.
+///
+/// **The two sides come from different places on purpose**: the links off the
+/// image, the rows off the rendered manifest, neither through `declared`, and
+/// the policy from [`APPLET_NEEDS`]. The arms above are the
+/// allowed-and-forbidden pair for every class this finds.
+fn every_applet_holds_only_what_its_policy_names() {
+    let manifest = std::fs::read_to_string(MANIFEST).expect("the image carries its own manifest");
+    let rows = manifest_rows(&manifest);
+
+    let mut applets: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(BIN).expect("read /bin") {
+        let path = entry.expect("a /bin entry").path();
+        let meta = std::fs::symlink_metadata(&path).expect("lstat a /bin entry");
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        let target = std::fs::read_link(&path).expect("read a /bin link");
+        assert_eq!(
+            target.to_str(),
+            Some(MULTICALL),
+            "{path:?} is a link to something else: a second multicall binary needs its own \
+             policy table, not this one",
+        );
+        applets.push(path.file_name().expect("a link has a name").to_string_lossy().into_owned());
+    }
+    applets.sort();
+    assert!(!applets.is_empty(), "no applet link in {BIN}: the inventory side read nothing");
+
+    let granted = rows
+        .get(MULTICALL)
+        .unwrap_or_else(|| panic!("{MULTICALL} has no row in {MANIFEST}"));
+    let mut over = Vec::new();
+    for applet in &applets {
+        let (_, needs) = APPLET_NEEDS
+            .iter()
+            .find(|(name, _)| name == applet)
+            .unwrap_or_else(|| panic!("`{applet}` is behind {MULTICALL} and no policy row says \
+                                      what it needs"));
+        for record in granted {
+            if !needs.contains(&record.as_str()) {
+                over.push(format!("{applet}: {record}"));
+            }
+        }
+    }
+
+    assert_eq!(
+        over, DECLARED_OVER_GRANTS,
+        "the authority {MULTICALL}'s one row hands applets that have no use for it is not the \
+         list this test declares — a row was split, or one grew",
+    );
+    println!(
+        "  applets: {} links behind {MULTICALL}, {} declared over-grants and no undeclared one",
+        applets.len(),
+        over.len(),
+    );
 }
 
 /// Run `/bin/ps` holding exactly `cap` and nothing else of ours.
