@@ -2085,14 +2085,52 @@ fn settle_null_sink_client_exits(qemu: &mut QemuInstance, result: &mut TestResul
 }
 
 /// Nothing to wait for: the test's own window carries everything its check
-/// reads. Every name but one.
+/// reads. Every name but two.
 fn no_settle(_: &mut QemuInstance, _: &mut TestResult) {}
+
+/// The pid the kernel gave `test_rs_<name>`, off its own spawn line.
+fn spawned_pid(log: &str, name: &str) -> Option<u32> {
+    let want = format!("/bin/test_rs_{name} ");
+    log.lines()
+        .rev()
+        .find(|l| l.contains("spawn: ") && l.contains(&want))?
+        .split("pid=")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Wait for the kernel to account the process: `run_test_paced` hands the
+/// capture over when the guest runner reaps the child, and `syscalls: pid=N`
+/// comes from `teardown_resources`, which
+/// `issues/kernel/deferred-release-outlives-its-syscall.md` records as able to
+/// run after the syscall that caused it returned. Both orders are legal.
+fn settle_syscall_cost(qemu: &mut QemuInstance, result: &mut TestResult) {
+    /// A liveness ceiling and never a verdict.
+    const ACCOUNTED: Duration = Duration::from_secs(5);
+
+    let Some(pid) = spawned_pid(&result.serial, "syscall_cost") else { return };
+    let want = accounting_of(pid);
+    if result.serial.contains(&want) {
+        return;
+    }
+    let more = qemu.drain_until(ACCOUNTED, |l| l.contains(&want));
+    result.serial.push_str(&more);
+}
+
+/// The trailing space is what keeps `pid=21` from matching `pid=212`.
+fn accounting_of(pid: u32) -> String {
+    format!("syscalls: pid={pid} ")
+}
 
 /// Select the between-the-test-and-its-check wait by name, as [`check_for`]
 /// selects the check.
 fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
     match name {
         "null_sink_client_exits" => settle_null_sink_client_exits,
+        "syscall_cost" => settle_syscall_cost,
         _ => no_settle,
     }
 }
@@ -2175,12 +2213,28 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         );
         return false;
     };
-    let counted = result
-        .serial
-        .lines()
-        .filter(|l| l.contains("syscalls: pid="))
-        .filter_map(|l| l.split(" 8=").nth(1)?.split_whitespace().next()?.parse::<u64>().ok())
-        .max()
+    // By pid, and absence is its own failure: read over every line with
+    // `unwrap_or(0)` behind it, a line that had not arrived was the same number
+    // as a process that made no calls.
+    let want = spawned_pid(&result.serial, "syscall_cost").map(accounting_of);
+    let line = want
+        .as_ref()
+        .and_then(|w| result.serial.lines().find(|l| l.contains(w.as_str())));
+    let Some(line) = line else {
+        eprintln!(
+            "FAIL rs::syscall_cost: the kernel never accounted the process — no `{}` line \
+             reached the capture, so nothing here says whether it made the calls it claims{}",
+            want.as_deref().unwrap_or("syscalls: pid=<the spawn line is missing too>"),
+            kernel_account(result)
+        );
+        return false;
+    };
+    // Absent `8=` is a process that made no `SYS_CLOCK` calls: a real zero.
+    let counted = line
+        .split(" 8=")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|n| n.parse::<u64>().ok())
         .unwrap_or(0);
     if counted < claimed {
         eprintln!(
