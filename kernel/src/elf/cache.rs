@@ -171,16 +171,6 @@ fn budget_bytes() -> usize {
     }
 }
 
-pub enum Cached {
-    /// A clone of the cached image; the file behind the path still matches it.
-    Fresh(LoadedLib),
-    /// The file no longer matches the image cached under it, and a reload would
-    /// map the library twice: the caller refuses by name.
-    Stale,
-    /// Nothing usable — no entry, or a clone that found no memory.
-    Absent,
-}
-
 /// Every cached image's allocation, summed. The caller holds the lock.
 fn held_bytes(cache: &[(String, CachedLib)]) -> usize {
     cache.iter().map(|(_, c)| c.alloc.size()).sum()
@@ -266,19 +256,23 @@ pub fn cache_loaded_lib(
     ))
 }
 
-/// Clone what is cached under `path`, if `id` still describes the file it came from.
-pub fn try_clone_cached(path: &str, id: BackingId) -> Cached {
+/// Clone what is cached under `path`, if `id` still describes the file it came
+/// from. `Ok(None)` is nothing usable — no entry, or a clone that found no
+/// memory — and the caller's own load path answers it. `Err` is the refusal:
+/// the file changed under an image no address space here can take back, so a
+/// reload would map the library twice.
+pub fn try_clone_cached(
+    path: &str,
+    id: BackingId,
+) -> Result<Option<LoadedLib>, SyscallError> {
     let cache = SO_CACHE.lock();
     let Some(idx) = cache.iter().position(|(p, _)| p == path) else {
-        return Cached::Absent;
+        return Ok(None);
     };
     if cache[idx].1.id != id {
-        return Cached::Stale;
+        return Err(SyscallError::NotSupported);
     }
-    match clone_from_cache(&cache[idx].1) {
-        Some(lib) => Cached::Fresh(lib),
-        None => Cached::Absent,
-    }
+    Ok(clone_from_cache(&cache[idx].1))
 }
 
 // Base address stays the cache's: `RELATIVE` relocations need no fixup until spawn/dlopen assigns a user address.

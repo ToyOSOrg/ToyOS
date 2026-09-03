@@ -215,16 +215,16 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         }
     };
     let mut lib = match crate::elf::try_clone_cached(&resolved, id) {
-        crate::elf::Cached::Fresh(lib) => lib,
-        crate::elf::Cached::Stale => {
+        Ok(Some(lib)) => lib,
+        Err(e) => {
             log!(
                 "dlopen: {}: the cached image is stale — the file behind this path changed since \
                  it was loaded, and the image cannot be replaced while a process has it mapped",
                 resolved
             );
-            return SyscallError::NotSupported.to_u64();
+            return e.to_u64();
         }
-        crate::elf::Cached::Absent => {
+        Ok(None) => {
             let (lib, rw_offset, rw_size) = match crate::elf::load_shared_lib(backing.as_ref()) {
                 Ok(result) => result,
                 Err(msg) => {

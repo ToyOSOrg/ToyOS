@@ -732,21 +732,21 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
         };
 
         match elf::try_clone_cached(&lib_path, id) {
-            elf::Cached::Fresh(lib) => {
+            Ok(Some(lib)) => {
                 out.paths.push(lib_path);
                 out.libs.push(lib);
                 continue;
             }
-            elf::Cached::Stale => {
+            Err(e) => {
                 log!(
                     "spawn: {}: {}: the cached image is stale — the file behind this path changed \
                      since it was loaded, and the image cannot be replaced while a process has it \
                      mapped",
                     path, lib_path
                 );
-                return Err(SyscallError::NotSupported);
+                return Err(e);
             }
-            elf::Cached::Absent => {}
+            Ok(None) => {}
         }
 
         match elf::load_shared_lib(so_backing.as_ref()) {
