@@ -195,18 +195,9 @@ pub struct DmaPool {
 }
 
 impl DmaPool {
-    /// Take enough contiguous 2 MiB pages to cover `size` bytes; the device
-    /// reaches them at their physical addresses, which is all of memory.
-    pub fn alloc(size: usize) -> Self {
-        Self::take(size, DeviceSpace::Untranslated)
-    }
-
-    /// The same, mapped into `space` and reachable by nothing outside it.
+    /// Take enough contiguous 2 MiB pages to cover `size` bytes, mapped into
+    /// `space` and reachable by nothing outside it.
     pub fn alloc_in(size: usize, space: DeviceSpace) -> Self {
-        Self::take(size, space)
-    }
-
-    fn take(size: usize, space: DeviceSpace) -> Self {
         let pages_2m = size.div_ceil(super::PAGE_2M as usize);
         let pages = super::pmm::alloc_contiguous(pages_2m, super::pmm::Category::Dma)
             .expect("DmaPool: out of physical memory");

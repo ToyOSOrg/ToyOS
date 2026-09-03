@@ -3642,11 +3642,6 @@ fn qemu_command(
     // A virtio function reaches memory through `vdev->dma_as`, the machine's own
     // address space with the unit bypassed, unless it is created with this — the
     // other half of the trap: a unit that decodes every function but these.
-    //
-    // virtio-sound is the one exception, by owner ruling: turning it on puts
-    // every audio DMA through the unit, and gate A's thorough tier has not
-    // judged that shape (`issues/kernel/three-devices-still-reach-all-of-memory.md`).
-    // `iommu_virtio_platform` asserts the exception rather than tolerating it.
     let platform = if shape.iommu.is_some() { ",iommu_platform=on" } else { "" };
 
     for controller in shape.xhci {
@@ -3809,7 +3804,7 @@ fn qemu_command(
                     audio_wav.display()
                 ))
                 .arg("-device")
-                .arg("virtio-sound-pci,audiodev=audio0,streams=1");
+                .arg(format!("virtio-sound-pci,audiodev=audio0,streams=1{platform}"));
         }
         qemu
             // virtio-console on stdio is the primary I/O channel; UART goes to
