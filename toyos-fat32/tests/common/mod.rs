@@ -560,7 +560,7 @@ pub fn short_names_in<D: BlockAccess>(
     let mut buf = vec![0u8; g.bytes_per_cluster() as usize];
     for _ in 0..4096 {
         fs.device().read_at(g.cluster_offset(cluster), &mut buf).expect("read directory cluster");
-        for entry in buf.chunks_exact(32) {
+        for entry in buf.as_chunks::<32>().0 {
             if entry[0] == 0x00 {
                 return out;
             }

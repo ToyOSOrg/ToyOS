@@ -143,7 +143,7 @@ impl PendingHandles {
 
         let count = endow.len() / ENDOW_ENTRY_LEN;
         let mut moving: Vec<(EndowEntry, RawHandle)> = Vec::with_capacity(count);
-        for raw in endow.chunks_exact(ENDOW_ENTRY_LEN) {
+        for raw in endow.as_chunks::<ENDOW_ENTRY_LEN>().0 {
             let label_off = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
             let label_len = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
             let handle = RawHandle(u32::from_ne_bytes([raw[8], raw[9], raw[10], raw[11]]));

@@ -31,6 +31,7 @@ Four fields, all required, no defaults.
 | | `owner` | it is the owner's to decide, and nobody else may |
 | | `none` | nothing is owed |
 | `kind` | `defect` | real, reproducible, someone should fix it |
+| | `tooling` | the development machine — the harness, a gate, a price, CI, the tracker, the build system, a measurement owed |
 | | `finding` | noticed in passing — and bounded: at its next review it is promoted to a `defect` or folded into the owning module header and closed (owner ruling 2026-08-25) |
 | | `track` | staged work — something to build that nobody has built |
 | | `question` | blocked on the owner, and nobody else can decide it |
@@ -38,13 +39,16 @@ Four fields, all required, no defaults.
 | `opened` | `YYYY-MM-DD` | the first commit whose issue tracker carried this heading. Before 2026-08-08 that is derived from the single file this directory replaced, so a reworded heading dates from the rewording |
 | `task` | a number | optional; present only where the issue names one |
 
+`kind: defect` is the OS; `kind: tooling` is the development machine, worked
+only when it blocks a landing.
+
 **`status` and `kind` are not free of each other.**
 `kind` says what the entry is; `status` says what is owed. Two of the kinds
 answer that second question by themselves, so they may not contradict it:
 
 | `kind` | `status` must be |
 |---|---|
-| `defect`, `finding` | `open`, `assigned` or `expected-red` |
+| `defect`, `tooling`, `finding` | `open`, `assigned` or `expected-red` |
 | `track` | `open` or `assigned` |
 | `question` | `owner` |
 | `rejected` | `none` |
