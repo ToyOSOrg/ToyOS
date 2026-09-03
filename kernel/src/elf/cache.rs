@@ -176,6 +176,28 @@ fn held_bytes(cache: &[(String, CachedLib)]) -> usize {
     cache.iter().map(|(_, c)| c.alloc.size()).sum()
 }
 
+/// What the cache holds for `path`, judged against the file `id` came from.
+///
+/// **The lookup and the publish-time recheck both ask here**, so the two cannot
+/// disagree about what still matches. They did: the recheck cloned the winner's
+/// entry without comparing anything, so two loaders whose opens straddled a
+/// rewrite both missed, both loaded, and the loser was handed an image of a
+/// file it never opened — the staleness the lookup refuses, served silently.
+fn entry_for<'a>(
+    cache: &'a [(String, CachedLib)],
+    path: &str,
+    id: BackingId,
+) -> Result<Option<&'a CachedLib>, SyscallError> {
+    let Some(idx) = cache.iter().position(|(p, _)| p == path) else {
+        return Ok(None);
+    };
+    let entry = &cache[idx].1;
+    if entry.id != id {
+        return Err(SyscallError::NotSupported);
+    }
+    Ok(Some(entry))
+}
+
 /// Takes ownership of `lib` and returns a clone in `Shared` mode with a private writable window; returns it unchanged if it cannot be cached.
 /// `Err` is the budget alone: an image that merely cannot be cached still works.
 pub fn cache_loaded_lib(
@@ -214,11 +236,16 @@ pub fn cache_loaded_lib(
     let mut cache = SO_CACHE.lock();
     // Asked again under the lock that publishes: `try_clone_cached` released it
     // before the load. Entries are never removed, so a second one for a name would
-    // strand a whole library forever — the loser clones the winner's instead.
-    if let Some(idx) = cache.iter().position(|(p, _)| p == path) {
-        let cloned = clone_from_cache(&cache[idx].1);
+    // strand a whole library forever — the loser clones the winner's instead, and
+    // is refused when the winner's file is not the one this caller opened.
+    let published = match entry_for(&cache, path, id) {
+        Err(e) => Some(Err(e)),
+        Ok(Some(entry)) => Some(Ok(clone_from_cache(entry))),
+        Ok(None) => None,
+    };
+    if let Some(outcome) = published {
         drop(cache);
-        return Ok(cloned.unwrap_or_else(|| owned(alloc)));
+        return outcome.map(|cloned| cloned.unwrap_or_else(|| owned(alloc)));
     }
     // Under the lock that publishes: two concurrent loads must not both find room.
     let budget = budget_bytes();
@@ -266,13 +293,7 @@ pub fn try_clone_cached(
     id: BackingId,
 ) -> Result<Option<LoadedLib>, SyscallError> {
     let cache = SO_CACHE.lock();
-    let Some(idx) = cache.iter().position(|(p, _)| p == path) else {
-        return Ok(None);
-    };
-    if cache[idx].1.id != id {
-        return Err(SyscallError::NotSupported);
-    }
-    Ok(clone_from_cache(&cache[idx].1))
+    Ok(entry_for(&cache, path, id)?.and_then(clone_from_cache))
 }
 
 // Base address stays the cache's: `RELATIVE` relocations need no fixup until spawn/dlopen assigns a user address.

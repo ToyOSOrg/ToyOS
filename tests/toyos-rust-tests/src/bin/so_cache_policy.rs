@@ -13,6 +13,8 @@ use toyos_abi::syscall::{self, SyscallError};
 
 /// Mirrored in `so_cache_refusals`, which reads its bytes off the device.
 const STALE: &str = "/home/so-cache-stale.so";
+/// The same-size arm's path; nothing reads its bytes back, only its refusal.
+const SAME_SIZE: &str = "/home/so-cache-same-size.so";
 const FIRST: &str = "/lib/libtls_lib.so";
 const SECOND: &str = "/lib/libtls_dlopen_lib.so";
 /// A symbol `FIRST` exports and `SECOND` does not: the verdict is a name.
@@ -35,7 +37,8 @@ fn main() {
 /// both are red, and stopping at the first would hide one control.
 fn test() {
     let arms = [
-        ("stale", a_changed_file_is_refused()),
+        ("stale-size", a_changed_file_is_refused()),
+        ("stale-mtime", a_same_size_rewrite_is_refused()),
         ("budget", the_budget_is_refused()),
     ];
     let mut failed = false;
@@ -79,6 +82,30 @@ fn a_changed_file_is_refused() -> Result<String, String> {
         ));
     }
     Ok(format!("{STALE} became {SECOND} and the second load was refused"))
+}
+
+/// The same library written over itself: same bytes, same length, new mtime.
+///
+/// **This is the arm a partial fix fails.** The one above changes the file's
+/// size as well as its contents, so an identity keyed on size alone refuses it
+/// and looks correct; here only the mtime moves. No symbol can tell the two
+/// writes apart — the refusal itself is the whole verdict.
+fn a_same_size_rewrite_is_refused() -> Result<String, String> {
+    copy(FIRST, SAME_SIZE);
+    let first = load_in_child(SAME_SIZE);
+    if !first.contains("LOADED") {
+        return Err(format!("the first load of {SAME_SIZE} did not happen: {first}"));
+    }
+
+    copy(FIRST, SAME_SIZE);
+    let second = load_in_child(SAME_SIZE);
+    if !second.contains("REFUSED NotSupported") {
+        return Err(format!(
+            "{SAME_SIZE} was rewritten with the same bytes at the same length and the load was \
+             not refused: {second} — an identity keyed on size alone cannot see this write"
+        ));
+    }
+    Ok(format!("a same-size rewrite of {SAME_SIZE} was refused"))
 }
 
 /// Distinct paths are distinct entries, so copies of one library fill the
