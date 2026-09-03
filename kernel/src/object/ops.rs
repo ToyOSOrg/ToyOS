@@ -402,6 +402,10 @@ fn write_pipe(id: PipeId, buf: &UserBytes) -> Option<u64> {
 pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
     match object {
         KObjectRef::File(f) => f.with(|state| {
+            // Refused, never wrapped: past this the `u32` page index would alias a low page.
+            if (state.position as u64).saturating_add(buf.len() as u64) > file_cache::MAX_FILE_SIZE {
+                return Some(SyscallError::InvalidArgument.to_u64());
+            }
             let mut written = 0;
             let mut refused = false;
             while written < buf.len() {
@@ -459,10 +463,11 @@ pub fn seek(object: &KObjectRef, pos: SeekFrom) -> u64 {
             SeekFrom::Current(n) => (state.position as i64).checked_add(n).unwrap_or(-1),
             SeekFrom::End(n) => (size as i64).checked_add(n).unwrap_or(-1),
         };
-        if new_pos < 0 {
+        if new_pos < 0 || new_pos as u64 > file_cache::MAX_FILE_SIZE {
             return SyscallError::InvalidArgument.to_u64();
         }
-        state.position = (new_pos as usize).min(size);
+        // Past EOF is a position, not an error (POSIX lseek): a later write extends the file.
+        state.position = new_pos as usize;
         state.position as u64
     })
 }
@@ -589,11 +594,14 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     let KObjectRef::File(file) = object else {
         return SyscallError::PermissionDenied.to_u64();
     };
+    if size > file_cache::MAX_FILE_SIZE {
+        return SyscallError::InvalidArgument.to_u64();
+    }
     let file_id = file.with(|state| state.file_id);
     {
         // The VFS lock outside `FileObject`'s (fsync's order) is `resize`'s witness.
         let mut vfs = crate::vfs::lock();
-        // A refused resize changed nothing, so the size and the position below stay as they were.
+        // A refused resize changed nothing, so the size stays as it was.
         // A budget expiry is the caller's own bound and not a fact about the device: retryable.
         if let Err(e) = file_cache::resize(&mut vfs, file_id, size) {
             return match e {
@@ -603,10 +611,8 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
             .to_u64();
         }
     }
+    // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
     file.with(|state| {
-        if state.position > size as usize {
-            state.position = size as usize;
-        }
         state.mtime = crate::clock::nanos_since_boot();
         0
     })

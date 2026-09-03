@@ -104,7 +104,7 @@ kernel/src/elf/mod.rs 105 0
 kernel/src/elf/reloc.rs 38 0
 kernel/src/fat32_adapter.rs 181 0
 kernel/src/file_backing.rs 25 0
-kernel/src/file_cache.rs 111 0
+kernel/src/file_cache.rs 113 0
 kernel/src/fs_rename.rs 18 0
 kernel/src/gpt.rs 32 0
 kernel/src/gpu.rs 10 0
@@ -157,7 +157,7 @@ kernel/src/object/handle.rs 63 0
 kernel/src/object/inbox.rs 6 0
 kernel/src/object/mod.rs 54 0
 kernel/src/object/namespace.rs 10 0
-kernel/src/object/ops.rs 67 0
+kernel/src/object/ops.rs 70 0
 kernel/src/object/pipe.rs 14 0
 kernel/src/object/port.rs 21 0
 kernel/src/object/process.rs 17 0
@@ -324,6 +324,7 @@ tests/toyos-rust-tests/src/bin/kill_while_blocked.rs 163 0
 tests/toyos-rust-tests/src/bin/launcher_refusals.rs 110 0
 tests/toyos-rust-tests/src/bin/locale_gate.rs 64 0
 tests/toyos-rust-tests/src/bin/log_volume_reread.rs 27 0
+tests/toyos-rust-tests/src/bin/lseek_past_eof.rs 13 0
 tests/toyos-rust-tests/src/bin/mkdir_cap.rs 11 0
 tests/toyos-rust-tests/src/bin/mmap_prot.rs 72 0
 tests/toyos-rust-tests/src/bin/mmap_stress.rs 31 0

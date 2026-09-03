@@ -248,6 +248,7 @@ log_partition_layout 477 shards=12
 log_poll_outlives_a_close 4738 shards=12
 log_reserve_window 7022 shards=12
 log_reserve_window_negative 6791 shards=12
+lseek_past_eof 24 shards=12
 metal_sim_client_death 4126 shards=12
 metal_sim_compositor 8986 shards=12
 metal_sim_compositor_stall 11390 shards=12
