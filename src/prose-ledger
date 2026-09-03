@@ -84,10 +84,10 @@ kernel/src/drivers/panic_console/mod.rs 215 0
 kernel/src/drivers/pci.rs 37 0
 kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
-kernel/src/drivers/virtio.rs 130 0
+kernel/src/drivers/virtio.rs 127 0
 kernel/src/drivers/virtio_console.rs 33 0
 kernel/src/drivers/virtio_gpu.rs 29 0
-kernel/src/drivers/virtio_net.rs 57 0
+kernel/src/drivers/virtio_net.rs 52 0
 kernel/src/drivers/virtio_sound.rs 68 0
 kernel/src/drivers/xhci/device.rs 83 0
 kernel/src/drivers/xhci/hid.rs 26 0

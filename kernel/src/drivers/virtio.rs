@@ -475,7 +475,6 @@ impl<'pool> Virtqueue<'pool> {
     pub fn avail_addr(&self) -> u64 { self.avail.device_addr() }
     pub fn used_addr(&self) -> u64 { self.used.device_addr() }
 
-    /// The rings themselves, for a caller reasoning about where they sit.
     pub fn rings(&self) -> [Dma<'pool>; 3] { [self.desc, self.avail, self.used] }
 
     /// Where in the notification region this queue's doorbell sits; meaningless before `setup_queue` runs.

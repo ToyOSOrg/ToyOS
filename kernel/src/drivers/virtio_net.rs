@@ -5,10 +5,8 @@
 //! shared pool, the one a `DeviceType::Nic` claim maps, holds only the frame
 //! buffers. [`assert_queues_are_private`] checks that split against where the
 //! rings physically are. `DmaPool` allocates whole pages and a claim maps a
-//! whole page, so the two pools cannot share one.
-//!
-//! Both pools sit in an address space of this device's own, so the addresses in
-//! its descriptors name these two pools or nothing at all.
+//! whole page, so the two pools cannot share one. Both sit in an address space
+//! of this device's own: an address in a descriptor names one of them or nothing.
 
 use alloc::boxed::Box;
 
