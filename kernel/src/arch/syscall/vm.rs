@@ -205,18 +205,25 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         return idx as u64;
     }
 
-    let lib = crate::elf::try_clone_cached(&resolved);
-    let mut lib = match lib {
-        Some(lib) => lib,
-        None => {
-            let backing = match vfs::lock().open_backing(&resolved) {
-                Ok(b) => b,
-                Err(e) => {
-                    log!("dlopen: {}: {e}", resolved);
-                    return e.to_u64();
-                }
-            };
-
+    // Opened before the cache is consulted: the answer depends on what the path holds *now*, and the fast path above is what keeps a `dlopen` loop from paying.
+    let (backing, id) = match vfs::lock().open_backing_identified(&resolved) {
+        Ok(pair) => pair,
+        Err(e) => {
+            log!("dlopen: {}: {e}", resolved);
+            return e.to_u64();
+        }
+    };
+    let mut lib = match crate::elf::try_clone_cached(&resolved, id) {
+        Ok(Some(lib)) => lib,
+        Err(e) => {
+            log!(
+                "dlopen: {}: the cached image is stale — the file behind this path changed since \
+                 it was loaded, and the image cannot be replaced while a process has it mapped",
+                resolved
+            );
+            return e.to_u64();
+        }
+        Ok(None) => {
             let (lib, rw_offset, rw_size) = match crate::elf::load_shared_lib(backing.as_ref()) {
                 Ok(result) => result,
                 Err(msg) => {
@@ -225,7 +232,10 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
                 }
             };
 
-            crate::elf::cache_loaded_lib(&resolved, lib, rw_offset, rw_size)
+            match crate::elf::cache_loaded_lib(&resolved, id, lib, rw_offset, rw_size) {
+                Ok(lib) => lib,
+                Err(e) => return e.to_u64(),
+            }
         }
     };
 

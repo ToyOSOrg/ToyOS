@@ -657,7 +657,64 @@ fn build_and_assemble(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    let mut programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
+    if config.hosted_rustc {
+        // `collect_hosted_rustc` puts it there and no row can.
+        programs.insert("rustc");
+    }
+    // Targets are inventoried beside the files: `bin/ls -> /bin/ghost` reaches a
+    // program as surely as a file would, and the files alone walk past it.
+    let targets: Vec<String> =
+        symlinks.iter().map(|(_, to)| symlink_target_name(to).to_string()).collect();
+    let mut names: Vec<&str> = initrd_files.iter().map(|(name, _)| name.as_str()).collect();
+    names.extend(targets.iter().map(String::as_str));
+    if let Err(why) = unnamed_program(&names, &programs, &config.boot.start) {
+        panic!("{why}");
+    }
+
     image::create_initrd(&initrd_files, &symlinks, quiet)
+}
+
+/// What `tests/common/qemu.rs` prefixes every binary it injects with.
+const HARNESS_PREFIXES: [&str; 2] = ["bin/test_rs_", "bin/test_c_"];
+
+fn symlink_target_name(to: &str) -> &str {
+    to.trim_start_matches('/')
+}
+
+/// The converse of the crate assertion above: a `bin/` entry no name reaches.
+/// A name buys authority — `/bin/init` builds a `[programs]` row's namespace and
+/// device claims — and a harness binary has none, holding only what its spawner
+/// moved in, so it is legal exactly when the config starts something that could
+/// spawn it. **An inventory over the `bin/` namespace, not a reachability
+/// proof**, which `the_check_does_not_reach_a_spawner_that_never_spawns` asserts.
+fn unnamed_program(
+    names: &[&str],
+    programs: &BTreeSet<&str>,
+    start: &[String],
+) -> Result<(), String> {
+    for name in names {
+        let Some(program) = name.strip_prefix("bin/") else { continue };
+        if program == INIT_PROGRAM || programs.contains(program) {
+            continue;
+        }
+        if HARNESS_PREFIXES.iter().any(|p| name.starts_with(p)) {
+            // A start list of names no row declares runs nothing, so it is empty.
+            if !start.iter().any(|s| programs.contains(s.as_str())) {
+                return Err(format!(
+                    "the image carries {name} and this config's `[boot] start` names no \
+                     `[programs]` row, so nothing runs that could spawn it — a harness binary \
+                     is endowed by the process that starts it and by nothing else"
+                ));
+            }
+            continue;
+        }
+        return Err(format!(
+            "the image carries {name} and no `[programs]` row names it, so `/bin/init` can build \
+             it no namespace and no device claim; add a row or take the file out"
+        ));
+    }
+    Ok(())
 }
 
 // --- Public API ---
@@ -2205,6 +2262,54 @@ mod tests {
         }
         let bad: SystemConfig = toml::from_str("init = []\n[boot]\nstart = [\"ghost\"]\n").unwrap();
         assert!(started_programs_are_declared(&bad).is_err());
+    }
+
+    fn declared(names: &[&str]) -> BTreeSet<&'static str> {
+        names.iter().map(|n| Box::leak(n.to_string().into_boxed_str()) as &str).collect()
+    }
+
+    /// The converse of the row above: what the image carries and no name reaches.
+    #[test]
+    fn a_bin_entry_no_name_reaches_is_refused() {
+        let programs = declared(&["shell"]);
+        let started = ["shell".to_string()];
+        assert!(unnamed_program(
+            &["bin/init", "bin/shell", "lib/libtls_lib.so", "etc/system.manifest"],
+            &programs,
+            &started,
+        )
+        .is_ok());
+        assert!(unnamed_program(&["bin/test_rs_window_child"], &programs, &started).is_ok());
+
+        let why = unnamed_program(&["bin/ghost"], &programs, &started).unwrap_err();
+        assert!(why.contains("bin/ghost") && why.contains("no `[programs]` row"), "{why}");
+        let why = unnamed_program(&["bin/test_rs_window_child"], &programs, &[]).unwrap_err();
+        assert!(why.contains("nothing runs that could spawn it"), "{why}");
+        // A start list that names only what no row declares runs nothing, so it
+        // is the empty list and not a spawner.
+        let ghosts = ["ghost".to_string()];
+        let why = unnamed_program(&["bin/test_rs_window_child"], &programs, &ghosts).unwrap_err();
+        assert!(why.contains("names no `[programs]` row"), "{why}");
+        // The other half of the symlink closure: the target as the inventory
+        // names it, then judged like any other name.
+        assert_eq!(symlink_target_name("/bin/toybox"), "bin/toybox");
+        let linked = symlink_target_name("/bin/ghost");
+        assert!(unnamed_program(&[linked], &programs, &started).is_err());
+    }
+
+    /// **What the check does not reach, as an assertion and not a sentence.** It
+    /// reads names, so a config starting a program that never spawns anything
+    /// passes it; closing that needs reachability, which no manifest name
+    /// carries. The day the check learns it, this reds.
+    #[test]
+    fn the_check_does_not_reach_a_spawner_that_never_spawns() {
+        // `logd` spawns nothing in any config this tree ships.
+        let programs = declared(&["logd"]);
+        assert!(
+            unnamed_program(&["bin/test_rs_window_child"], &programs, &["logd".to_string()])
+                .is_ok(),
+            "the scan now reaches whether the spawner spawns; correct this test and its header"
+        );
     }
 
     fn walk_configs(dir: &Path, root: &Path, out: &mut Vec<String>) {

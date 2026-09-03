@@ -349,6 +349,8 @@ const RUST_SKIP: &[&str] = &[
     // Needs `fsync-budget-spent` and the NVMe `/home`; unstaged it passes
     // vacuously. `home_budget_refusal_retried` boots it with both.
     "home_fsync_budget",
+    // Needs `so-cache-tiny` and the NVMe `/home`. `so_cache_refusals` gives both.
+    "so_cache_policy",
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
     "redirty_mid_flush",
@@ -560,6 +562,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
     ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
+    // The shared-object cache's two refusals. Body in `tests/common/storage.rs`.
+    ("so_cache_refusals", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
@@ -2088,14 +2092,50 @@ fn settle_null_sink_client_exits(qemu: &mut QemuInstance, result: &mut TestResul
 }
 
 /// Nothing to wait for: the test's own window carries everything its check
-/// reads. Every name but one.
+/// reads. Every name but two.
 fn no_settle(_: &mut QemuInstance, _: &mut TestResult) {}
+
+fn spawned_pid(log: &str, name: &str) -> Option<u32> {
+    let want = format!("/bin/test_rs_{name} ");
+    log.lines()
+        .rev()
+        .find(|l| l.contains("spawn: ") && l.contains(&want))?
+        .split("pid=")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Wait for the kernel to account the process: the capture closes when the guest
+/// runner reaps the child, while `syscalls: pid=N` comes from
+/// `teardown_resources`, which `deferred-release-outlives-its-syscall.md`
+/// records as able to run after the syscall that caused it returned.
+fn settle_syscall_cost(qemu: &mut QemuInstance, result: &mut TestResult) {
+    /// A liveness ceiling and never a verdict.
+    const ACCOUNTED: Duration = Duration::from_secs(5);
+
+    let Some(pid) = spawned_pid(&result.serial, "syscall_cost") else { return };
+    let want = accounting_of(pid);
+    if result.serial.contains(&want) {
+        return;
+    }
+    let more = qemu.drain_until(ACCOUNTED, |l| l.contains(&want));
+    result.serial.push_str(&more);
+}
+
+/// The trailing space is what keeps `pid=21` from matching `pid=212`.
+fn accounting_of(pid: u32) -> String {
+    format!("syscalls: pid={pid} ")
+}
 
 /// Select the between-the-test-and-its-check wait by name, as [`check_for`]
 /// selects the check.
 fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
     match name {
         "null_sink_client_exits" => settle_null_sink_client_exits,
+        "syscall_cost" => settle_syscall_cost,
         _ => no_settle,
     }
 }
@@ -2109,9 +2149,33 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "null_sink_client_exits" => check_null_sink_client_exits,
         "fault_gates" => check_fault_gates,
         "debug_trap" => check_debug_trap,
+        "dlopen_dedup" => check_dlopen_dedup,
         "syscall_cost" => check_syscall_cost,
         _ => check_rust_result,
     }
+}
+
+/// What a loader writes when it caches a library under the directory it searched
+/// and did not find it in. Only `dlopen_dedup`'s last arm produces this string.
+const FALLBACK_MISCACHED: &str = "dlopen: cached /tmp/dlopen-dedup/libtls_lib.so";
+
+/// `dlopen_dedup` plus the half no guest can see: one library reached two ways
+/// is one physical image, cached under the path that was actually opened.
+fn check_dlopen_dedup(result: &TestResult) -> bool {
+    if !check_rust_result(result) {
+        return false;
+    }
+    let log = format!("{}{}", result.before, result.serial);
+    if log.contains(FALLBACK_MISCACHED) {
+        eprintln!(
+            "FAIL rs::dlopen_dedup: {FALLBACK_MISCACHED:?} — the library was cached under the \
+             directory the loader searched and did not find it in, so a later dlopen of its own \
+             path mapped it a second time{}",
+            kernel_account(result)
+        );
+        return false;
+    }
+    true
 }
 
 /// The two numbers `syscall_cost` measures, read back and recorded. No
@@ -2154,12 +2218,27 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         );
         return false;
     };
-    let counted = result
-        .serial
-        .lines()
-        .filter(|l| l.contains("syscalls: pid="))
-        .filter_map(|l| l.split(" 8=").nth(1)?.split_whitespace().next()?.parse::<u64>().ok())
-        .max()
+    // By pid, and absence is its own failure: read over every line with
+    // `unwrap_or(0)` behind it, a late line was a process that made no calls.
+    let want = spawned_pid(&result.serial, "syscall_cost").map(accounting_of);
+    let line = want
+        .as_ref()
+        .and_then(|w| result.serial.lines().find(|l| l.contains(w.as_str())));
+    let Some(line) = line else {
+        eprintln!(
+            "FAIL rs::syscall_cost: the kernel never accounted the process — no `{}` line \
+             reached the capture, so nothing here says whether it made the calls it claims{}",
+            want.as_deref().unwrap_or("syscalls: pid=<the spawn line is missing too>"),
+            kernel_account(result)
+        );
+        return false;
+    };
+    // Absent `8=` is a process that made no `SYS_CLOCK` calls: a real zero.
+    let counted = line
+        .split(" 8=")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|n| n.parse::<u64>().ok())
         .unwrap_or(0);
     if counted < claimed {
         eprintln!(
@@ -8305,6 +8384,7 @@ fn run_machine_test(
         "home_budget_refusal_retried" => {
             storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
         }
+        "so_cache_refusals" => storage::so_cache_refusals(test_config, c_bins, rust_bins),
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
