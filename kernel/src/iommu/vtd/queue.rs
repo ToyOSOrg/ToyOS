@@ -22,6 +22,14 @@ const WAIT: u64 = 0x5;
 
 /// Granularity field, bits 5:4: `01` is global — every domain, every entry.
 const GLOBAL: u64 = 1 << 4;
+/// `10`: everything cached for one domain id, whatever address or requester it came from.
+const DOMAIN: u64 = 2 << 4;
+/// `11`, context cache only: one requester id, Section 6.5.2.1.
+const DEVICE: u64 = 3 << 4;
+/// Domain id, bits 31:16 of both descriptor types.
+const DOMAIN_SHIFT: u64 = 16;
+/// Source id, bits 47:32 of a context-cache descriptor.
+const SOURCE_SHIFT: u64 = 32;
 /// Set on every IOTLB invalidation: waits for in-flight transactions against
 /// the old translation to finish, not just for the entry to be gone.
 const DRAIN_WRITES: u64 = 1 << 6;
@@ -64,6 +72,43 @@ impl Queue {
             &[
                 (CONTEXT_CACHE | GLOBAL, 0),
                 (IOTLB | GLOBAL | DRAIN_WRITES | DRAIN_READS, 0),
+            ],
+        );
+    }
+
+    /// Every translation cached for one domain, gone. Owed after any change to
+    /// its second-level tables, a mapping becoming present included, because
+    /// `CAP.CM` says the unit may have cached the absence.
+    pub fn invalidate_domain(&mut self, regs: Mmio, domain: u16) {
+        self.submit(
+            regs,
+            &[(
+                IOTLB | DOMAIN | DRAIN_WRITES | DRAIN_READS
+                    | ((domain as u64) << DOMAIN_SHIFT),
+                0,
+            )],
+        );
+    }
+
+    /// One requester's context entry, then everything cached for the domain it
+    /// now names — Section 6.5.2.1's order, and the IOTLB half is not optional:
+    /// a translation cached under the old context entry outlives it.
+    pub fn invalidate_context(&mut self, regs: Mmio, domain: u16, stream: u16) {
+        self.submit(
+            regs,
+            &[
+                (
+                    CONTEXT_CACHE
+                        | DEVICE
+                        | ((domain as u64) << DOMAIN_SHIFT)
+                        | ((stream as u64) << SOURCE_SHIFT),
+                    0,
+                ),
+                (
+                    IOTLB | DOMAIN | DRAIN_WRITES | DRAIN_READS
+                        | ((domain as u64) << DOMAIN_SHIFT),
+                    0,
+                ),
             ],
         );
     }

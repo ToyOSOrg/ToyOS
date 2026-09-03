@@ -169,7 +169,7 @@ fn visit(ctx: &mut Ctx, dir: &Dir, depth: u32, r: &mut Report) {
         let Some(src) = ctx.vol.get(at..at + bytes_per_cluster) else { break };
         buf.copy_from_slice(src);
 
-        for entry in buf.chunks_exact(32) {
+        for entry in buf.as_chunks::<32>().0 {
             if entry[0] == 0x00 {
                 break 'chain;
             }

@@ -43,7 +43,7 @@ does not hold across a transfer.
    `handle_recv` (the whole fork estate was swept for this branch and
    `handle_recv` is not in it). The receiver then refuses by
    name and the fail-fast policy is untouched.
-2. **A fifteenth syscall** answering the kind of a handle. Cheaper to write and
+2. **A syscall** answering the kind of a handle. Cheaper to write and
    worse: it is a second place to ask, and it makes "what is this" a round trip
    rather than part of the answer that produced it.
 3. **`WrongType` stops being fatal.** Rejected: it is fatal for a reason, and

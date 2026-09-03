@@ -389,9 +389,9 @@ impl TrbRing {
     fn init(buf: Dma<'static>) -> Self {
         assert!(buf.size() >= RING_SIZE * core::mem::size_of::<Trb>());
         zero_dma(buf, 0, buf.size());
-        let ring = Self { buf, base_phys: buf.phys(), tail: 0, cycle: true };
+        let ring = Self { buf, base_phys: buf.device_addr(), tail: 0, cycle: true };
         let mut link = Trb::ZERO;
-        link.param = buf.phys();
+        link.param = buf.device_addr();
         link.control = TRB_LINK | (1 << 1); // TC (Toggle Cycle)
         ring.put(RING_SIZE - 1, link);
         ring
@@ -1277,7 +1277,7 @@ impl XhciController {
         if self.event_head == 0 {
             self.event_phase = !self.event_phase;
         }
-        let erdp = self.dma().phys() + OFF_EVT_RING as u64 + (self.event_head as u64) * 16;
+        let erdp = self.dma().device_addr() + OFF_EVT_RING as u64 + (self.event_head as u64) * 16;
         self.rt_base.write_u64(IR0_ERDP, erdp | (1 << 3)); // EHB clears interrupt pending
         self.rt_base.write_u32(IR0_IMAN, 3); // clear IP (W1C) + keep IE
     }

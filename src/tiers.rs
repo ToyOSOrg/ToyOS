@@ -1169,6 +1169,43 @@ pub const RELEGATED: &[Relegated] = &[
                  device-side arms have no other gate. Priced at 5,883 ms with two arms; 8,888 \
                  with five, over `FAST_COMMIT_MS`.",
     },
+    Relegated {
+        test: "iommu_domain_isolation",
+        ci_ms: 15_756,
+        why: Why::Cost,
+        guards: "What still runs per pull request: `iommu_empty_domain` and \
+                 `iommu_context_absent` each stage one function below or above its \
+                 context entry and read the unit's fault record off the console, so a \
+                 unit that stopped translating reds there. What only this name holds: \
+                 the four moved drivers' tables walked host-side out of RTADDR to their \
+                 leaves and required pairwise disjoint, a device aimed at another \
+                 driver's pool blocked with its BME read out of ECAM, and the fault \
+                 record's five fields. Two boots and a table walk: 15,756 ms on the \
+                 hosted shard.",
+    },
+    Relegated {
+        test: "iommu_virtio_platform",
+        ci_ms: 17_259,
+        why: Why::Cost,
+        guards: "What still runs per pull request: the two staging gates above boot the \
+                 same machine, so a virtio function created outside the unit is a \
+                 function whose staged fault never arrives — they red on absence. What \
+                 only this name holds: the ACCESS_PLATFORM negotiation asserted per \
+                 function on the unit and no-unit machines, the audio function's \
+                 declared exception, and the NIC declining the bit and losing the \
+                 device. Three boots: 17,259 ms on the hosted shard.",
+    },
+    Relegated {
+        test: "screen_gop_firmware_mode",
+        ci_ms: 12_624,
+        why: Why::Cost,
+        guards: "What still runs per pull request: `screen_console_clear` asserts the 8-pixel \
+                 strip below the last cell row that only the declared 1920x1080 panel has, so a \
+                 bootloader that chose a mode again reds on every pull request. What only this \
+                 name holds: the kernel's GOP line against QEMU's own scanout geometry on two \
+                 machines with different panels, plus stride and pixel format. Two boots: \
+                 12,624 ms on the hosted shard, over `FAST_CEILING_MS`.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own
