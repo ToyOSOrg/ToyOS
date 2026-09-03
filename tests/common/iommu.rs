@@ -700,7 +700,6 @@ pub fn iommu_virtio_platform(
         log.must_be_clean()?;
         log.must_say("Boot: complete")?;
 
-        // The guest side, off the negotiation each driver reports.
         let mut negotiated = Vec::new();
         for line in log.text().lines() {
             let Some(rest) = line.split("VirtIO: PCI ").nth(1) else { continue };
@@ -719,9 +718,6 @@ pub fn iommu_virtio_platform(
                 negotiated.len()
             ));
         }
-        // Which function is the sound device comes from the PCI walk's own
-        // class code, so the exception is checked against the machine rather
-        // than against a name this test chose.
         let sound = class_function(&log, "0401");
         let enumerated = enumerated_functions(&log);
         for (who, accepted) in &negotiated {
@@ -741,9 +737,6 @@ pub fn iommu_virtio_platform(
                 ));
             }
         }
-        // The exception is a measured fact and not a hole: on a machine with a
-        // unit there has to *be* an audio function, and it has to be the one
-        // that did not negotiate.
         if behind_unit && !negotiated.iter().any(|(who, ok)| Some(who.clone()) == sound && !ok) {
             return Err(format!(
                 "{name}: no virtio function declined VIRTIO_F_ACCESS_PLATFORM, so the audio \
@@ -986,8 +979,6 @@ pub fn iommu_domain_isolation(
             .to_string(),
     };
 
-    // Which function is which is read out of the PCI walk's own lines, so a
-    // fault naming some other device is a failure rather than a tautology.
     let nic = class_function(&log, "0200")
         .ok_or_else(|| format!("this machine enumerated no NIC\n{}", log.text()))?;
     let nvme = class_function(&log, "0108")
@@ -1042,9 +1033,6 @@ pub fn iommu_domain_isolation(
              bus and can fault again"
         ));
     }
-    // Every field of the bounded half, not two of them: a handler that cleared
-    // `BME` and latched nothing, or counted against no function, would pass a
-    // check that only read those two.
     let handled = log.must_say(FAULT)?;
     let nic_domain = context_of(socket, window, &nic)?.0;
     for field in [
@@ -1087,6 +1075,11 @@ pub fn iommu_domain_isolation(
     domains_are_disjoint(socket, &log, window, owned, &nvme)
 }
 
+/// Every moved function is in a domain of its own, and no two of those domains
+/// reach the same physical page. A set comparison and not a spot check: a
+/// domain's addresses start at `1 << (width - 2)`, so asking whether one
+/// translates an address inside RAM misses every populated top-level index by
+/// construction and cannot fail.
 fn domains_are_disjoint(
     socket: &Path,
     log: &Serial,
@@ -1161,6 +1154,8 @@ fn domains_are_disjoint(
     Ok(())
 }
 
+/// Every physical page one domain's second-level tables reach, Section 9.8's
+/// walk, a whole 4 KiB of entries at a time.
 fn leaves(socket: &Path, root: u64, levels: u64, bdf: &str) -> Result<BTreeSet<u64>, String> {
     let mut found = BTreeSet::new();
     let mut level = levels;
@@ -1169,11 +1164,10 @@ fn leaves(socket: &Path, root: u64, levels: u64, bdf: &str) -> Result<BTreeSet<u
         let mut next = BTreeSet::new();
         for table in &tables {
             for entry in over_qmp(socket, *table, ENTRIES, 'g')? {
-                // A 1 GiB leaf above the page-directory level, followed as a
-                // pointer, reads 512 words out of somebody's data page.
                 if entry & 0x3 == 0 {
                     continue;
                 }
+                // A 1 GiB leaf followed as a pointer reads 512 words out of a data page.
                 if entry & LARGE_PAGE != 0 {
                     return Err(format!(
                         "{bdf}: a level-{level} entry {entry:#018x} carries the page-size bit, \
@@ -1276,6 +1270,11 @@ fn unit_is_first(argv: &[String], name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The unit's register window, and the one thing on the guest's side of this
+/// gate that is checked rather than believed: a kernel that wrote the real
+/// `VER`, `GSTS`, `RTADDR` and `IRTA` into a page of RAM and printed *that*
+/// address satisfied every readback here. One unit, stated rather than assumed —
+/// `must_say` answers with the first match, so a second line is refused.
 fn register_window(socket: &Path, log: &Serial, name: &str) -> Result<u64, String> {
     let lines: Vec<&str> =
         log.text().lines().filter(|l| l.contains("translating gsts=")).collect();
