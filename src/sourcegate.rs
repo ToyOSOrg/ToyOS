@@ -716,9 +716,8 @@ fn pins_bytes(name: &str) -> bool {
 ///
 /// **A row pins bytes**, the shape [`COMMITTED_FILES`] already is: the tag is a
 /// trailing comment, so a publisher moving `v4` cannot change what runs here,
-/// and a security release arrives only when somebody moves the digest
-/// (`route.yml:128-130` argues it for the T14's image). What a pin is *not*
-/// checked against is
+/// and a security release arrives only when somebody moves the digest. What a
+/// pin is *not* checked against is
 /// `tests::the_pin_is_not_checked_against_the_repository_or_the_tag`. The walk
 /// reads `.github/workflows/` only, so a composite action's own `uses:` is
 /// unread; this tree holds no `action.yml`.

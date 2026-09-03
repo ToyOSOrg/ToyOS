@@ -30,25 +30,8 @@ permissions:
   contents: write
 
 jobs:
-  # Where the bootstrap runs, answered once — `route.yml` has the whole rule.
-  route:
-    uses: ./.github/workflows/route.yml
-
-  # Hosted on every event but `workflow_dispatch` since 2026-08-22, and the
-  # reason is this job's own shape: nearly every branch changes none of the four
-  # trees, so it exits in seconds — but on the T14 those seconds queued behind
-  # the machine's one worker, and seven of the thirteen runs waiting there when
-  # `route.yml` was rewritten were this workflow's. `build` is a required check
-  # and `ci.yml`'s `toolchain-ready` waits up to two hours for what it
-  # publishes, so a no-op that waits 34 minutes for a lane is what a pull
-  # request pays. The runs that do build are hours of compilation the laptop
-  # does faster than a hosted runner; that is the trade, and it is taken because
-  # the fast case is nearly every run and the slow case is parallel and
-  # unqueued. A dispatch is still the T14's, for a bootstrap somebody wants on
-  # the machine's own cores.
   build:
-    needs: [route]
-    runs-on: ${{ needs.route.outputs.runner }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -70,42 +53,23 @@ jobs:
             echo "build=yes" >> "$GITHUB_OUTPUT"
           fi
 
-      # This job runs on the bare machine and not in a container, so what it
-      # needs is the machine's own provisioning. `runner.environment` is what
-      # answers that — the runner reports `github-hosted` or `self-hosted`, and
-      # each of the three steps below is about exactly one of those two: an
-      # image whose disk must be reclaimed and whose packages must be
-      # installed, or a machine that was provisioned once and is only checked.
-      # A runner's *name* answers none of that and breaks on a rename.
+      # This job runs on the bare runner and not in a container, so what it
+      # needs is the image's own provisioning: a disk to reclaim and packages
+      # to install.
       - name: reclaim runner disk
-        if: steps.have.outputs.build == 'yes' && runner.environment == 'github-hosted'
+        if: steps.have.outputs.build == 'yes'
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
                       /usr/local/share/boost /usr/local/.ghcup
           df -h /
 
-      - name: GitHub-hosted deps
-        if: steps.have.outputs.build == 'yes' && runner.environment == 'github-hosted'
+      - name: deps
+        if: steps.have.outputs.build == 'yes'
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             cmake ninja-build build-essential pkg-config libssl-dev zstd \
             qemu-system-x86 ovmf
-
-      # No sudo on the persistent machine by design: this asserts the same list
-      # the step above installs, so a reprovisioned host that lost one of them
-      # reds here by name instead of failing an hour into the bootstrap.
-      - name: self-hosted deps
-        if: steps.have.outputs.build == 'yes' && runner.environment == 'self-hosted'
-        run: |
-          command -v cmake
-          command -v ninja
-          command -v cc
-          command -v pkg-config
-          command -v zstd
-          command -v qemu-system-x86_64
-          pkg-config --exists openssl
-          test -d /usr/share/OVMF
 
       # Full history, deliberately: bootstrap finds the upstream commit whose
       # prebuilt LLVM to download by walking back to the newest bors commit,
