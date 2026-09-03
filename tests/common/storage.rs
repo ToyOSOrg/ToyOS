@@ -559,7 +559,7 @@ pub fn page_cache_partition_offset(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     /// Mirrored in `kernel/src/page_cache.rs::offset_probe`.
-    const FIRST: u64 = 4096;
+    const FIRST: u64 = 3000;
     const AT: u64 = 7;
     const MARK: &[u8] = b"TOYOS-PARTITION-OFFSET";
     const BYTES: u64 = 128 * 1024 * 1024;

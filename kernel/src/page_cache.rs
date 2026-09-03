@@ -516,7 +516,7 @@ pub fn partition_offset_selftest(handle: &block::Handle) {
 /// blocks off the image after the guest has gone.
 #[cfg(feature = "boot-actuators")]
 mod offset_probe {
-    pub const FIRST: u64 = 4096;
+    pub const FIRST: u64 = 3000;
     pub const BLOCKS: u64 = 64;
     pub const AT: u64 = 7;
     pub const MARK: &[u8] = b"TOYOS-PARTITION-OFFSET";
