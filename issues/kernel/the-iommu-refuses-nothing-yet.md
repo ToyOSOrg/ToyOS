@@ -9,14 +9,14 @@ opened: 2026-08-02
 Built: discovery, translation, interrupt remapping with every source in the
 remappable format and every entry source-id-verified, and a domain per driver
 — xHCI, NVMe, virtio-net, virtio-console, virtio-gpu, virtio-sound and the HDA
-controller each reach their own pools and nothing else, each has an arm that
-aims it at another driver's pool and reads the fault, and
+controller each reach their own pools and nothing else; four of the seven have
+an arm that aims them at another driver's pool and reads the fault (xHCI, NVMe
+and virtio-console do not), and
 `iommu_domain_isolation` walks the tables the unit reads on the three machines
 that between them carry all seven and requires the page sets to be pairwise
 disjoint. The fault handler clears Bus Master Enable, latches the first record
-and counts per unit and per function before its terminal halt; the reschedule
-handoff lands with the process-kill arm, and teardown's slow half never runs
-from the deferred zero-handle queue.
+and counts per unit and per function before its terminal halt; teardown's slow
+half never runs from the deferred zero-handle queue.
 
 **What remains is the refusal**, and it is sequenced after the first userspace
 driver has moved (`issues/kernel/every-driver-is-still-in-the-kernel.md`):
@@ -36,7 +36,7 @@ What the harness cannot measure:
 - **Invalidation.** QEMU fills its IOTLB only on the success path, so a
   missed post-map invalidation cannot show, and a missed post-unmap one would
   need a device re-aimed at a page already reused. Measured: with every
-  invalidation removed, every IOMMU gate stayed green.
+  invalidation removed, all five of the then five IOMMU gates stayed green.
 - **Compatibility-format blocking and the fault event's exemption**, recorded in
   `issues/kernel/qemu-passes-compatibility-format-interrupts.md` as T14
   questions.

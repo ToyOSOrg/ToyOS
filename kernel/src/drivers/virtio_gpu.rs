@@ -4,7 +4,7 @@ use super::pci::PciDevice;
 use super::virtio::{BufDir, DescSlot, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
 use super::DmaPool;
 use toyos_abi::syscall::SyscallError;
-use crate::iommu::DeviceSpace;
+use crate::iommu::{DeviceSpace, IommuError};
 use crate::mm::{Dma, Unaligned, PAGE_2M};
 use crate::gpu::{FLAG_HARDWARE_CURSOR, Gpu, GpuInfo};
 use crate::log;
@@ -185,11 +185,9 @@ struct AttachedBacking {
 }
 
 impl AttachedBacking {
-    /// A domain this kernel cannot map into is a kernel bug: the address is the
-    /// allocator's own and the pages are whole 2 MiB frames.
-    fn take(space: DeviceSpace, phys: u64, bytes: u64) -> Self {
-        let at = space.map(phys, bytes).unwrap_or_else(|why| panic!("VirtIO GPU: {why}"));
-        Self { space, at, bytes }
+    fn take(space: DeviceSpace, phys: u64, bytes: u64) -> Result<Self, IommuError> {
+        let at = space.map(phys, bytes)?;
+        Ok(Self { space, at, bytes })
     }
 }
 
@@ -205,8 +203,7 @@ impl Drop for AttachedBacking {
 /// existing holders (e.g. a compositor) to unmap.
 struct FbAlloc {
     regions: [Region; 2],
-    /// `regions[0]`'s; `regions[1]` is the compositor's back buffer and is never
-    /// given to the device. `None` only for the placeholder built before the display.
+    /// `regions[0]`'s; `None` only for the placeholder built before the display.
     backing: Option<AttachedBacking>,
 }
 
@@ -415,8 +412,8 @@ impl GpuController {
         self.cursor_command(&cmd);
     }
 
-    /// `None` when the physical memory isn't there; the caller decides whether
-    /// that is fatal.
+    /// `None` when the physical memory or a device address is not there: the
+    /// boot-time claim may panic on it, a mode change may only refuse.
     fn alloc_framebuffer(&mut self, fb_size: u32) -> Option<FbAlloc> {
         let fb_size = fb_size as usize;
         let fb_pages = fb_size.div_ceil(PAGE_2M as usize);
@@ -433,7 +430,13 @@ impl GpuController {
                 pages: Some(alloc::sync::Arc::new(Pages::new(pages))),
             }
         });
-        let backing = AttachedBacking::take(self.space, regions[0].phys.phys(), fb_aligned);
+        let backing = match AttachedBacking::take(self.space, regions[0].phys.phys(), fb_aligned) {
+            Ok(backing) => backing,
+            Err(why) => {
+                log!("VirtIO GPU: no device address for a {fb_size}-byte scanout: {why}");
+                return None;
+            }
+        };
         log!(
             "VirtIO GPU: scanout buffer at {:?} phys={:#x} device={:#x} ({} bytes)",
             regions[0].phys.as_mut_ptr::<u8>(),
@@ -658,7 +661,8 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
         cache: CachePolicy::DeferToMtrr,
         pages: Some(alloc::sync::Arc::new(Pages::new(cursor_pages))),
     };
-    let cursor_backing = AttachedBacking::take(space, cursor_phys, PAGE_2M);
+    let cursor_backing = AttachedBacking::take(space, cursor_phys, PAGE_2M)
+        .unwrap_or_else(|why| panic!("VirtIO GPU: cursor mapping failed: {why}"));
     gpu.create_resource(CURSOR_RESOURCE_ID, FORMAT_B8G8R8A8_UNORM, CURSOR_SIZE, CURSOR_SIZE);
     gpu.attach_backing(CURSOR_RESOURCE_ID, cursor_backing.at, cursor_bytes as u32);
     log!(

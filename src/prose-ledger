@@ -86,7 +86,7 @@ kernel/src/drivers/serial.rs 79 0
 kernel/src/drivers/usb_storage.rs 17 0
 kernel/src/drivers/virtio.rs 127 0
 kernel/src/drivers/virtio_console.rs 33 0
-kernel/src/drivers/virtio_gpu.rs 45 0
+kernel/src/drivers/virtio_gpu.rs 42 0
 kernel/src/drivers/virtio_net.rs 52 0
 kernel/src/drivers/virtio_sound.rs 73 0
 kernel/src/drivers/xhci/device.rs 83 0
