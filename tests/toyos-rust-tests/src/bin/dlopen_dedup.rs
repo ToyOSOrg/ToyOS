@@ -15,11 +15,45 @@ const LIB: &[u8] = b"/lib/libtls_dlopen_lib.so";
 const OTHER_LIB: &[u8] = b"/lib/libtls_multi_crate.so";
 const LOADS: usize = 64;
 
+/// A directory only this test spawns from, so the `DT_NEEDED` fallback caches
+/// under a spelling nothing else can produce; `check_dlopen_dedup` in
+/// `tests/toyos.rs` holds the verdict. The binary beside it `DT_NEEDED`s a
+/// library that is in `/lib` and not there.
+const FROM: &str = "/tmp/dlopen-dedup";
+const NEEDS_A_LIB: &str = "/bin/test_rs_std_tls";
+const BY_PATH: &[u8] = b"/lib/libtls_lib.so";
+
 fn main() {
     let handles = handle_identity();
     object_identity(handles[0], handles[LOADS - 1]);
     one_name_under_contention();
+    one_library_under_two_spellings();
     println!("all dlopen dedup checks passed");
+}
+
+/// A library reached through the `/lib` fallback and then by its own path is one
+/// module, not two. **The verdict is the kernel's and this arm only stages it:**
+/// a guest cannot count physical images, so it puts the fallback's spelling
+/// somewhere unique — a `DT_NEEDED`-carrying binary in [`FROM`], which holds no
+/// library — and a loader caching under the directory it searched logs that path.
+fn one_library_under_two_spellings() {
+    let copy = format!("{FROM}/needs-a-lib");
+    std::fs::create_dir_all(FROM).unwrap_or_else(|e| panic!("make {FROM}: {e}"));
+    let bytes = std::fs::read(NEEDS_A_LIB).unwrap_or_else(|e| panic!("read {NEEDS_A_LIB}: {e}"));
+    std::fs::write(&copy, &bytes).unwrap_or_else(|e| panic!("write {copy}: {e}"));
+
+    let status = std::process::Command::new(&copy)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("spawn {copy}: {e}"));
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the copy in {FROM} did not run, so its DT_NEEDED never took the /lib fallback",
+    );
+
+    syscall::dl_open(BY_PATH).expect("the same library by its own path");
+    println!("  PASS: a library came through the fallback and then by its own path");
 }
 
 /// The mechanism: repeated loads of one name are one handle.

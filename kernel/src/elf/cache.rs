@@ -4,14 +4,21 @@
 //! A cached module's read-only pages are mapped into every process that loads
 //! it and its base address never moves, so its `R_X86_64_RELATIVE` relocations
 //! need no rework. Only the writable window is copied.
+//!
+//! **Nothing is ever removed, and both refusals follow from that**, as does
+//! `clone_from_cache`'s SAFETY: no address space is reachable from here, so
+//! neither a changed file nor a full budget can be answered by taking an entry
+//! back, and both are refused instead.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use toyos_abi::syscall::SyscallError;
 
 use super::{LibMemory, LoadedLib};
 use crate::mm::{KernelSlice, MAX_HEAP_ALLOC};
 use crate::process::PageAlloc;
 use crate::sync::Lock;
+use crate::vfs::BackingId;
 use crate::UserAddr;
 use toyos_elf::{RelaCounts, RelocKind};
 
@@ -141,15 +148,64 @@ struct CachedLib {
     rw_offset: usize,
     rw_size: usize,
     relocs: CachedRelocs,
+    /// The file this image was built from, as the mount described it at insert.
+    id: BackingId,
 }
 
-// Entries are pushed only, never removed: `clone_from_cache`'s SAFETY depends on `cached.alloc` staying live forever.
 static SO_CACHE: Lock<Vec<(String, CachedLib)>> = Lock::new(Vec::new());
 
+/// The most physical memory every cached image may hold between them. **A policy
+/// number**: nothing derives it. For scale, the largest shared object this tree
+/// builds loads a span of 144,760,832 bytes — a 146,800,640-byte allocation, so
+/// this admits one of those and refuses a second.
+const BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+/// `so-cache-tiny`'s number, in reach of a guest. Only the magnitude moves.
+const TINY_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
+fn budget_bytes() -> usize {
+    if crate::actuator::so_cache_tiny() {
+        TINY_BUDGET_BYTES
+    } else {
+        BUDGET_BYTES
+    }
+}
+
+/// Every cached image's allocation, summed. The caller holds the lock.
+fn held_bytes(cache: &[(String, CachedLib)]) -> usize {
+    cache.iter().map(|(_, c)| c.alloc.size()).sum()
+}
+
+/// What the cache holds for `path`, judged against the file `id` came from.
+/// **The lookup and the publish-time recheck both ask here**, so the two cannot
+/// disagree about what matches: a recheck comparing less than `id` would hand a
+/// loader whose open straddled a rewrite an image of a file it never opened.
+fn entry_for<'a>(
+    cache: &'a [(String, CachedLib)],
+    path: &str,
+    id: BackingId,
+) -> Result<Option<&'a CachedLib>, SyscallError> {
+    let Some(idx) = cache.iter().position(|(p, _)| p == path) else {
+        return Ok(None);
+    };
+    let entry = &cache[idx].1;
+    if entry.id != id {
+        return Err(SyscallError::NotSupported);
+    }
+    Ok(Some(entry))
+}
+
 /// Takes ownership of `lib` and returns a clone in `Shared` mode with a private writable window; returns it unchanged if it cannot be cached.
-pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: usize) -> LoadedLib {
+/// `Err` is the budget alone: an image that merely cannot be cached still works.
+pub fn cache_loaded_lib(
+    path: &str,
+    id: BackingId,
+    lib: LoadedLib,
+    rw_offset: usize,
+    rw_size: usize,
+) -> Result<LoadedLib, SyscallError> {
     if !matches!(lib.memory, LibMemory::Owned(_)) {
-        return lib;
+        return Ok(lib);
     }
     let snapshot = Snapshot::of(&lib);
     let user_base = lib.user_base;
@@ -162,10 +218,10 @@ pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: u
     // A lib without prescanned relocs keeps the scan-every-table path: the cache always stores what `cached_relocs` describes.
     let owned = |alloc| snapshot.into_lib(LibMemory::Owned(alloc), user_base, None);
     let Some(relocs) = scanned else {
-        return owned(alloc);
+        return Ok(owned(alloc));
     };
     let Some(rw_alloc) = PageAlloc::new(rw_size, crate::mm::pmm::Category::Elf) else {
-        return owned(alloc);
+        return Ok(owned(alloc));
     };
     let alloc_ptr = alloc.ptr();
     // SAFETY: `rw_offset`/`rw_size` are `load_shared_lib`'s validated window, so `alloc_ptr.add(rw_offset)` stays inside `alloc`; `rw_alloc` is a fresh, distinct allocation, so the ranges cannot overlap.
@@ -177,24 +233,42 @@ pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: u
     let mut cache = SO_CACHE.lock();
     // Asked again under the lock that publishes: `try_clone_cached` released it
     // before the load. Entries are never removed, so a second one for a name would
-    // strand a whole library forever — the loser clones the winner's instead.
-    if let Some(idx) = cache.iter().position(|(p, _)| p == path) {
-        let cloned = clone_from_cache(&cache[idx].1);
+    // strand a whole library forever — the loser clones the winner's instead, and
+    // is refused when the winner's file is not the one this caller opened.
+    let published = match entry_for(&cache, path, id) {
+        Err(e) => Some(Err(e)),
+        Ok(Some(entry)) => Some(Ok(clone_from_cache(entry))),
+        Ok(None) => None,
+    };
+    if let Some(outcome) = published {
         drop(cache);
-        return cloned.unwrap_or_else(|| owned(alloc));
+        return outcome.map(|cloned| cloned.unwrap_or_else(|| owned(alloc)));
     }
+    // Under the lock that publishes: two concurrent loads must not both find room.
+    let budget = budget_bytes();
+    let (held, entries) = (held_bytes(&cache), cache.len());
+    let Some(after) = held.checked_add(alloc.size()).filter(|b| *b <= budget) else {
+        drop(cache);
+        // Both allocations drop here, so the refusal gives back what the load took.
+        log!(
+            "dlopen: {} would take the shared-object cache to {} bytes over {} entries, past its \
+             {}-byte budget; refused, and nothing is evicted for it",
+            path, held.saturating_add(alloc.size()), entries + 1, budget
+        );
+        return Err(SyscallError::ResourceExhausted);
+    };
     cache.push((
         String::from(path),
-        CachedLib { alloc, snapshot, rw_offset, rw_size, relocs: relocs.clone() },
+        CachedLib { alloc, snapshot, rw_offset, rw_size, relocs: relocs.clone(), id },
     ));
     drop(cache);
     log!(
-        "dlopen: cached {} with {} bind + {} tpoff64 + {} tpoff32 + {} dtpmod64 + {} dtpoff64 pre-scanned relocs",
+        "dlopen: cached {} with {} bind + {} tpoff64 + {} tpoff32 + {} dtpmod64 + {} dtpoff64 pre-scanned relocs, cache now {} of {} bytes",
         path, relocs.bind.len(), relocs.tpoff64.len(), relocs.tpoff32.len(),
-        relocs.dtpmod64.len(), relocs.dtpoff64.len()
+        relocs.dtpmod64.len(), relocs.dtpoff64.len(), after, budget
     );
 
-    snapshot.into_lib(
+    Ok(snapshot.into_lib(
         LibMemory::Shared {
             rw_alloc,
             cached_image: snapshot.image,
@@ -203,14 +277,20 @@ pub fn cache_loaded_lib(path: &str, lib: LoadedLib, rw_offset: usize, rw_size: u
         },
         user_base,
         Some(relocs),
-    )
+    ))
 }
 
-/// Clone a library out of the cache by path, or `None` when it is not there.
-pub fn try_clone_cached(path: &str) -> Option<LoadedLib> {
+/// Clone what is cached under `path`, if `id` still describes the file it came
+/// from. `Ok(None)` is nothing usable — no entry, or a clone that found no
+/// memory — and the caller's own load path answers it. `Err` is the refusal:
+/// the file changed under an image no address space here can take back, so a
+/// reload would map the library twice.
+pub fn try_clone_cached(
+    path: &str,
+    id: BackingId,
+) -> Result<Option<LoadedLib>, SyscallError> {
     let cache = SO_CACHE.lock();
-    let idx = cache.iter().position(|(p, _)| p == path)?;
-    clone_from_cache(&cache[idx].1)
+    Ok(entry_for(&cache, path, id)?.and_then(clone_from_cache))
 }
 
 // Base address stays the cache's: `RELATIVE` relocations need no fixup until spawn/dlopen assigns a user address.
