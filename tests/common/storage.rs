@@ -247,8 +247,7 @@ fn front(path: &Path, n: usize) -> Vec<u8> {
 /// `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`. The independent oracle
 /// is the NVMe image: after the shutdown the replaced library's bytes are read
 /// off the device through this crate's own build of the `bcachefs` reader over a
-/// plain seek-and-read file, so the claim rests on no part of the guest's own
-/// account of itself.
+/// plain seek-and-read file, so the claim rests on nothing the guest says.
 pub fn so_cache_refusals(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

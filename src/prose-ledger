@@ -98,7 +98,7 @@ kernel/src/drivers/xhci/wait/boot.rs 89 0
 kernel/src/drivers/xhci/wait/mod.rs 78 0
 kernel/src/drivers/xhci/wait/msc.rs 214 0
 kernel/src/durability.rs 16 0
-kernel/src/elf/cache.rs 51 0
+kernel/src/elf/cache.rs 50 0
 kernel/src/elf/index.rs 23 0
 kernel/src/elf/mod.rs 105 0
 kernel/src/elf/reloc.rs 38 0
@@ -243,7 +243,7 @@ tests/common/qemu.rs 1632 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
-tests/common/storage.rs 78 0
+tests/common/storage.rs 77 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
 tests/common/volumes.rs 624 3
@@ -283,7 +283,7 @@ tests/toyos-rust-tests/src/bin/demand_window_race.rs 156 0
 tests/toyos-rust-tests/src/bin/device_claim_lifetime.rs 56 0
 tests/toyos-rust-tests/src/bin/disk_backtrace.rs 18 0
 tests/toyos-rust-tests/src/bin/disk_backtrace_child.rs 7 0
-tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 27 0
+tests/toyos-rust-tests/src/bin/dlopen_dedup.rs 25 0
 tests/toyos-rust-tests/src/bin/doom_music.rs 7 0
 tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 34 0
@@ -349,7 +349,7 @@ tests/toyos-rust-tests/src/bin/sched_stress.rs 22 0
 tests/toyos-rust-tests/src/bin/segfault_child.rs 3 0
 tests/toyos-rust-tests/src/bin/shm_release_reclaims.rs 49 0
 tests/toyos-rust-tests/src/bin/smp_hole_shootdown.rs 6 0
-tests/toyos-rust-tests/src/bin/so_cache_policy.rs 25 0
+tests/toyos-rust-tests/src/bin/so_cache_policy.rs 23 0
 tests/toyos-rust-tests/src/bin/std_alloc.rs 1 0
 tests/toyos-rust-tests/src/bin/std_fs.rs 11 0
 tests/toyos-rust-tests/src/bin/std_fs_write.rs 0 0

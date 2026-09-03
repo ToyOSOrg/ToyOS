@@ -178,9 +178,8 @@ fn held_bytes(cache: &[(String, CachedLib)]) -> usize {
 
 /// What the cache holds for `path`, judged against the file `id` came from.
 /// **The lookup and the publish-time recheck both ask here**, so the two cannot
-/// disagree about what still matches — and the recheck once compared nothing,
-/// handing a loader whose open straddled a rewrite an image of a file it never
-/// opened.
+/// disagree about what matches — the recheck once compared nothing, handing a
+/// loader whose open straddled a rewrite an image of a file it never opened.
 fn entry_for<'a>(
     cache: &'a [(String, CachedLib)],
     path: &str,

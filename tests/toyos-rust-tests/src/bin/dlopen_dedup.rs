@@ -32,12 +32,10 @@ fn main() {
 }
 
 /// A library reached through the `/lib` fallback and then by its own path is one
-/// module, not two.
-///
-/// **The verdict is the kernel's and this arm only stages it.** A guest cannot
-/// count physical images, so it puts the fallback's spelling somewhere unique: a
-/// `DT_NEEDED`-carrying binary in [`FROM`], which holds no library. A loader that
-/// caches under the directory it searched writes that path into the kernel log.
+/// module, not two. **The verdict is the kernel's and this arm only stages it:**
+/// a guest cannot count physical images, so it puts the fallback's spelling
+/// somewhere unique — a `DT_NEEDED`-carrying binary in [`FROM`], which holds no
+/// library — and a loader caching under the directory it searched logs that path.
 fn one_library_under_two_spellings() {
     let copy = format!("{FROM}/needs-a-lib");
     std::fs::create_dir_all(FROM).unwrap_or_else(|e| panic!("make {FROM}: {e}"));
