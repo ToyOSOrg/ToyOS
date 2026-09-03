@@ -2,11 +2,6 @@
 
 //! A machine's physical memory as a list of regions, and the builders that lay
 //! crafted tables out in one.
-//!
-//! [`Machine::byte`] panics on an address no `readable` call accepted. That is
-//! deliberate and it is the instrument: the crate's contract is that it reads
-//! nothing it has not first bounded, so an unbounded read here is a red rather
-//! than a quietly wrong byte.
 
 use toyos_acpi::Phys;
 

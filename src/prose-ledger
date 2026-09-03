@@ -398,10 +398,10 @@ toyos-abi/src/net.rs 11 0
 toyos-abi/src/ring.rs 128 0
 toyos-abi/src/syscall.rs 849 0
 toyos-abi/src/virtio_sound.rs 71 0
-toyos-acpi/src/fadt.rs 21 0
+toyos-acpi/src/fadt.rs 9 0
 toyos-acpi/src/lib.rs 52 0
 toyos-acpi/src/madt.rs 23 0
-toyos-acpi/tests/common/mod.rs 16 0
+toyos-acpi/tests/common/mod.rs 11 0
 toyos-acpi/tests/corpus.rs 44 0
 toyos-acpi/tests/fixtures.rs 15 0
 toyos-cc/src/ast.rs 8 0
