@@ -1,23 +1,19 @@
-//! The one `BuildHasher` a kernel hash container may use, seeded once from
-//! `RDRAND` before any container exists.
-//!
-//! `kernel/Cargo.toml` takes hashbrown without `default-hasher`, so
-//! `DefaultHashBuilder` has no `BuildHasher` impl and `HashMap::new` /
-//! `HashMap::with_capacity` do not exist: every spelling of a container stops
-//! compiling until it names this hasher.
+//! The one `BuildHasher` a kernel hash container may use, seeded from `RDRAND`
+//! before any container exists. `kernel/Cargo.toml` takes hashbrown without
+//! `default-hasher`, so `HashMap::new` / `with_capacity` do not exist and every
+//! spelling of a container stops compiling until it names this.
 //!
 //! **A container built before [`seed`] is the one wrong answer that would be
 //! silent**, because it would work: it hashes alike on every boot of an image,
 //! the property a `BTreeMap` is chosen over for a boundary-crossing key. So
-//! [`KernelHashState::new`] panics by name instead. Key origins are
-//! `src/kernelkeys.rs`.
+//! [`KernelHashState::new`] panics by name. Key origins: `src/kernelkeys.rs`.
 
 use core::hash::{BuildHasher, Hasher};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::cpu;
 
-/// `0` until [`seed`] has run — the one value it refuses to draw, so it means
+/// `0` until [`seed`] runs — the one value it refuses to draw, so it means
 /// "not seeded" and nothing else.
 static SEED: AtomicU64 = AtomicU64::new(0);
 
@@ -46,12 +42,11 @@ const fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// Carries the seed by value, so a container keeps hashing alike for its life.
+/// Carries the seed by value, so a container hashes alike for its whole life.
 #[derive(Clone, Copy, Debug)]
 pub struct KernelHashState(u64);
 
 impl KernelHashState {
-    /// This boot's seed, or a panic naming [`UNSEEDED`].
     pub fn new() -> Self {
         let seed = SEED.load(Ordering::Acquire);
         assert!(seed != 0, "{UNSEEDED}");
@@ -88,8 +83,7 @@ impl Hasher for KernelHasher {
             last[..tail.len()].copy_from_slice(tail);
             self.0 = mix(self.0 ^ u64::from_le_bytes(last));
         }
-        // The length too: `b"ab"` and `b"ab\0"` otherwise differ only in a zero
-        // byte the padding above already wrote.
+        // The length too, or `b"ab"` and `b"ab\0"` differ only in padding.
         self.0 = mix(self.0 ^ bytes.len() as u64);
     }
 
@@ -114,8 +108,8 @@ impl Hasher for KernelHasher {
     }
 }
 
-/// The only `HashMap` `kernel/src` may name; a site reads `HashMap::default()`
-/// because `new` belongs to the default hasher this kernel does not have.
+/// The only `HashMap` `kernel/src` may name; a site reads `default()` because
+/// `new` belongs to the default hasher this kernel does not have.
 pub type HashMap<K, V> = hashbrown::HashMap<K, V, KernelHashState>;
 
 /// Build a container before [`seed`]: the panic is the point.

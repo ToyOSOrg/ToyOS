@@ -248,9 +248,8 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         .expect("the boot parameter is not UTF-8")
     });
 
-    // Before mm::init: the kernel address space is the first hash container
-    // this boot builds, and one built on no seed orders alike on every boot of
-    // the image. `hasher::KernelHashState::new` refuses rather than allowing it.
+    // Before mm::init, whose address space is the first hash container this boot
+    // builds; `hasher::KernelHashState::new` refuses one built any earlier.
     #[cfg(feature = "boot-actuators")]
     if actuator::test_hash_before_seed() {
         hasher::probe_before_seed();

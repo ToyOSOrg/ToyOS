@@ -62,13 +62,12 @@ const ALLOWED_STATUS: &[(&str, &[&str])] = &[
 /// The one file in `issues/` that is not an issue.
 const README: &str = "issues/README.md";
 
-/// The heading that opens the closed area list.
 const AREAS: &str = "\n## Areas\n";
 
 /// The area names [`README`] closes, read out of it rather than restated —
-/// `redlist::Registry::read`'s rule, for its reason: a restatement drifts.
-/// [`AREAS`] is followed by one paragraph of backticked names, and the prose
-/// after it carries backticks of its own, so the paragraph is where it ends.
+/// `redlist::Registry::read`'s rule, for its reason: a restatement drifts. One
+/// paragraph of backticked names follows [`AREAS`], and the prose after carries
+/// backticks of its own, so the paragraph is where the list ends.
 fn declared_areas(root: &Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(root.join(README))
         .unwrap_or_else(|e| panic!("{README} closes the area list: {e}"));

@@ -704,9 +704,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // every verdict is a substring of a report the guest wrote, and there is no
     // clock in any of it.
     ("reentry_names_the_first_panic", Sched::Parallel, Tier::Fast),
-    // The kernel hasher's boot-order obligation, in the same shape as the row
-    // above and for its reasons. Carrying `UNMEASURED_MS` until the shards
-    // price it.
+    // The kernel hasher's boot-order obligation, in the row above's shape and
+    // for its reasons. Carrying `UNMEASURED_MS` until the shards price it.
     ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Fast),
     // Nightly 2026-08-21 by the margin rule: 9,120 ms committed, inside
     // `FAST_COMMIT_MS`..`FAST_CEILING_MS`. Its twin above is 5,073 ms and stays.
