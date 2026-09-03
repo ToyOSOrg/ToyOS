@@ -234,7 +234,7 @@ tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 89 0
 tests/common/hostload.rs 48 1
-tests/common/iommu.rs 309 0
+tests/common/iommu.rs 308 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2

@@ -650,11 +650,10 @@ fn scope_sources(log: &Serial) -> BTreeMap<String, String> {
 /// (`hw/virtio/virtio-bus.c:86-99`, `hw/virtio/virtio-pci.c:1400-1405` at
 /// v11.1.0), and under identity mapping the two are indistinguishable. So the
 /// argv says which functions were created behind a unit and the console says
-/// which negotiated `VIRTIO_F_ACCESS_PLATFORM`. [`Profile::HeadlessNoIommu`] is
-/// the same machine without one, and there the guest reports `n` because QEMU
-/// never *offers* the bit (`hw/virtio/virtio-bus.c:87-94`) rather than because
-/// the driver declined — this driver offers blindly. What makes the pair mean
-/// something is [`declining_is_not_free`], where the guest really does decline.
+/// which negotiated `VIRTIO_F_ACCESS_PLATFORM`. On [`Profile::HeadlessNoIommu`]
+/// the guest reports `n` because QEMU never *offers* the bit
+/// (`hw/virtio/virtio-bus.c:87-94`), not because the driver declined — it offers
+/// blindly; the independence comes from [`declining_is_not_free`].
 ///
 /// virtio-sound is a declared exception, asserted rather than tolerated: its
 /// function must be the one that did *not* negotiate
@@ -937,10 +936,10 @@ pub fn iommu_empty_domain(
 ///
 /// The actuator points the NIC's first RX buffer at the physical bytes NVMe's
 /// admin completion queue page ends with — a page the NIC's domain does not map.
-/// Three things then hold at once, and no two come from the same place: the unit
+/// Three things then hold at once and no two come from the same place: the unit
 /// blocks it and names the NIC and that address; the address is the one NVMe's
-/// own `ACQ` register holds, resolved through the tables the unit walks rather
-/// than taken off a console line; and every byte of the 2 KiB is still zero.
+/// own `ACQ` holds, resolved through the tables the unit walks; and every byte
+/// of the 2 KiB is still zero.
 ///
 /// Oracle: VT-d Rev. 4.0 Section 9.8, which [`translate`] implements
 /// independently, and QEMU's `vtd_iova_to_sspte`
