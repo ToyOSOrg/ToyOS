@@ -33,7 +33,7 @@ use std::io::Write;
 use std::process::Command;
 
 const DIR: &str = "/home/writeback_spawn";
-const IN_INITRD: &str = "/bin/test_rs_writeback_spawn";
+const IN_ROOT: &str = "/bin/test_rs_writeback_spawn";
 const ON_DISK: &str = "/home/writeback_spawn/child";
 const STILL_OPEN: &str = "/home/writeback_spawn/held";
 /// What tells this binary it is the copy being run rather than the test.
@@ -49,7 +49,7 @@ fn main() {
 
     let _ = fs::create_dir(DIR);
 
-    let image = fs::read(IN_INITRD).unwrap_or_else(|e| panic!("read {IN_INITRD}: {e}"));
+    let image = fs::read(IN_ROOT).unwrap_or_else(|e| panic!("read {IN_ROOT}: {e}"));
     // `fs::write` opens, writes and drops the handle. With `iod` parked that
     // drop pins the pages and enqueues the file; nothing has reached the device.
     fs::write(ON_DISK, &image).unwrap_or_else(|e| panic!("write {ON_DISK}: {e}"));
@@ -68,7 +68,7 @@ fn main() {
     // The differential: the same bytes read back a second way, off the device.
     // The spawn drained the queue, so the file left the cache and this re-open
     // resolves fresh extents and reads NVMe blocks — nothing of what was written
-    // is still buffered. Compared against the initrd's copy, which is a different
+    // is still buffered. Compared against ROOT's copy, which is a different
     // mount and a different filesystem, so a length that matched by construction
     // could not hide a wrong byte.
     let back = fs::read(ON_DISK).unwrap_or_else(|e| panic!("read back {ON_DISK}: {e}"));

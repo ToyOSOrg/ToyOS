@@ -7,7 +7,7 @@
 # that one.
 #
 # No `assets`: the actuator synthesises its own sound and never opens the WAD
-# or the soundfont, so neither belongs in this initrd either.
+# or the soundfont, so neither belongs on this ROOT either.
 
 [boot]
 start = ["logd", "soundd", "test-runner"]

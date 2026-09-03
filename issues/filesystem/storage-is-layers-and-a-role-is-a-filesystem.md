@@ -62,9 +62,10 @@ changes a disk compiles into it. `/system` is immutable by design: the
 installer and the updater write it offline, checkpoint it and mark the journal
 clean; a kernel that finds a dirty journal under `/system` refuses by name,
 because replay is a write-path job and a system image needing one is a broken
-install. The initrd, today a read-only bcachefs image in RAM mounted through
-`ReadOnlyBcacheFsAdapter` (`kernel/src/main.rs`), is deleted: the same image
-sits on ROOT (`issues/build/the-initrd-is-still-the-root-filesystem.md`).
+install. ROOT is a bcachefs image on a partition of the boot medium, found by
+partition type and selected by the UUID in its own superblock against the
+kernel's `root=` argument, mounted read-only through `ReadOnlyBcacheFsAdapter`
+(`kernel/src/rootfs.rs`).
 
 **Every other filesystem is a userland server** behind the VFS's existing
 trait (`kernel/src/vfs.rs`, `FileSystem`, one access mode per mount) through
@@ -127,15 +128,19 @@ entry.
 
 ## Stages, in order
 
-1. Root filesystem PR 2: ROOT, the kernel argument naming it, the initrd
-   deleted, the hierarchy laid down.
-2. The users track filed and built.
-3. The mount protocol, and FAT32 as the first userland filesystem server.
-4. NTFS read-only.
-5. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
-6. The installer: GPT, ESP, ROOT, a designated DATA, one boot entry.
-7. Updates: a second ROOT beside the first, the bootloader choosing.
-8. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
+0. The block layer: a shared device handle, a partition view, one page
+   cache per (device, partition). Landed by #396.
+1. ROOT is a partition, the kernel argument names it, and the initrd — the
+   in-RAM image the bootloader used to load whole — is deleted. Landed.
+2. The hierarchy: a synthesized `/`, ROOT at `/system`, DATA at `/apps` and
+   `/home`, `/media`, and the `/bin` sweep that follows.
+3. The users track filed and built.
+4. The mount protocol, and FAT32 as the first userland filesystem server.
+5. NTFS read-only.
+6. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
+7. The installer: GPT, ESP, ROOT, a designated DATA, one boot entry.
+8. Updates: a second ROOT beside the first, the bootloader choosing.
+9. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
    them.
 
 **Not decided here** (the owner's file names each): how ROOT is versioned,

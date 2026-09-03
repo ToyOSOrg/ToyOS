@@ -1105,7 +1105,7 @@ pub enum Profile {
     /// No USB at all — no xHCI, so no boot stick — and no i8042 once the boot
     /// passes `i8042: false`: the one bootable shape on which no input source
     /// can ever exist. The boot volume rides a second NVMe controller, which
-    /// works because userland runs from the initrd.
+    /// works because userland runs off that same disk's ROOT partition.
     MetalNoUsb,
     /// The machine whose only disk is the internal one, with the boot image on
     /// it: no xHCI and so no boot stick, and no second namespace either. Every
@@ -1131,9 +1131,9 @@ pub enum Profile {
     /// size, and it was the one nobody had varied for storage: every profile
     /// gave the guest a disk, so nothing asked what the kernel does without
     /// one. The answer was `.expect("NVMe: no controller found")` at 0.08 s.
-    /// The bootloader reads the initrd through UEFI before ExitBootServices,
-    /// so a machine really can boot ToyOS with no NVMe -- and a controller
-    /// hidden behind a firmware setting looks exactly the same.
+    /// ROOT is on the USB stick here, so a machine really can boot ToyOS with
+    /// no NVMe -- and a controller hidden behind a firmware setting looks
+    /// exactly the same.
     Diskless,
     /// metal-sim with a namespace formatted in 8 KiB logical blocks.
     ///
@@ -2523,7 +2523,7 @@ fn push_user_half(line: &str, stdout: &mut String) {
 const END_MARKER: &str = "===TEST_END ";
 
 impl QemuInstance {
-    /// Build everything and boot QEMU with test binaries in the initrd.
+    /// Build everything and boot QEMU with test binaries on ROOT.
     /// `test_crate` is the path to the test crate (must contain a `system.toml`).
     pub fn boot(
         test_crate: &Path,

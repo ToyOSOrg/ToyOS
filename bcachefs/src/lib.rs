@@ -24,7 +24,7 @@ mod alloc_bitmap;
 mod btree;
 mod fs;
 
-pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, SliceBlockIO, TransferError};
+pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, TransferError};
 #[cfg(feature = "std")]
 pub use block_io::VecBlockIO;
 pub use fs::{Formatted, Mounted, ReadOnly, ReadWrite, FsError, Extent};

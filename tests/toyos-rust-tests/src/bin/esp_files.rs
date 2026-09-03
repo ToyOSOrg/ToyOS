@@ -70,7 +70,7 @@ fn main() {
     // The bootloader's own directory, which firmware and the build both put
     // there — so a listing that misses it is a listing, not a namespace.
     let toyos = names("/boot/toyos");
-    for want in ["kernel.elf", "initrd.img", "host-note.txt"] {
+    for want in ["kernel.elf", "log.guid", "host-note.txt"] {
         assert!(toyos.iter().any(|n| n == want), "/boot/toyos has {toyos:?}, wanted {want}");
     }
     let root = names("/boot");

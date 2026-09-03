@@ -10,7 +10,7 @@
 //! `/bin/console`.
 //!
 //! One binary rather than two: each is ~1.8 MiB of statically linked std, and
-//! the initrd goes into a FAT volume sized from its contents. Modes are
+//! ROOT goes into a partition sized from its contents. Modes are
 //! `run test_rs_locale_gate <mode>`, which the test runner has always
 //! supported.
 //!

@@ -5,9 +5,8 @@
 //! Every published size of a boot image comes from here — so the claim "the
 //! image is N bytes and M% of it is X" stays a command anyone can re-run rather
 //! than a figure that was true once. It parses the GPT, both FAT32 volumes and
-//! the initrd's bcachefs with the same three crates the build system writes
-//! them with, so it cannot drift from the writer the way a separate parser
-//! would.
+//! ROOT's bcachefs with the same crates the build system writes them with, so
+//! it cannot drift from the writer the way a separate parser would.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -76,31 +75,26 @@ fn main() {
         );
 
         let bytes = disk[first as usize * LBA..(last as usize + 1) * LBA].to_vec();
-        let Ok(mut fs) = Fat32::mount(Volume(bytes)) else {
-            println!("      not a FAT32 volume");
+        if let Ok(mut fs) = Fat32::mount(Volume(bytes.clone())) {
+            match fs.walk("", 64) {
+                Ok(entries) => {
+                    for (file, size) in &entries {
+                        println!("      {file:40} {size}");
+                    }
+                }
+                Err(_) => println!("      unreadable directory tree"),
+            }
             continue;
-        };
-        let Ok(entries) = fs.walk("", 64) else {
-            println!("      unreadable directory tree");
-            continue;
-        };
-        for (file, size) in &entries {
-            println!("      {file:40} {size}");
         }
-
-        let initrd = entries
-            .iter()
-            .find(|(file, _)| file.to_lowercase().ends_with("initrd.img"));
-        if let Some((file, size)) = initrd {
-            let mut handle = fs.open(file).expect("open the initrd");
-            let mut image = vec![0u8; *size as usize];
-            fs.read(&mut handle, 0, &mut image).expect("read the initrd");
-            report_initrd(image);
+        let volume_bytes = bytes.len() as u64;
+        match Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(bytes)) {
+            Ok(fs) => report_root(fs, volume_bytes),
+            Err(_) => println!("      neither a FAT32 nor a bcachefs volume"),
         }
     }
 }
 
-/// Which of the four things in the initrd an entry is.
+/// Which of the four things on ROOT an entry is.
 ///
 /// The order matters: `bin/rustc` is the toolchain's, not userland's.
 fn group_of(name: &str) -> &'static str {
@@ -117,11 +111,9 @@ fn group_of(name: &str) -> &'static str {
     }
 }
 
-fn report_initrd(image: Vec<u8>) {
-    let volume_bytes = image.len() as u64;
-    let fs: Mounted<VecBlockIO, bcachefs::ReadOnly> =
-        Mounted::open(VecBlockIO::from_vec(image)).expect("open the initrd's bcachefs");
-    let entries = fs.list(usize::MAX, &|_| true).expect("list the initrd");
+fn report_root(fs: Mounted<VecBlockIO, bcachefs::ReadOnly>, volume_bytes: u64) {
+
+    let entries = fs.list(usize::MAX, &|_| true).expect("list ROOT");
 
     let mut groups: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
     let mut content = 0u64;
@@ -133,7 +125,7 @@ fn report_initrd(image: Vec<u8>) {
     }
 
     println!(
-        "\n  initrd: {} entries, {content} bytes of content in a {volume_bytes}-byte volume",
+        "\n  ROOT: {} entries, {content} bytes of content in a {volume_bytes}-byte volume",
         entries.len()
     );
     for (group, (count, bytes)) in &groups {

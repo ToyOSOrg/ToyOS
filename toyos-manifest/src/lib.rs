@@ -3,7 +3,7 @@
 //!
 //! **One definition of the format, used by both halves.** `src/build.rs`
 //! resolves `system.toml` into a [`Manifest`] and [`render`]s it into the
-//! initrd at [`PATH`]; init [`parse`]s it back. A round-trip test here is what
+//! ROOT at [`PATH`]; init [`parse`]s it back. A round-trip test here is what
 //! makes that a fact rather than two hand-matched implementations — the shape
 //! this crate exists to prevent is a renderer and a parser that disagree about
 //! one record and a machine that boots with an authority nobody declared.
@@ -24,7 +24,7 @@
 //! start <name>              init starts this program at boot
 //! ```
 
-/// Where the initrd carries it, without a leading slash — the initrd's own
+/// Where ROOT carries it, without a leading slash — that volume's own
 /// spelling. [`GUEST_PATH`] is what a process opens.
 pub const PATH: &str = "etc/system.manifest";
 

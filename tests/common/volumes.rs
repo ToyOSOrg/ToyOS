@@ -57,10 +57,10 @@ fn blob() -> Vec<u8> {
 }
 
 /// The files the build put on the ESP, which the guest must not have touched.
-/// `BOOTx64.EFI` is the one firmware reads; the other two are what the
-/// bootloader reads. Damaging any of them makes the stick unbootable, so
+/// `BOOTx64.EFI` is the one firmware reads and `kernel.elf` the one the
+/// bootloader does. Damaging either makes the stick unbootable, so
 /// "still byte-identical" is the assertion that matters most here.
-const UNTOUCHED: [&str; 3] = ["EFI/BOOT/BOOTx64.EFI", "toyos/kernel.elf", "toyos/initrd.img"];
+const UNTOUCHED: [&str; 2] = ["EFI/BOOT/BOOTx64.EFI", "toyos/kernel.elf"];
 
 fn test_dir() -> PathBuf {
     super::lane::dir()
@@ -2097,7 +2097,7 @@ pub fn log_backing_read_error(
 ///
 /// **The mount line is a load-bearing assertion and not decoration.** A `/boot`
 /// that failed to mount is not a mount at all: `Vfs::resolve_fs` falls through
-/// to the root filesystem, the initrd has no `boot/` in it, and every question
+/// to the root filesystem, ROOT has no `boot/` in it, and every question
 /// below would then answer `NotFound` for an honest reason — which is precisely
 /// the string this test exists to refuse.
 pub fn boot_volume_metadata_error(

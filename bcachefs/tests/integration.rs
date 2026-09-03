@@ -263,7 +263,7 @@ fn incremental_insert_and_read() {
 
 #[test]
 fn many_files_with_large_data() {
-    // Simulate a realistic initrd: 50 files of varying sizes
+    // Simulate a realistic ROOT image: 50 files of varying sizes
     let io = VecBlockIO::new(4096);
     let mut fs = Formatted::format(io).expect("format");
 

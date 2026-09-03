@@ -263,7 +263,7 @@ const FAT32_MIN_BYTES: usize = 34 * 1024 * 1024;
 /// more than the 4 MiB the size used to add. So the slack was entirely
 /// metadata, and what a guest could write was whatever rounding happened to
 /// leave: measured before the change at **48,640 bytes**, against `esp_files`'
-/// own 41,097-byte blob. One more guest test binary in the initrd took it
+/// own 41,097-byte blob. One more guest test binary in the image took it
 /// negative, and the symptom is an fsync that fails while the host-side volume
 /// still reports megabytes free.
 ///
@@ -799,20 +799,30 @@ mod tests {
 
     /// And it is clean because it is right, not because it is empty: a
     /// `populate` that wrote nothing at all would satisfy the gate above.
+    ///
+    /// Exactly these and nothing else: the bootloader panics on a file it
+    /// looks for and does not find, and an unnamed file on the ESP is one it
+    /// pays for and nothing loads.
     #[test]
     fn the_esp_carries_what_the_bootloader_looks_for() {
         let mut esp = create_esp_volume(b"kernel", b"bootloader", uuid::Uuid::new_v4(), "");
         let mut fs = Fat32::mount(VolumeIo(&mut esp)).expect("mount the ESP we just built");
-        let found: Vec<String> =
-            fs.walk("", 64).expect("walk the ESP").into_iter().map(|(path, _)| path).collect();
-        for want in
-            ["EFI/BOOT/BOOTx64.EFI", "toyos/kernel.elf", "toyos/log.guid", "toyos/cmdline"]
-        {
-            assert!(found.iter().any(|p| p.trim_start_matches('/') == want), "{want} is not on the ESP; it holds {found:?}");
-        }
-        assert!(
-            !found.iter().any(|p| p.ends_with("initrd.img")),
-            "the ESP still carries an image the bootloader no longer loads: {found:?}"
+        let mut found: Vec<String> = fs
+            .walk("", 64)
+            .expect("walk the ESP")
+            .into_iter()
+            .map(|(path, _)| path.trim_start_matches('/').to_string())
+            .filter(|path| !path.ends_with('/'))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "EFI/BOOT/BOOTx64.EFI",
+                "toyos/cmdline",
+                "toyos/kernel.elf",
+                "toyos/log.guid",
+            ]
         );
     }
 

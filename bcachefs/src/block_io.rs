@@ -215,124 +215,45 @@ impl BlockIO for VecBlockIO {
     }
 }
 
-/// Read-only block device backed by a static byte slice. Used for initrd in the kernel.
-///
-/// `Copy`, because the image is an address and a length and nothing else: a
-/// mount and every file backing that reads out of the same image hold the same
-/// pair, and the bound they check against is therefore the same one rather than
-/// a copy somebody re-derived.
-#[derive(Clone, Copy)]
-pub struct SliceBlockIO {
-    data: *const u8,
-    len: usize,
-}
-
-unsafe impl Send for SliceBlockIO {}
-unsafe impl Sync for SliceBlockIO {}
-
-impl SliceBlockIO {
-    /// Create a read-only block device from a raw pointer and length.
-    ///
-    /// # Safety
-    /// The pointer must remain valid for the lifetime of this object,
-    /// and `len` must be accurate.
-    pub unsafe fn new(data: *const u8, len: usize) -> Self {
-        Self { data, len }
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.data, self.len) }
-    }
-
-    /// The `BLOCK_SIZE` bytes block `block` occupies, or `None` when this image
-    /// does not reach that far.
-    ///
-    /// **The image is what bounds a block, and this is the only thing that
-    /// knows both.** A reader that holds the image's extents but not its length
-    /// — the kernel's initrd file backing was one — can compute an address for
-    /// any block the btree names and has nothing to compare it against, so a
-    /// corrupt or hostile image reads whatever was placed after it. The
-    /// comparison belongs to whoever owns the length, which is this type.
-    ///
-    /// Zero-copy on purpose: the caller that wants the bytes somewhere else has
-    /// [`BlockIO::read_block`], and the caller that is about to copy `n <=
-    /// BLOCK_SIZE` of them into a page (demand paging) would otherwise pay a
-    /// whole extra 4 KiB `memcpy` per faulted page for the bound.
-    pub fn block(&self, block: BlockNum) -> Option<&[u8]> {
-        let (off, end) = byte_range(block)?;
-        self.as_slice().get(off..end)
-    }
-}
-
-impl BlockIO for SliceBlockIO {
-    fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
-        buf.0.copy_from_slice(self.block(block).ok_or(DeviceError::FAILED)?);
-        Ok(())
-    }
-
-    /// A refusal rather than a panic, now that there is somewhere to report it.
-    /// Nothing can reach this — a slice is only ever mounted `ReadOnly`, which
-    /// has no write operations — and a device that will not write is an answer
-    /// either way.
-    fn write_block(&self, _block: BlockNum, _buf: &BlockBuf) -> Result<(), DeviceError> {
-        Err(DeviceError::FAILED)
-    }
-
-    fn block_count(&self) -> u64 {
-        (self.len / BLOCK_SIZE) as u64
-    }
-}
 
 /// The bound an image-backed reader applies to a block number the image itself
 /// named, at every way of getting it wrong.
 ///
 /// It runs here rather than in a guest because there is nothing architectural
 /// about it: a block number, a length, and the comparison between them. The
-/// kernel's initrd backing had no length to compare against at all until
-/// [`SliceBlockIO::block`] existed, which is what these tests are the control
-/// for.
-#[cfg(test)]
-mod slice_bounds {
+/// extent list lives *inside* the image, so a corrupt one names a block past
+/// its own end and a reader without a length reads whatever follows.
+#[cfg(all(test, feature = "std"))]
+mod image_bounds {
     use super::*;
 
     /// Three blocks of image, each byte stamped with its block number.
-    fn image() -> Vec<u8> {
-        let mut v = vec![0u8; 3 * BLOCK_SIZE];
-        for b in 0..3 {
+    fn image(blocks: usize) -> VecBlockIO {
+        let mut v = vec![0u8; blocks * BLOCK_SIZE];
+        for b in 0..blocks {
             v[b * BLOCK_SIZE..(b + 1) * BLOCK_SIZE].fill(b as u8 + 1);
         }
-        v
-    }
-
-    fn io(data: &[u8]) -> SliceBlockIO {
-        // SAFETY: `data` outlives every use below, and `len` is its own.
-        unsafe { SliceBlockIO::new(data.as_ptr(), data.len()) }
+        VecBlockIO::from_vec(v)
     }
 
     #[test]
     fn every_block_the_image_holds_is_served_whole() {
-        let data = image();
-        let io = io(&data);
+        let io = image(3);
         assert_eq!(io.block_count(), 3);
         for b in 0..3u64 {
-            let got = io.block(BlockNum::new(b)).expect("block inside the image");
-            assert_eq!(got.len(), BLOCK_SIZE);
-            assert!(got.iter().all(|&x| x == b as u8 + 1), "block {b} served the wrong bytes");
+            let mut buf = BlockBuf::zeroed();
+            io.read_block(BlockNum::new(b), &mut buf).expect("block inside the image");
+            assert!(buf.0.iter().all(|&x| x == b as u8 + 1), "block {b} served the wrong bytes");
         }
     }
 
-    /// The defect this exists for: the extent list lives *inside* the image, so
-    /// a corrupt one names a block past its own end and the reader that has no
-    /// length reads whatever the bootloader placed after it.
     #[test]
     fn a_block_past_the_end_is_refused_rather_than_read() {
-        let data = image();
-        let io = io(&data);
-        assert!(io.block(BlockNum::new(3)).is_none(), "one block past the end");
-        assert!(io.block(BlockNum::new(4)).is_none());
-        assert!(io.block(BlockNum::new(u64::MAX / BLOCK_SIZE as u64)).is_none());
+        let io = image(3);
         let mut buf = BlockBuf::zeroed();
-        assert_eq!(io.read_block(BlockNum::new(3), &mut buf), Err(DeviceError::FAILED));
+        for b in [3u64, 4, u64::MAX / BLOCK_SIZE as u64] {
+            assert_eq!(io.read_block(BlockNum::new(b), &mut buf), Err(DeviceError::FAILED));
+        }
     }
 
     /// A block that *starts* inside the image and ends past it. `get(off..end)`
@@ -340,10 +261,14 @@ mod slice_bounds {
     /// read out of whatever follows.
     #[test]
     fn a_block_that_starts_inside_and_ends_outside_is_refused() {
-        let data = vec![7u8; 2 * BLOCK_SIZE + 1];
-        let io = io(&data);
-        assert!(io.block(BlockNum::new(1)).is_some(), "the last whole block");
-        assert!(io.block(BlockNum::new(2)).is_none(), "one byte of a block is not a block");
+        let io = VecBlockIO::from_vec(vec![7u8; 2 * BLOCK_SIZE + 1]);
+        let mut buf = BlockBuf::zeroed();
+        io.read_block(BlockNum::new(1), &mut buf).expect("the last whole block");
+        assert_eq!(
+            io.read_block(BlockNum::new(2), &mut buf),
+            Err(DeviceError::FAILED),
+            "one byte of a block is not a block"
+        );
     }
 
     /// `block.raw() as usize * BLOCK_SIZE` wraps for a block number above
@@ -353,30 +278,30 @@ mod slice_bounds {
     /// in-range offset into somebody else's memory.
     #[test]
     fn a_block_number_whose_byte_offset_wraps_is_refused_and_does_not_panic() {
-        let data = image();
-        let io = io(&data);
+        let io = image(3);
+        let mut buf = BlockBuf::zeroed();
         for n in [
             usize::MAX as u64 / BLOCK_SIZE as u64 + 1,
             u64::MAX,
             1u64 << 52,
             (1u64 << 52) + 1,
         ] {
-            assert!(io.block(BlockNum::new(n)).is_none(), "block {n:#x} was not refused");
             assert_eq!(byte_range(BlockNum::new(n)), None, "block {n:#x} named a byte range");
+            assert_eq!(io.read_block(BlockNum::new(n), &mut buf), Err(DeviceError::FAILED));
         }
         // The largest block number that does express a range still names one
         // no image holds.
         let last = usize::MAX as u64 / BLOCK_SIZE as u64 - 1;
         assert!(byte_range(BlockNum::new(last)).is_some());
-        assert!(io.block(BlockNum::new(last)).is_none());
+        assert_eq!(io.read_block(BlockNum::new(last), &mut buf), Err(DeviceError::FAILED));
     }
 
     /// An empty image holds no block, including block 0 — the superblock's.
     #[test]
     fn an_empty_image_holds_no_block_at_all() {
-        let data: Vec<u8> = Vec::new();
-        let io = io(&data);
+        let io = VecBlockIO::from_vec(Vec::new());
+        let mut buf = BlockBuf::zeroed();
         assert_eq!(io.block_count(), 0);
-        assert!(io.block(BlockNum::new(0)).is_none());
+        assert_eq!(io.read_block(BlockNum::new(0), &mut buf), Err(DeviceError::FAILED));
     }
 }

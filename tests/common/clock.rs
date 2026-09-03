@@ -72,7 +72,7 @@ impl Mark {
     /// Suspend is already excluded because the monotonic clock stops with the
     /// host. Construction of a memoized boot artifact is excluded explicitly:
     /// it is a cold-cache cost shared by the shard, not the repeatable cost of
-    /// whichever test happened to request that kernel or initrd first. Fresh
+    /// whichever test happened to request that kernel or ROOT image first. Fresh
     /// per-boot image creation and the boot itself remain in this duration.
     pub fn elapsed(&self) -> Duration {
         self.artifact_build.execution_part(self.mono.elapsed())

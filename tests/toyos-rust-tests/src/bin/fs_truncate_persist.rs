@@ -65,16 +65,16 @@ fn truncate_round_trip(path: &str) {
 }
 
 /// A binary the loader has to demand-page out of tmpfs. Every mount that has
-/// held an executable until now is backed by a device or by the initrd image.
+/// held an executable until now is backed by a device or by the ROOT image.
 ///
 /// This binary is its own child: spawning a copy of itself needs no second
-/// program in the initrd, and guarantees the thing being loaded is a real
+/// program on ROOT, and guarantees the thing being loaded is a real
 /// std PIE rather than something small enough to avoid the interesting path.
 fn spawn_from_tmpfs() {
     const SRC: &str = "/bin/test_rs_fs_truncate_persist";
     const DST: &str = "/tmp/spawned_from_tmpfs";
 
-    let image = fs::read(SRC).expect("read this binary out of the initrd");
+    let image = fs::read(SRC).expect("read this binary out of ROOT");
     assert!(image.len() > PAGE, "the image is too small to demand-page");
     {
         let mut f = fs::File::create(DST).expect("create in tmpfs");

@@ -100,7 +100,7 @@ receives = ["compositor", "filepicker"]
 receives = ["compositor", "soundd", "surface"]
 syscap = ["power", "roster"]
 
-# Symlinks created in the initrd at build time.
+# Symlinks created on ROOT at build time.
 # Paths are relative to the filesystem root (no leading /).
 [symlinks]
 "bin/cat" = "/bin/toybox"
