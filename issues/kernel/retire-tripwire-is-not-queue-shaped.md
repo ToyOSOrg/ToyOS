@@ -6,6 +6,11 @@ opened: 2026-08-16
 
 # `retire_task`'s tripwire is a constant against a term the workload sets
 
+**This waits on a track, not on a decision:** the shape that closes it is
+`issues/kernel/cpu-time-is-a-band-and-not-a-reservation.md`'s dying-server
+chunk (`:32`, with the kill path's report and its one fixed-hop tripwire at
+`:51`), so no audit should list this as ready to work.
+
 `kernel/src/scheduler.rs`'s `GIVE_UP` is a `Tripwire` — a constant whose expiry
 is a kernel panic. Its own derivation carries a term that is not constant:
 
