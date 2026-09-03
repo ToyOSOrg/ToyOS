@@ -9,8 +9,8 @@ opened: 2026-08-10
 `tests/audio-baseline.toml`'s recorded sample was taken on the dev host under
 cross-arch TCG. The thorough tier compares a fresh sample against *that*, so
 `gate-a.yml` on any KVM runner is comparing two instruments and calling the
-difference a regression. `route.yml` now sends this gate to the T14 by default,
-so that is what every nightly does.
+difference a regression. The gate runs on two GitHub-hosted KVM shards, so that
+is what every nightly does.
 
 ## Settled 2026-08-21: it is the instrument, and the control says so
 
@@ -20,7 +20,7 @@ the audio law requires before a harm verdict may be set aside.
 
 **The experiment.** Four interleaved 15-iteration blocks of
 `cargo test --test toyos-build -- --audio-gate 15 --shard 1/1 --host-slots 0`
-on the T14, in the CI image at the digest `route.yml` names, `--device=/dev/kvm`,
+on the T14, in the CI image of the day, `--device=/dev/kvm`,
 QEMU 11.1.0 — the CI invocation, with private checkouts and a private cache root
 so the runner's own state was untouched. Order A,B,A,B; 30 iterations per arm.
 
@@ -102,4 +102,12 @@ Real, actionable work remains even though harm was null on this measurement: a
 per-host baseline needs a schema change (`AudioBaseline`'s host dimension,
 `tests/toyos.rs`'s `config_baseline` selection) and the T14's bimodal mixing
 weight has to be understood before a sample is worth recording. Owed to
-whoever owns `tests/audio-baseline.toml` and `gate-a.yml`'s runner routing.
+whoever owns `tests/audio-baseline.toml` and `gate-a.yml`.
+
+## The T14 is no longer a runner
+
+The gate's two shards are GitHub-hosted, and the sample they compare against is
+still the dev host's under cross-arch TCG, so this record is unchanged in what
+it says and only narrower in where a fresh sample can come from: a hosted
+sample is a sample over unnamed CPUs, and a T14 sample is now a job of
+`issues/hardware/the-t14-boots-toyos-unattended.md` rather than of a CI lane.

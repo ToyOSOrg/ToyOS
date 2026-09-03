@@ -48,14 +48,12 @@ fi
 # cannot open it emulates the whole suite and reports numbers taken on another
 # instrument — the same class of silent drift the version check above refuses,
 # and nothing else here would see it. The `tcg` canary has no node at all and
-# is untouched. On the self-hosted runner this is the one thing that can go
-# wrong invisibly: the container's user must be in the accelerator's group, and
-# that gid is a fact about one machine (`.github/runner/README.md`).
+# is untouched.
 if [ "$node" = yes ] && ! (exec 3<>/dev/kvm) 2>/dev/null; then
   echo "::error::/dev/kvm is here and this job cannot open it, so every boot would fall"
   echo "::error::back to emulation while the log above says the accelerator is present."
   echo "::error::Nothing about the tree: the job's user is outside the group that owns"
-  echo "::error::the node — .github/runner/README.md has the gid and where it comes from."
+  echo "::error::the node."
   exit 1
 fi
 

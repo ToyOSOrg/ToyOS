@@ -2,8 +2,8 @@
 # every shard's `deps` step installed per job — 52-59 s on the critical path
 # of all thirteen jobs, three times a day (run 31896922288). Published by
 # `.github/workflows/ci-image.yml` when this file or the declared QEMU moves;
-# consumed pinned by digest, the way `.github/runner/Dockerfile` is on the
-# T14, so a rebuild cannot change what a verdict was measured with. The build
+# consumed pinned by digest and never by tag, so a rebuild cannot change what a
+# verdict was measured with. The build
 # refuses an image whose QEMU is not the declared instrument — an image is
 # only allowed to be faster than apt, never to move the instrument.
 FROM debian:sid

@@ -141,11 +141,11 @@
 # is not one.
 #
 # WHAT THIS SAMPLE IS A SAMPLE OF, measured 2026-08-21 rather than argued. Every
-# number below was taken on the dev host under cross-arch TCG. `gate-a.yml` now
-# routes to the self-hosted T14 (Intel i5-1135G7, KVM, the same QEMU 11.1.0),
-# and the thorough tier there compares a T14 sample against this one — two
-# instruments. That was an argument before; the control it lacked has now been
-# run. Four interleaved 15-iteration blocks on an idle T14 (A,B,A,B; no CI job
+# number below was taken on the dev host under cross-arch TCG, and the thorough
+# tier compares a KVM runner's sample against it — two instruments, whichever
+# runner it is. That was an argument before; the control it lacked has been run
+# on the T14 (Intel i5-1135G7, KVM, the same QEMU 11.1.0) while that machine was
+# still a runner. Four interleaved 15-iteration blocks on an idle T14 (A,B,A,B; no CI job
 # container on the machine for any of the 240 boots; 1-min load 0.2-1.74), arm A
 # = `960b96e3`, the tree this sample was recorded on, arm B = `53101d08`:
 #
