@@ -100,25 +100,51 @@ pr = "none — the rustcrypto backend is independently upstreamable TODAY (no To
 
 [cpal]
 upstream = "RustAudio/cpal"
-base = "b4ddd28"
-delta = "+327"
+base = "v0.18.0"
+base_note = "45fe976. The `toyos` branch on b4ddd28 is left behind, unrewritten."
+branch = "toyos-0.18.0"
+delta = "+326"
 tier = "sibling"
 why = "Pure addition: a ToyOS host backend. Should become a `cpal-toyos` crate."
 pr = "none — sendable once toyos-abi and toyos are on crates.io"
 owed = "nothing for the rename: Cargo.toml's toyos arm names `toyos-abi = \"0.1\"` and `toyos = \"0.1\"`, both unchanged."
+release_note = """
+b4ddd28 is 94 commits before the tag whose version number its manifest already
+carried, so the backend implemented traits no released cpal has. On v0.18.0 the
+per-operation error enums are one `Error` of `ErrorKind` plus an optional
+message, `DeviceTrait` requires `Display` and has no `name`, `DeviceId`'s fields
+are private behind `DeviceId::new`, and the dispatched `Devices` derives
+`Clone`. The two ToyOS commits cherry-pick (one conflict, in the null host's
+docsrs cfg list, which the release deleted); the host's own migration is the
+third commit on the branch. The advertised configuration, the three asserts
+against soundd's reading of the device, and the fill loop are unchanged, so no
+consumer's audio arithmetic moved.
+"""
 
 [winit]
 upstream = "rust-windowing/winit"
-base = "c4afadbf"
+base = "v0.31.0-beta.2"
+base_note = "f98ccf8. The `toyos` branch on c4afadbf, 57 commits past the tag, is left behind, unrewritten."
+branch = "toyos-0.31.0-beta.2"
 delta = "+1249"
 tier = "sibling"
 why = "Adds the winit-toyos sibling crate — the model case for this tier."
 pr = "none — winit-toyos must be published before upstream can depend on it by version"
 followup = "winit-toyos is ToyOS's own code still living inside the fork; move it to the monorepo once published"
-owed = """
-`winit/Cargo.toml:101` patches `raw-window-handle` from `Japabu/`, the account
-name this estate left; `ToyOSOrg/` is where it lives now and GitHub is
-redirecting.
+release_note = """
+All seven ToyOS commits cherry-picked clean and `winit-toyos`'s tree is
+byte-identical to the one on `toyos`: beta.2's `winit-core` carries every API it
+names. The 57 commits the old base stood on moved `winit-core` only by
+documentation, an `Ohos` variant added to `NativeKeyCode`/`NativeKey`, an
+`Error` impl on `ImeSurroundingTextError`, and a `Send + Sync` bound added to
+`OwnedDisplayHandle` — a bound the release does not ask for and this backend
+therefore does not have to satisfy.
+"""
+rwh_patch = """
+The root `[patch.crates-io]` names `ToyOSOrg/raw-window-handle` branch
+`toyos-0.6.2`: this crate resolves raw-window-handle 0.6, and the fork's
+master-based `toyos` branch was handing every dependent the unreleased API that
+goes with it. The patch itself stays until #223 is released.
 """
 
 [softbuffer]
