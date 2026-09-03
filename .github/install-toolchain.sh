@@ -21,7 +21,9 @@ git config --global --add safe.directory "$PWD"
 tag=${TAG:-}
 if [ -z "$tag" ]; then
   tag=toolchain-linux-x86_64-$(git rev-parse HEAD:rust HEAD:toyos-abi/src \
-        HEAD:toyos/src HEAD:userland/libc/src | sha256sum | cut -c1-16)
+        HEAD:toyos/src HEAD:userland/libc/src HEAD:toyos-ld/src \
+        HEAD:toyos-ld/Cargo.toml HEAD:.github/workflows/toolchain.yml \
+        | sha256sum | cut -c1-16)
 fi
 echo "toolchain: $tag"
 
