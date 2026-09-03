@@ -284,6 +284,9 @@ actuators! {
     /// Point a scanout backing at that same page, which the display's own domain does not map.
     iommu_gpu_foreign_backing = "iommu-gpu-foreign-backing";
 
+    /// Point the HDA stream's buffer descriptor list at that page and start the stream, so the controller fetches descriptors from memory it does not own.
+    iommu_hda_foreign_bdl = "iommu-hda-foreign-bdl";
+
     /// Point every device MSI at APIC 1 rather than 0 — the only way to tell the
     /// two remapping-entry destination encodings apart, since 0 encodes alike in both.
     iommu_dest_apic1 = "iommu-dest-apic1";

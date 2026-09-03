@@ -397,11 +397,10 @@ pub fn init(devices: &[PciDevice]) {
     let stream_offset = STREAM_BASE + stream_index as u64 * STREAM_STRIDE;
     let stream = regs.subregion(stream_offset, STREAM_STRIDE);
 
-    // An address space of this controller's own, holding these two pools and
-    // nothing else; attached before `SD_BDPL` tells the device an address.
     let space = crate::iommu::DeviceSpace::create();
     let bdl = super::DmaPool::alloc_in(PERIODS * 16, space);
     let pcm = super::DmaPool::alloc_in(PERIODS * PERIOD_BYTES, space);
+    // Before `SD_BDPL` tells the device an address, and after both pools' mappings.
     space.attach(pci.bus, pci.dev, pci.func);
     // Unaligned: the descriptor layout is the HDA specification's (§3.6.2), not a Rust one.
     let bdl_view = bdl.view().unaligned();
@@ -481,6 +480,25 @@ pub fn init(devices: &[PciDevice]) {
     if crate::actuator::hda_allowlist_selftest() {
         allowlist_selftest(stream_offset);
     }
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_hda_foreign_bdl() {
+        run_on_a_foreign_bdl(stream);
+    }
+}
+
+/// Point the descriptor list at another driver's pool by its *physical* address, which this
+/// controller's own domain does not map, and start the stream: the list is fetched at `RUN`.
+#[cfg(feature = "boot-actuators")]
+fn run_on_a_foreign_bdl(stream: Mmio) {
+    let foreign = super::nvme::FOREIGN_PROBE.load(Ordering::Relaxed);
+    assert!(foreign != 0, "hda: this machine staged no foreign pool to aim at");
+    stream.write_u32(SD_BDPL, foreign as u32);
+    stream.write_u32(SD_BDPU, (foreign >> 32) as u32);
+    stream.write_u8(SD_CTL, SD_CTL_RUN);
+    log!(
+        "hda: the stream runs on a descriptor list at {foreign:#x}, inside another driver's \
+         pool (actuator)"
+    );
 }
 
 /// Every arm of [`write_permit`] and [`read_permit`], run against the bound controller and
