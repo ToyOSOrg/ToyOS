@@ -332,9 +332,9 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 name = "calc"
 version = "0.1.0"
 dependencies = [
- "font",
  "fontdue",
  "softbuffer",
+ "toyos-font",
  "winit",
 ]
 
@@ -476,12 +476,12 @@ dependencies = [
 name = "compositor"
 version = "0.1.0"
 dependencies = [
- "font",
  "sprite",
  "toyos",
  "toyos-abi",
  "toyos-desktop",
- "window",
+ "toyos-font",
+ "toyos-window",
 ]
 
 [[package]]
@@ -497,11 +497,11 @@ dependencies = [
 name = "console"
 version = "0.1.0"
 dependencies = [
- "font",
  "terminal",
  "toyos",
  "toyos-abi",
- "window",
+ "toyos-font",
+ "toyos-window",
 ]
 
 [[package]]
@@ -899,7 +899,7 @@ dependencies = [
 [[package]]
 name = "dpi"
 version = "0.1.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 
 [[package]]
 name = "ecdsa"
@@ -985,8 +985,8 @@ name = "editor"
 version = "0.1.0"
 dependencies = [
  "filepicker-api",
- "font",
- "window",
+ "toyos-font",
+ "toyos-window",
 ]
 
 [[package]]
@@ -1058,7 +1058,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1106,9 +1106,9 @@ name = "filepicker"
 version = "0.1.0"
 dependencies = [
  "filepicker-api",
- "font",
  "toyos",
- "window",
+ "toyos-font",
+ "toyos-window",
 ]
 
 [[package]]
@@ -1122,9 +1122,9 @@ dependencies = [
 name = "files"
 version = "0.1.0"
 dependencies = [
- "font",
  "sprite",
- "window",
+ "toyos-font",
+ "toyos-window",
 ]
 
 [[package]]
@@ -1165,10 +1165,6 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "font"
-version = "0.1.0"
 
 [[package]]
 name = "fontdue"
@@ -2242,8 +2238,8 @@ name = "paint"
 version = "0.1.0"
 dependencies = [
  "filepicker-api",
- "font",
- "window",
+ "toyos-font",
+ "toyos-window",
 ]
 
 [[package]]
@@ -2935,7 +2931,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3291,10 +3287,10 @@ dependencies = [
 name = "snake"
 version = "0.1.0"
 dependencies = [
- "font",
  "fontdue",
  "rand 0.8.5",
  "softbuffer",
+ "toyos-font",
  "winit",
 ]
 
@@ -3312,7 +3308,7 @@ dependencies = [
 [[package]]
 name = "softbuffer"
 version = "0.4.8"
-source = "git+https://github.com/ToyOSOrg/softbuffer?branch=toyos#18a4dd3b4c56d826a1a8c0b4b42c721e13caf3f8"
+source = "git+https://github.com/ToyOSOrg/softbuffer?branch=toyos#c05053e1bfd02d0665569d3a18485b35cc748cb3"
 dependencies = [
  "js-sys",
  "libc",
@@ -3324,10 +3320,10 @@ dependencies = [
  "objc2-quartz-core",
  "raw-window-handle",
  "redox_syscall",
+ "toyos-window",
  "tracing",
  "wasm-bindgen",
  "web-sys",
- "window",
  "windows-sys 0.61.2",
 ]
 
@@ -3476,9 +3472,9 @@ dependencies = [
 name = "terminal"
 version = "0.1.0"
 dependencies = [
- "font",
  "toyos",
- "window",
+ "toyos-font",
+ "toyos-window",
 ]
 
 [[package]]
@@ -3618,7 +3614,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-keymap",
- "window",
+ "toyos-window",
 ]
 
 [[package]]
@@ -3638,6 +3634,10 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
 ]
+
+[[package]]
+name = "toyos-font"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-hda"
@@ -3661,6 +3661,16 @@ version = "0.1.0"
 [[package]]
 name = "toyos-wallclock"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-window"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-font",
+ "toyos-keymap",
+]
 
 [[package]]
 name = "tracing"
@@ -3968,17 +3978,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "window"
-version = "0.1.0"
-dependencies = [
- "font",
- "toyos",
- "toyos-abi",
- "toyos-keymap",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4242,7 +4242,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "bitflags 2.11.0",
  "cfg_aliases",
@@ -4267,7 +4267,7 @@ dependencies = [
 [[package]]
 name = "winit-android"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "android-activity",
  "bitflags 2.11.0",
@@ -4282,7 +4282,7 @@ dependencies = [
 [[package]]
 name = "winit-appkit"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "bitflags 2.11.0",
  "block2",
@@ -4304,7 +4304,7 @@ dependencies = [
 [[package]]
 name = "winit-common"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "block2",
  "objc2",
@@ -4319,7 +4319,7 @@ dependencies = [
 [[package]]
 name = "winit-core"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "bitflags 2.11.0",
  "cursor-icon",
@@ -4333,7 +4333,7 @@ dependencies = [
 [[package]]
 name = "winit-orbital"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "bitflags 2.11.0",
  "dpi",
@@ -4349,21 +4349,21 @@ dependencies = [
 [[package]]
 name = "winit-toyos"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "bitflags 2.11.0",
  "dpi",
  "raw-window-handle",
  "smol_str",
+ "toyos-window",
  "tracing",
- "window",
  "winit-core",
 ]
 
 [[package]]
 name = "winit-uikit"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "bitflags 2.11.0",
  "block2",
@@ -4383,7 +4383,7 @@ dependencies = [
 [[package]]
 name = "winit-web"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "atomic-waker",
  "bitflags 2.11.0",
@@ -4405,7 +4405,7 @@ dependencies = [
 [[package]]
 name = "winit-win32"
 version = "0.31.0-beta.2"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#faf99eb71f937a6f904a5af209062ff9e71d6a0c"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos#c8883d8d5d663a2ca5f1ff7b9534670cb713dbf3"
 dependencies = [
  "bitflags 2.11.0",
  "cursor-icon",

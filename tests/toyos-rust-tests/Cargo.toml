@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
-window = { path = "../../userland/window" }
+toyos-window = { path = "../../userland/toyos-window" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos" }
 

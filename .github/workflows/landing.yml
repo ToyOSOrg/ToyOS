@@ -71,6 +71,21 @@ jobs:
             "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
           cargo run -- --writing-law-check --base "origin/${{ github.base_ref }}"
 
+      # The five crates on crates.io: a branch that changes one bumps its
+      # version and its dependents' pins. `src/sdkversion.rs` states the rule;
+      # the same function answers `cargo run -- --pr`. A step of this job and
+      # not a job of its own, for `gate-stage`'s reason: `abi-split` is required
+      # today, and a new job would be a check nobody has required yet.
+      - name: the published crates' versions
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "not a pull request: this rule is about a branch against its base."
+            exit 0
+          fi
+          git fetch --quiet origin \
+            "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          cargo run -- --sdk-version-check --base "origin/${{ github.base_ref }}"
+
   # What protects `main` is configured outside the repository, and this job
   # reads it back into VCS: half of it is readable from an endpoint that needs
   # no token.

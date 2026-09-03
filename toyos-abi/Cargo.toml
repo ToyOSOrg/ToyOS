@@ -3,6 +3,8 @@ name = "toyos-abi"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "The ToyOS kernel ABI: syscall numbers, struct layouts and typed syscall wrappers."
+repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [features]
 rustc-dep-of-std = ["core"]

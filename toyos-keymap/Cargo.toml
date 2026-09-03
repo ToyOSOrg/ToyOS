@@ -7,6 +7,8 @@ name = "toyos-keymap"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "Keyboard layouts, dead-key composition and key translation for ToyOS."
+repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [lints.rust]
 warnings = "deny"

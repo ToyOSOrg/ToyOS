@@ -55,7 +55,7 @@ things were missing and two of them ship today.
 
 **The frame replay exists.** `Window::present` *is*
 `present_damage(Rect { x: 0, y: 0, w: width, h: height })`
-(`userland/window/src/lib.rs:601-603`), and the compositor's `MSG_PRESENT` arm
+(`userland/toyos-window/src/lib.rs:601-603`), and the compositor's `MSG_PRESENT` arm
 adds whatever rect the client named with no pixel comparison of its own
 (`userland/compositor/src/session.rs:731`). So a client that presents twice with
 nothing drawn between makes the compositor recompose and re-blit the same
@@ -92,6 +92,6 @@ everywhere. Neither the size gate nor a whole-image compare shows it.
 So the shape is: the sub-region compare on `Ppm`, then one client at a time onto
 the terminal's pattern (compose into a `Framebuffer`, blit through a
 `window::Screen`, hand `take_damage` to `present_damage` —
-`userland/window/src/framebuffer.rs:85` and `userland/terminal/src/main.rs:36-37`
+`userland/toyos-window/src/framebuffer.rs:85` and `userland/terminal/src/main.rs:36-37`
 are the two ends of it), each landing with its own pixel-identity capture pair.
 `paint` is 1122 lines, `files` 370, `editor` 1909, `filepicker` 599.
