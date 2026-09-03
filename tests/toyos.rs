@@ -1012,8 +1012,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("iommu_context_absent", Sched::Parallel, Tier::Fast),
     ("iommu_empty_domain", Sched::Parallel, Tier::Fast),
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
-    ("iommu_virtio_platform", Sched::Parallel, Tier::Fast),
-    ("iommu_domain_isolation", Sched::Parallel, Tier::Fast),
+    ("iommu_virtio_platform", Sched::Parallel, Tier::Nightly),
+    ("iommu_domain_isolation", Sched::Parallel, Tier::Nightly),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
