@@ -2235,6 +2235,9 @@ pub fn log_partition_layout(
     /// is why the log moved off the ESP.
     const BASIC_DATA: &str = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7";
     const ESP_TYPE: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+    /// TOYOS-ROOT, written out for the same reason: this is the value the
+    /// kernel selects its ROOT candidates on.
+    const ROOT_TYPE: &str = "B350BC93-BB6A-4C5E-9589-A5C3CFD555FD";
 
     let image_path = test_dir().join("log-layout.img");
     let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
@@ -2246,12 +2249,13 @@ pub fn log_partition_layout(
         .open(&image_path)
         .map_err(|e| format!("the built image has no readable GPT: {e}"))?;
     let table: Vec<_> = disk.partitions().values().collect();
-    let [esp, log] = table.as_slice() else {
-        return Err(format!("the built image has {} partitions, wanted two", table.len()));
+    let [esp, root, log] = table.as_slice() else {
+        return Err(format!("the built image has {} partitions, wanted three", table.len()));
     };
 
     let types = [
         (esp.part_type_guid.guid.to_uppercase(), ESP_TYPE, "ESP"),
+        (root.part_type_guid.guid.to_uppercase(), ROOT_TYPE, "root partition"),
         (log.part_type_guid.guid.to_uppercase(), BASIC_DATA, "log partition"),
     ];
     for (got, want, what) in types {
@@ -2274,31 +2278,41 @@ pub fn log_partition_layout(
         ));
     }
 
-    let (esp_guid, log_guid) = (esp.part_guid, log.part_guid);
-    if esp_guid.is_nil() || log_guid.is_nil() {
+    let log_guid = log.part_guid;
+    let guids = [esp.part_guid, root.part_guid, log_guid];
+    if guids.iter().any(uuid::Uuid::is_nil) {
         return Err("a partition was given the all-zero GUID, which GPT reads as unused".to_string());
     }
-    if esp_guid == log_guid {
-        return Err(format!("both partitions carry the unique GUID {esp_guid}"));
+    for (i, one) in guids.iter().enumerate() {
+        if guids[i + 1..].contains(one) {
+            return Err(format!("two partitions carry the unique GUID {one}"));
+        }
     }
 
     // The alignment `create_gpt_disk` asserts, checked again from the table:
-    // the kernel mounts both of these over one 4 KiB block device and caches
-    // device blocks per volume, so a block belonging to both would be held
+    // the kernel mounts all three over one 4 KiB block device and caches
+    // device blocks per volume, so a block belonging to two would be held
     // twice and go stale on the other's write.
-    let (esp_start, esp_end) = (esp.first_lba * 512, (esp.last_lba + 1) * 512);
-    let (log_start, log_end) = (log.first_lba * 512, (log.last_lba + 1) * 512);
-    for (what, start, end) in
-        [("ESP", esp_start, esp_end), ("log partition", log_start, log_end)]
-    {
+    let extent = |p: &gpt::partition::Partition| (p.first_lba * 512, (p.last_lba + 1) * 512);
+    let placed = [
+        ("ESP", extent(esp)),
+        ("root partition", extent(root)),
+        ("log partition", extent(log)),
+    ];
+    for (what, (start, end)) in placed {
         if start % 4096 != 0 || end % 4096 != 0 {
             return Err(format!(
                 "the {what} spans bytes {start}..{end}, which is not whole 4 KiB device blocks"
             ));
         }
     }
-    if esp_end > log_start {
-        return Err(format!("the ESP runs to {esp_end} and the log partition starts at {log_start}"));
+    for (before, after) in placed.iter().zip(&placed[1..]) {
+        if before.1 .1 > after.1 .0 {
+            return Err(format!(
+                "the {} runs to {} and the {} starts at {}",
+                before.0, before.1 .1, after.0, after.1 .0
+            ));
+        }
     }
 
     // What the bootloader will read, and the kernel will be given. The file and

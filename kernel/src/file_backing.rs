@@ -78,6 +78,36 @@ impl FileBlocks {
     }
 }
 
+/// Attempts one block read may make before its refusal is the caller's answer.
+///
+/// A `BudgetExpired` is a claim about the caller's clock and not about the
+/// disk, so it is never a loss and never an answer — `kernel/CLAUDE.md` states
+/// the rule. Each attempt here is above `block::Partition`'s device lock, so it
+/// queues afresh with a whole `block::OPERATION` to spend; four of them bound
+/// what a page fault can cost while the shared controller is busy.
+const BUDGET_ATTEMPTS: u32 = 4;
+
+/// One block of `cache`, retried while the refusal is the budget's.
+///
+/// It cannot park between attempts, unlike every other retry ladder in this
+/// kernel: a demand-paging fill runs under the process-data lock, and a park
+/// there is the runtime panic `kernel/CLAUDE.md` names. Re-acquiring the device
+/// lock is the wait.
+fn read_block_retrying(
+    cache: &page_cache::Cached,
+    block: u64,
+    raw: &mut [u8; BLOCK_SIZE],
+) -> BlockResult {
+    let mut answer = cache.raw_read(block, raw);
+    for _ in 1..BUDGET_ATTEMPTS {
+        if answer != Err(BlockError::BudgetExpired) {
+            break;
+        }
+        answer = cache.raw_read(block, raw);
+    }
+    answer
+}
+
 /// The block holding `file_offset`, if the extents reach that far.
 fn offset_to_block(extents: &[Extent], file_offset: u64) -> Option<u64> {
     let block_idx = file_offset / BLOCK_SIZE_U64;
@@ -120,9 +150,9 @@ impl FileBacking for NvmeBacking {
             // Bypasses block page cache; file cache is the sole cache for file data.
             let mut raw = [0u8; BLOCK_SIZE];
             // `buf` is already zeroed, so a failed read here returns a hole, not stale data.
-            if self.cache.raw_read(block, &mut raw).is_err() {
-                log!("file: read of block {block} failed; serving zeros");
-                return Err(BlockError::Device);
+            if let Err(e) = read_block_retrying(&self.cache, block, &mut raw) {
+                log!("file: read of block {block} failed");
+                return Err(e);
             }
             let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
             buf[..valid].copy_from_slice(&raw[..valid]);
@@ -168,7 +198,7 @@ impl FileBacking for ReadOnlyBacking {
         // Bypasses the block page cache; the file cache is the sole cache for file data.
         let mut raw = [0u8; BLOCK_SIZE];
         // `buf` is already zeroed, so a failed read returns a hole, not stale data.
-        if let Err(e) = self.cache.raw_read(block, &mut raw) {
+        if let Err(e) = read_block_retrying(&self.cache, block, &mut raw) {
             log!("root: read of block {block} failed");
             return Err(e);
         }
