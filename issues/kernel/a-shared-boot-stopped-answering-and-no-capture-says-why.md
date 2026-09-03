@@ -1,6 +1,6 @@
 ---
 status: open
-kind: defect
+kind: tooling
 opened: 2026-09-03
 ---
 
@@ -44,7 +44,7 @@ shared boot waiting for its next command is parked at almost every sample.
 
 **Site: unknown.** The only candidate the surviving capture line supports is a
 `SYS_THREAD_JOIN` whose wake was lost: it parks on the target thread's own watch
-at `Deadline::never()` (`kernel/src/arch/syscall/proc.rs:166`), and nothing else
+at `Deadline::never()` (`kernel/src/arch/syscall/proc.rs:171`), and nothing else
 would leave a whole boot idle straight after a sibling thread's clean exit.
 `issues/kernel/thread-exits-completion-post-is-the-second-one.md` owns that
 path's two posts.

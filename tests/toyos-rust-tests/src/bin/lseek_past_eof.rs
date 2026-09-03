@@ -1,19 +1,16 @@
 //! A seek past EOF is a position, not an error, and nothing silently moves it.
 //!
-//! The expected outcomes are POSIX's (`lseek(2)`, `ftruncate(2)`, `write(2)`),
-//! not this kernel's, so every assertion below is the standard judging the
-//! kernel: the offset asked is the offset answered, the gap reads as zeros, a
-//! truncate leaves the pointer, and past the page index's reach is a refusal.
-//! The gap is read back off the device as well as out of the cache.
+//! POSIX judges the offsets, the hole and the seek pointer; the `MAX_FILE_SIZE`
+//! ceiling is this kernel's own, judged against the page index it protects.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::thread;
-use std::time::Duration;
+use std::process::Command;
 
 const PAGE: u64 = 4096;
 /// `file_cache::MAX_FILE_SIZE`: the page index is a `u32`, so `(u32::MAX + 1) * 4096`.
 const MAX_FILE_SIZE: u64 = (u32::MAX as u64 + 1) * PAGE;
+const DRAINS_THE_QUEUE: &str = "/bin/echo";
 
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 37 + 11) as u8 | 1).collect()
@@ -88,16 +85,17 @@ fn truncate_leaves_the_pointer(dir: &str) {
 /// alternative was a wrapped index aliasing a low page.
 fn the_ceiling_refuses(dir: &str) {
     let path = format!("{dir}/lseek_ceiling.bin");
+    let seed = pattern(8);
     let mut f = OpenOptions::new()
         .read(true).write(true).create(true).truncate(true)
         .open(&path)
         .unwrap_or_else(|e| panic!("create {path}: {e}"));
-    f.write_all(&[0x11]).expect("write one byte");
+    f.write_all(&seed).expect("seed page 0");
 
     f.seek(SeekFrom::Start(MAX_FILE_SIZE + 1))
         .expect_err("a seek past the ceiling was accepted");
     let here = f.seek(SeekFrom::Current(0)).expect("tell");
-    assert_eq!(here, 1, "{dir}: the refused seek moved the pointer to {here}");
+    assert_eq!(here, 8, "{dir}: the refused seek moved the pointer to {here}");
 
     f.set_len(MAX_FILE_SIZE + 1)
         .expect_err("a truncate past the ceiling was accepted");
@@ -107,13 +105,29 @@ fn the_ceiling_refuses(dir: &str) {
     f.write_all(&[0x22])
         .expect_err("a write whose end crosses the ceiling was accepted");
 
+    // The straddle a position-only guard passes: two bytes land under the
+    // ceiling, two past it where `(abs_pos / 4096) as u32` wraps onto page 0.
+    let at = MAX_FILE_SIZE - 2;
+    let got = f.seek(SeekFrom::Start(at)).expect("seek two bytes under the ceiling");
+    assert_eq!(got, at, "{dir}: a seek two bytes under the ceiling answered {got}");
+    f.write_all(&[0x33, 0x44, 0x55, 0x66])
+        .expect_err("a four-byte write straddling the ceiling was accepted");
+    let here = f.seek(SeekFrom::Current(0)).expect("tell");
+    assert_eq!(here, at, "{dir}: the refused straddle moved the pointer to {here}");
+    let len = f.metadata().expect("stat").len();
+    assert_eq!(len, 8, "{dir}: the refused straddle resized the file to {len}");
+    f.seek(SeekFrom::Start(0)).expect("rewind");
+    let mut page0 = vec![0u8; 8];
+    f.read_exact(&mut page0).expect("read the seeded head back");
+    assert_eq!(page0, seed, "{dir}: the refused straddle wrapped onto the file's own page 0");
+
     drop(f);
     fs::remove_file(&path).expect("cleanup");
 }
 
-/// The same hole read back off the device rather than out of the cache: the
-/// last close pins the file for write-back, `iod` drains it and drops an
-/// evictable file, so the re-open below is a cache miss the mount answers.
+/// The same hole off the device, not out of the cache, and nothing here is
+/// timed: `sync_all` reports a failure to reach it, and the spawn's
+/// `Vfs::open_backing` drains the queue and releases the file before the re-open.
 fn the_hole_reaches_the_device(dir: &str) {
     let path = format!("{dir}/lseek_device_hole.bin");
     let head = pattern(100);
@@ -125,10 +139,13 @@ fn the_hole_reaches_the_device(dir: &str) {
         f.write_all(&head).expect("write the head");
         f.seek(SeekFrom::Start(200)).expect("seek past EOF");
         f.write_all(&[0xAB]).expect("write one byte at the seeked offset");
+        f.sync_all().unwrap_or_else(|e| panic!("{dir}: the hole did not reach the device: {e}"));
     }
-    // The drain window `writeback_durability.rs` measures; a sleep yields the
-    // CPU, so `iod` has run and the file has left the cache before the read.
-    thread::sleep(Duration::from_millis(200));
+    let status = Command::new(DRAINS_THE_QUEUE)
+        .arg("lseek_past_eof")
+        .status()
+        .unwrap_or_else(|e| panic!("spawn {DRAINS_THE_QUEUE}: {e}"));
+    assert!(status.success(), "{dir}: the draining spawn exited {:?}", status.code());
 
     let mut back = Vec::new();
     File::open(&path)
@@ -152,6 +169,7 @@ fn main() {
         truncate_leaves_the_pointer(dir);
     }
     the_ceiling_refuses("/tmp");
+    the_ceiling_refuses("/home");
     the_hole_reaches_the_device("/home");
 
     println!("lseek past eof: the offset asked is the offset answered, the gap reads as zeros on the device, and the ceiling refuses");

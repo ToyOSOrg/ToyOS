@@ -14,7 +14,7 @@ calls `zero_range` on every grow). The cost is linear in the hole: reaching page
 N over a gap of M pages writes M zero blocks, one device write each, inside the
 VFS lock a flush holds.
 
-Nothing in the tree pays it today. Every writer this kernel has appends
+Every writer this kernel has appends
 sequentially, so `covered` reaches `target` in one block and the zeroing loop
 does not run — `fs_large_file` writes 1024 pages and allocates one block per
 page with no gap. The paths that pay are a `lseek` past the end followed by a
