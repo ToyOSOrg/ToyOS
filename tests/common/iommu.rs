@@ -931,69 +931,172 @@ pub fn iommu_empty_domain(
     Ok(())
 }
 
-/// The actuator points the NIC's first RX buffer at the physical bytes NVMe's
-/// admin completion queue page ends with — a page the NIC's domain does not map.
-/// Three things then hold at once and no two come from the same place: the unit
-/// blocks it and names the NIC and that address; the address is the one NVMe's
-/// own `ACQ` holds, resolved through the tables the unit walks; and every byte
-/// of the 2 KiB is still zero.
-///
+/// One device aimed at the physical bytes NVMe's admin completion queue page
+/// ends with — a page in another driver's pool, which the aimed device's own
+/// domain does not map. Three things then hold at once and no two come from
+/// the same place: the unit blocks it and names the device and that address;
+/// the address is the one NVMe's own `ACQ` holds, resolved through the tables
+/// the unit walks; and the function's bus mastering is gone. A write also
+/// leaves bytes to check; a read leaves none.
+struct ForeignArm {
+    profile: Profile,
+    params: &'static [&'static str],
+    /// The class `pci::enumerate` printed for the aimed device.
+    class: &'static str,
+    access: &'static str,
+    name: &'static str,
+}
+
+/// The NIC's first RX buffer, moved onto that page.
+const NIC_FOREIGN: ForeignArm = ForeignArm {
+    profile: Profile::Headless,
+    params: &["iommu-nic-foreign-dma"],
+    class: "0200",
+    access: "write",
+    name: "isolation",
+};
+
 /// Oracle: VT-d Rev. 4.0 Section 9.8, which [`translate`] implements
 /// independently, and QEMU's `vtd_iova_to_sspte`
-/// (`hw/i386/intel_iommu.c:1146-1210` at v11.1.0).
+/// (`hw/i386/intel_iommu.c:1146-1210` at v11.1.0). Every moved function's
+/// domain is then walked on the three machines that between them carry all
+/// seven, and the page sets are required to be pairwise disjoint.
 pub fn iommu_domain_isolation(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let options = BootOptions {
+    let qemu = foreign_fault(test_config, c_bins, rust_bins, &NIC_FOREIGN)?;
+    // Each guest ends before the next boots: QEMU holds an exclusive lock on the NVMe image.
+    let _ = qemu.shutdown();
+    let mut classes: BTreeSet<String> = BTreeSet::new();
+    for (profile, name) in
+        [(Profile::Headless, "headless"), (Profile::Hda, "hda"), (Profile::VirtioGpu, "virtio-gpu")]
+    {
+        let clean = QemuInstance::boot_with_options(
+            test_config,
+            c_bins,
+            rust_bins,
+            BootOptions { profile, qmp: true, ..Default::default() },
+        );
+        classes.extend(clean_walk(&clean, name)?);
+        let _ = clean.shutdown();
+    }
+    let want: BTreeSet<&str> = ["0108", "0200", "0380", "0401", "0403", "0780", "0c03"].into();
+    let moved: BTreeSet<&str> = classes.iter().map(String::as_str).collect();
+    if moved != want {
+        return Err(format!(
+            "the functions moved to a domain of their own are of classes {moved:?}, and every \
+             driver in this kernel that masters the bus is one of {want:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// A scanout backing in NVMe's pool, by its physical address. The device maps a
+/// backing when it is attached (`hw/display/virtio-gpu.c:918-931` at v11.1.0:
+/// `dma_memory_map` answers NULL for a translation the unit refused, and the
+/// command is answered `VIRTIO_GPU_RESP_ERR_UNSPEC` at `:1010-1014`), so the
+/// blocked access is the mapping's read.
+pub fn iommu_gpu_foreign_backing(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let arm = ForeignArm {
+        profile: Profile::VirtioGpu,
+        params: &["iommu-gpu-foreign-backing"],
+        class: "0380",
+        access: "read",
+        name: "gpu",
+    };
+    foreign_fault(test_config, c_bins, rust_bins, &arm).map(drop)
+}
+
+/// The HDA stream's buffer descriptor list at that page, and the stream
+/// started: the controller fetches the list the moment `RUN` is set
+/// (`hw/audio/intel-hda.c:480` at v11.1.0, `pci_dma_rw` per entry; the stream
+/// data would follow through `:433`).
+pub fn iommu_hda_foreign_bdl(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let arm = ForeignArm {
+        profile: Profile::Hda,
+        params: &["iommu-hda-foreign-bdl"],
+        class: "0403",
+        access: "read",
+        name: "hda",
+    };
+    foreign_fault(test_config, c_bins, rust_bins, &arm).map(drop)
+}
+
+/// virtio-sound's control-queue answer aimed at that page: the device maps
+/// every buffer of a chain when it pops it (`hw/virtio/virtio.c:1641-1648` at
+/// v11.1.0), and the answer it would have written there is
+/// `hw/audio/virtio-snd.c:723-727`'s.
+pub fn iommu_sound_foreign_dma(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let arm = ForeignArm {
         profile: Profile::Headless,
+        params: &["iommu-sound-foreign-dma"],
+        class: "0401",
+        access: "write",
+        name: "sound",
+    };
+    foreign_fault(test_config, c_bins, rust_bins, &arm).map(drop)
+}
+
+fn foreign_fault(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    arm: &ForeignArm,
+) -> Result<QemuInstance, String> {
+    let options = BootOptions {
+        profile: arm.profile,
         qmp: true,
-        kernel_params: &["iommu-nic-foreign-dma"],
+        kernel_params: arm.params,
         ready_marker: FAULT,
         ..Default::default()
     };
-    unit_is_first(&qemu::profile_argv(&options), "isolation")?;
+    unit_is_first(&qemu::profile_argv(&options), arm.name)?;
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
     let mut log = Serial::boot(&qemu);
     log.push(&qemu.drain_serial(Duration::from_secs(2)));
     let socket = qemu.qmp_socket();
 
-    let line = log.must_say(FAULT)?;
-    let fields = unit_fields(line);
-    let field = |k: &str| -> Result<String, String> {
-        fields.get(k).cloned().ok_or_else(|| format!("the fault line has no {k}=: {line:?}"))
-    };
-    let blocked = Blocked {
-        stream: field("stream")?,
-        address: field("addr")?,
-        access: field("access")?,
-        reason: line
-            .split_whitespace()
-            .last()
-            .ok_or_else(|| format!("the fault line names no reason: {line:?}"))?
-            .to_string(),
-    };
-
-    let nic = class_function(&log, "0200")
-        .ok_or_else(|| format!("this machine enumerated no NIC\n{}", log.text()))?;
+    let blocked = blocked_on(log.must_say(FAULT)?)?;
+    let aimed = class_function(&log, arm.class).ok_or_else(|| {
+        format!("this machine enumerated no class {} function to aim\n{}", arm.class, log.text())
+    })?;
     let nvme = class_function(&log, "0108")
         .ok_or_else(|| format!("this machine enumerated no NVMe controller\n{}", log.text()))?;
-    if blocked.stream != nic {
+    if blocked.stream != aimed {
         return Err(format!(
-            "the unit blocked {} and the device aimed at another driver's pool is {nic}",
+            "the unit blocked {} and the device aimed at another driver's pool is {aimed}",
             blocked.stream
         ));
     }
     if !SECOND_LEVEL.contains(&blocked.reason.as_str()) {
         return Err(format!(
-            "the unit blocked {nic} for {:?}, which is not something a second-level page table \
+            "the unit blocked {aimed} for {:?}, which is not something a second-level page table \
              walk decides — a domain that does not map an address has to refuse it in the walk",
             blocked.reason
         ));
     }
+    if blocked.access != arm.access {
+        return Err(format!(
+            "the unit blocked {aimed} on a {}, and what the actuator staged is a {}",
+            blocked.access, arm.access
+        ));
+    }
 
-    let window = register_window(socket, &log, "isolation")?;
+    let window = register_window(socket, &log, arm.name)?;
     let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
     let victim = translate(socket, window, &nvme, acq)?;
     let at = u64::from_str_radix(blocked.address.trim_start_matches("0x"), 16)
@@ -1008,31 +1111,35 @@ pub fn iommu_domain_isolation(
         ));
     }
 
-    let probe = victim + 0x800;
-    let words = over_qmp(socket, probe, PROBE_WORDS, 'g')?;
-    if let Some((i, word)) = words.iter().enumerate().find(|(_, w)| **w != 0) {
-        return Err(format!(
-            "the unit reported blocking {nic} at {}, and the {} bytes at {probe:#x} inside \
-             NVMe's pool hold {word:#018x} at word {i} rather than the zero the NVMe driver \
-             left. The write landed anyway",
-            blocked.address,
-            PROBE_WORDS * 8
-        ));
+    let mut bytes = String::new();
+    if arm.access == "write" {
+        let probe = victim + 0x800;
+        let words = over_qmp(socket, probe, PROBE_WORDS, 'g')?;
+        if let Some((i, word)) = words.iter().enumerate().find(|(_, w)| **w != 0) {
+            return Err(format!(
+                "the unit reported blocking {aimed} at {}, and the {} bytes at {probe:#x} inside \
+                 NVMe's pool hold {word:#018x} at word {i} rather than the zero the NVMe driver \
+                 left. The write landed anyway",
+                blocked.address,
+                PROBE_WORDS * 8
+            ));
+        }
+        bytes = format!(", all {} bytes there are still zero", PROBE_WORDS * 8);
     }
     // Out of the function's own `COMMAND` rather than off the line the handler printed.
-    let command = over_qmp(socket, config_space(&log, &nic)? + PCI_COMMAND, 1, 'w')?[0] as u16;
+    let command = over_qmp(socket, config_space(&log, &aimed)? + PCI_COMMAND, 1, 'w')?[0] as u16;
     if command & PCI_BUS_MASTER != 0 {
         return Err(format!(
-            "the unit blocked {nic} and its COMMAND is {command:#06x}, so it still masters the \
+            "the unit blocked {aimed} and its COMMAND is {command:#06x}, so it still masters the \
              bus and can fault again"
         ));
     }
     let handled = log.must_say(FAULT)?;
-    let nic_domain = context_of(socket, window, &nic)?.0;
+    let domain = context_of(socket, window, &aimed)?.0;
     for field in [
         "bme=cleared".to_string(),
         "first=y".to_string(),
-        format!("domain={nic_domain}"),
+        format!("domain={domain}"),
         "unitfaults=1".to_string(),
         "streamfaults=1".to_string(),
     ] {
@@ -1041,32 +1148,212 @@ pub fn iommu_domain_isolation(
         }
     }
     eprintln!(
-        "  [iommu] {nic} aimed at {}, inside {nvme}'s pool: blocked on a {} for {}, all {} bytes \
-         there are still zero, and its COMMAND reads {command:#06x} — bus mastering gone",
-        blocked.address,
-        blocked.access,
-        blocked.reason,
-        PROBE_WORDS * 8
+        "  [iommu] {aimed} aimed at {}, inside {nvme}'s pool: blocked on a {} for {}{bytes}, and \
+         its COMMAND reads {command:#06x} — bus mastering gone",
+        blocked.address, blocked.access, blocked.reason,
     );
-    // The first guest goes first: QEMU holds an exclusive lock on the NVMe image.
-    let lane = qemu.shutdown();
-    let clean =
-        QemuInstance::boot_with_options(test_config, c_bins, rust_bins, BootOptions {
-            profile: Profile::Headless,
-            qmp: true,
-            ..Default::default()
-        });
-    drop(lane);
-    let log = Serial::boot(&clean);
+    Ok(qemu)
+}
+
+/// One clean boot's moved functions, walked and compared; returns their classes.
+fn clean_walk(clean: &QemuInstance, name: &str) -> Result<BTreeSet<String>, String> {
+    let log = Serial::boot(clean);
     log.must_be_clean()?;
     log.must_say("Boot: complete")?;
     let socket = clean.qmp_socket();
-    let window = register_window(socket, &log, "isolation")?;
+    let window = register_window(socket, &log, name)?;
     let nvme = class_function(&log, "0108")
-        .ok_or_else(|| format!("this machine enumerated no NVMe controller\n{}", log.text()))?;
+        .ok_or_else(|| format!("{name}: this machine enumerated no NVMe controller\n{}", log.text()))?;
     let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
     let owned = translate(socket, window, &nvme, acq)?;
-    domains_are_disjoint(socket, &log, window, owned, &nvme)
+    domains_are_disjoint(socket, &log, window, owned, &nvme)?
+        .keys()
+        .map(|bdf| class_of(&log, bdf))
+        .collect()
+}
+
+/// Mirrored in `tests/toyos-rust-tests/src/bin/gpu_scanout_swap.rs`.
+const GPU_MODES: [(usize, usize); 3] = [(800, 600), (1024, 768), (640, 480)];
+const SWAPPED: &str = "===GPU_SCANOUT_SWAP_OK===";
+
+/// Three mode changes while the guest keeps every retired scanout mapped, then
+/// the display's domain walked out of the tables the unit reads: exactly the
+/// command pool, the cursor and the live scanout are mapped, the live scanout's
+/// device address translates to its pages, and no retired one translates at
+/// all. The device address is the attachment's and ends with it; the pages are
+/// the holder's and do not.
+pub fn iommu_gpu_scanout_swap(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions { profile: Profile::VirtioGpu, qmp: true, ..Default::default() };
+    unit_is_first(&qemu::profile_argv(&options), "gpu")?;
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let mut log = Serial::boot(&qemu);
+    let result = qemu.run_test("test_rs_gpu_scanout_swap", Duration::from_secs(30));
+    if let Some(err) = &result.error {
+        return Err(format!("the guest stopped answering: {err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) || !result.stdout.contains(SWAPPED) {
+        return Err(format!(
+            "the mode changes did not all go through: exit {:?}\n{}",
+            result.exit_code, result.stdout
+        ));
+    }
+    log.push(&result.serial);
+    log.push(&qemu.drain_serial(Duration::from_millis(500)));
+    log.must_not_say(FAULT)?;
+    log.must_be_clean()?;
+    let shown = qemu.screendump();
+    let last = GPU_MODES[GPU_MODES.len() - 1];
+    if (shown.width, shown.height) != last {
+        return Err(format!(
+            "QEMU scans out {}x{} after the guest set {}x{}",
+            shown.width, shown.height, last.0, last.1
+        ));
+    }
+
+    let gpu = class_function(&log, "0380")
+        .ok_or_else(|| format!("this machine enumerated no display controller\n{}", log.text()))?;
+    let socket = qemu.qmp_socket();
+    let window = register_window(socket, &log, "gpu")?;
+    let (did, root, levels) = context_of(socket, window, &gpu)?;
+    let moved = moved_functions(&log)?;
+    if moved.get(&gpu) != Some(&did) {
+        return Err(format!(
+            "the kernel says {gpu} moved to {:?} and its context entry names domain {did}",
+            moved.get(&gpu)
+        ));
+    }
+
+    let scanouts = gpu_buffers(&log, "scanout buffer")?;
+    let cursors = gpu_buffers(&log, "cursor resource")?;
+    if scanouts.len() != GPU_MODES.len() + 1 {
+        return Err(format!(
+            "{} scanout buffers were allocated for a boot and {} mode changes:\n{}",
+            scanouts.len(),
+            GPU_MODES.len(),
+            log.text()
+        ));
+    }
+    let [cursor] = cursors[..] else {
+        return Err(format!("{} cursor buffers were allocated", cursors.len()));
+    };
+    let (live, retired) = scanouts.split_last().expect("four scanouts");
+    let mut want = BTreeSet::new();
+    let mut pools = 0usize;
+    for (phys, end, _) in mappings_of(&log, did)? {
+        if retired.iter().any(|(p, _)| *p == phys) {
+            continue;
+        }
+        if phys != live.0 && phys != cursor.0 {
+            pools += 1;
+        }
+        want.extend((phys..end).step_by(PAGE_2M as usize));
+    }
+    if pools != 1 {
+        return Err(format!(
+            "{pools} mappings in {gpu}'s domain are neither a scanout nor the cursor, and the \
+             command pool is one"
+        ));
+    }
+    let leaves = leaves(socket, root, levels, &gpu)?;
+    if leaves != want {
+        return Err(format!(
+            "{gpu}'s domain {did} maps {leaves:#x?} where its live backings are {want:#x?}"
+        ));
+    }
+    let seen = translate(socket, window, &gpu, live.1)?;
+    if seen != live.0 {
+        return Err(format!(
+            "the live scanout's device address {:#x} translates to {seen:#x} and its pages are \
+             at {:#x}",
+            live.1, live.0
+        ));
+    }
+    for (phys, device) in retired {
+        if let Ok(to) = translate(socket, window, &gpu, *device) {
+            return Err(format!(
+                "the retired scanout at {phys:#x} was given device address {device:#x}, which \
+                 still translates to {to:#x} while a holder maps the pages"
+            ));
+        }
+    }
+    eprintln!(
+        "  [iommu] {gpu}: {} mode changes, {} retired scanout(s) no longer translate, and domain \
+         {did} maps exactly {} live 2 MiB page(s) — the command pool, the cursor and the \
+         {}x{} scanout",
+        GPU_MODES.len(),
+        retired.len(),
+        leaves.len(),
+        last.0,
+        last.1
+    );
+    Ok(())
+}
+
+/// `iommu: <bdf> moves to domain<N>`, by function; a function moved twice is refused.
+fn moved_functions(log: &Serial) -> Result<BTreeMap<String, u64>, String> {
+    let mut seen: BTreeMap<String, u64> = BTreeMap::new();
+    for line in log.text().lines() {
+        let Some(rest) = line.split("iommu: ").nth(1) else { continue };
+        let Some((bdf, tail)) = rest.split_once(' ') else { continue };
+        let Some(id) = tail.strip_prefix("moves to domain") else { continue };
+        let id: u64 = id.trim().parse().map_err(|_| format!("unreadable domain on {line:?}"))?;
+        if seen.insert(bdf.to_string(), id).is_some() {
+            return Err(format!("{bdf} moved twice: {line:?}"));
+        }
+    }
+    Ok(seen)
+}
+
+/// `iommu: domain<N> maps <phys>..<end> at <device>` for one domain, in order.
+fn mappings_of(log: &Serial, did: u64) -> Result<Vec<(u64, u64, u64)>, String> {
+    let needle = format!("iommu: domain{did} maps ");
+    let mut found = Vec::new();
+    for line in log.text().lines() {
+        let Some(rest) = line.split(needle.as_str()).nth(1) else { continue };
+        let mut words = rest.split_whitespace();
+        let (Some(range), Some("at"), Some(at)) = (words.next(), words.next(), words.next()) else {
+            return Err(format!("unreadable mapping line: {line:?}"));
+        };
+        let Some((phys, end)) = range.split_once("..") else {
+            return Err(format!("unreadable mapping line: {line:?}"));
+        };
+        found.push((hex(phys, line)?, hex(end, line)?, hex(at, line)?));
+    }
+    Ok(found)
+}
+
+/// `VirtIO GPU: <what> at <ptr> phys=<p> device=<d>` lines, as `(phys, device)`.
+fn gpu_buffers(log: &Serial, what: &str) -> Result<Vec<(u64, u64)>, String> {
+    let needle = format!("VirtIO GPU: {what} at ");
+    let mut found = Vec::new();
+    for line in log.text().lines().filter(|l| l.contains(needle.as_str())) {
+        let fields = unit_fields(line);
+        let field = |k: &str| -> Result<u64, String> {
+            hex(fields.get(k).ok_or_else(|| format!("no {k}= on {line:?}"))?, line)
+        };
+        found.push((field("phys")?, field("device")?));
+    }
+    Ok(found)
+}
+
+fn hex(word: &str, line: &str) -> Result<u64, String> {
+    u64::from_str_radix(word.trim_start_matches("0x"), 16)
+        .map_err(|_| format!("{word:?} is not a hex number on {line:?}"))
+}
+
+/// The class `pci::enumerate` printed for one function.
+fn class_of(log: &Serial, bdf: &str) -> Result<String, String> {
+    let needle = format!("PCI {bdf} [");
+    log.text()
+        .lines()
+        .find_map(|line| line.split(needle.as_str()).nth(1))
+        .and_then(|rest| rest.split(']').next())
+        .map(str::to_string)
+        .ok_or_else(|| format!("the PCI walk printed no class for {bdf}"))
 }
 
 /// Every moved function is in a domain of its own, and no two of those domains
@@ -1080,17 +1367,8 @@ fn domains_are_disjoint(
     window: u64,
     owned: u64,
     owner: &str,
-) -> Result<(), String> {
-    let mut seen: BTreeMap<String, u64> = BTreeMap::new();
-    for line in log.text().lines() {
-        let Some(rest) = line.split("iommu: ").nth(1) else { continue };
-        let Some((bdf, tail)) = rest.split_once(' ') else { continue };
-        let Some(id) = tail.strip_prefix("moves to domain") else { continue };
-        let id: u64 = id.trim().parse().map_err(|_| format!("unreadable domain on {line:?}"))?;
-        if seen.insert(bdf.to_string(), id).is_some() {
-            return Err(format!("{bdf} moved twice: {line:?}"));
-        }
-    }
+) -> Result<BTreeMap<String, u64>, String> {
+    let seen = moved_functions(log)?;
     if seen.len() < 2 {
         return Err(format!(
             "{} function(s) moved to a domain of their own, so there is no pair here to be \
@@ -1145,7 +1423,7 @@ fn domains_are_disjoint(
         roots.len(),
         pages.values().map(BTreeSet::len).sum::<usize>()
     );
-    Ok(())
+    Ok(seen)
 }
 
 /// Every physical page one domain's second-level tables reach, Section 9.8's
@@ -1399,7 +1677,12 @@ fn fault_boot(
     log.must_not_say("Boot: complete")?;
     log.must_not_say(qemu::DEFAULT_READY)?;
 
-    let line = log.must_say(FAULT)?;
+    let blocked = blocked_on(log.must_say(FAULT)?)?;
+    Ok((log, blocked))
+}
+
+/// The fault line's fields; a reason the kernel has no name for is refused.
+fn blocked_on(line: &str) -> Result<Blocked, String> {
     let fields = unit_fields(line);
     let field = |k: &str| -> Result<String, String> {
         fields.get(k).cloned().ok_or_else(|| format!("the fault line has no {k}=: {line:?}"))
@@ -1414,13 +1697,7 @@ fn fault_boot(
             "the unit reported a fault reason this kernel has no name for: {line:?}"
         ));
     }
-    let blocked = Blocked {
-        stream: field("stream")?,
-        address: field("addr")?,
-        access: field("access")?,
-        reason,
-    };
-    Ok((log, blocked))
+    Ok(Blocked { stream: field("stream")?, address: field("addr")?, access: field("access")?, reason })
 }
 
 /// How far up the identity domain reaches, off the line that built it.

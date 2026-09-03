@@ -39,7 +39,13 @@ const OFF_CURSORQ_BUFS: usize  = 0x3000;
 const DMA_SIZE: usize           = 0x4000;
 
 const CURSOR_SIZE: u32 = 64;
-const CURSOR_RESOURCE_ID: u32 = 3;
+const CURSOR_RESOURCE_ID: u32 = 1;
+/// Scanouts count up from here, so no mode change ever reuses the cursor's id.
+const FIRST_SCANOUT_RESOURCE_ID: u32 = 2;
+#[cfg(feature = "boot-actuators")]
+const FOREIGN_RESOURCE_ID: u32 = u32::MAX;
+#[cfg(feature = "boot-actuators")]
+const FOREIGN_COLUMNS: u32 = 32;
 
 const REQ_OFFSET: usize = 0x000;
 const RESP_OFFSET: usize = 0x800;
@@ -169,12 +175,9 @@ struct RespEdid {
     edid: [u8; 1024],
 }
 
-/// Pages the device can reach, for as long as it may reach them.
-///
-/// The device address is a property of the attachment and not of the pages: a
-/// `Region`'s `Arc<Pages>` outlives every scanout it was ever used for, so
-/// unmapping on the pages' last drop would leave the device scanning out an
-/// address the unit no longer translates.
+/// Pages the device can reach, for as long as it may reach them: the device
+/// address is the attachment's and not the pages', which a holder's
+/// `Arc<Pages>` keeps alive past every scanout they backed.
 struct AttachedBacking {
     space: DeviceSpace,
     at: u64,
@@ -202,9 +205,8 @@ impl Drop for AttachedBacking {
 /// existing holders (e.g. a compositor) to unmap.
 struct FbAlloc {
     regions: [Region; 2],
-    /// `regions[0]`'s attachment. `regions[1]` is the compositor's other
-    /// buffer and is never given to the device, so it is never mapped.
-    /// `None` only for the placeholder `init` builds before it has a display.
+    /// `regions[0]`'s; `regions[1]` is the compositor's back buffer and is never
+    /// given to the device. `None` only for the placeholder built before the display.
     backing: Option<AttachedBacking>,
 }
 
@@ -216,7 +218,6 @@ impl FbAlloc {
 
 struct GpuController {
     device: VirtioDevice,
-    /// Everything this display may reach, and nothing else.
     space: DeviceSpace,
     controlq: Virtqueue<'static>,
     cursorq: Virtqueue<'static>,
@@ -234,7 +235,6 @@ struct GpuController {
     resource: u32,
     fb: FbAlloc,
     cursor: Region,
-    /// The cursor's attachment, taken once and held for the life of the display.
     cursor_backing: Option<AttachedBacking>,
 }
 
@@ -312,8 +312,6 @@ impl GpuController {
         assert!(resp == RESP_OK_NODATA, "VirtIO GPU: RESOURCE_ATTACH_BACKING failed: {:#x}", resp);
     }
 
-    /// The response rather than an assertion on it, so the actuator below can
-    /// hand the device an address the unit blocks and still say what happened.
     fn attach_backing_answering(&mut self, id: u32, addr: u64, len: u32) -> u32 {
         // Variable-length payload: header followed by mem_entry array, written
         // consecutively.
@@ -446,21 +444,20 @@ impl GpuController {
         Some(FbAlloc { regions, backing: Some(backing) })
     }
 
-    /// Hand the device a scanout backing in another driver's pool, by its
-    /// *physical* address, which this display's own domain does not map.
-    ///
-    /// The answer is logged rather than asserted: the unit's fault halts every
-    /// CPU from the handler, so which of the halt and the response arrives
-    /// first is a race, and only one of the two outcomes is a passing gate.
+    /// Hand the device a backing in another driver's pool, by its *physical*
+    /// address, which this display's own domain does not map. The answer is
+    /// logged, not asserted: the unit's fault halts every CPU from the handler,
+    /// so which of the halt and the response arrives first is a race.
     #[cfg(feature = "boot-actuators")]
     fn attach_a_foreign_backing(&mut self) {
         let foreign =
             super::nvme::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
         assert!(foreign != 0, "VirtIO GPU: this machine staged no foreign pool to aim at");
-        self.resource += 1;
-        self.create_resource(self.resource, FORMAT_B8G8R8X8_UNORM, CURSOR_SIZE, CURSOR_SIZE);
+        // Sized to the probe exactly, so one transfer of the whole resource reads every byte of it.
+        const ROWS: u32 = super::nvme::PROBE_LEN as u32 / (FOREIGN_COLUMNS * 4);
+        self.create_resource(FOREIGN_RESOURCE_ID, FORMAT_B8G8R8X8_UNORM, FOREIGN_COLUMNS, ROWS);
         let resp = self.attach_backing_answering(
-            self.resource,
+            FOREIGN_RESOURCE_ID,
             foreign,
             super::nvme::PROBE_LEN as u32,
         );
@@ -468,6 +465,14 @@ impl GpuController {
             "VirtIO GPU: a backing at {foreign:#x}, inside another driver's pool, was answered \
              {resp:#x} (actuator)"
         );
+        if resp == RESP_OK_NODATA {
+            let rect = Rect { x: 0, y: 0, width: FOREIGN_COLUMNS, height: ROWS };
+            self.transfer_to_host(FOREIGN_RESOURCE_ID, rect, 0);
+            log!(
+                "VirtIO GPU: the device read all {} bytes of it (actuator)",
+                super::nvme::PROBE_LEN
+            );
+        }
     }
 
     fn build_gpu_info(&self) -> GpuInfo {
@@ -531,12 +536,11 @@ impl Gpu for GpuController {
         let rect = Rect { x: 0, y: 0, width, height };
         self.set_scanout(0, self.resource, rect);
 
-        // Every command above went through the control queue's used ring, so
-        // the device has acknowledged the new scanout before the old backing's
-        // address stops translating on the line below.
+        // Acknowledged on the control queue's used ring, so the device is off the
+        // old backing before its address stops translating below.
         self.destroy_resource(old_resource);
-        // Old pages free only when the last holder drops them; nothing is
-        // force-revoked. The old attachment ends here whatever holds the pages.
+        // Old pages free only when the last holder drops them; the attachment
+        // ends here whatever holds them.
         drop(core::mem::replace(&mut self.fb, new_fb));
 
         self.width = width;
@@ -562,8 +566,6 @@ fn fb_size_bytes(width: u32, height: u32) -> Option<u32> {
 pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     let pci_dev = *devices.iter().find(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_GPU_DEVICE))?;
     log!("VirtIO GPU: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
-    // An address space of this display's own, holding the command pool and
-    // whatever backing is attached at the time and nothing else.
     let space = DeviceSpace::create();
     // Leaked rather than held in a `static`: the display is never unbound.
     let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
@@ -613,7 +615,7 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
         cursor_resp: cursor_bufs.subview(RESP_OFFSET, HALF),
         width: 0,
         height: 0,
-        resource: 1,
+        resource: FIRST_SCANOUT_RESOURCE_ID,
         fb: FbAlloc { regions: core::array::from_fn(|_| Region::empty()), backing: None },
         cursor: Region::empty(),
         cursor_backing: None,

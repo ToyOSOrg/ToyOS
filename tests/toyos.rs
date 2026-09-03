@@ -207,8 +207,9 @@ const RUST_SKIP: &[&str] = &[
     "input_absent",
     // Needs a display whose mode can change, which is `Profile::VirtioGpu`
     // alone; the shared boot has no display at all. `gpu_set_resolution` runs
-    // it there.
+    // it there, and `iommu_gpu_scanout_swap` the second.
     "gpu_set_resolution",
+    "gpu_scanout_swap",
     "va_exhaustion",
     // Needs a NIC in front of netd; only `tests/netcase` has one.
     // `netd_listener_forgery` runs it there.
@@ -1015,6 +1016,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("iommu_interrupt_remapping", Sched::Parallel, Tier::Fast),
     ("iommu_virtio_platform", Sched::Parallel, Tier::Nightly),
     ("iommu_domain_isolation", Sched::Parallel, Tier::Nightly),
+    // Fast with the UNMEASURED marker until the shards price them.
+    ("iommu_gpu_scanout_swap", Sched::Parallel, Tier::Fast),
+    ("iommu_gpu_foreign_backing", Sched::Parallel, Tier::Fast),
+    ("iommu_hda_foreign_bdl", Sched::Parallel, Tier::Fast),
+    ("iommu_sound_foreign_dma", Sched::Parallel, Tier::Fast),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -8952,6 +8958,18 @@ fn run_machine_test(
         }
         "iommu_domain_isolation" => {
             common::iommu::iommu_domain_isolation(test_config, c_bins, rust_bins)
+        }
+        "iommu_gpu_scanout_swap" => {
+            common::iommu::iommu_gpu_scanout_swap(test_config, c_bins, rust_bins)
+        }
+        "iommu_gpu_foreign_backing" => {
+            common::iommu::iommu_gpu_foreign_backing(test_config, c_bins, rust_bins)
+        }
+        "iommu_hda_foreign_bdl" => {
+            common::iommu::iommu_hda_foreign_bdl(test_config, c_bins, rust_bins)
+        }
+        "iommu_sound_foreign_dma" => {
+            common::iommu::iommu_sound_foreign_dma(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
