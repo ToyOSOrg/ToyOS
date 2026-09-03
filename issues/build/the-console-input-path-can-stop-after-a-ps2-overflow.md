@@ -46,6 +46,14 @@ controller" from "the console stopped reading the kernel's queue", and it needs
   `injected 44, kernel drained 16` and then attempts 1 through 9 all
   `drained 0`, the row frozen at `echo sur`. That result is reported here, not
   measured here.
+- **Seen once on the dev host under load**, unarmed, on the `iommu-domains`
+  branch: `console_locale_detect` STALLED with "waiting for the wizard to ask
+  for a key under /bin/console — the console did not lend it the keyboard — it
+  never stopped talking and never got there", in a run whose 1-minute load was
+  9.7 with two other worktrees holding guest slots and which took 1833 s against
+  198 s for the same tree alone. The harness called it a blown liveness guard;
+  it was `ALONE: GREEN`, and green in a 198 s whole-suite run of the same commit.
+  A sighting outside CI and outside the armed arm, recorded because nothing else has one.
 
 The two do not reconcile at a common rate: at the 2-of-5 arm's own p = 0.4,
 P(0 of 20) is 3.66e-05. **The tree is not the difference** — the branch's

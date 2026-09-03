@@ -270,6 +270,7 @@ pub fn iommu_interrupt_remapping(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let options = BootOptions { profile: Profile::Headless, qmp: true, ..Default::default() };
+    unit_is_first(&qemu::profile_argv(&options), "headless")?;
     let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
     let log = Serial::boot(&qemu);
     log.must_be_clean()?;
@@ -680,8 +681,7 @@ pub fn iommu_virtio_platform(
         }
         // Ahead of everything it decodes, or a function created before it keeps
         // the bypassing address space and `iommu_platform=on` changes nothing
-        // (`hw/virtio/virtio-bus.c:97`). Nightly's `iommu_discovery` asserts it
-        // for the five machines it boots; this is the same assertion here.
+        // (`hw/virtio/virtio-bus.c:97`).
         unit_is_first(&argv, name)?;
         for device in &created {
             let want = behind_unit && !device.starts_with(SOUND);
@@ -1046,7 +1046,7 @@ pub fn iommu_domain_isolation(
     // `BME` and latched nothing, or counted against no function, would pass a
     // check that only read those two.
     let handled = log.must_say(FAULT)?;
-    let nic_domain = domain_of(&log, &nic)?;
+    let nic_domain = context_of(socket, window, &nic)?.0;
     for field in [
         "bme=cleared".to_string(),
         "first=y".to_string(),
@@ -1169,9 +1169,18 @@ fn leaves(socket: &Path, root: u64, levels: u64, bdf: &str) -> Result<BTreeSet<u
         let mut next = BTreeSet::new();
         for table in &tables {
             for entry in over_qmp(socket, *table, ENTRIES, 'g')? {
-                if entry & 0x3 != 0 {
-                    next.insert(entry & ENTRY_ADDR);
+                // A 1 GiB leaf above the page-directory level, followed as a
+                // pointer, reads 512 words out of somebody's data page.
+                if entry & 0x3 == 0 {
+                    continue;
                 }
+                if entry & LARGE_PAGE != 0 {
+                    return Err(format!(
+                        "{bdf}: a level-{level} entry {entry:#018x} carries the page-size bit, \
+                         and this kernel writes only 2 MiB leaves"
+                    ));
+                }
+                next.insert(entry & ENTRY_ADDR);
             }
         }
         tables = next;
@@ -1241,18 +1250,15 @@ const NVME_ACQ: u64 = 0x30;
 
 /// Where QEMU puts an `intel-iommu` on q35, which every profile here is: a
 /// constant on the host side, not a number the guest supplies.
+///
+/// `Q35_HOST_BRIDGE_IOMMU_ADDR`, `include/hw/i386/intel_iommu.h:35` at v11.1.0,
+/// mapped at `intel_iommu.c:5635`. The DMAR the guest reads is built from that
+/// same constant (`acpi-build.c:1687`), so this is one source agreeing with
+/// itself and not two: what it catches is a guest reporting something else.
 const UNIT_WINDOW: u64 = 0xfed9_0000;
 
 /// The `-device` name of the audio function that is ruled to stay outside the unit.
 const SOUND: &str = "virtio-sound";
-
-fn domain_of(log: &Serial, bdf: &str) -> Result<u64, String> {
-    log.text()
-        .lines()
-        .find_map(|l| l.split(&format!("iommu: {bdf} moves to domain")).nth(1))
-        .and_then(|rest| rest.trim().parse().ok())
-        .ok_or_else(|| format!("the kernel never said {bdf} moved to a domain of its own"))
-}
 
 fn unit_is_first(argv: &[String], name: &str) -> Result<(), String> {
     let devices: Vec<&str> =

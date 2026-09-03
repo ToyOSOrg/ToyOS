@@ -117,7 +117,7 @@ kernel/src/iod.rs 10 0
 kernel/src/iommu/mod.rs 67 0
 kernel/src/iommu/vtd/dmar.rs 33 0
 kernel/src/iommu/vtd/domain.rs 21 0
-kernel/src/iommu/vtd/fault.rs 65 0
+kernel/src/iommu/vtd/fault.rs 69 0
 kernel/src/iommu/vtd/interrupt.rs 53 0
 kernel/src/iommu/vtd/mod.rs 112 0
 kernel/src/iommu/vtd/queue.rs 31 0
@@ -234,7 +234,7 @@ tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 89 0
 tests/common/hostload.rs 48 1
-tests/common/iommu.rs 304 0
+tests/common/iommu.rs 310 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2

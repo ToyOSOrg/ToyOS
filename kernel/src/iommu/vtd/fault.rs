@@ -286,12 +286,16 @@ fn note(stream: StreamId) -> u32 {
         .map_or(0, |slot| slot.faults.fetch_add(1, Ordering::Relaxed) + 1)
 }
 
-/// Which address space the faulting function was in. Three answers and not two
-/// numbers: a function still on the identity domain and one this machine never
-/// enumerated both carry domain id 0, and they are not the same finding.
+/// Which address space the handler can say the faulting function was in. Three
+/// answers and not two numbers, and the middle one is deliberately weak: a
+/// function the kernel never attached carries domain id 0 whether it is on the
+/// identity domain or on one an actuator bound by hand, so the label says what
+/// is known — that nothing recorded a domain for it — rather than naming one.
 enum Blamed {
     Own(u32),
-    Identity,
+    /// Nothing called `attached` for this function.
+    Unrecorded,
+    /// This machine enumerated no function with that requester id.
     Unknown,
 }
 
@@ -299,7 +303,7 @@ impl core::fmt::Display for Blamed {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Own(id) => write!(f, "{id}"),
-            Self::Identity => write!(f, "identity"),
+            Self::Unrecorded => write!(f, "unrecorded"),
             Self::Unknown => write!(f, "unknown"),
         }
     }
@@ -309,7 +313,7 @@ fn blamed(stream: StreamId) -> Blamed {
     match find(u32::from(stream.requester())) {
         None => Blamed::Unknown,
         Some(slot) => match slot.domain.load(Ordering::Relaxed) {
-            0 => Blamed::Identity,
+            0 => Blamed::Unrecorded,
             id => Blamed::Own(id),
         },
     }
