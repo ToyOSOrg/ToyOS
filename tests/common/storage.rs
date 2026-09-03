@@ -428,13 +428,11 @@ pub fn home_budget_refusal_retried(
     Ok(())
 }
 
-/// The machine whose only disk is the internal one: `/boot` and `/log` mount
-/// off the same NVMe device the page cache serves.
+/// `/boot` and `/log` off the same NVMe device the page cache serves.
 ///
-/// The oracle is outside the guest and outside the kernel's FAT32: after the
-/// shutdown the boot image's own log partition is read on the host by `fatfs`,
-/// a different implementation, and the volume is judged against fatgen103 by
-/// `toyos-fat32-check`. The guest is halted and has no account left to give.
+/// The oracle is outside the guest and outside the kernel's FAT32: `logd`'s
+/// file is read off the image by `fatfs` and the volume judged against
+/// fatgen103 by `toyos-fat32-check`, with the guest already halted.
 pub fn internal_disk_boot(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -446,8 +444,7 @@ pub fn internal_disk_boot(
         ..Default::default()
     };
 
-    // The argv is the only place a device's *absence* is visible: no console
-    // line and no screendump can see a stick that is not there.
+    // The argv is the only place a device's *absence* is visible.
     let argv = qemu::profile_argv(&options());
     for banned in ["usb-storage", "nec-usb-xhci", "usb-kbd", "usb-mouse", "usb-tablet"] {
         if let Some(a) = argv.iter().find(|a| a.contains(banned)) {
@@ -463,8 +460,7 @@ pub fn internal_disk_boot(
         ));
     }
 
-    // Built here, not by `boot_with_options`: the log partition is read back
-    // off this exact file after the guest is gone.
+    // Built here, not by `boot_with_options`: the log partition is read back off this exact file.
     let dir = super::lane::dir();
     let image = dir.join("internal-disk-boot.img");
     let bytes = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
@@ -484,9 +480,8 @@ pub fn internal_disk_boot(
         }
     }
 
-    // Which device each volume came from, in the kernel's own words. `1` is
-    // NVMe's fixed `DeviceId`, and the USB range starts at 16 — so this line
-    // is also the assertion that no stick served either mount.
+    // `1` is NVMe's fixed `DeviceId` and the USB range starts at 16, so naming
+    // it is also the assertion that no stick served either mount.
     for said in [
         "gpt: device 1 carries the boot partition",
         "gpt: device 1 carries the log partition",
@@ -507,8 +502,7 @@ pub fn internal_disk_boot(
         ));
     }
 
-    // Down through the log sink rather than killed: the file logd wrote only
-    // reaches the device on the way out.
+    // Down, not killed: the file logd wrote reaches the device on the way out.
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
     let tail = qemu.drain_serial(Duration::from_secs(20));
@@ -552,10 +546,100 @@ pub fn internal_disk_boot(
     Ok(())
 }
 
-/// Two devices claiming one `DeviceId`, and what the block layer does with the
-/// second: the impostor the actuator offers fills every read with its own mark,
-/// so a registry that took it is caught serving that mark for block 0 of a
-/// device it is not.
+/// A write through a page cache whose view does not begin at block 0 lands at
+/// the device's block, not the view's.
+///
+/// The oracle is the NVMe image after the guest has gone: the mark at
+/// `(FIRST + AT) * 4096` and absent at `AT * 4096` is the partition offset in
+/// `BlockKey` and nothing else. A foreign disk, so the kernel refuses to format
+/// it and the probe's one block is the only byte this boot writes to it.
+pub fn page_cache_partition_offset(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `kernel/src/page_cache.rs::offset_probe`.
+    const FIRST: u64 = 4096;
+    const AT: u64 = 7;
+    const MARK: &[u8] = b"TOYOS-PARTITION-OFFSET";
+    const BYTES: u64 = 128 * 1024 * 1024;
+
+    let dir = super::lane::dir();
+    let image = dir.join("partition-offset.img");
+    foreign_disk_image(&image, BYTES);
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            kernel_params: &["pc-partition-offset"],
+            nvme_image: Some(image.clone()),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    for bad in ["PANIC:", "panicked at"] {
+        if boot.contains(bad) {
+            return Err(format!("{bad:?} with the offset probe armed\n{boot}"));
+        }
+    }
+    let verdict = boot
+        .lines()
+        .find(|l| l.contains("pc-partition-offset: "))
+        .ok_or_else(|| format!("the kernel never ran the offset probe:\n{boot}"))?
+        .trim()
+        .to_string();
+    for want in [
+        format!("landed_at_{}=true", FIRST + AT),
+        format!("at_block_{AT}=false"),
+    ] {
+        if !verdict.contains(&want) {
+            return Err(format!(
+                "a cache over a view at +{FIRST} did not write where the view says — {want:?} is \
+                 missing from: {verdict}"
+            ));
+        }
+    }
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+    drop(qemu);
+
+    let after = std::fs::read(&image).map_err(|e| format!("read the image back: {e}"))?;
+    let at = |block: u64| {
+        let start = (block * 4096) as usize;
+        after[start..start + MARK.len()].to_vec()
+    };
+    if at(FIRST + AT) != MARK {
+        return Err(format!(
+            "device block {} holds {:?} on the image, not the mark — the offset never reached \
+             the write",
+            FIRST + AT,
+            String::from_utf8_lossy(&at(FIRST + AT))
+        ));
+    }
+    if at(AT) == MARK {
+        return Err(format!(
+            "the mark is at device block {AT} on the image — the view's own block number went to \
+             the device unchanged"
+        ));
+    }
+
+    let _ = std::fs::remove_file(&image);
+    eprintln!("  [offset] {verdict}, and the image agrees off the device");
+    Ok(())
+}
+
+/// The impostor the actuator offers fills every read with its own mark, so a
+/// registry that took it is caught serving that mark for a device it is not.
 pub fn block_duplicate_id(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

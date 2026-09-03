@@ -14,8 +14,6 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::vfs::FileSystem;
 
-/// `BlockIO` over one page cache, which is over one partition of one device.
-///
 /// Nothing here names a device: the cache it holds does, so a filesystem is
 /// mounted on the partition its cache was opened over and on no other.
 #[derive(Clone)]
@@ -131,8 +129,7 @@ struct OpenFileInfo {
 /// VFS adapter for read-write bcachefs over one cached partition.
 pub struct BcacheFsAdapter {
     fs: Mounted<PageCacheBlockIO, ReadWrite>,
-    /// The same cache the mount reads through: file data bypasses the cache's
-    /// slots but not its device or its flush debt.
+    /// The mount's own cache: file data bypasses its slots, not its flush debt.
     cache: Arc<page_cache::Cached>,
     open_files: HashMap<FileId, OpenFileInfo>,
     name_to_id: BTreeMap<String, FileId>,

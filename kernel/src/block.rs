@@ -1,6 +1,5 @@
-//! One device object per physical device, registered under the [`DeviceId`] it
-//! answers to; every consumer takes a [`Handle`] and a [`Partition`] over it,
-//! so none owns a device and none can name a block outside its span.
+//! One device object per physical device; a consumer takes a [`Handle`] and a
+//! [`Partition`] over it and can name no block outside its span.
 //!
 //! Lock order: a consumer's own lock, then [`Handle::lock`]; never the reverse,
 //! and never two devices at once. [`DEVICES`] is a leaf taken alone.
@@ -16,7 +15,7 @@ use crate::scheduler::Operation;
 use crate::sync::{Lock, LockGuard};
 use crate::time::{Budget, Cadence, Deadline, Duration};
 
-/// Unique identifier for a block device; the page cache keys every block on it.
+/// Unique identifier for a block device; [`register`] issues each at most once.
 pub type DeviceId = u32;
 
 /// How long one operation on a block device may spend inside the device before it is refused.
@@ -125,15 +124,13 @@ pub trait BlockDevice: Send {
     fn flush(&mut self) -> BlockResult;
 }
 
-/// One physical device, and the lock serialising its queue.
 struct Device {
     id: DeviceId,
     blocks: u64,
     dev: Lock<Box<dyn BlockDevice>>,
 }
 
-/// A shared handle to one physical device; there is never a second object for
-/// one [`DeviceId`].
+/// A shared handle; there is never a second object for one [`DeviceId`].
 #[derive(Clone)]
 pub struct Handle(Arc<Device>);
 
@@ -161,12 +158,10 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
     Some(handle)
 }
 
-/// The registered device with this id.
 pub fn open(id: DeviceId) -> Option<Handle> {
     DEVICES.lock().get(&id).cloned()
 }
 
-/// Every device registered so far, by number.
 #[cfg(feature = "boot-actuators")]
 pub fn registered() -> Vec<Handle> {
     DEVICES.lock().values().cloned().collect()
@@ -188,10 +183,12 @@ impl Handle {
     }
 }
 
-/// A block of one partition of one device: the whole of a cached page's
-/// identity, minted only by [`Partition::key`], so a key naming one view's
-/// block cannot be built by another. The field order is the sort order, so a
-/// run of one view's keys is a run on the device.
+/// A block of one partition of one device, minted only by [`Partition::key`].
+/// `partition` is judged (`pc-partition-offset`): it puts a write where the
+/// slot was filled from. `device` is not, and no test can see it — one cache
+/// serves one partition, so two devices in one map is already unrepresentable.
+/// The field order is the sort order, so a run of one view's keys is a run on
+/// the device.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct BlockKey {
     device: DeviceId,
@@ -216,7 +213,6 @@ pub struct Partition {
 }
 
 impl Partition {
-    /// The whole device as one view.
     pub fn whole(handle: Handle) -> Self {
         let blocks = handle.block_count();
         Self { handle, first_block: 0, blocks }
@@ -289,9 +285,9 @@ impl Partition {
     }
 }
 
-/// The duplicate-id control (`block-duplicate-id`): the impostor answers to a
-/// registered number and fills every read with its own mark, so a registry that
-/// took it is caught serving that mark for a device it is not.
+/// The duplicate-id control (`block-duplicate-id`): the impostor fills every
+/// read with its own mark, so a registry that took it is caught serving that
+/// mark for a device it is not.
 #[cfg(feature = "boot-actuators")]
 pub fn duplicate_id_selftest() {
     use alloc::vec;
@@ -342,9 +338,11 @@ pub fn duplicate_id_selftest() {
     );
 }
 
-/// Blocks the filesystem metadata cache may hold, per cache instance: it is
-/// sized from memory and never from the device, so N instances claim N times
-/// this and nothing evicts across them.
+/// Blocks the metadata cache may hold, per instance: sized from memory and
+/// never from the device, so N instances claim N times this and none evicts
+/// across them. N is the role partitions a boot caches — one today, from
+/// `page_cache::init`'s one call site — and a foreign volume adds none, since a
+/// FAT mount reads through `fat32_adapter::FatDevice` and never a `Cached`.
 /// Must stay under 14,336 or the hashbrown index crosses the 16,384-bucket bound `nvme_large_device` asserts.
 pub fn metadata_cache_blocks() -> usize {
     if crate::actuator::test_small_caches() {

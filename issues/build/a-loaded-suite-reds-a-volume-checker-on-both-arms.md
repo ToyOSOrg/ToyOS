@@ -176,5 +176,6 @@ story.** One run an arm at 335.8 s and 382.2 s:
 
 The base run carries **zero** `usb-storage: … no answer in the data phase in
 2000 ms` and reds four of the family anyway, so the stall is one way into the
-class and not the class itself. Seven names have now shown it and `main` has
-produced six of them alone.
+class and not the class itself. `ftruncate_flush_race` and `fs_rename_durable`
+are new names for this entry; `main` alone produced four of the family in one
+run, which no earlier pair here had.

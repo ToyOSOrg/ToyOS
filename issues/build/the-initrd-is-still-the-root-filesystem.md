@@ -35,6 +35,15 @@ first, and its defining claim still holds: it carries no virtio device anywhere
 (`tests/common/qemu.rs`), so a virtio-blk root is not a shape that profile can
 take.
 
+**PR 2 also closes an incoherence PR 1 left unreachable.** On an internal-disk
+boot the page cache is opened over the *whole* device while `/boot` and `/log`
+read the same platter through their own eight-block `FatDevice` caches, so the
+two are mutually incoherent by construction. Nothing reaches it today: the only
+cache reader of that device is `open_home`, which reads block 0 and finds a
+GPT'd image foreign, so `/home` is a tmpfs and no cached page ever falls inside
+a FAT partition. Moving the cache onto ROOT is what makes it unrepresentable
+rather than merely unreached.
+
 Two facts worth keeping when the image is next re-costed:
 
 - **No binary this project produces has a `.debug_*` section** — `toyos-ld`

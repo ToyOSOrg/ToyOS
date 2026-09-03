@@ -380,8 +380,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // No controller is a configuration, not a failure — same as a missing xHCI, NIC, or sound device.
     // `None` from open_home means a disk exists but isn't ours; both land on tmpfs.
-    // The cache is one consumer of the namespace among several: the boot probe reads through the
-    // same handle, and so does a FAT mount when this device is the boot medium.
     let (home_cache, home_volume) = match nvme::init(&pci_devices) {
         Some(nvme_dev) => {
             let sector_size = nvme_dev.sector_size();
@@ -399,6 +397,11 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
                         nvme_gate::silent_command(&handle);
                     }
                     let cache = page_cache::init(block::Partition::whole(handle));
+                    // Before `/home` exists: the device blocks it reads back are ones nothing else has written.
+                    #[cfg(feature = "boot-actuators")]
+                    if actuator::page_cache_partition_offset() {
+                        page_cache::partition_offset_selftest(cache.partition().handle());
+                    }
                     let fs = bcachefs_adapter::open_home(&cache);
                     (Some(cache), fs)
                 }

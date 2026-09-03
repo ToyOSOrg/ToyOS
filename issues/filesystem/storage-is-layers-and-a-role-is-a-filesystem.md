@@ -16,11 +16,13 @@ and this file takes their answers.
 
 A block device is a shared handle: one object per physical device, the driver
 serialising its own queue, every consumer holding a handle and a partition view
-(offset, length) over it. The page cache keys every block on (device, partition,
-block) and holds one instance per partition it serves. Two devices claiming one
-id are refused at registration. GPT is the one partition scheme. Root filesystem
-PR 1 built this, and each cache instance is capped from memory rather than from
-its device, so N of them claim N times that cap.
+(offset, length) over it. The page cache holds one instance per partition it
+serves and keys every block on the partition offset it was opened over, so a
+page is written back where it was filled from. Two devices claiming one id are
+refused at registration, which is what keeps two of them out of one cache. GPT
+is the one partition scheme. Root filesystem PR 1 built this, and each cache
+instance is capped from memory rather than from its device, so N of them claim
+N times that cap.
 
 ## Volume
 

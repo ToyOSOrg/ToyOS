@@ -81,9 +81,7 @@ pub fn run() {
 }
 
 fn check(index: usize, disk: &Handle) {
-    // One device object shared with every other consumer, so each transfer
-    // takes the queue and gives it back rather than holding it for the sweep.
-    let read = |block: u64, count: u32, buf: &mut [u8]| disk.lock().read_blocks(block, count, buf);
+    let read =|block: u64, count: u32, buf: &mut [u8]| disk.lock().read_blocks(block, count, buf);
     let write = |block: u64, count: u32, buf: &[u8]| disk.lock().write_blocks(block, count, buf);
 
     let blocks = disk.block_count();

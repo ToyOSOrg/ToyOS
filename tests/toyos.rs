@@ -560,13 +560,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("launcher_refusals", Sched::Parallel, Tier::Fast),
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
     ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
-    // The one machine here with no USB disk, so `/boot` and `/log` come off the
-    // device the page cache serves; four kernel lines and a file read off the
-    // image once the guest is gone, no clock in any of them.
+    // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
     ("internal_disk_boot", Sched::Parallel, Tier::Fast),
-    // One boot, one kernel line: a second device claiming a registered number
-    // is refused and the number still serves the device that holds it.
+    // One boot each, kernel lines and image bytes for verdicts, no clock in either.
     ("block_duplicate_id", Sched::Parallel, Tier::Fast),
+    ("page_cache_partition_offset", Sched::Parallel, Tier::Fast),
     // F9's negative control: a budget-refused /home fsync retried to durable,
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
@@ -8528,6 +8526,9 @@ fn run_machine_test(
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
         "internal_disk_boot" => storage::internal_disk_boot(test_config, c_bins, rust_bins),
         "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),
+        "page_cache_partition_offset" => {
+            storage::page_cache_partition_offset(test_config, c_bins, rust_bins)
+        }
         "volume_from_another_disk" => {
             storage::volume_from_another_disk(test_config, c_bins, rust_bins)
         }

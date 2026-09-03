@@ -565,7 +565,7 @@ struct Disk {
 
 /// How many disks this machine has bound since boot, and the number the next bind hands out.
 ///
-/// A counter and not a position, and never reused: `usb_storage::open` indexes by it and a mount holds it for the disk's whole life.
+/// A counter and not a position, and never reused: `usb_storage::handle` indexes by it and a mount holds it for the disk's whole life.
 static DISKS_BOUND: AtomicUsize = AtomicUsize::new(0);
 
 fn setup_packet(bm_request_type: u8, b_request: u8, w_value: u16, w_index: u16, w_length: u16) -> u64 {

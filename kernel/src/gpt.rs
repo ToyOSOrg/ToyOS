@@ -92,9 +92,6 @@ pub fn log_volume() -> Option<Volume> {
 }
 
 /// Ask one registered block device whether it carries the boot partition.
-///
-/// Through a handle, not an owned device: the probe is one consumer among
-/// several and the device outlives it.
 pub fn probe(handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
     let Some(firmware) = boot_partition() else {

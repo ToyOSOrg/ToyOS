@@ -1,6 +1,5 @@
-//! One page cache per (device, partition) served, not one per machine. Every
-//! slot is bound to a [`BlockKey`], so the write-back address of a resident
-//! page comes from the identity it was filled under and nothing ambient.
+//! One page cache per (device, partition) served. Every slot is bound to a
+//! [`BlockKey`], so a resident page is written back where it was filled from.
 //!
 //! Lock order: a cache, then its device (`block::Handle::lock`); never
 //! reversed, and no holder of one cache takes another's.
@@ -15,7 +14,6 @@ use crate::block::{self, BlockDevice, BlockError, BlockKey, BlockResult, Partiti
 use crate::mm::PAGE_BYTES;
 use crate::sync::{Lock, LockGuard};
 
-/// One page cache and the partition view it serves.
 pub struct Cached {
     cache: Lock<PageCache>,
     part: Partition,
@@ -31,7 +29,6 @@ pub fn instrumented(dev: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
     dev
 }
 
-/// Opens a cache over `part`.
 pub fn init(part: Partition) -> Arc<Cached> {
     let cache = PageCache::new();
     log!(
@@ -83,7 +80,6 @@ pub struct PageCacheGuard<'a> {
 }
 
 impl PageCacheGuard<'_> {
-    /// Blocks in the partition this cache serves.
     pub fn block_count(&self) -> u64 {
         self.part.block_count()
     }
@@ -467,4 +463,61 @@ pub fn unbind_selftest(cached: &Cached) {
             if reread[..] == raw[..] { "match " } else { "differ from " }
         );
     }
+}
+
+/// The partition-offset control (`pc-partition-offset`): a cache over a view
+/// that does not begin at block 0 writes through the view's block numbers, and
+/// the bytes have to land at the device's. Read back past the cache and past
+/// the view, so only the key the slot was filled under could have offset it.
+#[cfg(feature = "boot-actuators")]
+pub fn partition_offset_selftest(handle: &block::Handle) {
+    let Some(part) = block::Partition::of(handle.clone(), offset_probe::FIRST, offset_probe::BLOCKS)
+    else {
+        log!("pc-partition-offset: FAIL (the view does not fit on device {})", handle.device_id());
+        return;
+    };
+    let cached = init(part);
+    {
+        let mut guard = cached.lock();
+        let Ok(page) = guard.write_new(offset_probe::AT) else {
+            log!("pc-partition-offset: FAIL (the view refused a write at its own block)");
+            return;
+        };
+        page[..offset_probe::MARK.len()].copy_from_slice(offset_probe::MARK);
+        if guard.sync().is_err() {
+            log!("pc-partition-offset: FAIL (the write-back was refused)");
+            return;
+        }
+    }
+
+    let mut at_offset = vec![0u8; PAGE_BYTES];
+    let mut at_zero = vec![0u8; PAGE_BYTES];
+    let device_block = offset_probe::FIRST + offset_probe::AT;
+    if handle.lock().read_blocks(device_block, 1, &mut at_offset).is_err() {
+        log!("pc-partition-offset: FAIL (device block {device_block} would not read back)");
+        return;
+    }
+    if handle.lock().read_blocks(offset_probe::AT, 1, &mut at_zero).is_err() {
+        log!("pc-partition-offset: FAIL (device block {} would not read back)", offset_probe::AT);
+        return;
+    }
+    let marked = |b: &[u8]| b[..offset_probe::MARK.len()] == *offset_probe::MARK;
+    log!(
+        "pc-partition-offset: view +{} block {} landed_at_{device_block}={} at_block_{}={}",
+        offset_probe::FIRST,
+        offset_probe::AT,
+        marked(&at_offset),
+        offset_probe::AT,
+        marked(&at_zero)
+    );
+}
+
+/// Mirrored by `tests/common/storage.rs`, which reads the same two device
+/// blocks off the image after the guest has gone.
+#[cfg(feature = "boot-actuators")]
+mod offset_probe {
+    pub const FIRST: u64 = 4096;
+    pub const BLOCKS: u64 = 64;
+    pub const AT: u64 = 7;
+    pub const MARK: &[u8] = b"TOYOS-PARTITION-OFFSET";
 }

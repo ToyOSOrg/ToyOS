@@ -13,7 +13,7 @@ use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId, Handle}
 use crate::log;
 use super::xhci;
 
-/// Where USB disks start in the [`DeviceId`] space; must stay clear of NVMe's range since the page cache keys on this.
+/// Where USB disks start in the [`DeviceId`] space; must stay clear of NVMe's range, or `block::register` refuses the second driver's disk.
 const USB_DEVICE_ID_BASE: DeviceId = 16;
 
 /// Disk numbers issued this boot; `0..count()` names every bound disk, and a number never moves or is reissued.
@@ -21,11 +21,9 @@ pub fn count() -> usize {
     xhci::storage_count()
 }
 
-/// The registered handle for the `index`-th disk, registering it on first ask.
-///
-/// One device object per disk for the machine's life: a caller takes a
-/// reference to the disk rather than a device of its own, so nothing here mints
-/// a second object answering to a number the block layer has already issued.
+/// The registered handle for the `index`-th disk, registering it on first ask;
+/// one device object per disk for the machine's life, so nothing here mints a
+/// second answering to a number the block layer has already issued.
 pub fn handle(index: usize) -> Option<(Handle, u32)> {
     let geometry = xhci::storage_geometry(index)?;
     let id = USB_DEVICE_ID_BASE + index as DeviceId;
@@ -40,9 +38,8 @@ pub fn handle(index: usize) -> Option<(Handle, u32)> {
     Some((handle, geometry.logical_block_bytes))
 }
 
-/// Whether the controller will still speak to the disk under this index,
-/// distinct from a failed transfer — unlike geometry, which stays valid after
-/// recovery has already given up on it.
+/// Whether the controller will still speak to the disk, distinct from a failed
+/// transfer — unlike geometry, which outlives recovery giving up on it.
 #[cfg(feature = "boot-actuators")]
 pub fn healthy(index: usize) -> bool {
     xhci::storage_online(index) == Some(true)

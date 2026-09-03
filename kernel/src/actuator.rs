@@ -329,6 +329,9 @@ actuators! {
 
     /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.
     block_duplicate_id = "block-duplicate-id";
+
+    /// Write through a page cache over a view that does not start at block 0, and say where on the device the bytes landed.
+    page_cache_partition_offset = "pc-partition-offset";
 }
 
 #[cfg(feature = "boot-actuators")]
