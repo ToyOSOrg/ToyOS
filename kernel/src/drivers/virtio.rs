@@ -691,7 +691,7 @@ pub fn used_selftest() {
     const CASES: usize = 11;
 
     // Not leaked: the pool's pages go back when this returns, and `Dma<'_>`'s borrow keeps the queue from outliving them.
-    let pool = DmaPool::alloc(0x1000);
+    let pool = DmaPool::alloc_in(0x1000, crate::iommu::DeviceSpace::Untranslated);
     let dma = pool.view();
     let mut q = Virtqueue::new(dma.subview(0, 0x1000), SIZE);
     q.write_chain(3, &[(dma.device_addr(), CHAIN, BufDir::Writable)]);
@@ -764,7 +764,7 @@ pub fn cap_selftest() {
     // guess but inside the BAR's real size has a case to be accepted by.
     const WINDOW: u64 = 0x8000;
     // One buffer for both the config space and the BAR window, so a permitted subregion stays inside it.
-    let pool = DmaPool::alloc(WINDOW as usize);
+    let pool = DmaPool::alloc_in(WINDOW as usize, crate::iommu::DeviceSpace::Untranslated);
     let phys = pool.view().host_phys();
     // SAFETY: the pool owns this page until it drops at end of function, and no Mmio built over it escapes.
     let cfg = unsafe { Mmio::over_phys(DirectMap::from_phys(phys), WINDOW) };
