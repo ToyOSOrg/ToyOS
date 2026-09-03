@@ -2986,10 +2986,9 @@ fn run_screen_test(
             // out, the kernel's `GOP:` line is what the bootloader handed it,
             // and `Profile::panel` is what the machine advertises: a loader
             // that picks a mode lands on the largest one both offer. Stride and
-            // pixel format ride the same line because neither shows in a
-            // geometry — a halved stride shears the picture, a swapped channel
-            // order recolours it, and both leave `WxH` agreeing with the
-            // scanout. **Not reached**: `framebuffer` and `framebuffer_size`.
+            // format ride the same line because neither shows in a geometry — a
+            // halved stride shears the picture and a swapped channel order
+            // recolours it. **Not reached**: `framebuffer`, `framebuffer_size`.
             let mode_of = |qemu: &mut QemuInstance,
                            label: &str|
              -> Result<(u32, u32, u32, u32), String> {
