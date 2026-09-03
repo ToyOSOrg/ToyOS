@@ -15,8 +15,8 @@ device operation. Today seventeen do.
 completely, interrupt remapping included, and no driver leaves the kernel before
 it.** Moving a driver out without translation *costs* security — a descriptor
 holding a physical address is an arbitrary read/write primitive over all of
-memory. `issues/kernel/the-iommu-stops-at-translation.md` is that prerequisite,
-and it is at translation only.
+memory. `issues/kernel/the-iommu-refuses-nothing-yet.md` is that prerequisite:
+every kernel driver holds a domain of its own, and the refusal is not built.
 
 Three pieces are explicitly *not* blocked on that and can run in parallel:
 
