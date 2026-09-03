@@ -326,6 +326,9 @@ actuators! {
 
     /// Reopen init by pid once it is spawned, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
+
+    /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.
+    block_duplicate_id = "block-duplicate-id";
 }
 
 #[cfg(feature = "boot-actuators")]

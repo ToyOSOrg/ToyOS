@@ -150,3 +150,21 @@ complained, and a passing run reports the same line. So on this name the leak
 follows a *deliberately failed* write rather than a raced one — a staged ENOMEM
 the test arranges — which makes it the cheapest reproducer here and the one a
 fix should be measured against.
+
+## A second both-arms pair, with `main` producing both names
+
+**2026-09-03, `rootfs-page-cache` against `dc6342fd`**, one full `--nightly`
+suite at a time on this dev host, five runs — two on the branch, three on the
+base — every one completing in 305-349 s.
+
+| arm | `redirty_mid_flush` | `toybox_cp_volume` | other `ALONE … GREEN` |
+|---|---|---|---|
+| branch | 2 of 2 | 1 of 2, `ALONE … red again` | — |
+| `dc6342fd` | 2 of 3 | 1 of 3, `ALONE … GREEN` | `kill_while_blocked`, `screen_i8042_health`, `log_flush_retry` |
+
+The base arm reproduces both names at the branch's rate, so neither is the
+branch's — which is the first time `main` alone has produced `redirty_mid_flush`
+here. Every failing run in both arms carries exactly one
+`usb-storage: … no answer in the data phase in 2000 ms` and the fully green runs
+carry none, so on this host the class tracks a spent `block::OPERATION` on the
+boot stick rather than anything in the tree.

@@ -7,7 +7,9 @@
 //! crosses `BlockAccess`/`BlockDevice` frames that cannot carry it.
 //! The guard must stay named `_op`; `let _` would drop it immediately, ending the operation before the call it bounds.
 
-use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId};
+use alloc::boxed::Box;
+
+use crate::block::{self, BlockDevice, BlockError, BlockResult, DeviceId, Handle};
 use crate::log;
 use super::xhci;
 
@@ -19,43 +21,46 @@ pub fn count() -> usize {
     xhci::storage_count()
 }
 
-/// A handle to the `index`-th disk, or `None` if there is no such disk.
-pub fn open(index: usize) -> Option<UsbBlockDevice> {
+/// The registered handle for the `index`-th disk, registering it on first ask.
+///
+/// One device object per disk for the machine's life: a caller takes a
+/// reference to the disk rather than a device of its own, so nothing here mints
+/// a second object answering to a number the block layer has already issued.
+pub fn handle(index: usize) -> Option<(Handle, u32)> {
     let geometry = xhci::storage_geometry(index)?;
-    Some(UsbBlockDevice {
-        index,
-        id: USB_DEVICE_ID_BASE + index as DeviceId,
-        blocks: geometry.blocks,
-        lba_bytes: geometry.logical_block_bytes,
-    })
+    let id = USB_DEVICE_ID_BASE + index as DeviceId;
+    let handle = match block::open(id) {
+        Some(handle) => handle,
+        None => block::register(Box::new(UsbBlockDevice {
+            index,
+            id,
+            blocks: geometry.blocks,
+        }))?,
+    };
+    Some((handle, geometry.logical_block_bytes))
 }
 
-pub struct UsbBlockDevice {
+/// Whether the controller will still speak to the disk under this index,
+/// distinct from a failed transfer — unlike geometry, which stays valid after
+/// recovery has already given up on it.
+#[cfg(feature = "boot-actuators")]
+pub fn healthy(index: usize) -> bool {
+    xhci::storage_online(index) == Some(true)
+}
+
+struct UsbBlockDevice {
     index: usize,
     id: DeviceId,
     blocks: u64,
-    /// What the device addresses in; cached here because a second query can return `None`, which this `u32` can't hold.
-    lba_bytes: u32,
 }
 
 impl UsbBlockDevice {
-    /// The device's own logical block size, as used by a GPT — not the 4 KiB [`BlockDevice`] transfer size.
-    pub fn logical_block_bytes(&self) -> u32 {
-        self.lba_bytes
-    }
-
     /// Every result must pass through here so budget refusals reach the census the slow-vs-failed policy reads.
     fn noted(&self, done: BlockResult) -> BlockResult {
         if done == Err(BlockError::BudgetExpired) {
             block::census::budget_expired(self.id);
         }
         done
-    }
-
-    /// Whether the controller will still speak to the disk under this index, distinct from a failed transfer — unlike geometry, which stays valid after recovery has already given up on it.
-    #[cfg(feature = "boot-actuators")]
-    pub fn healthy(&self) -> bool {
-        xhci::storage_online(self.index) == Some(true)
     }
 }
 

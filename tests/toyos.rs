@@ -560,6 +560,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("launcher_refusals", Sched::Parallel, Tier::Fast),
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
     ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
+    // The one machine here with no USB disk, so `/boot` and `/log` come off the
+    // device the page cache serves; four kernel lines and a file read off the
+    // image once the guest is gone, no clock in any of them.
+    ("internal_disk_boot", Sched::Parallel, Tier::Fast),
+    // One boot, one kernel line: a second device claiming a registered number
+    // is refused and the number still serves the device that holds it.
+    ("block_duplicate_id", Sched::Parallel, Tier::Fast),
     // F9's negative control: a budget-refused /home fsync retried to durable,
     // its bytes then read off the NVMe image by the host's own bcachefs
     // reader. Body in `tests/common/storage.rs`.
@@ -8519,6 +8526,8 @@ fn run_machine_test(
         // Body in `tests/common/storage.rs`, so the hunk in this shared file
         // stays one line.
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
+        "internal_disk_boot" => storage::internal_disk_boot(test_config, c_bins, rust_bins),
+        "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),
         "volume_from_another_disk" => {
             storage::volume_from_another_disk(test_config, c_bins, rust_bins)
         }
@@ -13428,7 +13437,7 @@ fn parse_file_cache_series(log: &str) -> Vec<(u64, u64, u64)> {
 }
 
 /// How many blocks the page cache's index has room for, out of
-/// `page cache: N device blocks, index sized for C cached blocks`.
+/// `page cache: … index sized for C cached blocks, cap S slots, B index bytes`.
 fn parse_page_cache_index(log: &str) -> Option<u64> {
     log.lines()
         .find_map(|l| l.split("index sized for ").nth(1))?

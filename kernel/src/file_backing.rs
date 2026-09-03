@@ -92,15 +92,16 @@ fn offset_to_block(extents: &[Extent], file_offset: u64) -> Option<u64> {
     None
 }
 
-/// File backed by NVMe blocks via the kernel PageCache.
+/// File backed by blocks of the partition one page cache serves.
 pub struct NvmeBacking {
+    cache: Arc<page_cache::Cached>,
     blocks: Arc<FileBlocks>,
     size: u64,
 }
 
 impl NvmeBacking {
-    pub fn new(blocks: Arc<FileBlocks>, size: u64) -> Self {
-        Self { blocks, size }
+    pub fn new(cache: Arc<page_cache::Cached>, blocks: Arc<FileBlocks>, size: u64) -> Self {
+        Self { cache, blocks, size }
     }
 }
 
@@ -119,7 +120,7 @@ impl FileBacking for NvmeBacking {
             // Bypasses block page cache; file cache is the sole cache for file data.
             let mut raw = [0u8; BLOCK_SIZE];
             // `buf` is already zeroed, so a failed read here returns a hole, not stale data.
-            if page_cache::raw_block_read(block, &mut raw).is_err() {
+            if self.cache.raw_read(block, &mut raw).is_err() {
                 log!("file: read of block {block} failed; serving zeros");
                 return Err(BlockError::Device);
             }

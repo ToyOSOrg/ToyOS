@@ -14,8 +14,18 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::vfs::FileSystem;
 
-/// BlockIO implementation that wraps the kernel's global PageCache.
-pub struct PageCacheBlockIO;
+/// `BlockIO` over one page cache, which is over one partition of one device.
+///
+/// Nothing here names a device: the cache it holds does, so a filesystem is
+/// mounted on the partition its cache was opened over and on no other.
+#[derive(Clone)]
+pub struct PageCacheBlockIO(Arc<page_cache::Cached>);
+
+impl PageCacheBlockIO {
+    pub fn new(cache: Arc<page_cache::Cached>) -> Self {
+        Self(cache)
+    }
+}
 
 /// The one conversion between the kernel's block verdict and the crate's;
 /// keeping the retry discriminant is the point — a `BudgetExpired` collapsed
@@ -37,30 +47,25 @@ impl From<crate::block::BlockError> for DeviceError {
 /// Errors propagate unchanged; nothing here invents a value for a refused transfer.
 impl BlockIO for PageCacheBlockIO {
     fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
-        let mut guard = page_cache::lock();
-        let (cache, dev) = guard.cache_and_dev();
-        let page = cache.read(dev, block.raw()).map_err(DeviceError::from)?;
+        let mut guard = self.0.lock();
+        let page = guard.read(block.raw()).map_err(DeviceError::from)?;
         buf.as_bytes_mut().copy_from_slice(page);
         Ok(())
     }
 
     fn write_block(&self, block: BlockNum, buf: &BlockBuf) -> Result<(), DeviceError> {
-        let mut guard = page_cache::lock();
-        let (cache, dev) = guard.cache_and_dev();
-        let page = cache.write_new(dev, block.raw()).map_err(DeviceError::from)?;
+        let mut guard = self.0.lock();
+        let page = guard.write_new(block.raw()).map_err(DeviceError::from)?;
         page.copy_from_slice(buf.as_bytes());
         Ok(())
     }
 
     fn block_count(&self) -> u64 {
-        let guard = page_cache::lock();
-        guard.block_count()
+        self.0.partition().block_count()
     }
 
     fn sync(&self) -> Result<(), DeviceError> {
-        let mut guard = page_cache::lock();
-        let (cache, dev) = guard.cache_and_dev();
-        cache.sync(dev).map_err(DeviceError::from)
+        self.0.lock().sync().map_err(DeviceError::from)
     }
 }
 
@@ -123,9 +128,12 @@ struct OpenFileInfo {
     blocks: Arc<FileBlocks>,
 }
 
-/// VFS adapter for read-write bcachefs on NVMe.
+/// VFS adapter for read-write bcachefs over one cached partition.
 pub struct BcacheFsAdapter {
     fs: Mounted<PageCacheBlockIO, ReadWrite>,
+    /// The same cache the mount reads through: file data bypasses the cache's
+    /// slots but not its device or its flush debt.
+    cache: Arc<page_cache::Cached>,
     open_files: HashMap<FileId, OpenFileInfo>,
     name_to_id: BTreeMap<String, FileId>,
     /// The `FileBlocks` every backing for a name shares; keyed by name because
@@ -135,9 +143,10 @@ pub struct BcacheFsAdapter {
 }
 
 impl BcacheFsAdapter {
-    pub fn new(fs: Mounted<PageCacheBlockIO, ReadWrite>) -> Self {
+    pub fn new(fs: Mounted<PageCacheBlockIO, ReadWrite>, cache: Arc<page_cache::Cached>) -> Self {
         Self {
             fs,
+            cache,
             open_files: HashMap::default(),
             name_to_id: BTreeMap::new(),
             blocks: BTreeMap::new(),
@@ -240,6 +249,7 @@ impl FileSystem for BcacheFsAdapter {
             let held = file_cache::open(file_id);
             let info = self.open_files.get(&file_id).ok_or(SyscallError::NotFound)?;
             let backing = Arc::new(NvmeBacking::new(
+                Arc::clone(&self.cache),
                 Arc::clone(&info.blocks),
                 file_cache::size(file_id),
             ));
@@ -258,7 +268,7 @@ impl FileSystem for BcacheFsAdapter {
             blocks: Arc::clone(&blocks),
         });
 
-        Ok((file_id, Some(Arc::new(NvmeBacking::new(blocks, size)))))
+        Ok((file_id, Some(Arc::new(NvmeBacking::new(Arc::clone(&self.cache), blocks, size)))))
     }
 
     fn create(&mut self, name: &str, mtime: u64) -> Result<FileId, SyscallError> {
@@ -323,7 +333,7 @@ impl FileSystem for BcacheFsAdapter {
             .with(|extents| self.fs.resolve_or_alloc_block(extents, page_idx))
             .ok_or(SyscallError::NotFound)?;
         let block = mapped("block allocation", &name, block)?;
-        page_cache::raw_block_write(block, data).map_err(|e| {
+        self.cache.raw_write(block, data).map_err(|e| {
             log!("bcachefs: write of block {block} for '{name}' refused: {e:?}");
             as_device_refusal(DeviceError::from(e))
         })
@@ -374,7 +384,7 @@ impl FileSystem for BcacheFsAdapter {
     fn open_backing(&mut self, name: &str) -> Result<Arc<dyn FileBacking>, SyscallError> {
         let (extents, size) = present("open_backing", name, self.fs.file_extents(name))?;
         let blocks = self.blocks_for(name, extents);
-        Ok(Arc::new(NvmeBacking::new(blocks, size)))
+        Ok(Arc::new(NvmeBacking::new(Arc::clone(&self.cache), blocks, size)))
     }
 
     fn cached_file_id(&mut self, name: &str) -> Option<FileId> {
@@ -489,11 +499,11 @@ impl FileSystem for ReadOnlyBcacheFsAdapter {
     }
 }
 
-/// Format a new bcachefs filesystem on the NVMe device via PageCache.
+/// Format a new bcachefs filesystem on the partition `cache` serves.
 ///
-/// Destroys everything on the device; only [`probe`] may call it, and only on [`Storage::Designated`].
-fn format() -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
-    match Formatted::format(PageCacheBlockIO) {
+/// Destroys everything on it; only [`probe`] may call it, and only on [`Storage::Designated`].
+fn format(cache: &Arc<page_cache::Cached>) -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
+    match Formatted::format(PageCacheBlockIO::new(Arc::clone(cache))) {
         Ok(fs) => Some(fs.mount()),
         Err(err) => {
             // A half-written volume is not one to mount; `open_home` falls back to tmpfs.
@@ -503,10 +513,9 @@ fn format() -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
     }
 }
 
-/// Try to mount an existing bcachefs filesystem from NVMe.
-fn mount() -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
-    let io = PageCacheBlockIO;
-    Mounted::<PageCacheBlockIO, ReadWrite>::open(io).ok()
+/// Try to mount an existing bcachefs filesystem on the partition `cache` serves.
+fn mount(cache: &Arc<page_cache::Cached>) -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
+    Mounted::<PageCacheBlockIO, ReadWrite>::open(PageCacheBlockIO::new(Arc::clone(cache))).ok()
 }
 
 /// What the machine's block device is, as far as we are entitled to care.
@@ -525,12 +534,12 @@ pub enum Storage {
 ///
 /// A failed mount is not consent: an unformatted disk, another OS, and a corrupt volume all read as `None`.
 /// One read decides all three because bcachefs's own superblock also lives at block 0.
-pub fn probe() -> Storage {
-    if let Some(fs) = mount() {
+pub fn probe(cache: &Arc<page_cache::Cached>) -> Storage {
+    if let Some(fs) = mount(cache) {
         log!("storage: mounted the ToyOS volume at block 0");
         return Storage::Ours(fs);
     }
-    if designated() {
+    if designated(cache) {
         log!("storage: block 0 designates this device for ToyOS — formatting it");
         return Storage::Designated;
     }
@@ -544,12 +553,11 @@ pub fn probe() -> Storage {
 /// Whether block 0 carries a designation stamp for a device of *this* size.
 ///
 /// The size is checked so a copied image cannot designate a different disk.
-fn designated() -> bool {
-    let mut guard = page_cache::lock();
+fn designated(cache: &Arc<page_cache::Cached>) -> bool {
+    let mut guard = cache.lock();
     let blocks = guard.block_count();
-    let (cache, dev) = guard.cache_and_dev();
     // A read error is not consent to format.
-    let Ok(block0) = cache.read(dev, 0) else {
+    let Ok(block0) = guard.read(0) else {
         log!("storage: block 0 could not be read; this disk is not ours to format");
         return false;
     };
@@ -580,10 +588,10 @@ fn designated() -> bool {
 ///
 /// `None` means the device is not ours; the caller falls back to a volatile tmpfs
 /// rather than panicking or formatting without consent.
-pub fn open_home() -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
-    match probe() {
+pub fn open_home(cache: &Arc<page_cache::Cached>) -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
+    match probe(cache) {
         Storage::Ours(fs) => Some(fs),
-        Storage::Designated => format(),
+        Storage::Designated => format(cache),
         Storage::Foreign => None,
     }
 }

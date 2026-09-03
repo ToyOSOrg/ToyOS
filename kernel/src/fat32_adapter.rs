@@ -7,7 +7,6 @@
 //! the volume and never the wider partition; and `toyos-fat32` never writes a
 //! BPB, so a volume that fails to parse is left untouched.
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
@@ -19,7 +18,7 @@ use crate::hasher::HashMap;
 use toyos_abi::syscall::SyscallError;
 use toyos_fat32::{BlockAccess, Error, Extent, Fat32, FatTime, IoError};
 
-use crate::block::BlockDevice;
+use crate::block;
 use crate::mm::PAGE_BYTES;
 use crate::drivers::{usb_storage, xhci};
 use crate::file_backing::FileBacking;
@@ -29,7 +28,7 @@ use crate::gpt;
 use crate::sync::Lock;
 use crate::vfs::FileSystem;
 
-/// The only transfer unit [`BlockDevice`] has, which is `mm::PAGE_SIZE`.
+/// The only transfer unit [`block::BlockDevice`] has, which is `mm::PAGE_SIZE`.
 const BLOCK: u64 = crate::mm::PAGE_SIZE;
 
 /// Which of the two partitions a mount is.
@@ -76,13 +75,11 @@ const MAX_EXTENTS: usize = 65_536;
 
 const _: () = assert!(core::mem::size_of::<Extent>() == 16);
 
-/// One partition, as a byte range over a device that only does whole 4 KiB
-/// blocks; offsets are relative to the partition.
+/// One volume, as a byte range over a partition view that only does whole
+/// 4 KiB blocks; every offset here is the volume's own.
 struct FatDevice {
-    dev: Box<dyn BlockDevice>,
-    /// Where the partition starts, in bytes from the start of the device.
-    start: u64,
-    /// How many bytes it has.
+    part: block::Partition,
+    /// How many bytes of the partition this volume uses.
     len: u64,
     /// On the heap: the deepest caller is the idle loop, whose 16 KiB stack
     /// has no guard page.
@@ -109,14 +106,15 @@ fn as_io_error(e: crate::block::BlockError) -> IoError {
 }
 
 impl FatDevice {
-    /// The device byte offset `offset` names, or [`IoError::Device`] past the
-    /// partition.
+    /// `offset` itself once it is inside the volume, or [`IoError::Device`]
+    /// past it. The partition view refuses anything past the partition; this is
+    /// the tighter of the two bounds, the volume's own.
     fn locate(&self, offset: u64, len: usize) -> Result<u64, IoError> {
         let end = offset.checked_add(len as u64).ok_or(IoError::Device)?;
         if end > self.len {
             return Err(IoError::Device);
         }
-        Ok(self.start + offset)
+        Ok(offset)
     }
 
     fn slot_of(&self, block: u64) -> Option<usize> {
@@ -130,8 +128,8 @@ impl FatDevice {
             self.scratch.copy_from_slice(&self.resident[at..at + BLOCK as usize]);
             return Ok(());
         }
-        let Self { dev, scratch, .. } = self;
-        dev.read_blocks(block, 1, scratch).map_err(as_io_error)?;
+        let Self { part, scratch, .. } = self;
+        part.read_blocks(block, 1, scratch).map_err(as_io_error)?;
         self.retain(block);
         Ok(())
     }
@@ -168,7 +166,7 @@ impl FatDevice {
             if within == 0 && left >= BLOCK as usize {
                 let count = left / BLOCK as usize;
                 let end = done + count * BLOCK as usize;
-                self.dev
+                self.part
                     .read_blocks(block, count as u32, &mut buf[done..end])
                     .map_err(as_io_error)?;
                 done = end;
@@ -194,7 +192,7 @@ impl FatDevice {
                 let count = left / BLOCK as usize;
                 let end = done + count * BLOCK as usize;
                 self.forget(block, count as u64);
-                self.dev
+                self.part
                     .write_blocks(block, count as u32, &buf[done..end])
                     .map_err(as_io_error)?;
                 done = end;
@@ -204,8 +202,8 @@ impl FatDevice {
                 let n = (BLOCK as usize - within).min(left);
                 self.load(block)?;
                 self.scratch[within..within + n].copy_from_slice(&buf[done..done + n]);
-                let Self { dev, scratch, .. } = self;
-                dev.write_blocks(block, 1, scratch).map_err(as_io_error)?;
+                let Self { part, scratch, .. } = self;
+                part.write_blocks(block, 1, scratch).map_err(as_io_error)?;
                 self.retain(block);
                 done += n;
             }
@@ -214,8 +212,9 @@ impl FatDevice {
     }
 }
 
-/// Lock order: VFS → here → `XHCI`; never the other way, and never two of
-/// these at once.
+/// Lock order: VFS → here → the device handle → `XHCI`; never the other way,
+/// and never two of these at once. A page cache is the other holder of a device
+/// handle and never takes one of these, so the two orders do not meet.
 static VOLUMES: [Lock<Option<FatDevice>>; 2] = [Lock::new(None), Lock::new(None)];
 
 fn device(role: Role) -> &'static Lock<Option<FatDevice>> {
@@ -263,7 +262,7 @@ impl BlockAccess for FatVolume {
 
     fn flush(&mut self) -> Result<(), IoError> {
         let mut guard = device(self.role).lock();
-        guard.as_mut().ok_or(IoError::Device)?.dev.flush().map_err(as_io_error)
+        guard.as_mut().ok_or(IoError::Device)?.part.flush().map_err(as_io_error)
     }
 }
 
@@ -942,38 +941,29 @@ fn probe_announced(mut probed: usize) -> usize {
     while probed < count {
         let index = probed;
         probed += 1;
-        // One `open` call for both the handle and the block size; the disk
-        // carries its own geometry.
-        let Some(mut disk) = usb_storage::open(index) else {
+        // One call for both the handle and the block size; the disk carries its
+        // own geometry, and registering it is what makes it openable by number.
+        let Some((handle, lba_bytes)) = usb_storage::handle(index) else {
             log!(
                 "usb-storage: disk {index} was announced and was gone again before its partition \
                  table could be read — not probed"
             );
             continue;
         };
-        let lba_bytes = disk.logical_block_bytes();
-        gpt::probe(&mut disk, lba_bytes);
+        gpt::probe(&handle, lba_bytes);
     }
     probed
-}
-
-/// The bound disk carrying `id`, or `None` when no driver here serves it
-/// (only USB today; see `issues/build/page-cache-owns-one-device.md`).
-fn device_carrying(id: crate::block::DeviceId) -> Option<Box<dyn BlockDevice>> {
-    (0..usb_storage::count())
-        .filter_map(usb_storage::open)
-        .find(|disk| disk.device_id() == id)
-        .map(|disk| Box::new(disk) as Box<dyn BlockDevice>)
 }
 
 /// Open the partition `role` names, or `None` for any of several ordinary
 /// non-matches — never a reason to log.
 pub fn mount(role: Role) -> Option<FatFs> {
     let volume = role.volume()?;
+    let device_id = volume.device;
 
-    let Some(dev) = device_carrying(volume.device) else {
+    let Some(handle) = block::open(volume.device) else {
         log!(
-            "{role}-volume: the partition is on device {} and no driver here can open it",
+            "{role}-volume: the partition is on device {} and no driver here registered it",
             volume.device
         );
         return None;
@@ -982,18 +972,27 @@ pub fn mount(role: Role) -> Option<FatFs> {
     let lba = volume.lba_bytes as u64;
     let start = volume.start_lba.checked_mul(lba)?;
     let len = volume.blocks.checked_mul(lba)?;
-    let device_bytes = dev.block_count().checked_mul(BLOCK)?;
-    if start.checked_add(len)? > device_bytes {
+    // Whole device blocks or nothing: a view that began or ended inside one
+    // would have to read and write the blocks either side of it, which are the
+    // partition table's and the next partition's.
+    if start % BLOCK != 0 || len % BLOCK != 0 {
+        log!(
+            "{role}-volume: the table puts the partition at {start}+{len} bytes, which is not \
+             whole {BLOCK}-byte blocks — refusing to mount it"
+        );
+        return None;
+    }
+    let device_bytes = handle.block_count().checked_mul(BLOCK)?;
+    let Some(part) = block::Partition::of(handle, start / BLOCK, len / BLOCK) else {
         log!(
             "{role}-volume: the table puts the partition at {start}+{len} on a device of \
              {device_bytes} bytes — refusing to mount past the end of it"
         );
         return None;
-    }
+    };
 
     *device(role).lock() = Some(FatDevice {
-        dev,
-        start,
+        part,
         len,
         scratch: vec![0u8; BLOCK as usize],
         resident: vec![0u8; RESIDENT_BLOCKS * BLOCK as usize],
@@ -1030,8 +1029,9 @@ pub fn mount(role: Role) -> Option<FatFs> {
     match Fat32::mount(volume) {
         Ok(fs) => {
             log!(
-                "{role}-volume: partition mounted, {volume_bytes} bytes of a {len}-byte partition \
-                 at device offset {start}, {}-byte sectors, {}-byte clusters, {} clusters",
+                "{role}-volume: partition mounted from device {device_id}, {volume_bytes} bytes of a \
+                 {len}-byte partition at device offset {start}, {}-byte sectors, {}-byte \
+                 clusters, {} clusters",
                 geom.bytes_per_sector,
                 geom.bytes_per_cluster(),
                 geom.cluster_count

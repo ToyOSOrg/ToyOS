@@ -25,7 +25,7 @@ kernel-loom/tests/sleep_lock.rs 80 1
 kernel-loom/tests/smp_bringup.rs 11 0
 kernel-loom/tests/ticket_lock.rs 35 1
 kernel-loom/tests/tlb_shootdown.rs 93 2
-kernel/src/actuator.rs 110 0
+kernel/src/actuator.rs 111 0
 kernel/src/arch/apic.rs 56 0
 kernel/src/arch/control_regs.rs 66 0
 kernel/src/arch/cpu.rs 68 0
@@ -64,8 +64,8 @@ kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 31 0
 kernel/src/arch/syscall/vm.rs 93 0
 kernel/src/arch/tlb.rs 43 0
-kernel/src/bcachefs_adapter.rs 76 0
-kernel/src/block.rs 33 0
+kernel/src/bcachefs_adapter.rs 81 0
+kernel/src/block.rs 69 0
 kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
 kernel/src/completion/mod.rs 45 0
@@ -83,7 +83,7 @@ kernel/src/drivers/panic_console/latch.rs 9 0
 kernel/src/drivers/panic_console/mod.rs 215 0
 kernel/src/drivers/pci.rs 37 0
 kernel/src/drivers/serial.rs 79 0
-kernel/src/drivers/usb_storage.rs 17 0
+kernel/src/drivers/usb_storage.rs 21 0
 kernel/src/drivers/virtio.rs 127 0
 kernel/src/drivers/virtio_console.rs 33 0
 kernel/src/drivers/virtio_gpu.rs 42 0
@@ -102,11 +102,11 @@ kernel/src/elf/cache.rs 50 0
 kernel/src/elf/index.rs 23 0
 kernel/src/elf/mod.rs 108 0
 kernel/src/elf/reloc.rs 38 0
-kernel/src/fat32_adapter.rs 181 0
+kernel/src/fat32_adapter.rs 183 0
 kernel/src/file_backing.rs 25 0
 kernel/src/file_cache.rs 113 0
 kernel/src/fs_rename.rs 18 0
-kernel/src/gpt.rs 32 0
+kernel/src/gpt.rs 35 0
 kernel/src/gpu.rs 10 0
 kernel/src/hasher.rs 23 0
 kernel/src/heartbeat.rs 24 0
@@ -139,7 +139,7 @@ kernel/src/log/registry.rs 12 0
 kernel/src/log/shard.rs 55 0
 kernel/src/log/storm.rs 15 0
 kernel/src/log/user.rs 16 0
-kernel/src/main.rs 77 0
+kernel/src/main.rs 79 0
 kernel/src/mm/alloc.rs 89 0
 kernel/src/mm/dma.rs 48 0
 kernel/src/mm/mmio.rs 18 0
@@ -165,7 +165,7 @@ kernel/src/object/process.rs 17 0
 kernel/src/object/service.rs 14 0
 kernel/src/object/shm.rs 35 0
 kernel/src/object/syscap.rs 8 0
-kernel/src/page_cache.rs 45 0
+kernel/src/page_cache.rs 56 0
 kernel/src/panic.rs 55 0
 kernel/src/pipe.rs 36 0
 kernel/src/preempt.rs 10 0
@@ -191,7 +191,7 @@ kernel/src/sync.rs 26 0
 kernel/src/time.rs 47 0
 kernel/src/tmpfs.rs 21 0
 kernel/src/trace.rs 29 0
-kernel/src/usb_gate.rs 53 0
+kernel/src/usb_gate.rs 55 0
 kernel/src/user_ptr.rs 67 0
 kernel/src/vfs.rs 94 0
 kernel/src/vma.rs 11 0
@@ -242,11 +242,11 @@ tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/qemu.rs 1642 11
+tests/common/qemu.rs 1650 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
-tests/common/storage.rs 77 0
+tests/common/storage.rs 99 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
 tests/common/volumes.rs 626 3
@@ -391,7 +391,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5144 23
+tests/toyos.rs 5149 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0

@@ -18,10 +18,9 @@ A block device is a shared handle: one object per physical device, the driver
 serialising its own queue, every consumer holding a handle and a partition view
 (offset, length) over it. The page cache keys every block on (device, partition,
 block) and holds one instance per partition it serves. Two devices claiming one
-id are refused at registration. GPT is the one partition scheme. This is
-`issues/build/page-cache-owns-one-device.md`'s ruling, and root filesystem PR 1
-builds it; before it, one consumer owns the one NVMe device outright and a
-machine booting off its internal disk gets neither `/boot` nor `/log`.
+id are refused at registration. GPT is the one partition scheme. Root filesystem
+PR 1 built this, and each cache instance is capped from memory rather than from
+its device, so N of them claim N times that cap.
 
 ## Volume
 
@@ -126,17 +125,15 @@ entry.
 
 ## Stages, in order
 
-1. Root filesystem PR 1: the block layer above; an internal-disk boot gets
-   `/boot` and `/log`.
-2. Root filesystem PR 2: ROOT, the kernel argument naming it, the initrd
+1. Root filesystem PR 2: ROOT, the kernel argument naming it, the initrd
    deleted, the hierarchy laid down.
-3. The users track filed and built.
-4. The mount protocol, and FAT32 as the first userland filesystem server.
-5. NTFS read-only.
-6. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
-7. The installer: GPT, ESP, ROOT, a designated DATA, one boot entry.
-8. Updates: a second ROOT beside the first, the bootloader choosing.
-9. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
+2. The users track filed and built.
+3. The mount protocol, and FAT32 as the first userland filesystem server.
+4. NTFS read-only.
+5. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
+6. The installer: GPT, ESP, ROOT, a designated DATA, one boot entry.
+7. Updates: a second ROOT beside the first, the bootloader choosing.
+8. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
    them.
 
 **Not decided here** (the owner's file names each): how ROOT is versioned,
