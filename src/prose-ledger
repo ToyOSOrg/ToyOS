@@ -513,7 +513,7 @@ toyos-ld/tests/archive_dialects.rs 47 0
 toyos-ld/tests/common/mod.rs 74 0
 toyos-ld/tests/determinism.rs 26 0
 toyos-manifest/src/lib.rs 122 0
-toyos-mixer/src/channel.rs 37 0
+toyos-mixer/src/channel.rs 38 0
 toyos-mixer/src/corpus.rs 179 1
 toyos-mixer/src/dll.rs 37 0
 toyos-mixer/src/format.rs 123 0
