@@ -40,7 +40,7 @@ Stages, in order:
        stage2=toyos-toolchain/x86_64-unknown-linux-gnu/stage2
        rustup toolchain link toyos "$stage2"
        ln -s "$(rustup which cargo)" "$stage2/bin/cargo"
-       export PATH="$PWD/$stage2/bin:$PATH"
+       export PATH="$PATH:$PWD/$stage2/bin"
        cargo +toyos build --target x86_64-unknown-toyos
 
    `toyos-ld` is in that `bin/` because rustc's ToyOS target names its linker
