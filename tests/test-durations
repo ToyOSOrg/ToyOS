@@ -314,6 +314,7 @@ shipped_config_boots 3024 shards=12
 shm_release_reclaims 29 shards=12
 short_sleep_livelock 4823 shards=12
 smp_failed_ap_leaves_no_hole 6672 shards=12
+so_cache_refusals 7784 shards=12
 sshd_fail_closed 2307 shards=12
 stall_is_not_a_verdict 0 shards=12
 std_alloc 12 shards=12
