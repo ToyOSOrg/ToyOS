@@ -683,7 +683,7 @@ userland/paint/src/main.rs 25 0
 userland/proctest/src/main.rs 0 0
 userland/shell/src/main.rs 54 0
 userland/snake/build.rs 0 0
-userland/snake/src/main.rs 9 0
+userland/snake/src/main.rs 8 0
 userland/soundd/src/backend.rs 56 0
 userland/soundd/src/client.rs 103 0
 userland/soundd/src/command.rs 33 0
