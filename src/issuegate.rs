@@ -38,7 +38,7 @@ const STATUSES: &[&str] = &["open", "assigned", "expected-red", "owner", "none"]
 ///
 /// Not the `Areas` list beside it: an area is a directory, and a directory name
 /// in this field is the mistake this gate exists to name.
-const KINDS: &[&str] = &["defect", "finding", "track", "question", "rejected"];
+const KINDS: &[&str] = &["defect", "tooling", "finding", "track", "question", "rejected"];
 
 /// The kinds that answer "what is owed" by themselves, and the statuses they
 /// may therefore be paired with.
@@ -50,6 +50,7 @@ const KINDS: &[&str] = &["defect", "finding", "track", "question", "rejected"];
 /// the query over-reported by eleven with nothing able to tell.
 const ALLOWED_STATUS: &[(&str, &[&str])] = &[
     ("defect", &["open", "assigned", "expected-red"]),
+    ("tooling", &["open", "assigned", "expected-red"]),
     ("finding", &["open", "assigned", "expected-red"]),
     ("track", &["open", "assigned"]),
     ("question", &["owner"]),
@@ -523,6 +524,7 @@ mod tests {
         says("status: pending\nkind: defect\nopened: 2026-08-15", "is not one of");
         says("status: open\nopened: 2026-08-15", "no `kind:` field");
         says("kind: defect\nopened: 2026-08-15", "no `status:` field");
+        says("status: owner\nkind: tooling\nopened: 2026-08-15", "already says what is owed");
         says("status: open\nkind: question\nopened: 2026-08-15", "already says what is owed");
         says("status: open\nkind: rejected\nopened: 2026-08-15", "already says what is owed");
 
@@ -535,6 +537,7 @@ mod tests {
         // The positive control: the shapes above are refused for their field
         // and not for being staged.
         assert!(refusals(&staged("status: open\nkind: defect\nopened: 2026-08-15")).is_empty());
+        assert!(refusals(&staged("status: open\nkind: tooling\nopened: 2026-08-15")).is_empty());
         assert!(refusals(&staged("status: none\nkind: rejected\nopened: 2026-08-15")).is_empty());
         assert!(refusals(&staged("status: owner\nkind: question\nopened: 2026-08-15")).is_empty());
     }
