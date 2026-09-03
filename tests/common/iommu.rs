@@ -1087,18 +1087,6 @@ pub fn iommu_domain_isolation(
     domains_are_disjoint(socket, &log, window, owned, &nvme)
 }
 
-/// Every function the kernel says it moved is in a domain of its own, and no
-/// two of those domains reach the same physical page.
-///
-/// One boot takes one fault, so the arm above covers one driver and this covers
-/// all of them, out of the tables the unit walks. It is a *set* comparison and
-/// not a spot check: asking whether one domain translates one address proves
-/// almost nothing, because a domain's addresses start at `1 << (width - 2)` and
-/// any address inside RAM misses every populated top-level index by
-/// construction. So each domain's second-level tables are walked to their
-/// leaves, the physical pages behind them collected, and the sets required to
-/// be pairwise disjoint — with `owned` in the owner's set and in nobody else's,
-/// which is the claim the fault arm makes behaviourally.
 fn domains_are_disjoint(
     socket: &Path,
     log: &Serial,
@@ -1173,14 +1161,6 @@ fn domains_are_disjoint(
     Ok(())
 }
 
-/// Every physical page one domain's second-level tables reach, read out of the
-/// tables themselves a whole 4 KiB at a time.
-///
-/// The walk is Section 9.8's: 512 eight-byte entries per level, an entry with
-/// neither `R` nor `W` absent, and at the page-directory level the page-size bit
-/// marking a 2 MiB leaf. A page-directory entry without it is refused rather
-/// than followed: this kernel writes no other leaf size, and a walker that
-/// quietly descended into one would be inventing a level.
 fn leaves(socket: &Path, root: u64, levels: u64, bdf: &str) -> Result<BTreeSet<u64>, String> {
     let mut found = BTreeSet::new();
     let mut level = levels;
@@ -1259,16 +1239,13 @@ const PROBE_WORDS: usize = 256;
 /// `REG_ACQ`, NVMe 2.0 Figure 41.
 const NVME_ACQ: u64 = 0x30;
 
-/// Where QEMU puts an `intel-iommu`'s registers on q35, which every profile
-/// here is. A constant on the host side, not a number the guest supplies.
+/// Where QEMU puts an `intel-iommu` on q35, which every profile here is: a
+/// constant on the host side, not a number the guest supplies.
 const UNIT_WINDOW: u64 = 0xfed9_0000;
 
 /// The `-device` name of the audio function that is ruled to stay outside the unit.
 const SOUND: &str = "virtio-sound";
 
-/// The domain the kernel says it moved `bdf` to, off its own `moves to` line;
-/// what the *hardware* says is `context_of`, and the two are compared in
-/// [`domains_are_disjoint`].
 fn domain_of(log: &Serial, bdf: &str) -> Result<u64, String> {
     log.text()
         .lines()
@@ -1277,12 +1254,6 @@ fn domain_of(log: &Serial, bdf: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("the kernel never said {bdf} moved to a domain of its own"))
 }
 
-/// The unit is created before every function it is meant to decode.
-///
-/// QEMU hands a function the bypassing address space when it is created ahead
-/// of the unit, and `iommu_platform=on` does not change that
-/// (`hw/virtio/virtio-bus.c:97` refuses only when the two disagree the other
-/// way), so a mis-ordered unit still negotiates and still bypasses.
 fn unit_is_first(argv: &[String], name: &str) -> Result<(), String> {
     let devices: Vec<&str> =
         argv.windows(2).filter(|w| w[0] == "-device").map(|w| w[1].as_str()).collect();
@@ -1299,19 +1270,6 @@ fn unit_is_first(argv: &[String], name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The unit's register window: the one thing on the guest's side of this gate
-/// that is checked rather than believed.
-///
-/// A kernel that allocated a page of RAM, wrote the real `GSTS`, `RTADDR` and
-/// `IRTA` values into it at their own offsets and printed *that* address would
-/// satisfy every readback in this file — the forged page carries `GSTS` too, so
-/// "`GSTS` would not show `IRES`" is not the mitigation it was taken for. The
-/// address is therefore the harness's constant, the kernel's `@0x…` is compared
-/// against it, and the window has to decode as a unit.
-///
-/// One unit, stated rather than assumed: a second `translating` line is refused,
-/// because `must_say` answers with the first match and every function after it
-/// would be validated against unit0's tables.
 fn register_window(socket: &Path, log: &Serial, name: &str) -> Result<u64, String> {
     let lines: Vec<&str> =
         log.text().lines().filter(|l| l.contains("translating gsts=")).collect();
