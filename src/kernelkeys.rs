@@ -1,12 +1,12 @@
 //! Whose keys a kernel hash container may hold.
 //!
-//! `kernel/Cargo.toml` takes hashbrown's `default-hasher`, so every kernel
-//! `HashMap`/`HashSet` gets `foldhash::fast::RandomState`, whose seeds are
-//! addresses — and with no ASLR here they are the same on every boot of an
-//! image. A container whose keys crossed the boundary is a collision flood away
-//! from a linear probe under whatever lock it sits behind, so it is a
-//! `BTreeMap`/`BTreeSet`: logarithmic worst case, no seed to derive.
+//! A container whose keys crossed the boundary is a collision flood away from a
+//! linear probe under whatever lock it sits behind, and the kernel's seed is no
+//! defence against that (`kernel/src/hasher.rs` says why), so it is a
+//! `BTreeMap`/`BTreeSet`: logarithmic worst case, no seed at all.
 //! [`DECLARED`] is what is left hashed, and every row says who mints its keys.
+//! The scan below is what holds *whether every container is declared*; nothing
+//! in the compiler answers that.
 //!
 //! **A row's `keys` sentence is a human assertion and nothing checks it**: the
 //! scan matches types, not origins, and the only test over that column asks
@@ -23,10 +23,8 @@
 //! (`use hashbrown::HashSet as UserKeyed;`, which compiles and builds an image);
 //! arguments split across lines, as rustfmt writes a long type; a turbofish
 //! (`HashSet::<String>::new()`, *written* and not inferred); and a type that is
-//! inferred, from `HashMap::new()`. **The exit condition is the compiler**:
-//! dropping `default-hasher` deletes `DefaultHashBuilder`'s `BuildHasher` impl,
-//! so no `HashMap::new()` compiles until it names a `BuildHasher` the kernel
-//! seeds itself — every spelling at once, and this scan goes with it.
+//! inferred, from `HashMap::new()`. Those four are why the enumeration is a
+//! floor and not a proof, and the exit condition for them is a parsed walk.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -82,6 +80,11 @@ pub const DECLARED: &[Declared] = &[
     },
 ];
 
+/// The one file the scan does not read, by exact path: it *defines* the alias
+/// the others name, over constants. An entry here is a reviewed edit, never a
+/// marker a file gives itself.
+const DEFINES_THE_ALIAS: &str = "kernel/src/hasher.rs";
+
 /// Every `HashMap<…>`/`HashSet<…>` this scan can see, as `file -> types`.
 fn found(root: &Path) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -102,6 +105,9 @@ fn found(root: &Path) -> BTreeMap<String, Vec<String>> {
                 .expect("under the repository root")
                 .to_string_lossy()
                 .replace('\\', "/");
+            if rel == DEFINES_THE_ALIAS {
+                continue;
+            }
             for line in text.lines() {
                 if line.trim_start().starts_with("//") {
                     continue;

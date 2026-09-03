@@ -3177,23 +3177,28 @@ pub const KNOWN_RED: &[Red] = &[
         source: "tests/toyos.rs",
         measured: "2026-09-03",
     },
-    // The judge read the exit accounting line off a capture that closes at the
-    // guest runner's exit report, and nothing waited for it.
     Red {
         test: "syscall_cost",
         instrument: Instrument::Ci,
         finding: Finding::fires(3, 5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the judge waits for the line it judges by, 2026-09-03 \
+             (`fb67fde69a0717655da68947efc78cdaac1f87f5`): it blocks for the kernel's \
+             `syscalls: pid=` line and refuses by name when it never comes, instead of reading \
+             an exit-accounting line off a capture that can close first. The hosted green this \
+             row stood until is `ci` run 33737201133, `guest (1)`, job 100590501475, \
+             2026-09-03T09:13:38Z — `[syscall] 554 cycles per SYS_CLOCK over 287300 of them, \
+             tsc 2444 MHz`, `PASS syscall_cost (82ms)` — on the shard class the three reds \
+             below came from",
+        ),
         what: "the run claims 180000 SYS_CLOCK transitions and the kernel counted 0 — no \
                `syscalls: pid=` line for the process reached the capture",
-        // Every hosted run of the name there has been; the three reds are this
-        // branch's, each red twice and ALONE in its own job.
+        // Every hosted run of the name there has been; the three reds are #380's,
+        // each red twice and ALONE in its own job.
         evidence: "red: `ci` 33727591910, 33731006452, 33733759354, `guest`, #380, 2026-09-03. \
                    green: `ci` 33701834606 (main, the push landing #373) `[syscall] 658 cycles \
                    per SYS_CLOCK over 277969 of them`; `ci` 33728852421 (schedule, ubuntu-24) \
-                   `563 cycles … over 286777`. The wait is built on this branch and has no \
-                   hosted run yet, so this stands until one is green. \
-                   issues/build/syscall-cost-reads-the-exit-line-off-a-capture-that-can-close-first.md",
+                   `563 cycles … over 286777`; `ci` 33737201133 with the wait in it",
         source: "tests/toyos.rs",
         measured: "2026-09-03",
     },
@@ -3223,6 +3228,19 @@ pub const KNOWN_RED: &[Red] = &[
                    303/304 in 507.6 s beside other worktrees' guests, `ALONE \
                    leak_rollback_selftest: GREEN`; the diff carries no kernel file; the name \
                    arrived on main this cycle (b1ed4c54)",
+        source: "tests/toyos.rs",
+        measured: "2026-09-03",
+    },
+    Red {
+        test: "so_cache_refusals",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "no \"byte budget; refused\" line — the kernel refused nothing: twelve 2 MiB \
+               images entered a cache whose test budget refuses at the second",
+        evidence: "`ci` run 33756442944, `guest (5)`, 2026-09-03, on w5b15-ready whose diff \
+                   touches no loader or cache file; `ALONE so_cache_refusals: GREEN, and it \
+                   was alone both times` in the same job",
         source: "tests/toyos.rs",
         measured: "2026-09-03",
     },

@@ -65,10 +65,9 @@ tracks, against the 1,400 to 2,700 every answered entry started at. Better than
 the note feared in kind as well: typed `TableError`, named bounds, packed
 structs only for `offset_of!`. Nothing about it is owed to *this* record.
 
-What the note was really reaching for outlives the size, and it is filed as
-`issues/kernel/acpi-table-decoding-has-no-host-test.md`: the decode is over
-firmware-supplied untrusted input and there is no host reproduction of any of
-it.
+What the note was really reaching for outlived the size, and it is answered:
+the decode is `toyos-acpi/`, host-tested against QEMU's own tables and a
+crafted corpus, and what stays in `drivers/acpi.rs` is the machine.
 
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling; promoted **in
 place** — this is the owner's review ledger and stays as the record of what the

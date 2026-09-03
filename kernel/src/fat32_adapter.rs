@@ -14,7 +14,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use hashbrown::HashMap;
+use crate::hasher::HashMap;
 
 use toyos_abi::syscall::SyscallError;
 use toyos_fat32::{BlockAccess, Error, Extent, Fat32, FatTime, IoError};
@@ -571,7 +571,7 @@ impl FatFs {
         Self {
             role,
             fs,
-            open: HashMap::new(),
+            open: HashMap::default(),
             by_name: BTreeMap::new(),
             extents: BTreeMap::new(),
         }

@@ -1,0 +1,18 @@
+Every ACPI table QEMU 11.1.0 published to a Profile::Headless guest, read out
+of guest physical memory over QMP `human-monitor-command` `xp/Nxb <addr>` — the
+host's read of the guest's memory, so no byte here came through the decoder
+these fixtures judge.
+
+The RSDP's address is the one value taken from the guest (the kernel's
+`ACPI: RSDP at` line); every other address was walked host-side out of these
+bytes, and the signature and checksum of what came back are what say it was
+right. Each table sums to zero.
+
+  rsdp.bin  0x7fb7e014      xsdt.bin  0x7fb7d0e8
+  facp.bin  0x7fb79000      apic.bin  0x7fb78000
+  hpet.bin  0x7fb77000      mcfg.bin  0x7fb76000
+  dmar.bin  0x7fb75000      waet.bin  0x7fb74000
+
+The addresses are `tests/fixtures.rs`'s `REGIONS`, so the XSDT's own entries
+point at them and the walk under test is the real one. The DSDT this boot named
+(0x7fb7a000, 8500 bytes) is not here: nothing in this crate decodes one.

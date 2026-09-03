@@ -691,11 +691,22 @@ const CI_PACKAGES: &[Package] = &[
     },
 ];
 
-/// One third-party action a workflow runs, in the `owner/repo[/path]@ref`
+/// One third-party action a workflow runs, in the `owner/repo[/path]@<40-hex>`
 /// spelling the `uses:` key gives it.
 struct Action {
     name: &'static str,
     why: &'static str,
+}
+
+/// Whether a `uses:` value names bytes: `@` and a lowercase 40-hex commit. A
+/// tag is a ref its publisher moves, so a row over one declares a repository
+/// and not the code a verdict is measured on.
+fn pins_bytes(name: &str) -> bool {
+    name.rsplit_once('@').is_some_and(|(owner, at)| {
+        !owner.is_empty()
+            && at.len() == 40
+            && at.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// Every action `.github/workflows/` pulls: the other half of what
@@ -703,30 +714,40 @@ struct Action {
 /// machine a verdict is measured on. One naming a path in this repository is
 /// not a row but a file, and the check is that it resolves.
 ///
-/// **A row pins a name and a tag, not bytes.** `@v4` is a branch its publisher
-/// moves, so this refuses an undeclared action and an unmoved row and claims
-/// nothing about the code behind the tag —
-/// `issues/build/an-action-tag-pins-a-name-and-not-bytes.md` is that gap. The
-/// walk also reads `.github/workflows/` only, so a composite action's own
-/// `uses:` is unread; this tree holds no `action.yml`.
+/// **A row pins bytes**, the shape [`COMMITTED_FILES`] already is: the tag is a
+/// trailing comment, so a publisher moving `v4` cannot change what runs here,
+/// and a security release arrives only when somebody moves the digest
+/// (`route.yml:128-130` argues it for the T14's image). What a pin is *not*
+/// checked against is
+/// `tests::the_pin_is_not_checked_against_the_repository_or_the_tag`. The walk
+/// reads `.github/workflows/` only, so a composite action's own `uses:` is
+/// unread; this tree holds no `action.yml`.
 const CI_ACTIONS: &[Action] = &[
     Action {
-        name: "actions/checkout@v4",
-        why: "GitHub's own checkout: how every job gets this tree at all",
+        name: "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        why: "GitHub's own checkout: how every job gets this tree at all (v4.4.0)",
     },
     Action {
-        name: "actions/cache@v4",
-        why: "GitHub's own cache: the cargo registry and target trees the hosted lanes reuse",
-    },
-    Action { name: "actions/cache/restore@v4", why: "the read half of the same action" },
-    Action { name: "actions/cache/save@v4", why: "the write half of the same action" },
-    Action {
-        name: "actions/upload-artifact@v4",
-        why: "how a shard hands its duration files and boot logs to the job that reads them",
+        name: "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
+        why: "GitHub's own cache: the cargo registry and target trees the hosted lanes reuse \
+              (v4.3.0)",
     },
     Action {
-        name: "actions/download-artifact@v4",
-        why: "the other end of that hand-off, in the job that merges the shards",
+        name: "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830",
+        why: "the read half of the same action, so the same commit",
+    },
+    Action {
+        name: "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830",
+        why: "the write half of the same action, so the same commit",
+    },
+    Action {
+        name: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        why: "how a shard hands its duration files and boot logs to the job that reads them \
+              (v4.6.2)",
+    },
+    Action {
+        name: "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        why: "the other end of that hand-off, in the job that merges the shards (v4.3.0)",
     },
 ];
 
@@ -779,6 +800,50 @@ const NO_BAN_ALIAS: &str = "these trees may not count a reference by hand, and a
 /// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
 /// what is left of that gap.
 const COMMITTED_FILES: &[(&str, &str, &str)] = &[
+    // The ACPI tables QEMU 11.1.0 published to a `Profile::Headless` guest,
+    // read out of guest physical memory over the monitor. Firmware output, not
+    // third-party source: `toyos-acpi/tests/fixtures.rs` decodes them against
+    // what that boot's kernel logged.
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/apic.bin",
+        "441794f0b4bd74feb6f4fc1adf82048023a612ba676dc308c8173e449c0ccdbb",
+        "ours: QEMU's own MADT, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/dmar.bin",
+        "30df13af55b4b10bb3c2644d26480aa7ee302deaaf141a7a1ff2a3e053030290",
+        "ours: QEMU's own DMAR, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/facp.bin",
+        "410716dfb169eaba296ed3c336028843b3cf9fce6ca7c179bb242199cfec9d1a",
+        "ours: QEMU's own FADT, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/hpet.bin",
+        "8a486edc412b6e5f1b906ebf3fcfd6a647c8987d8ec437e4cbb808f34d7e2775",
+        "ours: QEMU's own HPET table, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/mcfg.bin",
+        "5274632ea7572e49d97249c05ada4b2f597ad0603ba801538ddef4bd91add994",
+        "ours: QEMU's own MCFG, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/rsdp.bin",
+        "8e3493811dfa7d164fc2076846908139df2f962eea2a5b2e45405949cbd82bf9",
+        "ours: QEMU's own RSDP, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/waet.bin",
+        "21cf099f063f6422353ea0c9100bbe47a97d7be87449c12f201a8a3bb49b7f4e",
+        "ours: QEMU's own WAET, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/xsdt.bin",
+        "701b192931e243a094a83f59f9b82d28204f1b3a0d11ac4d813e7769966427df",
+        "ours: QEMU's own XSDT, captured by the commit that added toyos-acpi",
+    ),
     (
         "assets/DOOM1.WAD",
         "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",
@@ -1252,6 +1317,8 @@ fn used_actions(text: &str) -> Vec<(String, usize)> {
         .filter_map(|(n, line)| {
             let trimmed = line.trim_start().trim_start_matches("- ").trim_start();
             let value = trimmed.strip_prefix("uses:")?.trim();
+            // The tag rides in a trailing comment; only the pin is what runs.
+            let value = value.split('#').next().unwrap_or(value).trim();
             (!value.is_empty()).then(|| (value.to_string(), n + 1))
         })
         .collect()
@@ -1884,7 +1951,7 @@ mod tests {
             }
         }
         assert!(
-            found.iter().any(|(name, _, _)| name == "actions/checkout@v4"),
+            found.iter().any(|(name, _, _)| name.starts_with("actions/checkout@")),
             "the walk found no checkout step, so it is reading no workflow"
         );
 
@@ -1898,12 +1965,22 @@ mod tests {
                 }
                 continue;
             }
+            if !pins_bytes(name) {
+                complaints.push(format!(
+                    "{file}:{line}: `uses: {name}` pins a name and not bytes — an action is \
+                     pinned to a 40-hex commit with the tag in a trailing comment, so that a \
+                     publisher moving a ref cannot change the code a verdict is measured on"
+                ));
+            }
             if !CI_ACTIONS.iter().any(|a| a.name == *name) {
                 complaints
                     .push(format!("{file}:{line}: `uses: {name}`, which nothing declares"));
             }
         }
         for row in CI_ACTIONS {
+            if !pins_bytes(row.name) {
+                complaints.push(format!("`{}` is a row over a ref and not a commit", row.name));
+            }
             if !found.iter().any(|(name, _, _)| name == row.name) {
                 complaints.push(format!(
                     "no workflow uses `{}` any more, so the row saying it is {} is a permission \
@@ -1916,6 +1993,44 @@ mod tests {
             complaints.is_empty(),
             "an action runs somebody else's code on the machine a verdict is measured on:\n{}",
             complaints.join("\n"),
+        );
+    }
+
+    /// The pin's teeth, in the spellings a `uses:` value takes.
+    #[test]
+    fn a_uses_naming_a_ref_is_not_a_pin() {
+        let sha = "11d5960a326750d5838078e36cf38b85af677262";
+        assert!(pins_bytes(&format!("actions/checkout@{sha}")));
+        assert!(pins_bytes(&format!("actions/cache/restore@{sha}")));
+        assert!(!pins_bytes("actions/checkout@v4"));
+        assert!(!pins_bytes("actions/checkout@main"));
+        assert!(!pins_bytes("actions/checkout"));
+        assert!(!pins_bytes(&format!("@{sha}")));
+        // Short, long and upper-case are each not a ref git would resolve.
+        assert!(!pins_bytes(&format!("actions/checkout@{}", &sha[..39])));
+        assert!(!pins_bytes(&format!("actions/checkout@{sha}0")));
+        assert!(!pins_bytes(&format!("actions/checkout@{}", sha.to_uppercase())));
+
+        // The tag rides in a trailing comment and is not part of the value.
+        let read = used_actions(&format!("      - uses: actions/checkout@{sha} # v4.4.0\n"));
+        assert_eq!(read, [(format!("actions/checkout@{sha}"), 1)]);
+    }
+
+    /// `actions/cache`'s commit wearing `actions/checkout`'s name, over a tag
+    /// comment that is neither's: both per-value checks pass it. Resolving
+    /// either needs the publisher's git database, which a self-hosted gate
+    /// cannot reach, so the exit is a vendored action — and a check added to
+    /// `pins_bytes` before then reds here.
+    #[test]
+    fn the_pin_is_not_checked_against_the_repository_or_the_tag() {
+        let cache = "0057852bfaa89a56745cba8c7296529d2fc39830";
+        let swapped = format!("actions/checkout@{cache}");
+        assert!(pins_bytes(&swapped));
+        let declared = [swapped.clone()];
+        assert!(declared.contains(&swapped));
+        assert_eq!(
+            used_actions(&format!("      - uses: {swapped} # v9.9.9\n")),
+            [(swapped, 1)]
         );
     }
 
