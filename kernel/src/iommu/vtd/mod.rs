@@ -9,6 +9,7 @@
 //! register value rather than a bare "unsupported".
 
 pub mod dmar;
+pub mod domain;
 pub mod fault;
 pub mod interrupt;
 mod queue;
@@ -70,6 +71,42 @@ pub(super) const MAX_UNITS: usize = 16;
 /// Remapping tables outlive `init`: the unit keeps reading them while it is on.
 static TABLES: Lock<Tables> = Lock::new(Tables::new());
 
+/// Every translating unit, and the single owner of each one's invalidation
+/// queue: a queue has one tail, so a second holder would submit behind its back.
+static UNITS: Lock<Vec<Live>> = Lock::new(Vec::new());
+
+/// A unit past `enable`: its window, its queue, and the root table its context
+/// entries live in.
+pub(super) struct Live {
+    regs: Mmio,
+    queue: Queue,
+    root: Table,
+    /// A descriptor type a unit does not implement stalls its queue, so the
+    /// interrupt-entry-cache type goes only to a unit that remaps.
+    remaps: bool,
+}
+
+impl Live {
+    pub(super) fn root(&self) -> Table {
+        self.root
+    }
+
+    pub(super) fn invalidate_domain(&mut self, domain: u16) {
+        self.queue.invalidate_domain(self.regs, domain);
+    }
+
+    pub(super) fn invalidate_context(&mut self, domain: u16, stream: u16) {
+        self.queue.invalidate_context(self.regs, domain, stream);
+    }
+}
+
+/// Every remapping unit's interrupt-entry cache, gone.
+pub(super) fn invalidate_interrupt_entries() {
+    for unit in UNITS.lock().iter_mut().filter(|u| u.remaps) {
+        unit.queue.invalidate_interrupts(unit.regs);
+    }
+}
+
 pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     let dmar = match Dmar::open(rsdp_addr) {
         Ok(dmar) => dmar,
@@ -97,6 +134,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
         yn(dmar.flags & dmar::FLAG_X2APIC_OPT_OUT != 0),
         yn(dmar.flags & dmar::FLAG_DMA_CTRL_OPT_IN != 0),
     );
+
+    // Before any unit is armed: the handler reaches a faulting function's
+    // config space through this and cannot take a lock to find it.
+    fault::describe(devices);
 
     let mut units = 0usize;
     let mut regions = 0usize;
@@ -372,6 +413,9 @@ fn enable(
 ) {
     let index = unit.index;
     let Plan { width, records } = plan;
+    // Before any table is built: what a domain of a driver's own can be is the
+    // narrowest thing every translating unit on this machine agrees to.
+    domain::unit_agrees(width, unit.caps.domains());
 
     let (root, queue) = {
         let mut tables = TABLES.lock();
@@ -410,15 +454,17 @@ fn enable(
             {
                 let empty = tables.alloc();
                 log!("iommu: unit{index} gives {stream} a domain with no mappings (actuator)");
-                table::bind(&mut tables, root, stream, empty, width);
+                table::bind_identity(&mut tables, root, stream, empty, width);
                 continue;
             }
-            table::bind(&mut tables, root, stream, domain, width);
+            table::bind_identity(&mut tables, root, stream, domain, width);
         }
 
         let mut queue = Queue::new(&mut tables, unit.regs);
-        let irta = remap.map(|extended| interrupt::arm(&mut tables, extended));
         drop(tables);
+        // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
+        // then that one, and the order this subsystem holds is the reverse.
+        let irta = remap.map(interrupt::arm);
 
         // Before `TE`: the first blocked transaction must be reportable, not merely counted.
         fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);
@@ -456,9 +502,10 @@ fn enable(
             interrupt::INTERRUPT_REMAPPING_ENABLE,
             "interrupt remapping",
         );
-        // After `IRE`, so nothing is invalidated on a unit that is not yet reading the table.
-        interrupt::adopt(unit.regs, queue);
     }
+    // After `IRE`, so nothing is invalidated on a unit that is not yet reading
+    // the table, and after `TE`, so nothing reaches a unit that is not on.
+    UNITS.lock().push(Live { regs: unit.regs, queue, root, remaps: remap.is_some() });
 
     let gsts = unit.regs.read_u32(GSTS_REG);
     log!(

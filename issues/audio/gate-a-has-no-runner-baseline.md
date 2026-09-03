@@ -1,6 +1,6 @@
 ---
 status: open
-kind: defect
+kind: tooling
 opened: 2026-08-10
 ---
 
@@ -55,8 +55,7 @@ readable exit this workflow ever produced — is adjudicated: **the instrument,
 not the tree.** No re-run was used to reach that; a same-session interleaved
 control was.
 
-**Harm was null on both arms**, which is why this is a comparability finding and
-not a defect: dropouts 0/120 and 0/120, underruns 0 in all 240 config-runs,
+**Harm was null on both arms**: dropouts 0/120 and 0/120, underruns 0 in all 240 config-runs,
 drains all-zero but for a handful of single events, ceiling breaches 1/120 on
 arm A (a 334604 us single wake on `audio_tone.smp8`, no dropout behind it) and
 0/120 on arm B.

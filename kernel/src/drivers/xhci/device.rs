@@ -114,7 +114,7 @@ fn evaluate_ep0_trb(ctrl: &mut XhciController, slot_id: u8, max_packet: u16) -> 
     ctrl.write_ctx32(input_ctx, 2, 1, ep0_dw1);
 
     let mut evaluate = Trb::ZERO;
-    evaluate.param = input_ctx.phys();
+    evaluate.param = input_ctx.device_addr();
     evaluate.control = TRB_EVALUATE_CONTEXT | ((slot_id as u32) << 24);
     evaluate
 }
@@ -445,7 +445,7 @@ fn control(
     request: Request,
 ) -> (Await, Stages) {
     let dma = ctrl.dma();
-    let scratch = dma.phys() + OFF_DATA_BUF as u64;
+    let scratch = dma.device_addr() + OFF_DATA_BUF as u64;
     let (bm_request_type, b_request, w_value, w_index, data, len) = match request {
         Request::DeviceDescriptor { want } => (0x80, 0x06, 0x0100, 0, Some(scratch), want),
         Request::ConfigDescriptor => {
@@ -602,10 +602,10 @@ fn address_device_trb(ctrl: &mut XhciController, state: &Enumerating) -> Trb {
     ctrl.write_ctx32(input_ctx, 2, 4, 8);
 
     let out_ctx = super::zero_dma(dma, state.block + DEV_OUT_CTX, PAGE / 2);
-    ctrl.write_dcbaa(state.slot_id as usize, out_ctx.phys());
+    ctrl.write_dcbaa(state.slot_id as usize, out_ctx.device_addr());
 
     let mut addr_dev = Trb::ZERO;
-    addr_dev.param = input_ctx.phys();
+    addr_dev.param = input_ctx.device_addr();
     addr_dev.control = TRB_ADDRESS_DEVICE | ((state.slot_id as u32) << 24);
     addr_dev
 }
@@ -622,7 +622,7 @@ fn configure_endpoint_trb(ctrl: &mut XhciController, state: &mut Enumerating) ->
     state.rings = Some(rings);
 
     let mut configure = Trb::ZERO;
-    configure.param = ctrl.dma().subview(OFF_INPUT_CTX, PAGE).phys();
+    configure.param = ctrl.dma().subview(OFF_INPUT_CTX, PAGE).device_addr();
     configure.control = TRB_CONFIGURE_EP | ((state.slot_id as u32) << 24);
     Some(configure)
 }

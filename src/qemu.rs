@@ -156,6 +156,10 @@ pub fn launch(opts: &Options) {
         qemu.arg("-device")
             .arg("intel-iommu,intremap=on,caching-mode=on,aw-bits=48");
     }
+    // Without this a virtio function keeps the machine's own address space and
+    // the unit never sees it, whatever the tables say. virtio-sound is left off
+    // it by owner ruling until gate A has judged that shape.
+    let platform = if shape.iommu { ",iommu_platform=on" } else { "" };
 
     qemu.arg("-device")
         .arg("nec-usb-xhci,id=xhci")
@@ -186,7 +190,7 @@ pub fn launch(opts: &Options) {
         qemu.arg("-vga")
             .arg("none")
             .arg("-device")
-            .arg("virtio-gpu-pci,xres=1280,yres=720");
+            .arg(format!("virtio-gpu-pci,xres=1280,yres=720{platform}"));
     } else {
         qemu.arg("-vga").arg("std");
     }
@@ -195,7 +199,7 @@ pub fn launch(opts: &Options) {
         qemu.arg("-netdev")
             .arg("user,id=net0,hostfwd=tcp::2222-:22")
             .arg("-device")
-            .arg("virtio-net-pci-non-transitional,netdev=net0");
+            .arg(format!("virtio-net-pci-non-transitional,netdev=net0{platform}"));
 
         // VirtIO sound — wav file output for analysis or native audio for
         // listening. Both backends must keep the same host mixer timer-period,
@@ -222,7 +226,9 @@ pub fn launch(opts: &Options) {
             .arg("-chardev")
             .arg("stdio,id=cs0,signal=off")
             .arg("-device")
-            .arg("virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1")
+            .arg(format!(
+                "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
+            ))
             .arg("-device")
             .arg("virtconsole,chardev=cs0,id=console0");
     } else if opts.mute {

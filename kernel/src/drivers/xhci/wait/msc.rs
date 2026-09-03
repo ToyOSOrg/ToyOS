@@ -656,7 +656,7 @@ impl XhciController {
                     "usb-storage: a {} B data phase, past the {MSC_DATA_LEN} B this driver rings",
                     region.size(),
                 );
-                (region.phys(), region.size() as u32)
+                (region.device_addr(), region.size() as u32)
             }
             None => (0, 0),
         };
@@ -677,7 +677,7 @@ impl XhciController {
         cbw.write::<u8>(14, cdb_len);
         cbw.copy_from(15, &cdb[..cdb_len as usize]);
 
-        let cbw_phys = dma.phys() + (dev.block + MSC_CBW) as u64;
+        let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
         self.framed_phase(dev, false, cbw_phys, CBW_LEN, "command")?;
 
         // What the controller says reached the buffer; checked against the
@@ -691,7 +691,7 @@ impl XhciController {
             #[cfg(feature = "boot-actuators")]
             let held = short_read::hold(
                 dma,
-                (data_phys - dma.phys()) as usize,
+                (data_phys - dma.device_addr()) as usize,
                 data_len,
                 data_in && cdb.first() == Some(&0x28),
             );
@@ -716,7 +716,7 @@ impl XhciController {
             }
         }
 
-        let csw_phys = dma.phys() + (dev.block + MSC_CSW) as u64;
+        let csw_phys = dma.device_addr() + (dev.block + MSC_CSW) as u64;
         super::super::zero_dma(dma, dev.block + MSC_CSW, CSW_LEN as usize);
         let mut got = self.framed_phase(dev, true, csw_phys, CSW_LEN, "status");
         if let Err(Broke::Code { code: CC_STALL, .. }) = got {

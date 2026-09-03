@@ -145,7 +145,7 @@ impl MouseSample {
 /// whatever follows it in the buffer.
 pub fn fold_mouse(prev_buttons: u8, bytes: &[u8]) -> MouseSample {
     let mut s = MouseSample { buttons: prev_buttons, ..MouseSample::default() };
-    for chunk in bytes.chunks_exact(MOUSE_EVENT_LEN) {
+    for chunk in bytes.as_chunks::<MOUSE_EVENT_LEN>().0 {
         let ev = decode(chunk);
         s.reports += 1;
         s.scroll += ev.scroll as i32;

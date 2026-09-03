@@ -25,16 +25,15 @@
 //! One table serves every unit, which Section 5.1.3 permits explicitly, so an
 //! index names the same interrupt whichever unit walks it.
 //!
-//! `TABLES` is taken before this module's lock and never after it.
+//! This module's lock is taken before `UNITS` and before `TABLES`, never after
+//! either.
 
 use alloc::vec::Vec;
 
 use crate::iommu::{Refused, StreamId};
-use crate::mm::Mmio;
 use crate::sync::Lock;
 
-use super::queue::Queue;
-use super::table::{Table, Tables};
+use super::table::Table;
 
 pub const IRTA_REG: u64 = 0xB8;
 
@@ -82,18 +81,10 @@ struct Remap {
     extended: bool,
     /// Requester ids firmware gave this machine's I/O APICs, which Section 8.3.1.1 requires it to name.
     apics: Vec<(u8, StreamId)>,
-    /// Every unit that is remapping, with the queue an entry's write is invalidated through.
-    units: Vec<(Mmio, Queue)>,
 }
 
 static REMAP: Lock<Remap> =
-    Lock::new(Remap {
-        table: None,
-        used: 0,
-        extended: false,
-        apics: Vec::new(),
-        units: Vec::new(),
-    });
+    Lock::new(Remap { table: None, used: 0, extended: false, apics: Vec::new() });
 
 pub fn describe_apic(apic_id: u8, source: StreamId) {
     REMAP.lock().apics.push((apic_id, source));
@@ -105,22 +96,14 @@ pub fn apics_are_named(apics: &[u8]) -> bool {
 }
 
 /// Allocate the shared table on first ask and return the value `IRTA_REG` takes for it.
-pub fn arm(tables: &mut Tables, extended: bool) -> u64 {
+pub fn arm(extended: bool) -> u64 {
     let mut remap = REMAP.lock();
     remap.extended = extended;
     let table = match remap.table {
         Some(table) => table,
-        None => *remap.table.insert(tables.alloc()),
+        None => *remap.table.insert(super::TABLES.lock().alloc()),
     };
     table.phys() | if extended { EXTENDED_INTERRUPT_MODE } else { 0 } | SIZE_FIELD
-}
-
-/// Take over a remapping unit's invalidation queue, once `IRE` is confirmed.
-///
-/// Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the entry a
-/// fault was taken on, so a later entry is invisible until its cache is told.
-pub fn adopt(regs: Mmio, queue: Queue) {
-    REMAP.lock().units.push((regs, queue));
 }
 
 pub fn table_address() -> u64 {
@@ -164,9 +147,9 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16,
             );
             // Under the same lock as the write, so no other entry can be
             // written between an entry and the invalidation that publishes it.
-            for (regs, queue) in &mut remap.units {
-                queue.invalidate_interrupts(*regs);
-            }
+            // Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the
+            // entry a fault was taken on.
+            super::invalidate_interrupt_entries();
             let (lo, hi) = table.read_pair(index as usize);
             Ok((index, lo, hi))
         }

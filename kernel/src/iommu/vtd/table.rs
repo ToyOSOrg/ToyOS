@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use crate::iommu::{AddressWidth, Iova, StreamId};
+use crate::iommu::{AddressWidth, IommuError, Iova, StreamId};
 use crate::mm::pmm::{self, Category, PhysPage};
 use crate::mm::{DirectMap, Mmio, PAGE_2M};
 
@@ -30,7 +30,8 @@ const PRESENT: u64 = 1 << 0;
 /// The kernel's one domain; not 0, which an all-zero context entry also names — reusing it would blur a fault record and a domain-selective invalidation.
 pub const KERNEL_DOMAIN: u16 = 1;
 
-/// Both: the identity domain exists to leave every kernel driver reaching exactly what it reaches today.
+/// Both, in every domain: the coarsest split a driver's pools offer is finer
+/// than a 2 MiB leaf, so nothing here can be narrowed to one of them.
 const LEAF_PERM: u64 = SL_READ | SL_WRITE;
 
 /// 4 KiB remapping tables carved out of 2 MiB PMM pages; never freed, since releasing one would need an invalidate-before-release ordering this allocator's types don't express.
@@ -162,14 +163,102 @@ pub fn identity_domain(tables: &mut Tables, width: AddressWidth, top: u64) -> (T
     let mut frames = 0u64;
     let mut phys = 0u64;
     while phys < top {
-        map_2m(tables, root, levels, Iova::identity(phys), phys);
+        map_2m(tables, root, levels, Iova::identity(phys), phys, LEAF_PERM);
         phys += PAGE_2M;
         frames += 1;
     }
     (root, frames)
 }
 
-fn map_2m(tables: &mut Tables, root: Table, levels: u8, at: Iova, phys: u64) {
+/// One domain's second-level tables, its id, and how far up its addresses have been handed out.
+#[derive(Clone, Copy)]
+pub struct Domain {
+    root: Table,
+    id: u16,
+    width: AddressWidth,
+    next: u64,
+}
+
+impl Domain {
+    /// A quarter of the way up what the width can express — far above any
+    /// physical address these machines have, so a descriptor still carrying one
+    /// names nothing this domain maps and faults rather than landing.
+    fn first_address(width: AddressWidth) -> u64 {
+        1 << (width.bits() - 2)
+    }
+
+    pub fn new(tables: &mut Tables, id: u16, width: AddressWidth) -> Self {
+        Self { root: tables.alloc(), id, width, next: Self::first_address(width) }
+    }
+
+    pub fn root(&self) -> Table {
+        self.root
+    }
+
+    pub fn id(&self) -> u16 {
+        self.id
+    }
+
+    pub fn width(&self) -> AddressWidth {
+        self.width
+    }
+
+    pub fn floor(&self) -> u64 {
+        Self::first_address(self.width)
+    }
+
+    /// Reserve room for `bytes`, rounded up to whole leaves. An address is
+    /// never handed out twice, unmapped or not: a device holding a stale one
+    /// would reach whatever took its place.
+    pub fn reserve(&mut self, bytes: u64) -> Option<Iova> {
+        let span = bytes.next_multiple_of(PAGE_2M);
+        let end = self.next.checked_add(span)?;
+        // The depth these tables were built to: an address past what the top
+        // level reaches has no entry to be written into.
+        if end > 1u64 << self.width.bits() {
+            return None;
+        }
+        let at = Iova::translated(self.next);
+        self.next = end;
+        Some(at)
+    }
+}
+
+pub fn map(tables: &mut Tables, domain: &Domain, at: Iova, phys: u64, bytes: u64) {
+    let levels = levels(domain.width);
+    let mut offset = 0u64;
+    while offset < bytes {
+        map_2m(
+            tables,
+            domain.root,
+            levels,
+            Iova::translated(at.raw() + offset),
+            phys + offset,
+            LEAF_PERM,
+        );
+        offset += PAGE_2M;
+    }
+}
+
+/// Clears the leaves covering `bytes` at `at`; the caller invalidates before the pages behind them are reused.
+pub fn unmap(domain: &Domain, at: Iova, bytes: u64) -> Result<(), IommuError> {
+    let levels = levels(domain.width);
+    let mut offset = 0u64;
+    while offset < bytes {
+        let here = Iova::translated(at.raw() + offset);
+        let (table, index) =
+            leaf_of(domain.root, levels, here).ok_or(IommuError::NotMapped(here))?;
+        if table.read(index) & (SL_READ | SL_WRITE) == 0 {
+            return Err(IommuError::NotMapped(here));
+        }
+        table.write(index, 0);
+        offset += PAGE_2M;
+    }
+    Ok(())
+}
+
+/// Walks to the page-directory holding `at`'s leaf, growing the tables on the way.
+fn descend(tables: &mut Tables, root: Table, levels: u8, at: Iova) -> Table {
     let mut table = root;
     let mut level = levels;
     while level > 2 {
@@ -185,12 +274,55 @@ fn map_2m(tables: &mut Tables, root: Table, levels: u8, at: Iova, phys: u64) {
         };
         level -= 1;
     }
+    table
+}
+
+/// The same walk without growing it: `None` where no table covers `at` at all.
+fn leaf_of(root: Table, levels: u8, at: Iova) -> Option<(Table, usize)> {
+    let mut table = root;
+    let mut level = levels;
+    while level > 2 {
+        let index = ((at.raw() >> (12 + 9 * (level as u64 - 1))) & 0x1FF) as usize;
+        let entry = table.read(index);
+        if entry & (SL_READ | SL_WRITE) == 0 {
+            return None;
+        }
+        table = Table { phys: entry & ADDR_MASK };
+        level -= 1;
+    }
+    Some((table, ((at.raw() >> 21) & 0x1FF) as usize))
+}
+
+fn map_2m(tables: &mut Tables, root: Table, levels: u8, at: Iova, phys: u64, perm: u64) {
+    let table = descend(tables, root, levels, at);
     let index = ((at.raw() >> 21) & 0x1FF) as usize;
-    table.write(index, (phys & !(PAGE_2M - 1)) | SL_LARGE | LEAF_PERM);
+    table.write(index, (phys & !(PAGE_2M - 1)) | SL_LARGE | perm);
 }
 
 /// Gives `stream` a context entry naming the identity domain.
-pub fn bind(tables: &mut Tables, root: Table, stream: StreamId, domain: Table, width: AddressWidth) {
+pub fn bind_identity(
+    tables: &mut Tables,
+    root: Table,
+    stream: StreamId,
+    domain: Table,
+    width: AddressWidth,
+) {
+    write_context(tables, root, stream, domain, KERNEL_DOMAIN, width);
+}
+
+/// Moves `stream` onto a domain of its own, in one unit's root table.
+pub fn bind(tables: &mut Tables, root: Table, stream: StreamId, domain: &Domain) {
+    write_context(tables, root, stream, domain.root, domain.id, domain.width);
+}
+
+fn write_context(
+    tables: &mut Tables,
+    root: Table,
+    stream: StreamId,
+    domain: Table,
+    id: u16,
+    width: AddressWidth,
+) {
     let bus = stream.bus() as usize;
     let entry = root.read(bus * 2);
     let context = if entry & PRESENT != 0 {
@@ -202,6 +334,6 @@ pub fn bind(tables: &mut Tables, root: Table, stream: StreamId, domain: Table, w
     };
     // Translation type 00: untranslated requests route through the named second-level table.
     let lo = domain.phys | PRESENT;
-    let hi = ((KERNEL_DOMAIN as u64) << 8) | (levels(width) as u64 - 2);
+    let hi = ((id as u64) << 8) | (levels(width) as u64 - 2);
     context.write_pair(stream.devfn() as usize, lo, hi);
 }

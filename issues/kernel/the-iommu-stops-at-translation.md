@@ -18,13 +18,19 @@ mapping every device *in* the tables behaves the same either way.
 
 Interrupt remapping is built: every source is in the remappable format, `IRE` is
 set, `CFI` is never written, and every table entry is source-id-verified against
-the requester id its one source really carries. Per-driver domains and the
-refusal are not. They land in this order and each leaves the tree green.
+the requester id its one source really carries. Per-driver domains are built for
+four functions; the refusal is not, and is next.
 
-What the gate still takes from the kernel is the unit's register-window address
-(the `iommu: unit0 @0x…` line); a kernel lying there would have the gate read
-some other page, where `GSTS` would not show `IRES`, so the lie is not free but
-it is not closed either — closing it means the gate parsing the DMAR itself.
+The gate no longer takes the unit's register-window address from the kernel. It
+was taken from the `iommu: unit0 @0x…` line, and the mitigation recorded here —
+"a kernel lying there would have the gate read some other page, where `GSTS`
+would not show `IRES`" — was refuted by measurement: a kernel that writes the
+real `GSTS`, `RTADDR` and `IRTA` values into a page of RAM and prints that
+address passes every one of the five gates. The address is now the harness's own
+constant, `0xfed90000`, which is where QEMU puts an `intel-iommu` on q35; the
+kernel's `@0x…` is asserted equal to it and the window is required to decode as
+a unit. One unit per machine is stated rather than assumed — a second
+`translating` line is a refusal until the harness models two.
 
 Of the two things this stage was told to verify rather than assume, one was
 decided and one cannot be. QEMU does **not** block a compatibility-format
@@ -39,16 +45,39 @@ nothing. Both, with the interrupt-cache invalidation that is unmeasurable for a
 third reason, are recorded in
 `issues/kernel/qemu-passes-compatibility-format-interrupts.md` as T14 questions.
 
-**Domains, mapping, invalidation, faults.** Create/attach/map/unmap/flush, an
-IOVA allocator, and the half of the fault handler that kills a process instead
-of halting the machine: Bus Master Enable cleared on the offending function
-(which is what lets the handler stay bounded once it no longer stops the
-machine), a first-fault latch, a counter, a per-domain flag, the reschedule
-handoff, and a storm ceiling. The portable seam grows here too — with one domain
-and one backend, a domain id, a permission set, an error type and an `Iommu`
-trait would each have a single value or a single implementor, which is why none
-of them is in the tree. What is not negotiable is that teardown's slow half
-never runs from the deferred zero-handle queue.
+**Domains, mapping, invalidation, faults — built.** Many domains, an address
+allocator per domain whose first address sits a quarter of the way up the width
+so a descriptor still carrying a physical address faults rather than lands,
+map/unmap, and invalidation on every change because `CAP.CM` is set on every
+unit in reach. Four functions hold one each — xHCI, NVMe, virtio-net,
+virtio-console — and `iommu_domain_isolation` walks their tables host-side and
+requires the physical page sets to be pairwise disjoint. `DomainId`,
+`IommuError` and `DeviceSpace` earned their place; `DmaPerm` did not and is not
+in the tree, because 2 MiB is the only leaf this kernel writes — coarser than
+any split a driver's pools offer — and QEMU drops an access its cached
+translation denies rather than recording a fault, so a narrowed mapping is
+neither expressible nor observable here. `trait Iommu` still has one implementor
+and still does not land.
+
+The fault handler's bounded half is built and its terminal action is still a
+halt: every stream is kernel-owned, so a driver reaching outside its domain is a
+kernel bug. Before the halt, Bus Master Enable is cleared on the offending
+function, the first record is latched whole, and a count is kept per unit and
+per function with the domain each is in. Clearing `BME` is the ceiling on a
+storm — a function that cannot master the bus raises no second fault — and the
+reschedule handoff is not written, because with a halt there is nothing on the
+other side of it to hand to. It lands with the process-kill arm. What is not
+negotiable is that teardown's slow half never runs from the deferred
+zero-handle queue.
+
+**Nothing here measures invalidation, and the reason is not that QEMU has no
+caches.** It has both: `vtd_lookup_iotlb` at `hw/i386/intel_iommu.c:2118` and
+`vtd_update_iotlb` at `:2234`, and a generation-tagged context cache at `:2131`.
+Only the *success* path fills the IOTLB, so a missed post-map invalidation
+cannot show at all, and a missed post-unmap one would need a test that re-aims a
+device at an address whose page has been reused — none exists. Measured: with
+every invalidation removed, all five IOMMU gates stayed green and only
+`-D warnings` noticed.
 
 **The refusal.** Sequenced last, after the first userspace driver has moved
 (`issues/kernel/every-driver-is-still-in-the-kernel.md`), because before that it
@@ -66,13 +95,17 @@ targets on the T14 are. Restating it is the owner's call.
 
 Risks that are not stage-specific:
 
-- **Whether the harness's virtio devices are behind the unit is unknown.** QEMU
-  bypasses the unit for a virtio device unless it is created with
-  `iommu_platform=on`, which requires the guest to negotiate
-  `VIRTIO_F_ACCESS_PLATFORM` — these drivers do not. Under identity mapping the
-  two are indistinguishable, so both isolation gates today run on ordinary
-  emulated PCI functions. A host flag the guest silently declines is a vacuous
-  gate: assert the negotiation guest-side.
+- **The harness's virtio devices were outside the unit, and now are — measured.**
+  QEMU keeps a virtio function on `&address_space_memory` unless it is created
+  with `iommu_platform=on` (`hw/virtio/virtio-bus.c:86-99`), which the harness
+  set nowhere; and where the host offers `VIRTIO_F_ACCESS_PLATFORM` a guest
+  cannot silently decline it, because `virtio_validate_features` refuses
+  `FEATURES_OK` (`hw/virtio/virtio.c:2270-2276`) and the device is lost rather
+  than bypassing. Both halves are fixed and `iommu_virtio_platform` asserts the
+  negotiation guest-side. virtio-sound is the one declared exception: turning
+  the flag on puts every audio DMA through the unit, gate A has not judged that
+  shape, and by owner ruling it stays off until it has
+  (`issues/kernel/three-devices-still-reach-all-of-memory.md`).
 - **Isolation scopes and reserved regions are modelled, not measured.** QEMU's
   topology is flat and publishes no RMRR; the T14 gives the first real answer,
   and it may refuse a device this project wants in userspace.
