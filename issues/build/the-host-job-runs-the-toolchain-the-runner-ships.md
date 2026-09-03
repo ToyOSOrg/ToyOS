@@ -63,15 +63,15 @@ default 1.97.1 after the fix.
 ## The decision this tree has not made for the compiler the way it made it for everything else that moves
 
 `issues/build/two-container-images-one-unpinned-and-one-unconsumed.md` (still
-open) already names the pattern: `route.yml:131` pins the T14's image to a
-digest — "a
-rebuild must not be able to change the QEMU or Rust a recorded number was taken
-on" — specifically because a moving input under every verdict is a supply-chain
-decision, not a convenience. The `CLAUDE.md` principle for `rust/`, this
-project's own compiler fork, is "kept current with upstream" — a deliberate
-track-stable choice, stated and owned. The host job's ambient `macos-latest`
-toolchain has never been stated as either: it is not pinned like the T14 image,
-and it is not declared track-stable like `rust/` — it simply moves when Apple's
+open) already names the pattern: `ci-image.yml` prints a digest for a consumer
+to pin, never the tag, because "a rebuild must not be able to change the QEMU
+or Rust a recorded number was taken on" — a moving input under every verdict is
+a supply-chain decision, not a convenience. The `CLAUDE.md` principle for
+`rust/`, this project's own compiler fork, is "kept current with upstream" — a
+deliberate track-stable choice, stated and owned. The host job's ambient
+`macos-latest` toolchain has never been stated as either: it is not pinned like
+a container image, and it is not declared track-stable like `rust/` — it simply
+moves when Apple's
 runner image moves, silently, until a new lint reds every open pull request on
 the same morning.
 

@@ -38,9 +38,9 @@ lines) records load averages and process counts and is attached to an audio run
 `src/buildlock.rs` already names holders (`records_holder`, `guest_slot`,
 `build_slot`) but the record is transient: it exists while the guard is held and
 is gone when the question is asked. The audio baseline at `tests/toyos.rs:2107`
-is keyed on `(test, smp)` and nothing else, so it cannot distinguish the
-self-hosted runner's distribution from the developer's — that key has no runner
-provenance at all. The committed shard input is per-test duration only, which is
+is keyed on `(test, smp)` and nothing else, so it cannot distinguish a CI
+runner's distribution from the developer's — that key has no runner provenance
+at all. The committed shard input is per-test duration only, which is
 why `issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md`
 charges an image build to whichever test followed it.
 
