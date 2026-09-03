@@ -43,7 +43,7 @@ built on the first.
    IOMMU track's three hardware-only answers — isolation scopes and reserved
    regions, the 2× cost bar, and the compatibility-format question in
    `issues/kernel/qemu-passes-compatibility-format-interrupts.md`
-   (`issues/kernel/the-iommu-stops-at-translation.md` states the first two).
+   (`issues/kernel/the-iommu-refuses-nothing-yet.md` states the first two).
    `issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md` is the
    loop's admission check: no image is flashed that has not passed it.
 5. **The first milestone is one unattended boot with a log back** — flashed,
