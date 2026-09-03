@@ -57,7 +57,7 @@ kernel/src/arch/syscall/dispatch.rs 93 0
 kernel/src/arch/syscall/fs.rs 11 0
 kernel/src/arch/syscall/gate.rs 23 0
 kernel/src/arch/syscall/handles.rs 21 0
-kernel/src/arch/syscall/io.rs 26 0
+kernel/src/arch/syscall/io.rs 25 0
 kernel/src/arch/syscall/ipc.rs 35 0
 kernel/src/arch/syscall/machine.rs 18 0
 kernel/src/arch/syscall/mod.rs 5 0

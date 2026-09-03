@@ -257,8 +257,7 @@ pub(super) fn sys_write_nonblock(h: RawHandle, buf: &UserBytes) -> u64 {
     }
 }
 
-/// A DRNG with nothing to give is refused, never waited on; a CPU with no
-/// `RDRAND` at all never boots this far (`hasher::seed`).
+/// A DRNG with nothing to give is refused here, never waited on.
 pub(super) fn sys_random(out: &mut UserBytesMut) -> u64 {
     let mut i = 0;
     while i + 8 <= out.len() {
