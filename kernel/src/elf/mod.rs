@@ -184,7 +184,8 @@ impl LoadedLib {
         // A missing `DT_STRTAB` still leaves the symbol count intact; only names are lost.
         let strs: &[u8] = match &self.dynstr {
             // SAFETY: `dynstr` came from `ModuleImage::slice`'s bounds check,
-            // and outlives this borrow via `LoadedLib`.
+            // outlives this borrow via `LoadedLib`, and was refused by
+            // `rela::tables_outside_window` if it met the relocation window.
             Some(strs) => unsafe { strs.as_slice() },
             None => &[],
         };
@@ -309,6 +310,12 @@ pub fn load_shared_lib(
     let layout = parse_layout(&header_data)?;
 
     let (vaddr_min, vaddr_max) = (layout.vaddr_min, layout.vaddr_max);
+    // Every bound below is image-relative and every `r_offset` is a vaddr, so a
+    // non-zero `vaddr_min` shifts the two against each other: a write validated
+    // inside the writable window lands `vaddr_min` bytes lower in the image.
+    if vaddr_min != 0 {
+        return Err("ELF: a shared object must begin at vaddr 0");
+    }
     // No writable segment yields an empty window; no relocation can target it.
     let (rw_lo, rw_hi) = layout.writable_window().unwrap_or((layout.span(), layout.span()));
 
@@ -396,12 +403,21 @@ pub fn load_shared_lib(
 
     // Validate every entry before writing any: an unvalidated `DTPOFF64` with
     // `r_sym == 0` writes `r_addend` verbatim, an arbitrary 8-byte write.
-    // Bound is the writable window, not the whole image — once cached, the
-    // write lands in `rw_alloc`, which covers only that window.
-    // `window` is image-relative; the `RELATIVE` pass below applies through
-    // `ModuleImage::slice`, which subtracts `vaddr_min` — the two agree only
-    // when `vaddr_min == 0`, true for every module a linker produces.
-    let window = (rw_offset as u64, (rw_offset + rw_size) as u64);
+    // The exact writable extent, not `rw_offset`'s 2 MiB-rounded one: the
+    // rounded start is up to 2 MiB below the first writable byte, and the pages
+    // there are mapped `ReadExec` by `page_prot`.
+    let window = (rw_lo, rw_hi);
+    let extent = |slice: &KernelSlice| {
+        let at = (slice.base() as usize - image.base() as usize) as u64;
+        (at, at + slice.size() as u64)
+    };
+    let tables = rela::ReadTables {
+        dynsym: dynsym.as_ref().map_or((0, 0), extent),
+        dynstr: dynstr.as_ref().map_or((0, 0), extent),
+        rela: rela.as_ref().map_or((0, 0), extent),
+        jmprel: jmprel.as_ref().map_or((0, 0), extent),
+    };
+    rela::tables_outside_window(&tables, window)?;
     let entries = table_entries(&rela).chain(table_entries(&jmprel));
     // `None`: a library's image is written contiguously, with no fill-page edge.
     rela::validate(entries, window, sym_count, None).map_err(|e| e.as_str())?;
@@ -489,7 +505,8 @@ fn dynsym_count_from_sections(
 /// table lives in, not the caller's frame.
 fn table_entries(table: &Option<KernelSlice>) -> impl Iterator<Item = toyos_elf::Rela> + '_ {
     // SAFETY: every `KernelSlice` here came from `ModuleImage::slice`'s bounds
-    // check; the `RELATIVE` pass writes a different range, so this never races.
+    // check, and `rela::tables_outside_window` refused any image whose tables
+    // meet the range the writes are bounded to.
     table
         .iter()
         .flat_map(|slice| RelaTable::new(unsafe { slice.as_slice() }).iter())

@@ -779,6 +779,50 @@ const NO_BAN_ALIAS: &str = "these trees may not count a reference by hand, and a
 /// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
 /// what is left of that gap.
 const COMMITTED_FILES: &[(&str, &str, &str)] = &[
+    // The ACPI tables QEMU 11.1.0 published to a `Profile::Headless` guest,
+    // read out of guest physical memory over the monitor. Firmware output, not
+    // third-party source: `toyos-acpi/tests/fixtures.rs` decodes them against
+    // what that boot's kernel logged.
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/apic.bin",
+        "441794f0b4bd74feb6f4fc1adf82048023a612ba676dc308c8173e449c0ccdbb",
+        "ours: QEMU's own MADT, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/dmar.bin",
+        "30df13af55b4b10bb3c2644d26480aa7ee302deaaf141a7a1ff2a3e053030290",
+        "ours: QEMU's own DMAR, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/facp.bin",
+        "410716dfb169eaba296ed3c336028843b3cf9fce6ca7c179bb242199cfec9d1a",
+        "ours: QEMU's own FADT, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/hpet.bin",
+        "8a486edc412b6e5f1b906ebf3fcfd6a647c8987d8ec437e4cbb808f34d7e2775",
+        "ours: QEMU's own HPET table, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/mcfg.bin",
+        "5274632ea7572e49d97249c05ada4b2f597ad0603ba801538ddef4bd91add994",
+        "ours: QEMU's own MCFG, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/rsdp.bin",
+        "8e3493811dfa7d164fc2076846908139df2f962eea2a5b2e45405949cbd82bf9",
+        "ours: QEMU's own RSDP, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/waet.bin",
+        "21cf099f063f6422353ea0c9100bbe47a97d7be87449c12f201a8a3bb49b7f4e",
+        "ours: QEMU's own WAET, captured by the commit that added toyos-acpi",
+    ),
+    (
+        "toyos-acpi/fixtures/qemu-11.1.0/xsdt.bin",
+        "701b192931e243a094a83f59f9b82d28204f1b3a0d11ac4d813e7769966427df",
+        "ours: QEMU's own XSDT, captured by the commit that added toyos-acpi",
+    ),
     (
         "assets/DOOM1.WAD",
         "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",

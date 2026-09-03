@@ -95,7 +95,7 @@ pub fn resolve_dlopen_relocs(lib: &LoadedLib, other_libs: &[LoadedLib]) {
         let name = symbols.name(sym as usize);
         match other_libs.iter().find_map(|other| other.resolve(name)) {
             Some(addr) => {
-                // SAFETY: see write_at's `# Safety`.
+                // SAFETY: rela::tables_outside_window refused any image whose tables meet the window these writes land in.
                 unsafe { lib.write_at::<u64>(offset, addr.raw()) };
                 resolved += 1;
             }
@@ -125,7 +125,7 @@ pub fn resolve_lib_bind_relocs(
             .copied()
             .or_else(|| libs.iter().find_map(|other| other.resolve(name)));
         match resolved {
-            // SAFETY: see write_at's `# Safety`.
+            // SAFETY: rela::tables_outside_window refused any image whose tables meet the window these writes land in.
             Some(addr) => unsafe { lib.write_at::<u64>(offset, addr.raw()) },
             None => log!("dynamic: lib unresolved symbol: {}", name),
         }

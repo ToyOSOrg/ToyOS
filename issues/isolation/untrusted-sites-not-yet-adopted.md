@@ -65,11 +65,6 @@ was a *mapping* rather than a value, no read-side type helped while it stood,
 and it was closed on 2026-08-23 by splitting the pool — which is why this
 section names one entry and not two.
 
-Also untouched and deliberately so:
-**`issues/isolation/kernelslice-over-user-memory.md`** — its own text says
-M2 (#159) closes the aliasing, and that converting the borrow first would
-describe a hazard M2 removes.
-
 ## What this type is not about
 
 It carries no *time* and no *rate*, and nothing in it reasons about how long
