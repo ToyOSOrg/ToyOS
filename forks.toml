@@ -116,57 +116,36 @@ why = "Adds the winit-toyos sibling crate — the model case for this tier."
 pr = "none — winit-toyos must be published before upstream can depend on it by version"
 followup = "winit-toyos is ToyOS's own code still living inside the fork; move it to the monorepo once published"
 owed = """
-`winit-toyos/Cargo.toml:21` says `window = "0.1"` and must say
-`toyos-window = "0.1"`: `window` is another crate on crates.io, which is why the
-monorepo renamed the package. No source edit goes with it — `toyos-window`'s lib
-target is still `window`, and `winit-toyos/src/window.rs:6` already spells
-`use window as toyos_window;`.
-
-**This edit and the monorepo's rename are one change across two repositories.**
-Until it is pushed, the monorepo cannot build at all: `[patch.crates-io] window`
-is gone, so `window = "0.1"` resolves to the unrelated registry crate and fails
-to compile. Cargo offers no bridge — a `[patch]` entry whose replacement carries
-a different package name is not applied (cargo 1.97.1: "patch `toyos-window
-v0.1.0` was not used in the crate graph"). Pushing it first is safe, because
-main's lockfiles pin a revision and do not follow a branch.
-
-`winit/Cargo.toml:101` also patches `raw-window-handle` from `Japabu/`, the
-account name this estate left; `ToyOSOrg/` is where it lives now and GitHub is
+`winit/Cargo.toml:101` patches `raw-window-handle` from `Japabu/`, the account
+name this estate left; `ToyOSOrg/` is where it lives now and GitHub is
 redirecting.
 """
 
 [softbuffer]
 upstream = "rust-windowing/softbuffer"
-base = "f0d20b9"
-delta = "+155/-5"
+base = "v0.4.8"
+base_note = "d871852. The `toyos` branch on master's f0d20b9 is left behind, unrewritten."
+branch = "toyos-0.4.8"
+delta = "+161/-5"
 tier = "sibling"
-why = "ToyOS surface backend. The -5 lines track unreleased raw-window-handle renames, not ToyOS work."
+why = "ToyOS surface backend. The -5 lines track the patched raw-window-handle's renames, not ToyOS work."
 pr = "none — sendable once toyos-window is on crates.io"
-owed = """
-`Cargo.toml:150`, under `[target.'cfg(target_os = "toyos")'.dependencies]`, says
-`window = "0.1"` and must say `toyos-window = "0.1"`, for winit's reason and
-with winit's consequence: the monorepo does not build until it is pushed. No
-source edit goes with it; `src/backends/toyos.rs` names `window::Window` and
-the lib target is still `window`. `Cargo.toml:153` patches
-`raw-window-handle` from `Japabu/` and should name `ToyOSOrg/`.
+release_note = """
+The backend was re-applied by hand rather than cherry-picked: v0.4.8's
+`BufferInterface` is `pixels`/`pixels_mut` over `&[u32]` with `resize` and
+`buffer_mut`, where master's is `Pixel`, `AlphaMode`, `configure` and
+`byte_stride`. The buffer is `width * height` with no padding, so present blits
+row by row through `window::Framebuffer::blit`, which clips to the window.
 """
-rebase = """
-OWED, and the owner ruled it: `base` is 62 upstream commits past the v0.4.8
-release (`rust-windowing/softbuffer` v0.4.8 = d871852, compared 2026-09-03), so
-the branch sits on master and its diff is not a release's. It is to be rebased
-onto v0.4.8. What that needs, measured against the two compares:
-  - The -5 lines go. All five are `Web`/`WebCanvas`/`WebOffscreenCanvas` ->
-    `WasmBindgen*` renames in src/backends/web.rs and src/lib.rs, which exist
-    only because the fork patches an unreleased raw-window-handle. At v0.4.8 the
-    released 0.6 names are the old ones, so the delta becomes purely additive.
-  - Four of the six files the delta touches — Cargo.toml, src/backend_dispatch.rs,
-    src/lib.rs, src/backends/web.rs — also changed in those 62 commits, so each
-    ToyOS hunk is re-applied against the tag's shape rather than cherry-picked.
-    src/backends/mod.rs (+2) and the new src/backends/toyos.rs (+136) did not
-    change upstream and move as they are.
-  - src/backends/toyos.rs names `raw_window_handle::ToyOsWindowHandle`, so the
-    `[patch.crates-io] raw-window-handle` entry stays until PR #223 merges and
-    ships in a release.
+rwh_patch = """
+The `[patch.crates-io] raw-window-handle` entry stays: the newest release is
+0.6.2 and it has no `ToyOs` variant, so `src/backends/toyos.rs` cannot name one
+without the fork. The five deleted lines stay with it — the patched fork is on
+raw-window-handle's master, where `RawWindowHandle::Web` and
+`RawDisplayHandle::Web` are gone, so v0.4.8's own match arms are a compile
+error against it (E0599, src/lib.rs:321 and :338, measured on the tag). They go
+when the raw-window-handle fork moves onto 0.6.2 the way this one moved, which
+is what that entry's `owed` now records.
 """
 
 [raw-window-handle]
@@ -178,6 +157,13 @@ why = "Pure addition: a ToyOS handle variant. Depends on nothing of ours, so it 
 pr = "https://github.com/rust-windowing/raw-window-handle/pull/223 (open, 2026-07-28)"
 pr_branch = "add-toyos-support"
 pr_note = "`toyos` was moved to c39042b so its tree is byte-identical to the PR head; the delta grew +69 → +109 by adding the doc examples and CHANGELOG entry every other platform module carries. Verified 2026-08-07: `git diff origin/toyos origin/add-toyos-support` is empty, and both are +109 off 1b85948."
+owed = """
+`base` is master, not a release, and it is the last fork that is. v0.6.2 is an
+ancestor of `toyos` (23 commits behind it), and those 23 carry the
+`Web*` → `WasmBindgen*` renames every consumer then has to follow — which is
+the whole of softbuffer's `-5`. A `toyos-0.6.2` branch beside `toyos` ends that,
+and the PR branch stays where the maintainer wants it.
+"""
 
 [getrandom]
 upstream = "rust-random/getrandom"

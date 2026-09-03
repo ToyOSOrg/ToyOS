@@ -110,8 +110,7 @@ impl DoomApp {
             .resize(NonZeroU32::new(size.width).unwrap(), NonZeroU32::new(size.height).unwrap())
             .expect("failed to resize surface");
 
-        let mut buffer = surface.next_buffer().expect("failed to get buffer");
-        let stride = buffer.byte_stride().get() as usize / 4;
+        let mut buffer = surface.buffer_mut().expect("failed to get buffer");
 
         unsafe {
             let src = DG_ScreenBuffer;
@@ -126,19 +125,19 @@ impl DoomApp {
                 map[dx] = dx * SRC_W / dst_w;
             }
 
-            let dst = buffer.pixels().as_mut_ptr() as *mut u32;
+            let dst = buffer.as_mut_ptr();
             let mut prev_sy = usize::MAX;
             for dy in 0..dst_h {
                 let sy = dy * SRC_H / dst_h;
-                let dst_row = dst.add(dy * stride);
+                let dst_row = dst.add(dy * dst_w);
 
                 if sy == prev_sy && dy > 0 {
-                    core::ptr::copy_nonoverlapping(dst.add((dy - 1) * stride), dst_row, dst_w);
+                    core::ptr::copy_nonoverlapping(dst.add((dy - 1) * dst_w), dst_row, dst_w);
                 } else {
                     let src_row = src.add(sy * SRC_W);
                     for dx in 0..dst_w {
-                        // DOOM's XRGB (0x00RRGGBB) → softbuffer pixel with alpha=0xFF
-                        *dst_row.add(dx) = *src_row.add(*map.get_unchecked(dx)) | 0xFF000000;
+                        // DOOM's XRGB is softbuffer's pixel unchanged.
+                        *dst_row.add(dx) = *src_row.add(*map.get_unchecked(dx));
                     }
                 }
                 prev_sy = sy;
