@@ -157,3 +157,14 @@ clients`. That is filed apart as `gate-a-suspend-structure-verdict-unread`.
 The exit code is fixed in `.github/workflows/gate-a.yml` (`set -o pipefail`, the
 idiom every other workflow in `.github/` already uses). Nothing about how a
 verdict is *reached* changed.
+
+## 2026-09-03: on a quiet dev host the tier passes, on both arms of an A/B
+
+`cargo test --test toyos-build -- --audio-gate=10`, six blocks alternating the
+IOMMU audio move and its base (0c805ecf), 1-minute load 1.3-5.1 across the 240
+runs and `qemu 1 toyos-build 1` on every one: every block `PASS` against the
+recorded sample, dropouts 0 of 120 on each arm, ceiling breaches 0 of 120, no
+instrument-broken iteration. The finding above was taken at loads of 7-19
+beside other guests and stands as measured; this is the quiet-host reading it
+said nobody had taken, on that tip rather than on the sample's commit, so the
+question of the sample's commit is still open.
