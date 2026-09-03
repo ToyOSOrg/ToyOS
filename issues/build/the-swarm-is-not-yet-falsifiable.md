@@ -227,7 +227,7 @@ issues/kernel/nothing-charges-kernel-memory-to-a-process.md
 issues/kernel/page-global-is-a-decision-nobody-has-made.md
 issues/kernel/scheduler-policy-behavior-has-no-quantified-suite.md
 issues/kernel/the-capability-end-state-is-twelve-answers.md
-issues/kernel/the-iommu-stops-at-translation.md
+issues/kernel/the-iommu-refuses-nothing-yet.md
 issues/kernel/the-kernel-still-parses-what-userland-writes.md
 ```
 

@@ -318,8 +318,11 @@ pub fn init(devices: &[PciDevice]) {
     }
 
     // Placed after the stream check so a streamless device allocates nothing; see [`Bound`].
-    let kernel_mem = DmaPool::alloc(KERNEL_DMA_BYTES).leak();
-    let shared = DmaPool::alloc(abi::SHARED_BYTES).leak();
+    let space = crate::iommu::DeviceSpace::create();
+    let kernel_mem = DmaPool::alloc_in(KERNEL_DMA_BYTES, space).leak();
+    let shared = DmaPool::alloc_in(abi::SHARED_BYTES, space).leak();
+    // Before the device is told any address, and after both pools' mappings.
+    space.attach(pci.bus, pci.dev, pci.func);
     // Exclusive: just allocated, not yet told to the device or mapped to userland.
     shared.zero();
 
@@ -360,6 +363,11 @@ pub fn init(devices: &[PciDevice]) {
     device.enable_queue(abi::TX_QUEUE);
     device.activate();
 
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_sound_foreign_dma() {
+        answer_into_a_foreign_page(&mut controlq, &device, shared);
+    }
+
     // DmaPool allocations are whole 2 MiB pages; ABI offsets are relative to that page.
     let dma_region = Region {
         phys: crate::DirectMap::from_phys(shared.host_phys()),
@@ -398,6 +406,36 @@ fn queue<'pool>(
     size: u16,
 ) -> Virtqueue<'pool> {
     Virtqueue::from_regions(&VirtqueueRegions::from_separate(desc, avail, used, size), size)
+}
+
+/// Submit one control command whose answer buffer is in another driver's pool,
+/// by its *physical* address, which this function's own domain does not map.
+/// The request is the zeroed page's four bytes, a code the device answers with
+/// one status word; the descriptors sit past the chain `build_chains` wrote.
+#[cfg(feature = "boot-actuators")]
+fn answer_into_a_foreign_page(
+    controlq: &mut Virtqueue<'static>,
+    device: &VirtioDevice,
+    shared: Dma<'static>,
+) {
+    const FOREIGN_DESC: usize = 2;
+    let foreign = super::nvme::FOREIGN_PROBE.load(Ordering::Relaxed);
+    assert!(foreign != 0, "virtio-sound: this machine staged no foreign pool to aim at");
+    let slot = controlq.initial_slots().swap_remove(FOREIGN_DESC);
+    controlq.submit(
+        slot,
+        &[
+            (shared.device_addr() + abi::OFF_CTRL_REQ as u64, 4, BufDir::Readable),
+            (foreign, 8, BufDir::Writable),
+        ],
+        device.notify_mmio(),
+        device.notify_off_multiplier(),
+        abi::CONTROL_QUEUE,
+    );
+    log!(
+        "virtio-sound: a control answer aimed at {foreign:#x}, inside another driver's pool \
+         (actuator)"
+    );
 }
 
 /// Builds every chain once; after this no descriptor is ever written again — the
