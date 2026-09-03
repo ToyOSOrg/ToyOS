@@ -58,12 +58,6 @@ changes.
   (PASS). The absolute figure moved 277→619 ms across three runs of one boot
   with no code change, so what the allowance is being asked to absorb is the
   host, and a serial slot inside one suite does not buy a quiet one.
-- **`usb_transport_break`** — now `Sched::Serial`. The cause written here was
-  wrong and the correction is in `issues/hardware/`, *a Bulk-Only Reset that raced the transfer
-  it was recovering from*: the second line is the **device** stalling the next
-  command block, on an endpoint the recovery found Running and not halted, and
-  it was a driver defect that lost the caller's write rather than a count of how
-  much of the host the guest had. Closed.
 - **`desktop_typing_damage`** — `nothing typed at the terminal window reached a
   shell`. `shell_answers` typed ten times with a flat two seconds between, which
   is a twenty-second ceiling on a desktop coming up; the retry window is now
@@ -227,25 +221,6 @@ changes.
   attributes and two pairs of parentheses that spell out the precedence Rust
   already applied (`+` and `*` bind tighter than `|`), so no instruction in that
   driver moved. Still `Sched::Parallel`.
-- **`diskless_boot`** — added 2026-08-19, one full `cargo test` on
-  `wt/toyos-i8042deep`, whose whole delta is host-side harness code
-  (`tests/toyos.rs`, `src/redlist.rs`) and no kernel file at all. Twelve wide
-  with `toyos-spawnrule`'s suite holding guest slots throughout, named in that
-  run's own `[host-slots]` lines. `[qemu] QEMU died before ===READY=== (status:
-  Ok(ExitStatus(unix_wait_status(0))))` — **QEMU exited zero**, so this is
-  neither a guest that panicked nor a wall-clock guard reporting the content it
-  was going to assert; it is the process going away cleanly before the guest was
-  ready, which nothing here explains. 7 s under load, `ALONE: GREEN` in 3 s, and
-  `cargo run -- --known-red diskless_boot` answered `NOT ON THE LIST`. Not
-  investigated. **Retired 2026-08-22**: under `-no-reboot` a status-0 exit before
-  the marker is a guest that reset itself, the silent death of the direction-flag
-  class PR #202 closed — the redlist row carries the retirement.
-- **`nvme_large_device`** — same run, same session, and **its mechanism was not
-  this file's**: a machine-wide `KERNEL PANIC: execute unmapped address at 0x1b`
-  in ring 0 on a `spawn` syscall — the console `metal_sim_input` above owes,
-  paid by a different name. That was the stolen-loaded-context defect, since
-  diagnosed and fixed, so this bullet is closed: the red was the panic and
-  `nvme_large_device` was only the workload it interrupted. `ALONE: GREEN`.
 - **`screen_console_shell`** — added 2026-08-19, **1 of 2** full `cargo test`
   runs on `wt/toyos-spawnrule`, 1.23x width with another worktree's suite on the
   host. `typed \`echo zqjxk\` at the prompt and no row of the panel is its
@@ -301,13 +276,6 @@ changes.
   against an absolute, which is the first of the two legitimate fix shapes below
   and is the one thing this test already has both samples for. Still
   `Sched::Parallel`, not investigated further.
-
-- **`metal_sim_window_caps`** and **`null_sink_shipped_client`** — added
-  2026-08-25. Both carried the same two `tlb: cpu N has not flushed for
-  generation …` lines, naming the pair of initiators two CPUs shooting down
-  at once — a mutual wait, not a bound, fixed in `kernel/src/shootdown.rs`
-  and gated by `an_initiator_answers_while_it_waits`. Measured 2026-08-07 on
-  `wt/toyos-boot`, before the fix; not reproduced since.
 
 - **`console_locale_detect`** — added 2026-08-20, first push-triggered `main`
   sighting: `ci` run `32314166262`, `guest (9)`, headSha `eba06ad6`, found

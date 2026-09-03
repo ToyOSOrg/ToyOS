@@ -120,6 +120,13 @@ runs carry main's `d44b4978`, so they are not the same tree as the first three â
 which is why the claim here is about the instrument's spread and not about any
 tree.)
 
+**The mechanism, measured by bundle 16 on 2026-09-03**: `sysret_ss_reload`'s
+probe line (`sysret-ss: reloaded`) lands BEFORE `===READY===`, so `boot_log()`
+already holds it and `drain_until`'s predicate can only time out â€” the ceiling
+(10 s scaled by width and host speed) is spent on every run: 334, 452, 388,
+352, 433 s across five tiers. The fix is the test's (probe after READY, or
+check `boot_log` first); this record is tooling.
+
 So a taker needs, in order: the build clock keyed by config rather than by
 thread; a committed per-config profile that only `Shard::keep` reads, merged the
 way `cargo run -- --merge-durations` merges the test profile; and **two

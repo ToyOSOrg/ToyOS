@@ -19,10 +19,7 @@ sharing. Beside `target/`, a worktree also holds `kernel/target` 318 MB,
 
 ## One shared `CARGO_TARGET_DIR` is not the answer: measured, it silently swaps branches
 
-The first draft of this entry proposed `<primary>/target` for every host-workspace
-member, on the premise that "cargo does not key artifacts on the worktree path,
-fingerprints are content based, so even the workspace-local crates are reused
-when the source matches". **Half of that is true and it is the wrong half.**
+**Half of that is true and it is the wrong half.**
 Cargo indeed does not key on the path — and it does not compare content either.
 Freshness for a path package is *mtime*, so a checkout whose sources are merely
 *older* than another checkout's build is declared fresh and never looked at.

@@ -78,14 +78,3 @@ What is open:
   portable device — "on many modern laptops ATKBD_CMD_GETID may cause problems"
   — and the T14 is one. Sending a command Linux avoids on this exact machine
   class to shore up an inference is the wrong trade.
-
-- PCID + INVPCID codepaths untested on real hardware — QEMU TCG supports
-  neither. Both are CPUID-gated, so TCG falls back to a CR3 reload. Needs KVM or
-  bare metal.
-- TLB shootdowns still IPI all CPUs for a full flush. Per-page targeted
-  shootdowns not implemented.
-- The LAPIC timer uses one-shot mode; it should use TSC deadline mode
-  (`IA32_TSC_DEADLINE` MSR) for precise absolute-time wakeups. The TSC is already
-  calibrated for `nanos_since_boot()`.
-
----

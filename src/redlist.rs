@@ -352,7 +352,7 @@ pub const KNOWN_RED: &[Red] = &[
         what: "the transport broke 2 times; the injection is armed once per boot, so anything \
                else is a break this test did not stage",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
-        source: "issues/hardware/eleven-names-red-on-ci.md",
+        source: "issues/hardware/xhci-flap-wedges-under-kvm.md",
         measured: "2026-08-08",
     },
     // ---------------------------------------------------------------------
@@ -1622,7 +1622,7 @@ pub const KNOWN_RED: &[Red] = &[
                stalled five seconds on `tlb: cpu N has not flushed for generation …`",
         evidence: "two `--land` gates on `wt/toyos-boot` and five A/B runs against `main` at \
                    6d11938, one session",
-        source: "issues/build/parallel-tests-red-under-other-suites.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-07",
     },
     Red {
@@ -1633,7 +1633,7 @@ pub const KNOWN_RED: &[Red] = &[
         what: "FAIL 10 s in the wide phase, PASS 4 s alone on the branch and 5 s alone on `main`, \
                with the same two `tlb:` lines in the capture",
         evidence: "two `--land` gates on `wt/toyos-boot`, one session",
-        source: "issues/build/parallel-tests-red-under-other-suites.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-07",
     },
     // ---------------------------------------------------------------------
@@ -2781,7 +2781,7 @@ pub const KNOWN_RED: &[Red] = &[
                the guest was ready, which nothing in the register explains. 7 s under load \
                against 3 s alone; `ALONE: GREEN`. Not investigated",
         evidence: "the same run as this session's `nvme_large_device` row",
-        source: "issues/build/parallel-tests-red-under-other-suites.md",
+        source: "tests/toyos.rs",
         measured: "2026-08-19",
     },
     // ---------------------------------------------------------------------
@@ -3194,6 +3194,35 @@ pub const KNOWN_RED: &[Red] = &[
                    `563 cycles … over 286777`. The wait is built on this branch and has no \
                    hosted run yet, so this stands until one is green. \
                    issues/build/syscall-cost-reads-the-exit-line-off-a-capture-that-can-close-first.md",
+        source: "tests/toyos.rs",
+        measured: "2026-09-03",
+    },
+    Red {
+        test: "sched_check_build",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "85 passes … a 90th percentile needs at least 100 samples behind it and this \
+               has 85, so the gate would be reading its own largest sample",
+        evidence: "bundle 16's fifth full fast tier on w5b16-wedge, 2026-09-03, `ALONE \
+                   sched_check_build: GREEN, and it was alone both times`; the three retired \
+                   rows above for this name are the same loaded-host family",
+        source: "tests/toyos.rs",
+        measured: "2026-09-03",
+    },
+    Red {
+        test: "leak_rollback_selftest",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "leak-selftest: fat-reopen skipped, create failed: WouldBlock. A `create` \
+               answering `WouldBlock` is the shape \
+               issues/kernel/ftruncate-answers-wouldblock-and-nothing-retries-it.md records \
+               for `ftruncate` — a sibling site, not this one",
+        evidence: "bundle 13's full fast tier on w5b13-gop-mode at 2d9ebb5c, 2026-09-03, \
+                   303/304 in 507.6 s beside other worktrees' guests, `ALONE \
+                   leak_rollback_selftest: GREEN`; the diff carries no kernel file; the name \
+                   arrived on main this cycle (b1ed4c54)",
         source: "tests/toyos.rs",
         measured: "2026-09-03",
     },
