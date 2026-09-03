@@ -1195,6 +1195,17 @@ pub const RELEGATED: &[Relegated] = &[
                  declared exception, and the NIC declining the bit and losing the \
                  device. Three boots: 17,259 ms on the hosted shard.",
     },
+    Relegated {
+        test: "screen_gop_firmware_mode",
+        ci_ms: 12_624,
+        why: Why::Cost,
+        guards: "What still runs per pull request: `screen_console_clear` asserts the 8-pixel \
+                 strip below the last cell row that only the declared 1920x1080 panel has, so a \
+                 bootloader that chose a mode again reds on every pull request. What only this \
+                 name holds: the kernel's GOP line against QEMU's own scanout geometry on two \
+                 machines with different panels, plus stride and pixel format. Two boots: \
+                 12,624 ms on the hosted shard, over `FAST_CEILING_MS`.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own

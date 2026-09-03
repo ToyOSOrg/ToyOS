@@ -407,7 +407,7 @@ const AUDIO_SMP: &[u32] = &[1, 8];
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_decoder", Sched::Parallel, Tier::Fast),
-    ("screen_gop_firmware_mode", Sched::Parallel, Tier::Fast),
+    ("screen_gop_firmware_mode", Sched::Parallel, Tier::Nightly),
     // `thread::sleep(5 s)` is the measurement, not a ceiling: the assertion is
     // literally that the log is still on the panel five seconds after the boot
     // finished, so a 2x slower machine changes nothing about the wait but the
