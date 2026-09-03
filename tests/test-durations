@@ -304,6 +304,7 @@ screen_diag_boot 7330 shards=12
 screen_early_panic 4441 shards=12
 screen_fatal_halt 4970 shards=12
 screen_fatal_halt_composited 6908 shards=12
+screen_gop_firmware_mode 12624 shards=12
 screen_i8042_health 4495 shards=12
 screen_late_panic 3926 shards=12
 screen_log_absent 1823 shards=12
