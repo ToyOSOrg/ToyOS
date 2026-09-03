@@ -370,11 +370,13 @@ jobs:
       # the one it pins, and it moves to whatever toolchain this tree's ABI
       # belongs to.
       #
-      # A second release and not a copy of the asset: an asset belongs to one
-      # release and GitHub can neither share nor move one, so the alias carries
-      # the manifest — a few hundred bytes — and its notes name the tag the
-      # 401 MiB tarball is on. Never on a `pull_request`, whose head is
-      # somebody's branch and not what a consumer should be handed.
+      # A second release and not a copy of the asset: GitHub's API hangs an
+      # asset off one release id, so the alternative was re-uploading 401 MiB on
+      # every landing. The alias carries the manifest instead — a few hundred
+      # bytes — and its notes name the tag the tarball is on. `create` refuses a
+      # tag that exists, which is what `edit` plus a clobbering upload is for.
+      # Never on a `pull_request`, whose head is somebody's branch and not what
+      # a consumer should be handed.
       - name: sdk alias
         if: github.event_name != 'pull_request'
         env:
