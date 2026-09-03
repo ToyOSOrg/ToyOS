@@ -1458,14 +1458,12 @@ impl Virtio {
 struct Shape {
     /// `-vga` mode. "none" leaves firmware with no GOP to publish.
     vga: &'static str,
-    /// Video memory, which is what decides the panel: OVMF offers every mode
-    /// that fits in it and the bootloader takes the one with the most pixels.
-    /// `None` is QEMU's default 16 MiB, whose largest mode is 2048x2048 --- a
-    /// panel that is a whole number of glyph rows tall, which no real one has
-    /// to be. Declared rather than defaulted because the panel's *size* is a
-    /// shape dimension exactly as a disk's is, and the tests that read pixels
-    /// were all blind to the remainder until one profile had one.
-    vgamem_mb: Option<u32>,
+    /// The resolution this display's EDID advertises, which decides the panel:
+    /// firmware sets that mode and the bootloader inherits it. `None` is
+    /// QEMU's own default EDID, [`DEFAULT_PANEL`]. Declared because the panel's
+    /// *size* is a shape dimension exactly as a disk's is, and the tests that
+    /// read pixels were all blind to the remainder until one profile had one.
+    panel: Option<(u32, u32)>,
     /// A display adapter of its own, beside `vga`. `None` is firmware's GOP,
     /// which cannot change mode once boot services have exited — so there
     /// `SYS_GPU_SET_RESOLUTION` answers `NotSupported` and everything past the
@@ -1616,7 +1614,7 @@ impl Profile {
         match self {
             Self::Headless => Shape {
                 vga: "none",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Present,
                 xhci: &[XHCI_DEFAULT],
@@ -1630,7 +1628,7 @@ impl Profile {
             },
             Self::VirtioNetNoMsix => Shape {
                 vga: "none",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::NicWithoutMsix,
                 xhci: &[XHCI_DEFAULT],
@@ -1644,7 +1642,7 @@ impl Profile {
             },
             Self::Gop => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Present,
                 xhci: &[XHCI_DEFAULT],
@@ -1660,7 +1658,7 @@ impl Profile {
                 // No VGA at all: firmware then publishes no GOP, and the one
                 // display the guest has is the one whose mode it can set.
                 vga: "none",
-                vgamem_mb: None,
+                panel: None,
                 gpu: Some("virtio-gpu-pci"),
                 virtio: Virtio::Present,
                 xhci: &[XHCI_DEFAULT],
@@ -1674,7 +1672,7 @@ impl Profile {
             },
             Self::Diskless => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1690,14 +1688,11 @@ impl Profile {
             },
             Self::Metal => Shape {
                 vga: "std",
-                // The T14's panel. 1920x1080x4 is 8,294,400 bytes, so 8 MiB
-                // admits it and excludes every mode with more pixels ---
-                // 1920x1200 and 2048x1536 both need more, and 1600x1200 has
-                // fewer pixels, so this is the one the bootloader picks. It
-                // gives 240x67 cells with 8 pixels left over at the bottom,
-                // which is the geometry the machine actually has and the one
-                // the 2048x2048 default could not express.
-                vgamem_mb: Some(8),
+                // The T14's panel, advertised the way the laptop's is: 240x67
+                // cells with 8 pixels left over at the bottom, which is the
+                // geometry the machine actually has and the one no default
+                // expresses.
+                panel: Some((1920, 1080)),
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1711,7 +1706,7 @@ impl Profile {
             },
             Self::MetalNoUsb => Shape {
                 vga: "none",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[],
@@ -1729,7 +1724,7 @@ impl Profile {
             // driver has to walk past it exactly as it walks past the stick.
             Self::MetalUsb => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_WIDE],
@@ -1749,7 +1744,7 @@ impl Profile {
             },
             Self::MetalDisk => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1763,7 +1758,7 @@ impl Profile {
             },
             Self::NvmeWideSector => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1777,7 +1772,7 @@ impl Profile {
             },
             Self::UsbDisk => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1791,7 +1786,7 @@ impl Profile {
             },
             Self::UsbDisk4k => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1805,7 +1800,7 @@ impl Profile {
             },
             Self::UsbDiskHuge => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1819,7 +1814,7 @@ impl Profile {
             },
             Self::UsbDiskRefusedFirst => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1833,7 +1828,7 @@ impl Profile {
             },
             Self::UsbDiskReadOnly => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1847,7 +1842,7 @@ impl Profile {
             },
             Self::UsbDiskCrowd => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1867,7 +1862,7 @@ impl Profile {
             // controller that is not the first, which nothing else stages.
             Self::MetalFullSpeed => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1881,7 +1876,7 @@ impl Profile {
             },
             Self::MetalXhciSecond => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
@@ -1901,7 +1896,7 @@ impl Profile {
             // single button-merge entry.
             Self::MetalXhciBoth => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
@@ -1931,7 +1926,7 @@ impl Profile {
             // one controller and passed with MSI deliberately left disabled.
             Self::MetalXhciMsi => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_NO_IRQ_FIRST, XHCI_MSI_ONLY],
@@ -1948,7 +1943,7 @@ impl Profile {
             // the driver has a device it would otherwise bind and announce.
             Self::MetalXhciNoIrq => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_NO_IRQ_SECOND],
@@ -1962,7 +1957,7 @@ impl Profile {
             },
             Self::MetalHotplug => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
@@ -1979,7 +1974,7 @@ impl Profile {
             // and nothing else on the machine.
             Self::NoIommu => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -1993,7 +1988,7 @@ impl Profile {
             },
             Self::IommuNarrow => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -2007,7 +2002,7 @@ impl Profile {
             },
             Self::IommuNoIntremap => Shape {
                 vga: "std",
-                vgamem_mb: None,
+                panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_DEFAULT],
@@ -2054,7 +2049,19 @@ impl Profile {
     pub fn usb_disk(self) -> Option<(u64, u32)> {
         self.usb_disks().first().map(|d| (d.bytes, d.lba_bytes))
     }
+
+    /// The panel this machine's firmware sets, and therefore the geometry the
+    /// kernel is handed; `None` where the machine has no VGA adapter at all.
+    /// A test reading pixels asks the machine here rather than the guest.
+    pub fn panel(self) -> Option<(u32, u32)> {
+        let shape = self.shape();
+        (shape.vga == "std").then(|| shape.panel.unwrap_or(DEFAULT_PANEL))
+    }
 }
+
+/// What QEMU's stdvga advertises with no `xres`/`yres` of its own — measured
+/// off a boot, not read off a default.
+pub const DEFAULT_PANEL: (u32, u32) = (1280, 800);
 
 pub struct BootOptions {
     pub gdb_stub: bool,
@@ -3691,8 +3698,18 @@ fn qemu_command(
         .arg("-display")
         .arg("none")
         .arg("-no-reboot");
-    if let Some(mb) = shape.vgamem_mb {
-        qemu.arg("-global").arg(format!("VGA.vgamem_mb={mb}"));
+    if let Some((w, h)) = shape.panel {
+        // A panel on a machine with no VGA adapter is a declaration nothing
+        // emits, which is the silently-inert field this suite refuses by name.
+        assert_eq!(
+            shape.vga, "std",
+            "a {w}x{h} panel declared on a machine whose `-vga` is {:?}",
+            shape.vga
+        );
+        qemu.arg("-global")
+            .arg(format!("VGA.xres={w}"))
+            .arg("-global")
+            .arg(format!("VGA.yres={h}"));
     }
 
     // Controller and namespace as two devices rather than QEMU's implicit

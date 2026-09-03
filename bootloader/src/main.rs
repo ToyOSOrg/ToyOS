@@ -408,31 +408,13 @@ struct GopInfo {
     pixel_format: u32,
 }
 
+/// The mode is the firmware's: `Mode->Info` is the mode it already set for the
+/// panel (UEFI 2.11 §12.9.2, "Current Mode of the graphics device"), and
+/// §12.9.2.2's `SetMode` is never called.
 fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let bs = system_table.boot_services();
     let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().ok()?;
     let mut gop = bs.open_protocol_exclusive::<GraphicsOutput>(gop_handle).ok()?;
-
-    // Find the highest-resolution mode with a supported pixel format
-    let mut best_mode = None;
-    let mut best_pixels = 0usize;
-    for mode in gop.modes(bs) {
-        let info = mode.info();
-        match info.pixel_format() {
-            PixelFormat::Rgb | PixelFormat::Bgr => {}
-            _ => continue,
-        }
-        let (w, h) = info.resolution();
-        if w * h > best_pixels {
-            best_pixels = w * h;
-            best_mode = Some(mode);
-        }
-    }
-
-    if let Some(target) = best_mode {
-        println!("GOP: selecting best mode ({}x{})", target.info().resolution().0, target.info().resolution().1);
-        gop.set_mode(&target).expect("failed to set GOP mode");
-    }
 
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();
@@ -440,7 +422,12 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let pixel_format = match mode.pixel_format() {
         PixelFormat::Rgb => 0,
         PixelFormat::Bgr => 1,
-        _ => return None,
+        // Refused by name and not answered with another mode: the mode is not
+        // this loader's to pick, so there is nothing here to fall back to.
+        other => panic!(
+            "GOP: the firmware's mode is {width}x{height} {other:?}, and the kernel \
+             scans out RGB or BGR only"
+        ),
     };
 
     let mut fb = gop.frame_buffer();

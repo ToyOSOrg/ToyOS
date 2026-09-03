@@ -7,7 +7,7 @@ bcachefs/src/fs.rs 344 0
 bcachefs/src/lib.rs 21 0
 bcachefs/src/superblock.rs 45 0
 bcachefs/tests/integration.rs 116 0
-bootloader/src/main.rs 198 0
+bootloader/src/main.rs 202 0
 examples/imgstat.rs 16 0
 kernel-loom/src/lib.rs 154 0
 kernel-loom/tests/durability.rs 29 0
@@ -238,7 +238,7 @@ tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/qemu.rs 1632 11
+tests/common/qemu.rs 1634 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
@@ -384,7 +384,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5072 23
+tests/toyos.rs 5086 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 90 0
 toyos-abi/src/handle.rs 107 0
