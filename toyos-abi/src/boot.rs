@@ -107,17 +107,16 @@ const ROOT_PARAM: &str = "root=";
 
 /// What the boot parameter names ROOT, or `None` on a parameter that names none.
 ///
-/// The text is `bcachefs::FsUuid`'s, and it is compared against the *superblock*
-/// of each candidate partition rather than against any partition GUID: a role
-/// names a filesystem, and a filesystem may have members on more than one disk.
+/// `bcachefs::FsUuid`'s text, compared against each candidate partition's
+/// *superblock* and never against a partition GUID: a role names a filesystem,
+/// and a filesystem may have members on more than one disk.
 pub fn root_uuid(cmdline: &str) -> Option<&str> {
     cmdline.split(',').find_map(|token| token.strip_prefix(ROOT_PARAM))
 }
 
-/// Every token of the boot parameter that is not [`root_uuid`]'s.
-///
-/// One reading of the string, not two: a token this yields is one the actuator
-/// table has to declare, so a `root=` left in would panic a kernel that boots.
+/// Every token of the boot parameter that is not [`root_uuid`]'s. A token this
+/// yields is one the actuator table has to declare, so a `root=` left in would
+/// panic a kernel that boots.
 pub fn actuators(cmdline: &str) -> impl Iterator<Item = &str> {
     cmdline.split(',').filter(|t| !t.is_empty() && !t.starts_with(ROOT_PARAM))
 }
@@ -172,9 +171,8 @@ pub struct MemoryMapEntry {
 mod tests {
     use super::*;
 
-    /// The two readings partition the parameter: every token is one or the
-    /// other, and neither reading sees the other's. A `root=` reaching the
-    /// actuator table panics a kernel that would otherwise have booted.
+    /// Every token is one reading's or the other's, and neither sees the
+    /// other's: a `root=` reaching the actuator table panics a kernel.
     #[test]
     fn the_two_readings_of_a_boot_parameter_partition_it() {
         const ROOT: &str = "0123456789abcdef0123456789abcdef";
@@ -188,8 +186,7 @@ mod tests {
         assert_eq!(root_uuid(ARMED), Some(ROOT));
         assert!(actuators(ARMED).eq(["usb-flush-fails", "fat-boot-reads-fail"]));
 
-        // A machine given no root filesystem, and one given no parameter at
-        // all: neither is a token either reading invents.
+        // No root filesystem, and no parameter at all: neither reading invents.
         assert_eq!(root_uuid("usb-flush-fails"), None);
         assert!(actuators("usb-flush-fails").eq(["usb-flush-fails"]));
         assert_eq!(root_uuid(""), None);

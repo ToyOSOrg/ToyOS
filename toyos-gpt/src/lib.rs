@@ -237,12 +237,10 @@ pub fn locate(dev: &mut dyn Sectors, target: Guid) -> Result<Located, GptError> 
 
 /// Every partition on `dev` whose *type* GUID is `target`, in entry order.
 ///
-/// The same walk [`locate`] makes, up to and including the entry array's CRC,
+/// The same walk [`locate`] makes, up to and including the entry array's CRC
 /// and no further: a match here is a **candidate**, not a partition anything
-/// may read. It carries neither the range check nor the overlap check, because
-/// both are about one partition and this answers with a set — `locate` on a
-/// candidate's own [`Partition::unique_guid`] is what turns one into a
-/// partition that has passed every check this crate makes.
+/// may read. `locate` on a candidate's own [`Partition::unique_guid`] is what
+/// applies the range and overlap checks a set cannot carry.
 pub fn locate_type(
     dev: &mut dyn Sectors,
     target: Guid,
@@ -269,7 +267,6 @@ pub struct TypeScan {
     pub used_entries: u32,
 }
 
-/// The device's geometry, checked before either walk reads a table off it.
 struct Disk {
     lba_bytes: u32,
     lba_count: u64,
@@ -315,9 +312,8 @@ fn scan_type_at(
 
     let mut matched = 0u32;
     let mut listed = 0usize;
-    // Written during the stream and meaningless unless `walk_entries` returns
-    // `Ok`: the array's CRC is checked at the end of the walk, so an `Err`
-    // leaves the caller a `Result` it cannot take these out of.
+    // Meaningless unless `walk_entries` returns `Ok`: the array's CRC is
+    // checked at the end of the walk, and an `Err` hands the caller nothing.
     let used_entries = walk_entries(dev, &header, disk.lba_bytes, &mut |part| {
         if part.type_guid == target {
             matched += 1;
@@ -504,11 +500,10 @@ fn header_crc(lba1: &[u8], header_bytes: usize) -> u32 {
 /// Walk the entry array once, checking its CRC as we go, and show `visit`
 /// every entry that exists. Returns how many those were.
 ///
-/// **`Ok` is the only thing that licenses acting on what `visit` collected.**
-/// The array is streamed, so the CRC is not known until the last block has
-/// been through it; a caller that used its own state after an `Err` would make
-/// the checksum decorative — which is the shape of every "we validated it"
-/// that turns out not to have been load-bearing.
+/// **`Ok` is the only thing that licenses acting on what `visit` collected**:
+/// the array is streamed, so the CRC is not known until the last block has been
+/// through it, and a caller using its own state after an `Err` would make the
+/// checksum decorative.
 fn walk_entries(
     dev: &mut dyn Sectors,
     header: &Header,

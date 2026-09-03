@@ -40,15 +40,13 @@ const _: () = assert!(
 /// digits, and what a role's kernel argument names it by.
 ///
 /// Not a partition GUID and never mixed with one — a partition is where a
-/// filesystem's bytes are, and one filesystem may occupy several. Whoever
-/// formats the volume chooses these bytes; nothing here derives them.
+/// filesystem's bytes are, and one filesystem may occupy several.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FsUuid(pub [u8; 16]);
 
 impl FsUuid {
-    /// A filesystem no role names. What [`crate::Formatted::format`] leaves,
-    /// because naming one is a deliberate act and not a side effect of making
-    /// one.
+    /// A filesystem no role names, which is what [`crate::Formatted::format`]
+    /// leaves: naming one is a deliberate act, not a side effect of making one.
     pub const UNNAMED: Self = Self([0; 16]);
 
     /// The inverse of [`fmt::Display`]: 32 hex digits, either case, or `None`.

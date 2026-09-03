@@ -7,13 +7,10 @@ use bcachefs::{Formatted, FsUuid, VecBlockIO};
 use sha2::{Digest, Sha256};
 use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
 
-/// The image that goes on the ROOT partition, named by a UUID derived from its
-/// own contents.
-///
-/// **Derived, never drawn**: two builds of one tree have to agree on the name
-/// the kernel argument then carries, and a random UUID would make the image a
-/// different image on every build. The digest is over what this was given, so
-/// it names those files and those symlinks and nothing else.
+/// The image that goes on the ROOT partition, named by a UUID **derived, never
+/// drawn**: two builds of one tree have to agree on the name the kernel
+/// argument carries, and a random one would make the image a different image
+/// on every build.
 pub fn create_root_image(
     files: &[(String, Vec<u8>)],
     symlinks: &[(String, String)],
@@ -26,10 +23,9 @@ pub fn create_root_image(
     let btree_blocks = (total_entries / 30).max(2);
     let overhead = 64;
     let total_blocks = (1 + overhead + btree_blocks + data_blocks) * 11 / 10;
-    // Whole alignment units: the volume is a GPT partition now, and
-    // `Superblock::check` refuses a superblock whose block count is not its
-    // view's exactly — so a partitioner rounding the size up to the alignment
-    // would leave an image nothing can mount.
+    // Whole alignment units: `Superblock::check` refuses a superblock whose
+    // block count is not its view's exactly, so a partitioner rounding the
+    // size up to the alignment would leave an image nothing can mount.
     let total_blocks = align_up(total_blocks.max(64), PARTITION_ALIGN / 4096) as u64;
 
     let io = VecBlockIO::new(total_blocks);
@@ -55,10 +51,9 @@ pub fn create_root_image(
     fs.into_io().expect("write an in-memory image").into_vec()
 }
 
-/// A name for exactly this set of files and symlinks.
-///
-/// Lengths go into the digest beside the bytes, so no two entries can run
-/// together into an input a different split would also produce.
+/// A name for exactly this set of files and symlinks. Lengths go into the
+/// digest beside the bytes, so no two entries can run together into an input a
+/// different split would also produce.
 fn root_uuid(files: &[(String, Vec<u8>)], symlinks: &[(String, String)]) -> FsUuid {
     let mut hasher = Sha256::new();
     let mut field = |bytes: &[u8]| {
@@ -79,10 +74,9 @@ fn root_uuid(files: &[(String, Vec<u8>)], symlinks: &[(String, String)]) -> FsUu
     FsUuid(uuid)
 }
 
-/// The name the ROOT image `bytes` carries, read back out of its superblock.
-///
-/// The stamp and the kernel argument come from one place this way: the argument
-/// says what the image says, not what whoever assembled it meant to stamp.
+/// The name the ROOT image `bytes` carries, read back out of its superblock, so
+/// the kernel argument says what the image says rather than what whoever
+/// assembled it meant to stamp.
 pub fn root_uuid_of(bytes: &[u8]) -> FsUuid {
     let block = <[u8; 4096]>::try_from(&bytes[..4096])
         .expect("a bcachefs image is at least one block");
@@ -105,10 +99,9 @@ pub fn create_boot_image(
     // kernel. The kernel is given the partition by name; nothing anywhere goes
     // looking for one by type or by format.
     let log_guid = uuid::Uuid::new_v4();
-    // ROOT is the one exception, and by design: its *type* selects candidates
-    // and its superblock's UUID picks the one, because a release puts several
-    // ROOTs on one disk and the bootloader chooses between them by writing this
-    // argument.
+    // ROOT is the one exception: its *type* selects candidates and its
+    // superblock's UUID picks one, because a release puts several ROOTs on one
+    // disk and the bootloader chooses by writing this argument.
     let cmdline = cmdline_with_root(root_uuid_of(root_bytes), params);
     let esp_volume = create_esp_volume(kernel_bytes, bl_bytes, log_guid, &cmdline);
     let log_volume = create_log_volume();
@@ -653,8 +646,6 @@ impl toyos_gpt::Sectors for ImageSectors<'_> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Volume {
     Fat32,
-    /// A bcachefs image; judged by the crate's *reader*, which is not the code
-    /// that wrote it.
     Root,
 }
 
@@ -662,9 +653,9 @@ enum Volume {
 /// did not write it agree it is sound.
 ///
 /// `toyos-gpt` finds each partition by the unique GUID the table claims for it,
-/// then `toyos-fat32-check` judges a FAT volume's bytes against fatgen103 and
-/// `bcachefs`'s mount path judges ROOT's, so no writer defect is waved through
-/// by its own judge. A volume the table misplaces fails its format check on
+/// then `toyos-fat32-check` judges a FAT volume against fatgen103 and
+/// `bcachefs`'s mount path judges ROOT, so no writer defect is waved through by
+/// its own judge. A volume the table misplaces fails its format check on
 /// whatever it does land on, which is why the extents are not compared
 /// separately.
 fn certify(disk: &[u8], parts: &[(&str, toyos_gpt::Guid, Volume)]) -> Result<(), String> {
@@ -799,10 +790,8 @@ mod tests {
 
     /// And it is clean because it is right, not because it is empty: a
     /// `populate` that wrote nothing at all would satisfy the gate above.
-    ///
-    /// Exactly these and nothing else: the bootloader panics on a file it
-    /// looks for and does not find, and an unnamed file on the ESP is one it
-    /// pays for and nothing loads.
+    /// Exactly these and nothing else, because an unnamed file on the ESP is
+    /// one the volume pays for and nothing loads.
     #[test]
     fn the_esp_carries_what_the_bootloader_looks_for() {
         let mut esp = create_esp_volume(b"kernel", b"bootloader", uuid::Uuid::new_v4(), "");
@@ -887,18 +876,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **The independent oracle for ROOT.** Everything about the root
-    /// filesystem this build wrote, asked of the finished image by readers that
-    /// did not write it: `toyos-gpt` finds the partition by type where the
-    /// `gpt` crate placed it, `bcachefs`'s mount-and-read path lists what its
-    /// format-and-write path put there, and `toyos-fat32` reads the boot
-    /// parameter off the ESP that `fatfs` formatted.
+    /// **The independent oracle for ROOT**, asked of the finished image by
+    /// readers that did not write it: `toyos-gpt` finds the partition by type
+    /// where the `gpt` crate placed it, `bcachefs`'s mount-and-read path lists
+    /// what its format-and-write path put there, and `toyos-fat32` reads the
+    /// boot parameter off the ESP that `fatfs` formatted.
     ///
-    /// Every name, every size, every content hash and every symlink target,
-    /// against the list handed to [`create_root_image`] — a listing that merely
-    /// parsed would pass a much weaker claim — and then `root=` against the
-    /// superblock UUID the reader found, which is the whole of how a boot picks
-    /// its ROOT.
+    /// Every name, size, content hash and symlink target against the list
+    /// handed to [`create_root_image`] — a listing that merely parsed would
+    /// pass a far weaker claim — and `root=` against the superblock UUID the
+    /// reader found, which is the whole of how a boot picks its ROOT.
     #[test]
     fn the_root_partition_reads_back_as_the_files_the_build_put_in_it() {
         let files: Vec<(String, Vec<u8>)> = vec![
@@ -915,7 +902,7 @@ mod tests {
         let disk = create_boot_image(b"kernel", b"bootloader", &root_image, "");
 
         // Located by *type*, through the parser the kernel uses, at the offset
-        // the table gives — never at the offset the writer computed.
+        // the table gives — never at the one the writer computed.
         let mut out = [toyos_gpt::Partition {
             index: 0,
             type_guid: toyos_gpt::Guid::ZERO,
@@ -967,9 +954,9 @@ mod tests {
             assert_eq!(read.as_deref(), Some(target.as_str()));
         }
 
-        // And the kernel argument names *this* filesystem: the boot parameter
-        // comes off the ESP through the FAT driver, the UUID out of the
-        // superblock the mount above read.
+        // And the kernel argument names *this* filesystem: the parameter comes
+        // off the ESP through the FAT driver, the UUID out of the superblock
+        // the mount above read.
         let path = std::env::temp_dir()
             .join(format!("toyos-root-oracle-{}.img", std::process::id()));
         std::fs::write(&path, &disk).expect("stage the image");
