@@ -3156,6 +3156,27 @@ pub const KNOWN_RED: &[Red] = &[
         source: "tests/toyos.rs",
         measured: "2026-08-29",
     },
+    // The name has a second red mode, and the write-up that owned it described
+    // only the first: a 192 s liveness ceiling on an `smp: 2` guest. This is an
+    // assertion at 4 s, and nobody has a mechanism for it.
+    Red {
+        test: "launcher_refusals",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`launcher_refusals exited Some(101)` on the assertion, not on a ceiling: `16 \
+               more refused launches left more live objects behind: [(\"PipeWrite\", 0, 1), \
+               (\"Connection\", 0, 1)] … init is keeping the handles a refusal took`, and \
+               byte-identical on both occurrences",
+        evidence: "two whole-suite runs of `iommu-domains` on 2026-09-03, wide phase, beside \
+                   two other worktrees' suites: 303/304 in 586 s and 303/304 in 513 s, the \
+                   test red at 4 s and 5 s. `ALONE: GREEN` from the harness both times and \
+                   green again re-run by hand (3 s, 2 s); the same branch ran 304/304 twice. \
+                   The second red mode is written up in \
+                   `issues/build/parallel-tests-red-under-other-suites.md`",
+        source: "tests/toyos.rs",
+        measured: "2026-09-03",
+    },
 ];
 
 // ---------------------------------------------------------------------------
