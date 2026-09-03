@@ -7,11 +7,11 @@
 //! maps its whole region up front — so a workload of N faults costs N × 2 MiB
 //! of test image.
 //!
-//! **It prints and never asserts.** A threshold measured under TCG is
-//! meaningless — QEMU implements `FXSAVE` as a helper call and prices nothing
-//! like silicon — and one measured on metal drifts. The number is for a
-//! same-session A/B against another build of this tree, which is the only
-//! comparison that says anything.
+//! **No threshold, and the host reads the numbers instead.** A bound measured
+//! under TCG is meaningless — QEMU implements `FXSAVE` as a helper call and
+//! prices nothing like silicon — and one measured on metal drifts. The number
+//! is for a same-session A/B against another build of this tree; what the host
+//! refuses is a counter that did not move (`check_syscall_cost`).
 //!
 //! Reported as the minimum over repetitions rather than the mean: the minimum
 //! is the run with the least interference, and on a host running eleven other
