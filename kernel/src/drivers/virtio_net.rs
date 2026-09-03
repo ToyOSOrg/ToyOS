@@ -82,10 +82,9 @@ struct VirtioNic {
 }
 
 impl VirtioNic {
-    /// Where the device puts the next frame. The actuator points the first
-    /// buffer at another driver's pool by its *physical* address, which this
-    /// device's own domain does not map, so a unit really translating for it
-    /// blocks the write instead of letting it land.
+    /// Where the device puts the next frame. The actuator points the first buffer
+    /// at another driver's pool by its *physical* address, which this device's own
+    /// domain does not map, so a unit really translating for it blocks the write.
     fn rx_target(&self, buf_idx: usize) -> u64 {
         #[cfg(feature = "boot-actuators")]
         if buf_idx == 0 && crate::actuator::iommu_nic_foreign_dma() {
@@ -254,8 +253,8 @@ pub fn init(devices: &[PciDevice]) {
         }
     };
     log!("VirtIO net: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
-    // An address space holding these two pools and nothing else, so a
-    // descriptor this device is handed reaches its own buffers or faults.
+    // An address space holding these two pools and nothing else; attached before
+    // the device is told an address and after every mapping it gets.
     let space = DeviceSpace::create();
     // Leaked, not `static`: this NIC is never unbound, so the pages must outlive every scope.
     let kernel_mem = DmaPool::alloc_in(KERNEL_DMA_BYTES, space).leak();
@@ -263,8 +262,6 @@ pub fn init(devices: &[PciDevice]) {
     // Exclusive: allocated on the two lines above, nothing else holds a view.
     // Zeroed because these pages held other data before this allocation.
     shared.zero();
-    // Before the device is told an address, and after every mapping it gets:
-    // the identity domain is what it leaves behind.
     space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     let device = match VirtioDevice::init(&pci_dev, VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC) {
@@ -311,8 +308,8 @@ pub fn init(devices: &[PciDevice]) {
     });
     let tx_addr = shared.device_addr() + OFF_TX_BUF as u64;
 
-    // A claim maps physical pages into a process, so this is the one place the
-    // shared pool is named by where it is rather than by what the NIC calls it.
+    // A claim maps physical pages into a process: the one place the shared pool
+    // is named by where it is rather than by what the NIC calls it.
     let dma_region = Region {
         phys: crate::DirectMap::from_phys(shared.host_phys()),
         size: crate::mm::PAGE_2M,

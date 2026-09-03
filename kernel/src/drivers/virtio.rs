@@ -27,9 +27,9 @@ const STATUS_FEATURES_OK: u8 = 8;
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
 /// Virtio 1.2 §6: the device's buffer addresses are the platform's, so what
-/// translates a physical address for any other function translates this one's.
-/// A function never offered it is a function no unit sees, so every driver here
-/// accepts it and the negotiated set is logged for a gate to read back.
+/// translates any other function's translates this one's. A function never
+/// offered it is one no unit sees, so every driver accepts it and the negotiated
+/// set is logged for a gate to read back.
 pub const VIRTIO_F_ACCESS_PLATFORM: u64 = 1 << 33;
 
 pub const COMMON_DEVICE_FEATURE_SELECT: u64 = 0x00;
@@ -138,10 +138,9 @@ pub enum InitRefusal {
     Cap(MissingCap),
     /// It never acknowledged its reset: `DEVICE_STATUS` stayed non-zero.
     ResetUnanswered,
-    /// `FEATURES_OK` did not stick. Refused and not panicked: this is what a
-    /// device offered [`VIRTIO_F_ACCESS_PLATFORM`] answers a driver that
-    /// declined it, and a kernel that dies on a device's answer is one a device
-    /// can kill.
+    /// `FEATURES_OK` did not stick. Refused, not panicked: this is what a device
+    /// offered [`VIRTIO_F_ACCESS_PLATFORM`] answers a driver that declined it,
+    /// and a kernel that dies on a device's answer is one a device can kill.
     FeaturesRefused { offered: u64, status: u32 },
 }
 
@@ -185,9 +184,8 @@ fn reset_acknowledged(common: &Mmio, pci_dev: &PciDevice) -> bool {
     common.read_u32(COMMON_DEVICE_STATUS) == 0
 }
 
-/// Every driver's accepted set carries [`VIRTIO_F_ACCESS_PLATFORM`]; the
-/// actuator withholds it to stage a function no unit sees, sparing the console
-/// — the staged boot's own capture channel.
+/// Every driver's accepted set carries [`VIRTIO_F_ACCESS_PLATFORM`]; the actuator
+/// withholds it to stage a function no unit sees, sparing the console.
 fn platform_addressing(pci_dev: &PciDevice) -> u64 {
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::virtio_no_access_platform() && pci_dev.device_id() != 0x1043 {
@@ -477,7 +475,7 @@ impl<'pool> Virtqueue<'pool> {
     pub fn avail_addr(&self) -> u64 { self.avail.device_addr() }
     pub fn used_addr(&self) -> u64 { self.used.device_addr() }
 
-    /// The three rings themselves, for a caller reasoning about where they physically sit.
+    /// The rings themselves, for a caller reasoning about where they sit.
     pub fn rings(&self) -> [Dma<'pool>; 3] { [self.desc, self.avail, self.used] }
 
     /// Where in the notification region this queue's doorbell sits; meaningless before `setup_queue` runs.
