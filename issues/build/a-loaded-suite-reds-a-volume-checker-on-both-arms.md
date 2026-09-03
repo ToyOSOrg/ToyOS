@@ -105,3 +105,36 @@ same way, so this is a sighting and not a measurement. **It is not a both-arms
 pair for this name**: the volume checker reds on the branch arm only, and what
 the base arm produced is the wider *parallel-classification* red under a name
 that is not a volume checker at all. Two runs cannot tell the two apart.
+
+## A fifth name, on one run with no arm at all
+
+**2026-09-03, `w5b13-gop-mode` at `5551a98c`**, one `cargo test --test
+toyos-build -- --nightly` on this dev host while another worktree
+(`toyos-iommu2`) ran its own suite — the twelve guest slots were held by two
+processes throughout. `toybox_cp_volume` red, `ALONE … GREEN`:
+
+```
+  [toybox] staged 4194441 bytes and a 24611328-byte filler, 6291968 bytes free
+  [toybox] cp: flushing /log/cp-full.bin.8.part: out of memory
+FAIL toybox_cp_volume: cp left the log volume breaking the format:
+1 cluster(s) from 58952 are marked allocated and no directory entry reaches them
+before the boot the checker said:
+```
+
+Same sentence as `fat_backing_revoked` and `fs_dirs_durable` — one cluster
+allocated and unreachable on `/log`, found by `toyos-fat32-check` after the guest
+is gone — under a name none of the four entries above carried. The run's own
+line: `host: fastest boot 2175 ms against the reference 1320 ms — liveness
+ceilings paid at 1.65x width`. The re-run alone printed the same `cp: flushing
+… out of memory` and passed the checker.
+
+**No arm, so this decides nothing.** It is written down because
+`cargo run -- --known-red toybox_cp_volume` answers `NOT ON THE LIST`, and a
+landing that met this red had no record to read it against — the previous four
+names are not this one, and the index is what says so.
+
+One thing it adds that the four above do not: the guest's own `cp` reported
+`out of memory` mid-flush before the checker complained, so on this sighting the
+leak followed a *failed* write rather than a raced one. Whether that is the
+same mechanism seen from a fifth angle or a second mechanism is what the next
+measurement should separate.

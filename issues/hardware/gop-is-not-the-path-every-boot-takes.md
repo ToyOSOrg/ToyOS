@@ -61,6 +61,11 @@ Five of the six `boot_phase!` repaints land inside that window
 timestamp), so one repaint costs 21 ms at 2048x2048 and 7 ms at 1280x800 — a
 4.10x pixel ratio bought 3.1x, the rest being per-paint work that does not scale
 with the panel. The `-vga none` pair is the control: off the GOP path the two
-images are one millisecond apart. Every phase boundary also carries a `wbinvd`,
-which QEMU ignores entirely — on metal that is six full cache-hierarchy flushes
-on a machine that keeps running, and it is not measurable here.
+images are one millisecond apart.
+
+The sentence this replaces said each phase boundary also carries a `wbinvd` QEMU
+ignores, so metal would pay six cache-hierarchy flushes the measurement could not
+see. It stopped being true at `1134414e`, which made the scanout write-combining
+and left `flush_stores` — one `SFENCE`, `kernel/src/drivers/panic_console/mod.rs:944` —
+in its place; `grep -rn 'wbinvd' kernel/src/drivers/panic_console/` finds nothing.
+No unmeasured metal cost hides behind these numbers on that account.
