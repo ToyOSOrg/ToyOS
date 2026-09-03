@@ -310,7 +310,7 @@ pub const RELEGATED: &[Relegated] = &[
     },
     Relegated {
         test: "readdir_bound",
-        ci_ms: 8_578,
+        ci_ms: 19_823,
         why: Why::Cost,
         guards: "`read_dir` returning every entry or an error, never a short listing: a \
                  directory pushed past `vfs::MAX_LIST_ENTRIES` must be refused where 32,769 \
