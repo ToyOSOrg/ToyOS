@@ -125,8 +125,7 @@ pub trait BlockDevice: Send {
     fn flush(&mut self) -> BlockResult;
 }
 
-/// One physical device: its identity, its geometry, and the lock serialising
-/// its queue.
+/// One physical device, and the lock serialising its queue.
 struct Device {
     id: DeviceId,
     blocks: u64,
@@ -178,8 +177,7 @@ impl Handle {
         self.0.id
     }
 
-    /// The geometry the driver reported at registration; never re-asked, so a
-    /// partition's bound cannot move under a view that already passed it.
+    /// What the driver reported at registration; never re-asked, so a view's bound cannot move under it.
     pub fn block_count(&self) -> u64 {
         self.0.blocks
     }
@@ -208,9 +206,8 @@ impl BlockKey {
     }
 }
 
-/// One consumer's view of one span of a device, in whole [`BlockDevice`] blocks.
-/// Every block number crossing it is the view's own, so a read at
-/// `block_count()` is refused by name rather than served from past its end.
+/// One consumer's view of one span of a device, in whole [`BlockDevice`] blocks:
+/// a read at `block_count()` is refused by name, never served from past its end.
 #[derive(Clone)]
 pub struct Partition {
     handle: Handle,
@@ -225,8 +222,7 @@ impl Partition {
         Self { handle, first_block: 0, blocks }
     }
 
-    /// `blocks` blocks from `first_block`, or `None` when that span does not
-    /// fit on the device.
+    /// `blocks` blocks from `first_block`, or `None` when that span is off the device.
     pub fn of(handle: Handle, first_block: u64, blocks: u64) -> Option<Self> {
         let end = first_block.checked_add(blocks)?;
         (end <= handle.block_count()).then_some(Self { handle, first_block, blocks })
