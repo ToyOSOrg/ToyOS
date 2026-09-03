@@ -212,6 +212,13 @@ impl Image {
     fn locate(&mut self, target: Guid) -> Result<Located, GptError> {
         toyos_gpt::locate(self, target)
     }
+    fn locate_type(
+        &mut self,
+        target: Guid,
+        out: &mut [toyos_gpt::Partition],
+    ) -> Result<toyos_gpt::TypeScan, GptError> {
+        toyos_gpt::locate_type(self, target, out)
+    }
 }
 
 impl Sectors for Image {
@@ -266,6 +273,66 @@ fn each_guid_finds_its_own_entry() {
         let found = img.locate(g).expect("present");
         assert_eq!((found.partition.index, found.partition.first_lba, found.partition.last_lba), (index, first, last));
     }
+}
+
+/// The type scan's own case: the default table has three ESP-typed entries,
+/// so a scan that stopped at the first, or answered with every used entry,
+/// gets a different set than the one asserted.
+#[test]
+fn a_type_scan_lists_every_entry_of_that_type() {
+    let mut img = Builder::default().build();
+    let mut out = [toyos_gpt::Partition {
+        index: 0,
+        type_guid: Guid::ZERO,
+        unique_guid: Guid::ZERO,
+        first_lba: 0,
+        last_lba: 0,
+    }; 4];
+    let scan = img.locate_type(TYPE_ESP, &mut out).expect("the table parses");
+    assert_eq!((scan.matched, scan.listed, scan.used_entries), (3, 3, 4));
+    assert_eq!(scan.disk_guid, guid(0x5D));
+    let found: Vec<Guid> = out[..scan.listed].iter().map(|p| p.unique_guid).collect();
+    assert_eq!(found, vec![guid(0xA1), guid(0xC3), guid(0xD4)]);
+
+    // A type nothing carries is not an error; it is an empty set.
+    let none = img.locate_type(guid(0x77), &mut out).expect("the table parses");
+    assert_eq!((none.matched, none.listed), (0, 0));
+}
+
+/// A slice too small does not truncate silently: the count of matches is the
+/// table's, not the caller's, so the caller can tell it was not shown them all.
+#[test]
+fn a_type_scan_says_how_many_it_could_not_hand_back() {
+    let mut img = Builder::default().build();
+    let mut out = [toyos_gpt::Partition {
+        index: 0,
+        type_guid: Guid::ZERO,
+        unique_guid: Guid::ZERO,
+        first_lba: 0,
+        last_lba: 0,
+    }; 1];
+    let scan = img.locate_type(TYPE_ESP, &mut out).expect("the table parses");
+    assert_eq!((scan.matched, scan.listed), (3, 1));
+    assert_eq!(out[0].unique_guid, guid(0xA1));
+}
+
+/// The scan is held to the same CRC as the search: a damaged array yields no
+/// candidates at all, rather than the ones read before the checksum failed.
+#[test]
+fn a_type_scan_over_a_damaged_array_is_refused() {
+    let mut img = Builder::default().build();
+    *img.at(ARRAY_LBA, 3) ^= 0x01;
+    let mut out = [toyos_gpt::Partition {
+        index: 0,
+        type_guid: Guid::ZERO,
+        unique_guid: Guid::ZERO,
+        first_lba: 0,
+        last_lba: 0,
+    }; 4];
+    assert!(matches!(
+        img.locate_type(TYPE_ESP, &mut out),
+        Err(GptError::EntryArrayCrc { .. })
+    ));
 }
 
 #[test]

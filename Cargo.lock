@@ -1028,6 +1028,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "toml",
+ "toyos-abi",
  "toyos-cc",
  "toyos-fat32",
  "toyos-fat32-check",

@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use bcachefs::{BlockIO, BlockNum, Extent, SliceBlockIO};
+use bcachefs::Extent;
 use crate::block::{BlockError, BlockResult};
 use crate::page_cache;
 use crate::sync::Lock;
@@ -135,22 +135,27 @@ impl FileBacking for NvmeBacking {
     }
 }
 
-/// File backed by initrd memory (RAM). No PageCache, no disk I/O.
-pub struct InitrdBacking {
-    // Holds the whole image, not base+size, so an untrusted extent can be bounds-checked against it.
-    image: SliceBlockIO,
+/// File on a read-only volume, backed by a fixed extent list over the partition
+/// one page cache serves.
+///
+/// No revocation cell, unlike [`NvmeBacking`]: nothing can delete or truncate a
+/// file here, so the blocks a backing was opened over stay that file's for as
+/// long as it lives. A block outside the volume is refused by the view
+/// (`block::Partition::locate`), which is where every bound on a number the
+/// disk chose belongs.
+pub struct ReadOnlyBacking {
+    cache: Arc<page_cache::Cached>,
     extents: Vec<Extent>,
     size: u64,
 }
 
-impl InitrdBacking {
-    pub fn new(image: SliceBlockIO, extents: Vec<Extent>, size: u64) -> Self {
-        Self { image, extents, size }
+impl ReadOnlyBacking {
+    pub fn new(cache: Arc<page_cache::Cached>, extents: Vec<Extent>, size: u64) -> Self {
+        Self { cache, extents, size }
     }
 }
 
-impl FileBacking for InitrdBacking {
-    /// `Err` for a block the image does not reach; there is no device under an initrd to retry against.
+impl FileBacking for ReadOnlyBacking {
     fn read_page(&self, file_offset: u64, buf: &mut [u8; BLOCK_SIZE]) -> BlockResult {
         buf.fill(0);
         if file_offset >= self.size {
@@ -160,17 +165,15 @@ impl FileBacking for InitrdBacking {
         let Some(block) = offset_to_block(&self.extents, file_offset) else {
             return Ok(());
         };
-        // A block outside the image is corruption, not a hole: refuse it instead of faulting in zeros.
-        let Some(bytes) = self.image.block(BlockNum::new(block)) else {
-            log!(
-                "initrd: an extent names block {block}, which is not inside the \
-                 {}-block image it was read out of",
-                self.image.block_count()
-            );
-            return Err(BlockError::Device);
-        };
+        // Bypasses the block page cache; the file cache is the sole cache for file data.
+        let mut raw = [0u8; BLOCK_SIZE];
+        // `buf` is already zeroed, so a failed read returns a hole, not stale data.
+        if let Err(e) = self.cache.raw_read(block, &mut raw) {
+            log!("root: read of block {block} failed");
+            return Err(e);
+        }
         let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
-        buf[..valid].copy_from_slice(&bytes[..valid]);
+        buf[..valid].copy_from_slice(&raw[..valid]);
         Ok(())
     }
 

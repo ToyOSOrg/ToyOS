@@ -1,4 +1,4 @@
-use bcachefs::{Extent, Formatted, FsError, Mounted, ReadOnly, ReadWrite, VecBlockIO};
+use bcachefs::{Extent, Formatted, FsError, FsUuid, Mounted, ReadOnly, ReadWrite, VecBlockIO};
 
 // --- Basic read-only tests ---
 
@@ -1175,4 +1175,29 @@ fn a_refused_sync_stays_refused_through_the_filesystem() {
         Err(FsError::DeviceSync(bcachefs::DeviceError::Refused(_))) => {}
         other => panic!("expected DeviceSync(Refused), got {other:?}"),
     }
+}
+
+/// A name survives the trip to disk and back, and a volume nobody named comes
+/// back unnamed: the kernel selects ROOT by comparing these sixteen bytes to
+/// the one its boot parameter carries, so a name that did not persist would
+/// make every candidate look like every other.
+#[test]
+fn a_filesystems_name_round_trips_through_its_superblock() {
+    let named = FsUuid::parse("0123456789abcdef0123456789abcdef").expect("32 hex digits");
+    assert_eq!(named.to_string(), "0123456789abcdef0123456789abcdef");
+    assert_eq!(FsUuid::parse("0123456789ABCDEF0123456789ABCDEF"), Some(named));
+    for wrong in ["", "0123456789abcdef0123456789abcde", "0123456789abcdef0123456789abcdeg"] {
+        assert_eq!(FsUuid::parse(wrong), None, "{wrong:?} is not a filesystem name");
+    }
+
+    let mut fs = Formatted::format(VecBlockIO::new(128)).expect("format");
+    fs.create("bin/init", b"init-binary", 0).expect("create");
+    fs.set_uuid(named);
+    let raw = fs.into_io().expect("finish").into_vec();
+    let mounted =
+        Mounted::<_, ReadOnly>::open(VecBlockIO::from_vec(raw)).expect("open what was written");
+    assert_eq!(mounted.uuid(), named);
+
+    let unnamed = Formatted::format(VecBlockIO::new(128)).expect("format");
+    assert_eq!(unnamed.mount_readonly().uuid(), FsUuid::UNNAMED);
 }

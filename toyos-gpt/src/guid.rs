@@ -29,6 +29,23 @@ impl Guid {
         [0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B],
     );
 
+    /// `B350BC93-BB6A-4C5E-9589-A5C3CFD555FD` — the TOYOS-ROOT partition type.
+    ///
+    /// A *type*, so it selects candidates and never a filesystem: which ROOT a
+    /// boot mounts is decided by the UUID in the candidate's own superblock,
+    /// against the `root=` the kernel was given.
+    pub const TOYOS_ROOT: Self = Self::from_fields(
+        0xB350_BC93,
+        0xBB6A,
+        0x4C5E,
+        [0x95, 0x89, 0xA5, 0xC3, 0xCF, 0xD5, 0x55, 0xFD],
+    );
+
+    /// [`Guid::TOYOS_ROOT`]'s canonical text, for a host partition-table writer
+    /// that names a type by string. `toyos_root_text_is_the_type_guid` is what
+    /// holds the two spellings together.
+    pub const TOYOS_ROOT_TEXT: &'static str = "B350BC93-BB6A-4C5E-9589-A5C3CFD555FD";
+
     pub const fn from_fields(a: u32, b: u16, c: u16, d: [u8; 8]) -> Self {
         let a = a.to_le_bytes();
         let b = b.to_le_bytes();
@@ -87,6 +104,14 @@ mod tests {
 
         let text = heapless_format(Guid(ON_DISK));
         assert_eq!(&text[..], b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
+    }
+
+    /// The host writes the partition table by naming the type in text and the
+    /// kernel matches it as bytes; nothing else compares the two spellings.
+    #[test]
+    fn toyos_root_text_is_the_type_guid() {
+        let text = heapless_format(Guid::TOYOS_ROOT);
+        assert_eq!(&text[..], Guid::TOYOS_ROOT_TEXT.as_bytes());
     }
 
     #[test]

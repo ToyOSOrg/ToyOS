@@ -8,7 +8,7 @@ repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [dependencies]
 toyos-font = { path = "../toyos-font", version = "0.1.0" }
-toyos-abi = { path = "../../toyos-abi", version = "0.1.0" }
+toyos-abi = { path = "../../toyos-abi", version = "0.2.0" }
 toyos-keymap = { path = "../../toyos-keymap", version = "0.1.0" }
 toyos = { path = "../../toyos", version = "0.1.0" }
 
