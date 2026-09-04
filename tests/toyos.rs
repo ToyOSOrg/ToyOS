@@ -2269,6 +2269,11 @@ fn check_syscall_cost(result: &TestResult) -> bool {
     true
 }
 
+/// The name, formatted into every needle below rather than written beside a
+/// `test_rs_` literal: `suite_split` reads that spelling as a machine test
+/// *driving* the binary, and these only read console lines about it.
+const STORM: &str = "exit_wait_storm";
+
 /// The children `exit_wait_storm` spawns, mirrored from its `CHILDREN`.
 const STORM_CHILDREN: usize = 24;
 
@@ -2283,8 +2288,9 @@ const STORM_CALLS: [(u64, usize); 3] = [
 /// The parent is the *first* `spawn:` line, since every later one is a child of
 /// it; `spawned_pid` reads the last and would answer with a child.
 fn storm_parent(log: &str) -> Option<u32> {
+    let want = format!("/bin/test_rs_{STORM} ");
     log.lines()
-        .find(|l| l.contains("spawn: ") && l.contains("/bin/test_rs_exit_wait_storm "))?
+        .find(|l| l.contains("spawn: ") && l.contains(&want))?
         .split("pid=")
         .nth(1)?
         .split_whitespace()
@@ -2319,15 +2325,16 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     }
     let Some(parent) = storm_parent(&result.serial) else {
         eprintln!(
-            "FAIL rs::exit_wait_storm: no `spawn: /bin/test_rs_exit_wait_storm` line reached the \
-             capture, so nothing here says what the kernel saw{}",
+            "FAIL rs::{STORM}: no `spawn: /bin/test_rs_{STORM}` line reached the capture, so \
+             nothing here says what the kernel saw{}",
             kernel_account(result)
         );
         return false;
     };
+    let died = format!("exit: test_rs_{STORM} pid=");
     let mut codes: Vec<i32> = Vec::new();
     for line in result.serial.lines() {
-        let Some(rest) = line.split("exit: test_rs_exit_wait_storm pid=").nth(1) else {
+        let Some(rest) = line.split(died.as_str()).nth(1) else {
             continue;
         };
         let mut fields = rest.split_whitespace();
@@ -2345,7 +2352,7 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     let expected: Vec<i32> = (0..STORM_CHILDREN as i32).collect();
     if codes != expected {
         eprintln!(
-            "FAIL rs::exit_wait_storm: the kernel accounted children exiting with {codes:?}, \
+            "FAIL rs::{STORM}: the kernel accounted children exiting with {codes:?}, \
              against the {STORM_CHILDREN} the guest reports collecting\nstdout:\n{}{}",
             result.stdout,
             kernel_account(result)
@@ -2355,7 +2362,7 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     let want = accounting_of(parent);
     let Some(line) = result.serial.lines().find(|l| l.contains(want.as_str())) else {
         eprintln!(
-            "FAIL rs::exit_wait_storm: the kernel never accounted the parent — no `{want}` line \
+            "FAIL rs::{STORM}: the kernel never accounted the parent — no `{want}` line \
              reached the capture, so nothing here says which calls it made{}",
             kernel_account(result)
         );
@@ -2370,7 +2377,7 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
             .unwrap_or(0);
         if counted < least {
             eprintln!(
-                "FAIL rs::exit_wait_storm: the parent made {counted} call(s) of syscall {call} \
+                "FAIL rs::{STORM}: the parent made {counted} call(s) of syscall {call} \
                  and the storm is {least}\nstdout:\n{}{}",
                 result.stdout,
                 kernel_account(result)
