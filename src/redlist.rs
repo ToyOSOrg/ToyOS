@@ -3471,7 +3471,7 @@ pub const KNOWN_RED: &[Red] = &[
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 6),
         standing: Standing::Stands,
-        what: "`STALLED: waiting for the wizard to ask for a key under /bin/console — the \
+        what: "`STALLED: waiting for the wizard to ask for a key under /system/bin/console — the \
                console did not lend it the keyboard — it never stopped talking and never got \
                there`, **891 s**, and `ALONE: GREEN — it fails only beside other guests`. The \
                guest kept talking through the whole guard, so this is the input path stopping \
