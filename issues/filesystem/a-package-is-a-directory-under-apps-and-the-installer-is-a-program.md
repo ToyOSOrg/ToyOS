@@ -10,7 +10,7 @@ The milestone the owner set on 2026-09-03: download and install
 github.com/Japabu/gbae from its GitHub release and run it, in QEMU first,
 with no shortcut past what an ordinary OS target does. What this track
 rules is below; the five decisions still the owner's are in
-`issues/apps/five-package-decisions-are-the-owners.md`, each with the
+`issues/filesystem/five-package-decisions-are-the-owners.md`, each with the
 recommendation this track assumes until answered.
 
 ## What exists on the other side

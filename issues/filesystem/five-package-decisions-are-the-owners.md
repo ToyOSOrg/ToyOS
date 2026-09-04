@@ -6,7 +6,7 @@ opened: 2026-09-04
 
 # Five package decisions are the owner's, each with the orchestrator's recommendation
 
-`issues/apps/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`
+`issues/filesystem/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`
 assumes the recommendation in each. A one-line answer closes this file and
 moves into that one.
 
