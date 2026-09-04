@@ -3486,6 +3486,21 @@ pub const KNOWN_RED: &[Red] = &[
         measured: "2026-09-04",
     },
     Red {
+        test: "console_locale_detect",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "the row above's shape on the hosted shard: `STALLED: waiting for the wizard to ask \
+               for a key under /system/bin/console — the console did not lend it the keyboard — \
+               it never stopped talking and never got there`, **349 s**, then `ALONE: GREEN, and \
+               it was alone both times`. Not about the diff it appeared on: root filesystem PR 2b \
+               moves paths and touches no input path, and the same shape fired 1 of 6 on the loaded \
+               dev host the same day",
+        evidence: "pull-request `ci` run 33844151499, `guest (3)`, headSha fba3d88e, 2026-09-04",
+        source: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
+        measured: "2026-09-04",
+    },
+    Red {
         test: "doom_sound_flood",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 3),
