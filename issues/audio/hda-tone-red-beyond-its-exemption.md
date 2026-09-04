@@ -27,9 +27,9 @@ beside a comment listing "no mid-tone silence" among the things that red the run
 was filed for. `hda_tone` is `Tier::Nightly` for `Why::TimerAnchored`
 (`src/tiers.rs`), so a plain `cargo test` no longer runs it and a landing whose
 gate is `cargo test` no longer meets this red at all; and `src/redlist.rs`
-carries two rows for the name — one `Seen` on the dev host alone, sourced here,
-and one at 4 of 5 on CI — so an agent who does meet it is told whose it is
-rather than reading it as theirs.
+carries rows for the name — the dev-host-alone one sourced here retired on
+3 of 3 green alone on 2026-09-04, and one at 4 of 5 on CI — so an agent who
+does meet it is told whose it is rather than reading it as theirs.
 
 Neither touches the verdict, and the verdict was owed a fresh sample: every
 capture behind it had gone through QEMU's 48000→44100 resampler, since removed.
