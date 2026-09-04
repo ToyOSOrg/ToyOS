@@ -82,27 +82,15 @@ changes.
 - **`metal_sim_pointer_churn`** — observed once, on a host carrying three other
   suites *and* a `toyos-sched-sim` run. Not investigated. Still
   `Sched::Parallel`.
-- **`dump_nmi_probe`** — added 2026-08-07, and the odd one out: it is already
-  `Sched::Serial`, so it failed in the *serial tail* rather than the wide phase
-  and the harness therefore never re-ran it alone. Run alone on the same tree
-  moments later it passes in 23 s. `the NMI went unanswered too` is its
-  wall-clock verdict expiring on a host carrying three other worktrees' suites —
-  the `[host-slots]` lines in that run name all three. `4ad8875` made it serial
-  for exactly this reason, which shows what serialising buys and what it does
-  not: within one run the phase is quiet, across runs nothing but
-  `buildlock::guest_slot` spans worktrees and twelve slots is not one guest.
-  Nothing here should widen its millisecond.
-- **`blocked_dump`** — added 2026-08-07, `nothing typed at the terminal window
-  reached a shell`, `ALONE … GREEN` in 5 s. Same shape and same sentence as
-  `desktop_typing_damage` and `desktop_locale_detect`: its verdict is the dump's
-  content, but *reaching* the dump crosses a compositor, a terminal and a shell,
-  and that step is a wall-clock margin. Still `Sched::Parallel`.
-- **`screen_console_scroll`** — added 2026-08-07. `round 1: the guest never
-  printed CHURN-DONE 0 100`, **598 s** in the wide phase, `ALONE … GREEN`. The
-  landing gate it killed ran 778.9 s with four other `--land` processes on the
-  host, on a branch whose whole delta was two documentation lines. 598 s against
-  a phase that is ~45 s on a quiet host is the finding; the message is not.
-  Still `Sched::Parallel`.
+- **`dump_nmi_probe`** — retired 2026-09-04, green 3 of 3 beside a full fast
+  tier; `src/redlist.rs` carries the runs. `4ad8875` made it `Sched::Serial`,
+  which shows what serialising buys and what it does not: within one run the
+  phase is quiet, across runs nothing but `buildlock::guest_slot` spans
+  worktrees and twelve slots is not one guest.
+- **`blocked_dump`** — retired 2026-09-04, green 3 of 3 beside a full fast
+  tier; `src/redlist.rs` carries the runs.
+- **`screen_console_scroll`** — retired 2026-09-04, green 3 of 3 beside a full
+  fast tier; `src/redlist.rs` carries the runs.
 - **`hda_tone`** — added 2026-08-07, hours after the test itself landed. In a
   full run on a host carrying another worktree's suite: `2 mid-tone silences in
   the capture: total 2 [3p×1 4p×1]`, `dither 3.3%`, `phase-breaks 92`. Alone on
@@ -122,15 +110,10 @@ changes.
   could be the cause: the second is symmetric and lists what *main* changed since
   the branch last merged, which reads as the branch's own work and is not.
 
-- **`xhci_hid_break`** — added 2026-08-07, in a landing gate on a branch whose
-  delta since its own previous green gate was one documentation commit. `input
-  never came back: no pointer event moved by (2560, -1920); deltas seen:
-  [(256, 256), (256, 256)]`, `ALONE … GREEN`. The two deltas it did see are the
-  boot-time absolute tablet, so what went missing is the relative mouse's event
-  after the staged break — a wall-clock margin on the recovery path, not a
-  recovery that failed. It is one of the three longest jobs in the suite by
-  `longest_first`'s own profile, so it is dispatched early and runs beside
-  everything. Still `Sched::Parallel`.
+- **`xhci_hid_break`** — retired 2026-09-04, green 3 of 3 beside a full fast
+  tier; `src/redlist.rs` carries the runs. It is one of the three longest jobs
+  in the suite by `longest_first`'s own profile, so it is dispatched early and
+  runs beside everything.
 
 - **`handle_kill_policy`** — added 2026-08-17, **1 of 6** full `cargo test` runs
   in one session on `wt/toyos-suitecut`, whose whole delta is four test timeouts,
