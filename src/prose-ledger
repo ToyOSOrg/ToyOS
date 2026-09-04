@@ -208,7 +208,7 @@ src/durations.rs 370 4
 src/fingerprint.rs 18 0
 src/forkcheck.rs 176 1
 src/hostws.rs 187 2
-src/image.rs 299 1
+src/image.rs 264 0
 src/issuegate.rs 123 0
 src/kernelkeys.rs 56 0
 src/lib.rs 51 0
@@ -247,7 +247,7 @@ tests/common/qemu.rs 1651 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
-tests/common/storage.rs 118 0
+tests/common/storage.rs 109 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
 tests/common/volumes.rs 662 3
