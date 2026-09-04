@@ -136,7 +136,7 @@ fn rasterize_font(ttf_bytes: &[u8], cell_width: usize, cell_height: usize) -> Ve
     out
 }
 
-/// The pre-rasterized 8x16 font the initrd carries as
+/// The pre-rasterized 8x16 font ROOT carries as
 /// `/share/fonts/JetBrainsMono-Regular-8x16.font`, which `/bin/console` and
 /// `/bin/terminal` blit.
 ///
@@ -207,7 +207,7 @@ pub fn regen_panic_font(root: &Path) {
 /// **The image is a function of what the repository declares, not of what the
 /// directory happens to hold.** Sweeping the directory instead put
 /// `assets/.DS_Store` and an `assets/target/` some cargo invocation left behind
-/// into every shipped initrd — 16,368 bytes of it, measured off
+/// into every shipped image — 16,368 bytes of it, measured off
 /// `target/bootable.img` — so a fresh clone built a different image and opening
 /// the directory in Finder moved the image hash with no code change.
 ///
@@ -257,7 +257,7 @@ fn absentees(dir: &Path, declared: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
     declared.iter().map(|name| dir.join(name)).filter(|path| !path.exists()).collect()
 }
 
-/// An asset in the initrd, and the one program that opens it.
+/// An asset on ROOT, and the one program that opens it.
 ///
 /// **`assets = [..]` names a directory and sweeps it whole**, so a config that
 /// builds no reader for a file still shipped it: these two are 19.7 MB of the
@@ -266,11 +266,11 @@ fn absentees(dir: &Path, declared: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
 /// with no doom in it. Named here rather than per config, because which program
 /// opens a file is a property of the program and not of any one image, and a
 /// list repeated in five configs is a list that goes stale in four of them.
-/// The names are the initrd's, which [`collect`] lower-cases.
+/// The names are ROOT's, which [`collect`] lower-cases.
 /// `only_doom_opens_doom_s_assets` is what keeps the right-hand column true.
 const OPENED_BY: &[(&str, &str)] = &[("doom1.wad", "doom"), ("soundfont.sf2", "doom")];
 
-/// The initrd's files, for an image building exactly `programs`.
+/// ROOT's asset files, for an image building exactly `programs`.
 pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u8>)> {
     let mut files = vec![];
 
@@ -383,7 +383,7 @@ mod tests {
         }
     }
 
-    /// The initrd carries what the repository declares: git's index, and
+    /// ROOT carries what the repository declares: git's index, and
     /// nothing else.
     ///
     /// Against a repository this test builds, not against `assets/`: the two
@@ -397,7 +397,7 @@ mod tests {
     /// the image, which is how doom lost its music for a cycle with the whole
     /// suite green.
     #[test]
-    fn the_initrd_carries_what_the_repository_declares() {
+    fn root_carries_what_the_repository_declares() {
         let dir = std::env::temp_dir().join(format!("toyos-assets-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("icons")).expect("make the asset tree");
@@ -432,7 +432,7 @@ mod tests {
                 "share/icons/kept.svg".to_string(),
                 "share/music.sf2".to_string(),
             ]),
-            "the initrd's asset list is not what the repository says it is"
+            "ROOT's asset list is not what the repository says it is"
         );
 
         // And the other half: an asset git carries that this tree does not.

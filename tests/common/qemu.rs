@@ -1105,7 +1105,7 @@ pub enum Profile {
     /// No USB at all — no xHCI, so no boot stick — and no i8042 once the boot
     /// passes `i8042: false`: the one bootable shape on which no input source
     /// can ever exist. The boot volume rides a second NVMe controller, which
-    /// works because userland runs from the initrd.
+    /// works because userland runs off that same disk's ROOT partition.
     MetalNoUsb,
     /// The machine whose only disk is the internal one, with the boot image on
     /// it: no xHCI and so no boot stick, and no second namespace either. Every
@@ -1131,9 +1131,9 @@ pub enum Profile {
     /// size, and it was the one nobody had varied for storage: every profile
     /// gave the guest a disk, so nothing asked what the kernel does without
     /// one. The answer was `.expect("NVMe: no controller found")` at 0.08 s.
-    /// The bootloader reads the initrd through UEFI before ExitBootServices,
-    /// so a machine really can boot ToyOS with no NVMe -- and a controller
-    /// hidden behind a firmware setting looks exactly the same.
+    /// ROOT is on the USB stick here, so a machine really can boot ToyOS with
+    /// no NVMe -- and a controller hidden behind a firmware setting looks
+    /// exactly the same.
     Diskless,
     /// metal-sim with a namespace formatted in 8 KiB logical blocks.
     ///
@@ -1942,22 +1942,23 @@ impl Profile {
                 hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
             },
-            // The boot stick's controller is the one with no interrupt
-            // mechanism at all, so the driver refuses it and the machine does
-            // no USB storage I/O whatsoever. That is the load-bearing part of
-            // this shape, not decoration: `wait_transfer` drains the *whole*
-            // event ring and dispatches every HID report in it, so a keyboard
-            // sharing a controller with the boot stick delivers on the back of
-            // the ESP log's idle-loop writes whether or not its interrupt
-            // works. Measured — the first version of this profile put both on
-            // one controller and passed with MSI deliberately left disabled.
+            // The machine does no USB storage I/O whatsoever: an empty
+            // `storage_bus` puts the boot volume on NVMe, and the first
+            // controller has no interrupt mechanism, so the driver refuses it
+            // and never polls it. That is load-bearing, not decoration:
+            // `wait_transfer` drains the *whole* event ring and dispatches
+            // every HID report in it, so a keyboard on any polled controller
+            // delivers on the back of somebody else's transfer whether or not
+            // its own interrupt works. Measured — the first version of this
+            // profile put storage and HID on one controller and passed with
+            // MSI deliberately left disabled.
             Self::MetalXhciMsi => Shape {
                 vga: "std",
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
                 xhci: &[XHCI_NO_IRQ_FIRST, XHCI_MSI_ONLY],
-                storage_bus: "xhci.0",
+                storage_bus: "",
                 usb: &["usb-kbd,bus=xhci1.0", "usb-mouse,bus=xhci1.0"],
                 nvme_bytes: NVME_SMALL,
                 nvme_lba_bytes: NVME_LBA_DEFAULT,
@@ -2523,7 +2524,7 @@ fn push_user_half(line: &str, stdout: &mut String) {
 const END_MARKER: &str = "===TEST_END ";
 
 impl QemuInstance {
-    /// Build everything and boot QEMU with test binaries in the initrd.
+    /// Build everything and boot QEMU with test binaries on ROOT.
     /// `test_crate` is the path to the test crate (must contain a `system.toml`).
     pub fn boot(
         test_crate: &Path,
@@ -3646,6 +3647,12 @@ fn qemu_command(
         !shape.xhci.is_empty() || (shape.usb.is_empty() && shape.usb_disks.is_empty()),
         "a USB device needs a controller"
     );
+    // A data stick declared onto no bus is emitted with an empty `bus=`, which
+    // QEMU puts on whichever controller it likes.
+    assert!(
+        !shape.storage_bus.is_empty() || shape.usb_disks.is_empty(),
+        "a USB disk needs a bus to be on"
+    );
 
     // Ahead of every other `-device`: QEMU gives a PCI function the bypassing
     // address space unless the unit exists when the function is created, so a
@@ -3704,8 +3711,9 @@ fn qemu_command(
         }
     }
 
-    if shape.xhci.is_empty() {
-        // No controller to carry the stick: the boot volume rides its own NVMe controller.
+    // An empty `storage_bus` declares that storage is not USB here: the boot
+    // volume rides its own NVMe controller and every xHCI carries HID alone.
+    if shape.storage_bus.is_empty() {
         qemu.arg("-device")
             .arg("nvme,serial=bootdisk,id=nvmebootctl,bootindex=0")
             .arg("-device")

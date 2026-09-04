@@ -225,6 +225,57 @@ struct Header {
 /// between the two should do: refuse rather than pick, by construction,
 /// because this never reads both and chooses.
 pub fn locate(dev: &mut dyn Sectors, target: Guid) -> Result<Located, GptError> {
+    let disk = open_disk(dev)?;
+    match locate_at(dev, 1, target, &disk) {
+        Ok(located) => Ok(located),
+        Err(primary_err) if primary_err.primary_never_checked_out() => {
+            locate_at(dev, disk.lba_count - 1, target, &disk).or(Err(primary_err))
+        }
+        Err(primary_err) => Err(primary_err),
+    }
+}
+
+/// Every partition on `dev` whose *type* GUID is `target`, in entry order.
+///
+/// The same walk [`locate`] makes, up to and including the entry array's CRC
+/// and no further: a match here is a **candidate**, not a partition anything
+/// may read. `locate` on a candidate's own [`Partition::unique_guid`] is what
+/// applies the range and overlap checks a set cannot carry.
+pub fn locate_type(
+    dev: &mut dyn Sectors,
+    target: Guid,
+    out: &mut [Partition],
+) -> Result<TypeScan, GptError> {
+    let disk = open_disk(dev)?;
+    match scan_type_at(dev, 1, target, &disk, out) {
+        Ok(scan) => Ok(scan),
+        Err(primary_err) if primary_err.primary_never_checked_out() => {
+            scan_type_at(dev, disk.lba_count - 1, target, &disk, out).or(Err(primary_err))
+        }
+        Err(primary_err) => Err(primary_err),
+    }
+}
+
+/// What [`locate_type`] found: `matched` is how many entries carried the type,
+/// `listed` how many of those fit the caller's slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeScan {
+    pub matched: u32,
+    pub listed: usize,
+    pub disk_guid: Guid,
+    /// Entries with a non-zero type GUID, i.e. partitions that exist.
+    pub used_entries: u32,
+}
+
+struct Disk {
+    lba_bytes: u32,
+    lba_count: u64,
+    lba_count_slack: u64,
+}
+
+/// The preamble both walks share: a block size this crate parses, a device big
+/// enough to hold a table, and a protective MBR at LBA 0.
+fn open_disk(dev: &mut dyn Sectors) -> Result<Disk, GptError> {
     let lba_bytes = dev.lba_bytes();
     if !(MIN_LBA_BYTES..=MAX_LBA_BYTES).contains(&lba_bytes) || !lba_bytes.is_power_of_two() {
         return Err(GptError::UnsupportedLbaSize(lba_bytes));
@@ -242,14 +293,38 @@ pub fn locate(dev: &mut dyn Sectors, target: Guid) -> Result<Located, GptError> 
     read(dev, 0, block)?;
     check_protective_mbr(block)?;
 
-    match locate_at(dev, 1, target, lba_bytes, lba_count, lba_count_slack) {
-        Ok(located) => Ok(located),
-        Err(primary_err) if primary_err.primary_never_checked_out() => {
-            locate_at(dev, lba_count - 1, target, lba_bytes, lba_count, lba_count_slack)
-                .or(Err(primary_err))
+    Ok(Disk { lba_bytes, lba_count, lba_count_slack })
+}
+
+/// [`locate_type`]'s work against one header, primary or backup.
+fn scan_type_at(
+    dev: &mut dyn Sectors,
+    header_lba: u64,
+    target: Guid,
+    disk: &Disk,
+    out: &mut [Partition],
+) -> Result<TypeScan, GptError> {
+    let mut block = [0u8; MAX_LBA_BYTES as usize];
+    let block = &mut block[..disk.lba_bytes as usize];
+
+    read(dev, header_lba, block)?;
+    let header = parse_header(block, disk, header_lba)?;
+
+    let mut matched = 0u32;
+    let mut listed = 0usize;
+    // Meaningless unless `walk_entries` returns `Ok`: the array's CRC is
+    // checked at the end of the walk, and an `Err` hands the caller nothing.
+    let used_entries = walk_entries(dev, &header, disk.lba_bytes, &mut |part| {
+        if part.type_guid == target {
+            matched += 1;
+            if let Some(slot) = out.get_mut(listed) {
+                *slot = part;
+                listed += 1;
+            }
         }
-        Err(primary_err) => Err(primary_err),
-    }
+    })?;
+
+    Ok(TypeScan { matched, listed, disk_guid: header.disk_guid, used_entries })
 }
 
 /// `locate`'s work against one header, primary or backup — read it, check it,
@@ -258,17 +333,15 @@ fn locate_at(
     dev: &mut dyn Sectors,
     header_lba: u64,
     target: Guid,
-    lba_bytes: u32,
-    lba_count: u64,
-    lba_count_slack: u64,
+    disk: &Disk,
 ) -> Result<Located, GptError> {
     let mut block = [0u8; MAX_LBA_BYTES as usize];
-    let block = &mut block[..lba_bytes as usize];
+    let block = &mut block[..disk.lba_bytes as usize];
 
     read(dev, header_lba, block)?;
-    let header = parse_header(block, lba_bytes, lba_count, lba_count_slack, header_lba)?;
+    let header = parse_header(block, disk, header_lba)?;
 
-    let (found, used_entries) = scan_entries(dev, &header, target, lba_bytes)?;
+    let (found, used_entries) = scan_entries(dev, &header, target, disk.lba_bytes)?;
     let Some(partition) = found else {
         return Err(GptError::NotFound { used_entries });
     };
@@ -282,7 +355,7 @@ fn locate_at(
             last: partition.last_lba,
         });
     }
-    check_no_overlap(dev, &header, &partition, lba_bytes)?;
+    check_no_overlap(dev, &header, &partition, disk.lba_bytes)?;
 
     Ok(Located { partition, disk_guid: header.disk_guid, used_entries })
 }
@@ -324,13 +397,8 @@ fn check_protective_mbr(lba0: &[u8]) -> Result<(), GptError> {
     Ok(())
 }
 
-fn parse_header(
-    lba1: &[u8],
-    lba_bytes: u32,
-    lba_count: u64,
-    lba_count_slack: u64,
-    header_lba: u64,
-) -> Result<Header, GptError> {
+fn parse_header(lba1: &[u8], disk: &Disk, header_lba: u64) -> Result<Header, GptError> {
+    let Disk { lba_bytes, lba_count, lba_count_slack } = *disk;
     if lba1.get(..8) != Some(&HEADER_SIGNATURE[..]) {
         return Err(GptError::NoHeader);
     }
@@ -429,27 +497,25 @@ fn header_crc(lba1: &[u8], header_bytes: usize) -> u32 {
     crc.finish()
 }
 
-/// Walk the entry array once, checking its CRC as we go, and remember the
-/// entry carrying `target`.
+/// Walk the entry array once, checking its CRC as we go, and show `visit`
+/// every entry that exists. Returns how many those were.
 ///
-/// The match is returned only if the CRC holds. Acting on an entry read out of
-/// an array whose checksum then failed would make the checksum decorative —
-/// which is the shape of every "we validated it" that turns out not to have
-/// been load-bearing.
-fn scan_entries(
+/// **`Ok` is the only thing that licenses acting on what `visit` collected**:
+/// the array is streamed, so the CRC is not known until the last block has been
+/// through it, and a caller using its own state after an `Err` would make the
+/// checksum decorative.
+fn walk_entries(
     dev: &mut dyn Sectors,
     header: &Header,
-    target: Guid,
     lba_bytes: u32,
-) -> Result<(Option<Partition>, u32), GptError> {
+    visit: &mut dyn FnMut(Partition),
+) -> Result<u32, GptError> {
     let mut block = [0u8; MAX_LBA_BYTES as usize];
     let block = &mut block[..lba_bytes as usize];
 
     let entries_per_lba = lba_bytes / header.entry_bytes;
     let mut crc = Crc32::new();
     let mut remaining = header.entry_count as u64 * header.entry_bytes as u64;
-    let mut found: Option<Partition> = None;
-    let mut duplicate: Option<(u32, u32)> = None;
     let mut used = 0u32;
     let mut index = 0u32;
     let mut lba = header.entry_array_lba;
@@ -468,24 +534,13 @@ fn scan_entries(
             let type_guid = read_guid(entry, 0);
             if !type_guid.is_zero() {
                 used += 1;
-                let unique_guid = read_guid(entry, 16);
-                if unique_guid == target {
-                    match &found {
-                        None => {
-                            found = Some(Partition {
-                                index,
-                                type_guid,
-                                unique_guid,
-                                first_lba: le_u64(entry, 32),
-                                last_lba: le_u64(entry, 40),
-                            });
-                        }
-                        Some(first) if duplicate.is_none() => {
-                            duplicate = Some((first.index, index));
-                        }
-                        Some(_) => {}
-                    }
-                }
+                visit(Partition {
+                    index,
+                    type_guid,
+                    unique_guid: read_guid(entry, 16),
+                    first_lba: le_u64(entry, 32),
+                    last_lba: le_u64(entry, 40),
+                });
             }
             index += 1;
         }
@@ -498,6 +553,30 @@ fn scan_entries(
     if computed != header.entry_array_crc {
         return Err(GptError::EntryArrayCrc { stored: header.entry_array_crc, computed });
     }
+    Ok(used)
+}
+
+/// The entry carrying the unique GUID `target`, out of a walk whose CRC held.
+fn scan_entries(
+    dev: &mut dyn Sectors,
+    header: &Header,
+    target: Guid,
+    lba_bytes: u32,
+) -> Result<(Option<Partition>, u32), GptError> {
+    let mut found: Option<Partition> = None;
+    let mut duplicate: Option<(u32, u32)> = None;
+
+    let used = walk_entries(dev, header, lba_bytes, &mut |part| {
+        if part.unique_guid != target {
+            return;
+        }
+        match &found {
+            None => found = Some(part),
+            Some(first) if duplicate.is_none() => duplicate = Some((first.index, part.index)),
+            Some(_) => {}
+        }
+    })?;
+
     // Held back until the CRC held, like the match itself.
     if let Some((first, second)) = duplicate {
         return Err(GptError::DuplicateUniqueGuid { first, second });

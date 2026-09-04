@@ -1,10 +1,11 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use bcachefs::{BlockIO, BlockNum, Extent, SliceBlockIO};
+use bcachefs::Extent;
 use crate::block::{BlockError, BlockResult};
 use crate::page_cache;
 use crate::sync::Lock;
+use crate::time::Deadline;
 
 /// `mm::PAGE_SIZE`: `usize` for buffer sizing, `u64` for file offsets.
 const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
@@ -78,6 +79,44 @@ impl FileBlocks {
     }
 }
 
+/// One block of `cache`, retried while the refusal is the budget's.
+///
+/// A `BudgetExpired` is a claim about the caller's clock and never a loss, and
+/// each attempt here is above `block::Partition`'s device lock, so it queues
+/// afresh with a whole `block::OPERATION` to spend. Bounded by
+/// `block::DEADMAN`, which is what bounds the run of attempts in both the
+/// kernel's other ladders (`writeback::drain_retrying`, `ops::fsync`).
+///
+/// It cannot park or yield between attempts, unlike either of those: a
+/// demand-paging fill runs under the process-data lock, where a park is the
+/// runtime panic `kernel/CLAUDE.md` names. Re-acquiring the device lock is the
+/// only wait, so the deadline is checked before each attempt and the caller
+/// gets the device's own last word when it is reached.
+fn read_block_retrying(
+    cache: &page_cache::Cached,
+    block: u64,
+    raw: &mut [u8; BLOCK_SIZE],
+) -> BlockResult {
+    let began = crate::clock::now();
+    let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let answer = cache.raw_read(block, raw);
+        if answer != Err(BlockError::BudgetExpired) {
+            return answer;
+        }
+        if deadman.reached(crate::clock::now()) {
+            log!(
+                "file: block {block} refused on the operation budget {attempts} time(s) in {} — {}",
+                crate::clock::now() - began,
+                crate::block::DEADMAN,
+            );
+            return answer;
+        }
+    }
+}
+
 /// The block holding `file_offset`, if the extents reach that far.
 fn offset_to_block(extents: &[Extent], file_offset: u64) -> Option<u64> {
     let block_idx = file_offset / BLOCK_SIZE_U64;
@@ -120,9 +159,9 @@ impl FileBacking for NvmeBacking {
             // Bypasses block page cache; file cache is the sole cache for file data.
             let mut raw = [0u8; BLOCK_SIZE];
             // `buf` is already zeroed, so a failed read here returns a hole, not stale data.
-            if self.cache.raw_read(block, &mut raw).is_err() {
-                log!("file: read of block {block} failed; serving zeros");
-                return Err(BlockError::Device);
+            if let Err(e) = read_block_retrying(&self.cache, block, &mut raw) {
+                log!("file: read of block {block} failed");
+                return Err(e);
             }
             let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
             buf[..valid].copy_from_slice(&raw[..valid]);
@@ -135,22 +174,27 @@ impl FileBacking for NvmeBacking {
     }
 }
 
-/// File backed by initrd memory (RAM). No PageCache, no disk I/O.
-pub struct InitrdBacking {
-    // Holds the whole image, not base+size, so an untrusted extent can be bounds-checked against it.
-    image: SliceBlockIO,
+/// File on a read-only volume, backed by a fixed extent list over the partition
+/// one page cache serves.
+///
+/// No revocation cell, unlike [`NvmeBacking`]: nothing can delete or truncate a
+/// file here, so the blocks a backing was opened over stay that file's for as
+/// long as it lives. A block outside the volume is refused by the view
+/// (`block::Partition::locate`), which is where every bound on a number the
+/// disk chose belongs.
+pub struct ReadOnlyBacking {
+    cache: Arc<page_cache::Cached>,
     extents: Vec<Extent>,
     size: u64,
 }
 
-impl InitrdBacking {
-    pub fn new(image: SliceBlockIO, extents: Vec<Extent>, size: u64) -> Self {
-        Self { image, extents, size }
+impl ReadOnlyBacking {
+    pub fn new(cache: Arc<page_cache::Cached>, extents: Vec<Extent>, size: u64) -> Self {
+        Self { cache, extents, size }
     }
 }
 
-impl FileBacking for InitrdBacking {
-    /// `Err` for a block the image does not reach; there is no device under an initrd to retry against.
+impl FileBacking for ReadOnlyBacking {
     fn read_page(&self, file_offset: u64, buf: &mut [u8; BLOCK_SIZE]) -> BlockResult {
         buf.fill(0);
         if file_offset >= self.size {
@@ -160,17 +204,15 @@ impl FileBacking for InitrdBacking {
         let Some(block) = offset_to_block(&self.extents, file_offset) else {
             return Ok(());
         };
-        // A block outside the image is corruption, not a hole: refuse it instead of faulting in zeros.
-        let Some(bytes) = self.image.block(BlockNum::new(block)) else {
-            log!(
-                "initrd: an extent names block {block}, which is not inside the \
-                 {}-block image it was read out of",
-                self.image.block_count()
-            );
-            return Err(BlockError::Device);
-        };
+        // Bypasses the block page cache; the file cache is the sole cache for file data.
+        let mut raw = [0u8; BLOCK_SIZE];
+        // `buf` is already zeroed, so a failed read returns a hole, not stale data.
+        if let Err(e) = read_block_retrying(&self.cache, block, &mut raw) {
+            log!("root: read of block {block} failed");
+            return Err(e);
+        }
         let valid = BLOCK_SIZE.min((self.size - file_offset) as usize);
-        buf[..valid].copy_from_slice(&bytes[..valid]);
+        buf[..valid].copy_from_slice(&raw[..valid]);
         Ok(())
     }
 

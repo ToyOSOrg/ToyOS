@@ -1,3 +1,5 @@
+use core::fmt;
+
 use crate::block_io::{BlockBuf, BlockNum, BlockIO, BlockIOExt, BLOCK_SIZE};
 use crate::crc32c::crc32c;
 use crate::fs::FsError;
@@ -34,6 +36,48 @@ const _: () = assert!(
     "a designation stamp would parse as a superblock, or the reverse",
 );
 
+/// A filesystem's name: sixteen bytes in its superblock, printed as 32 hex
+/// digits, and what a role's kernel argument names it by.
+///
+/// Not a partition GUID and never mixed with one — a partition is where a
+/// filesystem's bytes are, and one filesystem may occupy several.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FsUuid(pub [u8; 16]);
+
+impl FsUuid {
+    /// A filesystem no role names, which is what [`crate::Formatted::format`]
+    /// leaves: naming one is a deliberate act, not a side effect of making one.
+    pub const UNNAMED: Self = Self([0; 16]);
+
+    /// The inverse of [`fmt::Display`]: 32 hex digits, either case, or `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.as_bytes();
+        if text.len() != 32 {
+            return None;
+        }
+        let mut out = [0u8; 16];
+        for (byte, pair) in out.iter_mut().zip(text.as_chunks::<2>().0) {
+            let digit = |c: u8| match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                b'A'..=b'F' => Some(c - b'A' + 10),
+                _ => None,
+            };
+            *byte = digit(pair[0])? << 4 | digit(pair[1])?;
+        }
+        Some(Self(out))
+    }
+}
+
+impl fmt::Display for FsUuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// On-disk superblock layout. Stored at block 0 and backed up at the last block.
 #[derive(Debug, Clone)]
 pub struct Superblock {
@@ -48,6 +92,7 @@ pub struct Superblock {
     pub journal_head: u64,
     pub flags: u16,
     pub hash_seed: [u8; 16],
+    pub uuid: FsUuid,
 }
 
 impl Superblock {
@@ -97,6 +142,8 @@ impl Superblock {
 
         let mut hash_seed = [0u8; 16];
         hash_seed.copy_from_slice(&b[90..106]);
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&b[106..122]);
 
         Ok(Self {
             block_count: read_u64(b, 12),
@@ -110,6 +157,7 @@ impl Superblock {
             journal_head: read_u64(b, 80),
             flags: read_u16(b, 88),
             hash_seed,
+            uuid: FsUuid(uuid),
         })
     }
 
@@ -137,6 +185,7 @@ impl Superblock {
         write_u64(b, 80, self.journal_head);
         write_u16(b, 88, self.flags);
         b[90..106].copy_from_slice(&self.hash_seed);
+        b[106..122].copy_from_slice(&self.uuid.0);
 
         let crc = crc32c(&b[Self::CRC_START..]);
         write_u32(b, 8, crc);

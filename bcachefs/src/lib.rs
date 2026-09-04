@@ -24,11 +24,11 @@ mod alloc_bitmap;
 mod btree;
 mod fs;
 
-pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, SliceBlockIO, TransferError};
+pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, TransferError};
 #[cfg(feature = "std")]
 pub use block_io::VecBlockIO;
 pub use fs::{Formatted, Mounted, ReadOnly, ReadWrite, FsError, Extent};
-pub use superblock::{DESIGNATION_BLOCKS_OFFSET, DESIGNATION_MAGIC, Superblock};
+pub use superblock::{DESIGNATION_BLOCKS_OFFSET, DESIGNATION_MAGIC, FsUuid, Superblock};
 
 /// Records the largest single allocation each test thread makes, so a test can
 /// assert what parsing a crafted block asks the allocator for.

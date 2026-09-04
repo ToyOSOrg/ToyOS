@@ -202,7 +202,7 @@ const CELL: usize = GLYPH_W * GLYPH_H;
 /// screen is a bit-exact function of the table the drawer used, so decoding
 /// against *that* table makes a screen assertion an ordinary string assertion.
 /// The table is rebuilt here by [`toyos_build::assets::console_font`], the same
-/// producer that puts it in the initrd.
+/// producer that puts it on ROOT.
 ///
 /// Exact, not nearest-match, and that is a property of the blend rather than a
 /// tolerance: `font::Font::draw_char` computes `(fg*a + bg*(255-a))/255` per

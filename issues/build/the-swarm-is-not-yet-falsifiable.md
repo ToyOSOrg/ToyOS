@@ -205,7 +205,6 @@ issues/audio/hda-has-no-jack-detection-volume-or-keys.md
 issues/build/defect-events.md
 issues/build/soundds-mix-pass-has-no-host-test.md
 issues/build/the-eased-merge-law-carries-a-threshold.md
-issues/build/the-initrd-is-still-the-root-filesystem.md
 issues/build/the-swarm-is-not-yet-falsifiable.md
 issues/build/the-toolchain-ships-no-cargo-and-the-shared-cache-waits-on-one.md
 issues/build/there-is-no-network-gate.md

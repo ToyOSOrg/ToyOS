@@ -46,6 +46,7 @@ mod durability;
 mod gpt;
 mod page_cache;
 mod rollback;
+mod rootfs;
 mod file_cache;
 #[cfg(feature = "boot-actuators")]
 mod leak_selftest;
@@ -239,7 +240,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // After both channels exist, before the first actuator site.
     // cmdline_len==0 is checked first: an empty bootloader Vec has no backing allocation to point at.
-    actuator::init(if kernel_args.cmdline_len == 0 {
+    let cmdline = if kernel_args.cmdline_len == 0 {
         ""
     } else {
         core::str::from_utf8(core::slice::from_raw_parts(
@@ -247,7 +248,11 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
             kernel_args.cmdline_len as usize,
         ))
         .expect("the boot parameter is not UTF-8")
-    });
+    };
+    // Both readings of it here: the parameter is in no reserved region, so
+    // `mm::init` may hand that memory out and neither may hold a borrow.
+    actuator::init(cmdline);
+    rootfs::init(cmdline);
 
     // Before pat::init, which restores whatever CR0 it found — a firmware CD would ride straight through otherwise.
     arch::control_regs::init_cr0(0);
@@ -278,8 +283,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         kernel_args.kernel_stack_addr, kernel_args.kernel_stack_size
     );
     log!(
-        "boot: initrd {:#x}+{:#x}, kernel elf {:#x}+{:#x}, rsdp {:#x}, boot pml4 {:#x}",
-        kernel_args.initrd_addr, kernel_args.initrd_size,
+        "boot: kernel elf {:#x}+{:#x}, rsdp {:#x}, boot pml4 {:#x}",
         kernel_args.kernel_elf_addr, kernel_args.kernel_elf_size,
         kernel_args.rsdp_addr, kernel_args.boot_pml4_addr
     );
@@ -301,10 +305,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
 
-    let initrd = core::slice::from_raw_parts(
-        DirectMap::from_phys(kernel_args.initrd_addr).as_ptr::<u8>(),
-        kernel_args.initrd_size as usize,
-    );
     let kernel_elf = core::slice::from_raw_parts(
         DirectMap::from_phys(kernel_args.kernel_elf_addr).as_ptr::<u8>(),
         kernel_args.kernel_elf_size as usize,
@@ -313,7 +313,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     let reserved = [
         mm::Region { start: kernel_args.kernel_memory_addr, end: kernel_args.kernel_memory_addr + kernel_args.kernel_memory_size },
-        mm::Region { start: kernel_args.initrd_addr, end: kernel_args.initrd_addr + kernel_args.initrd_size },
         mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
         mm::Region { start: kernel_args.kernel_stack_addr, end: kernel_args.kernel_stack_addr + kernel_args.kernel_stack_size },
         mm::Region { start: 0x8000, end: 0x9000 }, // AP trampoline page
@@ -451,12 +450,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     inbox::init();
 
 
-    // (base, len) is named once here; every file backing under this mount holds the same pair, checkable against the initrd's end.
-    assert!(!initrd.is_empty(), "No initrd provided");
-    // SAFETY: initrd is bootloader-reserved memory, never freed or written, valid for the image's whole lifetime.
-    let initrd_image = unsafe { bcachefs::SliceBlockIO::new(initrd.as_ptr(), initrd.len()) };
-    let initrd_fs = bcachefs_adapter::mount_initrd(initrd_image);
-    vfs::lock().set_root(Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(initrd_fs, initrd_image)));
+    // After `probe_boot_disks`: ROOT is a partition, and on a USB-booted machine
+    // the device carrying it does not exist until the controller has bound it.
+    let root = rootfs::mount();
+    vfs::lock().set_root(Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(
+        root.fs, root.cache,
+    )));
 
     // tmpfs when the NVMe device isn't ours to write: persistence is the only difference, so the earlier refusal doesn't cascade.
     use vfs::UserAccess;

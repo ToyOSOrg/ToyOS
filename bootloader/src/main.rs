@@ -29,8 +29,8 @@ use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 /// entry is a refusal that says what it refused, instead of a firmware pool
 /// request sized by whatever the ESP claimed.
 ///
-/// Policy, and generous: the largest file ToyOS puts on the ESP is the initrd
-/// at ~200 MB, so this is five times the real worst case and still far below
+/// Policy, and generous: `kernel.elf` is the largest file ToyOS puts on the
+/// ESP, and this bound is orders of magnitude above it while still far below
 /// what a UEFI implementation would serve in one allocation.
 const MAX_ESP_FILE: u64 = 1024 * 1024 * 1024;
 
@@ -101,7 +101,7 @@ fn load_file_bytes(handle: Handle, system_table: &SystemTable<Boot>, path: &CStr
 /// A buffer to be filled by a read, allocated *without* zeroing it first.
 /// The caller must check that the read filled the whole buffer.
 ///
-/// Do not simplify to `vec![0; size]`: that memsets the whole initrd
+/// Do not simplify to `vec![0; size]`: that memsets the whole file
 /// immediately before `File::read` overwrites every byte. The chain is not
 /// visible at the call site — `vec![0u8; n]` takes `SpecFromElem`'s zero branch
 /// to `RawVec::with_capacity_zeroed_in` and so to `alloc_zeroed`, and uefi
@@ -182,29 +182,28 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
     })
 }
 
-/// Name the partition the kernel's log goes on, without reading it.
-///
-/// Written beside `kernel.elf` and `initrd.img` by `src/image.rs`, which draws
-/// the GUID and stamps the same sixteen bytes into the GPT entry. Read here
-/// because this is the volume firmware designated and because the kernel has no
-/// filesystem yet: the identity is *given* all the way down, and nothing at any
-/// level scans for a partition of the right type or format.
-///
-/// A missing or short file panics, like every other check in this file. The
-/// same function writes all three, so a volume with two of them was assembled
-/// by something that is not this project — and booting it anyway would mean a
-/// kernel that quietly has nowhere to write its log, on the machine that has no
-/// other channel.
-/// The boot parameter the kernel arms its actuators from, byte for byte as
-/// `src/image.rs` wrote it.
+/// The boot parameter the kernel takes ROOT's name and its actuators from,
+/// byte for byte as `src/image.rs` wrote it.
 ///
 /// Missing panics, for [`log_partition_guid`]'s reason: one function writes all
 /// four files, so a volume with three of them was not assembled by this project.
-/// Empty is the ordinary case and is what every image anyone ships carries.
 fn cmdline(handle: Handle, system_table: &SystemTable<Boot>) -> vec::Vec<u8> {
     load_file_bytes(handle, system_table, cstr16!("\\toyos\\cmdline"))
 }
 
+/// Name the partition the kernel's log goes on, without reading it.
+///
+/// Written beside `kernel.elf` by `src/image.rs`, which draws the GUID and
+/// stamps the same sixteen bytes into the GPT entry. Read here because this is
+/// the volume firmware designated and because the kernel has no filesystem yet:
+/// the identity is *given* all the way down, and nothing at any level scans for
+/// a partition of the right type or format.
+///
+/// A missing or short file panics, like every other check in this file. The
+/// same function writes all four, so a volume with three of them was assembled
+/// by something that is not this project — and booting it anyway would mean a
+/// kernel that quietly has nowhere to write its log, on the machine that has no
+/// other channel.
 fn log_partition_guid(handle: Handle, system_table: &SystemTable<Boot>) -> [u8; 16] {
     let bytes = load_file_bytes(handle, system_table, cstr16!("\\toyos\\log.guid"));
     <[u8; 16]>::try_from(bytes.as_slice()).unwrap_or_else(|_| {
@@ -497,10 +496,10 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
     pml4 as u64
 }
 
-// Ten arguments because this is the handoff and they are what firmware leaves:
+// Nine arguments because this is the handoff and they are what firmware leaves:
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, initrd: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
     let mms = system_table.boot_services().memory_map_size();
     let memory_map_entry_count = mms.map_size / mms.entry_size + 8;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
@@ -548,8 +547,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, initrd: ve
         kernel_stack_addr: kernel.stack_offset as u64,
         kernel_stack_size: kernel.stack_size as u64,
         rsdp_addr,
-        initrd_addr: initrd.as_ptr() as u64,
-        initrd_size: initrd.len() as u64,
         kernel_elf_addr: kernel_elf_bytes.as_ptr() as u64,
         kernel_elf_size: kernel_elf_bytes.len() as u64,
         gop_framebuffer,
@@ -588,9 +585,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, initrd: ve
 
     // The boot map above covers only `BOOT_MAP_BYTES` — everything the entry
     // jump below needs mapped, not everything `KernelArgs` names. The kernel
-    // reaches the rest (initrd, cmdline, its own stack) through the page
-    // tables it builds for itself once it is running; only the entry point
-    // has to be live under *these* transient ones.
+    // reaches the rest (the cmdline, its own stack) through the page tables it
+    // builds for itself once it is running; only the entry point has to be
+    // live under *these* transient ones.
     assert!(
         kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES),
         "kernel image at {kernel_phys:#x}..+{:#x} does not fit the {BOOT_MAP_BYTES:#x}-byte boot map",
@@ -601,7 +598,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, initrd: ve
     mem::forget(memory_map);
     mem::forget(kernel.memory);
     mem::forget(kernel_elf_bytes);
-    mem::forget(initrd);
     mem::forget(cmdline);
 
     // SAFETY: `entry_virt` is `kernel_phys + entry_offset` read through the
@@ -642,10 +638,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let kernel_bytes = load_file_bytes(handle, &system_table, cstr16!("\\toyos\\kernel.elf"));
     println!("Kernel: {} bytes", kernel_bytes.len());
 
-    println!("Loading initrd...");
-    let initrd = load_file_bytes(handle, &system_table, cstr16!("\\toyos\\initrd.img"));
-    println!("Initrd: {} bytes", initrd.len());
-
     let log_guid = log_partition_guid(handle, &system_table);
     println!("Log partition: signature {:02x?}", log_guid);
 
@@ -663,5 +655,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let rtc_offset = rtc_utc_offset(&system_table);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, initrd, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);
 }

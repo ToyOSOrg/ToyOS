@@ -289,7 +289,7 @@ const RUST_SKIP: &[&str] = &[
     // on `tests/doomcase`.
     "doom_sound_flood",
     // Same, plus the WAD and the SoundFont doom's music is made of, which no
-    // other config should pay 19 MiB of initrd for. `doom_music` runs it on
+    // other config should pay 19 MiB of ROOT for. `doom_music` runs it on
     // `tests/doommusiccase`.
     "doom_music",
     // Its failure mode is a CPU that never runs anything again, so on the
@@ -987,6 +987,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
+    // The three ways a machine's ROOT set can be wrong. Serial, not by
+    // association: each stages a whole boot image and up to a second 32 GiB
+    // stick beside it, and the three of them widening the parallel phase is
+    // what pushed `port_poll_churn` over its 300 s ceiling twice in a row.
+    ("root_candidate_malformed", Sched::Serial, Tier::Fast),
+    ("root_named_but_absent", Sched::Serial, Tier::Fast),
+    ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
     // The write-back queue's three negative controls (wall 4 of
@@ -1327,7 +1334,7 @@ const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "40_stdio",
         stage: Stage::Built,
-        why: Why::Declined("it writes `fred.txt` into the working directory and reads it back; the corpus runs from the read-only initrd root, so the write fails and the program prints `couldn't read fred.txt`. A writable working directory for the corpus is a harness change nothing else has needed"),
+        why: Why::Declined("it writes `fred.txt` into the working directory and reads it back; the corpus runs from the read-only ROOT, so the write fails and the program prints `couldn't read fred.txt`. A writable working directory for the corpus is a harness change nothing else has needed"),
     },
     NotRun {
         case: "79_vla_continue",
@@ -1802,13 +1809,6 @@ fn check_panic_recovery(result: &TestResult) -> bool {
 }
 
 /// The kernel names the frames of a process it loaded off a **disk**.
-///
-/// `check_panic_recovery` above asserts the same thing for a process loaded out
-/// of the initrd, and that was the only demangled-name assertion in the tree.
-/// The two paths were different code: the initrd answered
-/// `FileBacking::memory_ptr` and nothing else did, so this one produced a
-/// backtrace of bare `[exe+0x…]` offsets and no test could tell. Watch it red
-/// with `read_backtrace_table` replaced by `SymbolTable::empty_with_bounds`.
 ///
 /// `null_deref_run_from_disk` is this child's alone, so a `contains` over the
 /// capture window cannot be satisfied by `segfault_child` running in the same
@@ -3273,7 +3273,7 @@ fn run_screen_test(
             // second. This image contains no process that can claim it.
             //
             // Same config file `--diag-boot` builds from, and no test binaries
-            // in the initrd, so the image booted here is the image flashed.
+            // on ROOT, so the image booted here is the image flashed.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("diag");
             let options = BootOptions {
                 profile: qemu::Profile::Metal,
@@ -3499,7 +3499,7 @@ fn run_screen_test(
             // is exactly the path this program exists to bring up.
             //
             // Same config file `--console-boot` builds from and no test
-            // binaries in the initrd, so the image booted here is the image
+            // binaries on ROOT, so the image booted here is the image
             // flashed — the property `screen_diag_boot` has for its mode.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
@@ -4179,7 +4179,7 @@ fn run_screen_test(
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             // The verdict waits for a CPU with nothing left to run, so it lands
             // after the last boot checkpoint by construction. 30s covers
-            // firmware plus the initrd read off USB.
+            // firmware plus the root filesystem read off USB.
             let dump = qemu.screendump_until("never asserted", Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
@@ -4240,7 +4240,7 @@ fn run_screen_test(
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             // Nothing announces the panic here — there is no console for a
             // marker to arrive on — so the screen is polled until it carries
-            // the report. 30s covers firmware plus the initrd read off USB.
+            // the report. 30s covers firmware plus the root filesystem read off USB.
             let dump = qemu.screendump_until("PANIC:", Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
@@ -5246,7 +5246,7 @@ fn group_boot<'a>(
 /// compositor on the firmware framebuffer, carrying the client binaries its
 /// members run.
 ///
-/// Those and not the whole rust set — metalcase's initrd is four programs and
+/// Those and not the whole rust set — metalcase's ROOT is four programs and
 /// the rest would add tens of megabytes to a boot that needs these.
 fn boot_metal_sim_desktop(rust_bins: &[(String, Vec<u8>)]) -> QemuInstance {
     const CLIENTS: [&str; 4] =
@@ -6863,14 +6863,14 @@ const SNAKE_TURNS: usize = 8;
 /// instrument `assets/DOOM1.WAD` selects, and the subset was measured to render
 /// bit-exact against the full bank through this same
 /// `mus2mid.c` and this same rustysynth. Neither can say the file got into an
-/// initrd, that doom opened it, or that what came out reached an audio device.
+/// image, that doom opened it, or that what came out reached an audio device.
 /// Those three are what `b8b0749` broke for a cycle with the suite green.
 ///
 /// Three verdicts, none of them a clock:
 ///
 /// 1. **doom opened the file this tree committed.** The guest prints the byte
 ///    count it read, and the host compares it against `assets/soundfont.sf2` on
-///    disk. A stale initrd, a truncated asset and a second SoundFont from
+///    disk. A stale image, a truncated asset and a second SoundFont from
 ///    somewhere else all fail here rather than turning into quiet silence.
 /// 2. **It played to the end of the check.** The actuator counts the audio
 ///    callback's own periods, so a host that stopped this guest cannot shorten
@@ -8970,6 +8970,15 @@ fn run_machine_test(
             common::wallclock::zone_from_firmware(test_config, c_bins, rust_bins)
         }
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
+        "root_candidate_malformed" => {
+            common::volumes::root_candidate_malformed(test_config, c_bins, rust_bins)
+        }
+        "root_named_but_absent" => {
+            common::volumes::root_named_but_absent(test_config, c_bins, rust_bins)
+        }
+        "root_named_twice" => {
+            common::volumes::root_named_twice(test_config, c_bins, rust_bins)
+        }
         "log_partition_layout" => {
             common::volumes::log_partition_layout(test_config, c_bins, rust_bins)
         }
@@ -9512,7 +9521,7 @@ fn run_machine_test(
             // MSI-X table would make this whole test a re-run of the happy
             // path under a different name.
             let controllers = xhci_argv(&argv);
-            let [storage, hid] = controllers[..] else {
+            let [refused, hid] = controllers[..] else {
                 return Err(format!("this profile is two controllers; argv has {controllers:?}"));
             };
             if !hid.contains("msix=off") {
@@ -9524,20 +9533,25 @@ fn run_machine_test(
                      driver is expected to refuse it — that is xhci_no_interrupt"
                 ));
             }
-            // And the boot stick's controller has nothing at all, so the guest
-            // does no USB storage I/O. Without this the test cannot fail:
-            // `wait_transfer` drains the entire event ring and dispatches
-            // every HID report in it, so the ESP log's idle-loop writes
-            // deliver a keyboard's reports with no interrupt anywhere. That is
-            // measured, not feared — the first shape of this profile passed
-            // with MSI deliberately left disabled.
+            // And the other controller has no interrupt mechanism, so the
+            // driver refuses it and never polls it. Without this the test
+            // cannot fail: `wait_transfer` drains the entire event ring and
+            // dispatches every HID report in it, so a transfer on any polled
+            // controller delivers a keyboard's reports with no interrupt
+            // anywhere. Measured, not feared — the first shape of this profile
+            // passed with MSI deliberately left disabled.
             for want in ["msix=off", "msi=off"] {
-                if !storage.contains(want) {
+                if !refused.contains(want) {
                     return Err(format!(
-                        "{storage} carries the boot stick and still has {want}'s mechanism, so \
-                         storage I/O would drain the HID controller's ring for free"
+                        "{refused} still has {want}'s mechanism, so a transfer on it would drain \
+                         the HID controller's ring for free"
                     ));
                 }
+            }
+            // Nothing rides USB but the two HID devices; the boot volume is on
+            // this profile's NVMe, so no storage transfer can drain a ring.
+            if argv.iter().any(|a| a.starts_with("usb-storage")) {
+                return Err(format!("a USB disk on a machine that must do no USB storage I/O: {argv:?}"));
             }
             let usb = usb_argv(&argv);
             for want in ["usb-kbd", "usb-mouse"] {
@@ -12001,7 +12015,7 @@ fn run_machine_test(
             // either direction. `Gop` is `cargo run -- --gop`'s shape, the
             // GOP framebuffer plus the whole virtio block, so every daemon in
             // `[boot] start` finds its device. No test binaries go into the
-            // initrd: the image booted here is the image shipped.
+            // ROOT: the image booted here is the image shipped.
             let config = Path::new(env!("CARGO_MANIFEST_DIR"));
             let mut qemu = QemuInstance::boot_with_options(
                 config,

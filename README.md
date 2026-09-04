@@ -208,7 +208,7 @@ allocation-free and `forbid(unsafe_code)`, and answers exactly one question:
 where is the partition with this GUID.
 
 **A test suite that boots the OS, not a mock of it.** `cargo test` builds the
-toolchain, kernel, bootloader and initrd, then boots the whole system across a
+toolchain, kernel, bootloader and root filesystem, then boots the whole system across a
 dozen concurrent QEMU guests — fast enough to run on every change, which is the
 only property that matters. Many distinct machine shapes exist, because device
 *shape* is what finds bugs: a device that is absent, one enumerated in a hostile

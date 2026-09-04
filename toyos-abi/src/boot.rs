@@ -8,8 +8,6 @@ pub struct KernelArgs {
     pub kernel_stack_addr: u64,
     pub kernel_stack_size: u64,
     pub rsdp_addr: u64,
-    pub initrd_addr: u64,
-    pub initrd_size: u64,
     pub kernel_elf_addr: u64,
     pub kernel_elf_size: u64,
     pub gop_framebuffer: u64,
@@ -50,11 +48,10 @@ pub struct KernelArgs {
     /// No presence flag, unlike the boot partition above, and not because the
     /// state cannot arise but because it is not a machine. A machine really can
     /// have no boot partition to be named — PXE, an unpartitioned disk. But
-    /// this GUID comes from a file `create_fat_volume` writes beside
-    /// `kernel.elf` and `initrd.img`, so a volume carrying those two and not
-    /// this one was not built by this project, and the bootloader refuses it by
-    /// name rather than starting a kernel that would silently have nowhere to
-    /// put its log.
+    /// this GUID comes from a file `create_esp_volume` writes beside
+    /// `kernel.elf`, so a volume carrying that one and not this one was not
+    /// built by this project, and the bootloader refuses it by name rather than
+    /// starting a kernel that would silently have nowhere to put its log.
     ///
     /// Naming the partition is all this does. Whether one with that GUID is on
     /// the disk is the kernel's question, and its answer there may well be no.
@@ -87,22 +84,41 @@ pub struct KernelArgs {
     /// format defines, and carrying it inward would make every reader of this
     /// struct know that.
     pub rtc_utc_offset_known: u32,
-    /// The boot parameter, as ASCII with no terminator: a comma-separated list
-    /// naming the actuators this boot arms, read out of `\toyos\cmdline` on the
-    /// volume the bootloader loaded itself from.
+    /// The boot parameter, as ASCII with no terminator: comma-separated tokens
+    /// read out of `\toyos\cmdline` on the volume the bootloader loaded itself
+    /// from. [`root_uuid`] and [`actuators`] are the two readings of it.
     ///
-    /// Empty on every image anyone ships, and a kernel that carries no actuators
-    /// refuses a non-empty one rather than ignoring it
+    /// Every shipping image carries exactly `root=<uuid>`, and a kernel that
+    /// carries no actuators refuses any other token rather than ignoring it
     /// (`kernel/src/actuator.rs`). It is in this struct rather than anywhere the
     /// kernel could go and fetch it because the earliest actuator panics before
     /// `mm::init` and another acts at AP bring-up: a parameter that is not here
     /// arrives too late to be one.
     ///
-    /// Pool memory the bootloader forgets, like the initrd — but unlike the
-    /// initrd it is not in the kernel's reserved list, because it is parsed into
-    /// a word before `mm::init` runs and there is nothing left to protect.
+    /// Pool memory the bootloader forgets, and not in the kernel's reserved
+    /// list, because it is parsed before `mm::init` runs and there is nothing
+    /// left to protect.
     pub cmdline_addr: u64,
     pub cmdline_len: u64,
+}
+
+/// The token naming the filesystem the kernel mounts as root.
+const ROOT_PARAM: &str = "root=";
+
+/// What the boot parameter names ROOT, or `None` on a parameter that names none.
+///
+/// `bcachefs::FsUuid`'s text, compared against each candidate partition's
+/// *superblock* and never against a partition GUID: a role names a filesystem,
+/// and a filesystem may have members on more than one disk.
+pub fn root_uuid(cmdline: &str) -> Option<&str> {
+    cmdline.split(',').find_map(|token| token.strip_prefix(ROOT_PARAM))
+}
+
+/// Every token of the boot parameter that is not [`root_uuid`]'s. A token this
+/// yields is one the actuator table has to declare, so a `root=` left in would
+/// panic a kernel that boots.
+pub fn actuators(cmdline: &str) -> impl Iterator<Item = &str> {
+    cmdline.split(',').filter(|t| !t.is_empty() && !t.starts_with(ROOT_PARAM))
 }
 
 impl KernelArgs {
@@ -131,16 +147,16 @@ const _: () = {
     assert!(offset_of!(KernelArgs, kernel_memory_addr) == 16);
     assert!(offset_of!(KernelArgs, kernel_stack_addr) == 32);
     assert!(offset_of!(KernelArgs, kernel_stack_size) == 40);
-    assert!(offset_of!(KernelArgs, boot_partition_start_lba) == 128);
-    assert!(offset_of!(KernelArgs, boot_partition_blocks) == 136);
-    assert!(offset_of!(KernelArgs, boot_partition_guid) == 144);
-    assert!(offset_of!(KernelArgs, boot_partition_present) == 160);
-    assert!(offset_of!(KernelArgs, log_partition_guid) == 164);
-    assert!(offset_of!(KernelArgs, rtc_utc_offset_minutes) == 180);
-    assert!(offset_of!(KernelArgs, rtc_utc_offset_known) == 184);
-    assert!(offset_of!(KernelArgs, cmdline_addr) == 192);
-    assert!(offset_of!(KernelArgs, cmdline_len) == 200);
-    assert!(size_of::<KernelArgs>() == 208);
+    assert!(offset_of!(KernelArgs, boot_partition_start_lba) == 112);
+    assert!(offset_of!(KernelArgs, boot_partition_blocks) == 120);
+    assert!(offset_of!(KernelArgs, boot_partition_guid) == 128);
+    assert!(offset_of!(KernelArgs, boot_partition_present) == 144);
+    assert!(offset_of!(KernelArgs, log_partition_guid) == 148);
+    assert!(offset_of!(KernelArgs, rtc_utc_offset_minutes) == 164);
+    assert!(offset_of!(KernelArgs, rtc_utc_offset_known) == 168);
+    assert!(offset_of!(KernelArgs, cmdline_addr) == 176);
+    assert!(offset_of!(KernelArgs, cmdline_len) == 184);
+    assert!(size_of::<KernelArgs>() == 192);
     assert!(align_of::<KernelArgs>() == 8);
 };
 
@@ -150,4 +166,30 @@ pub struct MemoryMapEntry {
     pub uefi_type: u32,
     pub start: u64,
     pub end: u64,
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every token is one reading's or the other's, and neither sees the
+    /// other's: a `root=` reaching the actuator table panics a kernel.
+    #[test]
+    fn the_two_readings_of_a_boot_parameter_partition_it() {
+        const ROOT: &str = "0123456789abcdef0123456789abcdef";
+        const SHIPPING: &str = "root=0123456789abcdef0123456789abcdef";
+        const ARMED: &str =
+            "root=0123456789abcdef0123456789abcdef,usb-flush-fails,fat-boot-reads-fail";
+
+        assert_eq!(root_uuid(SHIPPING), Some(ROOT));
+        assert_eq!(actuators(SHIPPING).count(), 0);
+
+        assert_eq!(root_uuid(ARMED), Some(ROOT));
+        assert!(actuators(ARMED).eq(["usb-flush-fails", "fat-boot-reads-fail"]));
+
+        // No root filesystem, and no parameter at all: neither reading invents.
+        assert_eq!(root_uuid("usb-flush-fails"), None);
+        assert!(actuators("usb-flush-fails").eq(["usb-flush-fails"]));
+        assert_eq!(root_uuid(""), None);
+        assert_eq!(actuators("").count(), 0);
+    }
 }

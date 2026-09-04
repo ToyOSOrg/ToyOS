@@ -334,7 +334,7 @@ version = "0.1.0"
 dependencies = [
  "fontdue",
  "softbuffer",
- "toyos-font",
+ "toyos-font 0.1.0",
  "winit",
 ]
 
@@ -477,11 +477,11 @@ name = "compositor"
 version = "0.1.0"
 dependencies = [
  "sprite",
- "toyos",
- "toyos-abi",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
  "toyos-desktop",
- "toyos-font",
- "toyos-window",
+ "toyos-font 0.1.0",
+ "toyos-window 0.2.0",
 ]
 
 [[package]]
@@ -498,10 +498,10 @@ name = "console"
 version = "0.1.0"
 dependencies = [
  "terminal",
- "toyos",
- "toyos-abi",
- "toyos-font",
- "toyos-window",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
+ "toyos-font 0.1.0",
+ "toyos-window 0.2.0",
 ]
 
 [[package]]
@@ -560,8 +560,8 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation",
- "toyos",
- "toyos-abi",
+ "toyos 0.1.0",
+ "toyos-abi 0.1.0",
  "web-sys",
  "windows",
  "windows-core",
@@ -985,8 +985,8 @@ name = "editor"
 version = "0.1.0"
 dependencies = [
  "filepicker-api",
- "toyos-font",
- "toyos-window",
+ "toyos-font 0.1.0",
+ "toyos-window 0.2.0",
 ]
 
 [[package]]
@@ -1106,16 +1106,16 @@ name = "filepicker"
 version = "0.1.0"
 dependencies = [
  "filepicker-api",
- "toyos",
- "toyos-font",
- "toyos-window",
+ "toyos 0.2.0",
+ "toyos-font 0.1.0",
+ "toyos-window 0.2.0",
 ]
 
 [[package]]
 name = "filepicker-api"
 version = "0.1.0"
 dependencies = [
- "toyos",
+ "toyos 0.2.0",
 ]
 
 [[package]]
@@ -1123,8 +1123,8 @@ name = "files"
 version = "0.1.0"
 dependencies = [
  "sprite",
- "toyos-font",
- "toyos-window",
+ "toyos-font 0.1.0",
+ "toyos-window 0.2.0",
 ]
 
 [[package]]
@@ -1294,7 +1294,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "toyos-abi",
+ "toyos-abi 0.1.0",
  "wasi",
  "wasm-bindgen",
 ]
@@ -1307,7 +1307,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 5.3.0",
- "toyos-abi",
+ "toyos-abi 0.1.0",
  "wasip2",
 ]
 
@@ -1320,7 +1320,7 @@ dependencies = [
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.0",
- "toyos-abi",
+ "toyos-abi 0.1.0",
  "wasip2",
  "wasip3",
 ]
@@ -1525,8 +1525,8 @@ dependencies = [
 name = "init"
 version = "0.1.0"
 dependencies = [
- "toyos",
- "toyos-abi",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
  "toyos-manifest",
 ]
 
@@ -1760,7 +1760,7 @@ version = "0.8.9"
 source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos#fa0abe774f6f891a5d8918ac554bc43004232cf2"
 dependencies = [
  "cfg-if",
- "toyos-abi",
+ "toyos-abi 0.1.0",
  "windows-link",
 ]
 
@@ -1798,8 +1798,8 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 name = "logd"
 version = "0.1.0"
 dependencies = [
- "toyos",
- "toyos-abi",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
  "toyos-wallclock",
 ]
 
@@ -1843,8 +1843,8 @@ version = "1.2.0"
 source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#c84d7e351712502707bf26e0d9d9cd25993463d5"
 dependencies = [
  "libc",
- "toyos",
- "toyos-abi",
+ "toyos 0.1.0",
+ "toyos-abi 0.1.0",
  "wasi",
  "windows-sys 0.61.2",
 ]
@@ -1908,8 +1908,8 @@ name = "netd"
 version = "0.0.0"
 dependencies = [
  "smoltcp",
- "toyos",
- "toyos-abi",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
 ]
 
 [[package]]
@@ -2285,8 +2285,8 @@ name = "paint"
 version = "0.1.0"
 dependencies = [
  "filepicker-api",
- "toyos-font",
- "toyos-window",
+ "toyos-font 0.1.0",
+ "toyos-window 0.2.0",
 ]
 
 [[package]]
@@ -3243,7 +3243,7 @@ dependencies = [
 name = "shell"
 version = "0.1.0"
 dependencies = [
- "toyos",
+ "toyos 0.2.0",
 ]
 
 [[package]]
@@ -3352,7 +3352,7 @@ dependencies = [
  "fontdue",
  "rand 0.8.5",
  "softbuffer",
- "toyos-font",
+ "toyos-font 0.1.0",
  "winit",
 ]
 
@@ -3362,8 +3362,8 @@ version = "0.6.3"
 source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#19eb798d570ad63b04aaf0faef5c96b7aeca1063"
 dependencies = [
  "libc",
- "toyos",
- "toyos-abi",
+ "toyos 0.1.0",
+ "toyos-abi 0.1.0",
  "windows-sys 0.61.2",
 ]
 
@@ -3382,7 +3382,7 @@ dependencies = [
  "objc2-quartz-core",
  "raw-window-handle",
  "redox_syscall 0.5.18",
- "toyos-window",
+ "toyos-window 0.1.0",
  "tracing",
  "wasm-bindgen",
  "web-sys",
@@ -3394,8 +3394,8 @@ name = "soundd"
 version = "0.0.0"
 dependencies = [
  "rubato",
- "toyos",
- "toyos-abi",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
  "toyos-hda",
  "toyos-mixer",
 ]
@@ -3534,17 +3534,17 @@ dependencies = [
 name = "terminal"
 version = "0.1.0"
 dependencies = [
- "toyos",
- "toyos-font",
- "toyos-window",
+ "toyos 0.2.0",
+ "toyos-font 0.1.0",
+ "toyos-window 0.2.0",
 ]
 
 [[package]]
 name = "test-runner"
 version = "0.1.0"
 dependencies = [
- "toyos",
- "toyos-abi",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
 ]
 
 [[package]]
@@ -3673,33 +3673,54 @@ name = "toybox"
 version = "0.1.0"
 dependencies = [
  "cpal",
- "toyos",
- "toyos-abi",
- "toyos-keymap",
- "toyos-window",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
+ "toyos-keymap 0.1.0",
+ "toyos-window 0.2.0",
 ]
 
 [[package]]
 name = "toyos"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43276f23ad529f26be1ad1281b08bcaaabdb325778dc8cde9b3d1bfeca155a03"
 dependencies = [
- "toyos-abi",
+ "toyos-abi 0.1.0",
+]
+
+[[package]]
+name = "toyos"
+version = "0.2.0"
+dependencies = [
+ "toyos-abi 0.2.0",
 ]
 
 [[package]]
 name = "toyos-abi"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fce2965bd320e8da58a50d08e58e90a16438919cf647cf3c8af119b0841e28cd"
+
+[[package]]
+name = "toyos-abi"
+version = "0.2.0"
 
 [[package]]
 name = "toyos-desktop"
 version = "0.1.0"
 dependencies = [
- "toyos-abi",
+ "toyos-abi 0.2.0",
 ]
 
 [[package]]
 name = "toyos-font"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-font"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "812cbf2f1cfd97efddd55a1ebebc4a3cc3bffc8b449bf113410e1487b52efcc8"
 
 [[package]]
 name = "toyos-hda"
@@ -3710,10 +3731,16 @@ name = "toyos-keymap"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-keymap"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06db3c1cb438056c9b9a766c8f0dbbfdf3331e723a5bc7f287badc0cfb2f7f78"
+
+[[package]]
 name = "toyos-manifest"
 version = "0.1.0"
 dependencies = [
- "toyos-abi",
+ "toyos-abi 0.2.0",
 ]
 
 [[package]]
@@ -3727,11 +3754,23 @@ version = "0.1.0"
 [[package]]
 name = "toyos-window"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ddc161edbcb6613a24d8c2d50a287cdad602165164c16387de315e699097021"
 dependencies = [
- "toyos",
- "toyos-abi",
- "toyos-font",
- "toyos-keymap",
+ "toyos 0.1.0",
+ "toyos-abi 0.1.0",
+ "toyos-font 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "toyos-keymap 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "toyos-window"
+version = "0.2.0"
+dependencies = [
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
+ "toyos-font 0.1.0",
+ "toyos-keymap 0.1.0",
 ]
 
 [[package]]
@@ -4423,7 +4462,7 @@ dependencies = [
  "dpi",
  "raw-window-handle",
  "smol_str",
- "toyos-window",
+ "toyos-window 0.1.0",
  "tracing",
  "winit-core",
 ]

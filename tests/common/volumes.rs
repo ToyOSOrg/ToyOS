@@ -57,10 +57,10 @@ fn blob() -> Vec<u8> {
 }
 
 /// The files the build put on the ESP, which the guest must not have touched.
-/// `BOOTx64.EFI` is the one firmware reads; the other two are what the
-/// bootloader reads. Damaging any of them makes the stick unbootable, so
+/// `BOOTx64.EFI` is the one firmware reads and `kernel.elf` the one the
+/// bootloader does. Damaging either makes the stick unbootable, so
 /// "still byte-identical" is the assertion that matters most here.
-const UNTOUCHED: [&str; 3] = ["EFI/BOOT/BOOTx64.EFI", "toyos/kernel.elf", "toyos/initrd.img"];
+const UNTOUCHED: [&str; 2] = ["EFI/BOOT/BOOTx64.EFI", "toyos/kernel.elf"];
 
 fn test_dir() -> PathBuf {
     super::lane::dir()
@@ -2097,7 +2097,7 @@ pub fn log_backing_read_error(
 ///
 /// **The mount line is a load-bearing assertion and not decoration.** A `/boot`
 /// that failed to mount is not a mount at all: `Vfs::resolve_fs` falls through
-/// to the root filesystem, the initrd has no `boot/` in it, and every question
+/// to the root filesystem, ROOT has no `boot/` in it, and every question
 /// below would then answer `NotFound` for an honest reason — which is precisely
 /// the string this test exists to refuse.
 pub fn boot_volume_metadata_error(
@@ -2235,6 +2235,8 @@ pub fn log_partition_layout(
     /// is why the log moved off the ESP.
     const BASIC_DATA: &str = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7";
     const ESP_TYPE: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+    /// TOYOS-ROOT, the value the kernel selects its candidates on.
+    const ROOT_TYPE: &str = "B350BC93-BB6A-4C5E-9589-A5C3CFD555FD";
 
     let image_path = test_dir().join("log-layout.img");
     let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
@@ -2246,8 +2248,8 @@ pub fn log_partition_layout(
         .open(&image_path)
         .map_err(|e| format!("the built image has no readable GPT: {e}"))?;
     let table: Vec<_> = disk.partitions().values().collect();
-    let [esp, log] = table.as_slice() else {
-        return Err(format!("the built image has {} partitions, wanted two", table.len()));
+    let [esp, root, log] = table.as_slice() else {
+        return Err(format!("the built image has {} partitions, wanted three", table.len()));
     };
 
     let types = [
@@ -2258,6 +2260,33 @@ pub fn log_partition_layout(
         if got != want {
             return Err(format!("the {what} is typed {got}, wanted {want}"));
         }
+    }
+    // ROOT's type is read with the kernel's parser: the `gpt` crate answers the
+    // all-zero GUID for a type its own table does not name.
+    let mut found = [toyos_gpt::Partition {
+        index: 0,
+        type_guid: toyos_gpt::Guid::ZERO,
+        unique_guid: toyos_gpt::Guid::ZERO,
+        first_lba: 0,
+        last_lba: 0,
+    }; 4];
+    let scan = toyos_gpt::locate_type(
+        &mut ImageSectors { bytes: &image },
+        toyos_gpt::Guid::TOYOS_ROOT,
+        &mut found,
+    )
+    .map_err(|e| format!("the kernel's own GPT parser cannot read this table: {e:?}"))?;
+    if (scan.matched, scan.listed) != (1, 1) {
+        return Err(format!(
+            "the built image carries {} partitions typed {ROOT_TYPE}, wanted one",
+            scan.matched
+        ));
+    }
+    if found[0].first_lba != root.first_lba || found[0].last_lba != root.last_lba {
+        return Err(format!(
+            "the kernel's parser puts ROOT at LBA {}..{} and the table says {}..{}",
+            found[0].first_lba, found[0].last_lba, root.first_lba, root.last_lba
+        ));
     }
 
     // The attribute field, spelled out. Bit 0 marks a partition the firmware
@@ -2274,31 +2303,41 @@ pub fn log_partition_layout(
         ));
     }
 
-    let (esp_guid, log_guid) = (esp.part_guid, log.part_guid);
-    if esp_guid.is_nil() || log_guid.is_nil() {
+    let log_guid = log.part_guid;
+    let guids = [esp.part_guid, root.part_guid, log_guid];
+    if guids.iter().any(uuid::Uuid::is_nil) {
         return Err("a partition was given the all-zero GUID, which GPT reads as unused".to_string());
     }
-    if esp_guid == log_guid {
-        return Err(format!("both partitions carry the unique GUID {esp_guid}"));
+    for (i, one) in guids.iter().enumerate() {
+        if guids[i + 1..].contains(one) {
+            return Err(format!("two partitions carry the unique GUID {one}"));
+        }
     }
 
     // The alignment `create_gpt_disk` asserts, checked again from the table:
-    // the kernel mounts both of these over one 4 KiB block device and caches
-    // device blocks per volume, so a block belonging to both would be held
+    // the kernel mounts all three over one 4 KiB block device and caches
+    // device blocks per volume, so a block belonging to two would be held
     // twice and go stale on the other's write.
-    let (esp_start, esp_end) = (esp.first_lba * 512, (esp.last_lba + 1) * 512);
-    let (log_start, log_end) = (log.first_lba * 512, (log.last_lba + 1) * 512);
-    for (what, start, end) in
-        [("ESP", esp_start, esp_end), ("log partition", log_start, log_end)]
-    {
+    let extent = |p: &gpt::partition::Partition| (p.first_lba * 512, (p.last_lba + 1) * 512);
+    let placed = [
+        ("ESP", extent(esp)),
+        ("root partition", extent(root)),
+        ("log partition", extent(log)),
+    ];
+    for (what, (start, end)) in placed {
         if start % 4096 != 0 || end % 4096 != 0 {
             return Err(format!(
                 "the {what} spans bytes {start}..{end}, which is not whole 4 KiB device blocks"
             ));
         }
     }
-    if esp_end > log_start {
-        return Err(format!("the ESP runs to {esp_end} and the log partition starts at {log_start}"));
+    for (before, after) in placed.iter().zip(&placed[1..]) {
+        if before.1 .1 > after.1 .0 {
+            return Err(format!(
+                "the {} runs to {} and the {} starts at {}",
+                before.0, before.1 .1, after.0, after.1 .0
+            ));
+        }
     }
 
     // What the bootloader will read, and the kernel will be given. The file and
@@ -2857,4 +2896,252 @@ pub fn log_flush_retry(
     eprintln!("  [hung] {offline}");
     eprintln!("  [hung] {gave_up}");
     Ok(())
+}
+
+/// Where ROOT is on `image`, found by the parser the kernel uses.
+fn root_extent(image: &[u8]) -> Result<(usize, usize), String> {
+    let mut found = [toyos_gpt::Partition {
+        index: 0,
+        type_guid: toyos_gpt::Guid::ZERO,
+        unique_guid: toyos_gpt::Guid::ZERO,
+        first_lba: 0,
+        last_lba: 0,
+    }; 4];
+    let scan =
+        toyos_gpt::locate_type(&mut ImageSectors { bytes: image }, toyos_gpt::Guid::TOYOS_ROOT, &mut found)
+            .map_err(|e| format!("this image has no readable partition table: {e:?}"))?;
+    if (scan.matched, scan.listed) != (1, 1) {
+        return Err(format!("this image carries {} ROOT partitions, wanted one", scan.matched));
+    }
+    let at = found[0].first_lba as usize * 512;
+    Ok((at, found[0].lba_count() as usize * 512))
+}
+
+/// A second USB disk carrying a copy of `image`, `mutate`d after the copy.
+///
+/// A copy rather than a constructed table: the twin's ROOT is then a filesystem
+/// this kernel really can mount and really does name the same thing, which is
+/// what the duplicate case needs and what no hand-written GPT would give.
+fn root_twin(
+    path: &Path,
+    image: &[u8],
+    bytes: u64,
+    mutate: impl FnOnce(&mut Vec<u8>) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut copy = image.to_vec();
+    mutate(&mut copy)?;
+    let file = std::fs::File::create(path).map_err(|e| format!("create the twin disk: {e}"))?;
+    file.set_len(bytes).map_err(|e| format!("size the twin disk: {e}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("open the twin disk: {e}"))?;
+    file.write_all(&copy).map_err(|e| format!("write the twin disk: {e}"))?;
+    Ok(())
+}
+
+/// **A ROOT candidate this kernel cannot mount is refused by name and the boot
+/// goes on.** Disk contents crossed a trust boundary, so a partition wearing
+/// the ROOT type over bytes that are not a filesystem may not stop a machine
+/// whose real ROOT is right there. The candidate is a second stick whose two
+/// ROOT superblocks — block 0 and the backup at the volume's last block, which
+/// is where `Superblock::read` looks second — are inverted.
+pub fn root_candidate_malformed(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let (bytes, _) = qemu::Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let twin = test_dir().join("root-malformed-twin.img");
+    root_twin(&twin, &image, bytes, |copy| {
+        let (at, len) = root_extent(copy)?;
+        for block in [at, at + len - 4096] {
+            for byte in &mut copy[block..block + 4096] {
+                *byte = !*byte;
+            }
+        }
+        Ok(())
+    })?;
+
+    let qemu = qemu::QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::UsbDisk,
+            usb_images: vec![twin.clone()],
+            ..Default::default()
+        },
+    );
+    let log = qemu.boot_log().to_string();
+    drop(qemu);
+    let _ = std::fs::remove_file(&twin);
+
+    let refused = log
+        .lines()
+        .find(|l| l.contains("holds no filesystem this kernel can mount"))
+        .ok_or_else(|| {
+            format!("the malformed candidate was not refused by name:\n{}", volume_lines(&log))
+        })?
+        .trim()
+        .to_string();
+    if !refused.contains("BadMagic") {
+        return Err(format!("the refusal does not name what was wrong with it: {refused}"));
+    }
+    let mounted = log
+        .lines()
+        .find(|l| l.contains("root: mounted"))
+        .ok_or_else(|| {
+            format!("the real ROOT did not mount beside it:\n{}", volume_lines(&log))
+        })?
+        .trim()
+        .to_string();
+    eprintln!("  [root] {refused}");
+    eprintln!("  [root] {mounted}");
+    Ok(())
+}
+
+/// **A machine that carries no filesystem the kernel argument names cannot
+/// continue, and says which one and what it saw.** One hex digit of `root=` on
+/// the ESP is flipped, which is a byte-for-byte edit inside a file of the same
+/// length — so the FAT volume is untouched and only the name changes.
+pub fn root_named_but_absent(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let path = test_dir().join("root-absent.img");
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    // `root=` alone appears five times on the ESP, because `kernel.elf` carries
+    // the token as a literal. The search is for the whole argument, whose
+    // sixteen bytes are read out of ROOT's own superblock.
+    let (root_at, _) = root_extent(&image)?;
+    let named: String =
+        image[root_at + 106..root_at + 122].iter().map(|b| format!("{b:02x}")).collect();
+    let want = format!("root={named}");
+    let (esp_at, esp_len) = esp_extent(&image, &path)?;
+    let esp = &image[esp_at..esp_at + esp_len];
+    let hits: Vec<usize> = (0..esp.len().saturating_sub(want.len()))
+        .filter(|&i| &esp[i..i + want.len()] == want.as_bytes())
+        .collect();
+    let [at] = hits[..] else {
+        return Err(format!("the ESP carries {} {want:?} tokens, wanted one", hits.len()));
+    };
+    // The last digit, so the flip cannot collide with the first: two names that
+    // differ in one place are still two names.
+    let digit = esp_at + at + want.len() - 1;
+    let was = image[digit];
+    image[digit] = if was == b'0' { b'1' } else { b'0' };
+
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let log = boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path, Vec::new())?;
+    let _ = std::fs::remove_file(&path);
+
+    let verdict = root_refusal(&log)?;
+    if !verdict.contains("matches 0 of the 1") {
+        return Err(format!("the kernel did not report a machine with no ROOT: {verdict}"));
+    }
+    let seen = log
+        .lines()
+        .find(|l| l.contains("root: candidate ") && l.contains(" at LBA "))
+        .ok_or_else(|| format!("the panic named no candidate:\n{}", volume_lines(&log)))?
+        .trim()
+        .to_string();
+    eprintln!("  [root] {verdict}");
+    eprintln!("  [root] {seen}");
+    Ok(())
+}
+
+/// **Two filesystems answering to one name is a boot the kernel refuses rather
+/// than one it guesses at.** A second stick carries an untouched copy of the
+/// boot image, so the machine has two TOYOS-ROOT partitions whose superblocks
+/// carry the same UUID and which are equally good.
+pub fn root_named_twice(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let (bytes, _) = qemu::Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, &[]);
+    let path = test_dir().join("root-twice.img");
+    std::fs::write(&path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let twin = test_dir().join("root-twice-twin.img");
+    root_twin(&twin, &image, bytes, |_| Ok(()))?;
+
+    let log =
+        boot_expecting_root_refusal(test_config, c_bins, rust_bins, &path, vec![twin.clone()])?;
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&twin);
+
+    let verdict = root_refusal(&log)?;
+    if !verdict.contains("matches 2 of the 2") {
+        return Err(format!("the kernel did not report two filesystems under one name: {verdict}"));
+    }
+    let named: Vec<String> = log
+        .lines()
+        .filter(|l| l.contains("root: candidate ") && l.contains(" at LBA "))
+        .map(|l| l.trim().to_string())
+        .collect();
+    if named.len() != 2 {
+        return Err(format!(
+            "the panic named {} candidates and the machine carries two:\n{}",
+            named.len(),
+            volume_lines(&log)
+        ));
+    }
+    eprintln!("  [root] {verdict}");
+    for line in &named {
+        eprintln!("  [root] {line}");
+    }
+    Ok(())
+}
+
+/// Boot an image whose ROOT set the kernel is expected to refuse, and hand back
+/// the log. `ready_marker` is the panic's own first words, which is what tells
+/// the harness this boot is not going to reach userland.
+fn boot_expecting_root_refusal(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    image: &Path,
+    usb_images: Vec<PathBuf>,
+) -> Result<String, String> {
+    let profile =
+        if usb_images.is_empty() { qemu::Profile::Headless } else { qemu::Profile::UsbDisk };
+    let qemu = qemu::QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile,
+            boot_image: Some(image.to_path_buf()),
+            usb_images,
+            ready_marker: "boot: root=",
+            ..Default::default()
+        },
+    );
+    // Both channels: this kernel dies before virtio-console init, so the 16550
+    // carries the refusal, and which of the two a profile puts the early log on
+    // is not something this test is about.
+    let mut log = qemu.boot_log().to_string();
+    for _ in 0..20 {
+        let uart = qemu.uart_log();
+        if uart.contains("boot: root=") {
+            log.push_str(&uart);
+            return Ok(log);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    log.push_str(&qemu.uart_log());
+    Ok(log)
+}
+
+/// The kernel's refusal line, or what the boot said instead.
+fn root_refusal(log: &str) -> Result<String, String> {
+    log.lines()
+        .find(|l| l.contains("boot: root=") && l.contains("TOYOS-ROOT partition"))
+        .map(|l| l.trim().to_string())
+        .ok_or_else(|| format!("the kernel did not refuse this ROOT set:\n{}", volume_lines(log)))
 }

@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ thread_local! {
 /// shipping- and test-kernel users tens of seconds, relegating those names;
 /// the next run then charges the same builds to two different names. The raw
 /// suite wall clock still includes every build. Only per-test prices use this
-/// mark to remove construction of memoized kernel, bootloader, and initrd
+/// mark to remove construction of memoized kernel, bootloader, and root-image
 /// artifacts.
 #[derive(Clone, Copy)]
 pub struct ArtifactBuildMark(Duration, PhantomData<Rc<()>>);
@@ -76,9 +76,9 @@ impl Drop for ArtifactBuildTimer {
 #[serde(rename_all = "kebab-case")]
 struct SystemConfig {
     #[serde(default)]
-    programs: HashMap<String, ProgramConfig>,
+    programs: BTreeMap<String, ProgramConfig>,
     #[serde(default)]
-    symlinks: HashMap<String, String>,
+    symlinks: BTreeMap<String, String>,
     #[serde(default)]
     hosted_rustc: bool,
     #[serde(default)]
@@ -371,7 +371,7 @@ fn cargo_build(
 // one path.
 //
 // The window is not a moment: `build_test_image` builds, then runs the entire
-// userland build and initrd assembly, and only then reads the artifact back.
+// userland build and root-image assembly, and only then reads the artifact back.
 // Seconds to minutes, during which another config's build overwrites it.
 //
 // So: hold [`buildlock::artifact`] across each build→stage pair, and copy the
@@ -380,7 +380,7 @@ fn cargo_build(
 //
 // The bootloader used to be here for the same reason and no longer is: its init
 // list was compiled into it, so the `.efi` was a function of the boot config,
-// and an image once carried metalcase's initrd beside another config's
+// and an image once carried metalcase's root image beside another config's
 // bootloader whose 28-byte init string was `"/bin/soundd;/bin/test-runner"` —
 // the compositor was never spawned and the test failed as though the daemon
 // under test were broken. The bootloader carries no config now, so it is
@@ -503,11 +503,11 @@ fn assert_overflow_checked(what: &str, image: &[u8]) {
     );
 }
 
-// --- Shared initrd assembly ---
+// --- Shared root-image assembly ---
 
-/// Build all programs from a config and assemble an initrd.
+/// Build all programs from a config and assemble the ROOT image.
 /// The one program the kernel starts, in **every** image whatever `[programs]`
-/// says. It reads the manifest below and starts what that names, so an initrd
+/// says. It reads the manifest below and starts what that names, so a ROOT image
 /// without it is a machine with a kernel and no userland at all.
 const INIT_PROGRAM: &str = "init";
 
@@ -576,7 +576,7 @@ fn build_and_assemble(
         }
     }
 
-    let mut initrd_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut root_files: Vec<(String, Vec<u8>)> = Vec::new();
     let ws_target = userland_dir.join(format!("target/x86_64-unknown-toyos/{PROFILE}"));
 
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
@@ -630,27 +630,27 @@ fn build_and_assemble(
             };
             let data =
                 fs::read(&binary).unwrap_or_else(|_| panic!("Failed to read binary for {name}"));
-            initrd_files.push((format!("bin/{name}"), data));
+            root_files.push((format!("bin/{name}"), data));
         }
 
         let init = ws_target.join(INIT_PROGRAM);
         let data = fs::read(&init).expect("Failed to read binary for init");
-        initrd_files.push((format!("bin/{INIT_PROGRAM}"), data));
-        initrd_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
+        root_files.push((format!("bin/{INIT_PROGRAM}"), data));
+        root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
 
         if config.hosted_rustc {
-            collect_hosted_rustc(root, &mut initrd_files);
+            collect_hosted_rustc(root, &mut root_files);
         }
     }
 
     if !config.assets.is_empty() {
         let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
-        initrd_files.extend(assets::collect(&config.assets, &programs));
+        root_files.extend(assets::collect(&config.assets, &programs));
     }
 
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {
-        initrd_files.push((name.clone(), data.clone()));
+        root_files.push((name.clone(), data.clone()));
     }
 
     let symlinks: Vec<(String, String)> = config.symlinks.iter()
@@ -666,13 +666,13 @@ fn build_and_assemble(
     // program as surely as a file would, and the files alone walk past it.
     let targets: Vec<String> =
         symlinks.iter().map(|(_, to)| symlink_target_name(to).to_string()).collect();
-    let mut names: Vec<&str> = initrd_files.iter().map(|(name, _)| name.as_str()).collect();
+    let mut names: Vec<&str> = root_files.iter().map(|(name, _)| name.as_str()).collect();
     names.extend(targets.iter().map(String::as_str));
     if let Err(why) = unnamed_program(&names, &programs, &config.boot.start) {
         panic!("{why}");
     }
 
-    image::create_initrd(&initrd_files, &symlinks, quiet)
+    image::create_root_image(&root_files, &symlinks, quiet)
 }
 
 /// What `tests/common/qemu.rs` prefixes every binary it injects with.
@@ -812,14 +812,14 @@ fn kernel_features(
     features.join(",")
 }
 
-/// The boot parameter this build writes to the ESP, with every name checked
+/// The actuator half of the boot parameter, with every name checked
 /// against `kernel/src/actuator.rs`.
 ///
 /// Refused here as well as in the kernel, and before any lock, so that deleting
 /// an actuator takes its stale command lines down with it instead of quietly
 /// producing an image that arms nothing — the same rule `--kernel-feature` runs
 /// on, one layer further in.
-fn kernel_cmdline(root: &Path, params: &[String]) -> String {
+fn actuator_params(root: &Path, params: &[String]) -> String {
     if params.is_empty() {
         return String::new();
     }
@@ -1089,7 +1089,7 @@ pub fn build(
     // has to come back now, not after this build has waited out every other
     // worktree's hold on the sysroot.
     let kernel_features = kernel_features(root, debug, kernel_feature, kernel_param);
-    let cmdline = kernel_cmdline(root, kernel_param);
+    let params = actuator_params(root, kernel_param);
 
     // Outermost, before any build lock, and that order is the whole deadlock
     // argument: every acquirer of both takes the sysroot lock first. It waits
@@ -1163,11 +1163,11 @@ pub fn build(
         )
     };
 
-    let initrd_bytes =
+    let root_bytes =
         build_and_assemble(root, &config, &path_env, &[], false);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
-    let disk_bytes = image::create_boot_image(&kernel_bytes, &bl_bytes, &initrd_bytes, &cmdline);
+    let disk_bytes = image::create_boot_image(&kernel_bytes, &bl_bytes, &root_bytes, &params);
     let image_path = root.join(boot.image());
     fs::write(&image_path, disk_bytes).expect("Failed to write image");
 
@@ -1239,11 +1239,11 @@ pub fn designate_for_format(path: &Path, len: u64) {
 /// run asks cargo again.
 ///
 /// Per part rather than per image, because a part is what a key can be true of:
-/// the kernel is its feature set, the bootloader is its init list, the initrd is
+/// the kernel is its feature set, the bootloader is its init list, the ROOT image is
 /// its config and the caller's extra files. That is the same split
 /// [`stage_artifact`] already writes into the artifact names, and it is what
 /// makes this affordable — the kernels a full run builds share a handful of
-/// initrds, and an initrd is hundreds of megabytes.
+/// ROOT images, and a ROOT image is hundreds of megabytes.
 ///
 /// What it does not see is a source edit that lands mid-run. A run is a
 /// measurement of one tree, so that is the behaviour wanted either way; a run
@@ -1277,13 +1277,13 @@ impl Memo {
 
 static KERNEL: Memo = Memo::new();
 static BOOTLOADER: Memo = Memo::new();
-static INITRD: Memo = Memo::new();
+static ROOT_IMAGE: Memo = Memo::new();
 
-/// What an initrd is a function of: the config naming the programs, and the
+/// What the ROOT image is a function of: the config naming the programs, and the
 /// files the caller adds to it. Hashed whole — the test binaries in
 /// `extra_files` are the bulk of the image, and a key over their names and
 /// lengths would call two different builds of one binary the same image.
-fn initrd_key(config_path: &Path, extra_files: &[(String, Vec<u8>)]) -> u64 {
+fn root_image_key(config_path: &Path, extra_files: &[(String, Vec<u8>)]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     config_path.hash(&mut h);
@@ -1319,17 +1319,17 @@ pub fn build_test_image(
         kernel_params.is_empty() || kernel_features == TEST_KERNEL,
         "a boot asking for {kernel_params:?} must boot the test kernel, not {kernel_features:?}"
     );
-    let cmdline = kernel_params.join(",");
+    let params = kernel_params.join(",");
     let kernel_key = kernel_key(&features);
     let bl_key = key_hash(&[PROFILE]);
-    let initrd_key = initrd_key(config_path, extra_files);
+    let root_image_key = root_image_key(config_path, extra_files);
 
     // Nothing left to build, so nothing for the lock, the toolchain check or the
     // staleness sweep to protect.
-    if let (Some(kernel), Some(bl), Some(initrd)) =
-        (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), INITRD.get(initrd_key))
+    if let (Some(kernel), Some(bl), Some(root)) =
+        (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), ROOT_IMAGE.get(root_image_key))
     {
-        return image::create_boot_image(&kernel, &bl, &initrd, &cmdline);
+        return image::create_boot_image(&kernel, &bl, &root, &params);
     }
 
     // A cache miss is shared setup, not a property of whichever test happened
@@ -1399,13 +1399,13 @@ pub fn build_test_image(
         (kernel, bl)
     };
 
-    let initrd_bytes = INITRD.get_or_build(initrd_key, || {
+    let root_bytes = ROOT_IMAGE.get_or_build(root_image_key, || {
         build_and_assemble(root, &config, &path_env, extra_files, quiet)
     });
 
     drop(build_timer);
 
-    image::create_boot_image(&kernel_bytes, &bl_bytes, &initrd_bytes, &cmdline)
+    image::create_boot_image(&kernel_bytes, &bl_bytes, &root_bytes, &params)
 }
 
 /// Build all binaries in a multi-binary crate. Returns vec of (binary_name, bytes).
@@ -1414,7 +1414,7 @@ pub fn build_test_image(
 /// **The test binaries are enumerated from `src/bin`, never from the target
 /// directory**: cargo does not remove a binary when its source is deleted, so a
 /// target-directory scan keeps shipping a renamed or merged test from an artifact
-/// nothing in the tree can produce any more — into the initrd, into the test list,
+/// nothing in the tree can produce any more — into the ROOT image, into the test list,
 /// and over the name of whatever gets it next.
 pub fn build_toyos_bins(root: &Path, crate_path: &Path, quiet: bool) -> Vec<(String, Vec<u8>)> {
     let _slot = buildlock::build_slot(root, "the test binaries");
@@ -1524,7 +1524,7 @@ pub fn build_toyos_bins(root: &Path, crate_path: &Path, quiet: bool) -> Vec<(Str
 
 // --- Internal helpers ---
 
-fn collect_hosted_rustc(root: &Path, initrd_files: &mut Vec<(String, Vec<u8>)>) {
+fn collect_hosted_rustc(root: &Path, root_files: &mut Vec<(String, Vec<u8>)>) {
     let sysroot = toolchain::rust_dir(root).join("build/x86_64-unknown-toyos/stage2");
     assert!(
         sysroot.exists(),
@@ -1538,7 +1538,7 @@ fn collect_hosted_rustc(root: &Path, initrd_files: &mut Vec<(String, Vec<u8>)>) 
         "Hosted rustc binary missing: {}",
         rustc.display()
     );
-    initrd_files.push(("bin/rustc".to_string(), fs::read(&rustc).unwrap()));
+    root_files.push(("bin/rustc".to_string(), fs::read(&rustc).unwrap()));
 
     if let Ok(entries) = fs::read_dir(sysroot.join("lib")) {
         for entry in entries.flatten() {
@@ -1546,7 +1546,7 @@ fn collect_hosted_rustc(root: &Path, initrd_files: &mut Vec<(String, Vec<u8>)>) 
             if path.extension().is_some_and(|e| e == "so") {
                 let name = path.file_name().unwrap().to_str().unwrap().to_string();
                 let data = fs::read(&path).unwrap();
-                initrd_files.push((format!("lib/{name}"), data));
+                root_files.push((format!("lib/{name}"), data));
             }
         }
     }
@@ -1558,7 +1558,7 @@ fn collect_hosted_rustc(root: &Path, initrd_files: &mut Vec<(String, Vec<u8>)>) 
             if path.extension().is_some_and(|e| e == "so") {
                 let name = path.file_name().unwrap().to_str().unwrap().to_string();
                 let data = fs::read(&path).unwrap();
-                initrd_files.push((
+                root_files.push((
                     format!("lib/rustlib/x86_64-unknown-toyos/codegen-backends/{name}"),
                     data,
                 ));
@@ -1574,7 +1574,7 @@ fn collect_hosted_rustc(root: &Path, initrd_files: &mut Vec<(String, Vec<u8>)>) 
                 .is_some_and(|e| e == "rlib" || e == "rmeta")
             {
                 let name = path.file_name().unwrap().to_str().unwrap().to_string();
-                initrd_files.push((
+                root_files.push((
                     format!("lib/rustlib/x86_64-unknown-toyos/lib/{name}"),
                     fs::read(&path).unwrap(),
                 ));

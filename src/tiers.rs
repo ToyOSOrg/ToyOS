@@ -1221,6 +1221,19 @@ pub const RELEGATED: &[Relegated] = &[
                  machines with different panels, plus stride and pixel format. Two boots: \
                  12,624 ms on the hosted shard, over `FAST_CEILING_MS`.",
     },
+    Relegated {
+        test: "root_named_twice",
+        ci_ms: 8_079,
+        why: Why::Cost,
+        guards: "What still runs per pull request: `root_named_but_absent` boots the same shape \
+                 with the twin absent and asserts the zero-match panic names the UUID and every \
+                 candidate, and `root_candidate_malformed` asserts a candidate the kernel cannot \
+                 mount is refused by name while the real ROOT mounts. What only this name holds: \
+                 two TOYOS-ROOT partitions carrying one UUID, on two sticks, refused with both \
+                 named rather than either mounted. One boot staging a second 32 GiB stick that \
+                 is a copy of the boot image: 8,079 ms on the hosted shard, over \
+                 `FAST_COMMIT_MS`.",
+    },
 ];
 
 /// The names [`RELEGATED`] holds, which is what `tests/toyos.rs` checks its own

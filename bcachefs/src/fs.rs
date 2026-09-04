@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use crate::alloc_bitmap::BitmapAllocator;
 use crate::block_io::{BlockBuf, BlockNum, BlockIO, BlockIOExt, DeviceError, BLOCK_SIZE};
 use crate::btree::{self, Entry, Key, KeyType, Node};
-use crate::superblock::Superblock;
+use crate::superblock::{FsUuid, Superblock};
 
 /// Extent: a contiguous run of blocks on disk.
 ///
@@ -525,11 +525,21 @@ impl<IO: BlockIO> Formatted<IO> {
             journal_head: 0,
             flags: 0, // not clean until sync
             hash_seed,
+            uuid: FsUuid::UNNAMED,
         };
 
         sb.write(&io)?;
 
         Ok(Self { io, sb, alloc })
+    }
+
+    /// Name this filesystem, so a role's kernel argument can select it.
+    ///
+    /// A separate act from formatting: a volume nothing names is legal, and
+    /// nothing here invents a name for one. Persisted by [`Self::sync`], which
+    /// [`Self::into_io`] runs.
+    pub fn set_uuid(&mut self, uuid: FsUuid) {
+        self.sb.uuid = uuid;
     }
 
     /// Create a file on the formatted filesystem (used during mkfs).
@@ -620,6 +630,11 @@ impl<IO: BlockIO, Mode> Mounted<IO, Mode> {
             alloc,
             _mode: PhantomData,
         })
+    }
+
+    /// What this filesystem is named, or [`FsUuid::UNNAMED`].
+    pub fn uuid(&self) -> FsUuid {
+        self.sb.uuid
     }
 
     /// Decode a leaf value against *this volume's* block count.

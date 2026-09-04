@@ -365,16 +365,14 @@ counts are what the ruling asks for: removed beside documented.
 | `main.rs` | 6 | 2 | 4 | two raw `asm!("cli")` became `arch::cpu::disable_interrupts()`, which is that exact instruction with those exact options and already existed. |
 | `symbols.rs` | 4 | 0 | 4 | two raw-pointer tables shared with `toyos-elf` (which forbids `unsafe`), a `Sync` impl that was the second half of an already-commented pair, and the leaked `AtomicPtr` a panic reads lock-free. |
 | `hw.rs` | 3 | 0 | 3 | `IrqGuard`'s `pushfq`/`cli` pair and `sti; hlt`. Irreducible by *sequence*: saving `IF` and clearing it must be one uninterruptible run, and `sti` must precede `hlt` with no boundary between. |
-| `file_backing.rs` | 3 | 0 | 3 | the initrd's `Send`/`Sync` pair and its extent-to-pointer path. The justification found a real gap — filed. |
 | `sync.rs` | 2 | 0 | 2 | `LockGuard`'s `Deref`/`DerefMut`. Turning a `&UnsafeCell<T>` into `&T` is what a lock is. |
 | `scheduler.rs` | 2 | 0 | 2 | the futex word's read, and `IdleProof::new_unchecked`. The proof token is itself a reduction already taken — `reap_finished` needs no `unsafe` because of it. |
 | `pipe.rs` | 1 | 0 | 1 | `unsafe impl Send for Pipe`. **Checked rather than assumed**: deleting it fails to compile (`*mut u8 cannot be sent between threads safely`) — the test the two vestigial `mm`/`object` pairs failed. |
 | `page_cache.rs` | 1 | 1 | 0 | `alloc_zeroed` + `Box::from_raw` for a 1 MiB chunk became `vec![0u8; CHUNK_SIZE].into_boxed_slice()`, which reaches the same `alloc_zeroed` through `alloc`'s zeroing specialization for `u8` with no stack temporary. The field type went from `Box<[u8; CHUNK_SIZE]>` to `Box<[u8]>`; every use of a chunk was already a `[off..off + 4096]` slice. |
-| `bcachefs_adapter.rs` | 1 | 0 | 1 | `SliceBlockIO::new` over the initrd region from `KernelArgs`. |
-| **total** | **76** | **13** | **63** | |
+| **total** | **72** | **13** | **59** | |
 
-Four findings came out of writing the justifications, filed rather than fixed
-because each was a decision past a documentation sweep. **All four were decided
+Three findings came out of writing the justifications, filed rather than fixed
+because each was a decision past a documentation sweep. **All three were decided
 and fixed on 2026-08-22**, which is what the sweep's own report predicted would
 be worth more than the comments were:
 
@@ -386,15 +384,6 @@ be worth more than the comments were:
   order; the ring headers are reached one `&AtomicU32` at a time and a
   submission is a `read_volatile` of the whole entry, so no reference over that
   page exists at all.
-- `InitrdBacking` was given the *file's* size and never the image's, so nothing
-  bounded an extent against the end of the initrd it came out of. **Decided and
-  fixed 2026-08-22**: it holds the image (`bcachefs::SliceBlockIO`, now `Copy`)
-  and reads through `SliceBlockIO::block`, which is the one thing that knows
-  both the block number and the length. `file_backing.rs` and
-  `bcachefs_adapter.rs` now contain no `unsafe` at all — the `Send`/`Sync` pair,
-  the extent-to-pointer path and the copy out of it are gone, and the one
-  remaining claim about the initrd region is `SliceBlockIO::new`'s, made once in
-  `main.rs` where the region is named. A reduction, not a comment.
 - The futex word and the crash dump read user memory with `*ptr` where
   `copy_in` uses `read_volatile`. **Decided and fixed 2026-08-22**: both are
   `read_volatile`, and the rule is now `user_ptr.rs`'s module header rather

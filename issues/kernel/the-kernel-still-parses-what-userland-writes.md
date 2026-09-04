@@ -38,7 +38,7 @@ before that day. Independent of everything else; may run as soon as a slot frees
 **Move 2 — filesystem daemons**, sequenced after the completion architecture. A
 crafted image attacks the kernel rather than a sandboxed daemon. The FS daemon
 needs the blocking story to be efficient, and the boot path needs its story told
-first: the initrd covers early boot, but what mounts `/boot` and `/home`, and
+first: the kernel mounts ROOT itself, but what mounts `/boot` and `/home`, and
 with what authority, is the open question.
 
 **Move 3 — the panic-time symbol resolver**, small and independent. ELF parsing

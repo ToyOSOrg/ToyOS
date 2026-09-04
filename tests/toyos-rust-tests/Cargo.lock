@@ -111,8 +111,8 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation",
- "toyos",
- "toyos-abi",
+ "toyos 0.1.0",
+ "toyos-abi 0.1.0",
  "web-sys",
  "windows",
  "windows-core",
@@ -261,7 +261,7 @@ version = "0.8.9"
 source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos#fa0abe774f6f891a5d8918ac554bc43004232cf2"
 dependencies = [
  "cfg-if",
- "toyos-abi",
+ "toyos-abi 0.1.0",
  "windows-link",
 ]
 
@@ -656,13 +656,28 @@ dependencies = [
 [[package]]
 name = "toyos"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43276f23ad529f26be1ad1281b08bcaaabdb325778dc8cde9b3d1bfeca155a03"
 dependencies = [
- "toyos-abi",
+ "toyos-abi 0.1.0",
+]
+
+[[package]]
+name = "toyos"
+version = "0.2.0"
+dependencies = [
+ "toyos-abi 0.2.0",
 ]
 
 [[package]]
 name = "toyos-abi"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fce2965bd320e8da58a50d08e58e90a16438919cf647cf3c8af119b0841e28cd"
+
+[[package]]
+name = "toyos-abi"
+version = "0.2.0"
 
 [[package]]
 name = "toyos-font"
@@ -678,17 +693,17 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "libloading",
- "toyos",
- "toyos-abi",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
  "toyos-window",
 ]
 
 [[package]]
 name = "toyos-window"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "toyos",
- "toyos-abi",
+ "toyos 0.2.0",
+ "toyos-abi 0.2.0",
  "toyos-font",
  "toyos-keymap",
 ]
