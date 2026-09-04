@@ -2093,7 +2093,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "handle_kill_policy",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 4),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS handle_kill_policy` at 542, 563 \
+             and 761 ms in the last three nightly `ci` runs on `main` (33485669019, 33603832656, \
+             33728852421), with no live-object census line among any of the thirty-six shards' \
+             failures",
+        ),
         what: "`16 more killed processes left more live objects behind: [(\"Process\", 6, 7)]` — \
                `the_kills_release_what_they_held`'s machine-wide live-object census, one \
                `Process` higher on the second sample than the first. `ALONE: GREEN, and it was \
@@ -2143,7 +2148,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "usb_boot_stick_pulled",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS usb_boot_stick_pulled` at 16, 16 \
+             and 15 s in the last three nightly `ci` runs on `main` (33485669019, 33603832656, \
+             33728852421). **This retires the sighting, not the invariant** — the kernel path \
+             the panic came through is what the cited write-up is about, and it stays open",
+        ),
         what: "`\"PANIC:\" after the boot stick was pulled` — and the panic is the kernel's: \
                `a task waits on at most one queue` (`toyos-sched/src/waitq.rs:124`) reached through \
                `Ticket::register` from `kernel::io_uring::enter`, in logd's `Poller::submit`, \
@@ -2239,7 +2249,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_console_shell",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS screen_console_shell` at 3, 2 and \
+             2 s in the last three nightly `ci` runs on `main` (33485669019, 33603832656, \
+             33728852421). Both halves of the test moved after this sighting, so a recurrence \
+             would arrive under the new message and not this one",
+        ),
         what: "`no \\`i8042:\\` line above the prompt: \\`/boot/toyos/kernel.log\\` never reached the \
                scrollback` — **and the panel it printed disproves that sentence**: every line on \
                it is stamped `0.000` and comes from the first screenful of the boot, so the seed \
@@ -2404,7 +2419,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "log_poll_outlives_a_close",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the three loaded suites this row asks for, and three more: six full `cargo test` \
+             fast tiers in one worktree on 2026-09-04, each with single-test runs of the same \
+             suite beside it, `PASS log_poll_outlives_a_close` in every one at 3-8 s. Those six \
+             suites booted 612 guests between them and printed no `DOUBLE PANIC`, no `DOUBLE \
+             FAULT` and no `kernel panic` of any kind, which is the exposure this row's leading \
+             explanation is measured in",
+        ),
         what: "`kernel panic: DOUBLE PANIC — the guest went quiet because every CPU is halted, \
                not because it was still working. The panic is the finding and the guard never \
                got to be one`. The kernel's complete last words were `[kernel 0.991 cpu0] DOUBLE \
@@ -2601,7 +2623,16 @@ pub const KNOWN_RED: &[Red] = &[
         test: "console_line_atomicity",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 3),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the nine loaded observations this row asks for, taken 2026-09-04 as nine runs of \
+             this name rather than nine suites carrying it: green 9 of 9 beside a full \
+             `cargo test` fast tier in the same worktree, 5-10 s each at 2.47x to 5.46x width, \
+             every one after waiting on `[host-slots]` for a slot the suite beside it held, and \
+             every one `2 writers x 1000 lines of 200 bytes, 0 mixed`. The class the row names \
+             is measured in loaded boots, and the six fast tiers that were the load booted 612 \
+             guests with no `DOUBLE FAULT`, no `DOUBLE PANIC` and no `kernel panic` under any \
+             name",
+        ),
         what: "`kernel panic: DOUBLE FAULT on CPU 1 (pid=Some(Pid(2)) tid=Some(Tid(0)))`, 21 s \
                against the 9 s it passed in the run before. **A kernel death and not a verdict**, \
                and the first dev-host one the panic vocabulary has named rather than reported as \
@@ -2634,7 +2665,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "console_line_atomicity",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 3),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 9 of 9 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree at 2.47x to 5.46x width: \
+             every run `2 writers x 1000 lines of 200 bytes, 0 mixed; 100 unterminated bytes \
+             flushed by an exit`, so the count this row is about — a writer's thousand arriving \
+             short — did not recur once",
+        ),
         what: "`writer A declared 1000 whole lines and the capture carries 798` — the \
                non-vacuity count, not the atomicity assertion: **`0 mixed` means the \
                mechanism held**. A second sighting of the 2026-08-15 capture loss with the \
@@ -2650,7 +2687,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "handle_kill_policy",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 3),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 6 of 6 on 2026-09-04: six \
+             full `cargo test` fast tiers in one worktree, each with single-test runs of the \
+             same suite beside it, `PASS handle_kill_policy` in every one at 2-8 s. Six loaded \
+             suites against this row's 1 of 3, and no live-object census line in any of them",
+        ),
         what: "`16 more killed processes left more live objects behind: [(\"Process\", 6, 7)]` — \
                byte-identical to the 2026-08-17 sighting on an unrelated branch, numbers \
                included, which is what a machine-wide census either side of a kill on a shared \
@@ -2725,7 +2767,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_console_shell",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 2),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 6 of 6 on 2026-09-04: six \
+             full `cargo test` fast tiers in one worktree, each with single-test runs of the \
+             same suite beside it, `PASS screen_console_shell` in every one at 3-8 s against \
+             this row's 786 s",
+        ),
         what: "`typed \\`echo zqjxk\\` at the prompt and no row of the panel is its output` — a \
                **different assertion** from this name's 2026-08-17 CI row, which is about the \
                seeded `i8042:` line. 786 s against `PASS (2s)` alone in the same run, and the \
@@ -3434,6 +3481,25 @@ pub const KNOWN_RED: &[Red] = &[
                    was alone both times` in the same job",
         source: "tests/toyos.rs",
         measured: "2026-09-03",
+    },
+    Red {
+        test: "console_locale_detect",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::fires(1, 6),
+        standing: Standing::Stands,
+        what: "`STALLED: waiting for the wizard to ask for a key under /bin/console — the \
+               console did not lend it the keyboard — it never stopped talking and never got \
+               there`, **891 s**, and `ALONE: GREEN — it fails only beside other guests`. The \
+               guest kept talking through the whole guard, so this is the input path stopping \
+               and not a wedge. The name's first sighting on this instrument: its two other \
+               rows are CI's, and the shape is the one \
+               `issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md` already \
+               records for it",
+        evidence: "six full `cargo test` fast tiers in one worktree on 2026-09-04, each with \
+                   single-test runs of the same suite beside it; red in one, and green in the \
+                   three nightly `ci` runs of the same week",
+        source: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
+        measured: "2026-09-04",
     },
     Red {
         test: "doom_sound_flood",
