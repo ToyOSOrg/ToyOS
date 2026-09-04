@@ -2020,6 +2020,13 @@ mod tests {
         }
     }
 
+    /// One prefix and no other, so a doc naming `/etc/logd` or `/apps/logd` is a
+    /// token the filter below drops and an assertion that reds. Still `/bin/`
+    /// because `toyos-abi/src` is the tree the sweep did not reach;
+    /// `issues/build/twenty-seven-sdk-doc-lines-name-a-path-that-is-gone.md`
+    /// moves this and those lines together.
+    const LOG_DOC_BIN: &str = "/bin/";
+
     /// `Rights::LOG`'s doc names its holders, which is a claim about these
     /// manifests and rots on its own: `/system/bin/console` stood in it for the whole
     /// time no boot config gave it a `logread` row.
@@ -2044,9 +2051,7 @@ mod tests {
             .split('`')
             .skip(1)
             .step_by(2)
-            // The last segment, so the doc's spelling of the directory is not
-            // a second place this claim has to be kept in step.
-            .map(|token| token.rsplit('/').next().unwrap_or(token).to_string())
+            .map(|token| token.strip_prefix(LOG_DOC_BIN).unwrap_or(token).to_string())
             .filter(|token| every_program.contains(token))
             .collect();
         assert_eq!(

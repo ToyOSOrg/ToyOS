@@ -112,7 +112,10 @@ hierarchy is a convention, and `/boot`'s mount guard is the one restriction.
   `.local/<app>` for saves and caches.
 - `/log`, `/tmp` — as today.
 - `/media/<label>` — foreign and unassigned volumes; a Windows disk is
-  `/media/windows`.
+  `/media/windows`. A mount point is exactly one top-level name
+  (`kernel/src/vfs.rs`, `ROOT_ENTRIES` and the array indexed by it), so
+  `/media/<label>` is a nested mount the structure cannot represent: stage 5
+  owes that, and stage 2 left `/media` an empty directory.
 
 Users are a track of their own: a `/home/<user>` tree plus a login session
 whose namespace init builds from a per-user row. The sshd key path already has

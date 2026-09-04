@@ -430,10 +430,9 @@ pub fn home_budget_refusal_retried(
 /// `/apps` and `/home` are two paths into one filesystem, judged off the device.
 ///
 /// The guest writes one file under each and shuts down; the host then finds
-/// both in **one** bcachefs volume on the NVMe image, under one superblock
-/// UUID, through this crate's own build of the reader over a plain
-/// seek-and-read device. A second filesystem behind the second path could not
-/// answer for both names out of one mount.
+/// both in **one** bcachefs volume on the NVMe image, through this crate's own
+/// build of the reader over a plain seek-and-read device. A second filesystem
+/// behind the second path could not answer for both names out of one mount.
 pub fn apps_and_home_are_one_filesystem(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

@@ -228,7 +228,7 @@ jobs:
   #
   # Nothing installed but Homebrew's QEMU and `rustup` is also what this job
   # found the premise on. Dispatch 32749539353 (2026-08-24) got both toolchain
-  # stages through and then failed linking `/bin/doom`: `toyos-ld: undefined
+  # stages through and then failed linking `/system/bin/doom`: `toyos-ld: undefined
   # symbol: DG_ScreenBuffer`. `userland/doom/build.rs` archived doomgeneric
   # through `cc::Build::compile`, which reaches for whatever `ar` is in `PATH`
   # — Homebrew's GNU binutils on the dev host, Apple's cctools archiver on a

@@ -38,10 +38,6 @@ and an SDK version bump, and neither is worth spending on prose.
 The next branch that claims the sysroot for its own reason deletes them in the
 same commit — deleted rather than corrected, per the owner's rule on wrong
 prose — and `userland/toyos-window`'s one line goes with the next bump of that
-crate. This file closes when the `rg` above is empty.
-
-## Not this
-
-The four `CLAUDE.md` files carry six more such lines: `CLAUDE.md:40`,
-`CLAUDE.md:44`, `CLAUDE.md:83`, `src/CLAUDE.md:9`, `tests/CLAUDE.md:14` and
-`userland/CLAUDE.md:3`. An agent never edits one; they are the owner's.
+crate. `LOG_DOC_BIN` in `src/build.rs` is the directory the `Rights::LOG` doc
+gate strips, and it moves in that same commit or the gate stops seeing a doc
+that names the wrong one. This file closes when the `rg` above is empty.

@@ -2505,18 +2505,11 @@ pub const NO_LOG_ALERT: &str = "log: no /log";
 /// The other arm of the same table: what the kernel says when both halves are
 /// there. `screen_diag_boot` is the gate on it.
 ///
-/// **One declaration, beside [`NO_LOG_ALERT`], because the last hand-copied
-/// spelling of this line outlived the kernel's by two commits and a nightly.**
-/// `screen_diag_boot` carried `"log: this boot is on the console and in"` inline
-/// at its assertion — the shape the line had while the kernel opened the log
-/// file and could name it. `9ca7631` cut it when `/system/bin/logd` took the file over
-/// and `ecede44` restored the half the kernel still knows, correcting
-/// `screen_log_absent` and not this one; the gate then reded on `main` through
-/// two nightly dispatches with nothing to say why, and `src/redlist.rs` carries
-/// the two runs. The writer is `report_log_destination` in `kernel/src/main.rs`,
-/// whose `(true, true)` arm formats exactly this — a test asserting on a log
-/// line reads it from one named declaration that cites its writer, never from
-/// a literal copied at the assertion.
+/// **One declaration, beside [`NO_LOG_ALERT`].** The writer is
+/// `report_log_destination` in `kernel/src/main.rs`, whose `(true, true)` arm
+/// formats exactly this — a test asserting on a log line reads it from one
+/// named declaration that cites its writer, never from a literal copied at the
+/// assertion, which is how a hand-copied spelling outlives the kernel's.
 pub const LOG_ON_CONSOLE_AND_FILE: &str = "log: this boot is on the console and on /log";
 
 /// The log partition is named, never discovered — proved by moving the name.
