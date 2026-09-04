@@ -161,8 +161,6 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
     for krate in PUBLISHED {
         let manifest = format!("{}/Cargo.toml", krate.dir);
         let prefix = format!("{}/", krate.dir);
-        // `cargo publish` re-locks the package's own lockfile itself, so a
-        // change confined to one is not a change to what gets published.
         if !changed.iter().any(|p| p.starts_with(&prefix) && !p.ends_with("Cargo.lock")) {
             continue;
         }
@@ -210,10 +208,7 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
         }
     }
 
-    // A bump is not published until every lockfile git tracks agrees too:
-    // `cargo publish` re-locks the package's own `Cargo.lock` and refuses a
-    // dirty tree, so a path-dependency entry left at the old version there
-    // fails publish after the version check above has already passed.
+    // `cargo publish` re-locks the package's own lockfile and refuses a dirty tree.
     for lockfile in tracked_lockfiles(root)? {
         let text = file_at(root, "HEAD", &lockfile)?;
         for (name, locked, has_source) in lock_packages(&text) {
@@ -270,22 +265,23 @@ fn file_at(root: &Path, commit: &str, path: &str) -> Result<String, String> {
     git(root, &["show", &format!("{commit}:{path}")])
 }
 
-/// Every `Cargo.lock` git tracks, except the fork's own — `rust/` is a
-/// submodule with its own resolution this rule has no business in.
 fn tracked_lockfiles(root: &Path) -> Result<Vec<String>, String> {
     let out = git(root, &["ls-files", "-z", "*Cargo.lock"])?;
     Ok(out.split('\0').filter(|p| !p.is_empty() && !p.starts_with("rust/")).map(String::from).collect())
 }
 
-/// Every `[[package]]` block in a `Cargo.lock`, as `(name, version,
-/// has_source)`. A hand walk over the format cargo itself writes: `source` is
-/// absent on exactly a path or workspace-patched dependency, present on
-/// everything the registry resolved.
+#[derive(Default)]
+struct Block {
+    name: Option<String>,
+    version: Option<String>,
+    has_source: bool,
+}
+
 fn lock_packages(text: &str) -> Vec<(String, String, bool)> {
     let mut out = Vec::new();
-    let mut block: Option<(Option<String>, Option<String>, bool)> = None;
-    let flush = |block: &mut Option<(Option<String>, Option<String>, bool)>, out: &mut Vec<_>| {
-        if let Some((Some(name), Some(version), has_source)) = block.take() {
+    let mut block: Option<Block> = None;
+    let flush = |block: &mut Option<Block>, out: &mut Vec<_>| {
+        if let Some(Block { name: Some(name), version: Some(version), has_source }) = block.take() {
             out.push((name, version, has_source));
         }
     };
@@ -293,7 +289,7 @@ fn lock_packages(text: &str) -> Vec<(String, String, bool)> {
         let line = line.trim();
         if line == "[[package]]" {
             flush(&mut block, &mut out);
-            block = Some((None, None, false));
+            block = Some(Block::default());
             continue;
         }
         if line.starts_with('[') {
@@ -301,15 +297,15 @@ fn lock_packages(text: &str) -> Vec<(String, String, bool)> {
             block = None;
             continue;
         }
-        let Some((name, version, has_source)) = &mut block else { continue };
+        let Some(current) = &mut block else { continue };
         if let Some(value) = line.strip_prefix("name").and_then(|v| v.trim_start().strip_prefix('=')) {
-            *name = Some(value.trim().trim_matches('"').to_string());
+            current.name = Some(value.trim().trim_matches('"').to_string());
         } else if let Some(value) =
             line.strip_prefix("version").and_then(|v| v.trim_start().strip_prefix('='))
         {
-            *version = Some(value.trim().trim_matches('"').to_string());
+            current.version = Some(value.trim().trim_matches('"').to_string());
         } else if line.starts_with("source") {
-            *has_source = true;
+            current.has_source = true;
         }
     }
     flush(&mut block, &mut out);
@@ -414,9 +410,6 @@ mod tests {
         assert!(verdict.contains("toyos 0.1.0 -> 0.2.0"), "{verdict}");
     }
 
-    /// A `Cargo.lock` holding one `[[package]]` block, in the shape cargo
-    /// writes it: `source` present is a registry entry, absent is a path
-    /// dependency.
     fn lockfile(name: &str, version: &str, source: bool) -> String {
         let mut text =
             format!("# generated\nversion = 4\n\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n");
@@ -426,9 +419,6 @@ mod tests {
         text
     }
 
-    /// A change confined to a `Cargo.lock` under a published crate's own
-    /// directory is not a change to what gets published — `cargo publish`
-    /// re-locks it itself, so the bump check must not fire on it alone.
     #[test]
     fn a_lock_only_change_to_a_published_crate_passes_without_a_bump() {
         let (_origin, wt) = repo("sdk-lock-only");
@@ -442,10 +432,6 @@ mod tests {
         assert!(verdict.contains("changes none of the five"), "{verdict}");
     }
 
-    /// **The publish-time refusal this rule exists to catch**: `cargo
-    /// publish` re-locks the package's own `Cargo.lock` and refuses a dirty
-    /// tree, so a path-dependency entry a bump left behind fails publish
-    /// after the version and pin checks above have both already passed.
     #[test]
     fn a_bump_with_a_stale_path_dependency_lock_entry_is_refused_by_name() {
         let (_origin, wt) = repo("sdk-stale-lock");
@@ -461,8 +447,6 @@ mod tests {
         publishing(&wt);
         main_is_here(&wt);
 
-        // The bump moves both manifests, the pin included — the old rule's
-        // whole check — and leaves the lockfile behind.
         commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
         commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
         commit(
@@ -484,15 +468,11 @@ mod tests {
             "{refusal}"
         );
 
-        // The whole change: re-locking is what turns it green.
         commit(&wt, "toyos/Cargo.lock", &lockfile("toyos-abi", "0.2.0", false), "sdk: re-lock");
         let verdict = judge(&wt, "main").expect("a lock that agrees passes");
         assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
     }
 
-    /// A registry entry at the old version is a fork's own pin — `winit`,
-    /// `softbuffer` and `cpal` name these by version and cannot always be
-    /// patched to the local path, so this is legitimate and not refused.
     #[test]
     fn a_registry_entry_at_the_old_version_passes() {
         let (_origin, wt) = repo("sdk-fork-pin");
