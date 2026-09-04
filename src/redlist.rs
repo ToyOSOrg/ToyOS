@@ -1208,7 +1208,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "audio_tone_load",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 6 of 6, twelve boots: three \
+             alone (the verdict line's own `qemu 1`, host load 1.4-3.2) and three beside a full \
+             fast tier (`qemu 2`, host load 3.3-5.4). Every boot at both widths read `gaps: none \
+             (baseline none) ... phase-breaks 0` with wake latencies of 5.5-6.8 ms, against the \
+             76-297 ms every red carried; the two-boot rule was not reached once",
+        ),
         what: "gate A's fast tier, failing its own two-boot rule — dropouts on the first boot *and* \
                on the confirming re-boot — four times in one session at smp=1, on two different \
                trees. **The denominator is not readable**: the closed sighting file said \"six \
@@ -1223,7 +1229,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "audio_tone_load",
         instrument: Instrument::DevHostAlone,
         finding: Finding::quiet(3),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the loaded arm it was the control for is retired above, on the reasoning `hda_tone` \
+             already carries: a quiet reading whose red half has gone is not evidence of anything \
+             on its own",
+        ),
         what: "`main`, alone, three times, green at both widths, with wake latencies of 6.5–54 ms \
                where every red carried 76–297 ms — soundd not being scheduled rather than a cost \
                per period",
@@ -1250,7 +1260,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "i8042_absent",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 6 of 6: three alone \
+             (309/310, 310/312, 311/312 ms) and three beside a full fast tier, one of them with \
+             nine other guests up (315/316, 310/315, 310/313 ms). The absolute figures do still \
+             move under width — a seventh run at nine guests read `boot 392ms without vs 536ms \
+             with` — but the sign reversed and the difference stayed inside the 300 ms allowance \
+             in every one, so the shape this row is about did not recur",
+        ),
         what: "`601ms without an i8042 and 287ms with one` against a 300 ms allowance. The absolute \
                figure moved 277→619 ms across three runs of one boot with no code change, and it is \
                already `Sched::Serial`, so intra-suite width is not what reaches it",
