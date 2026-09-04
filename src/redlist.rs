@@ -1279,7 +1279,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_locale_detect",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 5 of 5 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree: 6 s at 3.11x width, 4 s at \
+             1.55x, 8 s at 4.71x with twelve guests up, 4 s at 2.20x with twelve, 9 s at 3.64x \
+             with twelve. The sentence this row quotes is no longer reached through a host clock: \
+             `shell_echoes` waits on the guest's own `terminal: ready` where it retyped against \
+             `qemu::budget(20 s)`",
+        ),
         what: "`nothing typed at the terminal window reached a shell`, `ALONE … GREEN`, on a branch \
                that touches neither the compositor nor the terminal",
         evidence: "one full suite on a host carrying three to four concurrent suites",
@@ -1290,7 +1297,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "netd_connection_caps",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 5 of 5 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree: 6 s at 1.50x width, 6 s at \
+             1.51x, 9 s at 2.63x with eleven guests up, 9 s at 2.68x with twelve, 6 s at 1.50x \
+             with eight. The widest is 9 s against this row's 50 s and a committed price of \
+             6538 ms, so the elapsed this row is about did not recur",
+        ),
         what: "red at 50 s inside a landing gate that was otherwise 257/259, green in 7 s alone on \
                the same tree moments later, on a branch that touches neither netd nor the network \
                stack",
