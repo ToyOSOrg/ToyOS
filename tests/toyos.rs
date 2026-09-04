@@ -1202,7 +1202,7 @@ const EXPECTED_FAILURES: &[ExpectedFailure] = &[ExpectedFailure {
     // each time — so a green is one sample of a rate and may not red the run.
     // A month: long enough that a fix already in flight lands first, short
     // enough that nobody inherits this silently.
-    stale: Stale::OnThisDate("2026-09-06"),
+    stale: Stale::OnThisDate("2026-10-06"),
 }, ExpectedFailure {
     test: "hda_tone",
     task: 88,
@@ -1215,7 +1215,7 @@ const EXPECTED_FAILURES: &[ExpectedFailure] = &[ExpectedFailure {
     // Intermittent: seven runs on this host gave 8, 8, 8, 8, 8, 16 and 0 breaks,
     // so a green is one sample and may not red a healthy tree. The date is the
     // same month the entry above uses, for the same reason.
-    stale: Stale::OnThisDate("2026-09-06"),
+    stale: Stale::OnThisDate("2026-10-06"),
 }];
 
 /// The renderer's two text colours, as the screendump reports them.
