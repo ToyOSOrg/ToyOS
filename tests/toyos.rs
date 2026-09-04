@@ -993,7 +993,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // what pushed `port_poll_churn` over its 300 s ceiling twice in a row.
     ("root_candidate_malformed", Sched::Serial, Tier::Fast),
     ("root_named_but_absent", Sched::Serial, Tier::Fast),
-    ("root_named_twice", Sched::Serial, Tier::Fast),
+    ("root_named_twice", Sched::Serial, Tier::Nightly),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
     // The write-back queue's three negative controls (wall 4 of
