@@ -99,9 +99,19 @@ fn open(candidate: &gpt::RootCandidate) -> Option<Root> {
         return None;
     };
 
+    // Every number below is one the disk chose, so each refusal says which.
     let lba = volume.lba_bytes as u64;
-    let start = volume.start_lba.checked_mul(lba)?;
-    let len = volume.blocks.checked_mul(lba)?;
+    let (Some(start), Some(len)) =
+        (volume.start_lba.checked_mul(lba), volume.blocks.checked_mul(lba))
+    else {
+        log!(
+            "root: candidate {guid} claims LBA {}+{} of {lba} bytes, which is not a byte range — \
+             refusing it",
+            volume.start_lba,
+            volume.blocks
+        );
+        return None;
+    };
     // Whole device blocks or nothing: a view that began or ended inside one
     // would share it with the table or with the next partition.
     if start % PAGE != 0 || len % PAGE != 0 {
@@ -111,7 +121,15 @@ fn open(candidate: &gpt::RootCandidate) -> Option<Root> {
         );
         return None;
     }
-    let part = block::Partition::of(handle, start / PAGE, len / PAGE)?;
+    let device_blocks = handle.block_count();
+    let Some(part) = block::Partition::of(handle, start / PAGE, len / PAGE) else {
+        log!(
+            "root: candidate {guid} is at {start}+{len} on a device of {} bytes — refusing to \
+             read past the end of it",
+            device_blocks.saturating_mul(PAGE)
+        );
+        return None;
+    };
 
     let cache = page_cache::init(part);
     match Mounted::<_, ReadOnly>::open(PageCacheBlockIO::new(Arc::clone(&cache))) {

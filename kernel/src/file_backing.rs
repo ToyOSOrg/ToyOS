@@ -5,6 +5,7 @@ use bcachefs::Extent;
 use crate::block::{BlockError, BlockResult};
 use crate::page_cache;
 use crate::sync::Lock;
+use crate::time::Deadline;
 
 /// `mm::PAGE_SIZE`: `usize` for buffer sizing, `u64` for file offsets.
 const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
@@ -78,29 +79,42 @@ impl FileBlocks {
     }
 }
 
-/// Attempts one block read may make before its refusal is the caller's answer;
-/// four of them bound what a page fault costs while the controller is busy.
-const BUDGET_ATTEMPTS: u32 = 4;
-
-/// One block of `cache`, retried while the refusal is the budget's — a
-/// `BudgetExpired` is the caller's clock and never a loss, and each attempt
-/// here is above the device lock, so it queues afresh with a whole
-/// `block::OPERATION`. It cannot park between attempts, unlike every other
-/// retry ladder here: a demand-paging fill runs under the process-data lock,
-/// where a park is the runtime panic `kernel/CLAUDE.md` names.
+/// One block of `cache`, retried while the refusal is the budget's.
+///
+/// A `BudgetExpired` is a claim about the caller's clock and never a loss, and
+/// each attempt here is above `block::Partition`'s device lock, so it queues
+/// afresh with a whole `block::OPERATION` to spend. Bounded by
+/// `block::DEADMAN`, which is what bounds the run of attempts in both the
+/// kernel's other ladders (`writeback::drain_retrying`, `ops::fsync`).
+///
+/// It cannot park or yield between attempts, unlike either of those: a
+/// demand-paging fill runs under the process-data lock, where a park is the
+/// runtime panic `kernel/CLAUDE.md` names. Re-acquiring the device lock is the
+/// only wait, so the deadline is checked before each attempt and the caller
+/// gets the device's own last word when it is reached.
 fn read_block_retrying(
     cache: &page_cache::Cached,
     block: u64,
     raw: &mut [u8; BLOCK_SIZE],
 ) -> BlockResult {
-    let mut answer = cache.raw_read(block, raw);
-    for _ in 1..BUDGET_ATTEMPTS {
+    let began = crate::clock::now();
+    let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let answer = cache.raw_read(block, raw);
         if answer != Err(BlockError::BudgetExpired) {
-            break;
+            return answer;
         }
-        answer = cache.raw_read(block, raw);
+        if deadman.reached(crate::clock::now()) {
+            log!(
+                "file: block {block} refused on the operation budget {attempts} time(s) in {} — {}",
+                crate::clock::now() - began,
+                crate::block::DEADMAN,
+            );
+            return answer;
+        }
     }
-    answer
 }
 
 /// The block holding `file_offset`, if the extents reach that far.
