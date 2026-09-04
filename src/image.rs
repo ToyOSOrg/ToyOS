@@ -9,13 +9,23 @@ use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
 
 /// The image that goes on the ROOT partition, named by a UUID **derived, never
 /// drawn**: two builds of one tree have to agree on the name the kernel
-/// argument carries, and a random one would make the image a different image
-/// on every build.
+/// argument carries.
+///
+/// **A set, not a sequence.** Both lists are sorted by name here, so the
+/// volume's bytes and the UUID over them are a function of what the caller
+/// holds and not of the order it happened to hand it over in — a caller that
+/// walked a hash map, or a directory, would otherwise make one tree two images.
+/// `one_ordering_of_one_set_is_one_image` is the arm.
 pub fn create_root_image(
     files: &[(String, Vec<u8>)],
     symlinks: &[(String, String)],
     quiet: bool,
 ) -> Vec<u8> {
+    let mut files: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut symlinks: Vec<&(String, String)> = symlinks.iter().collect();
+    symlinks.sort_by(|a, b| a.0.cmp(&b.0));
+
     let data_size: usize = files.iter().map(|(_, d)| d.len()).sum::<usize>();
     let total_entries = files.len() + symlinks.len();
     // Estimate: superblock(1) + bitmap + btree nodes + data blocks + backup(1) + 10% padding
@@ -31,7 +41,7 @@ pub fn create_root_image(
     let io = VecBlockIO::new(total_blocks);
     let mut fs = Formatted::format(io).expect("format an in-memory image");
 
-    for (name, data) in files {
+    for (name, data) in &files {
         if !quiet {
             eprintln!("root: adding '{}' ({} bytes)", name, data.len());
         }
@@ -39,7 +49,7 @@ pub fn create_root_image(
             .unwrap_or_else(|e| panic!("root: failed to add '{}': {:?}", name, e));
     }
 
-    for (name, target) in symlinks {
+    for (name, target) in &symlinks {
         if !quiet {
             eprintln!("root: symlink '{}' -> '{}'", name, target);
         }
@@ -47,14 +57,15 @@ pub fn create_root_image(
             .unwrap_or_else(|e| panic!("root: failed to symlink '{}' -> '{}': {:?}", name, target, e));
     }
 
-    fs.set_uuid(root_uuid(files, symlinks));
+    fs.set_uuid(root_uuid(&files, &symlinks));
     fs.into_io().expect("write an in-memory image").into_vec()
 }
 
-/// A name for exactly this set of files and symlinks. Lengths go into the
-/// digest beside the bytes, so no two entries can run together into an input a
-/// different split would also produce.
-fn root_uuid(files: &[(String, Vec<u8>)], symlinks: &[(String, String)]) -> FsUuid {
+/// A name for exactly this set of files and symlinks, in the order
+/// [`create_root_image`] sorted them into. Lengths go into the digest beside
+/// the bytes, so no two entries can run together into an input a different
+/// split would also produce.
+fn root_uuid(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> FsUuid {
     let mut hasher = Sha256::new();
     let mut field = |bytes: &[u8]| {
         hasher.update((bytes.len() as u64).to_le_bytes());
@@ -874,6 +885,64 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **One ordering of one set is one image.** The judge below compares
+    /// `root=` against the superblock the same build stamped, so it is blind to
+    /// this: a `root_uuid` that returned a constant would satisfy it. This is
+    /// the arm that is not — the same files and the same symlinks handed over
+    /// backwards have to come out as the same UUID and the same bytes, or two
+    /// builds of one tree are two images and the kernel argument names a
+    /// filesystem that the next build no longer has.
+    ///
+    /// Red before `create_root_image` sorted: the reviewer's two consecutive
+    /// builds of one clean worktree differed in nothing but the order
+    /// `SystemConfig`'s hash maps were walked in, and produced
+    /// `root=2e3c3663b390f7f29619becb841aba0e` then
+    /// `root=5be60e77792461c3c80a04ed7b80e606`.
+    #[test]
+    fn one_ordering_of_one_set_is_one_image() {
+        let files: Vec<(String, Vec<u8>)> = vec![
+            ("bin/init".to_string(), b"init-binary".to_vec()),
+            ("bin/toybox".to_string(), (0..40_000u32).map(|i| (i ^ 0x5A) as u8).collect()),
+            ("etc/system.manifest".to_string(), b"[start]\ninit\n".to_vec()),
+            ("share/empty".to_string(), Vec::new()),
+        ];
+        let symlinks = vec![
+            ("bin/ls".to_string(), "/bin/toybox".to_string()),
+            ("bin/cat".to_string(), "/bin/toybox".to_string()),
+            ("bin/echo".to_string(), "/bin/toybox".to_string()),
+        ];
+
+        let forwards = create_root_image(&files, &symlinks, true);
+
+        let mut backwards_files = files.clone();
+        backwards_files.reverse();
+        let mut backwards_symlinks = symlinks.clone();
+        backwards_symlinks.reverse();
+        let backwards = create_root_image(&backwards_files, &backwards_symlinks, true);
+
+        assert_eq!(
+            root_uuid_of(&forwards),
+            root_uuid_of(&backwards),
+            "one set of files named two filesystems"
+        );
+        assert_eq!(forwards.len(), backwards.len());
+        assert!(
+            forwards == backwards,
+            "one set of files wrote two different {}-byte volumes under one name {}",
+            forwards.len(),
+            root_uuid_of(&forwards)
+        );
+
+        // And it is not a constant: a different set is a different name.
+        let mut other = files.clone();
+        other[0].1.push(b'!');
+        assert_ne!(
+            root_uuid_of(&forwards),
+            root_uuid_of(&create_root_image(&other, &symlinks, true)),
+            "one byte of one file changed and the filesystem kept its name"
+        );
     }
 
     /// **The independent oracle for ROOT**, asked of the finished image by

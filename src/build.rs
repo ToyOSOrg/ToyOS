@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -76,9 +76,9 @@ impl Drop for ArtifactBuildTimer {
 #[serde(rename_all = "kebab-case")]
 struct SystemConfig {
     #[serde(default)]
-    programs: HashMap<String, ProgramConfig>,
+    programs: BTreeMap<String, ProgramConfig>,
     #[serde(default)]
-    symlinks: HashMap<String, String>,
+    symlinks: BTreeMap<String, String>,
     #[serde(default)]
     hosted_rustc: bool,
     #[serde(default)]
