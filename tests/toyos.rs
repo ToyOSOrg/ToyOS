@@ -987,11 +987,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
-    // The three ways a machine's ROOT set can be wrong. Each stages its own
-    // image or its own second stick, so none of them shares a boot.
-    ("root_candidate_malformed", Sched::Parallel, Tier::Fast),
-    ("root_named_but_absent", Sched::Parallel, Tier::Fast),
-    ("root_named_twice", Sched::Parallel, Tier::Fast),
+    // The three ways a machine's ROOT set can be wrong. Serial, not by
+    // association: each stages a whole boot image and up to a second 32 GiB
+    // stick beside it, and the three of them widening the parallel phase is
+    // what pushed `port_poll_churn` over its 300 s ceiling twice in a row.
+    ("root_candidate_malformed", Sched::Serial, Tier::Fast),
+    ("root_named_but_absent", Sched::Serial, Tier::Fast),
+    ("root_named_twice", Sched::Serial, Tier::Fast),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
     // The write-back queue's three negative controls (wall 4 of
