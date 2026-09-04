@@ -67,18 +67,10 @@ changes.
   that (`tests/toyos.rs`'s `SURFACE_UP`) — and the four-minute lane holder that
   the profile used to seat a second desktop beside, `desktop_window_child`, is
   `Tier::Nightly` and so never in a pull request's parallel phase.
-- **`desktop_locale_detect`** — added 2026-08-05. Same `nothing typed at the
-  terminal window reached a shell`, same `ALONE … GREEN`, in the same run as the
-  entry above and on a branch that touches neither the compositor nor the
-  terminal. It reaches a shell through `shell_answers` exactly as
-  `desktop_typing_damage` does, so it inherits that retry window and evidently
-  not enough of it. Still `Sched::Parallel`.
-- **`netd_connection_caps`** — added 2026-08-05. Red at 50 s inside a landing
-  gate that was otherwise 257/259 with 0 invalidated, green in 7 s alone on the
-  same tree moments later, on a branch that touches neither netd nor the
-  network stack. The 50 s against a 7 s solo run is the shape of a boot that
-  never got enough of the host, not of a cap that was announced wrong. Still
-  `Sched::Parallel`.
+- **`desktop_locale_detect`** — retired 2026-09-04, green 5 of 5 beside a full
+  fast tier; `src/redlist.rs` carries the runs.
+- **`netd_connection_caps`** — retired 2026-09-04, green 5 of 5 beside a full
+  fast tier; `src/redlist.rs` carries the runs.
 - **`metal_sim_pointer_churn`** — observed once, on a host carrying three other
   suites *and* a `toyos-sched-sim` run. Not investigated. Still
   `Sched::Parallel`.
@@ -240,7 +232,15 @@ changes.
   10,000 ms fast line, correctly: that number is the partition's, not the
   test's. The diff it rode on is one issue file. `ALONE: GREEN, and it was
   alone both times` — a rate, not a classification; the redlist row carries
-  the sighting.
+  the sighting. **2026-09-04: a different assertion under the same name, on
+  both instruments.** `N of 24 exits collected and M of 24 threads joined
+  inside 3s — a publish was not delivered`, `exit code Some(1)` in 3-5 s,
+  where the sighting above is the harness's 12 s ceiling on a guest that was
+  still talking: PR #400 run 33831507251 `guest (1)`, and 5 of 6 loaded fast
+  tiers on the dev host that day. One of those alone re-runs was **red again
+  with the same failure**, so this name is not only the wall-clock shape this
+  file is about. The 2026-08-20 row is retired on the change of shape and two
+  rows carry the new one.
 
 - **`console_line_atomicity`** — added 2026-08-20, the name's first sighting
   on the CI instrument (its standing rows are the loaded dev host's, 1 of 3
