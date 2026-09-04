@@ -48,7 +48,7 @@ of the defect cannot grow without a red naming what grew.
 carries no `syscap` at all. The row this record opened on — `system.toml:99`,
 `syscap = ["power", "roster"]` across nineteen links — is measured by nothing:
 the differential that would see `/bin/echo` holding `Rights::POWER` has to read
-`system.toml` and the initrd's link list on the host, in `cargo test --lib`,
+`system.toml` and ROOT's link list on the host, in `cargo test --lib`,
 because no boot carries that manifest.
 
 **The differential reads one row for every link, and the proposed fix is exactly

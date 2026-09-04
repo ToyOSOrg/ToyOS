@@ -58,7 +58,7 @@ children in the shared boot (smp=2) and 120 more on a dedicated smp=8 boot,
 and every one of them started and exited.** The T14 has eight CPUs, so the
 CPU count was the first fidelity gap closed and it was not enough. The chain
 *under a live compositor and a real `/bin/terminal`* was the next fidelity step
-and was **not** taken: `tests/metalcase`'s initrd carries no terminal, shell or
+and was **not** taken: `tests/metalcase`'s ROOT carries no terminal, shell or
 toybox, and five other tests share that boot.
 
 **The measurement meant to decide it was `ps` — and `ps` is a victim.** The

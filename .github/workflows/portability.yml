@@ -52,8 +52,8 @@ jobs:
   # this move exists to close), git (for `actions/checkout` and for
   # `rust/x`'s own history walk), curl and its CA bundle (to fetch `rustup`
   # itself), the declared QEMU and Rust, `cargo run -- --build-only` builds
-  # the toolchain, kernel, bootloader, userland and initrd — the whole of
-  # "cargo run builds everything" (root CLAUDE.md) — without ever launching a
+  # the toolchain, kernel, bootloader, userland and root filesystem — the whole
+  # of "cargo run builds everything" (root CLAUDE.md) — without ever launching a
   # window.
   #
   # The move this replaces was the open gap in the previous version of this
