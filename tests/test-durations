@@ -135,7 +135,7 @@ abuse_thread_name 1 shards=12
 abuse_tls_alloc 15 shards=12
 allocator_stress 787 shards=12
 alone_line_reports_the_alone_run 0 shards=12
-apps_and_home_are_one_filesystem 18446744073709551615 shards=none
+apps_and_home_are_one_filesystem 7263 shards=12
 audio_idle_suspend 1013 shards=12
 audio_tone (smp=1) 8450 shards=12
 audio_tone (smp=8) 8471 shards=12
@@ -202,7 +202,7 @@ hda_client_stall 19047 shards=12
 hda_tone 13389 shards=12
 hda_two_live_refused 4848 shards=12
 heap_ceiling_recovery 10371 shards=12
-hierarchy_paths 18446744073709551615 shards=none
+hierarchy_paths 87 shards=12
 home_backing_revoked 663 shards=12
 home_budget_refusal_retried 18661 shards=12
 i8042_absent 9221 shards=12
