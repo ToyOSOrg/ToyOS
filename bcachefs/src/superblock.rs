@@ -56,7 +56,7 @@ impl FsUuid {
             return None;
         }
         let mut out = [0u8; 16];
-        for (byte, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
+        for (byte, pair) in out.iter_mut().zip(text.as_chunks::<2>().0) {
             let digit = |c: u8| match c {
                 b'0'..=b'9' => Some(c - b'0'),
                 b'a'..=b'f' => Some(c - b'a' + 10),
