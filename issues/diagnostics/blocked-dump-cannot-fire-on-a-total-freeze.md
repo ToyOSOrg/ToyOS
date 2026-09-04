@@ -120,6 +120,15 @@ The CI job ran one guest at a time, so its initial and isolated executions are a
 CI rate of one in two; the earlier loaded-dev-host occurrence is evidence on a
 different instrument and is not folded into that rate.
 
+**The green count both halves retire on, as of 2026-09-04.** The CI half asks
+for six consecutive green hosted runs and has **three**: nightly `ci` runs
+`33485669019`, `33603832656` and `33728852421` on `main`, each `PASS
+screen_blocked_dump (4s)`. The loaded-dev-host half asked for three loaded
+observations and has them — green 3 of 3 beside a full `cargo test` fast tier
+in one worktree, twelve guests up in each, painting `== VERDICT:` every time —
+so its redlist row is retired and this shape's remaining count is the CI one.
+Three more green nightlies close it; one red under this name restarts it.
+
 The recorded repaint mechanism does not cover this shape — that one names a
 string the window covered, while this panel is a paginated boot-log tail rather
 than a dump missing only its last line. `dump-deaf-cpu` is ruled out despite

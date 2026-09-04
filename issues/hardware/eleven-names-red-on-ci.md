@@ -58,7 +58,12 @@ none of these six has been looked at. **No entry here is a candidate for
 40% of the time for reasons nobody has looked at" is neither.
 
 **`metal_sim_null_audio` and `hda_two_live_refused` are the first two off this
-table**, closed when soundd stopped racing to present its null sink. The remaining nine stand.
+table**, closed when soundd stopped racing to present its null sink.
+**Re-taken 2026-09-04 against the last three nightly `ci` runs on `main`**
+(`33485669019`, `33603832656`, `33728852421`): of the names above, only
+`usb_disk_index_stable` reds in any of them, and `src/redlist.rs` carries that
+row at 1 of 3. Every other row this file sources is retired there on those
+runs, never deleted.
 
 **Six of the eleven are `Sched::Serial`, and until 2026-08-08 the harness re-ran
 none of them**: the retry loop was written for the parallel phase and branched on
