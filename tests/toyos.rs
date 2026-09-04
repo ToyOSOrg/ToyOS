@@ -2150,6 +2150,7 @@ fn settle_for(name: &str) -> fn(&mut QemuInstance, &mut TestResult) {
     match name {
         "null_sink_client_exits" => settle_null_sink_client_exits,
         "syscall_cost" => settle_syscall_cost,
+        "exit_wait_storm" => settle_exit_wait_storm,
         _ => no_settle,
     }
 }
@@ -2165,6 +2166,7 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "debug_trap" => check_debug_trap,
         "dlopen_dedup" => check_dlopen_dedup,
         "syscall_cost" => check_syscall_cost,
+        "exit_wait_storm" => check_exit_wait_storm,
         _ => check_rust_result,
     }
 }
@@ -2264,6 +2266,118 @@ fn check_syscall_cost(result: &TestResult) -> bool {
         return false;
     }
     eprintln!("  [syscall] {cycles} cycles per SYS_CLOCK over {counted} of them, tsc {mhz} MHz");
+    true
+}
+
+/// The children `exit_wait_storm` spawns, mirrored from its `CHILDREN`.
+const STORM_CHILDREN: usize = 24;
+
+/// The calls the parent's own profile is read for, and how many of each the
+/// storm is: spawn, process wait, thread join.
+const STORM_CALLS: [(u64, usize); 3] = [
+    (toyos_abi::syscall::SYS_SPAWN, STORM_CHILDREN),
+    (toyos_abi::syscall::SYS_PROCESS_WAIT, STORM_CHILDREN),
+    (toyos_abi::syscall::SYS_THREAD_JOIN, STORM_CHILDREN),
+];
+
+/// The parent is the *first* `spawn:` line, since every later one is a child of
+/// it; `spawned_pid` reads the last and would answer with a child.
+fn storm_parent(log: &str) -> Option<u32> {
+    log.lines()
+        .find(|l| l.contains("spawn: ") && l.contains("/bin/test_rs_exit_wait_storm "))?
+        .split("pid=")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Wait for the parent's accounting line: every child's and every thread's
+/// teardown line was emitted before it, so its arrival is what says the
+/// capture this check reads is whole.
+fn settle_exit_wait_storm(qemu: &mut QemuInstance, result: &mut TestResult) {
+    /// A liveness ceiling and never a verdict.
+    const ACCOUNTED: Duration = Duration::from_secs(5);
+
+    let Some(pid) = storm_parent(&result.serial) else { return };
+    let want = accounting_of(pid);
+    if result.serial.contains(&want) {
+        return;
+    }
+    let more = qemu.drain_until(ACCOUNTED, |l| l.contains(&want));
+    result.serial.push_str(&more);
+}
+
+/// `exit_wait_storm` against the kernel's own record of the same run: the codes
+/// it says the children died with, and the calls it counted the parent making.
+/// The guest writes neither, so a count it reports and a publish it never asked
+/// for are told apart here and nowhere else.
+fn check_exit_wait_storm(result: &TestResult) -> bool {
+    if !check_rust_result(result) {
+        return false;
+    }
+    let Some(parent) = storm_parent(&result.serial) else {
+        eprintln!(
+            "FAIL rs::exit_wait_storm: no `spawn: /bin/test_rs_exit_wait_storm` line reached the \
+             capture, so nothing here says what the kernel saw{}",
+            kernel_account(result)
+        );
+        return false;
+    };
+    let mut codes: Vec<i32> = Vec::new();
+    for line in result.serial.lines() {
+        let Some(rest) = line.split("exit: test_rs_exit_wait_storm pid=").nth(1) else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let Some(Ok(pid)) = fields.next().map(str::parse::<u32>) else { continue };
+        if pid == parent {
+            continue;
+        }
+        if let Some(Ok(code)) =
+            fields.next().and_then(|f| f.strip_prefix("code=")).map(str::parse::<i32>)
+        {
+            codes.push(code);
+        }
+    }
+    codes.sort_unstable();
+    let expected: Vec<i32> = (0..STORM_CHILDREN as i32).collect();
+    if codes != expected {
+        eprintln!(
+            "FAIL rs::exit_wait_storm: the kernel accounted children exiting with {codes:?}, \
+             against the {STORM_CHILDREN} the guest reports collecting\nstdout:\n{}{}",
+            result.stdout,
+            kernel_account(result)
+        );
+        return false;
+    }
+    let want = accounting_of(parent);
+    let Some(line) = result.serial.lines().find(|l| l.contains(want.as_str())) else {
+        eprintln!(
+            "FAIL rs::exit_wait_storm: the kernel never accounted the parent — no `{want}` line \
+             reached the capture, so nothing here says which calls it made{}",
+            kernel_account(result)
+        );
+        return false;
+    };
+    for (call, least) in STORM_CALLS {
+        let counted = line
+            .split(&format!(" {call}="))
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0);
+        if counted < least {
+            eprintln!(
+                "FAIL rs::exit_wait_storm: the parent made {counted} call(s) of syscall {call} \
+                 and the storm is {least}\nstdout:\n{}{}",
+                result.stdout,
+                kernel_account(result)
+            );
+            return false;
+        }
+    }
     true
 }
 

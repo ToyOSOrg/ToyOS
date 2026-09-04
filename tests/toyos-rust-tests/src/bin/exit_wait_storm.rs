@@ -13,18 +13,20 @@
 //! must red as a number rather than as a stall the suite names apart and
 //! nobody bisects.
 //!
+//! **A child parks until the parent releases it, and that is what makes the
+//! parent's wait a park.** A child on its own schedule has published its exit
+//! before the wait asks, and the wait then reads a value.
+//!
 //! Every child is this binary with an argument, so what the parent waits for is
 //! a real process exit and not a stub.
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Children spawned before any of them is waited for. They exit while the
-/// parent is parked, which is the ordering the park is about — a child that
-/// had already exited would be answered from the object's published value and
-/// never park at all.
+/// Children spawned, held on their own stdin, and released together.
 const CHILDREN: u32 = 24;
 
 /// Threads joined in a fan-in. Each exits on its own schedule, so the joiner
@@ -32,51 +34,78 @@ const CHILDREN: u32 = 24;
 /// one of those parks ended.
 const THREADS: u32 = 24;
 
-/// What the whole storm must fit in.
+/// What the storm must fit in. The spawns that set it up are outside it: they
+/// are ELF loads, and a bound over them measures the loader.
 const BOUND: Duration = Duration::from_secs(3);
+
+/// A liveness allowance for the spawns and never a measurement of them: it
+/// turns a wedged setup into a number instead of the harness's stall.
+const SETUP: Duration = Duration::from_secs(30);
+
+/// Which phase the watchdog names, and how far each got.
+static SPAWNING: AtomicU32 = AtomicU32::new(1);
+static SPAWNED: AtomicU32 = AtomicU32::new(0);
+static COLLECTED: AtomicU32 = AtomicU32::new(0);
+static JOINED: AtomicU32 = AtomicU32::new(0);
 
 fn main() {
     if let Some(code) = std::env::args().nth(1) {
-        // The child half: exit with the code the parent chose, after a moment
-        // that is long enough for the parent to be parked on it.
-        thread::sleep(Duration::from_millis(2));
+        // The child half: park in `read` until the parent drops the write end,
+        // then exit with the code the parent chose.
+        let mut byte = [0u8; 1];
+        let _ = std::io::stdin().read(&mut byte);
         std::process::exit(code.parse::<i32>().expect("the parent passes an integer"));
     }
 
     let exe = std::env::current_exe().expect("current_exe failed");
 
-    // As `blocking_read_stress`: a lost publish must red as a count and never
-    // as the `STALL` the harness disqualifies.
-    static COLLECTED: AtomicU32 = AtomicU32::new(0);
-    static JOINED: AtomicU32 = AtomicU32::new(0);
     thread::spawn(|| {
-        thread::sleep(BOUND);
+        thread::sleep(SETUP + BOUND);
         // Ends the process rather than this thread, for
         // `blocking_read_stress`'s reason: a thread panic leaves `main` parked
         // on the publish that never came, and the harness reports a stall.
-        eprintln!(
-            "exit_wait_storm: {} of {CHILDREN} exits collected and {} of {THREADS} threads \
-             joined inside {BOUND:?} — a publish was not delivered",
-            COLLECTED.load(Ordering::Relaxed),
-            JOINED.load(Ordering::Relaxed),
-        );
+        if SPAWNING.load(Ordering::Relaxed) == 1 {
+            eprintln!(
+                "exit_wait_storm: {} of {CHILDREN} children spawned in {SETUP:?} — the storm \
+                 never started",
+                SPAWNED.load(Ordering::Relaxed),
+            );
+        } else {
+            eprintln!(
+                "exit_wait_storm: {} of {CHILDREN} exits collected and {} of {THREADS} threads \
+                 joined inside {BOUND:?} — a publish was not delivered",
+                COLLECTED.load(Ordering::Relaxed),
+                JOINED.load(Ordering::Relaxed),
+            );
+        }
         std::process::exit(1);
     });
 
-    let started = Instant::now();
-
-    // Every child is spawned before any is waited for, so the waits find them
-    // running and park.
     let mut children = Vec::new();
+    let mut held = Vec::new();
     for i in 0..CHILDREN {
-        children.push((
-            i,
-            Command::new(&exe)
-                .arg((i % 100).to_string())
-                .spawn()
-                .unwrap_or_else(|e| panic!("spawn child {i}: {e}")),
-        ));
+        let mut child = Command::new(&exe)
+            .arg((i % 100).to_string())
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn child {i}: {e}"));
+        held.push(child.stdin.take().expect("the spawn was asked for a pipe"));
+        children.push((i, child));
+        SPAWNED.store(i + 1, Ordering::Relaxed);
     }
+
+    // The premise, asserted rather than left to timing: nothing has released a
+    // child yet, so every wait below finds one running and parks.
+    for (i, child) in &mut children {
+        assert!(
+            child.try_wait().expect("try_wait for a child this process spawned").is_none(),
+            "child {i} exited before it was released, so its wait would have read a value",
+        );
+    }
+
+    SPAWNING.store(0, Ordering::Relaxed);
+    let started = Instant::now();
+    drop(held);
 
     let mut collected = 0u32;
     for (i, mut child) in children {
