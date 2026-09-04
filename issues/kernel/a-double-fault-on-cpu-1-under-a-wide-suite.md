@@ -204,9 +204,13 @@ get 79 of them.
 Do not close this on green runs. What retires it is a second sighting that names
 its own cause — which it now will.
 
-**2026-08-25, promoted to `defect`.** `src/redlist.rs` carries a live
-`Standing::Stands` row against `console_line_atomicity` whose `source` is this
-file, and that row states an owed count: nine loaded suites of the post-`cld`
-tree with no red under this name, refused behind `wt/toyos-census`'s sysroot
-claim on 2026-08-22 and not run since. Running that count is the act, and it is
-the harness owner's.
+**2026-09-04, the owed count was run and the row is retired; this entry is
+not.** Nine loaded observations of `console_line_atomicity` on the post-`cld`
+tree, each beside a full `cargo test` fast tier in the same worktree at 2.47x
+to 5.46x width: green 9 of 9, every one `2 writers x 1000 lines of 200 bytes,
+0 mixed`. They were nine runs of the name and not nine whole suites, which is
+the weaker instrument of the two and is why the six fast tiers that were the
+load are counted too: 612 guest boots with no `DOUBLE FAULT`, no `DOUBLE PANIC`
+and no `kernel panic` under any name, four of the six contending with a second
+worktree (`toyos-rootfs3`) for guest and build slots. That is exposure, not a
+second sighting — and the paragraph above says what retires this entry.

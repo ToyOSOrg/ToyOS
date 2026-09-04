@@ -54,6 +54,12 @@ controller" from "the console stopped reading the kernel's queue", and it needs
   198 s for the same tree alone. The harness called it a blown liveness guard;
   it was `ALONE: GREEN`, and green in a 198 s whole-suite run of the same commit.
   A sighting outside CI and outside the armed arm, recorded because nothing else has one.
+- **Seen again on the dev host under load, 2026-09-04, and this one has a
+  denominator**: the same STALL sentence, **891 s**, `ALONE: GREEN — it fails
+  only beside other guests`, in **1 of 6** full `cargo test` fast tiers run in
+  one worktree that day, each with single-test runs of the same suite beside
+  it. Green in the three nightly `ci` runs of the same week. `src/redlist.rs`
+  carries it as this name's first `DevHostLoaded` row.
 
 The two do not reconcile at a common rate: at the 2-of-5 arm's own p = 0.4,
 P(0 of 20) is 3.66e-05. **The tree is not the difference** — the branch's
