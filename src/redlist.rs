@@ -2546,7 +2546,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "exit_wait_storm",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the guest's own bound covered the 24 spawns that only set its storm up, so the \
+             deadline expired before it made a first `SYS_PROCESS_WAIT` — the message asserted a \
+             cause the same capture's kernel console refutes. Fixed in a329adc0: the children \
+             are held on their own stdin and released together, the bound covers the storm \
+             alone, and `check_exit_wait_storm` judges the guest's counts against the kernel's \
+             `exit:` lines and the parent's syscall profile",
+        ),
         what: "`exit_wait_storm: 0 of 24 exits collected and 0 of 24 threads joined inside 3s \
                — a publish was not delivered`, `FAIL exit_wait_storm: exit code Some(1)` at \
                4 s, and `ALONE: GREEN, and it was alone both times — nothing the harness \
@@ -2562,7 +2569,16 @@ pub const KNOWN_RED: &[Red] = &[
         test: "exit_wait_storm",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(5, 6),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this instrument and closed, 2026-09-04. The base fired 4 of 12 loaded \
+             runs — three rounds of four beside a full `cargo test` fast tier in the same \
+             worktree, `fastest boot` 2227, 3510, 4013 and 6039 ms against the reference \
+             1320 ms — and every one of the four was red again on its own ALONE re-run, which \
+             is the counts moving rather than the host. The spawn loop is what spent the bound: \
+             it runs 2160 ms under that load and 636 ms with the host idle. a329adc0 takes the \
+             spawns out of the bound and holds the children; the fixed arm is 12 of 12 green \
+             over the same three rounds of the same script, at widths up to 2.99x",
+        ),
         what: "the same guest-side deadline, at counts that move: `0 of 24 exits collected \
                and 0 of 24 threads joined` three times, `21 of 24 … and 0 of 24` once, \
                `24 of 24 … and 16 of 24` once — every one `inside 3s — a publish was not \
