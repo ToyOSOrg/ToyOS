@@ -1163,7 +1163,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "hda_tone",
         instrument: Instrument::DevHostAlone,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken alone on this host and green 3 of 3 on 2026-09-04 — 7 s each at 1.49-1.50x \
+             width with no other guest on the machine, every capture `gaps none phase-breaks 0` \
+             at dither 24.1-25.9%, peak 16000, pitch 440.0Hz. This retires the *alone* \
+             instrument only: the write-up cited here re-judged it 8 of 8 clean on 2026-08-29 \
+             and put the silence at 1 of 11 beside two other suites, so the loaded and CI \
+             readings of this name are untouched",
+        ),
         what: "`1 mid-tone silences in the capture: total 1 [1p×1]` — the harm assertion, which \
                #88's exemption is right not to cover, so any landing whose gate is `cargo test` is \
                red on `main` for this and an agent will read it as theirs",
@@ -1247,7 +1254,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "i8042_mouse",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 3 of 3 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree with twelve guests up: \
+             10 s at 2.71x width, 8 s at 2.56x, 6 s at 2.22x. Every run `1009 packets injected, \
+             1009 out`, and the kernel's own line `0 undecoded, 0 discarded, 0 overruns, \
+             0 dropped, 0 lost edges` — this row's shape is a packet that did not arrive",
+        ),
         what: "`1003 pointer events reached userland out of 1004 packets injected, never more than \
                4 of them (12 bytes) outstanding against a 16-byte device queue` — inside the bound \
                the summing fix installed, so that mechanism is not what this is. A/B in one session \
@@ -1315,7 +1328,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "dump_nmi_probe",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 3 of 3 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree: 5 s at 1.51x width with \
+             eleven guests up, 7 s at 2.66x with twelve, 7 s at 3.08x with twelve. Two of the \
+             three waited on `[host-slots]` for a guest slot the suite beside them held. The \
+             millisecond this row says nothing should widen was not widened",
+        ),
         what: "`the NMI went unanswered too` — its wall-clock verdict expiring on a host carrying \
                three other worktrees' suites. It is `Sched::Serial`, so it failed in the serial \
                tail and the harness never re-ran it alone; run alone moments later it passes in \
@@ -1328,7 +1347,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "blocked_dump",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 3 of 3 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree with twelve guests up and \
+             a 2.0-4.7 s wait for a guest slot: 6 s at 3.59x width, 5 s at 3.09x, 6 s at 3.45x. \
+             Every run reached the dump — `all 8 cpus answered; 0 overdue, 0 absurd, 0 unheld, \
+             0 never ran`. The step this row is about, reaching a shell through a host clock, is \
+             gone: `shell_echoes` waits on the guest's own `terminal: ready`",
+        ),
         what: "`nothing typed at the terminal window reached a shell`, `ALONE … GREEN` in 5 s. Its \
                verdict is the dump's content, but *reaching* the dump crosses a compositor, a \
                terminal and a shell, and that step is a wall-clock margin",
@@ -1469,7 +1495,16 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_console_scroll",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 3 of 3 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree: 10 s at 2.24x width with \
+             twelve guests up, 12 s at 3.20x with twelve, 12 s at 2.38x with eleven, two of them \
+             after a 3.8-4.1 s wait for a guest slot. Every run printed all three rounds — \
+             `round 1: lines 0..100 at 7 per flush, all 66 rows match the model character for \
+             character` — against the 598 s and the missing `CHURN-DONE 0 100` this row is \
+             about. That is the three loaded observations of this name the row asks for, taken \
+             as three loaded runs rather than three loaded suites",
+        ),
         what: "`round 1: the guest never printed CHURN-DONE 0 100`, **598 s** in the wide phase \
                against a phase that is ~45 s on a quiet host, `ALONE … GREEN`. The landing gate it \
                killed ran 778.9 s with four other `--land` processes on the host, on a branch whose \
@@ -1491,7 +1526,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 3 of 3 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree: 12 s at 1.83x width with \
+             ten guests up, 13 s at 1.47x with twelve, 11 s at 1.50x with twelve, one of them \
+             after a 15.9 s wait for a guest slot. Every run ends `\"hello\" plus a \
+             (1600, -1920) pointer delta crossed them afterwards` — the relative mouse's event \
+             after the staged break, which is exactly what this row says never came back",
+        ),
         what: "`input never came back: no pointer event moved by (2560, -1920); deltas seen: \
                [(256, 256), (256, 256)]`, `ALONE … GREEN`. The two deltas it did see are the \
                boot-time absolute tablet, so what went missing is the relative mouse's event after \
@@ -1505,7 +1547,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_early_panic",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "re-taken on this host under its own instrument and green 3 of 3 on 2026-09-04, each \
+             beside a full `cargo test` fast tier in the same worktree: 3 s at 1.52x width with \
+             eleven guests up, 4 s at 2.29x with twelve, 4 s at 2.28x with twelve. This row's \
+             own regime — eight `--land` builds at once — is not what a suite beside it stages, \
+             so what these three runs retire is the row and not that regime",
+        ),
         what: "`ALONE … GREEN`. One branch's two consecutive landing gates died on two *different* \
                tests from this list — `blocked_dump`, then this — with eight `toyos-build --land` \
                processes queued on the integration lock at once. Guest slots bound guests, and a \
