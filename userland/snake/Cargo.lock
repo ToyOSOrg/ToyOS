@@ -108,6 +108,8 @@ dependencies = [
 [[package]]
 name = "toyos-abi"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fce2965bd320e8da58a50d08e58e90a16438919cf647cf3c8af119b0841e28cd"
 
 [[package]]
 name = "unicode-ident"
