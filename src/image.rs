@@ -889,17 +889,10 @@ mod tests {
 
     /// **One ordering of one set is one image.** The judge below compares
     /// `root=` against the superblock the same build stamped, so it is blind to
-    /// this: a `root_uuid` that returned a constant would satisfy it. This is
-    /// the arm that is not — the same files and the same symlinks handed over
-    /// backwards have to come out as the same UUID and the same bytes, or two
-    /// builds of one tree are two images and the kernel argument names a
-    /// filesystem that the next build no longer has.
-    ///
-    /// Red before `create_root_image` sorted: the reviewer's two consecutive
-    /// builds of one clean worktree differed in nothing but the order
-    /// `SystemConfig`'s hash maps were walked in, and produced
-    /// `root=2e3c3663b390f7f29619becb841aba0e` then
-    /// `root=5be60e77792461c3c80a04ed7b80e606`.
+    /// this: a `root_uuid` returning a constant satisfies it. This is the arm
+    /// that is not — the same files handed over backwards have to come out as
+    /// one UUID and one byte string, or two builds of one tree are two images
+    /// and the kernel argument names a filesystem the next build has not got.
     #[test]
     fn one_ordering_of_one_set_is_one_image() {
         let files: Vec<(String, Vec<u8>)> = vec![

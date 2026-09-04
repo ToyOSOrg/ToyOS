@@ -987,6 +987,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("log_backing_read_error", Sched::Parallel, Tier::Fast),
     ("boot_volume_metadata_error", Sched::Parallel, Tier::Fast),
     ("log_partition_layout", Sched::Parallel, Tier::Fast),
+    // The three ways a machine's ROOT set can be wrong. Each stages its own
+    // image or its own second stick, so none of them shares a boot.
+    ("root_candidate_malformed", Sched::Parallel, Tier::Fast),
+    ("root_named_but_absent", Sched::Parallel, Tier::Fast),
+    ("root_named_twice", Sched::Parallel, Tier::Fast),
     ("log_partition_identity", Sched::Parallel, Tier::Nightly),
     ("cache_eviction", Sched::Parallel, Tier::Nightly),
     // The write-back queue's three negative controls (wall 4 of
@@ -8963,6 +8968,15 @@ fn run_machine_test(
             common::wallclock::zone_from_firmware(test_config, c_bins, rust_bins)
         }
         "late_storage_connect" => common::volumes::late_storage_connect(test_config, c_bins, rust_bins),
+        "root_candidate_malformed" => {
+            common::volumes::root_candidate_malformed(test_config, c_bins, rust_bins)
+        }
+        "root_named_but_absent" => {
+            common::volumes::root_named_but_absent(test_config, c_bins, rust_bins)
+        }
+        "root_named_twice" => {
+            common::volumes::root_named_twice(test_config, c_bins, rust_bins)
+        }
         "log_partition_layout" => {
             common::volumes::log_partition_layout(test_config, c_bins, rust_bins)
         }
