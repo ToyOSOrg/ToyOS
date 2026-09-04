@@ -13477,12 +13477,7 @@ fn parse_page_cache_index(log: &str) -> Option<u64> {
 /// Decode one bcachefs superblock straight out of a disk image, with the
 /// same parser the kernel uses — magic, version and CRC all checked.
 fn read_superblock(image: &Path, block: u64) -> Result<bcachefs::Superblock, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = fs::File::open(image).map_err(|e| format!("open {}: {e}", image.display()))?;
-    f.seek(SeekFrom::Start(block * 4096)).map_err(|e| format!("seek: {e}"))?;
-    let mut buf = bcachefs::BlockBuf::zeroed();
-    f.read_exact(buf.as_bytes_mut()).map_err(|e| format!("read: {e}"))?;
-    bcachefs::Superblock::parse(&buf).map_err(|e| format!("{e:?}"))
+    common::storage::superblock_at(image, block)
 }
 
 /// A disk image's apparent size and the bytes it actually occupies. The gap

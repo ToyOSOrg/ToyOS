@@ -481,10 +481,25 @@ pub fn apps_and_home_are_one_filesystem(
         }
     }
 
+    // Which volume this is, taken from the volume and not from the reader:
+    // `Formatted::format` leaves the UUID zero on one nothing named, so a UUID
+    // here would be a constant every image satisfies. The block count the
+    // superblock records is not — it says the guest formatted this partition
+    // and no other span of the device.
+    let (at, bytes) = toyos_build::image::data_partition_of(&image)?;
+    let blocks = bytes / 4096;
+    let sb = superblock_at(&image, at / 4096)?;
+    if sb.block_count != blocks {
+        return Err(format!(
+            "the volume on the image was formatted for {} blocks and the DATA partition is \
+             {blocks}",
+            sb.block_count
+        ));
+    }
+
     let io = FileBlocks::open(&image)?;
     let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
         .map_err(|e| format!("the NVMe image's DATA partition does not mount: {e:?}"))?;
-    let uuid = fs.uuid();
     for (name, seed) in [(IN_HOME, 0xA5u8), (IN_APPS, 0x5A)] {
         let got = fs
             .read_file(name)
@@ -499,8 +514,8 @@ pub fn apps_and_home_are_one_filesystem(
     }
 
     eprintln!(
-        "  [hierarchy] {IN_HOME} and {IN_APPS}, {LEN} bytes each, both in the one filesystem \
-         {uuid} on the NVMe image"
+        "  [hierarchy] {IN_HOME} and {IN_APPS}, {LEN} bytes each, both in the one filesystem the \
+         DATA partition at byte {at} carries, formatted for its own {blocks} blocks"
     );
     Ok(())
 }
@@ -785,6 +800,16 @@ pub fn block_duplicate_id(
 
     eprintln!("  [block] {verdict}");
     Ok(())
+}
+
+/// The bcachefs superblock in `image` at device block `block`.
+pub fn superblock_at(image: &Path, block: u64) -> Result<bcachefs::Superblock, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(image).map_err(|e| format!("open {}: {e}", image.display()))?;
+    f.seek(SeekFrom::Start(block * 4096)).map_err(|e| format!("seek: {e}"))?;
+    let mut buf = bcachefs::BlockBuf::zeroed();
+    f.read_exact(buf.as_bytes_mut()).map_err(|e| format!("read: {e}"))?;
+    bcachefs::Superblock::parse(&buf).map_err(|e| format!("{e:?}"))
 }
 
 /// A disk image's DATA partition as a bcachefs block device: plain
