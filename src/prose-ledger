@@ -293,7 +293,7 @@ tests/toyos-rust-tests/src/bin/doom_sound_flood.rs 6 0
 tests/toyos-rust-tests/src/bin/empty_dir_stat.rs 34 0
 tests/toyos-rust-tests/src/bin/endowment_denied.rs 178 2
 tests/toyos-rust-tests/src/bin/esp_files.rs 50 0
-tests/toyos-rust-tests/src/bin/exit_wait_storm.rs 36 0
+tests/toyos-rust-tests/src/bin/exit_wait_storm.rs 39 0
 tests/toyos-rust-tests/src/bin/fat_backing_revoked.rs 56 0
 tests/toyos-rust-tests/src/bin/fault_gate_child.rs 32 0
 tests/toyos-rust-tests/src/bin/fault_gates.rs 27 0
@@ -393,7 +393,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5149 23
+tests/toyos.rs 5165 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 101 0
 toyos-abi/src/handle.rs 107 0

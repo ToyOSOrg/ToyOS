@@ -206,24 +206,18 @@ changes.
   from this name's 2026-08-17 CI row, which is about the seeded `i8042:` line.
   Still `Sched::Parallel`, not investigated.
 
-- **`exit_wait_storm`** — added 2026-08-20, first CI sighting: PR #147 run
-  32331741273, `guest (1)`, `timed out after 12s, with the guest still talking
-  13s ago (245 console line(s) while it ran) — it was working and did not
-  finish`, against a committed price of 200 ms — a 65x wall stretch on a storm
-  of exiting children under a loaded shard partition, the `c_capture` shape.
-  The same run's `durations` job refused the 13,058 ms reading against the
-  10,000 ms fast line, correctly: that number is the partition's, not the
-  test's. The diff it rode on is one issue file. `ALONE: GREEN, and it was
-  alone both times` — a rate, not a classification; the redlist row carries
-  the sighting. **2026-09-04: a different assertion under the same name, on
-  both instruments.** `N of 24 exits collected and M of 24 threads joined
-  inside 3s — a publish was not delivered`, `exit code Some(1)` in 3-5 s,
-  where the sighting above is the harness's 12 s ceiling on a guest that was
-  still talking: PR #400 run 33831507251 `guest (1)`, and 5 of 6 loaded fast
-  tiers on the dev host that day. One of those alone re-runs was **red again
-  with the same failure**, so this name is not only the wall-clock shape this
-  file is about. The 2026-08-20 row is retired on the change of shape and two
-  rows carry the new one.
+- **`exit_wait_storm`** — CLOSED 2026-09-04, and it was never this file's
+  shape. The 3 s watchdog was armed before the 24 `Command::spawn` calls that
+  only *set up* the storm: 601 ms of ELF loading on an idle dev host, and past
+  the whole bound on a loaded one. So the guest printed `0 of 24 exits
+  collected … a publish was not delivered` while its own `spawn:` lines were
+  still arriving and it had not yet made a first `SYS_PROCESS_WAIT` — the
+  message asserted a cause the kernel's console refuted in the same capture.
+  The children also died as fast as they were spawned, so the P7 park the test
+  exists for was reached by none of its 24 waits. They are held on their own
+  stdin and released together now, the bound covers the storm alone, and
+  `check_exit_wait_storm` judges the guest's counts against the kernel's own
+  record of which children died and which calls their parent made.
 
 - **`console_line_atomicity`** — added 2026-08-20, the name's first sighting
   on the CI instrument (its standing rows are the loaded dev host's, 1 of 3
