@@ -42,6 +42,6 @@ crate. This file closes when the `rg` above is empty.
 
 ## Not this
 
-The four `CLAUDE.md` files carry five more such lines (`CLAUDE.md:40`,
-`CLAUDE.md:44`, `src/CLAUDE.md:9`, `tests/CLAUDE.md:14`,
-`userland/CLAUDE.md:3`). An agent never edits one; they are the owner's.
+The four `CLAUDE.md` files carry six more such lines: `CLAUDE.md:40`,
+`CLAUDE.md:44`, `CLAUDE.md:83`, `src/CLAUDE.md:9`, `tests/CLAUDE.md:14` and
+`userland/CLAUDE.md:3`. An agent never edits one; they are the owner's.
