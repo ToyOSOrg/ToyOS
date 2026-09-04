@@ -929,7 +929,7 @@ mod tests {
         );
 
         // And it is not a constant: a different set is a different name.
-        let mut other = files.clone();
+        let mut other = files;
         other[0].1.push(b'!');
         assert_ne!(
             root_uuid_of(&forwards),
