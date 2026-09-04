@@ -161,7 +161,9 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
     for krate in PUBLISHED {
         let manifest = format!("{}/Cargo.toml", krate.dir);
         let prefix = format!("{}/", krate.dir);
-        if !changed.iter().any(|p| p.starts_with(&prefix)) {
+        // `cargo publish` re-locks the package's own lockfile itself, so a
+        // change confined to one is not a change to what gets published.
+        if !changed.iter().any(|p| p.starts_with(&prefix) && !p.ends_with("Cargo.lock")) {
             continue;
         }
         let at_head = version_at(root, "HEAD", &manifest)?;
@@ -208,6 +210,29 @@ pub fn judge(root: &Path, base: &str) -> Result<String, String> {
         }
     }
 
+    // A bump is not published until every lockfile git tracks agrees too:
+    // `cargo publish` re-locks the package's own `Cargo.lock` and refuses a
+    // dirty tree, so a path-dependency entry left at the old version there
+    // fails publish after the version check above has already passed.
+    for lockfile in tracked_lockfiles(root)? {
+        let text = file_at(root, "HEAD", &lockfile)?;
+        for (name, locked, has_source) in lock_packages(&text) {
+            if has_source {
+                continue;
+            }
+            let Some(krate) = PUBLISHED.iter().find(|k| k.name == name) else { continue };
+            let manifest = format!("{}/Cargo.toml", krate.dir);
+            let wants = version_at(root, "HEAD", &manifest)?;
+            if locked != wants {
+                refusals.push(format!(
+                    "[sdk] {lockfile} locks {name} at {locked} with no `source` (a path \
+                     dependency), and {manifest} now declares {wants}: `cargo update -p {name} \
+                     --manifest-path {manifest}` (or the workspace lockfile's equivalent).",
+                ));
+            }
+        }
+    }
+
     if refusals.is_empty() {
         return Ok(match bumped.len() {
             0 => "this branch changes none of the five published crates.".to_string(),
@@ -243,6 +268,52 @@ fn file_at(root: &Path, commit: &str, path: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     git(root, &["show", &format!("{commit}:{path}")])
+}
+
+/// Every `Cargo.lock` git tracks, except the fork's own — `rust/` is a
+/// submodule with its own resolution this rule has no business in.
+fn tracked_lockfiles(root: &Path) -> Result<Vec<String>, String> {
+    let out = git(root, &["ls-files", "-z", "*Cargo.lock"])?;
+    Ok(out.split('\0').filter(|p| !p.is_empty() && !p.starts_with("rust/")).map(String::from).collect())
+}
+
+/// Every `[[package]]` block in a `Cargo.lock`, as `(name, version,
+/// has_source)`. A hand walk over the format cargo itself writes: `source` is
+/// absent on exactly a path or workspace-patched dependency, present on
+/// everything the registry resolved.
+fn lock_packages(text: &str) -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    let mut block: Option<(Option<String>, Option<String>, bool)> = None;
+    let flush = |block: &mut Option<(Option<String>, Option<String>, bool)>, out: &mut Vec<_>| {
+        if let Some((Some(name), Some(version), has_source)) = block.take() {
+            out.push((name, version, has_source));
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "[[package]]" {
+            flush(&mut block, &mut out);
+            block = Some((None, None, false));
+            continue;
+        }
+        if line.starts_with('[') {
+            flush(&mut block, &mut out);
+            block = None;
+            continue;
+        }
+        let Some((name, version, has_source)) = &mut block else { continue };
+        if let Some(value) = line.strip_prefix("name").and_then(|v| v.trim_start().strip_prefix('=')) {
+            *name = Some(value.trim().trim_matches('"').to_string());
+        } else if let Some(value) =
+            line.strip_prefix("version").and_then(|v| v.trim_start().strip_prefix('='))
+        {
+            *version = Some(value.trim().trim_matches('"').to_string());
+        } else if line.starts_with("source") {
+            *has_source = true;
+        }
+    }
+    flush(&mut block, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -341,6 +412,100 @@ mod tests {
         let verdict = judge(&wt, "main").expect("bump plus pin is the whole rule");
         assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
         assert!(verdict.contains("toyos 0.1.0 -> 0.2.0"), "{verdict}");
+    }
+
+    /// A `Cargo.lock` holding one `[[package]]` block, in the shape cargo
+    /// writes it: `source` present is a registry entry, absent is a path
+    /// dependency.
+    fn lockfile(name: &str, version: &str, source: bool) -> String {
+        let mut text =
+            format!("# generated\nversion = 4\n\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n");
+        if source {
+            text.push_str("source = \"registry+https://github.com/rust-lang/crates.io-index\"\n");
+        }
+        text
+    }
+
+    /// A change confined to a `Cargo.lock` under a published crate's own
+    /// directory is not a change to what gets published — `cargo publish`
+    /// re-locks it itself, so the bump check must not fire on it alone.
+    #[test]
+    fn a_lock_only_change_to_a_published_crate_passes_without_a_bump() {
+        let (_origin, wt) = repo("sdk-lock-only");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
+        publishing(&wt);
+        main_is_here(&wt);
+
+        commit(&wt, "toyos-abi/Cargo.lock", &lockfile("toyos-abi", "0.1.0", false), "abi: re-lock");
+        let verdict = judge(&wt, "main").expect("a lock-only change owes no bump");
+        assert!(verdict.contains("changes none of the five"), "{verdict}");
+    }
+
+    /// **The publish-time refusal this rule exists to catch**: `cargo
+    /// publish` re-locks the package's own `Cargo.lock` and refuses a dirty
+    /// tree, so a path-dependency entry a bump left behind fails publish
+    /// after the version and pin checks above have both already passed.
+    #[test]
+    fn a_bump_with_a_stale_path_dependency_lock_entry_is_refused_by_name() {
+        let (_origin, wt) = repo("sdk-stale-lock");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
+        commit(
+            &wt,
+            "toyos/Cargo.toml",
+            &manifest("toyos", "0.1.0", &[("toyos-abi", "0.1.0")]),
+            "sdk manifest",
+        );
+        commit(&wt, "toyos/Cargo.lock", &lockfile("toyos-abi", "0.1.0", false), "sdk lock");
+        publishing(&wt);
+        main_is_here(&wt);
+
+        // The bump moves both manifests, the pin included — the old rule's
+        // whole check — and leaves the lockfile behind.
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
+        commit(
+            &wt,
+            "toyos/Cargo.toml",
+            &manifest("toyos", "0.2.0", &[("toyos-abi", "0.2.0")]),
+            "sdk: follow the abi",
+        );
+        let refusal = judge(&wt, "main").expect_err("a stale lock entry must be refused");
+        assert!(
+            refusal.contains(
+                "toyos/Cargo.lock locks toyos-abi at 0.1.0 with no `source` (a path dependency), \
+                 and toyos-abi/Cargo.toml now declares 0.2.0"
+            ),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("cargo update -p toyos-abi --manifest-path toyos-abi/Cargo.toml"),
+            "{refusal}"
+        );
+
+        // The whole change: re-locking is what turns it green.
+        commit(&wt, "toyos/Cargo.lock", &lockfile("toyos-abi", "0.2.0", false), "sdk: re-lock");
+        let verdict = judge(&wt, "main").expect("a lock that agrees passes");
+        assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
+    }
+
+    /// A registry entry at the old version is a fork's own pin — `winit`,
+    /// `softbuffer` and `cpal` name these by version and cannot always be
+    /// patched to the local path, so this is legitimate and not refused.
+    #[test]
+    fn a_registry_entry_at_the_old_version_passes() {
+        let (_origin, wt) = repo("sdk-fork-pin");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.1.0", &[]), "abi manifest");
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A;\n", "abi source");
+        commit(&wt, "userland/snake/Cargo.lock", &lockfile("toyos-abi", "0.1.0", true), "fork lock");
+        publishing(&wt);
+        main_is_here(&wt);
+
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
+        commit(&wt, "toyos-abi/Cargo.toml", &manifest("toyos-abi", "0.2.0", &[]), "abi: 0.2.0");
+        let verdict = judge(&wt, "main").expect("a fork's registry pin is not this rule's business");
+        assert!(verdict.contains("toyos-abi 0.1.0 -> 0.2.0"), "{verdict}");
     }
 
     /// A branch that touches none of the five is every other branch, and the
