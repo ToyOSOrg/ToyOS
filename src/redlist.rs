@@ -2376,7 +2376,15 @@ pub const KNOWN_RED: &[Red] = &[
         test: "exit_wait_storm",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "shape changed: `timed out after 12s, with the guest still talking` -> `0 of 24 \
+             exits collected and 0 of 24 threads joined inside 3s — a publish was not \
+             delivered`. The first is the harness's ceiling on a guest that was still \
+             working; the second is the guest binary's own deadline, and it exits 1 in 4 s. \
+             Re-taken on the CI instrument by PR #400 run 33831507251, job 100895334068 \
+             (`guest (1)`), 2026-09-04, which carries the second and not the first. The two \
+             rows measured that day are that shape",
+        ),
         what: "`timed out after 12s, with the guest still talking 13s ago (245 console \
                line(s) while it ran) — it was working and did not finish`, and the same \
                run's `durations` job refused the 13,058 ms reading against the 10,000 ms \
@@ -2390,6 +2398,39 @@ pub const KNOWN_RED: &[Red] = &[
                    second CI sighting",
         source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-08-20",
+    },
+    Red {
+        test: "exit_wait_storm",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`exit_wait_storm: 0 of 24 exits collected and 0 of 24 threads joined inside 3s \
+               — a publish was not delivered`, `FAIL exit_wait_storm: exit code Some(1)` at \
+               4 s, and `ALONE: GREEN, and it was alone both times — nothing the harness \
+               controls differed, so it failed once and passed once`. CI is one guest per \
+               machine, so nothing here is contention: the deadline is the guest's own and \
+               it expired on a shard whose host read `fastest boot 1388 ms`, 1.05x width",
+        evidence: "PR #400 run 33831507251, job 100895334068 (`guest (1)`), 2026-09-04; \
+                   211 passed, 1 failed, 212 total in 199.4 s, the other eleven shards green",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
+        measured: "2026-09-04",
+    },
+    Red {
+        test: "exit_wait_storm",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::fires(5, 6),
+        standing: Standing::Stands,
+        what: "the same guest-side deadline, at counts that move: `0 of 24 exits collected \
+               and 0 of 24 threads joined` three times, `21 of 24 … and 0 of 24` once, \
+               `24 of 24 … and 16 of 24` once — every one `inside 3s — a publish was not \
+               delivered` and `exit code Some(1)` in 3-5 s. The re-run alone was GREEN three \
+               times and **red again with the same failure once**, so the ALONE: GREEN \
+               reading this name has carried is not the whole of it",
+        evidence: "six full `cargo test` fast tiers in one worktree on 2026-09-04, each with \
+                   single-test runs of the same suite beside it; the one green suite is \
+                   314 of 314",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
+        measured: "2026-09-04",
     },
     Red {
         test: "tlb_shootdown_waits",
