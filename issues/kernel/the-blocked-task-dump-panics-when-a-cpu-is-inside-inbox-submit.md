@@ -50,7 +50,7 @@ what this entry is written under: the assertion fires on a state the kernel can
 reach, and re-running is not an answer to it.
 
 `cargo run -- --known-red blocked_dump` answers `KNOWN-RED`, and **neither row
-is this**: one is the census half and `/bin/terminal` racing the compositor
+is this**: one is the census half and `/system/bin/terminal` racing the compositor
 (CI, 2 of 5, 2026-08-08), the other is `nothing typed at the terminal window
 reached a shell` on a loaded dev host. Both are wall-clock guards reporting the
 content they were going to assert. This is an assertion inside the kernel,

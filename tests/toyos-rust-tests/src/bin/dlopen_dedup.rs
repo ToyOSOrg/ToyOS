@@ -10,9 +10,9 @@ use std::sync::{Arc, Barrier};
 
 use toyos_abi::syscall;
 
-const LIB: &[u8] = b"/lib/libtls_dlopen_lib.so";
+const LIB: &[u8] = b"/system/lib/libtls_dlopen_lib.so";
 /// A name this binary loads nowhere else, so the concurrent arm starts clean.
-const OTHER_LIB: &[u8] = b"/lib/libtls_multi_crate.so";
+const OTHER_LIB: &[u8] = b"/system/lib/libtls_multi_crate.so";
 const LOADS: usize = 64;
 
 /// A directory only this test spawns from, so the `DT_NEEDED` fallback caches
@@ -20,8 +20,8 @@ const LOADS: usize = 64;
 /// `tests/toyos.rs` holds the verdict. The binary beside it `DT_NEEDED`s a
 /// library that is in `/lib` and not there.
 const FROM: &str = "/tmp/dlopen-dedup";
-const NEEDS_A_LIB: &str = "/bin/test_rs_std_tls";
-const BY_PATH: &[u8] = b"/lib/libtls_lib.so";
+const NEEDS_A_LIB: &str = "/system/bin/test_rs_std_tls";
+const BY_PATH: &[u8] = b"/system/lib/libtls_lib.so";
 
 fn main() {
     let handles = handle_identity();

@@ -15,10 +15,10 @@ On top of retention, in dependency order:
 
 1. **Retention plus one query syscall and a topic decoder**, with `hw` and
    `disk` as its first two consumers.
-2. **A diagnostic port on `/bin/init`**, answering a program name with a
+2. **A diagnostic port on `/system/bin/init`**, answering a program name with a
    `Process` handle narrowed to `Rights::READ`. `SYS_PROCESS_STATS` takes a
    `Process` handle and a handle is the whole of the right, so nothing hands a
-   diagnostic tool a way to sample a daemon: `/bin/init` holds the only `Process`
+   diagnostic tool a way to sample a daemon: `/system/bin/init` holds the only `Process`
    handles for what `[boot] start` names and the only `SysCap` carrying
    `Rights::MANAGE`, which is what `SYS_PROCESS_OPEN` takes. So "where is
    soundd's / the compositor's / netd's time going?" is unanswerable from a

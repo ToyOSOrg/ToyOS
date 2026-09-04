@@ -707,7 +707,7 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
         // Which spelling opens is decided before the cache is consulted, and is
         // the key from here on: keyed by the exe-dir string it never found, a
         // library loaded through the fallback was mapped a second time by any
-        // later `dlopen("/lib/…")`. Fallback only for NotFound — any other error
+        // later `dlopen("/system/lib/…")`. Fallback only for NotFound — any other error
         // would repeat on `/lib` too and produce a misleading second log line.
         let (so_backing, id, lib_path) = {
             let in_exe_dir = alloc::format!("{}/{}", exe_dir, lib_name);
@@ -715,7 +715,7 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
             match opened {
                 Ok((b, id)) => (b, id, in_exe_dir),
                 Err(SyscallError::NotFound) => {
-                    let fallback = alloc::format!("/lib/{}", lib_name);
+                    let fallback = alloc::format!("/system/lib/{}", lib_name);
                     match vfs::lock().open_backing_identified(&fallback) {
                         Ok((b, id)) => (b, id, fallback),
                         Err(e) => {
@@ -868,9 +868,9 @@ fn exe_tpoff(
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every
 /// image, so a missing one is a bad build, not a different boot.
-pub const INIT_PATH: &str = "/bin/init";
+pub const INIT_PATH: &str = "/system/bin/init";
 
-/// Start `/bin/init`, holding the machine's one full-rights `SysCap`.
+/// Start `/system/bin/init`, holding the machine's one full-rights `SysCap`.
 ///
 /// Nothing else can construct one: what init endows is the entire set of
 /// processes that can ever claim a device, enter the RT band, or power off.

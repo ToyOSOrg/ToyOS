@@ -77,7 +77,7 @@ static SIBLING_RETURNED: AtomicU32 = AtomicU32::new(0);
 /// frames this one freed, which is the whole of what the third arm is about,
 /// and a second binary would be a second name in the shared registry for one
 /// verdict.
-const SELF: &str = "/bin/test_rs_futex_wake_counts";
+const SELF: &str = "/system/bin/test_rs_futex_wake_counts";
 /// `argv[1]` the sweeper is spawned with.
 const SWEEP: &str = "sweep";
 

@@ -103,7 +103,7 @@ fn publish_durable(claimed: u64) {
     DURABLE_NS.fetch_max(clamped, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Newest record `/bin/logd` has `fsync`ed to the device, or 0 if none yet.
+/// Newest record `/system/bin/logd` has `fsync`ed to the device, or 0 if none yet.
 pub fn durable_ns() -> u64 {
     DURABLE_NS.load(core::sync::atomic::Ordering::Relaxed)
 }

@@ -455,7 +455,7 @@ const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
 ];
 
 /// Directories whose Rust is compiled for the guest, by repository-relative
-/// prefix. A ToyOS program spawning `/bin/echo` is spawning a file out of its
+/// prefix. A ToyOS program spawning `/system/bin/echo` is spawning a file out of its
 ///
 /// own image, and the guest has no way to reach a host binary at all.
 /// **A crate's build script is host code and is walked**, whatever prefix it is
@@ -2077,8 +2077,8 @@ mod tests {
             spawn_arguments("Command::new(env!(\"CARGO_BIN_EXE_toyos-ld\"))"),
             ["env!(\"CARGO_BIN_EXE_toyos-ld\")"]
         );
-        let call = "Command::new(format!(\"/bin/{cmd}\"))";
-        assert_eq!(spawn_arguments(call), ["format!(\"/bin/{cmd}\")"]);
+        let call = "Command::new(format!(\"/usr/bin/{cmd}\"))";
+        assert_eq!(spawn_arguments(call), ["format!(\"/usr/bin/{cmd}\")"]);
         assert_eq!(spawn_arguments("Command::new(\"a\"); Command::new(\"b\")"), ["\"a\"", "\"b\""]);
         assert!(spawn_arguments("let x = 1;").is_empty());
     }

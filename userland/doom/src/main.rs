@@ -50,7 +50,7 @@ impl ApplicationHandler for DoomApp {
         let argv: Vec<*const u8> = vec![
             b"doom\0".as_ptr(),
             b"-iwad\0".as_ptr(),
-            b"/share/doom1.wad\0".as_ptr(),
+            b"/system/share/doom1.wad\0".as_ptr(),
         ];
         let argv = argv.leak();
         unsafe {

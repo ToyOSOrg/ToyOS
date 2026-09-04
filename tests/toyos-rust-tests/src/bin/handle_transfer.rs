@@ -12,7 +12,7 @@
 //!    taken out of the table and dropped on the refusal, so a caller told
 //!    `ResourceExhausted` — ordinary backpressure — had silently lost the
 //!    capabilities it was about to retry with, and its own `close` of one was
-//!    `Stale`, which ends it. `/bin/init` was that caller.
+//!    `Stale`, which ends it. `/system/bin/init` was that caller.
 //! 2. **The queue is full.** `MAX_QUEUED_BATCHES` refuses by name, and the
 //!    refused batch is still the sender's for the same reason.
 //! 3. **Sent and never received.** The peer dies holding the batch; the queue
@@ -42,7 +42,7 @@ use toyos_abi::syscall::{
 };
 use toyos_abi::RawHandle;
 
-const SELF_PATH: &str = "/bin/test_rs_handle_transfer";
+const SELF_PATH: &str = "/system/bin/test_rs_handle_transfer";
 
 /// The name the child's namespace carries the connector under.
 const SERVICE: &str = "transfer";

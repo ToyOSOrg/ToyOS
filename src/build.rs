@@ -83,7 +83,7 @@ struct SystemConfig {
     hosted_rustc: bool,
     #[serde(default)]
     assets: Vec<String>,
-    /// What `/bin/init` starts at boot. Program *keys*, never paths — a path
+    /// What `/system/bin/init` starts at boot. Program *keys*, never paths — a path
     /// here is a second spelling of a `[programs]` key and is what let a boot
     /// list smuggle an argument through. Arguments live on the program entry's
     /// `args` instead.
@@ -381,7 +381,7 @@ fn cargo_build(
 // The bootloader used to be here for the same reason and no longer is: its init
 // list was compiled into it, so the `.efi` was a function of the boot config,
 // and an image once carried metalcase's root image beside another config's
-// bootloader whose 28-byte init string was `"/bin/soundd;/bin/test-runner"` —
+// bootloader whose 28-byte init string was `"/system/bin/soundd;/system/bin/test-runner"` —
 // the compositor was never spawned and the test failed as though the daemon
 // under test were broken. The bootloader carries no config now, so it is
 // memoized once per profile and that hazard is not expressible.
@@ -511,7 +511,7 @@ fn assert_overflow_checked(what: &str, image: &[u8]) {
 /// without it is a machine with a kernel and no userland at all.
 const INIT_PROGRAM: &str = "init";
 
-/// Names `/bin/init` serves itself.
+/// Names `/system/bin/init` serves itself.
 ///
 /// init is in every image and is no `[programs]` key, so these have no
 /// declaration to come from. They travel in the manifest so init creates
@@ -519,7 +519,7 @@ const INIT_PROGRAM: &str = "init";
 /// rather than a constant here and a string in init.
 const INIT_SERVED: &[&str] = &["launcher"];
 
-/// The resolved config as the records `/bin/init` reads.
+/// The resolved config as the records `/system/bin/init` reads.
 ///
 /// The format, the renderer and the parser are `toyos-manifest/`, whose
 /// round-trip test is what makes "what the build writes is what init reads" a
@@ -534,7 +534,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                 let cfg = &config.programs[*name];
                 toyos_manifest::Program {
                     name: (*name).clone(),
-                    path: format!("/bin/{name}"),
+                    path: format!("/system/bin/{name}"),
                     args: cfg.args.clone(),
                     serves: cfg.serves.clone(),
                     provides: cfg.provides.clone(),
@@ -662,7 +662,7 @@ fn build_and_assemble(
         // `collect_hosted_rustc` puts it there and no row can.
         programs.insert("rustc");
     }
-    // Targets are inventoried beside the files: `bin/ls -> /bin/ghost` reaches a
+    // Targets are inventoried beside the files: `bin/ls -> /system/bin/ghost` reaches a
     // program as surely as a file would, and the files alone walk past it.
     let targets: Vec<String> =
         symlinks.iter().map(|(_, to)| symlink_target_name(to).to_string()).collect();
@@ -678,12 +678,14 @@ fn build_and_assemble(
 /// What `tests/common/qemu.rs` prefixes every binary it injects with.
 const HARNESS_PREFIXES: [&str; 2] = ["bin/test_rs_", "bin/test_c_"];
 
+/// Where a symlink's target sits on ROOT, which mounts at `/system`; a target
+/// outside that mount comes back whole and reaches no name in this image.
 fn symlink_target_name(to: &str) -> &str {
-    to.trim_start_matches('/')
+    to.strip_prefix("/system/").unwrap_or(to)
 }
 
 /// The converse of the crate assertion above: a `bin/` entry no name reaches.
-/// A name buys authority — `/bin/init` builds a `[programs]` row's namespace and
+/// A name buys authority — `/system/bin/init` builds a `[programs]` row's namespace and
 /// device claims — and a harness binary has none, holding only what its spawner
 /// moved in, so it is legal exactly when the config starts something that could
 /// spawn it. **An inventory over the `bin/` namespace, not a reachability
@@ -710,7 +712,7 @@ fn unnamed_program(
             continue;
         }
         return Err(format!(
-            "the image carries {name} and no `[programs]` row names it, so `/bin/init` can build \
+            "the image carries {name} and no `[programs]` row names it, so `/system/bin/init` can build \
              it no namespace and no device claim; add a row or take the file out"
         ));
     }
@@ -734,7 +736,7 @@ pub enum Boot {
     /// `screen_diag_boot` boots this same config, so the tested image and the
     /// flashed image are the same image.
     Diag,
-    /// `console/system.toml`: `/bin/console` claims the framebuffer and runs
+    /// `console/system.toml`: `/system/bin/console` claims the framebuffer and runs
     /// the shell on it. A third mode rather than a replacement for [`Diag`] —
     /// claiming the screen is what stops the boot checkpoints painting, so a
     /// machine that wedges before userland is readable in that mode and in no
@@ -888,7 +890,7 @@ pub fn harness_kernel_build_is_declared(features: &str, debug_wait: bool) -> boo
 /// a daemon added to `[boot] start` tomorrow is in this set the moment it
 /// exists — a hardcoded list would let the next `netd`'s lines start deciding C
 /// tests again, which is what task #84 was (`tests/common/console.rs`).
-/// `/bin/init` itself is added by hand because it is the one speaker that is not a
+/// `/system/bin/init` itself is added by hand because it is the one speaker that is not a
 /// `[programs]` key: it is the parent that starts every one of them, and it
 /// speaks before any of them exists (`init: netd: no nic on this machine` is on
 /// the console before netd is loaded).
@@ -921,10 +923,18 @@ pub fn console_speakers(config: &Path) -> std::collections::BTreeSet<String> {
     names
 }
 
-/// What `/bin/init` starts on the boot `config` describes, in the manifest's
+/// What `/system/bin/init` starts on the boot `config` describes, in the manifest's
 /// order. `config` is the `system.toml` itself, not its directory.
 pub fn boot_start(config: &Path) -> Vec<String> {
     parse_config(config).boot.start
+}
+
+/// The manifest bytes and the symlink table `config` renders to, for a reader
+/// that judges the finished ROOT against what the config asked for.
+pub fn manifest_and_symlinks(config: &Path) -> (Vec<u8>, Vec<(String, String)>) {
+    let config = parse_config(config);
+    let symlinks = config.symlinks.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    (render_manifest(&config), symlinks)
 }
 
 /// Every actuator `kernel/src/actuator.rs` declares, read out of the file that
@@ -1186,10 +1196,10 @@ pub fn build(
 /// a real one.
 ///
 /// Designates the result, because every caller here is making a scratch disk
-/// for a guest that expects a working `/home`, and the kernel will not format
-/// an undesignated one. Leaving it to the call sites would mean two places to
-/// forget; forgetting is not silent (the boot says so and `/home` is volatile)
-/// but it is not worth the chance.
+/// for a guest that expects a working `/apps` and `/home`, and the kernel will
+/// not format an undesignated one. Leaving it to the call sites would mean two
+/// places to forget; forgetting is not silent (the boot says so and both paths
+/// are volatile) but it is not worth the chance.
 pub fn create_sparse(path: &Path, len: u64) {
     let file = fs::File::create(path)
         .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
@@ -1198,10 +1208,11 @@ pub fn create_sparse(path: &Path, len: u64) {
     designate_for_format(path, len);
 }
 
-/// Stamp block 0 so the kernel is allowed to format this image.
+/// Partition this image as a DATA disk and stamp the designation on that
+/// partition, so the kernel is allowed to format it.
 ///
-/// The kernel never formats a device that does not carry this, which is what
-/// stops it taking the disk of any machine it is booted on. So a throwaway
+/// The kernel never formats a volume that does not carry the stamp, which is
+/// what stops it taking the disk of any machine it is booted on. So a throwaway
 /// image has to say so, and this is the whole of the test harness's opt-in:
 /// **data on a scratch file, not a build flag.** The kernel binary and the
 /// code path are identical either way — `probe` runs the same three-way match
@@ -1212,22 +1223,7 @@ pub fn create_sparse(path: &Path, len: u64) {
 /// destructive write by construction: on a device with anything on it, this
 /// overwrites the partition table.
 pub fn designate_for_format(path: &Path, len: u64) {
-    use std::io::{Seek, SeekFrom, Write};
-
-    let mut block = [0u8; 4096];
-    block[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);
-    let blocks = (len / 4096).to_le_bytes();
-    let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;
-    block[at..at + blocks.len()].copy_from_slice(&blocks);
-
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .unwrap_or_else(|e| panic!("open {} to designate: {e}", path.display()));
-    file.seek(SeekFrom::Start(0))
-        .unwrap_or_else(|e| panic!("seek {}: {e}", path.display()));
-    file.write_all(&block)
-        .unwrap_or_else(|e| panic!("stamp {}: {e}", path.display()));
+    image::designate_data_disk(path, len);
 }
 
 /// One part of a boot image, built once per key for the life of this process.
@@ -1956,7 +1952,7 @@ mod tests {
     /// It listens on every interface and authenticates against a file that is
     /// absent on a fresh install, so on a default boot it would be a port that
     /// accepts connections and refuses all of them. Whoever wants it runs
-    /// `/bin/sshd` themselves. It stays in `[programs]` — the gate is on what
+    /// `/system/bin/sshd` themselves. It stays in `[programs]` — the gate is on what
     /// init starts, not on the binary being present.
     #[test]
     fn no_shipped_boot_config_starts_sshd() {
@@ -1971,10 +1967,10 @@ mod tests {
         }
     }
 
-    /// **Every config with a `[boot] start` runs `/bin/logd`, and `logread` is
+    /// **Every config with a `[boot] start` runs `/system/bin/logd`, and `logread` is
     /// held by exactly the programs that read a cursor.**
     ///
-    /// The kernel writes no file — `/bin/logd` owns `/log` and reads records off
+    /// The kernel writes no file — `/system/bin/logd` owns `/log` and reads records off
     /// a cursor — so a boot config that does not start `logd` is an image whose
     /// log partition stays empty for the whole of that boot — and on
     /// the machine this subsystem exists for, a T14 with no serial port, that is
@@ -1986,9 +1982,9 @@ mod tests {
     /// `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, which is authority
     /// over every record every CPU wrote, and a right with no caller is a
     /// capability handed out for a plan. Two programs read a cursor —
-    /// `/bin/logd`, which writes the file, and `test-runner`, which runs the
+    /// `/system/bin/logd`, which writes the file, and `test-runner`, which runs the
     /// conservation gates inside itself — so those two carry it and nothing
-    /// else may. `/bin/console` is the near miss: it *could* show this boot's
+    /// else may. `/system/bin/console` is the near miss: it *could* show this boot's
     /// records live off a cursor instead of seeding from the previous boot's
     /// files, and it does not hold the right until something in it reads one.
     ///
@@ -2025,7 +2021,7 @@ mod tests {
     }
 
     /// `Rights::LOG`'s doc names its holders, which is a claim about these
-    /// manifests and rots on its own: `/bin/console` stood in it for the whole
+    /// manifests and rots on its own: `/system/bin/console` stood in it for the whole
     /// time no boot config gave it a `logread` row.
     #[test]
     fn the_log_right_doc_names_exactly_the_manifests_holders() {
@@ -2048,7 +2044,9 @@ mod tests {
             .split('`')
             .skip(1)
             .step_by(2)
-            .map(|token| token.trim_start_matches("/bin/").to_string())
+            // The last segment, so the doc's spelling of the directory is not
+            // a second place this claim has to be kept in step.
+            .map(|token| token.rsplit('/').next().unwrap_or(token).to_string())
             .filter(|token| every_program.contains(token))
             .collect();
         assert_eq!(
@@ -2232,7 +2230,7 @@ mod tests {
     }
 
     /// The diagnostic image's whole reason for existing: nothing in it can claim
-    /// the framebuffer, so the kernel's boot log stays on the panel. `/bin/init`
+    /// the framebuffer, so the kernel's boot log stays on the panel. `/system/bin/init`
     /// is in every image and could reach a device, so the property becomes "the
     /// config declares no `devices`" — checkable here for the first time.
     #[test]
@@ -2245,7 +2243,7 @@ mod tests {
     }
 
     /// `[boot] start` names program keys, so a typo is a build error rather than
-    /// a refusal `/bin/init` reports at boot.
+    /// a refusal `/system/bin/init` reports at boot.
     fn started_programs_are_declared(cfg: &SystemConfig) -> Result<(), String> {
         for name in &cfg.boot.start {
             if !cfg.programs.contains_key(name) {
@@ -2292,8 +2290,8 @@ mod tests {
         assert!(why.contains("names no `[programs]` row"), "{why}");
         // The other half of the symlink closure: the target as the inventory
         // names it, then judged like any other name.
-        assert_eq!(symlink_target_name("/bin/toybox"), "bin/toybox");
-        let linked = symlink_target_name("/bin/ghost");
+        assert_eq!(symlink_target_name("/system/bin/toybox"), "bin/toybox");
+        let linked = symlink_target_name("/system/bin/ghost");
         assert!(unnamed_program(&[linked], &programs, &started).is_err());
     }
 

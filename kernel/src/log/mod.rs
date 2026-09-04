@@ -47,7 +47,7 @@ const SHUTDOWN_DURABLE: Budget = Budget::of(
     "the shutdown's last lines are on the console only, and it says so",
 );
 
-/// Waits, bounded, for `/bin/logd` to make committed records durable.
+/// Waits, bounded, for `/system/bin/logd` to make committed records durable.
 pub fn wait_for_durable() {
     // Snapshotted once: a re-read would never be satisfied while still committing.
     let want = read::newest_committed_at_ns();

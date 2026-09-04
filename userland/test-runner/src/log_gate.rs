@@ -244,7 +244,7 @@ fn gate(cap: &SysCap) -> Result<(), String> {
     // depend on the shape of the boot.** During a storm no read is empty, so the
     // only poll in flight was the one from before the first read; whether it was
     // ever completed came down to when `klogd` happened to get a turn. At
-    // `--smp 4` that measured `wakes=1`, and at `--smp 8` with `/bin/logd` also
+    // `--smp 4` that measured `wakes=1`, and at `--smp 8` with `/system/bin/logd` also
     // reading the cursor it measured **zero** — a red about scheduling rather
     // than about the readiness source. `min_complete` 0 with no timeout submits
     // and harvests without blocking, so this costs one syscall a round.
@@ -330,13 +330,13 @@ fn gate(cap: &SysCap) -> Result<(), String> {
     // Every completion above is a `klogd` post landing while this poll happened
     // to be pending, and during a storm that is a race against eight producers:
     // it measured `wakes=1` at `--smp 4` and **zero** at `--smp 8` once
-    // `/bin/logd` was reading the cursor too, which is a red about scheduling
+    // `/system/bin/logd` was reading the cursor too, which is a red about scheduling
     // and not about `Source::Log`. So if the storm produced none, make one —
     // the shape `log_poll_outlives_a_close` already proves on this tree: a child
     // that runs and exits commits `process.rs`'s `exit:` line, which is one
     // kernel record from userland with no actuator and no privilege behind it.
     if run.completions == 0 {
-        let mut child = std::process::Command::new("/bin/echo")
+        let mut child = std::process::Command::new("/system/bin/echo")
             .arg("log-gate")
             .spawn()
             .map_err(|e| format!("the record-making child would not start: {e}"))?;

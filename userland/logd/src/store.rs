@@ -54,7 +54,7 @@ pub const MAX_LOG_PARTS: u32 = 9999;
 ///
 /// One mebibyte: a boot that logs a hundred times more than any real one still
 /// fits, and sixteen of them fit the volume with room to spare. It also bounds
-/// what `/bin/console` reads off USB before it paints anything.
+/// what `/system/bin/console` reads off USB before it paints anything.
 pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
 /// The rotate-fast bound, and it is an argument now rather than a kernel

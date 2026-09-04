@@ -159,7 +159,7 @@ chain.
 and Cranelift as its backend. It compiles the platform-independent translation
 units of doomgeneric — 56,726 lines of C descended from id Software's Doom —
 into `x86_64-unknown-toyos` objects in about four seconds, and that archive is
-the `/bin/doom` in the desktop image. It also takes cases from TinyCC's own
+the `/system/bin/doom` in the desktop image. It also takes cases from TinyCC's own
 `tests2` corpus all the way to running ToyOS processes, comparing each one's
 output against TinyCC's expectations.
 

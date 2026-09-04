@@ -287,7 +287,7 @@ fn speakers() -> &'static BTreeSet<String> {
 /// wire carries: `ConsoleObject` is one line buffer per holder, so the bytes at
 /// the front of a console line were written by the process the line belongs to.
 /// The shape is `<name>: ` — what every daemon in this tree prints, and what
-/// `/bin/init` prints when it speaks in one of their names before it has
+/// `/system/bin/init` prints when it speaks in one of their names before it has
 /// started them.
 fn speaker_of<'a>(line: &str, speakers: &'a BTreeSet<String>) -> Option<&'a str> {
     let (head, rest) = line.split_once(':')?;

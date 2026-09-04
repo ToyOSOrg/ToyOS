@@ -26,7 +26,7 @@ use crate::scheduler;
 use super::read::{drain_ordered, Published, RecordSink};
 use super::shard;
 
-// klogd, not logd: `/bin/logd` is a separate userland process; one name for both would collide in a dump report.
+// klogd, not logd: `/system/bin/logd` is a separate userland process; one name for both would collide in a dump report.
 const NAME: &str = "klogd";
 
 // `emit` finds `klogd` through this, not the process table: the lookup takes a lock, and `emit` runs inside IRQ handlers and every syscall's locked region.

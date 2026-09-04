@@ -111,7 +111,7 @@ fn test_acceptor_isolation_io_uring() {
 /// non-runnable back to runnable, its lag is clamped to ±MAX_VRUNTIME_LAG_NS
 /// (50ms). Read immediately after the wake transition.
 fn test_min_vruntime_invariant() {
-    let me = "/bin/test_rs_sched_stress";
+    let me = "/system/bin/test_rs_sched_stress";
 
     // Spawn 3 CPU burners to drive min_vruntime forward.
     let mut burners = Vec::new();

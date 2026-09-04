@@ -21,7 +21,7 @@
 //! reading the roster of every process in the machine, and powering the machine
 //! off
 //! — and each is one bit on a handle to a `SysCap` the kernel mints exactly once,
-//! for `/bin/init`. A handle that carries the wrong *bit* is refused with a word,
+//! for `/system/bin/init`. A handle that carries the wrong *bit* is refused with a word,
 //! because probing what an attenuated capability can still do is what
 //! attenuation is for; a handle that is **no handle at all** ends the caller.
 //!
@@ -36,7 +36,7 @@
 //! is refused to the same handle. A kernel that demanded the bit for the header
 //! fails the first; a kernel that stopped demanding it fails the second.
 //!
-//! `/bin/ps` is then run twice, endowed a duplicate with the bit and a
+//! `/system/bin/ps` is then run twice, endowed a duplicate with the bit and a
 //! duplicate without it. The shipped applet reaching those same two answers
 //! through the SDK is what says the manifest's name, the kernel's demand and
 //! the program are one line rather than three that agree by luck — and it is
@@ -49,7 +49,7 @@
 //! this suite can produce and exactly the defect being denied.
 //!
 //! **The applets nobody compared.** A row's granularity is the binary and
-//! `/bin/toybox` is many programs behind many links, so every applet is endowed
+//! `/system/bin/toybox` is many programs behind many links, so every applet is endowed
 //! the union; the last half holds each against a policy table.
 //!
 //! **A wrong-typed handle is refused with a word here, and that is a property of
@@ -78,8 +78,8 @@ use toyos_abi::syscall::{
 };
 use toyos_abi::RawHandle;
 
-const SELF_PATH: &str = "/bin/test_rs_endowment_denied";
-const PS_PATH: &str = "/bin/ps";
+const SELF_PATH: &str = "/system/bin/test_rs_endowment_denied";
+const PS_PATH: &str = "/system/bin/ps";
 const OPEN: &str = "echo";
 const PRIVILEGED: &str = "privileged";
 
@@ -95,9 +95,9 @@ const ONE_ENTRY: usize = SYSINFO_HEADER_SIZE + SYSINFO_ENTRY_SIZE;
 const HANDLE_FAULT: i32 = 139;
 
 /// The artifacts this image carries, not the `system.toml` that produced them.
-const MANIFEST: &str = "/etc/system.manifest";
+const MANIFEST: &str = "/system/etc/system.manifest";
 const BIN: &str = "/bin";
-const MULTICALL: &str = "/bin/toybox";
+const MULTICALL: &str = "/system/bin/toybox";
 
 /// What reaches a spawned process as authority rather than as an argument.
 const AUTHORITY: &[&str] = &["serve", "provide", "receive", "device", "syscap"];
@@ -438,7 +438,7 @@ fn the_roster_is_a_right_and_the_header_is_not() {
     println!("  roster: one byte short is the header and ambient, one entry costs ROSTER");
 }
 
-/// `/bin/ps`, endowed a duplicate with the bit and a duplicate without it.
+/// `/system/bin/ps`, endowed a duplicate with the bit and a duplicate without it.
 ///
 /// **The shipped applet and not a raw call, because the plumbing is the risk.**
 /// The manifest's `roster` name, `syscap_rights`' bit, init's narrowing, the
@@ -572,7 +572,7 @@ fn every_applet_holds_only_what_its_policy_names() {
     );
 }
 
-/// Run `/bin/ps` holding exactly `cap` and nothing else of ours.
+/// Run `/system/bin/ps` holding exactly `cap` and nothing else of ours.
 ///
 /// A fresh duplicate per run: the endowment moves into the child, and a claim
 /// this process kept would be a second holder of one handle.
@@ -582,9 +582,9 @@ fn ps_endowed(cap: SysCap) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn /bin/ps")
+        .expect("spawn /system/bin/ps")
         .wait_with_output()
-        .expect("wait for /bin/ps")
+        .expect("wait for /system/bin/ps")
 }
 
 /// Run `role` and require that the kernel ended it at its call.

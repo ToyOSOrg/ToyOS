@@ -46,6 +46,17 @@ impl Guid {
     /// holds the two spellings together.
     pub const TOYOS_ROOT_TEXT: &'static str = "B350BC93-BB6A-4C5E-9589-A5C3CFD555FD";
 
+    /// `064E3777-5076-4C71-8E07-90AD24CFE8D6` — the TOYOS-DATA partition type,
+    /// the writable volume `/apps` and `/home` are two paths into.
+    pub const TOYOS_DATA: Self = Self::from_fields(
+        0x064E_3777,
+        0x5076,
+        0x4C71,
+        [0x8E, 0x07, 0x90, 0xAD, 0x24, 0xCF, 0xE8, 0xD6],
+    );
+
+    pub const TOYOS_DATA_TEXT: &'static str = "064E3777-5076-4C71-8E07-90AD24CFE8D6";
+
     pub const fn from_fields(a: u32, b: u16, c: u16, d: [u8; 8]) -> Self {
         let a = a.to_le_bytes();
         let b = b.to_le_bytes();
@@ -112,6 +123,9 @@ mod tests {
     fn toyos_root_text_is_the_type_guid() {
         let text = heapless_format(Guid::TOYOS_ROOT);
         assert_eq!(&text[..], Guid::TOYOS_ROOT_TEXT.as_bytes());
+        let text = heapless_format(Guid::TOYOS_DATA);
+        assert_eq!(&text[..], Guid::TOYOS_DATA_TEXT.as_bytes());
+        assert_ne!(Guid::TOYOS_ROOT, Guid::TOYOS_DATA);
     }
 
     #[test]

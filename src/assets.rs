@@ -137,8 +137,8 @@ fn rasterize_font(ttf_bytes: &[u8], cell_width: usize, cell_height: usize) -> Ve
 }
 
 /// The pre-rasterized 8x16 font ROOT carries as
-/// `/share/fonts/JetBrainsMono-Regular-8x16.font`, which `/bin/console` and
-/// `/bin/terminal` blit.
+/// `/system/share/fonts/JetBrainsMono-Regular-8x16.font`, which `/system/bin/console` and
+/// `/system/bin/terminal` blit.
 ///
 /// Produced by the same `rasterize_font` [`collect`] calls, so the screendump
 /// decoder in `tests/common/screen.rs` reads the exact table the guest drew
@@ -295,7 +295,7 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
             if let Some((_, reader)) = OPENED_BY.iter().find(|(asset, _)| *asset == name) {
                 if !programs.contains(reader) {
                     eprintln!(
-                        "assets: leaving out {} — only /bin/{reader} opens it and this image \
+                        "assets: leaving out {} — only /system/bin/{reader} opens it and this image \
                          builds no {reader}",
                         path.display()
                     );
@@ -521,19 +521,19 @@ mod tests {
         for (asset, reader) in OPENED_BY {
             let out = Command::new("git")
                 .args(["-C", &root.display().to_string()])
-                .args(["grep", "-l", &format!("/share/{asset}"), "--", "userland"])
+                .args(["grep", "-l", &format!("/system/share/{asset}"), "--", "userland"])
                 .output()
                 .expect("run git grep");
             let hits: Vec<String> = String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .map(str::to_string)
                 .collect();
-            assert!(!hits.is_empty(), "nothing under userland/ opens /share/{asset} at all");
+            assert!(!hits.is_empty(), "nothing under userland/ opens /system/share/{asset} at all");
             let strangers: Vec<&String> =
                 hits.iter().filter(|p| !p.starts_with(&format!("userland/{reader}/"))).collect();
             assert!(
                 strangers.is_empty(),
-                "OPENED_BY says only /bin/{reader} opens /share/{asset}, and {strangers:?} \
+                "OPENED_BY says only /system/bin/{reader} opens /system/share/{asset}, and {strangers:?} \
                  name it too — an image without {reader} would be built without a file it needs"
             );
         }

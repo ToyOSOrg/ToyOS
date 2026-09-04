@@ -57,11 +57,11 @@ impl FileBrowser {
         });
         let fb = window.framebuffer();
 
-        let font_data = fs::read("/share/fonts/JetBrainsMono-Regular-8x16.font").expect("failed to read font");
+        let font_data = fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font").expect("failed to read font");
         let font = font::Font::from_prebuilt(&font_data);
 
-        let folder_svg = fs::read("/share/icons/folder-bold.svg").expect("failed to read folder icon");
-        let file_svg = fs::read("/share/icons/file-bold.svg").expect("failed to read file icon");
+        let folder_svg = fs::read("/system/share/icons/folder-bold.svg").expect("failed to read folder icon");
+        let file_svg = fs::read("/system/share/icons/file-bold.svg").expect("failed to read file icon");
         let folder_icon = Sprite::from_svg_colored(&folder_svg, ICON_SIZE as u32, [0xf0, 0xc8, 0x50]);
         let file_icon = Sprite::from_svg_colored(&file_svg, ICON_SIZE as u32, [0xd0, 0xd0, 0xd8]);
 

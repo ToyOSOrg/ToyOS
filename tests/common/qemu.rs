@@ -901,7 +901,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     //    it — never printed. Both directions, because the second is what keeps a
     //    stall or a slow test from pasting a boot's console at somebody.
     const DF: &str = "[kernel 6.204 cpu1] DOUBLE FAULT on CPU 1 (pid=Some(Pid(2)) tid=Some(Tid(0)))";
-    let window_before = "[kernel 6.201 cpu0] spawn: /bin/test_rs_console_line_atomicity pid=41\n";
+    let window_before = "[kernel 6.201 cpu0] spawn: /system/bin/test_rs_console_line_atomicity pid=41\n";
     let window_serial = format!(
         "AAAAAAAA\n{DF}\n\
          [kernel 6.204 cpu1]   cr2=0xffff800002672ff8 (address that caused the fault chain)\n\
@@ -2216,7 +2216,7 @@ pub struct TestResult {
     /// goes on delivering lines and nothing kept them. The window is not
     /// hypothetical and it is not narrow — measured on `wall_clock_file`,
     /// 2026-08-15: one run in three carried five real lines in it, including
-    /// `soundd: null sink idle` and the kernel's `spawn: /bin/test-runner`
+    /// `soundd: null sink idle` and the kernel's `spawn: /system/bin/test-runner`
     /// record, so the ready marker fires before the runner is even loaded and
     /// every daemon still finishing its startup writes into a hole.
     ///
@@ -2762,7 +2762,7 @@ impl QemuInstance {
     /// its assertion, a frozen-screen `GUEST_QUIET` later.
     ///
     /// **Only for a config whose screen freezes when idle** — no compositor;
-    /// `/bin/console` repaints on I/O alone. A compositor's cursor blink and its
+    /// `/system/bin/console` repaints on I/O alone. A compositor's cursor blink and its
     /// once-a-second taskbar clock never let the screen freeze, so such a caller
     /// would wait the whole backstop when its `done` never comes and keeps the
     /// plain [`Self::screendump_while`] (which is also why the `screen_blocked_dump`

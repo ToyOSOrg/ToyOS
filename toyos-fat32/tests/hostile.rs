@@ -269,7 +269,7 @@ fn a_device_that_fails_mid_read_reports_it() {
 /// `IoError` grew a second variant on 2026-08-22 for one reason: the kernel's
 /// implementor bounds an operation with `block::OPERATION`, and reaching that
 /// bound is a statement about the caller's clock. Flattening it into
-/// `Error::Io` is what made `/bin/logd` end a boot's log for a stick that was
+/// `Error::Io` is what made `/system/bin/logd` end a boot's log for a stick that was
 /// answering — 1 red in 73 full 12-wide suites (2026-08-22), one `SYS_FSYNC`
 /// held for 2.1 s while the guest's peers booted in 1.4 s.
 /// The two `assert_ne!`s are the point of the test: `Error::Io` is exactly the
@@ -292,7 +292,7 @@ fn a_budget_that_expired_is_not_a_device_that_failed() {
     assert_eq!(fs.walk("", 1024).unwrap_err(), Error::BudgetExpired);
 }
 
-/// The flush is the call `/bin/logd`'s durability claim rests on, so it is the
+/// The flush is the call `/system/bin/logd`'s durability claim rests on, so it is the
 /// one that has to keep the distinction all the way up.
 ///
 /// Both arms against the same device, so what separates them is the refusal

@@ -7,15 +7,15 @@ use toyos_abi::syscall;
 /// third is the one the rest of this binary exercises: the checks below read
 /// the first two, and every test after them reads that one.
 const RACED: [&[u8]; 3] = [
-    b"/lib/libtls_lib.so",
-    b"/lib/libtls_dlopen_lib.so",
-    b"/lib/libtls_multi_crate.so",
+    b"/system/lib/libtls_lib.so",
+    b"/system/lib/libtls_dlopen_lib.so",
+    b"/system/lib/libtls_multi_crate.so",
 ];
 
 fn main() {
     two_names_at_once_are_two_modules();
 
-    let lib = unsafe { libloading::Library::new("/lib/libtls_multi_crate.so") }
+    let lib = unsafe { libloading::Library::new("/system/lib/libtls_multi_crate.so") }
         .expect("failed to dlopen tls-multi-crate");
 
     let push = unsafe { lib.get::<unsafe extern "C" fn(u8) -> u8>(b"mc_push") }.expect("mc_push");

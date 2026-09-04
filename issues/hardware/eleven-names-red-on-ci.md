@@ -28,7 +28,7 @@ all five.**
 | `hda_tone` | **4/5** | 4 | Serial | 1 mid-tone silence in the capture (`issues/audio/`) |
 | `late_storage_connect` | 2/5 | 7 | Serial | the boot scan bound a disk, so the port was not held empty |
 | `hda_two_live_refused` | 2/5 | 2 | Parallel | `"presenting a null sink" never reached the boot console` — **closed** with it |
-| `blocked_dump` | 2/5 | 3 | Parallel | two *different* reasons — the census half, and /bin/terminal racing the compositor |
+| `blocked_dump` | 2/5 | 3 | Parallel | two *different* reasons — the census half, and /system/bin/terminal racing the compositor |
 | `dump_nmi_probe` | 1/5 | 2 | Serial | the rip resolved to `u128_div_rem`, not to the spin |
 | `kernel_heartbeat` | 1/5 | 5 | Serial | 2 of 12 heartbeats dropped a healthy CPU from the mask |
 | `usb_disk_index_stable` | 1/5 | 2 | Parallel | nothing enumerated on the first controller |

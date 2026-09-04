@@ -4,12 +4,12 @@
 use std::process::Command;
 
 fn main() {
-    let status = Command::new("/bin/test_rs_gsbase_probe").status().expect("spawn gsbase_probe");
+    let status = Command::new("/system/bin/test_rs_gsbase_probe").status().expect("spawn gsbase_probe");
     if status.success() {
         println!("FAIL the gsbase primitive is present at ring 3 (exit {:?})", status.code());
         std::process::exit(1);
     }
-    let out = Command::new("/bin/echo").arg("still alive").output().expect("spawn echo");
+    let out = Command::new("/system/bin/echo").arg("still alive").output().expect("spawn echo");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         "still alive",

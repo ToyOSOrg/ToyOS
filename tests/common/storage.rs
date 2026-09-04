@@ -37,14 +37,14 @@ pub fn foreign_disk_untouched(
     // image has to exist before the boot that must not touch it.
     let dir = super::lane::dir();
     let image = dir.join("foreign-disk.img");
-    foreign_disk_image(&image, BYTES);
+    let (data_at, _) = foreign_disk_image(&image, BYTES);
     let before = whole_device(&image);
 
-    // The premise, checked before the boot rather than assumed: if this image
+    // The premise, checked before the boot rather than assumed: if this volume
     // somehow already parsed as a ToyOS volume, the kernel would mount it and
     // the assertion below would pass for the wrong reason.
-    if front(&image, 4) == *b"BCFS" {
-        return Err("the foreign image starts with a bcachefs superblock".to_string());
+    if front(&image, data_at, 4) == *b"BCFS" {
+        return Err("the foreign volume starts with a bcachefs superblock".to_string());
     }
 
     let mut qemu = QemuInstance::boot_with_options(
@@ -138,12 +138,22 @@ pub fn volume_from_another_disk(
     ))
     .map_err(|e| format!("the volume this test wrote does not mount on its own device: {e:?}"))?;
 
-    std::fs::write(&image, &volume).map_err(|e| format!("write the copied volume: {e}"))?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&image)
-        .and_then(|f| f.set_len(DEVICE_BYTES))
-        .map_err(|e| format!("grow the device under the volume: {e}"))?;
+    // On a device the volume was not formatted for, inside a partition it was
+    // not formatted for: the copy lands over the designation stamp, so the
+    // kernel finds a real superblock naming a block count that is not this
+    // partition's.
+    let file = std::fs::File::create(&image).map_err(|e| format!("create the image: {e}"))?;
+    file.set_len(DEVICE_BYTES).map_err(|e| format!("grow the device under the volume: {e}"))?;
+    let (at, _) = toyos_build::image::designate_data_disk(&image, DEVICE_BYTES);
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&image)
+            .map_err(|e| format!("open the image: {e}"))?;
+        file.seek(SeekFrom::Start(at)).map_err(|e| format!("seek: {e}"))?;
+        file.write_all(&volume).map_err(|e| format!("write the copied volume: {e}"))?;
+    }
     let before = whole_device(&image);
 
     let mut qemu = QemuInstance::boot_with_options(
@@ -200,46 +210,42 @@ pub fn volume_from_another_disk(
     Ok(())
 }
 
-/// A GPT protective MBR and a plausible partition header: what the front of a
-/// disk with another operating system on it looks like. Nothing in it is a
-/// bcachefs superblock and nothing in it is a designation stamp, which is the
-/// only property that matters -- but a recognisable layout is what makes a
-/// failure legible, since the diff below prints where the bytes changed.
-pub fn foreign_disk_image(path: &Path, len: u64) {
+/// A disk carrying a TOYOS-DATA partition that is somebody else's, and where
+/// it landed.
+///
+/// **The partition is ToyOS-typed on purpose**: a disk with no such partition
+/// is refused before block 0 is read and could not exercise the probe at all.
+/// Here the kernel finds the candidate, opens the view, reads block 0, and has
+/// to refuse it there — the volume holding neither a bcachefs superblock nor a
+/// designation stamp is the only property that matters.
+pub fn foreign_disk_image(path: &Path, len: u64) -> (u64, u64) {
     use std::io::{Seek, SeekFrom, Write};
 
     let file = std::fs::File::create(path).expect("create foreign image");
     file.set_len(len).expect("size foreign image");
+    let (at, bytes) = toyos_build::image::designate_data_disk(path, len);
 
-    let mut mbr = [0u8; 512];
-    // One 0xEE partition spanning the disk, then the MBR signature.
-    mbr[446] = 0x00;
-    mbr[450] = 0xEE;
-    mbr[454..458].copy_from_slice(&1u32.to_le_bytes());
-    mbr[458..462].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-    mbr[510] = 0x55;
-    mbr[511] = 0xAA;
-
-    let mut gpt = [0u8; 512];
-    gpt[..8].copy_from_slice(b"EFI PART");
-    gpt[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+    // Over the stamp the writer left: consent is what this disk must not carry.
+    let mut volume = [0u8; 4096];
+    volume[3..11].copy_from_slice(b"NTFS    ");
+    volume[510] = 0x55;
+    volume[511] = 0xAA;
 
     let mut file = std::fs::OpenOptions::new().write(true).open(path).expect("open foreign image");
-    file.seek(SeekFrom::Start(0)).expect("seek");
-    file.write_all(&mbr).expect("write mbr");
-    file.write_all(&gpt).expect("write gpt header");
+    file.seek(SeekFrom::Start(at)).expect("seek");
+    file.write_all(&volume).expect("write the foreign volume's first block");
+    (at, bytes)
 }
 
-/// The first `n` bytes of `path`, for a premise that is about the front of the
-/// image rather than about all of it.
-fn front(path: &Path, n: usize) -> Vec<u8> {
-    use std::io::Read;
+/// The `n` bytes at `at`, for a premise that is about one block of the image
+/// rather than about all of it.
+fn front(path: &Path, at: u64, n: usize) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
 
     let mut head = vec![0u8; n];
-    std::fs::File::open(path)
-        .expect("open image")
-        .read_exact(&mut head)
-        .expect("read the front of the image");
+    let mut file = std::fs::File::open(path).expect("open image");
+    file.seek(SeekFrom::Start(at)).expect("seek into the image");
+    file.read_exact(&mut head).expect("read the front of the volume");
     head
 }
 
@@ -255,8 +261,9 @@ pub fn so_cache_refusals(
 ) -> Result<(), String> {
     /// Without it the budget arm would have to load 256 MiB of libraries.
     const PARAMS: &[&str] = &["so-cache-tiny"];
-    /// Mirrored in the guest binary, on the mount root the host reader sees.
-    const STALE: &str = "so-cache-stale.so";
+    /// Mirrored in the guest binary; `/home` is a directory of DATA, so that is
+    /// the name the host reader sees on the volume.
+    const STALE: &str = "home/so-cache-stale.so";
     const SECOND: &str = "libtls_dlopen_lib.so";
 
     let want = rust_bins
@@ -276,9 +283,9 @@ pub fn so_cache_refusals(
         },
     );
     let boot = qemu.boot_log().to_string();
-    if boot.contains("/home is a tmpfs") {
+    if boot.contains("are a tmpfs") {
         return Err(format!(
-            "/home fell back to tmpfs, so the readback below would judge no device:\n{boot}"
+            "/apps and /home fell back to tmpfs, so the readback below would judge no device:\n{boot}"
         ));
     }
 
@@ -346,8 +353,9 @@ pub fn home_budget_refusal_retried(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     const PARAMS: &[&str] = &["fsync-budget-spent"];
-    /// Mirrored in `tests/toyos-rust-tests/src/bin/home_fsync_budget.rs`.
-    const PATH: &str = "f9-budget.bin";
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/home_fsync_budget.rs`, under
+    /// the `/home` directory of DATA the host reader sees.
+    const PATH: &str = "home/f9-budget.bin";
     const LEN: usize = 3 * 4096 + 41;
     fn pattern() -> Vec<u8> {
         (0..LEN).map(|i| (i.wrapping_mul(151) ^ 0x3C) as u8).collect()
@@ -364,9 +372,9 @@ pub fn home_budget_refusal_retried(
         },
     );
     let boot = qemu.boot_log().to_string();
-    if boot.contains("/home is a tmpfs") {
+    if boot.contains("are a tmpfs") {
         return Err(format!(
-            "/home fell back to tmpfs, so nothing below touches the NVMe path:\n{boot}"
+            "/apps and /home fell back to tmpfs, so nothing below touches the NVMe path:\n{boot}"
         ));
     }
 
@@ -424,6 +432,84 @@ pub fn home_budget_refusal_retried(
     eprintln!("  [f9] {retried}");
     eprintln!(
         "  [f9] {LEN} bytes byte-identical off the NVMe image via the host's own bcachefs reader"
+    );
+    Ok(())
+}
+
+/// `/apps` and `/home` are two paths into one filesystem, judged off the device.
+///
+/// The guest writes one file under each and shuts down; the host then finds
+/// both in **one** bcachefs volume on the NVMe image, under one superblock
+/// UUID, through this crate's own build of the reader over a plain
+/// seek-and-read device. A second filesystem behind the second path could not
+/// answer for both names out of one mount.
+pub fn apps_and_home_are_one_filesystem(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/hierarchy_paths.rs`, without
+    /// the mount point: the volume carries `/home/x` as `home/x`.
+    const IN_HOME: &str = "home/hierarchy-home.bin";
+    const IN_APPS: &str = "apps/hierarchy-apps.bin";
+    const LEN: usize = 2 * 4096 + 61;
+    fn payload(seed: u8) -> Vec<u8> {
+        (0..LEN).map(|i| (i.wrapping_mul(53) ^ seed as usize) as u8).collect()
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::MetalDisk, ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    if boot.contains("are a tmpfs") {
+        return Err(format!(
+            "/apps and /home fell back to tmpfs, so the readback below would judge no device:\n\
+             {boot}"
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_hierarchy_paths", Duration::from_secs(60));
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "hierarchy_paths guest failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+
+    let image = qemu.nvme_image().to_path_buf();
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let io = FileBlocks::open(&image)?;
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
+        .map_err(|e| format!("the NVMe image's DATA partition does not mount: {e:?}"))?;
+    let uuid = fs.uuid();
+    for (name, seed) in [(IN_HOME, 0xA5u8), (IN_APPS, 0x5A)] {
+        let got = fs
+            .read_file(name)
+            .map_err(|e| format!("reading {name} off the DATA partition: {e:?}"))?;
+        if got != payload(seed) {
+            let at = got.iter().zip(payload(seed)).position(|(a, b)| *a != b);
+            return Err(format!(
+                "{name} on the device is {} bytes, first differing at {at:?}",
+                got.len()
+            ));
+        }
+    }
+
+    eprintln!(
+        "  [hierarchy] {IN_HOME} and {IN_APPS}, {LEN} bytes each, both in the one filesystem \
+         {uuid} on the NVMe image"
     );
     Ok(())
 }
@@ -710,19 +796,25 @@ pub fn block_duplicate_id(
     Ok(())
 }
 
-/// A disk image as a bcachefs block device: plain seek-and-read, no cache and
-/// no kernel code.
-struct FileBlocks {
+/// A disk image's DATA partition as a bcachefs block device: plain
+/// seek-and-read, no cache and no kernel code. The partition is located through
+/// the table by `toyos-gpt`, never at an offset this side computed.
+pub struct FileBlocks {
     file: std::cell::RefCell<std::fs::File>,
+    first: u64,
     blocks: u64,
 }
 
 impl FileBlocks {
-    fn open(path: &Path) -> Result<Self, String> {
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let (at, bytes) = toyos_build::image::data_partition_of(path)?;
         let file = std::fs::File::open(path)
             .map_err(|e| format!("open {}: {e}", path.display()))?;
-        let len = file.metadata().map_err(|e| format!("stat: {e}"))?.len();
-        Ok(Self { file: std::cell::RefCell::new(file), blocks: len / 4096 })
+        Ok(Self {
+            file: std::cell::RefCell::new(file),
+            first: at / 4096,
+            blocks: bytes / 4096,
+        })
     }
 }
 
@@ -742,7 +834,7 @@ impl bcachefs::BlockIO for FileBlocks {
     ) -> Result<(), bcachefs::DeviceError> {
         use std::io::{Read, Seek, SeekFrom};
         let mut file = self.file.borrow_mut();
-        file.seek(SeekFrom::Start(block.raw() * 4096))
+        file.seek(SeekFrom::Start((self.first + block.raw()) * 4096))
             .map_err(|_| bcachefs::DeviceError::classify(&HostIoFailed))?;
         file.read_exact(buf.as_bytes_mut()).map_err(|_| bcachefs::DeviceError::classify(&HostIoFailed))
     }

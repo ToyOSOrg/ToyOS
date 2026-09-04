@@ -30,7 +30,7 @@
 //! until recently the broken one: `cp x emptydir/` wrote a *file* named
 //! `emptydir`, because both halves of `is_dir` read "no entries" as "no such
 //! path". Both halves are fixed and this is where the pair is judged together —
-//! `/bin/cp` asks `fs::metadata`, which asks `readdir`, which asks the kernel.
+//! `/system/bin/cp` asks `fs::metadata`, which asks `readdir`, which asks the kernel.
 
 use std::fs;
 use std::path::Path;
@@ -71,13 +71,13 @@ fn big() -> Vec<u8> {
     (0..BIG).map(|i| (i.wrapping_mul(31).wrapping_add(i >> 9) ^ 0xA5) as u8).collect()
 }
 
-/// Spawn `/bin/<cmd>` with one of its two output streams on a pipe.
+/// Spawn `/system/bin/<cmd>` with one of its two output streams on a pipe.
 ///
 /// One stream at a time rather than `Command::output()`: the stream that is
 /// not piped is inherited, so a command that says something unexpected says it
 /// on the console instead of into a buffer no assertion reads.
 fn spawn(cmd: &str, args: &[&str], errors: bool) -> std::process::Output {
-    let mut command = Command::new(format!("/bin/{cmd}"));
+    let mut command = Command::new(format!("/system/bin/{cmd}"));
     command.args(args);
     if errors {
         command.stderr(Stdio::piped());
@@ -86,9 +86,9 @@ fn spawn(cmd: &str, args: &[&str], errors: bool) -> std::process::Output {
     }
     command
         .spawn()
-        .unwrap_or_else(|e| panic!("spawn /bin/{cmd}: {e}"))
+        .unwrap_or_else(|e| panic!("spawn /system/bin/{cmd}: {e}"))
         .wait_with_output()
-        .unwrap_or_else(|e| panic!("wait for /bin/{cmd}: {e}"))
+        .unwrap_or_else(|e| panic!("wait for /system/bin/{cmd}: {e}"))
 }
 
 fn must_pass(cmd: &str, args: &[&str]) -> String {

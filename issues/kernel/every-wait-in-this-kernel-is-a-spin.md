@@ -188,7 +188,7 @@ both before any lock conversion; the order is forced, not preferred.
   above it cannot reach the driver at all (see the third wall below).
   `block::OPERATION` bounds the composition `USB_TIMEOUT_NS` cannot see — the
   batching, the retries and the recoveries one `read_blocks` is made of — and
-  the daemon it decides is `/bin/logd`, whose `LOG_WRITE_BUDGET` is measured in
+  the daemon it decides is `/system/bin/logd`, whose `LOG_WRITE_BUDGET` is measured in
   userland around a syscall and so is reachable only if the syscall returns. Its
   doc named `USB_TIMEOUT_NS` as what made that so, which was true of a dead
   device and never of a slow one; both bounds are now named there. **What is

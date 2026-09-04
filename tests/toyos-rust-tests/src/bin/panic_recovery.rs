@@ -12,7 +12,7 @@ fn main() {
 
 /// Kernel panic!() during syscall → process killed, system survives.
 fn test_syscall_panic() {
-    let status = Command::new("/bin/test_rs_test_panic_child")
+    let status = Command::new("/system/bin/test_rs_test_panic_child")
         .arg("0")
         .status()
         .expect("failed to spawn child");
@@ -22,7 +22,7 @@ fn test_syscall_panic() {
 
 /// Kernel null-pointer fault during syscall → process killed, system survives.
 fn test_syscall_fault() {
-    let status = Command::new("/bin/test_rs_test_panic_child")
+    let status = Command::new("/system/bin/test_rs_test_panic_child")
         .arg("1")
         .status()
         .expect("failed to spawn child");
@@ -35,7 +35,7 @@ fn test_syscall_fault() {
 /// stack nothing returns to. Without the assert the syscall returns normally and
 /// the child exits 0, so this case has teeth in the negative direction too.
 fn test_lock_across_switch() {
-    let status = Command::new("/bin/test_rs_test_panic_child")
+    let status = Command::new("/system/bin/test_rs_test_panic_child")
         .arg("2")
         .status()
         .expect("failed to spawn child");
@@ -49,7 +49,7 @@ fn test_lock_across_switch() {
 /// masked and preemption disabled, freezing a single-CPU machine for the whole
 /// window — from an ungated syscall. Refused means the child survives.
 fn test_lock_across_switch_is_one_shot() {
-    let status = Command::new("/bin/test_rs_test_panic_child")
+    let status = Command::new("/system/bin/test_rs_test_panic_child")
         .arg("2")
         .status()
         .expect("failed to spawn child");
@@ -59,7 +59,7 @@ fn test_lock_across_switch_is_one_shot() {
 
 /// User-mode segfault → process killed, system survives.
 fn test_user_segfault() {
-    let status = Command::new("/bin/test_rs_segfault_child")
+    let status = Command::new("/system/bin/test_rs_segfault_child")
         .status()
         .expect("failed to spawn child");
     assert!(!status.success(), "child that segfaults should be killed");
@@ -68,7 +68,7 @@ fn test_user_segfault() {
 
 /// System still works after all three fault types.
 fn test_system_alive() {
-    let output = Command::new("/bin/echo")
+    let output = Command::new("/system/bin/echo")
         .arg("still alive")
         .output()
         .expect("failed to run echo after recoveries");

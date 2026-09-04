@@ -1,13 +1,13 @@
 //! The in-guest half of the layout and wizard gates, as a surface.
 //!
 //! This program is a **surface owner**, built out of exactly the pieces
-//! `/bin/terminal` and `/bin/console` are: it holds the keyboard claim and one
+//! `/system/bin/terminal` and `/system/bin/console` are: it holds the keyboard claim and one
 //! `Translator`, makes a port of its own and serves `toyos::surface::Host` on
 //! it, and puts that port's connector in the namespace of the child it spawns.
 //! What it does not have is a screen — so
 //! every assertion the host makes reads a console line instead of a pixel,
 //! which is why the layout and wizard gates run here and not against
-//! `/bin/console`.
+//! `/system/bin/console`.
 //!
 //! One binary rather than two: each is ~1.8 MiB of statically linked std, and
 //! ROOT goes into a partition sized from its contents. Modes are
@@ -22,7 +22,7 @@
 //!   by `swiss_german_layout`.
 //! - `detect` — run `locale detect` and relay its conversation while the
 //!   wizard holds this surface's keys. **The keyboard is claimed here**, which
-//!   is the shape the compositor and `/bin/console` put it in and the shape
+//!   is the shape the compositor and `/system/bin/console` put it in and the shape
 //!   that used to make the wizard refuse. Driven by `locale_detect` and
 //!   `locale_detect_unrecognized`.
 
@@ -133,14 +133,14 @@ fn spawn_locale(args: &[&str], surface: &Connector) -> Child {
         .add(surface::SERVICE, surface)
         .finish()
         .expect("locale_gate: the kernel refused a namespace for the wizard");
-    Command::new("/bin/toybox")
+    Command::new("/system/bin/toybox")
         .arg("locale")
         .args(args)
         .endow(SVC_LABEL, child_ns.into_raw().0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("locale_gate: cannot run /bin/toybox")
+        .expect("locale_gate: cannot run /system/bin/toybox")
 }
 
 fn layout(mut surface: Surface, connector: &Connector) {

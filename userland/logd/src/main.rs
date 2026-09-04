@@ -1,4 +1,4 @@
-//! `/bin/logd` — the machine's log, written to a file by a process that can be
+//! `/system/bin/logd` — the machine's log, written to a file by a process that can be
 //! killed without taking the kernel with it.
 //!
 //! What this program replaces is the kernel's own file sink,
@@ -35,7 +35,7 @@
 //!   not two.
 //!
 //! So `serves = ["log"]` is not on its manifest row yet, by the same rule that
-//! keeps `logread` off `/bin/console`'s: *a right with no caller is a
+//! keeps `logread` off `/system/bin/console`'s: *a right with no caller is a
 //! capability handed out for a plan*. The acceptor arrives with the first
 //! `Register`.
 //!

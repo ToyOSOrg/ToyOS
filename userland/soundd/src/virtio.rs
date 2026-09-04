@@ -255,7 +255,7 @@ pub struct Virtio {
 impl Virtio {
     /// Ask what the device's stream can do, and configure it.
     ///
-    /// The claim is the argument: `/bin/init` minted it and endowed it, so
+    /// The claim is the argument: `/system/bin/init` minted it and endowed it, so
     /// "does this machine have a virtio-sound?" was already answered before
     /// soundd's first instruction.
     pub fn claim(dev: VirtioSoundDev) -> Result<(Self, u32, u8), Refusal> {

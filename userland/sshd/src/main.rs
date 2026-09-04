@@ -132,12 +132,12 @@ struct SshSession {
 }
 
 impl SshSession {
-    /// Resolve a command name to a full path. Bare names resolve to /bin/<name>.
+    /// Resolve a command name to a full path. Bare names resolve to /system/bin/<name>.
     fn resolve_program(name: &str) -> String {
         if name.starts_with('/') {
             name.to_string()
         } else {
-            format!("/bin/{}", name)
+            format!("/system/bin/{}", name)
         }
     }
 
@@ -298,7 +298,7 @@ impl russh::server::Handler for SshSession {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel_id)?;
-        self.spawn_shell("/bin/shell", &[]);
+        self.spawn_shell("/system/bin/shell", &[]);
         Ok(())
     }
 
@@ -311,7 +311,7 @@ impl russh::server::Handler for SshSession {
         session.channel_success(channel_id)?;
         let cmd = std::str::from_utf8(data).unwrap_or("").trim();
         // Run through shell so redirects, pipes, etc. work
-        self.spawn_shell("/bin/shell", &["-c", cmd]);
+        self.spawn_shell("/system/bin/shell", &["-c", cmd]);
         Ok(())
     }
 
@@ -469,7 +469,7 @@ mod tests {
     fn a_key_listed_with_options_authorizes_nothing() {
         let mine = key();
         for options in [
-            "command=\"/bin/shell -c ls\"",
+            "command=\"/system/bin/shell -c ls\"",
             "no-pty",
             "restrict",
             "from=\"10.0.0.1\",no-agent-forwarding",

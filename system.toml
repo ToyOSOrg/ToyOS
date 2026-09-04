@@ -1,5 +1,5 @@
 # sshd is deliberately not in `[boot] start`. It is built into the image and
-# started by hand (`/bin/sshd &`) on a machine that wants remote access: it
+# started by hand (`/system/bin/sshd &`) on a machine that wants remote access: it
 # listens on every interface, so carrying it in every boot is a listening port
 # nobody asked for.
 # `src/build.rs`'s `no_shipped_boot_config_starts_sshd` is the gate.
@@ -13,7 +13,7 @@ hosted-rustc = false
 # day delete it.
 assets = ["assets"]
 
-# What `/bin/init` starts at boot. Program keys, not paths, and the order means
+# What `/system/bin/init` starts at boot. Program keys, not paths, and the order means
 # nothing: every port exists before any server runs.
 [boot]
 # `filepicker` is a `serves` daemon like the three beside it: a machine-wide
@@ -87,7 +87,7 @@ receives = ["compositor", "filepicker"]
 [programs.files]
 receives = ["compositor", "filepicker"]
 
-# `power` is `/bin/shutdown`'s and `roster` is `/bin/ps`'s, and each of those is
+# `power` is `/system/bin/shutdown`'s and `roster` is `/system/bin/ps`'s, and each of those is
 # this binary under another name: init resolves the symlink to this row, so the
 # applets are endowed a `SysCap` carrying `Rights::POWER | Rights::ROSTER` and
 # nothing else in the image is. The row's granularity is the binary, so every
@@ -101,24 +101,24 @@ receives = ["compositor", "soundd", "surface"]
 syscap = ["power", "roster"]
 
 # Symlinks created on ROOT at build time.
-# Paths are relative to the filesystem root (no leading /).
+# Keys are ROOT-relative; targets are the guest paths they resolve to.
 [symlinks]
-"bin/cat" = "/bin/toybox"
-"bin/cp" = "/bin/toybox"
-"bin/echo" = "/bin/toybox"
-"bin/free" = "/bin/toybox"
-"bin/grep" = "/bin/toybox"
-"bin/hexdump" = "/bin/toybox"
-"bin/locale" = "/bin/toybox"
-"bin/ls" = "/bin/toybox"
-"bin/mkdir" = "/bin/toybox"
-"bin/mv" = "/bin/toybox"
-"bin/net" = "/bin/toybox"
-"bin/ps" = "/bin/toybox"
-"bin/pwd" = "/bin/toybox"
-"bin/rm" = "/bin/toybox"
-"bin/screen" = "/bin/toybox"
-"bin/shutdown" = "/bin/toybox"
-"bin/spin" = "/bin/toybox"
-"bin/stats" = "/bin/toybox"
-"bin/tone" = "/bin/toybox"
+"bin/cat" = "/system/bin/toybox"
+"bin/cp" = "/system/bin/toybox"
+"bin/echo" = "/system/bin/toybox"
+"bin/free" = "/system/bin/toybox"
+"bin/grep" = "/system/bin/toybox"
+"bin/hexdump" = "/system/bin/toybox"
+"bin/locale" = "/system/bin/toybox"
+"bin/ls" = "/system/bin/toybox"
+"bin/mkdir" = "/system/bin/toybox"
+"bin/mv" = "/system/bin/toybox"
+"bin/net" = "/system/bin/toybox"
+"bin/ps" = "/system/bin/toybox"
+"bin/pwd" = "/system/bin/toybox"
+"bin/rm" = "/system/bin/toybox"
+"bin/screen" = "/system/bin/toybox"
+"bin/shutdown" = "/system/bin/toybox"
+"bin/spin" = "/system/bin/toybox"
+"bin/stats" = "/system/bin/toybox"
+"bin/tone" = "/system/bin/toybox"

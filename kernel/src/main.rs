@@ -204,6 +204,10 @@ fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
     gpu::register(driver, info);
 }
 
+/// The two names DATA answers to. One filesystem, so `/apps/x` and `/home/x`
+/// are two directories of it and never two volumes.
+const DATA_PATHS: [&str; 2] = ["apps", "home"];
+
 /// Says where this boot's log can be read, on the last surface still showing it once userland owns the screen.
 fn report_log_destination() {
     // Kernel-side because panic_console owns the panel; logd reports which file it opened separately.
@@ -378,40 +382,30 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     gpt::init(kernel_args);
 
     // No controller is a configuration, not a failure — same as a missing xHCI, NIC, or sound device.
-    // `None` from open_home means a disk exists but isn't ours; both land on tmpfs.
-    let (home_cache, home_volume) = match nvme::init(&pci_devices) {
+    match nvme::init(&pci_devices) {
         Some(nvme_dev) => {
             let sector_size = nvme_dev.sector_size();
             let dev = page_cache::instrumented(Box::new(nvme_dev));
-            match block::register(dev) {
-                Some(handle) => {
-                    gpt::probe(&handle, sector_size);
-                    // Before anything mounts the device: the block the gate reads is one nothing else is touching yet.
-                    #[cfg(feature = "boot-actuators")]
-                    if actuator::nvme_spent_budget() {
-                        nvme_gate::run(&handle);
-                    }
-                    #[cfg(feature = "boot-actuators")]
-                    if actuator::nvme_command_silent() {
-                        nvme_gate::silent_command(&handle);
-                    }
-                    let cache = page_cache::init(block::Partition::whole(handle));
-                    // Before `/home` exists: the device blocks it reads back are ones nothing else has written.
-                    #[cfg(feature = "boot-actuators")]
-                    if actuator::page_cache_partition_offset() {
-                        page_cache::partition_offset_selftest(cache.partition().handle());
-                    }
-                    let fs = bcachefs_adapter::open_home(&cache);
-                    (Some(cache), fs)
+            if let Some(handle) = block::register(dev) {
+                gpt::probe(&handle, sector_size);
+                // Before anything mounts the device: the block the gate reads is one nothing else is touching yet.
+                #[cfg(feature = "boot-actuators")]
+                if actuator::nvme_spent_budget() {
+                    nvme_gate::run(&handle);
                 }
-                None => (None, None),
+                #[cfg(feature = "boot-actuators")]
+                if actuator::nvme_command_silent() {
+                    nvme_gate::silent_command(&handle);
+                }
+                // Before DATA is mounted: the device blocks it reads back are ones nothing else has written.
+                #[cfg(feature = "boot-actuators")]
+                if actuator::page_cache_partition_offset() {
+                    page_cache::partition_offset_selftest(&handle);
+                }
             }
         }
-        None => {
-            log!("NVMe: no controller on this machine, storage unavailable");
-            (None, None)
-        }
-    };
+        None => log!("NVMe: no controller on this machine, storage unavailable"),
+    }
 
     boot_phase!("storage ready", t_storage);
 
@@ -450,26 +444,39 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     inbox::init();
 
 
-    // After `probe_boot_disks`: ROOT is a partition, and on a USB-booted machine
-    // the device carrying it does not exist until the controller has bound it.
-    let root = rootfs::mount();
-    vfs::lock().set_root(Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(
-        root.fs, root.cache,
-    )));
-
-    // tmpfs when the NVMe device isn't ours to write: persistence is the only difference, so the earlier refusal doesn't cascade.
+    // After `probe_boot_disks`: ROOT and DATA are partitions, and on a
+    // USB-booted machine the device carrying one does not exist until the
+    // controller has bound it.
     use vfs::UserAccess;
-    match (home_cache.as_ref(), home_volume) {
-        (Some(cache), Some(fs)) => {
-            let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(cache));
-            vfs::lock().mount("home", Box::new(adapter), UserAccess::ReadWrite)
+    let root = rootfs::mount();
+    vfs::lock().mount(
+        &["system"],
+        Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(root.fs, root.cache)),
+        UserAccess::KernelOnly,
+    );
+
+    // One filesystem, two paths: `/apps` and `/home` are two directories of
+    // DATA, so one sync settles both and neither can outlive the other.
+    // tmpfs when there is no DATA volume this kernel may write: persistence is
+    // the only difference, so the earlier refusal doesn't cascade.
+    #[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
+    let data_cache = match bcachefs_adapter::open_data() {
+        Some((cache, fs)) => {
+            let adapter = bcachefs_adapter::BcacheFsAdapter::new(fs, Arc::clone(&cache));
+            vfs::lock().mount(&DATA_PATHS, Box::new(adapter), UserAccess::ReadWrite);
+            Some(cache)
         }
-        _ => {
-            log!("storage: /home is a tmpfs — it will not survive a reboot");
-            vfs::lock().mount("home", Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite)
+        None => {
+            log!("storage: /apps and /home are a tmpfs — they will not survive a reboot");
+            vfs::lock().mount(
+                &DATA_PATHS,
+                Box::new(crate::tmpfs::TmpFs::new()),
+                UserAccess::ReadWrite,
+            );
+            None
         }
-    }
-    vfs::lock().mount("tmp", Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite);
+    };
+    vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite);
 
     // Named by role, not type: both partitions are FAT32 and neither is selected for being FAT32 — a missing one just has no mount.
     use fat32_adapter::Role;
@@ -477,12 +484,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // The filesystem sits outside the capability model by ruling, so no handle is owed for /boot.
     // /log is ReadWrite on purpose: it's an ordinary userland file logd owns, and the worst a process can do is cost the diagnostic.
     match fat32_adapter::mount(Role::Boot) {
-        Some(fs) => vfs::lock().mount(Role::Boot.mount(), Box::new(fs), UserAccess::KernelOnly),
+        Some(fs) => vfs::lock().mount(&[Role::Boot.mount()], Box::new(fs), UserAccess::KernelOnly),
         None => log!("boot-volume: not mounted; the kernel has no /boot this boot"),
     }
     match fat32_adapter::mount(Role::Log) {
         Some(fs) => {
-            vfs::lock().mount(Role::Log.mount(), Box::new(fs), UserAccess::ReadWrite);
+            vfs::lock().mount(&[Role::Log.mount()], Box::new(fs), UserAccess::ReadWrite);
         }
         // No fallback onto /boot: with no log partition the log stays in the in-memory shards, still reachable via screen and console.
         None => log!("log-volume: not mounted; this boot's kernel log stays in memory"),
@@ -505,7 +512,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     #[cfg(feature = "boot-actuators")]
     if actuator::pc_unbind_selftest() {
-        match &home_cache {
+        match &data_cache {
             Some(cache) => page_cache::unbind_selftest(cache),
             None => log!("pc-unbind-selftest: FAIL (this boot has no metadata page cache)"),
         }
@@ -569,7 +576,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         input_merge_test::run();
     }
 
-    // init reads /etc/system.manifest itself; the boot config never names the program it starts.
+    // init reads /system/etc/system.manifest itself; the boot config never names the program it starts.
     let pid = process::spawn_init();
     log!("spawned {} pid={pid}", process::INIT_PATH);
 

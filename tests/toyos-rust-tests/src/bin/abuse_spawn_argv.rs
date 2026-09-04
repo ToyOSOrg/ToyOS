@@ -80,11 +80,11 @@ fn main() {
     assert_eq!(err, SyscallError::InvalidArgument, "wrong error for all-NUL argv");
 
     // Spawn still works, so the rejections left the kernel intact.
-    let status = Command::new("/bin/echo")
+    let status = Command::new("/system/bin/echo")
         .arg("spawn still works")
         .status()
-        .expect("spawn /bin/echo");
-    assert!(status.success(), "/bin/echo exited {status:?}");
+        .expect("spawn /system/bin/echo");
+    assert!(status.success(), "/system/bin/echo exited {status:?}");
 
     unsafe { syscall::munmap(region, REGION) }.expect("munmap");
     println!("oversized spawn argv/env rejected, spawn still usable");

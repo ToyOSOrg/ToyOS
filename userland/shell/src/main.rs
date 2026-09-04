@@ -786,7 +786,7 @@ fn print_help() {
     println!("Variables: $VAR, ${{VAR}}, $? (exit status)");
     println!("Quoting: 'literal', \"with $expansion\"");
     println!();
-    println!("Programs in /bin/ are available by name.");
+    println!("Programs in /system/bin/ are available by name.");
 }
 
 // --- History ---

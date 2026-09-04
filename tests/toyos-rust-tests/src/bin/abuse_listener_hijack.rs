@@ -33,7 +33,7 @@
 //!    the only wrong-typed handle in the ABI that does**: an `add` entry's
 //!    connector is routinely one a *peer* transferred — a `provides` name is
 //!    exactly that — so presenting the wrong one may be reporting a peer's bug
-//!    rather than your own. `/bin/init`'s launcher is why, and
+//!    rather than your own. `/system/bin/init`'s launcher is why, and
 //!    `launcher_refusals` is the other end of the same property.
 //! 3. **A handle number from another process's table names nothing here.** The
 //!    victim prints the raw number of a live acceptor of its own; the thief
@@ -47,7 +47,7 @@ use std::process::{Command, Stdio};
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SyscallError};
 
-const SELF_PATH: &str = "/bin/test_rs_abuse_listener_hijack";
+const SELF_PATH: &str = "/system/bin/test_rs_abuse_listener_hijack";
 const NAME: &str = "abuse-listener-hijack";
 
 /// `process::HANDLE_FAULT_EXIT_CODE`.

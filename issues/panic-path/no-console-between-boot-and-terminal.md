@@ -40,7 +40,7 @@ milliseconds later, and no key pauses it: `page_forever` is reached only from
 `halt_all_cpus`, so a *successful* boot never pages.
 
 **The durable answer landed and is not this.** "A log sink that survives
-userland" is `/bin/logd`: the kernel keeps the record ring and the console and
+userland" is `/system/bin/logd`: the kernel keeps the record ring and the console and
 writes no file at all, logd owns `/log` and puts one file per boot there named
 for the wall clock, `src/build.rs`'s `every_boot_config_runs_logd` refuses a boot
 config that omits it, and `kernel/src/log_file.rs` is deleted. Both ways of
@@ -56,7 +56,7 @@ reflash.**
 list, so `boot_checkpoint` keeps painting; `screen_diag_boot` gates it, and its
 `[page n/m]` footer branch has never executed — QEMU's grid fits the log on one
 page where the T14's 240 columns give two, so that branch is a guard and not a
-certification until the laptop runs it. `--console-boot` puts `/bin/console`
+certification until the laptop runs it. `--console-boot` puts `/system/bin/console`
 over the framebuffer with a shell underneath, but claiming the screen is exactly
 what stops `boot_checkpoint` painting, so a machine that wedges *before* userland
 shows nothing at all in that mode; its scrollback seed is a file read once at

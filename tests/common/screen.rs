@@ -125,7 +125,7 @@ impl Ppm {
         rows.join("\n")
     }
 
-    /// Every cell row as `/bin/console` drew it, right-trimmed, blanks kept.
+    /// Every cell row as `/system/bin/console` drew it, right-trimmed, blanks kept.
     pub fn console_rows(&self, font: &ConsoleFont) -> Vec<String> {
         let mut rows: Vec<String> = Vec::new();
         for cy in 0..self.height / GLYPH_H {
@@ -195,7 +195,7 @@ impl Ppm {
 /// Cells of the console's font, in the alpha values it blits.
 const CELL: usize = GLYPH_W * GLYPH_H;
 
-/// The font `/bin/console` and `/bin/terminal` draw with — 8x16 anti-aliased
+/// The font `/system/bin/console` and `/system/bin/terminal` draw with — 8x16 anti-aliased
 /// alpha, not the kernel's 1-bit table.
 ///
 /// The two decoders exist for the same reason and read the same way: a glyph on

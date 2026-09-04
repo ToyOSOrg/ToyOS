@@ -32,7 +32,7 @@ use toyos_abi::syscall::{
     self, DeviceType, MmapFlags, MmapProt, SpawnArgs, SyscallError, SYSCAP_LABEL,
 };
 
-const SELF_PATH: &str = "/bin/test_rs_device_claim_lifetime";
+const SELF_PATH: &str = "/system/bin/test_rs_device_claim_lifetime";
 
 fn main() {
     let cap: SysCap = Endowments::get()

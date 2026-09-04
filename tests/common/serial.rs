@@ -546,7 +546,7 @@ pub fn self_check() -> Result<(), String> {
     const DF_HEADER: &str =
         "[kernel 6.204 cpu1] DOUBLE FAULT on CPU 1 (pid=Some(Pid(2)) tid=Some(Tid(0)))";
     let staged_df = format!(
-        "[kernel 6.201 cpu0] spawn: /bin/test_rs_console_line_atomicity pid=41\n\
+        "[kernel 6.201 cpu0] spawn: /system/bin/test_rs_console_line_atomicity pid=41\n\
          AAAAAAAA\n\
          {DF_HEADER}\n\
          [kernel 6.204 cpu1]   cr2=0xffff800002672ff8 (address that caused the fault chain)\n\
@@ -573,7 +573,7 @@ pub fn self_check() -> Result<(), String> {
     }
     // Nothing from before the death, because that is the run going normally and
     // a bound spent on it is a bound not spent on the report.
-    if report.contains("spawn: /bin/test_rs_console_line_atomicity") {
+    if report.contains("spawn: /system/bin/test_rs_console_line_atomicity") {
         return Err(format!("the report starts before the death:\n{report}"));
     }
     // A line another process wrote *after* the header stays: the console is not

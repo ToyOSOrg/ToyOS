@@ -547,11 +547,11 @@ fn main() {
         assert!(b.iter().all(|&x| x == (i % 251) as u8), "kernel heap corrupted block {i}");
     }
 
-    let status = std::process::Command::new("/bin/echo")
+    let status = std::process::Command::new("/system/bin/echo")
         .arg("loader still works")
         .status()
-        .expect("spawn /bin/echo");
-    assert!(status.success(), "/bin/echo exited {status:?}");
+        .expect("spawn /system/bin/echo");
+    assert!(status.success(), "/system/bin/echo exited {status:?}");
 
     let _ = fs::remove_dir_all(DIR);
     let _ = fs::remove_dir_all(BIG_DIR);

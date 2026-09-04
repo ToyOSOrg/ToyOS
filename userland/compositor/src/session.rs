@@ -167,21 +167,21 @@ impl Session {
             .expect("the cursor buffer the framebuffer claim just handed over");
         let cursor_buf = cursor_shm.as_ptr();
         let cursors = Cursors {
-            default: read_sprite("/share/icons/cursor-bold.svg", CURSOR_PX, [255, 255, 255]),
+            default: read_sprite("/system/share/icons/cursor-bold.svg", CURSOR_PX, [255, 255, 255]),
             resize: read_sprite(
-                "/share/icons/arrow-down-right-bold.svg",
+                "/system/share/icons/arrow-down-right-bold.svg",
                 CURSOR_PX,
                 [255, 255, 255],
             ),
-            crosshair: read_sprite("/share/icons/crosshair-simple-bold.svg", CURSOR_PX, [0, 0, 0]),
+            crosshair: read_sprite("/system/share/icons/crosshair-simple-bold.svg", CURSOR_PX, [0, 0, 0]),
         };
         render::upload_cursor(&fb_dev, cursor_buf, &cursors.default, hw_cursor);
 
-        let font_data = std::fs::read("/share/fonts/JetBrainsMono-Regular-8x16.font")
+        let font_data = std::fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font")
             .expect("failed to read font");
         let font = font::Font::from_prebuilt(&font_data);
 
-        let raw = std::fs::read("/share/wallpaper.rgb").expect("failed to read wallpaper");
+        let raw = std::fs::read("/system/share/wallpaper.rgb").expect("failed to read wallpaper");
         let mut wallpaper = Wallpaper {
             w: u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize,
             h: u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize,
@@ -198,9 +198,9 @@ impl Session {
         wallpaper.rescale(&screen);
 
         let icons = TitleBarIcons {
-            minimize: read_sprite("/share/icons/minus-bold.svg", 14, [255, 255, 255]),
-            maximize: read_sprite("/share/icons/square-bold.svg", 14, [255, 255, 255]),
-            close: read_sprite("/share/icons/x-bold.svg", 14, [255, 255, 255]),
+            minimize: read_sprite("/system/share/icons/minus-bold.svg", 14, [255, 255, 255]),
+            maximize: read_sprite("/system/share/icons/square-bold.svg", 14, [255, 255, 255]),
+            close: read_sprite("/system/share/icons/x-bold.svg", 14, [255, 255, 255]),
         };
 
         let desk = desk_of(&screen, &font);
@@ -394,7 +394,7 @@ impl Session {
                     }
                 }
                 KeyAction::SpawnTerminal => {
-                    Command::new("/bin/terminal").spawn().ok();
+                    Command::new("/system/bin/terminal").spawn().ok();
                 }
                 KeyAction::Paste => {
                     if let Some(i) = focused {

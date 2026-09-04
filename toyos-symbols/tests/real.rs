@@ -4,7 +4,7 @@
 //! Every other property this crate could assert is a property of hostile or
 //! synthetic bytes, and a parser that refused everything would pass those
 //! trivially. This is the shape `kernel/src/symbols.rs` actually meets at
-//! every boot: `/bin/input-test` as `toyos-ld` linked it, whole, with the
+//! every boot: `/system/bin/input-test` as `toyos-ld` linked it, whole, with the
 //! judge being GNU `readelf`/`nm` (`/opt/homebrew/opt/binutils/bin`, a distinct
 //! implementation of the ELF spec from `toyos-elf`) rather than anything this
 //! tree wrote.

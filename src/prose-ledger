@@ -64,7 +64,7 @@ kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 31 0
 kernel/src/arch/syscall/vm.rs 93 0
 kernel/src/arch/tlb.rs 43 0
-kernel/src/bcachefs_adapter.rs 77 0
+kernel/src/bcachefs_adapter.rs 80 0
 kernel/src/block.rs 63 0
 kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
@@ -106,7 +106,7 @@ kernel/src/fat32_adapter.rs 183 0
 kernel/src/file_backing.rs 44 0
 kernel/src/file_cache.rs 113 0
 kernel/src/fs_rename.rs 18 0
-kernel/src/gpt.rs 49 0
+kernel/src/gpt.rs 50 0
 kernel/src/gpu.rs 10 0
 kernel/src/hasher.rs 23 0
 kernel/src/heartbeat.rs 24 0
@@ -139,7 +139,7 @@ kernel/src/log/registry.rs 12 0
 kernel/src/log/shard.rs 55 0
 kernel/src/log/storm.rs 15 0
 kernel/src/log/user.rs 16 0
-kernel/src/main.rs 80 0
+kernel/src/main.rs 85 0
 kernel/src/mm/alloc.rs 89 0
 kernel/src/mm/dma.rs 48 0
 kernel/src/mm/mmio.rs 18 0
@@ -165,14 +165,14 @@ kernel/src/object/process.rs 17 0
 kernel/src/object/service.rs 14 0
 kernel/src/object/shm.rs 35 0
 kernel/src/object/syscap.rs 8 0
-kernel/src/page_cache.rs 58 0
+kernel/src/page_cache.rs 64 0
 kernel/src/panic.rs 55 0
 kernel/src/pipe.rs 36 0
 kernel/src/preempt.rs 10 0
 kernel/src/process.rs 220 0
 kernel/src/revoke_selftest.rs 6 0
 kernel/src/rollback.rs 4 0
-kernel/src/rootfs.rs 26 0
+kernel/src/rootfs.rs 23 0
 kernel/src/rtc.rs 42 0
 kernel/src/sched/driver.rs 205 0
 kernel/src/sched/dump.rs 80 0
@@ -194,12 +194,12 @@ kernel/src/tmpfs.rs 21 0
 kernel/src/trace.rs 29 0
 kernel/src/usb_gate.rs 53 0
 kernel/src/user_ptr.rs 67 0
-kernel/src/vfs.rs 94 0
+kernel/src/vfs.rs 114 0
 kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
 src/assets.rs 123 0
-src/build.rs 703 3
+src/build.rs 710 3
 src/buildlock.rs 378 5
 src/ci.rs 117 0
 src/clippy.rs 35 0
@@ -208,7 +208,7 @@ src/durations.rs 370 4
 src/fingerprint.rs 18 0
 src/forkcheck.rs 176 1
 src/hostws.rs 187 2
-src/image.rs 272 1
+src/image.rs 299 1
 src/issuegate.rs 123 0
 src/kernelkeys.rs 56 0
 src/lib.rs 51 0
@@ -247,7 +247,7 @@ tests/common/qemu.rs 1651 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
-tests/common/storage.rs 99 0
+tests/common/storage.rs 118 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
 tests/common/volumes.rs 662 3
@@ -316,6 +316,7 @@ tests/toyos-rust-tests/src/bin/handle_lifetime.rs 116 1
 tests/toyos-rust-tests/src/bin/handle_transfer.rs 84 0
 tests/toyos-rust-tests/src/bin/hda_client_stall.rs 27 0
 tests/toyos-rust-tests/src/bin/heap_ceiling.rs 69 0
+tests/toyos-rust-tests/src/bin/hierarchy_paths.rs 25 0
 tests/toyos-rust-tests/src/bin/home_backing_revoked.rs 34 0
 tests/toyos-rust-tests/src/bin/home_fsync_budget.rs 5 0
 tests/toyos-rust-tests/src/bin/i8042_keyboard.rs 24 0
@@ -392,7 +393,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5145 23
+tests/toyos.rs 5149 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 101 0
 toyos-abi/src/handle.rs 107 0
@@ -492,7 +493,7 @@ toyos-fat32/tests/host_write.rs 86 1
 toyos-fat32/tests/hostile.rs 201 3
 toyos-fat32/tests/replace_rename.rs 11 0
 toyos-gpt/src/crc32.rs 13 0
-toyos-gpt/src/guid.rs 29 0
+toyos-gpt/src/guid.rs 31 0
 toyos-gpt/src/lib.rs 177 0
 toyos-gpt/tests/parse.rs 91 0
 toyos-hda/src/caps.rs 60 0

@@ -109,7 +109,7 @@ userland/doom — GPL-2.0
 
     Licence text: licenses/GPL-2.0-doomgeneric.txt
 
-`/bin/doom` links doomgeneric, so the program is GPL-2.0. The C sources are not
+`/system/bin/doom` links doomgeneric, so the program is GPL-2.0. The C sources are not
 committed: `userland/doom/build.rs` fetches upstream commit `fc60163` into a
 gitignored directory and `toyos-cc` compiles it. `forks.toml` `[doomgeneric]`
 records the pin and why it is a pin.

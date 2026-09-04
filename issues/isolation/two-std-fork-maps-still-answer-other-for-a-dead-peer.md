@@ -55,4 +55,4 @@ The instrument is the differential the pipe arm already uses, one layer down: a
 guest arm whose `TcpStream::write` to a peer that has exited must answer
 `BrokenPipe`, against libc's `send` on the same shape. `netd_gone_mid_bind`
 is the boot that already stages a departed netd, and its module header records
-what today's `Other` costs `/bin/sshd`.
+what today's `Other` costs `/system/bin/sshd`.

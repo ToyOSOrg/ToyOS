@@ -313,7 +313,7 @@ const INVERSION: &str = "within a shard the sequence order is the timestamp orde
 /// wrong for a stream that outlives every handle. Every `SysCap` maps to
 /// `Source::Log`, so any process closing any capability posted `-NotFound` into
 /// every pending log poll there was. It was latent while nothing parked on one
-/// and live from the moment `/bin/logd`'s whole loop is read-then-park.
+/// and live from the moment `/system/bin/logd`'s whole loop is read-then-park.
 ///
 /// The verdict is the guest's and it has two halves: closing a second handle to
 /// the same capability completes nothing, and a record afterwards still

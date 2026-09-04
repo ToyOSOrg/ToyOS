@@ -36,7 +36,7 @@ use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 use window::Window;
 
-const SELF_PATH: &str = "/bin/test_rs_compositor_client_death";
+const SELF_PATH: &str = "/system/bin/test_rs_compositor_client_death";
 
 /// The compositor connection, in the process that finishes the request its
 /// creator did not live to send.

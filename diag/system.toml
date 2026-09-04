@@ -8,7 +8,7 @@
 # kernel logged — including the one `i8042:` line that says why the integrated
 # keyboard is dead — was on screen for about a tenth of a second and then gone.
 #
-# `/bin/init` is in every image and holds the one `SysCap`, so the guarantee is
+# `/system/bin/init` is in every image and holds the one `SysCap`, so the guarantee is
 # no longer "nothing here *can* claim the framebuffer" but "this config declares
 # no `devices`" — which `no_diag_program_claims_the_screen` checks before the
 # image is written, and which nothing checked before. The reachable set is the

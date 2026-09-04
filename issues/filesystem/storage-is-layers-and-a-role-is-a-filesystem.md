@@ -133,7 +133,7 @@ entry.
 1. ROOT is a partition, the kernel argument names it, and the initrd — the
    in-RAM image the bootloader used to load whole — is deleted. Landed.
 2. The hierarchy: a synthesized `/`, ROOT at `/system`, DATA at `/apps` and
-   `/home`, `/media`, and the `/bin` sweep that follows.
+   `/home`, `/media`, and the `/bin` sweep that follows. Landed.
 3. The users track filed and built.
 4. The mount protocol, and FAT32 as the first userland filesystem server.
 5. NTFS read-only.

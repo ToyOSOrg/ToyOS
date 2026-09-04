@@ -15,9 +15,9 @@ which the SDK's `Window::poll_event` latch has since closed. The investigation
 is the scheduler agent's; what is here is the evidence and the eliminations, so
 it is not re-derived.
 
-**What the log establishes.** `/bin/ls` was spawned twelve times. Ten exited
+**What the log establishes.** `/system/bin/ls` was spawned twelve times. Ten exited
 `code=0` in 12–59 ms. Two — pid 10 at 692.459 s and pid 26 at 904.327 s —
-**produced no output at all and never exited**, and neither did `/bin/rustc`
+**produced no output at all and never exited**, and neither did `/system/bin/rustc`
 pid 18 at 826.991 s. Nothing distinguishes their `spawn:` lines from the
 healthy ones: same binary, same `ELF: 3740 relocations indexed`, same
 `layout=0ms relocs=0ms deps=0ms tls=1ms total=1ms`. The kernel-side spawn
@@ -52,12 +52,12 @@ polls every client fd every pass (`userland/terminal/src/main.rs:73-75`,
 
 **Not reproduced, and here is exactly what was tried** so nobody repeats it. A
 guest binary modelled on the chain — a parent owning `tty_piped` stdio and
-draining it, a shell role whose stdio is those pipes, spawning `/bin/ls /bin`
+draining it, a shell role whose stdio is those pipes, spawning `/system/bin/ls /bin`
 with `Stdio::inherit()` and waiting with a 2 s per-child ceiling — ran **120
 children in the shared boot (smp=2) and 120 more on a dedicated smp=8 boot,
 and every one of them started and exited.** The T14 has eight CPUs, so the
 CPU count was the first fidelity gap closed and it was not enough. The chain
-*under a live compositor and a real `/bin/terminal`* was the next fidelity step
+*under a live compositor and a real `/system/bin/terminal`* was the next fidelity step
 and was **not** taken: `tests/metalcase`'s ROOT carries no terminal, shell or
 toybox, and five other tests share that boot.
 
@@ -67,7 +67,7 @@ and split three ways: `R` with no CPU is a task nothing ever picked up, `S`
 with no CPU is one that blocked before its first user instruction, and any CPU
 at all moves the fault into userland startup. The owner ran it on the T14
 during boot 10 of `boot5-doom-wedge.log` and **`ps` pid 17 printed nothing and
-never exited**, and neither did `/bin/shutdown` pid 25 or three `doom`s. In
+never exited**, and neither did `/system/bin/shutdown` pid 25 or three `doom`s. In
 that whole boot the only processes that ever exited were `netd` and one
 `locale`.
 
@@ -102,7 +102,7 @@ the words the dump renders as `ready`, which is why the census says `ready and
 has never run` and `cpu_ns` says zero.
 
 It also fits the shape of this file's own numbers rather than contradicting it.
-Twelve `/bin/ls`, two of them hung, is a *fraction* lost and not everything —
+Twelve `/system/bin/ls`, two of them hung, is a *fraction* lost and not everything —
 which is what the rotating scan start produces when several CPUs publish zero
 and one of them is dead. What `min_by_key` over a stale zero adds is that the
 fraction never shrinks, however long the CPU has been gone.

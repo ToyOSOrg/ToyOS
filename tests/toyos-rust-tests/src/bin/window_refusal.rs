@@ -27,7 +27,7 @@ use toyos::{ipc, namespace, port};
 use toyos_abi::syscall::SVC_LABEL;
 use window::{CreateError, Window};
 
-const SELF_PATH: &str = "/bin/test_rs_window_refusal";
+const SELF_PATH: &str = "/system/bin/test_rs_window_refusal";
 
 /// The reply, and the `CreateError` the client must turn it into. `None` is
 /// the "not an answer to this request at all" case.

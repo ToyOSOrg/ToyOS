@@ -30,7 +30,7 @@ child a name it cannot resolve. Neither side is told.
 
 It is unreached today only by coincidence: every extras-carrying caller in the
 tree (the terminal and the console, both transferring `surface` to
-`/bin/shell`) happens to go through the launcher, and the shell's own children
+`/system/bin/shell`) happens to go through the launcher, and the shell's own children
 inherit `surface` because init merged it in. That is the kind of safety that
 ends the moment somebody adds a caller.
 

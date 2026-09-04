@@ -7,7 +7,7 @@
 //! merges — which is the one code path a failed read can silently turn into a
 //! page of zeros written back over real data.
 //!
-//! The machine's own log reaches this path too — `/bin/logd` appends to an
+//! The machine's own log reaches this path too — `/system/bin/logd` appends to an
 //! ordinary file and `fsync`s every batch, so its tail page is an ordinary
 //! eviction candidate and the append after it loses one is this same re-fetch.
 //! A host-written file is staged instead because it makes the trigger certain

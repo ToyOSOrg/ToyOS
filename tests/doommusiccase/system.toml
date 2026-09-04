@@ -6,7 +6,7 @@
 # `assets/DOOM1.WAD` reach ROOT and that doom finds both. So the two cannot
 # share a config, and this one pays 19 MiB of ROOT that no other test should.
 #
-# No compositor: `/bin/doom --music-check` never opens a window.
+# No compositor: `/system/bin/doom --music-check` never opens a window.
 
 assets = ["assets"]
 
@@ -27,7 +27,7 @@ serves = ["soundd"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
 
-# No compositor: `/bin/doom --music-check` opens no window. test-runner passes
+# No compositor: `/system/bin/doom --music-check` opens no window. test-runner passes
 # its namespace to doom.
 # `logread` is the log gate's own: a spawned test binary does not inherit a
 # `SysCap` dup, so the gate that reads the kernel's records runs inside

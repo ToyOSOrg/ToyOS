@@ -39,7 +39,7 @@ counter — or a demonstration that no library can be reached on a FAT mount.
 
 256 MiB over every cached image, and nothing is ever evicted, so the bytes an
 unprivileged process spends on distinct `dlopen` paths are gone for the boot and
-the cache is closed to every later loader — including `/bin/init`'s. It is
+the cache is closed to every later loader — including `/system/bin/init`'s. It is
 bounded, unlike `no-physical-memory-fairness.md`'s unbounded case, and that is
 the difference: the memory comes back at reboot and not before.
 

@@ -144,7 +144,7 @@ pub fn send_nmi(cpu_id: u32) {
     Reg::Icr.write(((apic_id as u64) << 32) | 0x4400);
 }
 
-// Time /bin/logd gets to durably write the panic report before halt; a Budget (not Bound) because expiry degrades gracefully instead of panicking.
+// Time /system/bin/logd gets to durably write the panic report before halt; a Budget (not Bound) because expiry degrades gracefully instead of panicking.
 const LOG_FILE_DRAIN: Budget = Budget::of(
     Duration::from_millis(500),
     "the report reaches the panel and not /log",
@@ -159,7 +159,7 @@ fn owed(want: u64) -> bool {
     crate::log::user::durable_ns() < want
 }
 
-/// Give `/bin/logd` a chance to put this report on the stick before the machine stops.
+/// Give `/system/bin/logd` a chance to put this report on the stick before the machine stops.
 // The panic path never writes /log directly — every lock a write needs may already be held by the panicking thread itself.
 fn wait_for_log_file() {
     // Skip when serial exists: panic_flush already got the report off the box, and waiting here would only delay the pager.

@@ -73,11 +73,6 @@ pub const DECLARED: &[Declared] = &[
         ty: "HashMap<Pid, Arc<KShare>>",
         keys: "`process::Pid`, minted by the process table",
     },
-    Declared {
-        file: "kernel/src/vfs.rs",
-        ty: "HashMap<String, Mount>",
-        keys: "a mount name, passed by `main.rs` alone — no syscall mounts anything",
-    },
 ];
 
 /// The one file the scan does not read, by exact path: it *defines* the alias

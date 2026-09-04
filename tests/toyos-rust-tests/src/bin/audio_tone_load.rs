@@ -19,7 +19,7 @@ fn main() {
 
     let burners: Vec<_> = (0..2)
         .map(|_| {
-            Command::new("/bin/test_rs_audio_tone_load")
+            Command::new("/system/bin/test_rs_audio_tone_load")
                 .arg("burn")
                 .spawn()
                 .expect("spawn burner")

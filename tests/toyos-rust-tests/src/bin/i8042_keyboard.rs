@@ -7,7 +7,7 @@
 //!
 //! It holds a [`Translator`] because the kernel no longer does: the claim carries
 //! a HID usage and a modifier mask, and what those type is a layout, which is
-//! userland's. This is the same type and the same call `/bin/console` and
+//! userland's. This is the same type and the same call `/system/bin/console` and
 //! every window client make, so `tr=` below is what a real surface would put
 //! on a real shell's stdin.
 
@@ -69,7 +69,7 @@ fn main() {
 }
 
 /// The device-minting capability the test estate is endowed. A claim is
-/// `/bin/init`'s to mint everywhere else; here test-runner passes a `DEVICE`
+/// `/system/bin/init`'s to mint everywhere else; here test-runner passes a `DEVICE`
 /// duplicate down, so a boot can run several binaries that each need an input
 /// device.
 fn capability() -> SysCap {

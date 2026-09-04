@@ -41,5 +41,5 @@ receives = ["surface", "launcher"]
 receives = ["compositor", "soundd", "surface"]
 
 [symlinks]
-"bin/echo" = "/bin/toybox"
-"bin/tone" = "/bin/toybox"
+"bin/echo" = "/system/bin/toybox"
+"bin/tone" = "/system/bin/toybox"

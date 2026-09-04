@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs, path::Path};
 
-/// The upstream doomgeneric commit `/bin/doom` is built from. `forks.toml`
+/// The upstream doomgeneric commit `/system/bin/doom` is built from. `forks.toml`
 /// records it as the estate's one non-crate third-party source.
 ///
 /// Everything this project measures about doom is a measurement of *these*
@@ -196,7 +196,7 @@ fn main() {
 ///
 /// Every header field is fixed — zero timestamp, zero uid and gid, mode 100644
 /// — so the same objects archive to the same bytes on any host, on any day.
-/// Measured 2026-08-24: this archive links `/bin/doom` to the same 4,185,664
+/// Measured 2026-08-24: this archive links `/system/bin/doom` to the same 4,185,664
 /// bytes, sha256 `28c3f361…`, that GNU `ar`'s archive of the same objects does.
 ///
 /// `src/libc.rs`'s `merge_rlibs` writes the other one of these, for

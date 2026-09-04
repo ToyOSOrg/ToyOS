@@ -11,15 +11,15 @@ fn main() {
         .collect();
     assert!(!entries.is_empty(), "/bin should not be empty");
 
-    let self_exists = std::path::Path::new("/bin/test_rs_std_fs").exists();
+    let self_exists = std::path::Path::new("/system/bin/test_rs_std_fs").exists();
     assert!(self_exists, "our own binary should exist in /bin");
 
-    let data = fs::read("/bin/test_rs_std_fs")
+    let data = fs::read("/system/bin/test_rs_std_fs")
         .expect("should be able to read our own binary");
     assert!(!data.is_empty(), "binary should not be empty");
 
     // Non-existent file should return NotFound
-    let err = fs::read("/bin/nonexistent").unwrap_err();
+    let err = fs::read("/system/bin/nonexistent").unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
 
     file_types();
@@ -32,7 +32,7 @@ fn main() {
 /// Every arm here is an exclusion as much as an assertion: a `FileType` that
 /// answered yes to two questions at once is the shape all three defects took.
 fn file_types() {
-    let ty = fs::metadata("/bin/test_rs_std_fs").expect("stat our own binary").file_type();
+    let ty = fs::metadata("/system/bin/test_rs_std_fs").expect("stat our own binary").file_type();
     assert!(ty.is_file() && !ty.is_dir() && !ty.is_symlink(), "a regular file typed as {ty:?}");
 
     let ty = fs::metadata("/bin").expect("stat /bin").file_type();
@@ -48,7 +48,7 @@ fn file_types() {
 /// and `is_dir()` compared against it — which made an `fstat` of a real pipe
 /// answer yes.
 fn pipe_is_not_a_directory() {
-    let mut child = Command::new("/bin/echo")
+    let mut child = Command::new("/system/bin/echo")
         .arg("down the pipe")
         .stdout(Stdio::piped())
         .spawn()

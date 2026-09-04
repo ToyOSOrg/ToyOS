@@ -133,7 +133,7 @@ fn a_directory_still_lists_in_a_mount_past_the_bound() {
 /// binary through the same lock — is the check that the filesystem still
 /// works, not just that this process is still running.
 fn system_alive() {
-    let output = Command::new("/bin/echo")
+    let output = Command::new("/system/bin/echo")
         .arg("still alive")
         .output()
         .expect("failed to run echo after the refusal");

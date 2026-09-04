@@ -213,11 +213,6 @@ pub struct Partition {
 }
 
 impl Partition {
-    pub fn whole(handle: Handle) -> Self {
-        let blocks = handle.block_count();
-        Self { handle, first_block: 0, blocks }
-    }
-
     /// `blocks` blocks from `first_block`, or `None` when that span is off the device.
     pub fn of(handle: Handle, first_block: u64, blocks: u64) -> Option<Self> {
         let end = first_block.checked_add(blocks)?;

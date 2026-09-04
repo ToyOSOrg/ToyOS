@@ -30,7 +30,7 @@ use toyos_abi::handle::{Rights, HANDLE_INVALID};
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::{FramebufferInfo, RawHandle};
 
-const SELF_PATH: &str = "/bin/test_rs_abuse_gpu_resolution";
+const SELF_PATH: &str = "/system/bin/test_rs_abuse_gpu_resolution";
 
 /// `process::HANDLE_FAULT_EXIT_CODE`.
 const HANDLE_FAULT: i32 = 139;

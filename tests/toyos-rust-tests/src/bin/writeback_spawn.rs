@@ -33,7 +33,7 @@ use std::io::Write;
 use std::process::Command;
 
 const DIR: &str = "/home/writeback_spawn";
-const IN_ROOT: &str = "/bin/test_rs_writeback_spawn";
+const IN_ROOT: &str = "/system/bin/test_rs_writeback_spawn";
 const ON_DISK: &str = "/home/writeback_spawn/child";
 const STILL_OPEN: &str = "/home/writeback_spawn/held";
 /// What tells this binary it is the copy being run rather than the test.

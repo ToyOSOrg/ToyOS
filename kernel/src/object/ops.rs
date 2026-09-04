@@ -519,7 +519,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
 
 /// `SYS_FSYNC`: the file's bytes on the device, and the device told to commit them.
 ///
-/// The device-commit step is not optional: `/bin/logd` publishes `LOG_DURABLE_NS` off `fsync`'s result, so a flush that stopped at the page cache would make that durability contract a claim about nothing.
+/// The device-commit step is not optional: `/system/bin/logd` publishes `LOG_DURABLE_NS` off `fsync`'s result, so a flush that stopped at the page cache would make that durability contract a claim about nothing.
 pub fn fsync(object: &KObjectRef) -> u64 {
     let KObjectRef::File(file) = object else {
         return SyscallError::PermissionDenied.to_u64();

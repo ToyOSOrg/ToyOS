@@ -42,7 +42,7 @@ fn a_repeat_of_a_held_directory_still_succeeds() {
 
 /// A spawn after the refusal — it reads the binary through the same VFS lock a panic would have stranded.
 fn system_alive() {
-    let output = Command::new("/bin/echo")
+    let output = Command::new("/system/bin/echo")
         .arg("still alive")
         .output()
         .expect("failed to run echo after the refusal");

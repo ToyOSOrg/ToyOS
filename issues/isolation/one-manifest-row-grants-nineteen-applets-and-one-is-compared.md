@@ -7,13 +7,13 @@ opened: 2026-09-01
 # One manifest row grants nineteen applets, and exactly one of them is compared against it
 
 `system.toml:99` is `[programs.toybox]`, and 19 rows below it link an applet name
-to `/bin/toybox`. Init resolves a symlink to its binary row
+to `/system/bin/toybox`. Init resolves a symlink to its binary row
 (`userland/init/src/main.rs:422-441`), so every applet runs with the union of
 authority that one row grants —
 `issues/isolation/toybox-is-one-row-for-nineteen-applets.md`.
 
 **One applet is already checked, and the shape it uses is the right one.**
-`tests/toyos-rust-tests/src/bin/endowment_denied.rs:39-43` runs `/bin/ps` twice,
+`tests/toyos-rust-tests/src/bin/endowment_denied.rs:39-43` runs `/system/bin/ps` twice,
 endowed a duplicate with `Rights::ROSTER` and a duplicate without it, and its own
 comment says what that buys: "the manifest's name, the kernel's demand and the
 program are one line rather than three that agree by luck". That is one allowed
@@ -24,12 +24,12 @@ endowment table back.
 
 **The enumeration exists now, and it reds on the image that boots.**
 `endowment_denied`'s `every_applet_holds_only_what_its_policy_names` reads the
-links off `/bin` with `read_dir`/`read_link`, parses `/etc/system.manifest` with
+links off `/bin` with `read_dir`/`read_link`, parses `/system/etc/system.manifest` with
 a parser that is neither init's nor `toyos_manifest`'s, and holds each applet
 against `APPLET_NEEDS`. With its declared list empty, the guest answers:
 
 ```
-assertion `left == right` failed: the authority /bin/toybox's one row hands
+assertion `left == right` failed: the authority /system/bin/toybox's one row hands
 applets that have no use for it is not the list this test declares
   left: ["cat: receive soundd", "cp: receive soundd", "echo: receive soundd",
          "free: receive soundd", "grep: receive soundd", "hexdump: receive soundd",
@@ -47,15 +47,15 @@ of the defect cannot grow without a red naming what grew.
 `tests/testcases/system.toml`, whose `toybox` row is `receives = ["soundd"]` and
 carries no `syscap` at all. The row this record opened on — `system.toml:99`,
 `syscap = ["power", "roster"]` across nineteen links — is measured by nothing:
-the differential that would see `/bin/echo` holding `Rights::POWER` has to read
+the differential that would see `/system/bin/echo` holding `Rights::POWER` has to read
 `system.toml` and ROOT's link list on the host, in `cargo test --lib`,
 because no boot carries that manifest.
 
 **The differential reads one row for every link, and the proposed fix is exactly
 what that would ignore.** `declared` tries `row(invoked path)` *before*
 `read_link` (`userland/init/src/main.rs:433-441`), so a row keyed `shutdown` with
-`path = "/bin/shutdown"` would win — while this checker resolves every link to
-`/bin/toybox`, reads that one row, and would keep reporting the union. Whoever
+`path = "/system/bin/shutdown"` would win — while this checker resolves every link to
+`/system/bin/toybox`, reads that one row, and would keep reporting the union. Whoever
 builds the per-path row extends the checker to ask `row(invoked path)` first, in
 the same landing: a red after that fix is this checker's and not the fix's.
 

@@ -213,7 +213,7 @@ fn require(ok: bool, why: impl FnOnce() -> String) -> Result<(), String> {
 }
 
 fn spawn_mode(mode: &str) -> std::process::ExitStatus {
-    Command::new("/bin/test_rs_fpu_isolation")
+    Command::new("/system/bin/test_rs_fpu_isolation")
         .arg(mode)
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn {mode}: {e}"))
@@ -243,7 +243,7 @@ fn fault_arm(round: u32) -> Result<(), String> {
     // instructions later, which masks everything again and leaves the next
     // process nothing to be protected from. Unasserted, this arm passes
     // vacuously on exactly the machine it is for.
-    let child = Command::new("/bin/test_rs_fault_gate_child")
+    let child = Command::new("/system/bin/test_rs_fault_gate_child")
         .arg("mf")
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn fault_gate_child mf: {e}"));

@@ -40,7 +40,7 @@ it.
 The track itself is not planned here.
 
 One fact about the tree that a real-bcachefs track inherits whichever way it is
-sequenced: the kernel must parse this format to reach `/bin/init` at all, so a
+sequenced: the kernel must parse this format to reach `/system/bin/init` at all, so a
 machine whose ROOT it cannot mount has no userland. The observation the ruling
 inverts is the other half — a home-grown format has no second implementation to
 be judged against, and upstream bcachefs is exactly such a judge.

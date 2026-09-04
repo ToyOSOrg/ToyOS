@@ -583,15 +583,28 @@ fn designated(cache: &Arc<page_cache::Cached>) -> bool {
     true
 }
 
-/// The `/home` filesystem, and the only path on which `format` runs.
+/// The DATA filesystem `/apps` and `/home` are two paths into, and the only
+/// path on which `format` runs.
 ///
-/// `None` means the device is not ours; the caller falls back to a volatile tmpfs
-/// rather than panicking or formatting without consent.
-pub fn open_home(cache: &Arc<page_cache::Cached>) -> Option<Mounted<PageCacheBlockIO, ReadWrite>> {
-    match probe(cache) {
-        Storage::Ours(fs) => Some(fs),
-        Storage::Designated => format(cache),
-        Storage::Foreign => None,
-    }
+/// A role names one filesystem, so two TOYOS-DATA partitions are refused rather
+/// than guessed between. `None` — none of them, two of them, or a volume that
+/// is not ours — leaves the caller a volatile tmpfs rather than a panic or a
+/// format without consent.
+pub fn open_data() -> Option<(Arc<page_cache::Cached>, Mounted<PageCacheBlockIO, ReadWrite>)> {
+    let candidates = crate::gpt::data_candidates();
+    let [candidate] = candidates.as_slice() else {
+        log!(
+            "storage: this machine carries {} TOYOS-DATA partitions, and a data volume is one",
+            candidates.len()
+        );
+        return None;
+    };
+    let cache = page_cache::over_candidate(candidate, "data")?;
+    let fs = match probe(&cache) {
+        Storage::Ours(fs) => fs,
+        Storage::Designated => format(&cache)?,
+        Storage::Foreign => return None,
+    };
+    Some((cache, fs))
 }
 

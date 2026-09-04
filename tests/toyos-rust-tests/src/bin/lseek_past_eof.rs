@@ -10,7 +10,7 @@ use std::process::Command;
 const PAGE: u64 = 4096;
 /// `file_cache::MAX_FILE_SIZE`: the page index is a `u32`, so `(u32::MAX + 1) * 4096`.
 const MAX_FILE_SIZE: u64 = (u32::MAX as u64 + 1) * PAGE;
-const DRAINS_THE_QUEUE: &str = "/bin/echo";
+const DRAINS_THE_QUEUE: &str = "/system/bin/echo";
 
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 37 + 11) as u8 | 1).collect()

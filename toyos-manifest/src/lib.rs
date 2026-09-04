@@ -1,5 +1,5 @@
 //! What every program in an image is allowed to hold, written by the build
-//! system and read by `/bin/init`.
+//! system and read by `/system/bin/init`.
 //!
 //! **One definition of the format, used by both halves.** `src/build.rs`
 //! resolves `system.toml` into a [`Manifest`] and [`render`]s it into the
@@ -28,8 +28,8 @@
 /// spelling. [`GUEST_PATH`] is what a process opens.
 pub const PATH: &str = "etc/system.manifest";
 
-/// The path `/bin/init` opens.
-pub const GUEST_PATH: &str = "/etc/system.manifest";
+/// The path `/system/bin/init` opens.
+pub const GUEST_PATH: &str = "/system/etc/system.manifest";
 
 /// A program key may be this long. Policy on the primitive: the launcher
 /// carries one in a message, and a longer one is refused by name rather than
@@ -76,7 +76,7 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // per-thread entries, each carrying a pid, a size, a CPU time and a name.
     // The machine header the same call answers first is ambient, so `free` and
     // every daemon that sizes itself off total memory name nothing here — this
-    // is the census alone, and `/bin/ps` is what it is for.
+    // is the census alone, and `/system/bin/ps` is what it is for.
     ("roster", Rights::ROSTER),
 ];
 
@@ -287,7 +287,7 @@ mod tests {
             programs: vec![
                 Program {
                     name: "compositor".into(),
-                    path: "/bin/compositor".into(),
+                    path: "/system/bin/compositor".into(),
                     serves: vec!["compositor".into()],
                     receives: vec!["soundd".into(), "launcher".into()],
                     devices: vec!["framebuffer".into(), "keyboard".into()],
@@ -295,7 +295,7 @@ mod tests {
                 },
                 Program {
                     name: "soundd".into(),
-                    path: "/bin/soundd".into(),
+                    path: "/system/bin/soundd".into(),
                     serves: vec!["soundd".into()],
                     devices: vec!["hda-audio".into(), "virtio-sound".into()],
                     syscap: vec!["rt".into()],
@@ -303,7 +303,7 @@ mod tests {
                 },
                 Program {
                     name: "terminal".into(),
-                    path: "/bin/terminal".into(),
+                    path: "/system/bin/terminal".into(),
                     args: vec!["--login shell".into()],
                     provides: vec!["surface".into()],
                     receives: vec!["compositor".into()],
@@ -331,8 +331,8 @@ mod tests {
     #[test]
     fn records_attach_to_the_program_above_them() {
         let m = parse(
-            "program soundd /bin/soundd\nserve soundd\nsyscap rt\n\
-             program toybox /bin/toybox\narg pwd\nreceive compositor\n\
+            "program soundd /system/bin/soundd\nserve soundd\nsyscap rt\n\
+             program toybox /system/bin/toybox\narg pwd\nreceive compositor\n\
              init-serve launcher\nstart soundd\n",
         );
         assert_eq!(m.program("soundd").unwrap().syscap, ["rt"]);

@@ -38,7 +38,7 @@ use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
-const SELF_PATH: &str = "/bin/test_rs_process_lifecycle";
+const SELF_PATH: &str = "/system/bin/test_rs_process_lifecycle";
 
 /// The label the `waiter` role finds its subject under. A local name in one
 /// process's own table, and it names nothing anywhere else.
@@ -311,7 +311,7 @@ fn a_handle_is_the_whole_of_the_right() {
 
 /// A pid is a name everybody can say, and saying it is not a key. The one call
 /// that turns one into a handle needs a capability carrying `MANAGE`, and the
-/// kernel mints exactly one — `/bin/init`'s. The test estate's carries `DEVICE`
+/// kernel mints exactly one — `/system/bin/init`'s. The test estate's carries `DEVICE`
 /// and `DUP`, which is what makes this refusal non-vacuous: the handle resolves,
 /// and it is the right that is missing.
 fn a_pid_is_not_authority() {

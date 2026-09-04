@@ -7,7 +7,7 @@ opened: 2026-08-18
 # The log staged three things it never built, and userland output still never reaches logd
 
 The log architecture is on the tree: the per-CPU record ring, `klogd`, the
-cursor syscall, the per-holder console object, and `/bin/logd` owning `/log`.
+cursor syscall, the per-holder console object, and `/system/bin/logd` owning `/log`.
 Three staged pieces were never built.
 
 **1. Userland stdout and stderr are console writes, not streams to logd.** Every

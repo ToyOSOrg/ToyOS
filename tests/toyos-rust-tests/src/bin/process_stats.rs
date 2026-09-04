@@ -22,7 +22,7 @@ use toyos::process::Process;
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 
-const SELF_PATH: &str = "/bin/test_rs_process_stats";
+const SELF_PATH: &str = "/system/bin/test_rs_process_stats";
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -99,7 +99,7 @@ fn stats_of(child: &std::process::Child) -> Result<ProcessStats, SyscallError> {
 }
 
 fn exited_child() {
-    let mut child = Command::new("/bin/echo").arg("hello").spawn().expect("spawn echo");
+    let mut child = Command::new("/system/bin/echo").arg("hello").spawn().expect("spawn echo");
     let status = child.wait().expect("wait");
     assert!(status.success());
 
@@ -133,7 +133,7 @@ fn live_process() {
     // **A line out of the child, not a bare spawn.** `spawn` returns before the
     // child has been scheduled, so a sample taken there reads a process that has
     // faulted nothing and the assertions below become a race against the
-    // scheduler. A role of this binary rather than `/bin/cat`, because what is
+    // scheduler. A role of this binary rather than `/system/bin/cat`, because what is
     // needed is a *flushed* line from something still running, and a filter's
     // buffering is not this test's to depend on.
     let mut child = Command::new(SELF_PATH)
@@ -229,7 +229,7 @@ fn blocked_time_names_what_it_waited_on() {
 /// Reading does not spend it. This asserted the opposite before the handle:
 /// the snapshot lived on the parent and the read deleted it.
 fn repeatable() {
-    let mut child = Command::new("/bin/echo").arg("once").spawn().expect("spawn");
+    let mut child = Command::new("/system/bin/echo").arg("once").spawn().expect("spawn");
     child.wait().expect("wait");
 
     let first = stats_of(&child).expect("first read");
@@ -243,7 +243,7 @@ fn repeatable() {
 /// The right is the gate, and a handle without it is refused rather than
 /// answered.
 fn refused_without_read() {
-    let mut child = Command::new("/bin/echo").arg("rights").spawn().expect("spawn");
+    let mut child = Command::new("/system/bin/echo").arg("rights").spawn().expect("spawn");
     child.wait().expect("wait");
 
     let full = toyos_abi::RawHandle(child.into_raw_handle());

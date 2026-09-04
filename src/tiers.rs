@@ -665,7 +665,7 @@ pub const RELEGATED: &[Relegated] = &[
         test: "toybox_cp_volume",
         ci_ms: 18_735,
         why: Why::Cost,
-        guards: "The real /bin/cp against a FAT32 volume sized from what the volume says it \
+        guards: "The real /system/bin/cp against a FAT32 volume sized from what the volume says it \
                  has left, including the case where it fills.",
     },
     Relegated {
@@ -754,8 +754,8 @@ pub const RELEGATED: &[Relegated] = &[
         guards: "A device that rejects the optional flush command remains usable, while a \
                  real write failure still propagates. Treating every command error alike \
                  either loses compatible disks or hides failed writes. **The cost this \
-                 relegation is about was cut about sevenfold when `/bin/logd` took the file** — \
-                 `/bin/logd` ends on an error instead of retrying inside a budget, which is what \
+                 relegation is about was cut about sevenfold when `/system/bin/logd` took the file** — \
+                 `/system/bin/logd` ends on an error instead of retrying inside a budget, which is what \
                  turned 1,737 failing flushes over six seconds into the handful a single refusal \
                  costs — and `ci_ms` above is untouched \
                  because it is a CI measurement and the new figure is a dev-host one. A nightly \
