@@ -242,11 +242,8 @@ fn round_up_sectors(n: usize) -> usize {
 /// transfers whole 4 KiB blocks and each mounted volume keeps its own resident
 /// copies of the blocks it has touched (`fat32_adapter::FatDevice`); two
 /// partitions sharing one device block would make each other's copies stale
-/// with nothing able to notice. Unaligned, the ESP ended 1024 bytes into a
-/// device block that the log partition then began in.
-///
-/// 1 MiB rather than the 4096 the kernel needs, because that is what every
-/// partitioner uses and what a flash device's erase block wants.
+/// with nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
+/// because that is what every partitioner uses and what an erase block wants.
 const PARTITION_ALIGN: usize = 1024 * 1024;
 
 /// The smallest volume there is a FAT32 for.
@@ -259,21 +256,12 @@ const FAT32_MIN_BYTES: usize = 34 * 1024 * 1024;
 
 /// What a guest can write into `/boot` after the three files are on it.
 ///
-/// The `64/63` beside this at the one call site is headroom for the
-/// filesystem's own metadata, and it is why this cannot be the flat slack it
-/// used to be. `fatfs` picks the cluster size from the volume size, and at the
-/// 512-byte clusters it gives the smaller ones the two FAT copies cost one
-/// byte of table per 64 bytes of volume — 4.1 MiB of the test image's 257 MiB,
-/// more than the 4 MiB the size used to add. So the slack was entirely
-/// metadata, and what a guest could write was whatever rounding happened to
-/// leave: measured before the change at **48,640 bytes**, against `esp_files`'
-/// own 41,097-byte blob. One more guest test binary in the image took it
-/// negative, and the symptom is an fsync that fails while the host-side volume
-/// still reports megabytes free.
-///
-/// `64/63` is the 512-byte-cluster worst case, so where `fatfs` picks larger
-/// clusters it over-provisions rather than under: the same image measures
-/// **7,901,184 bytes** free after the change, on 4096-byte clusters.
+/// The `64/63` beside this at the one call site is headroom for the two FAT
+/// copies, which cost a byte of table per 64 bytes of volume at the 512-byte
+/// clusters `fatfs` gives a small one — the worst case, so a volume whose
+/// clusters are larger is over-provisioned rather than under. A flat slack
+/// leaves a guest whatever the rounding did, and an fsync that fails while the
+/// host-side volume reports megabytes free is the symptom of getting it wrong.
 const ESP_FREE_BYTES: usize = 4 * 1024 * 1024;
 
 fn align_up(n: usize, to: usize) -> usize {
@@ -368,26 +356,18 @@ fn build_time() -> FatTime {
 /// and leave the free-cluster count recorded.
 ///
 /// Written with **our** FAT32 driver rather than with the crate that formatted
-/// the volume, and that is the whole of the fix for a defect every image this
-/// project ever produced carried: `fatfs`'s `create_dir` writes a long-name
-/// entry ahead of each `.` and `..`, which the format requires to be a
-/// subdirectory's first two entries, and gives `..` the root's cluster number
-/// where the format requires zero. Twelve `fsck_msdos` complaints, present
-/// before any guest ran, and neither reachable through that crate's API.
+/// the volume: `fatfs`'s `create_dir` writes a long-name entry ahead of each
+/// `.` and `..`, which the format requires to be a subdirectory's first two
+/// entries, and gives `..` the root's cluster number where the format requires
+/// zero — neither reachable through that crate's API. `toyos-fat32` is also the
+/// driver the kernel appends `kernel.log` with and the one its own host suite
+/// runs the volume checker against, so "the image we build is clean" is a claim
+/// about the writer that is judged. `fatfs` keeps the format call, where an
+/// empty volume has no subdirectory for either bug to live in.
 ///
-/// Using `toyos-fat32` is not a way round them. It deletes the second FAT32
-/// writer from the project: this is the one the kernel appends `kernel.log`
-/// with, the one `toyos-fat32`'s host suite runs the volume checker and a real
-/// macOS mount against on every `cargo test` in that crate, and now the one the
-/// claim "the image we build is clean" is a claim about. `fatfs` keeps the
-/// format call, where it has never had a complaint against it — an empty volume
-/// has no subdirectory for either bug to live in.
-///
-/// The free-cluster count is the third thing the checker asks for:
-/// `format_volume` leaves FSInfo's field 0xFFFFFFFF, which FAT32 defines as
-/// "unknown" and every host then reports this volume's free space from.
-/// `free_bytes` counts the FAT when the volume arrived without a hint and
-/// `sync` writes it.
+/// `format_volume` leaves FSInfo's free-cluster field 0xFFFFFFFF, which FAT32
+/// defines as "unknown" and every host reports free space from; `free_bytes`
+/// counts the FAT when the volume arrived without a hint and `sync` writes it.
 fn populate(volume: &mut [u8], label: &str, files: &[(&str, &[u8])]) {
     let time = build_time();
     let mut fs = Fat32::mount(VolumeIo(volume))
@@ -826,19 +806,10 @@ mod tests {
     }
 
     /// The two volumes this build writes break no rule of the format, and the
-    /// gate is silence rather than sameness.
-    ///
-    /// The ESP did break some, from the first image this project ever built
-    /// until [`populate`] stopped writing it with `fatfs` — twelve complaints,
-    /// before any guest ran, from two format violations that crate's
-    /// `create_dir` has. The consequence was not only a dirty volume:
-    /// `esp_filesystem` could only ask that the guest add no *new* complaint,
-    /// so a complaint the guest produced for its own reason would have hidden
-    /// inside the twelve.
-    ///
-    /// Here rather than in the boot suite because it needs no guest, no QEMU
-    /// and no kernel: it is a claim about the writer, and it fails in seconds
-    /// on `cargo test --lib`.
+    /// gate is silence rather than sameness: a suite that could only ask the
+    /// guest to add no *new* complaint hides every complaint the writer left.
+    /// Here rather than in the boot suite because it needs no guest, no QEMU and
+    /// no kernel — a claim about the writer, failing in seconds.
     #[test]
     fn the_volumes_this_build_writes_break_no_format_rule() {
         for (what, volume) in [
@@ -944,15 +915,10 @@ mod tests {
     /// answer comes out of the image rather than from whoever built it.
     ///
     /// **This is what makes a staged boot image answerable.** The actuators are
-    /// baked in at build time, so a caller that supplies its own image cannot
-    /// arm anything by asking — and until [`param_conflict`] existed nothing
-    /// refused the pair: the harness took the parameters, built a kernel for
-    /// them, booted the supplied image instead, and reported the arm as taken.
-    /// A green run with an inert arm is the worst kind of harness defect,
-    /// because every negative control staged through one proves nothing.
-    ///
-    /// Both directions, over images this file's own writer produced: the reader
-    /// is the writer's inverse and a round trip is the only thing that says so.
+    /// baked in at build time, so a caller supplying its own image cannot arm
+    /// anything by asking, and a green run with an inert arm is the worst kind
+    /// of harness defect: every negative control staged through one proves
+    /// nothing. Both directions, because the reader is the writer's inverse.
     #[test]
     fn an_image_says_what_it_is_armed_with() {
         let dir = std::env::temp_dir().join(format!("toyos-image-params-{}", std::process::id()));
@@ -982,9 +948,8 @@ mod tests {
             );
         }
 
-        // The recorded defect, 2026-08-22: an actuator armed beside an image
-        // built without it. It has to name both sides — the reader gets the
-        // message and nothing else.
+        // An actuator armed beside an image built without it names both sides:
+        // the reader gets the message and nothing else.
         for (image, asked, name) in [
             (&shipping, &["usb-flush-fails"][..], "usb-flush-fails"),
             (&armed, &[][..], "fat-boot-reads-fail"),

@@ -4,14 +4,9 @@
 //! that -- but its negative: **a device the kernel was not given comes back
 //! byte-for-byte unchanged.** That is asserted against the backing file, on
 //! the host, because the guest's account of what it did to a disk is exactly
-//! the thing in question.
-//!
-//! The stimulus is the state that caused this: a disk that holds something,
-//! mounts as nothing, and belongs to someone. The kernel used to read "mount
-//! returned None" as permission to format, so the first boot on the T14 would
-//! have taken the owner's disk -- and the only reason the real first boot did
-//! not is that an unrelated panic in `page_cache::init` came first, which has
-//! since been fixed.
+//! the thing in question. The stimulus is a disk that holds something, mounts
+//! as nothing, and belongs to someone -- which a kernel reading "mount returned
+//! None" as permission to format would take.
 
 use std::io::Write;
 use std::path::Path;
@@ -24,9 +19,8 @@ use super::qemu::{self, BootOptions, QemuInstance};
 /// Boot the guest against a disk that belongs to somebody else, and prove it
 /// comes back untouched.
 ///
-/// Lives here rather than in `toyos.rs` so that the registration hunk in that
-/// shared file stays one line: every agent edits it, and a wide diff there is
-/// how work gets swept into somebody else's commit.
+/// Lives here so the registration hunk in `toyos.rs` stays one line: every
+/// agent edits that file.
 pub fn foreign_disk_untouched(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -85,11 +79,9 @@ pub fn foreign_disk_untouched(
         return Err(format!("the kernel decided to format a disk it was not given\n{log}"));
     }
 
-    // Shut down rather than kill. `PageCache::sync` at shutdown is the only
-    // thing that moves a format from the cache to the device, so killing QEMU
-    // here would fingerprint an image that a formatting kernel had also left
-    // untouched -- which is exactly what the first version of this test did,
-    // and the negative gate caught it passing against a kernel that formatted.
+    // Shut down rather than kill: `PageCache::sync` at shutdown is the only
+    // thing that moves a format from the cache to the device, so a killed QEMU
+    // fingerprints an image a formatting kernel would also have left untouched.
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
     let tail = qemu.drain_serial(Duration::from_secs(20));
@@ -250,10 +242,9 @@ fn front(path: &Path, at: u64, n: usize) -> Vec<u8> {
 }
 
 /// The shared-object cache's two refusals, judged in
-/// `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`. The independent oracle
-/// is the NVMe image: after the shutdown the replaced library's bytes are read
-/// off the device through this crate's own build of the `bcachefs` reader over a
-/// plain seek-and-read file, so the claim rests on nothing the guest says.
+/// `tests/toyos-rust-tests/src/bin/so_cache_policy.rs`. The independent oracle is
+/// the NVMe image: the replaced library's bytes are read off the device after
+/// the shutdown, so the claim rests on nothing the guest says.
 pub fn so_cache_refusals(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
