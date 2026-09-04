@@ -809,7 +809,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_window_child",
         instrument: Instrument::Ci,
         finding: Finding::fires(2, 10),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "shape changed: `the surface owner exited before it said it was ready`, the \
+             `/bin/terminal` boot race, -> `the windowed child never reported leaving`. The race \
+             is closed — a port exists before either end's process does — and the last three \
+             nightly `ci` runs on `main` (33485669019, 33603832656, 33728852421) carry this name \
+             as `XFAIL desktop_window_child` on the second message at 93, 73 and 68 s, never on \
+             the first. The row measured 2026-09-03 is that shape",
+        ),
         what: "the surface owner exited before it said it was ready — the /bin/terminal boot race, \
                2 of 10 **on a runner with one guest on it and nothing to contend with**. Rep 2 has \
                the compositor spawned at 0.347 s, the terminal at 0.349 s, and the terminal exiting \
@@ -872,7 +879,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "dump_nmi_probe",
         instrument: Instrument::Ci,
         finding: Finding::quiet(10),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS dump_nmi_probe` at 8, 9 and 8 s in \
+             the last three nightly `ci` runs on `main` (33485669019, 33603832656, 33728852421), \
+             which is what this row already said",
+        ),
         what: "0 of 10 against 2 of 10 in the arm before it",
         evidence: "probe-green fixed arm, run 31283095698, ten reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -882,7 +893,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_audio_client",
         instrument: Instrument::Ci,
         finding: Finding::quiet(10),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS desktop_audio_client (13s)` in each \
+             of the last three nightly `ci` runs on `main` (33485669019, 33603832656, \
+             33728852421), which is what this row already said",
+        ),
         what: "0 of 10 against 1 of 10 in the arm before it",
         evidence: "probe-green fixed arm, run 31283095698, ten reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -891,14 +906,19 @@ pub const KNOWN_RED: &[Red] = &[
     Red {
         test: "desktop_window_child",
         instrument: Instrument::Ci,
-        finding: Finding::fires(2, 10),
+        finding: Finding::fires(3, 3),
         standing: Standing::Stands,
-        what: "2 of 10, untouched by the three fixes that made the other names in the same arm \
-               green. It is the one name left between `main` and the three-consecutive-greens \
-               trigger",
-        evidence: "probe-green fixed arm, run 31283095698, ten reps",
+        what: "`XFAIL desktop_window_child — expected, #156` on `the windowed child never \
+               reported leaving`, at 93, 73 and 68 s, in every one of the three runs. It is \
+               still the one name between `main` and the three-consecutive-greens trigger, and \
+               its exemption is what keeps those runs' shards green — `test result: ok, NOT \
+               clean. 1 expected: desktop_window_child (#156)`. Re-taking the fixed arm's 2 of \
+               10 of 2026-08-09",
+        evidence: "the last three nightly `ci` runs on `main` — 33485669019 (2026-09-01), \
+                   33603832656 (09-02), 33728852421 (09-03) — each twelve shards under \
+                   `--nightly`",
         source: "issues/kernel/desktop-window-child-freeze.md",
-        measured: "2026-08-09",
+        measured: "2026-09-03",
     },
     // ---------------------------------------------------------------------
     // Single `ci` runs on `main`, each red once and adjudicated on its own.
@@ -967,7 +987,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS xhci_hid_break` at 18, 18 and 20 s \
+             in the last three nightly `ci` runs on `main` (33485669019, 33603832656, \
+             33728852421), with no `STALLED` under this name in any of the thirty-six shards",
+        ),
         what: "`STALLED: 133s of guard expired, and the guest had said nothing for the last 131s of \
                it` — the timeout shape the probe measured at 0 of 5, twice in one job, and \
                `ALONE: red again`. So that 0 of 5 is not cover for it either",
@@ -1617,7 +1641,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_blocked_dump",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument, and **not** the six greens this row's \
+             own rule asks for: `PASS screen_blocked_dump (4s)` in each of the last three \
+             nightly `ci` runs on `main` (33485669019, 33603832656, 33728852421). Three of six, \
+             so the defect is not called gone — the write-up carries the running count and stays \
+             open",
+        ),
         what: "`the report the keystroke painted does not carry \"== VERDICT:\"`; the decoded \
                panel was the boot-log tail ending `[page 2/4]`, with none of the dump's three \
                summary markers. The isolated re-run painted `0 overdue, 0 absurd, 0 unheld, 0 \
@@ -1639,7 +1669,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_blocked_dump",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the three loaded observations this row asks for, taken 2026-09-04 as three runs of \
+             this name rather than three suites carrying it: green 3 of 3 beside a full \
+             `cargo test` fast tier in the same worktree, twelve guests up in each, at 11, 9 and \
+             10 s, two of them after waiting on `[host-slots]`. Every one painted the marker the \
+             row is about — `== VERDICT: 0 overdue, 0 absurd, 0 unheld, 0 never ran` once and \
+             `1 overdue, …` twice — where this row is the panel carrying no `== VERDICT:` at all",
+        ),
         what: "`the report the keystroke painted does not carry \"== VERDICT:\"`, after 520 s in \
                the wide phase; the isolated re-run was green. This is the no-verdict shape, not \
                the retired compositor-overlay red under the same test name. **2026-08-22:** as \
