@@ -287,6 +287,14 @@ const HID_SCOPED: &str = "the count is per device now. The verdict pairs each br
     longer counted and a missing recovery still reds. A completion that stops naming its device \
     is refused rather than widened back to every dci 3 on the machine";
 
+const NIGHTLIES: &str = "a later measurement on the same instrument. The last three nightly `ci` \
+    runs on `main` — 33485669019 (2026-09-01), 33603832656 (09-02) and 33728852421 (09-03), each \
+    twelve shards at `--jobs 1` under `--nightly`, all thirty-six finishing with a suite result \
+    line — name this test in none of their failures. The whole of what they red on is \
+    `home_budget_refusal_retried` in all three, `syscall_window_nmi_controls` and \
+    `log_flush_retry` in two each, and `xhci_slow_connect`, `usb_disk_index_stable` and \
+    `doom_sound_flood` in one each";
+
 /// Every measurement, grouped by the campaign that took it.
 ///
 /// Adding a row means answering all eight fields; there is no default and no
@@ -415,7 +423,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "hda_tone",
         instrument: Instrument::Ci,
         finding: Finding::fires(4, 5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: green in the last three nightly `ci` \
+             runs on `main` (33485669019, 33603832656, 33728852421), whose shards read `PASS \
+             hda_tone` with `gaps none phase-breaks 0` at peak 16000 and dither 25.3%. This is \
+             the harm verdict alone — the run that carried that line also says `#88 did not fire \
+             this run, which proves nothing`, and the phase check is still exempted, still \
+             intermittent and untouched by this",
+        ),
         what: "1 mid-tone silence in the capture — gate A's harm verdict, which is not what #88's \
                `EXPECTED_FAILURES` entry covers: that entry names only \"the captured tone is not \
                one sine\"",
@@ -453,7 +468,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "blocked_dump",
         instrument: Instrument::Ci,
         finding: Finding::fires(2, 5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: green in the last three nightly `ci` \
+             runs on `main` (33485669019, 33603832656, 33728852421), one shard reading `[dump] \
+             10 threads, 10 parked, all 8 cpus answered; 0 overdue, 0 absurd, 0 unheld, 0 never \
+             ran` and `PASS blocked_dump (3s)`. Neither of this row's two reasons recurred: the \
+             census half is that line, and `/bin/terminal` racing the compositor was closed by \
+             the capability endowment branch",
+        ),
         what: "two *different* reasons in the two reps — the census half, and /bin/terminal racing \
                the compositor",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
@@ -495,12 +517,16 @@ pub const KNOWN_RED: &[Red] = &[
     Red {
         test: "usb_disk_index_stable",
         instrument: Instrument::Ci,
-        finding: Finding::fires(1, 5),
+        finding: Finding::fires(1, 3),
         standing: Standing::Stands,
-        what: "nothing enumerated on the first controller",
-        evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
+        what: "`nothing enumerated on the first controller; there is no renumbering to survive`, \
+               `ALONE: GREEN, and it was alone both times` — the same shape probe-rate run \
+               31258202923 measured at 1 of 5 on 2026-08-08, re-taken and still firing",
+        evidence: "the last three nightly `ci` runs on `main` — 33485669019 (2026-09-01) red in \
+                   job 99785072482, 33603832656 and 33728852421 green — re-taking that probe's \
+                   1 of 5",
         source: "issues/hardware/eleven-names-red-on-ci.md",
-        measured: "2026-08-08",
+        measured: "2026-09-03",
     },
     // The twelve that came off the list when `wt/toyos-clock` landed. **These are
     // the rows the prose gets read backwards on.** They are measurements that the
@@ -509,7 +535,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "metal_sim_client_death",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "came off the list with `wt/toyos-clock`'s waits, and the \"a guest stops making \
                progress and pays its whole ceiling\" shape went with it",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
@@ -520,7 +546,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "metal_sim_window_drag",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "came off the list with `wt/toyos-clock`'s waits",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -530,7 +556,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "metal_sim_pointer_churn",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "came off the list with `wt/toyos-clock`'s waits. Read the later row for this name \
                before treating it as retired",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
@@ -541,7 +567,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "metal_sim_compositor_stall",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "came off the list with `wt/toyos-clock`'s waits",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -551,7 +577,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_audio_client",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "came off the list with `wt/toyos-clock`'s waits. A thirteenth name with one sample \
                each way on one tree — stalled in run 31264914759 and passed in 31266194663, same \
                commit, half an hour apart — which is a rate and not a reproduction",
@@ -563,7 +589,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_typing_damage",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "came off the list with `wt/toyos-clock`'s waits. Distinct from the QEMU 8.2.2 red \
                measured earlier in the same campaign, which was closed by putting the dev host's \
                own QEMU in the container",
@@ -575,7 +601,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "doom_sound_flood",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument, of the shape this row is about. The \
+             last three nightly `ci` runs on `main` carry no timeout under this name; \
+             33728852421 reds it once on a *different* assertion, and the row measured \
+             2026-09-03 is that one",
+        ),
         what: "came off the list with `wt/toyos-clock`'s waits",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -585,7 +616,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "i8042_health_cadence",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "came off the list with `wt/toyos-clock`'s waits",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -595,7 +626,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "sshd_fail_closed",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "came off the list with `wt/toyos-clock`'s waits",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -605,7 +636,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hotplug",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "0 of 5, and the write-up says only that it *coincides* with `wt/toyos-clock`'s \
                waits — nothing named a trigger for the KVM wedge it used to give",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
@@ -616,7 +647,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "0 of 5, and the write-up is explicit about what this does and does not cover: it \
                is about the \"guest stops making progress and pays its whole ceiling\" shape, \
                which prints a timeout. It is **not** cover for the endpoint-count red under the \
@@ -629,7 +660,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_pager_keys",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "0 of 5 on CI — while the dev host has it reproducing alone on `main` in the same \
                week, and `main`'s own CI went red on it once since. Read all three rows",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
@@ -640,7 +671,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_flap",
         instrument: Instrument::Ci,
         finding: Finding::quiet(5),
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "PASS 5 of 5, in 7–9 s, on the same image and the same accelerator that wedged it — \
                and nothing in `toyos_xhci` changed between the two runs. A defect that stopped \
                appearing under an unchanged driver is a defect whose trigger nobody has named",
@@ -684,7 +715,12 @@ pub const KNOWN_RED: &[Red] = &[
         test: "doom_sound_flood",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "shape changed: `timed out after 88s` -> `the device played a peak of 32768 \
+             (expected 4000..=12000)`. The last three nightly `ci` runs on `main` carry no \
+             timeout under this name; 33728852421 reds it once on the peak, in 7 s, and the row \
+             measured 2026-09-03 is that shape",
+        ),
         what: "`timed out after 88s` alone, against 4–26 s on the dev host. Nothing here is \
                diagnosed, and it is 0 of 5 in the rate probe five days later",
         evidence: "run 31247206462, red again alone",
@@ -709,7 +745,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "sshd_fail_closed",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "red alone in 22 s, having taken 152 s in the phase. Not diagnosed, and 0 of 5 in \
                the rate probe five days later",
         evidence: "run 31247206462, red again alone",
@@ -720,7 +756,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hotplug",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "`timed out after 66s` alone — `device_add`/`device_del` against a 100 ms debounce. \
                Green on the dev host in seconds and green under TCG on the same runner image and \
                the same QEMU",
@@ -732,7 +768,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "`timed out after 75s` alone — a staged transfer error on a HID endpoint. Green on \
                the dev host and under TCG on the same runner image",
         evidence: "run 31247206462, red again alone",
@@ -755,7 +791,7 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_flap",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(NIGHTLIES),
         what: "`timed out after 164s` alone: three collapsed replugs survive and the fourth never \
                answers — the guest goes silent at about 4.4 s and never speaks again. Green under \
                TCG on the same runner image and the same QEMU, and green on the dev host, because \
@@ -773,7 +809,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_window_child",
         instrument: Instrument::Ci,
         finding: Finding::fires(2, 10),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "shape changed: `the surface owner exited before it said it was ready`, the \
+             `/bin/terminal` boot race, -> `the windowed child never reported leaving`. The race \
+             is closed — a port exists before either end's process does — and the last three \
+             nightly `ci` runs on `main` (33485669019, 33603832656, 33728852421) carry this name \
+             as `XFAIL desktop_window_child` on the second message at 93, 73 and 68 s, never on \
+             the first. The row measured 2026-09-03 is that shape",
+        ),
         what: "the surface owner exited before it said it was ready — the /bin/terminal boot race, \
                2 of 10 **on a runner with one guest on it and nothing to contend with**. Rep 2 has \
                the compositor spawned at 0.347 s, the terminal at 0.349 s, and the terminal exiting \
@@ -836,7 +879,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "dump_nmi_probe",
         instrument: Instrument::Ci,
         finding: Finding::quiet(10),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS dump_nmi_probe` at 8, 9 and 8 s in \
+             the last three nightly `ci` runs on `main` (33485669019, 33603832656, 33728852421), \
+             which is what this row already said",
+        ),
         what: "0 of 10 against 2 of 10 in the arm before it",
         evidence: "probe-green fixed arm, run 31283095698, ten reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -846,7 +893,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "desktop_audio_client",
         instrument: Instrument::Ci,
         finding: Finding::quiet(10),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS desktop_audio_client (13s)` in each \
+             of the last three nightly `ci` runs on `main` (33485669019, 33603832656, \
+             33728852421), which is what this row already said",
+        ),
         what: "0 of 10 against 1 of 10 in the arm before it",
         evidence: "probe-green fixed arm, run 31283095698, ten reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -855,14 +906,19 @@ pub const KNOWN_RED: &[Red] = &[
     Red {
         test: "desktop_window_child",
         instrument: Instrument::Ci,
-        finding: Finding::fires(2, 10),
+        finding: Finding::fires(3, 3),
         standing: Standing::Stands,
-        what: "2 of 10, untouched by the three fixes that made the other names in the same arm \
-               green. It is the one name left between `main` and the three-consecutive-greens \
-               trigger",
-        evidence: "probe-green fixed arm, run 31283095698, ten reps",
+        what: "`XFAIL desktop_window_child — expected, #156` on `the windowed child never \
+               reported leaving`, at 93, 73 and 68 s, in every one of the three runs. It is \
+               still the one name between `main` and the three-consecutive-greens trigger, and \
+               its exemption is what keeps those runs' shards green — `test result: ok, NOT \
+               clean. 1 expected: desktop_window_child (#156)`. Re-taking the fixed arm's 2 of \
+               10 of 2026-08-09",
+        evidence: "the last three nightly `ci` runs on `main` — 33485669019 (2026-09-01), \
+                   33603832656 (09-02), 33728852421 (09-03) — each twelve shards under \
+                   `--nightly`",
         source: "issues/kernel/desktop-window-child-freeze.md",
-        measured: "2026-08-09",
+        measured: "2026-09-03",
     },
     // ---------------------------------------------------------------------
     // Single `ci` runs on `main`, each red once and adjudicated on its own.
@@ -931,7 +987,11 @@ pub const KNOWN_RED: &[Red] = &[
         test: "xhci_hid_break",
         instrument: Instrument::Ci,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument: `PASS xhci_hid_break` at 18, 18 and 20 s \
+             in the last three nightly `ci` runs on `main` (33485669019, 33603832656, \
+             33728852421), with no `STALLED` under this name in any of the thirty-six shards",
+        ),
         what: "`STALLED: 133s of guard expired, and the guest had said nothing for the last 131s of \
                it` — the timeout shape the probe measured at 0 of 5, twice in one job, and \
                `ALONE: red again`. So that 0 of 5 is not cover for it either",
@@ -1581,7 +1641,13 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_blocked_dump",
         instrument: Instrument::Ci,
         finding: Finding::fires(1, 2),
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "a later measurement on the same instrument, and **not** the six greens this row's \
+             own rule asks for: `PASS screen_blocked_dump (4s)` in each of the last three \
+             nightly `ci` runs on `main` (33485669019, 33603832656, 33728852421). Three of six, \
+             so the defect is not called gone — the write-up carries the running count and stays \
+             open",
+        ),
         what: "`the report the keystroke painted does not carry \"== VERDICT:\"`; the decoded \
                panel was the boot-log tail ending `[page 2/4]`, with none of the dump's three \
                summary markers. The isolated re-run painted `0 overdue, 0 absurd, 0 unheld, 0 \
@@ -1603,7 +1669,14 @@ pub const KNOWN_RED: &[Red] = &[
         test: "screen_blocked_dump",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
-        standing: Standing::Stands,
+        standing: Standing::Retired(
+            "the three loaded observations this row asks for, taken 2026-09-04 as three runs of \
+             this name rather than three suites carrying it: green 3 of 3 beside a full \
+             `cargo test` fast tier in the same worktree, twelve guests up in each, at 11, 9 and \
+             10 s, two of them after waiting on `[host-slots]`. Every one painted the marker the \
+             row is about — `== VERDICT: 0 overdue, 0 absurd, 0 unheld, 0 never ran` once and \
+             `1 overdue, …` twice — where this row is the panel carrying no `== VERDICT:` at all",
+        ),
         what: "`the report the keystroke painted does not carry \"== VERDICT:\"`, after 520 s in \
                the wide phase; the isolated re-run was green. This is the no-verdict shape, not \
                the retired compositor-overlay red under the same test name. **2026-08-22:** as \
@@ -3411,6 +3484,22 @@ pub const KNOWN_RED: &[Red] = &[
                    three nightly `ci` runs of the same week",
         source: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
         measured: "2026-09-04",
+    },
+    Red {
+        test: "doom_sound_flood",
+        instrument: Instrument::Ci,
+        finding: Finding::fires(1, 3),
+        standing: Standing::Stands,
+        what: "`the device played a peak of 32768 (expected 4000..=12000): the volume the last \
+               command named is not the volume that reached the wire`, in 7 s, and `ALONE: \
+               GREEN, and it was alone both times`. 32768 is `-i16::MIN` — full scale, against \
+               the 7968 the band is centred on and the 251 a superseded update would give, so \
+               it is neither of the two outcomes `tests/common/audio.rs` derives the band from",
+        evidence: "nightly `ci` run 33728852421, job 100563991283 (`guest (11)`), 2026-09-03; \
+                   green in 33485669019 and 33603832656, the other two nightlies of that week; \
+                   the alone re-run read `21160 samples of signal at peak 7969`",
+        source: "issues/audio/doom-sound-flood-played-full-scale-once.md",
+        measured: "2026-09-03",
     },
 ];
 
