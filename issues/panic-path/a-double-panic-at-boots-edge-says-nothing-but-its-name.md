@@ -61,9 +61,16 @@ so the row stands and so does this.
 
 **Nothing about it is a decision.** The row names its own retirement condition —
 three loaded suites of the fixed tree with no red under this name — and that is
-an instrument run: `cargo test` in two worktrees at once, three times, with the
-result read rather than argued. Checked 2026-08-24 and still owed; the row's own
-note records why the first attempt did not happen on 2026-08-22. A closing pass
-cannot supply it, because a suite run beside five other agents' suites is a
-loaded host that nobody can characterise afterwards — the instrument needs the
-machine, not a spare slot on it.
+an instrument run: the result read rather than argued.
+
+**2026-09-04, run: six, and the row is retired.** Six full `cargo test` fast
+tiers in one worktree, each with single-test runs of the same suite beside it,
+four of the six contending with a second worktree (`toyos-rootfs3`) for guest
+and build slots: `PASS log_poll_outlives_a_close` at 3-8 s in every one, and
+612 guest boots between them with no `DOUBLE PANIC`, no `DOUBLE FAULT` and no
+`kernel panic` of any kind. The load is characterised rather than assumed —
+every run's concurrent guest count was sampled and the harness's own
+`[host-slots]` lines name who held the slots. That retires the measurement.
+**Finding 1 is not retired by it**: what this entry is about is a double panic
+that said nothing but its name, and only a sighting that carries the first
+crash's identity closes that.
