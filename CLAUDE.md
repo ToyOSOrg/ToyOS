@@ -37,11 +37,11 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 **Userspace daemons** — compositor, netd, soundd, sshd, logd. Each claims a device or capability from the kernel and serves its function; crash one and the kernel is fine.
 
-**The log is a userland file.** `/bin/logd` reads records on a cursor and owns `/log`; the kernel keeps the record ring, the console and the panel, and writes no file. `SYS_FSYNC` reaches the device's cache flush because logd's durability claim rests on it.
+**The log is a userland file.** `/system/bin/logd` reads records on a cursor and owns `/log`; the kernel keeps the record ring, the console and the panel, and writes no file. `SYS_FSYNC` reaches the device's cache flush because logd's durability claim rests on it.
 
 **Syscall ABI** — `toyos-abi/`: struct layouts, syscall numbers, typed wrappers; completely unstable, read the code. Never add or change a syscall without discussion; a deleted syscall's number is retired, never reused. `toyos/` builds on it with typed handles, IPC framing, ports, namespaces and `surface` — userland uses `toyos`, the kernel uses `toyos-abi` only.
 
-**Capabilities** — a process holds exactly what its parent moved into it, and among kernel objects there is nothing it can name to get more. No registry, no connect-by-name, no pid-as-authority: `/bin/init` builds every program's namespace and device claims from `system.toml` before spawning it, and a handle a process does not hold is a bug in that process — the kernel ends it rather than answering a word it can ignore. **The filesystem is the declared exception** (owner ruling): paths are ambient, `/boot`'s mount guard is the one restriction the ambient space carries, and the full intentional ambient set is the capability end-state track's committed answer.
+**Capabilities** — a process holds exactly what its parent moved into it, and among kernel objects there is nothing it can name to get more. No registry, no connect-by-name, no pid-as-authority: `/system/bin/init` builds every program's namespace and device claims from `system.toml` before spawning it, and a handle a process does not hold is a bug in that process — the kernel ends it rather than answering a word it can ignore. **The filesystem is the declared exception** (owner ruling): paths are ambient, `/boot`'s mount guard is the one restriction the ambient space carries, and the full intentional ambient set is the capability end-state track's committed answer.
 
 **CPU state** — a CPU's control registers come from one declaration, applied by the BSP and by every AP and asserted on each; no read-modify-write decides what either holds.
 
@@ -80,7 +80,7 @@ bootloader/        UEFI bootloader
 userland/          All userland programs
 toyos-abi/         Kernel ABI (types, constants, syscall numbers, syscall wrappers)
 toyos/             Userland SDK (typed handles, IPC, ports, namespaces, surface, shm, net)
-toyos-manifest/    The one definition of `/etc/system.manifest`
+toyos-manifest/    The one definition of `/system/etc/system.manifest`
 toyos-wallclock/   The calendar, and the zone offset userland has to recover — pure
 toyos-keymap/      Layouts, dead-key composition, key translation, layout detection
 toyos-fat32/       FAT32 driver, read + write; no format path by design
