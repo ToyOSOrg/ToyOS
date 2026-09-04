@@ -1,4 +1,4 @@
-//! `cp`, `mv` and `hexdump` as a user reaches them: spawned from `/bin`, judged
+//! `cp`, `mv` and `hexdump` as a user reaches them: spawned from `/system/bin`, judged
 //! on their exit code and on their bytes.
 //!
 //! The three claims that are not "it works":
@@ -180,9 +180,9 @@ fn cp_refusals() {
     );
     println!("  PASS cp refuses a missing source, and the destination is unchanged");
 
-    // `/bin` rather than a directory made here: it is the one that is populated
+    // `/system/bin` rather than a directory made here: it is the one that is populated
     // without this test having to populate it.
-    must_refuse("cp", &["/bin", "/tmp/toybox_fromdir.bin"], "is a directory");
+    must_refuse("cp", &["/system/bin", "/tmp/toybox_fromdir.bin"], "is a directory");
     assert!(fs::read("/tmp/toybox_fromdir.bin").is_err(), "cp of a directory created a file");
     println!("  PASS cp refuses a directory by name");
 

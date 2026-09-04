@@ -37,7 +37,7 @@ terminal blocked in `child.wait()` on that shell
 | 27 | 28 | none — **and it is the only pair that exited** |
 
 Shell 28 is the healthy control the same log offers: 95 syscalls, `spawn 3`
-paired with `waitpid 3`, and it went on from `ls /bin` to `free` and then
+paired with `waitpid 3`, and it went on from `ls /system/bin` to `free` and then
 `doom`. So neither a lost exit notification nor a missed wakeup is involved,
 and `sys_waitpid` registering on the park lot before it reads the table
 (`kernel/src/arch/syscall.rs:1067`) is doing its job.
@@ -52,7 +52,7 @@ polls every client fd every pass (`userland/terminal/src/main.rs:73-75`,
 
 **Not reproduced, and here is exactly what was tried** so nobody repeats it. A
 guest binary modelled on the chain — a parent owning `tty_piped` stdio and
-draining it, a shell role whose stdio is those pipes, spawning `/system/bin/ls /bin`
+draining it, a shell role whose stdio is those pipes, spawning `/system/bin/ls /system/bin`
 with `Stdio::inherit()` and waiting with a 2 s per-child ceiling — ran **120
 children in the shared boot (smp=2) and 120 more on a dedicated smp=8 boot,
 and every one of them started and exited.** The T14 has eight CPUs, so the

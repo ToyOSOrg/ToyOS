@@ -5,14 +5,14 @@ use std::os::toyos::io::{AsRawFd, FromRawFd};
 use std::process::{Command, Stdio};
 
 fn main() {
-    let entries: Vec<_> = fs::read_dir("/bin")
-        .expect("should be able to read /bin")
+    let entries: Vec<_> = fs::read_dir("/system/bin")
+        .expect("should be able to read /system/bin")
         .filter_map(|e| e.ok())
         .collect();
-    assert!(!entries.is_empty(), "/bin should not be empty");
+    assert!(!entries.is_empty(), "/system/bin should not be empty");
 
     let self_exists = std::path::Path::new("/system/bin/test_rs_std_fs").exists();
-    assert!(self_exists, "our own binary should exist in /bin");
+    assert!(self_exists, "our own binary should exist in /system/bin");
 
     let data = fs::read("/system/bin/test_rs_std_fs")
         .expect("should be able to read our own binary");
@@ -35,7 +35,7 @@ fn file_types() {
     let ty = fs::metadata("/system/bin/test_rs_std_fs").expect("stat our own binary").file_type();
     assert!(ty.is_file() && !ty.is_dir() && !ty.is_symlink(), "a regular file typed as {ty:?}");
 
-    let ty = fs::metadata("/bin").expect("stat /bin").file_type();
+    let ty = fs::metadata("/system/bin").expect("stat /system/bin").file_type();
     assert!(ty.is_dir() && !ty.is_file() && !ty.is_symlink(), "a directory typed as {ty:?}");
 
     pipe_is_not_a_directory();

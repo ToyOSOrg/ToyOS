@@ -44,7 +44,7 @@ if the union keeps growing.
 ## Its size is measured now, and it is a number
 
 `endowment_denied`'s `every_applet_holds_only_what_its_policy_names` reads the
-links off `/bin` and the rows off `/system/etc/system.manifest`, neither through
+links off `/system/bin` and the rows off `/system/etc/system.manifest`, neither through
 `declared`, and holds each applet against a per-applet policy table. On the
 image a guest test boots it answers `14 links behind /system/bin/toybox, 13 declared
 over-grants` — thirteen applets endowed a connector to soundd because `tone`

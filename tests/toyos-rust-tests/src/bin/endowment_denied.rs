@@ -96,7 +96,7 @@ const HANDLE_FAULT: i32 = 139;
 
 /// The artifacts this image carries, not the `system.toml` that produced them.
 const MANIFEST: &str = "/system/etc/system.manifest";
-const BIN: &str = "/bin";
+const BIN: &str = "/system/bin";
 const MULTICALL: &str = "/system/bin/toybox";
 
 /// What reaches a spawned process as authority rather than as an argument.
@@ -525,13 +525,13 @@ fn every_applet_holds_only_what_its_policy_names() {
     let rows = manifest_rows(&manifest);
 
     let mut applets: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(BIN).expect("read /bin") {
-        let path = entry.expect("a /bin entry").path();
-        let meta = std::fs::symlink_metadata(&path).expect("lstat a /bin entry");
+    for entry in std::fs::read_dir(BIN).expect("read /system/bin") {
+        let path = entry.expect("a /system/bin entry").path();
+        let meta = std::fs::symlink_metadata(&path).expect("lstat a /system/bin entry");
         if !meta.file_type().is_symlink() {
             continue;
         }
-        let target = std::fs::read_link(&path).expect("read a /bin link");
+        let target = std::fs::read_link(&path).expect("read a /system/bin link");
         assert_eq!(
             target.to_str(),
             Some(MULTICALL),

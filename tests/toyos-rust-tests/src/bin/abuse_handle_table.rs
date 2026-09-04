@@ -51,12 +51,13 @@ fn main() {
         unsafe { pairs.add(i).write([i as u32, 1]) };
     }
     let argv = unsafe { region.add(REGION / 2) };
-    unsafe { core::ptr::copy_nonoverlapping(b"/system/bin/echo\0".as_ptr(), argv, 10) };
+    const ARGV0: &[u8] = b"/system/bin/echo\0";
+    unsafe { core::ptr::copy_nonoverlapping(ARGV0.as_ptr(), argv, ARGV0.len()) };
 
     let spawn_with = |slot_map_count: u64, endow_count: u64| {
         let args = SpawnArgs {
             argv_ptr: argv as u64,
-            argv_len: 10,
+            argv_len: ARGV0.len() as u64,
             slot_map_ptr: region as u64,
             slot_map_count,
             env_ptr: 0,

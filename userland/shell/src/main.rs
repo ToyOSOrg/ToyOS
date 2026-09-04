@@ -15,7 +15,7 @@ static mut LAST_STATUS: i32 = 0;
 
 fn main() {
     if env::var_os("PATH").is_none() {
-        env::set_var("PATH", "/bin");
+        env::set_var("PATH", "/system/bin");
     }
     if env::var_os("HOME").is_none() {
         env::set_var("HOME", "/home/root");
@@ -1062,7 +1062,7 @@ fn complete_command(prefix: &str) -> Vec<String> {
     }
 
     // Executables in PATH
-    let path = env::var("PATH").unwrap_or_else(|_| "/bin".into());
+    let path = env::var("PATH").unwrap_or_else(|_| "/system/bin".into());
     for dir in path.split(':') {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {

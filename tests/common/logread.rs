@@ -18,7 +18,7 @@ use std::time::Duration;
 use super::qemu::{BootOptions, QemuInstance};
 
 /// The in-guest gate's name in the `run <name>` protocol. It is a `test-runner`
-/// builtin rather than a `/bin` entry, and the marker protocol is the same
+/// builtin rather than a `/system/bin` entry, and the marker protocol is the same
 /// either way.
 const GATE: &str = "log-gate";
 

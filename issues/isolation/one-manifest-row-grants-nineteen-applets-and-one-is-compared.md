@@ -24,7 +24,7 @@ endowment table back.
 
 **The enumeration exists now, and it reds on the image that boots.**
 `endowment_denied`'s `every_applet_holds_only_what_its_policy_names` reads the
-links off `/bin` with `read_dir`/`read_link`, parses `/system/etc/system.manifest` with
+links off `/system/bin` with `read_dir`/`read_link`, parses `/system/etc/system.manifest` with
 a parser that is neither init's nor `toyos_manifest`'s, and holds each applet
 against `APPLET_NEEDS`. With its declared list empty, the guest answers:
 
