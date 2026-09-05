@@ -54,7 +54,7 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     // config that puts netd in front of one.
     let options = BootOptions {
         profile: qemu::Profile::Headless,
-        root_files: vec![(CA_ON_ROOT.to_string(), ca)],
+        extra_root_files: vec![(CA_ON_ROOT.to_string(), ca)],
         ..Default::default()
     };
     if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
