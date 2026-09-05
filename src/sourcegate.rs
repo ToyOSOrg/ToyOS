@@ -938,6 +938,11 @@ const COMMITTED_FILES: &[(&str, &str, &str)] = &[
         "NOTICE",
     ),
     (
+        "tests/fixtures/gbae-v0.2.0-toyos-x86_64.tar.gz",
+        "99fcd8a7263b5c25cd90cead1baaa7200ef272100fc2226e008a4e8205ba2916",
+        "NOTICE",
+    ),
+    (
         "toyos-elf/tests/fixtures/toyos-ld-headers.bin",
         "6243d543a15941133514c1a8a24c79d118060caeae7e985870a67d9fc3021354",
         "ours: the first 4096 bytes of a toyos-ld output (toyos-elf/tests/real.rs)",
