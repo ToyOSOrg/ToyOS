@@ -68,7 +68,7 @@ kernel/src/arch/syscall/gate.rs 23 0
 kernel/src/arch/syscall/handles.rs 21 0
 kernel/src/arch/syscall/io.rs 25 0
 kernel/src/arch/syscall/ipc.rs 35 0
-kernel/src/arch/syscall/machine.rs 18 0
+kernel/src/arch/syscall/machine.rs 21 0
 kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 31 0
 kernel/src/arch/syscall/vm.rs 93 0
@@ -79,7 +79,7 @@ kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
 kernel/src/completion/mod.rs 45 0
 kernel/src/device.rs 26 0
-kernel/src/drivers/acpi.rs 39 0
+kernel/src/drivers/acpi.rs 45 0
 kernel/src/drivers/gop.rs 11 0
 kernel/src/drivers/hda.rs 73 0
 kernel/src/drivers/i8042/mod.rs 250 0
@@ -254,7 +254,8 @@ tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
 tests/common/pkg.rs 77 0
-tests/common/qemu.rs 1661 11
+tests/common/power.rs 9 0
+tests/common/qemu.rs 1670 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
@@ -408,7 +409,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5179 23
+tests/toyos.rs 5181 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 101 0
 toyos-abi/src/handle.rs 108 0
@@ -421,12 +422,12 @@ toyos-abi/src/net.rs 11 0
 toyos-abi/src/ring.rs 128 0
 toyos-abi/src/syscall.rs 849 0
 toyos-abi/src/virtio_sound.rs 71 0
-toyos-acpi/src/fadt.rs 9 0
+toyos-acpi/src/fadt.rs 17 0
 toyos-acpi/src/lib.rs 52 0
 toyos-acpi/src/madt.rs 23 0
 toyos-acpi/tests/common/mod.rs 11 0
-toyos-acpi/tests/corpus.rs 51 0
-toyos-acpi/tests/fixtures.rs 15 0
+toyos-acpi/tests/corpus.rs 53 0
+toyos-acpi/tests/fixtures.rs 19 0
 toyos-cc/src/ast.rs 8 0
 toyos-cc/src/codegen/addr.rs 12 0
 toyos-cc/src/codegen/bitfield.rs 15 0
@@ -739,6 +740,7 @@ userland/toybox/src/mv.rs 13 0
 userland/toybox/src/net.rs 1 0
 userland/toybox/src/ps.rs 34 0
 userland/toybox/src/pwd.rs 0 0
+userland/toybox/src/reboot.rs 4 0
 userland/toybox/src/rm.rs 0 0
 userland/toybox/src/screen.rs 4 0
 userland/toybox/src/shutdown.rs 10 0

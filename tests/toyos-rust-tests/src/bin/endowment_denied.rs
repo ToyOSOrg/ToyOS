@@ -116,14 +116,14 @@ const APPLET_NEEDS: &[(&str, &[&str])] = &[
     ("mv", &[]),
     ("ps", &["syscap roster"]),
     ("pwd", &[]),
+    ("reboot", &["syscap power"]),
     ("rm", &[]),
     ("shutdown", &["syscap power"]),
     ("tone", &["receive soundd"]),
 ];
 
 /// Every authority this image hands an applet that has no use for it: the exact
-/// size of `issues/isolation/toybox-is-one-row-for-nineteen-applets.md` here. It
-/// shrinks when the row is split per authority class and never grows.
+/// size of `issues/isolation/toybox-is-one-row-for-every-applet.md` here.
 const DECLARED_OVER_GRANTS: &[&str] = &[
     "cat: receive soundd",
     "cp: receive soundd",
@@ -136,6 +136,7 @@ const DECLARED_OVER_GRANTS: &[&str] = &[
     "mv: receive soundd",
     "ps: receive soundd",
     "pwd: receive soundd",
+    "reboot: receive soundd",
     "rm: receive soundd",
     "shutdown: receive soundd",
 ];
@@ -302,11 +303,17 @@ fn a_right_the_capability_lacks_is_a_word() {
     //
     // There is no arm for the unnarrowed cap here, and there cannot be: the
     // call that proves the estate *does* hold `POWER` does not come back, and
-    // `run shutdown` at the end of a dozen host-side gates is that proof.
+    // `run shutdown` at the end of a dozen host-side gates is that proof —
+    // `machine_reboot` is the same proof for the reboot half.
     assert_eq!(
         toothless.shutdown(),
         SyscallError::PermissionDenied,
         "a capability without POWER shut the machine down",
+    );
+    assert_eq!(
+        toothless.reboot(),
+        SyscallError::PermissionDenied,
+        "a capability without POWER returned the machine to firmware",
     );
 
     // A handle that is not a capability at all. It never reaches the type
