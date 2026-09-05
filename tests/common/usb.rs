@@ -1214,7 +1214,7 @@ pub fn xhci_deaf_registers(
     if !log.contains("Boot: complete") {
         return Err(format!("the boot did not finish past a port that would not reset\n{log}"));
     }
-    let port_wait = waited_out_the_budget(&log, "xHCI: port ", "never finished its reset")
+    let port_wait = waited_out_the_budget(&log, " connected", "never finished its reset")
         .map_err(|e| format!("{e}\n{log}"))?;
     eprintln!(
         "  [usb] a controller that will not halt is refused by name after {controller_wait:.3} s; \

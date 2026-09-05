@@ -1493,7 +1493,9 @@ struct Shape {
     /// The bus the boot stick and the second USB disk attach to. Named rather
     /// than assumed, because which controller carries the storage is a shape
     /// dimension once there is more than one: the index the block layer holds
-    /// has to name the same disk either way.
+    /// has to name the same disk either way. An actuator that refuses a
+    /// controller wholesale may not run on a profile whose boot volume rides
+    /// it: ROOT is read through the block layer, so the refusal costs the mount.
     storage_bus: &'static str,
     /// Every USB device besides the boot stick, each naming its own bus.
     /// Absence is what makes an i8042 test measure anything: QEMU activates
