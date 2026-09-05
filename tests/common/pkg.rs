@@ -126,6 +126,23 @@ fn guest_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String>
         return Err(format!("init never said {WHY:?}:\n{}", &log[at.min(log.len())..]));
     }
 
+    // A symlink under `/apps` to a declared binary: the probe's exit 0 is the
+    // refusal.
+    let at = log.len();
+    passed(qemu, log, "test_rs_pkg_launch_gbae symlink-row")?;
+    const PLANTED: &str = "init: launcher: /apps/toy/manifest.toml cannot be read";
+    if !log[at.min(log.len())..].contains(PLANTED) {
+        return Err(format!(
+            "a symlink under /apps was not classified by /apps — init never said {PLANTED:?}:\n{}",
+            &log[at.min(log.len())..]
+        ));
+    }
+
+    // And the directory it left comes off, because a name `install` refuses to
+    // write over is a name nothing else could free.
+    passed(qemu, log, "pkg remove toy")?;
+    refused(qemu, log, "pkg remove toy", "pkg: toy is not installed — there is no /apps/toy")?;
+
     // Consent: `test-runner` closes a child's stdin, so this asks and is
     // answered with nothing.
     refused(qemu, log, &format!("pkg install {good}"), "pkg: not installing gbae")?;

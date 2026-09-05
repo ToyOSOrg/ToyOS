@@ -6,8 +6,7 @@
 //!
 //! **Nothing here is a grant.** `/apps` is writable to every program that can
 //! name it, so a manifest is a peer's claim about itself: it says which binary
-//! *of its own directory* a launch starts, and the authority that launch
-//! carries is the image's `[apps]` row. A device, a right and another
+//! *of its own directory* a launch starts. A device, a right and another
 //! package's binary have no spelling in this file at all.
 //!
 //! ```text

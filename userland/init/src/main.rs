@@ -467,16 +467,21 @@ enum Resolved<'a> {
 
 /// The row a launch's path names, `/apps` included.
 ///
-/// **A package's manifest chooses the binary and never the authority**: the
-/// directory is writable, so the namespace comes from the image's `[apps]` row.
+/// **A launch path under a writable directory is classified by that directory
+/// before any symlink is followed, never after.** `declared` follows one link,
+/// so asking it first would let `/apps/<anything>/x` — a symlink any process
+/// can plant — resolve to the whole `[programs]` row of the binary it points at.
+///
 /// A path under `/apps` that no manifest answers for is refused rather than
 /// answered undeclared, because the caller's fallback for undeclared is a
 /// direct spawn carrying the caller's own namespace.
 fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
-    if let Some(row) = declared(system, path) {
-        return Resolved::Row(row);
-    }
-    let Some(name) = package::package_of(path) else { return Resolved::NotDeclared };
+    let Some(name) = package::package_of(path) else {
+        return match declared(system, path) {
+            Some(row) => Resolved::Row(row),
+            None => Resolved::NotDeclared,
+        };
+    };
     let file = Package::path(name);
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => text,
