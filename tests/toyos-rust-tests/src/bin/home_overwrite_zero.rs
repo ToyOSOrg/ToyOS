@@ -20,7 +20,6 @@ const PINNED: &str = "/home/overwrite-pinned.bin";
 const LOOPED: &str = "/home/overwrite-looped.bin";
 const LEN: usize = 1_902_104;
 const ROUNDS: usize = 4;
-/// Long enough for `iod` to run the queued teardown of the unlinked file.
 const DRAIN: Duration = Duration::from_millis(300);
 
 fn payload(seed: u8) -> Vec<u8> {
