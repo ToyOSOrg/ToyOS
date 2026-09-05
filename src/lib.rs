@@ -24,6 +24,7 @@ pub mod issuegate;
 pub mod kernelkeys;
 pub mod libc;
 pub mod mergehealth;
+pub mod oracle;
 pub mod pr;
 /// The comment law and its ratchet over `src/prose-ledger`; the ratchet is its
 /// own tests', the one line classifier also `writinglaw`'s.

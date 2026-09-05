@@ -930,6 +930,15 @@ impl FileBlocks {
             blocks: bytes / 4096,
         })
     }
+
+    /// The whole file as one volume, for an image that is not a partitioned
+    /// disk: a raw device a guest formatted end to end.
+    pub fn whole(path: &Path) -> Result<Self, String> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        let bytes = file.metadata().map_err(|e| format!("stat {}: {e}", path.display()))?.len();
+        Ok(Self { file: std::cell::RefCell::new(file), first: 0, blocks: bytes / 4096 })
+    }
 }
 
 /// A host file's I/O failure was attempted and failed; nothing here budgets.
