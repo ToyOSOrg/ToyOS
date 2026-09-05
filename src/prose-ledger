@@ -208,7 +208,7 @@ kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
 src/assets.rs 123 0
-src/bin/toyos-metal.rs 2 0
+src/bin/toyos-metal.rs 4 0
 src/build.rs 722 3
 src/buildlock.rs 378 5
 src/ci.rs 117 0
@@ -225,7 +225,7 @@ src/lib.rs 51 0
 src/libc.rs 29 0
 src/main.rs 72 0
 src/mergehealth.rs 229 3
-src/metal.rs 151 0
+src/metal.rs 146 0
 src/pr.rs 228 5
 src/prosegate.rs 128 0
 src/qemu.rs 115 0

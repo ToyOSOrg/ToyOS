@@ -1,5 +1,7 @@
 //! The metal loop's entry point. Everything it does is
-//! [`toyos_build::metal`]; this decides only the exit status.
+//! [`toyos_build::metal`]; this decides only the exit status, and it decides
+//! two: a boot that failed exits 1 and a loop that could not run exits 2, so
+//! "the machine is broken" is never read as "the driver is".
 
 use toyos_build::metal::{run, Args};
 
@@ -14,5 +16,5 @@ fn main() {
         Err(refusal) => refusal,
     };
     eprintln!("toyos-metal: {refusal}");
-    std::process::exit(2);
+    std::process::exit(if refusal.about_the_boot() { 1 } else { 2 });
 }

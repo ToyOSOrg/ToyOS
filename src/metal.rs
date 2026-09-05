@@ -2,15 +2,15 @@
 //! once, and reads the boot record back off the log partition.
 //!
 //! It runs on the development host and reaches the machine over `ssh`.
-//! [`Target::words`] is the one place a root command line is written: the
-//! installed `/etc/sudoers.d/toyos-metal` and every argv are rendered from it,
-//! so no command outside [`JOBS`] can be constructed.
+//! [`Target::words`] is the one place a root command line is written — the
+//! installed `/etc/sudoers.d/toyos-metal` and every argv are rendered from it —
+//! so the loop constructs no command outside [`JOBS`] but the one that puts
+//! that rule there, [`install_sudoers`], which the rule does not permit either.
 //!
 //! Two admission checks stand before any write: the image is a whole number of
 //! [`LBA`]-byte sectors carrying `EFI PART` in its final one, and the disk
 //! answers with the identity this loop was given. A node that is not
-//! `/dev/sd<letter>` cannot be written down, so the machine's own NVMe is
-//! unnameable.
+//! `/dev/sd<letter>` cannot be written down, so the machine's NVMe is unnameable.
 
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -19,7 +19,6 @@ use std::process::{Command, Output, Stdio};
 
 use crate::image::LBA;
 
-/// How long `ssh` waits for the machine to accept a connection.
 const CONNECT_SECS: u64 = 10;
 
 /// How long the machine has to go quiet after `reboot`, and how long it then
@@ -57,13 +56,11 @@ pub enum Refusal {
     NoHome,
     /// The disk did not answer with the identity this loop was given.
     Identity { field: &'static str, want: String, got: String },
-    /// A file the loop needed could not be read.
     File { path: String, why: String },
     /// The image's length is not a whole number of sectors.
     Sectors { bytes: u64 },
     /// The final sector does not begin `EFI PART`: the backup table is gone.
     BackupHeader { at: u64, saw: String },
-    /// The image's table did not parse.
     Table(String),
     /// The table does not hold exactly one partition of a type the loop needs.
     Partitions { what: &'static str, matched: u32 },
@@ -73,18 +70,22 @@ pub enum Refusal {
     Landed { what: String, want: u64, got: u64 },
     /// `efibootmgr` named no four-hex-digit boot entry.
     BootEntry(String),
-    /// `sudo -n` could not run without a password.
     Sudo(String),
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
-    /// A command on the machine failed.
     Remote { what: String, status: String, stderr: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
-    /// The boot left no `Boot: complete` record on the log partition.
     NoBootRecord,
-    /// The loop was asked for something it does not do.
     Usage(String),
+}
+
+impl Refusal {
+    /// Whether the machine failed rather than the loop: the boot is the subject
+    /// only once the stick is written and the reboot asked for.
+    pub fn about_the_boot(&self) -> bool {
+        matches!(self, Self::Silent { .. } | Self::NoBootRecord)
+    }
 }
 
 impl fmt::Display for Refusal {
@@ -245,32 +246,18 @@ impl Identity {
     }
 }
 
-/// One command this loop runs as root on the machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Job {
-    Wipe,
-    Flash,
-    Create,
-    Delete,
-    BootNext,
-    Mount,
-    Umount,
-    Reboot,
-    Probe,
+/// Declares every command this loop runs as root and the table the rule is
+/// rendered from out of one list, so a `Job` the rule does not carry cannot be
+/// written down.
+macro_rules! jobs {
+    ($($name:ident),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Job { $($name),+ }
+        const JOBS: &[Job] = &[$(Job::$name),+];
+    };
 }
 
-/// The whole of what the machine's rule permits.
-const JOBS: &[Job] = &[
-    Job::Wipe,
-    Job::Flash,
-    Job::Create,
-    Job::Delete,
-    Job::BootNext,
-    Job::Mount,
-    Job::Umount,
-    Job::Reboot,
-    Job::Probe,
-];
+jobs!(Wipe, Flash, Create, Delete, BootNext, Mount, Umount, Reboot, Probe);
 
 /// One word of a root command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,11 +301,11 @@ impl Word {
     }
 }
 
-/// The account name as the rule's *user* field, which is stricter than a
-/// command word: `,` and `:` separate a user list and a `Runas` there, where in
-/// a command argument they are merely escapable.
+/// The account name as the rule's *user* field, stricter than a command word:
+/// `,` and `:` separate a user list and a `Runas` there and `%` and `+` make
+/// the name a group and a netgroup, where an argument only escapes all four.
 fn user_word(user: &str) -> Result<Word, Refusal> {
-    if user.contains([',', ':']) {
+    if user.contains([',', ':', '%', '+']) {
         return Err(Refusal::Word(user.to_string()));
     }
     Word::literal(user)
@@ -421,9 +408,9 @@ impl Target {
         Ok(out)
     }
 
-    /// One job's argv, with `fill` substituted for the masked word. A job's
-    /// mask count and its caller must agree, and a `fill` that is not four hex
-    /// digits is a bad reading of `efibootmgr` rather than a bug here.
+    /// One job's argv, with `fill` substituted for the masked word: a job's mask
+    /// count and its caller must agree, and a `fill` that is not four hex digits
+    /// is a bad reading of `efibootmgr` rather than a bug here.
     fn argv(&self, job: Job, fill: Option<&str>) -> Result<Vec<String>, Refusal> {
         let words = self.words(job)?;
         let masked = words.iter().filter(|w| **w == Word::Hex4).count();
@@ -481,7 +468,6 @@ struct Part {
     guid: toyos_gpt::Guid,
 }
 
-/// An image that has passed the pre-flash admission check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Flashable {
     path: PathBuf,
@@ -551,9 +537,8 @@ fn one_partition(
     })
 }
 
-/// The kernel's own boot record, out of `Boot: complete (123ms)`
-/// (`kernel/src/log/mod.rs`'s `boot_phase!`). The QEMU harness reads the same
-/// line, so it reads it through here.
+/// The kernel's own boot record, out of `Boot: complete (123ms)`. The QEMU
+/// harness judges the same line, so it reads it through here.
 pub fn boot_millis(log: &str) -> Option<u64> {
     let tail = log.lines().find_map(|line| line.split("Boot: complete (").nth(1))?;
     tail.split("ms)").next()?.parse().ok()
@@ -611,14 +596,12 @@ fn lid_policy(text: &str) -> Result<(), Refusal> {
 /// The loop, over one target.
 struct Driver {
     target: Target,
-    /// Print each write this run would make instead of making it. Every read
-    /// still happens: a dry run that skipped the identity check would be
-    /// rehearsing a different loop.
+    /// Print each write this run would make instead of making it; every read
+    /// still happens, or the rehearsal would be of a different loop.
     dry_run: bool,
 }
 
 impl Driver {
-    /// One `ssh`, unprivileged: its output back, or a refusal.
     fn ssh(&self, what: &str, command: &str) -> Result<String, Refusal> {
         let out = Command::new("ssh")
             .args(self.target.ssh_argv(command))
@@ -666,13 +649,11 @@ impl Driver {
         self.ssh("sudo -n", &probe).map(|_| ()).map_err(|e| Refusal::Sudo(e.to_string()))
     }
 
-    /// **The write is verified, not assumed.** A short local read ends `ssh`
+    /// **The write is verified, not assumed**: a short local read ends `ssh`
     /// and the remote `dd` exits 0 on the prefix it got, so `dd`'s own byte
-    /// count and then the table the kernel re-read are both compared.
-    ///
-    /// `wipefs` first: the stick is larger than the image, so the disk's old
-    /// backup GPT survives past the image's own and the firmware would find
-    /// two tables.
+    /// count and then the table the kernel re-read are both compared. `wipefs`
+    /// first, because the stick outlives the image and its old backup GPT would
+    /// otherwise leave the firmware two tables.
     fn flash(&self, image: &Flashable) -> Result<(), Refusal> {
         self.as_root("wiping the old signatures", Job::Wipe, None, None)?;
         let out = self.as_root("flashing the stick", Job::Flash, None, Some(&image.path))?;
@@ -710,24 +691,30 @@ impl Driver {
     /// `--build-only` draws a fresh one — so it is deleted rather than reused.
     fn boot_entry(&self, esp: &Part) -> Result<String, Refusal> {
         let want = esp.guid.to_string().to_ascii_lowercase();
+        let ours = |listing: &str| {
+            entries_labelled(listing, &self.target.label)
+                .into_iter()
+                .partition::<Vec<_>, _>(|(_, guid)| *guid == want)
+        };
         let listing = self.ssh("listing boot entries", EFIBOOTMGR)?;
-        let mut stale = Vec::new();
-        for (id, guid) in entries_labelled(&listing, &self.target.label) {
-            if guid == want && !self.dry_run {
-                return Ok(id);
-            }
-            stale.push(id);
+        let (mine, stale) = ours(&listing);
+        if let Some((id, _)) = mine.first() {
+            return Ok(id.clone());
         }
-        for id in stale {
+        for (id, _) in stale {
             self.as_root("deleting a stale boot entry", Job::Delete, Some(&id), None)?;
         }
-        let created = self.as_root("creating the boot entry", Job::Create, None, None)?;
-        let Some(created) = created else { return Ok("0000".to_string()) };
-        let created = String::from_utf8_lossy(&created.stdout).to_string();
-        entries_labelled(&created, &self.target.label)
-            .first()
-            .map(|(id, _)| id.clone())
-            .ok_or_else(|| Refusal::BootEntry(created.trim().to_string()))
+        self.as_root("creating the boot entry", Job::Create, None, None)?;
+        // Read back rather than parsed out of `--create`'s own output: the
+        // firmware's list is what the next command names, and one parser reads
+        // it. A dry run created nothing, so `0000` stands for the id it would
+        // have been given — the only value here that is not the real run's.
+        let after = self.ssh("listing boot entries", EFIBOOTMGR)?;
+        match (ours(&after).0.first(), self.dry_run) {
+            (Some((id, _)), _) => Ok(id.clone()),
+            (None, true) => Ok("0000".to_string()),
+            (None, false) => Err(Refusal::BootEntry(after.trim().to_string())),
+        }
     }
 
     /// **`reboot` is `systemctl` and returns before the machine goes down**, so
@@ -756,10 +743,20 @@ impl Driver {
         self.ssh("making the mount point", &format!("mkdir -p {}", shell_word(&self.target.mount)))?;
         self.as_root("mounting the log partition", Job::Mount, None, None)?;
         let read = self.read_mounted();
-        // Unconditional: a failure between the mount and here would otherwise
-        // leave the partition mounted and wedge the next run.
-        self.as_root("unmounting the log partition", Job::Umount, None, None)?;
-        read
+        // Unconditional, because a failure in the read would otherwise leave
+        // the partition mounted and wedge the next run — and subordinate,
+        // because the read's failure is the one worth answering with.
+        let unmounted = self.as_root("unmounting the log partition", Job::Umount, None, None);
+        match (read, unmounted) {
+            (Ok(text), Ok(_)) => Ok(text),
+            (Ok(_), Err(umount)) => Err(umount),
+            (Err(read), Ok(_)) => Err(read),
+            (Err(read), Err(umount)) => Err(Refusal::Remote {
+                what: format!("reading the log ({read}), and then unmounting it"),
+                status: "both failed".to_string(),
+                stderr: umount.to_string(),
+            }),
+        }
     }
 
     fn read_mounted(&self) -> Result<String, Refusal> {
@@ -877,6 +874,21 @@ fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> {
     // where another user could win the race between `visudo -c` and `install`.
     let staged = format!("/home/{}/.toyos-metal.sudoers", target.user);
     let driver = Driver { target: target.clone(), dry_run: false };
+    // Cleared whichever way the install went: a refused rule left behind is a
+    // file the next run would `visudo -c` instead of the one it just wrote.
+    let installed = stage_and_install(&driver, target, password, &staged);
+    let cleared = driver.ssh("clearing the staged rule", &format!("rm -f {staged}"));
+    installed.and(cleared)?;
+    println!("installed /etc/sudoers.d/toyos-metal");
+    Ok(())
+}
+
+fn stage_and_install(
+    driver: &Driver,
+    target: &Target,
+    password: &Path,
+    staged: &str,
+) -> Result<String, Refusal> {
     let rule = target.sudoers()?;
 
     let mut stage = Command::new("ssh")
@@ -895,8 +907,8 @@ fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> {
     driver.ssh("checking the rule", &format!("/usr/sbin/visudo -c -f {staged}"))?;
 
     // The password crosses this process as bytes on one pipe and reaches no
-    // argument, no formatter and no output. `sudo -S` reads one line, so the
-    // trailing newline is supplied here whether or not the file carries one.
+    // argument, no formatter and no output; `sudo -S` reads one line, so the
+    // newline is supplied whether or not the file carries one.
     let mut secret = std::fs::read(password)
         .map_err(|e| Refusal::File { path: password.display().to_string(), why: e.to_string() })?;
     while secret.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
@@ -921,9 +933,7 @@ fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> {
         .map_err(|e| unstarted("installing the rule", &e))?;
     let out = install.wait_with_output().map_err(|e| unstarted("installing the rule", &e))?;
     answer("installing the rule", out)?;
-    driver.ssh("clearing the staged rule", &format!("rm -f {staged}"))?;
-    println!("installed /etc/sudoers.d/toyos-metal");
-    Ok(())
+    Ok(String::new())
 }
 
 /// The whole loop, answering the boot's own millisecond count. `None` is a dry
@@ -1080,8 +1090,17 @@ mod tests {
 
     #[test]
     fn an_account_name_that_would_widen_the_rule_is_refused() {
-        for user in ["t14,root", "t14 root", "t14:x", "", "t*", "t14 ALL=(root) NOPASSWD", "t14\t"]
-        {
+        for user in [
+            "t14,root",
+            "t14 root",
+            "t14:x",
+            "%sudo",
+            "+netgroup",
+            "",
+            "t*",
+            "t14 ALL=(root) NOPASSWD",
+            "t14\t",
+        ] {
             let mut t = target();
             t.user = user.to_string();
             assert_eq!(t.sudoers(), Err(Refusal::Word(user.to_string())), "{user}");
@@ -1156,11 +1175,19 @@ mod tests {
             ]
         );
         assert_eq!(entries_labelled(listing, "Ubuntu").len(), 1);
-        // A label is matched whole, a header is not a row, and an entry with no
-        // `HD(` device path names no partition to compare.
         assert!(entries_labelled(listing, "ToyO").is_empty());
         assert!(entries_labelled("BootOrder: 0001,001D\n", "ToyOS").is_empty());
         assert_eq!(entries_labelled(listing, "Setup"), [("0010".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
+        assert!(Refusal::NoBootRecord.about_the_boot());
+        assert!(Refusal::Silent { what: "come back", secs: RETURN_SECS }.about_the_boot());
+        assert!(!Refusal::Node("/dev/nvme0n1".to_string()).about_the_boot());
+        assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
+        assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
+        assert!(!Refusal::NoHome.about_the_boot());
     }
 
     #[test]
