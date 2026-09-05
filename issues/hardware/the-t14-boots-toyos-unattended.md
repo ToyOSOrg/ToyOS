@@ -29,6 +29,25 @@ built on the first.
    ACPI S5 through `PM1a_CNT` and there is no reset path in this kernel — no
    FADT reset register, no other. Something that returns the machine to the
    firmware is stage 2's own work.
+
+   The table half is answered: QEMU 11.1.0's q35 FADT sets `RESET_REG_SUP`
+   (flags bit 10 of `0x000084a5` at offset 112) and carries RESET_REG =
+   SystemIO 8-bit `0x0cf9` with RESET_VALUE `0x0f`, in
+   `toyos-acpi/fixtures/qemu-11.1.0/facp.bin` bytes 112..=128; QEMU writes it
+   at `hw/i386/acpi-build.c:224` and acts on bit 2 of that port with
+   `qemu_system_reset_request` at `hw/isa/lpc_ich9.c:663`. **Reaching it from
+   userland needs an ABI word and so lands alone**: `SYS_SHUTDOWN` (19) is the
+   only power syscall and `Rights::POWER` (bit 10) its only bit, so
+   `/system/bin/reboot` and the test runner's `run reboot` are blocked on a new
+   syscall number in `toyos-abi/src/syscall.rs` and its `SysCap` wrapper.
+
+   A chipset watchdog is not a substitute on this machine. The T14 is Tiger
+   Lake-LP — LPC `8086:a082`, SMBus `8086:a0a3` — and Linux 6.8.0-138's
+   `lpc_ich` claims neither of those ids among its 237 PCI aliases, registers
+   no `/sys/class/watchdog`, and finds no WDAT among the firmware's tables. So
+   ICH9's PMBASE+`0x60` TCO block, which QEMU's q35 models
+   (`hw/acpi/ich9_tco.c`, `include/hw/southbridge/ich9.h:205`), is not this
+   machine's, and a driver green on QEMU says nothing about it.
 3. **The driver**, a small Rust program on the Linux side, no Python: flash the
    image to the ToyOS partitions, set bootnext, reboot, wait, mount the log
    partition, and answer pass or fail from the log's verdict line. The
