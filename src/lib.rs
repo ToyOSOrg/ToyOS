@@ -24,7 +24,10 @@ pub mod issuegate;
 pub mod kernelkeys;
 pub mod libc;
 pub mod mergehealth;
+/// The metal loop: the only module here that reaches a machine over the network.
+pub mod metal;
 pub mod pr;
+
 /// The comment law and its ratchet over `src/prose-ledger`; the ratchet is its
 /// own tests', the one line classifier also `writinglaw`'s.
 pub mod prosegate;

@@ -548,7 +548,7 @@ const BLANK_PARTITION: toyos_gpt::Partition = toyos_gpt::Partition {
 };
 
 /// A disk file as logical blocks, for a reader that may not hold the image.
-struct FileSectors<'a>(&'a mut std::fs::File);
+pub(crate) struct FileSectors<'a>(pub(crate) &'a mut std::fs::File);
 
 impl toyos_gpt::Sectors for FileSectors<'_> {
     fn lba_bytes(&self) -> u32 {
