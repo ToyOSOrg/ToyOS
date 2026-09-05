@@ -110,8 +110,8 @@ fn addresses() -> Vec<GeneralName> {
     ]
 }
 
-/// Deterministic filler: the body has to be reproducible across the two arms
-/// and large enough that the record layer fragments it, and nothing else.
+/// Deterministic, so the two arms hash the same bytes; large, so the record
+/// layer fragments it.
 fn filler(len: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(len);
     let mut state = 0x2545_f491_4f6c_dd1du64;
@@ -242,35 +242,32 @@ fn serve(role: &str, leaf: &Leaf, version: Version, body: Arc<Vec<u8>>) {
     listen(role, leaf, version, Answer::Body(body));
 }
 
-/// What a connection is answered with.
+#[derive(Clone)]
 enum Answer {
     Body(Arc<Vec<u8>>),
     Redirect(u16),
 }
 
 impl Answer {
-    fn clone_ref(&self) -> Answer {
-        match self {
-            Answer::Body(body) => Answer::Body(Arc::clone(body)),
-            Answer::Redirect(port) => Answer::Redirect(*port),
-        }
-    }
-
     fn head(&self) -> String {
         match self {
             Answer::Body(body) => format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             ),
-            Answer::Redirect(port) => format!(
-                "HTTP/1.1 302 Found\r\nLocation: http://{HOST_BIND}:{port}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            ),
+            // The guest reads this `Location`, so it names the guest's view of
+            // the host: loopback there would name the guest itself.
+            Answer::Redirect(port) => {
+                let [a, b, c, d] = GUEST_VIEW_OF_HOST;
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{a}.{b}.{c}.{d}:{port}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            }
         }
     }
 }
 
-/// Bind one TLS server and print the port it got. The listener is bound before
-/// the port is printed, so the harness never races the accept loop.
+/// Bind one TLS server. The port is printed after the bind, so nothing races.
 fn listen(role: &str, leaf: &Leaf, version: Version, answer_with: Answer) {
     let provider = Arc::new(rustls_rustcrypto::provider());
     let versions: &[&rustls::SupportedProtocolVersion] = match version {
@@ -293,7 +290,7 @@ fn listen(role: &str, leaf: &Leaf, version: Version, answer_with: Answer) {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let config = Arc::clone(&config);
-            let with = answer_with.clone_ref();
+            let with = answer_with.clone();
             std::thread::spawn(move || answer(stream, Some(config), &with));
         }
     });
