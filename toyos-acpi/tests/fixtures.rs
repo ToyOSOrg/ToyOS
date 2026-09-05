@@ -106,10 +106,11 @@ fn the_fadt_names_the_power_block_and_the_dsdt() {
 /// `ACPI: reset register SystemIO 0xcf9 <- 0x0f`, against QEMU 11.1.0's own
 /// source: `hw/i386/acpi-build.c:222-226` publishes `AML_AS_SYSTEM_IO`,
 /// `bit_width` 8, `ICH9_RST_CNT_IOPORT` (`include/hw/southbridge/ich9.h:122`,
-/// `0xCF9`), `reset_val` `0xf`; `hw/isa/lpc_ich9.c:657` resets on bit 2.
+/// `0xCF9`), `reset_val` `0xf`; `hw/isa/lpc_ich9.c:663` resets on bit 2.
 #[test]
 fn the_fadt_names_the_reset_register_qemu_acts_on() {
-    assert_eq!(reset_register(machine(), RSDP), Ok(Reset::Port { port: 0xcf9, value: 0x0f }));
+    let fadt = find_table(machine(), RSDP, b"FACP", 36).expect("FADT");
+    assert_eq!(reset_register(&fadt), Reset::Port { port: 0xcf9, value: 0x0f });
 }
 
 #[test]

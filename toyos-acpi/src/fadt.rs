@@ -13,10 +13,11 @@ const FADT_RESET_REG: usize = 116;
 const FADT_RESET_VALUE: usize = 128;
 pub const FADT_X_DSDT: usize = 140;
 
-/// Fixed feature flags bit 10, `RESET_REG_SUP` (Table 5.10).
+/// Fixed feature flags bit 10, `RESET_REG_SUP` (Table 5.10); then the address space IDs of Table 5.1.
 const RESET_REG_SUP: u32 = 1 << 10;
-/// Address space 1, System I/O (Table 5.1).
+const SPACE_SYSTEM_MEMORY: u8 = 0;
 const SPACE_SYSTEM_IO: u8 = 1;
+const SPACE_PCI_CONFIG: u8 = 2;
 
 // `Err` is not "absent" and must not be treated as one by the caller.
 // Bit 1 of the flags is the port 60/64 keyboard-controller bit, defined only from FADT revision 3 onward.
@@ -60,43 +61,56 @@ pub fn century_of(index: u8) -> Century {
     }
 }
 
-/// What the FADT says about returning the machine to firmware: a register, or
-/// the field that refused one. The alternative to naming them is a guessed
-/// port, and a guess writes a byte to whatever else lives there.
+/// The 8-bit System I/O port the FADT names and the byte to write there, or the
+/// field that refused one — the alternative being a guessed port, and a guess
+/// writes a byte to whatever else lives there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reset {
-    /// An 8-bit System I/O port, and the byte the firmware asks be written to it.
     Port { port: u16, value: u8 },
+    Absent,
     Unsupported,
+    SystemMemory,
+    PciConfig,
     Space(u8),
     Field { bit_width: u8, bit_offset: u8 },
+    /// Zero, or past the 16-bit port space: not a port this kernel writes.
     Address(u64),
 }
 
-/// The reset register the FADT names, or which of its fields refused.
-pub fn reset_register<P: Phys>(phys: P, rsdp_addr: u64) -> Result<Reset, TableError> {
-    const NEEDED: usize = FADT_RESET_VALUE + 1;
-    let fadt = find_table(phys, rsdp_addr, b"FACP", NEEDED)?;
-    let short = || TableError::Length { declared: fadt.len() as u32, needed: NEEDED };
-    let flags = fadt.u32_at(FADT_FLAGS).ok_or_else(short)?;
-    if flags & RESET_REG_SUP == 0 {
-        return Ok(Reset::Unsupported);
+pub fn reset_register<P: Phys>(fadt: &Table<P>) -> Reset {
+    // Revision 3 is where Table 5.9 puts these fields, and a table stopping short of them has none either.
+    if !matches!(fadt.byte(SDT_REVISION), Some(r) if r >= 3) {
+        return Reset::Absent;
     }
-    let space = fadt.byte(FADT_RESET_REG).ok_or_else(short)?;
-    if space != SPACE_SYSTEM_IO {
-        return Ok(Reset::Space(space));
+    let fields = || {
+        Some((
+            fadt.u32_at(FADT_FLAGS)?,
+            fadt.byte(FADT_RESET_REG)?,
+            fadt.byte(FADT_RESET_REG + 1)?,
+            fadt.byte(FADT_RESET_REG + 2)?,
+            fadt.u64_at(FADT_RESET_REG + 4)?,
+            fadt.byte(FADT_RESET_VALUE)?,
+        ))
+    };
+    let Some((flags, space, bit_width, bit_offset, address, value)) = fields() else {
+        return Reset::Absent;
+    };
+    if flags & RESET_REG_SUP == 0 {
+        return Reset::Unsupported;
+    }
+    match space {
+        SPACE_SYSTEM_MEMORY => return Reset::SystemMemory,
+        SPACE_PCI_CONFIG => return Reset::PciConfig,
+        SPACE_SYSTEM_IO => {}
+        other => return Reset::Space(other),
     }
     // The bit width, not the GAS access size: firmware may leave that 0 (undefined).
-    let bit_width = fadt.byte(FADT_RESET_REG + 1).ok_or_else(short)?;
-    let bit_offset = fadt.byte(FADT_RESET_REG + 2).ok_or_else(short)?;
     if (bit_width, bit_offset) != (8, 0) {
-        return Ok(Reset::Field { bit_width, bit_offset });
+        return Reset::Field { bit_width, bit_offset };
     }
-    let address = fadt.u64_at(FADT_RESET_REG + 4).ok_or_else(short)?;
-    let value = fadt.byte(FADT_RESET_VALUE).ok_or_else(short)?;
     match u16::try_from(address) {
-        Ok(port) => Ok(Reset::Port { port, value }),
-        Err(_) => Ok(Reset::Address(address)),
+        Ok(port) if port != 0 => Reset::Port { port, value },
+        _ => Reset::Address(address),
     }
 }
 

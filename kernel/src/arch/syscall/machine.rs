@@ -1,9 +1,9 @@
 //! What a process may learn about the machine, and the two things it may do to it.
 //!
 //! [`sys_log_read`], the roster half of [`sys_sysinfo`], and both of
-//! [`sys_shutdown`] and [`sys_reboot`] — one right for stopping the machine,
-//! whichever way — each require a `SysCap` bit from `/system/bin/init`'s
-//! `system.toml`; `SYS_SYSINFO`'s header is ambient, and [`sys_sched_info`] demands nothing.
+//! [`sys_shutdown`] and [`sys_reboot`] each require a `SysCap` bit from
+//! `/system/bin/init`'s `system.toml`; `SYS_SYSINFO`'s header is ambient, and
+//! [`sys_sched_info`] demands nothing.
 
 use alloc::vec::Vec;
 
@@ -44,7 +44,6 @@ pub(super) fn sys_log_read(
     }
 }
 
-/// Everything both power paths do before the machine stops answering, ending on `last`.
 fn quiesce(last: &str) {
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
@@ -73,12 +72,12 @@ pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
     }
-    let Some((port, value)) = acpi::reset_register() else {
+    if !acpi::can_reboot() {
         log!("reboot: this machine's FADT names no reset register — refused");
         return SyscallError::NotSupported.to_u64();
-    };
+    }
     quiesce("Rebooting.");
-    acpi::reboot(port, value);
+    acpi::reboot();
 }
 
 /// The most live threads `SYS_SYSINFO` will describe; kept under `mm::MAX_HEAP_ALLOC` so an unbounded thread count cannot trip the allocator's fail-fast assert.

@@ -15,15 +15,11 @@ is no serial channel**: the 16550 loopback reads `0xFF`
 partition and the screen are the only two channels there are, and the loop is
 built on the first.
 
-Owner rulings, 2026-09-05: the USB stick is ToyOS's disk for the first
-milestone and the internal NVMe is never written, mounted or stamped;
-passwordless sudo on the T14, scoped to exactly the commands the driver runs, is
-approved; the machine is reached over Tailscale.
-
 ## Stages
 
 1. **The driver**, a small Rust program run on this Mac, no Python: assert the
-   pre-flash gate on the image, assert the stick's identity over SSH, flash it,
+   pre-flash gate on the image, assert the stick's identity over SSH — **the
+   internal NVMe is never written, mounted or stamped** — flash it,
    set `efibootmgr --bootnext` so a failure to come back is one reboot and not a
    machine stuck in ToyOS, reboot, wait, mount the log partition, and answer
    pass or fail from the log's verdict line. Every SSH command is one of a fixed

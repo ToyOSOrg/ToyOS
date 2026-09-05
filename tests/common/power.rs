@@ -1,7 +1,8 @@
 //! The two ways the machine stops, told apart by QEMU rather than by the guest:
 //! a reset, a power-off and a triple fault all end a `-no-reboot` QEMU with
-//! status 0, so what is asserted is the cause its `SHUTDOWN` event names — and
-//! a reboot implemented as a power-off reds on `guest-shutdown`.
+//! status 0, so what is asserted is the cause its `SHUTDOWN` event names, and a
+//! reboot implemented as a power-off reds on `guest-shutdown`. Nothing here
+//! judges the boot after the reset: `-no-reboot` exits instead of taking it.
 
 use std::io::Write;
 use std::path::Path;
@@ -9,6 +10,8 @@ use std::time::Duration;
 
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
+
+const WAIT: Duration = Duration::from_secs(20);
 
 /// The machine returns to firmware when a process holding `POWER` asks it to.
 pub fn machine_reboot(
@@ -21,19 +24,17 @@ pub fn machine_reboot(
 
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    // The half the stop reason cannot see: a kernel that decoded some other
-    // register would still reset this machine at 0xcf9 by luck.
+    // A decode this kernel got wrong, never one it bypassed: a kernel writing
+    // 0xcf9 without reading the FADT satisfies this and the stop reason both.
     boot.must_say("ACPI: reset register SystemIO 0xcf9 <- 0x0f")?;
 
-    // Opened before the ask: the event is emitted once, and QEMU exits on it.
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket());
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
 
     writeln!(qemu.stdin_mut(), "run reboot").expect("write to QEMU stdin");
     qemu.flush_stdin();
-    let reason = stop.reason(Duration::from_secs(20));
-    // Ends when QEMU exits and the reader disconnects, so a machine that came
-    // back to firmware costs none of this ceiling.
-    let tail = qemu.drain_serial(Duration::from_secs(20));
+    let reason = stop.reason();
+    // Ends when QEMU exits and the reader disconnects, so a guest that came back to firmware pays none of this.
+    let tail = qemu.drain_serial(WAIT);
 
     let drain = serial::Serial::named("reboot drain", tail.as_str());
     drain.must_be_clean()?;

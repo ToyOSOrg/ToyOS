@@ -3396,29 +3396,26 @@ impl Qmp {
 pub struct QmpShutdown(Qmp);
 
 impl QmpShutdown {
-    pub fn open(socket: &Path) -> Self {
-        Self(Qmp::connect(socket))
+    /// `budget` bounds the wait and is set here, while the peer is still there
+    /// to accept it: macOS refuses a `setsockopt` on a socket already closed.
+    pub fn open(socket: &Path, budget: Duration) -> Self {
+        let qmp = Qmp::connect(socket);
+        qmp.stream.set_read_timeout(Some(budget)).expect("qmp: the shutdown-event budget");
+        Self(qmp)
     }
 
     /// The `reason` the `SHUTDOWN` event names — `guest-reset`,
     /// `guest-shutdown`, `host-signal` — or `None` if the guest never stopped.
-    /// Each read is bounded by the timeout [`Qmp::connect_while`] set and this
-    /// bounds the whole wait; no fresh `setsockopt` is issued, because macOS
-    /// refuses one on a socket whose peer is already gone.
-    pub fn reason(&mut self, timeout: Duration) -> Option<String> {
+    pub fn reason(&mut self) -> Option<String> {
         use std::io::Read;
-        let deadline = Instant::now() + timeout;
         let qmp = &mut self.0;
         loop {
             if let Some(reason) = shutdown_reason(&qmp.pending) {
                 return Some(reason);
             }
-            if Instant::now() >= deadline {
-                return None;
-            }
             let mut buf = [0u8; 4096];
             match qmp.stream.read(&mut buf) {
-                // Timed out, or the socket ended: what it had is in `pending`.
+                // Budget spent, or the socket ended: what it had is in `pending`.
                 Ok(0) | Err(_) => return shutdown_reason(&qmp.pending),
                 Ok(n) => qmp.pending.extend_from_slice(&buf[..n]),
             }
