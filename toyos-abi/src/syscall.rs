@@ -276,6 +276,9 @@ pub const SYS_RT_ENTER: u64 = 112;
 /// [`Rights::LOG`]: crate::handle::Rights::LOG
 pub const SYS_LOG_READ: u64 = 114;
 
+/// Return the machine to firmware, on the same `Rights::POWER` that powers it off. See [`reboot`].
+pub const SYS_REBOOT: u64 = 116;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -1089,13 +1092,20 @@ pub unsafe fn gpu_set_resolution(
 /// [`Rights::POWER`](crate::handle::Rights::POWER).
 ///
 /// **The only way this comes back is refused.** A shutdown that happened has no
-/// caller left to answer, so there is no success to report and the return type
-/// is the refusal alone. The loop is what says so: a kernel that answered `0`
-/// without cutting the power has not shut down, and is asked again rather than
-/// reported as a success that did not happen.
+/// caller left to answer, so the return type is the refusal alone; the loop is
+/// what says so, asking again rather than reporting a success that did not happen.
 pub fn shutdown(syscap: RawHandle) -> SyscallError {
     loop {
         if let Err(e) = check_unit(syscall(SYS_SHUTDOWN, syscap.0 as u64, 0, 0, 0)) {
+            return e;
+        }
+    }
+}
+
+/// [`shutdown`]'s sibling on the same right, refused the same way and looping for the same reason.
+pub fn reboot(syscap: RawHandle) -> SyscallError {
+    loop {
+        if let Err(e) = check_unit(syscall(SYS_REBOOT, syscap.0 as u64, 0, 0, 0)) {
             return e;
         }
     }

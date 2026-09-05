@@ -94,21 +94,22 @@ impl Rights {
     ///
     /// [`SYS_LOG_READ`]: crate::syscall::SYS_LOG_READ
     pub const LOG: Rights = Rights(1 << 9);
-    /// On a `SysCap`: power the machine off.
+    /// On a `SysCap`: power the machine off, or return it to firmware.
     ///
-    /// [`SYS_SHUTDOWN`] ends every process there is and does not come back, so
-    /// it is the largest authority this capability carries. It rides a bit for
+    /// [`SYS_SHUTDOWN`] and [`SYS_REBOOT`] each end every process there is and
+    /// do not come back, so this is the largest authority this capability
+    /// carries — one bit for both, because a machine taken away from its
+    /// processes is the same authority whichever state it is left in. It rides a bit for
     /// the same reason minting a device claim and entering the real-time band
     /// do: what can cut the power is exactly what `/bin/init` endowed, and
     /// there is nothing a program can name to reach it otherwise.
     ///
-    /// The kernel mints one capability carrying it, at boot, for `/bin/init`
-    /// (`kernel::loader::spawn_init`). `/bin/toybox` holds a narrowed duplicate
-    /// because `/bin/shutdown` is that binary under another name, and
-    /// `test-runner` holds one because `run shutdown` is how the suite ends a
-    /// guest and reads what reached the volume.
+    /// The kernel mints one carrying it, at boot, for `/bin/init`
+    /// (`kernel::loader::spawn_init`); every other holder is a narrowed
+    /// duplicate init endowed from a `system.toml` row that named `power`.
     ///
     /// [`SYS_SHUTDOWN`]: crate::syscall::SYS_SHUTDOWN
+    /// [`SYS_REBOOT`]: crate::syscall::SYS_REBOOT
     pub const POWER: Rights = Rights(1 << 10);
     /// On a `SysCap`: read the roster of every process in the machine.
     ///

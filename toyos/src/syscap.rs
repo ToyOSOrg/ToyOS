@@ -2,10 +2,10 @@
 //!
 //! Five things are reachable no other way — minting a device claim, entering
 //! the real-time band, turning a pid into a process handle, listing every
-//! process in the machine, and powering the machine off — and each is one bit
-//! on a handle to this. The kernel makes exactly one at boot, for `/bin/init`,
-//! so the set of processes that can ever do any of the five is exactly what
-//! init endowed.
+//! process in the machine, and taking its power away — off, or back to
+//! firmware — and each is one bit on a handle to this. The kernel makes exactly
+//! one at boot, for `/bin/init`, so the set of processes that can ever do any
+//! of the five is exactly what init endowed.
 
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, DeviceType, SyscallError};
@@ -52,6 +52,11 @@ impl SysCap {
     /// the ones a `system.toml` row named `power` in.
     pub fn shutdown(&self) -> SyscallError {
         syscall::shutdown(self.0.raw())
+    }
+
+    /// Return the machine to firmware, on the same right and refused the same way as [`Self::shutdown`].
+    pub fn reboot(&self) -> SyscallError {
+        syscall::reboot(self.0.raw())
     }
 
     /// The machine's header, then one entry per live thread for as much of
