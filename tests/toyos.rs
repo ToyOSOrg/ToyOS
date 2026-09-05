@@ -11,7 +11,7 @@ use common::qemu::{
     self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance, TestResult,
     STALLED,
 };
-use common::{audio, bcachefs_oracle, compile, faults, hostload, pkg, screen, serial, stats, storage, usb};
+use common::{audio, compile, faults, hostload, pkg, screen, serial, stats, storage, usb};
 use toyos_build::day::Day;
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
@@ -573,11 +573,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // margins, which is the definition of [`Sched::Serial`].
     ("netd_hostile_peer", Sched::Serial, Tier::Nightly),
     ("launcher_refusals", Sched::Parallel, Tier::Fast),
-    // The bcachefs read path's outside judge: a Linux guest with upstream's own
-    // tools formats a volume, writes a tree into it and states its checksums,
-    // and ToyOS's reader has to agree. It boots a 1.6 GB fetched image and a
-    // whole distribution, so it is Nightly on its wall clock alone.
-    ("bcachefs_upstream_read", Sched::Serial, Tier::Nightly),
     ("foreign_disk_untouched", Sched::Parallel, Tier::Fast),
     ("volume_from_another_disk", Sched::Parallel, Tier::Fast),
     // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
@@ -8674,7 +8669,6 @@ fn run_machine_test(
     match name {
         // Body in `tests/common/storage.rs`, so the hunk in this shared file
         // stays one line.
-        "bcachefs_upstream_read" => bcachefs_oracle::bcachefs_upstream_read(),
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
         "internal_disk_boot" => storage::internal_disk_boot(test_config, c_bins, rust_bins),
         "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),

@@ -6,3 +6,8 @@ edition = "2021"
 [features]
 default = ["std"]
 std = []
+
+# Decompresses the committed fixtures. Already in the lockfile, and a
+# dev-dependency only: nothing the kernel links pulls it in.
+[dev-dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

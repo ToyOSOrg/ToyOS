@@ -44,3 +44,9 @@ sequenced: the kernel must parse this format to reach `/system/bin/init` at all,
 machine whose ROOT it cannot mount has no userland. The observation the ruling
 inverts is the other half — a home-grown format has no second implementation to
 be judged against, and upstream bcachefs is exactly such a judge.
+
+**How that judge is used, since a judge is not a dependency:** upstream's `bcachefs-tools` is a *development*
+instrument, run by a builder on a volume ToyOS wrote, with its `fsck` and its
+readback pasted into the pull request. What the suite runs against is committed
+fixtures — volumes upstream's tools wrote, recorded in `NOTICE`. Nothing is
+fetched and no distribution is depended on.

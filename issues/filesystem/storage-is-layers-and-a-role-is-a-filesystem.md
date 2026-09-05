@@ -89,8 +89,9 @@ leaves a mounted NTFS hibernated, and a write corrupts it, so the server
 refuses write access on a volume whose dirty or hibernation flag is set, by
 name. BitLocker
 volumes are reported unreadable rather than mounted. The outside judge for an
-NTFS driver is Windows itself in a QEMU guest reading a volume ToyOS wrote —
-a differential oracle that needs no host binary. ext4 follows NTFS by the same
+NTFS driver is Windows itself, run at development time by a builder against a
+volume ToyOS wrote and its readback pasted into the pull request; the suite
+reads committed fixtures and fetches nothing. ext4 follows NTFS by the same
 shape if wanted.
 
 ## Paths
