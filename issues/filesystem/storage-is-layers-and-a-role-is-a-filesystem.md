@@ -7,9 +7,7 @@ opened: 2026-09-03
 # Storage is four layers, and a role names a filesystem rather than a partition
 
 What the installed product's disks look like, from the block device up to a
-path, and the order the pieces land in. Ruled by the orchestrator on
-2026-09-03 from the discussion with the owner; the eight decisions that were
-still the owner's were answered on 2026-09-05 and are written in below.
+path, and the order the pieces land in.
 
 ## Block
 
@@ -19,9 +17,8 @@ serialising its own queue, every consumer holding a handle and a partition view
 serves and keys every block on the partition offset it was opened over, so a
 page is written back where it was filled from. Two devices claiming one id are
 refused at registration, which is what keeps two of them out of one cache. GPT
-is the one partition scheme. Root filesystem PR 1 built this, and each cache
-instance is capped from memory rather than from its device, so N of them claim
-N times that cap.
+is the one partition scheme. Each cache instance is capped from memory rather
+than from its device, so N of them claim N times that cap.
 
 ## Volume
 
@@ -115,8 +112,8 @@ hierarchy is a convention, and `/boot`'s mount guard is the one restriction.
 - `/media/<label>` — foreign and unassigned volumes; a Windows disk is
   `/media/windows`. A mount point is exactly one top-level name
   (`kernel/src/vfs.rs`, `ROOT_ENTRIES` and the array indexed by it), so
-  `/media/<label>` is a nested mount the structure cannot represent: stage 5
-  owes that, and stage 2 left `/media` an empty directory.
+  `/media/<label>` is a nested mount the structure cannot represent: the
+  mount protocol owes that, and `/media` is an empty directory until then.
 
 Users are a track of their own,
 `issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`: a `/home/<user>`
@@ -132,26 +129,19 @@ entry.
 
 ## Stages, in order
 
-0. The block layer: a shared device handle, a partition view, one page
-   cache per (device, partition). Landed by #396.
-1. ROOT is a partition, the kernel argument names it, and the initrd — the
-   in-RAM image the bootloader used to load whole — is deleted. Landed.
-2. The hierarchy: a synthesized `/`, ROOT at `/system`, DATA at `/apps` and
-   `/home`, `/media`, and the `/bin` sweep that follows. Landed.
-3. The users track, filed as
-   `issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`, built.
-4. The mount protocol, and FAT32 as the first userland filesystem server.
-5. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
-6. The installer, written together with the layout it lays down: GPT, ESP,
+1. The users track, `issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`.
+2. The mount protocol, and FAT32 as the first userland filesystem server.
+3. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
+4. The installer, written together with the layout it lays down: GPT, ESP,
    ROOT, a designated DATA, one boot entry.
-7. Updates: one ROOT partition per release, a second beside the first, the
+5. Updates: one ROOT partition per release, a second beside the first, the
    bootloader choosing — no snapshot logic in the kernel's read path.
-8. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
+6. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
    them.
-9. A full secure boot chain, the end state of `/system`'s immutability:
+7. A full secure boot chain, the end state of `/system`'s immutability:
    firmware verifies the bootloader, the bootloader the kernel, the kernel the
    ROOT image it mounts, and a link that fails is refused by name.
-10. NTFS read-only, postponed here by the owner.
+8. NTFS read-only, postponed here by the owner.
 
 LOG stays its own FAT32 partition through the dev phase, because a Mac has to
 read the stick; folding it into DATA is the installed product's shape and no

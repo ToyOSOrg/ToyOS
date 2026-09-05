@@ -8,9 +8,7 @@ opened: 2026-09-04
 
 The milestone the owner set on 2026-09-03: download and install
 github.com/Japabu/gbae from its GitHub release and run it, in QEMU first,
-with no shortcut past what an ordinary OS target does. What this track
-rules is below; the five decisions that were the owner's were answered on
-2026-09-05 and are written in.
+with no shortcut past what an ordinary OS target does.
 
 ## What exists on the other side
 
@@ -57,8 +55,7 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 
 ## Stages, in order
 
-Stage 1 began when the hierarchy landed as #401; the storage track's users
-and mount-protocol stages follow this track rather than block it.
+The storage track's users and mount-protocol stages do not block this one.
 
 1. `pkg install <file>` from a local archive on the boot stick, with the
    digest checked against a `SHA256SUMS` beside it: the layout, the
