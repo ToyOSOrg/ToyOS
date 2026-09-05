@@ -481,6 +481,7 @@ dependencies = [
  "toyos-abi 0.3.0",
  "toyos-desktop",
  "toyos-font 0.1.0",
+ "toyos-manifest",
  "toyos-window 0.3.0",
 ]
 
@@ -2454,6 +2455,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkg"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "sha2 0.10.9",
+ "toyos-manifest",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3244,6 +3254,7 @@ name = "shell"
 version = "0.1.0"
 dependencies = [
  "toyos 0.3.0",
+ "toyos-manifest",
 ]
 
 [[package]]

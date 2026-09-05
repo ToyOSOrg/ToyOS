@@ -1598,7 +1598,7 @@ pub const BOOT_STICK_ID: &str = "bootstick";
 
 /// What every profile but [`Profile::MetalDisk`] gives the guest. Large
 /// enough for a filesystem, small enough that a boot formats it quickly.
-const NVME_SMALL: u64 = 128 * 1024 * 1024;
+pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
 
 /// What every namespace but [`Profile::NvmeWideSector`]'s reports — QEMU's
 /// implicit default, and the T14's.
@@ -2189,6 +2189,12 @@ pub struct BootOptions {
     /// command line entirely, so every existing profile assertion sees the argv
     /// it always saw.
     pub rtc_base: Option<&'static str>,
+    /// Files put on ROOT beside the image's own, each named by its
+    /// ROOT-relative path — `share/pkg/x` is `/system/share/pkg/x` in the
+    /// guest. A fixture the guest reads and no program in the image produces;
+    /// the image is memoized on their names and bytes, so two boots staging
+    /// different fixtures do not share one.
+    pub extra_root_files: Vec<(String, Vec<u8>)>,
 }
 
 /// The in-guest test runner's startup marker.
@@ -2217,6 +2223,7 @@ impl Default for BootOptions {
             boot_image: None,
             usb_images: Vec::new(),
             rtc_base: None,
+            extra_root_files: Vec::new(),
         }
     }
 }
@@ -2358,7 +2365,7 @@ pub fn build_boot_image(
 ) -> Vec<u8> {
     let kernel: &[&str] =
         if kernel_params.is_empty() { &[] } else { toyos_build::build::TEST_KERNEL };
-    build_boot_image_with(test_crate, c_tests, rust_tests, kernel, kernel_params, false)
+    build_boot_image_with(test_crate, c_tests, rust_tests, &[], kernel, kernel_params, false)
 }
 
 /// Refuse a staged [`BootOptions::boot_image`] that is not the image this
@@ -2398,6 +2405,14 @@ fn refuse_a_staged_image_this_boot_did_not_ask_for(image: &Path, options: &BootO
         toyos_build::build::DEBUG_KERNEL_BUILD,
         image.display(),
     );
+    assert!(
+        options.extra_root_files.is_empty(),
+        "[qemu] this boot stages {} file(s) onto ROOT and hands the guest {}; a staged image \
+         carries the files it was built with and this call builds nothing, so the fixture would \
+         never reach the guest",
+        options.extra_root_files.len(),
+        image.display(),
+    );
     if let Some(why) = toyos_build::image::param_conflict(image, options.kernel_params) {
         panic!(
             "[qemu] {why}. `BootOptions::boot_image` replaces the image this call would have \
@@ -2434,6 +2449,7 @@ fn build_boot_image_with(
     test_crate: &Path,
     c_tests: &[(String, Vec<u8>)],
     rust_tests: &[(String, Vec<u8>)],
+    staged: &[(String, Vec<u8>)],
     kernel_features: &[&str],
     kernel_params: &[&str],
     debug_wait: bool,
@@ -2483,6 +2499,7 @@ fn build_boot_image_with(
             extra_files.push((format!("bin/test_rs_{name}"), data.clone()));
         }
     }
+    extra_files.extend(staged.iter().cloned());
 
     let config_path = test_crate.join("system.toml");
     assert!(
@@ -2592,6 +2609,7 @@ impl QemuInstance {
                     test_crate,
                     c_tests,
                     rust_tests,
+                    &options.extra_root_files,
                     &features,
                     options.kernel_params,
                     options.debug_wait,

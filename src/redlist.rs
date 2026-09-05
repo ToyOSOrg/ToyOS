@@ -3454,6 +3454,20 @@ pub const KNOWN_RED: &[Red] = &[
         measured: "2026-09-03",
     },
     Red {
+        test: "sched_check_build",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "cpu0: 1956 passes, p50 < 262144 ns, p90 < 262144 ns, p99 < 524288 ns, max \
+               4312321 ns, 366 over the 200000 ns budget — this distribution has mass the \
+               KVM, native x86-64 sample never showed; alone: 2517 passes, p50 < 131072 ns, \
+               31 over, a different assertion, so the divergence is itself the finding",
+        evidence: "`ci` run 33973213660, `guest (8)`, 2026-09-05, on pkg-install-file a691b3cf, \
+                   a branch that touches no scheduler code; the shard's other 21 names passed",
+        source: "tests/toyos.rs",
+        measured: "2026-09-05",
+    },
+    Red {
         test: "leak_rollback_selftest",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
