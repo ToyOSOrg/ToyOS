@@ -2,15 +2,15 @@
 //!
 //! The crates are crates.io's, unpatched: this binary exists so that what a
 //! Linux program writes is what ToyOS runs. Every outcome is one line —
-//! `ok bytes=<n> sha256=<hex>` or `refused <name>` — and the refusal names are
-//! the contract the harness asserts against, so a verification failure can
-//! never reach the caller as a truncated or empty body.
+//! `ok bytes=<n> sha256=<hex>` or `refused <name>`, so a verification failure
+//! never reaches the caller as a truncated or empty body.
 //!
-//! TLS 1.3 is the only version offered. ureq's own rustls connector hardcodes
-//! `ALL_VERSIONS`, so the version is set on a `ClientConfig` of ours handed to
-//! ureq through `Agent::with_parts` — its documented extension point, not a
-//! patch. A server that speaks only TLS 1.2 is then refused by rustls as
-//! `Tls12NotOfferedOrEnabled` rather than by a cipher-suite accident.
+//! A constraint on scheme, version or authority is set on the client handed to
+//! the library, never checked on the argument: the peer chooses every hop after
+//! the first. So `https_only` refuses a cleartext hop wherever a redirect puts
+//! one, and TLS 1.3 is the only version offered — ureq's connector hardcodes
+//! `ALL_VERSIONS`, so it is set on a `ClientConfig` of ours through
+//! `Agent::with_parts`, its documented extension point rather than a patch.
 
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -63,10 +63,6 @@ fn main() {
 }
 
 fn fetch(url: &str, ca_path: Option<&str>) -> Result<(usize, String), String> {
-    if !url.starts_with("https://") {
-        return Err("plain-http".to_string());
-    }
-
     let roots = roots(ca_path)?;
     let agent = agent(roots)?;
 
@@ -167,7 +163,7 @@ fn agent(roots: RootCertStore) -> Result<Agent, String> {
         .chain(TcpConnector::default())
         .chain(Tls13Connector { config: Arc::new(config) });
     Ok(Agent::with_parts(
-        Config::default(),
+        Config::builder().https_only(true).build(),
         connector,
         DefaultResolver::default(),
     ))
@@ -256,6 +252,9 @@ impl Transport for Tls13Transport {
 /// rustls reaches the caller as an `io::Error` carrying the real one, so the
 /// name comes from the downcast and never from the message text.
 fn refusal(err: &Error) -> String {
+    if let Error::RequireHttpsOnly(_) = err {
+        return "plain-http".to_string();
+    }
     if let Error::Io(io) = err {
         if let Some(tls) = io.get_ref().and_then(|e| e.downcast_ref::<rustls::Error>()) {
             return tls_refusal(tls);

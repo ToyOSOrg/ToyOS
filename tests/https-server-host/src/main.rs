@@ -1,14 +1,8 @@
-//! The host end of the `https_tls13` judge: one CA and four TLS servers, all
-//! minted at start-up so no key or certificate is ever committed.
-//!
-//! Each server answers one fixed body over one HTTP/1.1 response and differs
-//! from the others only in what the client should refuse it for — a name it
-//! does not have, a validity window that has passed, a protocol version this
-//! client will not speak. The body is the same bytes on every port so the
-//! guest and the host arm hash the same thing.
+//! The host end of the `https_tls13` judge: a CA and the servers a client
+//! should refuse it for, all minted at start-up so no key is ever committed.
 //!
 //! stdout is the harness's contract: `ca <path>`, `body-bytes <n>`,
-//! `body-sha256 <hex>`, one `port <role> <n>` per server, then `ready`.
+//! `body-sha256 <hex>`, one `port <role> <n>` per listener, then `ready`.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -39,6 +33,10 @@ use x509_cert::Certificate;
 /// carries both so the two arms differ by their std and by nothing else.
 const GUEST_VIEW_OF_HOST: [u8; 4] = [10, 0, 2, 2];
 const HOST_LOOPBACK: [u8; 4] = [127, 0, 0, 1];
+
+/// Slirp translates the guest's 10.0.2.2 to the host's loopback, so binding
+/// there serves both arms without putting an ephemeral TLS port on the LAN.
+const HOST_BIND: &str = "127.0.0.1";
 
 /// The name the mismatch control's certificate carries instead. `.invalid` is
 /// reserved by RFC 2606, so it can never become somebody's real host.
@@ -94,6 +92,8 @@ fn main() {
     serve("wrongname", &wrong, Version::Tls13, Arc::clone(&body));
     serve("expired", &expired, Version::Tls13, Arc::clone(&body));
     serve("tls12", &valid, Version::Tls12, Arc::clone(&body));
+    let plain = cleartext(Arc::clone(&body));
+    serve_redirect("redirect", &valid, plain);
     downgrade();
     println!("ready");
     std::io::stdout().flush().expect("flush the contract");
@@ -188,8 +188,7 @@ impl Authority {
         let mut builder =
             CertificateBuilder::new(profile, SerialNumber::from(2u32), window(age), spki)
                 .expect("a leaf builder");
-        // The CABF subscriber profile leaves subjectAltName to its caller, and
-        // the SAN is the whole subject of three of this judge's four arms.
+        // The CABF subscriber profile leaves subjectAltName to its caller.
         builder
             .add_extension(&SubjectAltName(general))
             .expect("the subject alternative names");
@@ -220,9 +219,59 @@ fn window(age: Age) -> Validity {
     )
 }
 
-/// Bind one server and print the port it got. The listener is bound before the
-/// port is printed, so the harness never races the accept loop.
+/// The cleartext half of the redirect arm: a peer a `302` can name.
+fn cleartext(body: Arc<Vec<u8>>) -> u16 {
+    let listener = TcpListener::bind((HOST_BIND, 0)).expect("a listening port");
+    let port = listener.local_addr().expect("the bound address").port();
+    println!("port plain {port}");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let body = Arc::clone(&body);
+            std::thread::spawn(move || answer(stream, None, &Answer::Body(body)));
+        }
+    });
+    port
+}
+
+fn serve_redirect(role: &str, leaf: &Leaf, plain: u16) {
+    listen(role, leaf, Version::Tls13, Answer::Redirect(plain));
+}
+
 fn serve(role: &str, leaf: &Leaf, version: Version, body: Arc<Vec<u8>>) {
+    listen(role, leaf, version, Answer::Body(body));
+}
+
+/// What a connection is answered with.
+enum Answer {
+    Body(Arc<Vec<u8>>),
+    Redirect(u16),
+}
+
+impl Answer {
+    fn clone_ref(&self) -> Answer {
+        match self {
+            Answer::Body(body) => Answer::Body(Arc::clone(body)),
+            Answer::Redirect(port) => Answer::Redirect(*port),
+        }
+    }
+
+    fn head(&self) -> String {
+        match self {
+            Answer::Body(body) => format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ),
+            Answer::Redirect(port) => format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{HOST_BIND}:{port}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+        }
+    }
+}
+
+/// Bind one TLS server and print the port it got. The listener is bound before
+/// the port is printed, so the harness never races the accept loop.
+fn listen(role: &str, leaf: &Leaf, version: Version, answer_with: Answer) {
     let provider = Arc::new(rustls_rustcrypto::provider());
     let versions: &[&rustls::SupportedProtocolVersion] = match version {
         Version::Tls12 => &[&rustls::version::TLS12],
@@ -237,15 +286,15 @@ fn serve(role: &str, leaf: &Leaf, version: Version, body: Arc<Vec<u8>>) {
         .expect("the server's certificate");
     let config = Arc::new(config);
 
-    let listener = TcpListener::bind(("0.0.0.0", 0)).expect("a listening port");
+    let listener = TcpListener::bind((HOST_BIND, 0)).expect("a listening port");
     let port = listener.local_addr().expect("the bound address").port();
     println!("port {role} {port}");
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             let config = Arc::clone(&config);
-            let body = Arc::clone(&body);
-            std::thread::spawn(move || answer(stream, config, &body));
+            let with = answer_with.clone_ref();
+            std::thread::spawn(move || answer(stream, Some(config), &with));
         }
     });
 }
@@ -255,7 +304,7 @@ fn serve(role: &str, leaf: &Leaf, version: Version, body: Arc<Vec<u8>>) {
 /// come from the client's own version pin rather than from an honest peer
 /// declining. rustls names that one `ServerTlsVersionIsDisabledByOurConfig`.
 fn downgrade() {
-    let listener = TcpListener::bind(("0.0.0.0", 0)).expect("a listening port");
+    let listener = TcpListener::bind((HOST_BIND, 0)).expect("a listening port");
     println!("port downgrade {}", listener.local_addr().expect("bound").port());
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -294,30 +343,42 @@ fn downgrade() {
     });
 }
 
-fn answer(stream: TcpStream, config: Arc<ServerConfig>, body: &[u8]) {
-    let Ok(conn) = ServerConnection::new(config) else {
-        return;
-    };
-    let mut tls = StreamOwned::new(conn, stream);
+/// One request, one response — over TLS with a config, in the clear without.
+fn answer(stream: TcpStream, config: Option<Arc<ServerConfig>>, with: &Answer) {
+    match config {
+        Some(config) => {
+            let Ok(conn) = ServerConnection::new(config) else {
+                return;
+            };
+            let mut tls = StreamOwned::new(conn, stream);
+            let _ = exchange(&mut tls, with);
+            let _ = tls.sock.shutdown(std::net::Shutdown::Write);
+        }
+        None => {
+            let mut plain = stream;
+            let _ = exchange(&mut plain, with);
+            let _ = plain.shutdown(std::net::Shutdown::Write);
+        }
+    }
+}
+
+/// Read one request head and write the answer. The head is read a byte at a
+/// time and bounded: the peer is untrusted and may never send the blank line.
+fn exchange(io: &mut (impl Read + Write), with: &Answer) -> std::io::Result<()> {
     let mut request = Vec::new();
     let mut byte = [0u8; 1];
     while !request.ends_with(b"\r\n\r\n") {
-        match tls.read(&mut byte) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => request.push(byte[0]),
+        if io.read(&mut byte)? == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
+        request.push(byte[0]);
         if request.len() > 8192 {
-            return;
+            return Err(std::io::ErrorKind::InvalidData.into());
         }
     }
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    if tls.write_all(head.as_bytes()).is_err() {
-        return;
+    io.write_all(with.head().as_bytes())?;
+    if let Answer::Body(body) = with {
+        io.write_all(body)?;
     }
-    let _ = tls.write_all(body);
-    let _ = tls.flush();
-    let _ = tls.sock.shutdown(std::net::Shutdown::Write);
+    io.flush()
 }

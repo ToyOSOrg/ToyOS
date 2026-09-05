@@ -24,14 +24,16 @@ const HOST_VIEW_OF_HOST: &str = "127.0.0.1";
 const CA_ON_ROOT: &str = "etc/https-judge-ca.pem";
 const CA_IN_GUEST: &str = "/system/etc/https-judge-ca.pem";
 
-/// Every arm of the judge: the port role the server prints, and the one line
-/// the client must answer with. `ok` is the only one whose line is not fixed
-/// here — it carries the body's own digest.
+/// Every refusal arm: the port role the server prints, and the one line the
+/// client must answer with. `ok` is elsewhere — its line carries the digest.
 const REFUSALS: &[(&str, &str)] = &[
     ("wrongname", "https_fetch: refused hostname-mismatch"),
     ("expired", "https_fetch: refused certificate-expired"),
     ("tls12", "https_fetch: refused tls12-refused"),
     ("downgrade", "https_fetch: refused downgrade-refused"),
+    // A valid TLS server whose `302` names a cleartext URL: the peer chooses
+    // the second hop, so only `https_only` stands between it and plaintext.
+    ("redirect", "https_fetch: refused plain-http"),
 ];
 
 pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
@@ -61,12 +63,13 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let config = compile::repo_root().join("tests/netcase");
     let mut guest = QemuInstance::boot_with_options(&config, &[], &bins, options);
     let mut console = guest.boot_log().to_string();
-    let _ = super::qemu::await_marker(
+    super::qemu::await_marker(
         &mut guest,
         &mut console,
         "netd: ready, at most ",
         "netd to come up",
-    );
+    )
+    .map_err(|e| format!("netd never came up, so no fetch below means anything: {e}"))?;
 
     let ok_line = format!(
         "https_fetch: ok bytes={} sha256={}",
@@ -98,9 +101,10 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
     lines.push(format!("unknown-authority: {unknown}"));
 
+    let cleartext = server.port("plain")?;
     let plain = run_guest(
         &mut guest,
-        &format!("test_rs_https_fetch http://{GUEST_VIEW_OF_HOST}:{good}/ --ca {CA_IN_GUEST}"),
+        &format!("test_rs_https_fetch http://{GUEST_VIEW_OF_HOST}:{cleartext}/ --ca {CA_IN_GUEST}"),
     )?;
     if plain != "https_fetch: refused plain-http" {
         return Err(format!("a plain http:// fetch answered {plain:?}"));
@@ -148,8 +152,7 @@ fn run_guest(guest: &mut QemuInstance, command: &str) -> Result<String, String> 
     answer(&result.stdout).ok_or_else(|| format!("{command} printed no verdict:\n{}", result.stdout))
 }
 
-/// The one line the program is contracted to print, taken from a capture that
-/// may also carry a daemon's.
+/// The one line the program prints, out of a capture that may carry a daemon's.
 fn answer(stdout: &str) -> Option<String> {
     stdout
         .lines()
