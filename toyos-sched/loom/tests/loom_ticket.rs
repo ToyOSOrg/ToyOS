@@ -12,7 +12,7 @@ use toyos_sched_loom::cpu::{CpuHandle, CpuHandles};
 use toyos_sched_loom::mailbox::{mailbox, MailboxConsumer};
 use toyos_sched_loom::model::{model, wait_list, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0};
 use toyos_sched_loom::task::{Claim, TaskKey, TaskShared, TaskState, WaitClass, WakeCause, WakeReason};
-use toyos_sched_loom::waitq::{Cancelled, Commit, CurrentTask, WaitList, WaitQueue};
+use toyos_sched_loom::waitq::{wake_direct, Cancelled, Commit, CurrentTask, WaitList, WaitQueue};
 use toyos_sched_loom::model::Kicks;
 
 type Queue = WaitQueue<Msg, LoomLock<WaitList<Msg>>>;
@@ -266,6 +266,11 @@ fn cancel_and_wake_agree_on_who_won() {
         };
 
         let cancelled = ticket.cancel();
+        assert!(
+            !waiter.is_waiting(),
+            "a withdrawal must leave the task registrable at once, before any \
+             waker has finished: the one-queue flag is still set ({cancelled:?})",
+        );
         let woken = waker.join().unwrap();
         let msgs = drain(&mut rx, &world.preempt);
 
@@ -276,5 +281,42 @@ fn cancel_and_wake_agree_on_who_won() {
         assert!(msgs.is_empty(), "a pre-park claim posts nothing: {msgs:?}");
         assert_eq!(waiter.state(), TaskState::Running(CPU0));
         assert!(world.queue.is_empty());
+    });
+}
+
+/// `completion::wait_inner`'s loop against the wake path the kernel uses: a
+/// cancel and the next iteration's registration, racing `wake_direct`, whose
+/// claim never touches the list.
+#[test]
+fn the_iteration_after_a_cancel_may_register_again() {
+    model(|| {
+        let (world, mut rx) = world();
+        let waiter = task(1);
+        let ticket = world.queue.prepare_wait(&CurrentTask::new(&waiter, CPU0));
+
+        let waker = {
+            let world = world.clone();
+            let waiter = waiter.clone();
+            loom::thread::spawn(move || {
+                wake_direct(
+                    &waiter,
+                    WakeCause::new(WakeReason::Woken),
+                    &world.cpus,
+                    &world.kicks,
+                    &RemoteGuard,
+                )
+            })
+        };
+
+        ticket.cancel();
+        world
+            .queue
+            .prepare_wait(&CurrentTask::new(&waiter, CPU0))
+            .cancel();
+
+        waker.join().unwrap();
+        drain(&mut rx, &world.preempt);
+        assert!(!waiter.is_waiting(), "the second withdrawal left the flag set");
+        assert!(world.queue.is_empty(), "no registration is left behind");
     });
 }

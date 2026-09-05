@@ -563,7 +563,7 @@ toyos-sched/loom/tests/loom_mailbox.rs 85 0
 toyos-sched/loom/tests/loom_push.rs 88 1
 toyos-sched/loom/tests/loom_retire.rs 125 0
 toyos-sched/loom/tests/loom_sleep.rs 38 0
-toyos-sched/loom/tests/loom_ticket.rs 30 0
+toyos-sched/loom/tests/loom_ticket.rs 33 0
 toyos-sched/sim/src/choice.rs 61 0
 toyos-sched/sim/src/explore.rs 108 0
 toyos-sched/sim/src/hw_impl.rs 43 0

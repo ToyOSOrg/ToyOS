@@ -33,16 +33,15 @@ already said
 console only from /log/2026-08-15-181448_0010.log`. The panic is 4.7 s after
 that, in logd's next `Poller::submit`.
 
-**It is not the path
-`issues/kernel/keyboard-flood-panics-blocked-read.md` records.** That one
-reaches the same assertion through
-`scheduler::wait_until::<kernel::keyboard::has_data>` from `sys_read`, on a
-thread blocked on stdin under thousands of injected key events a second. This
-one has no keyboard in it at all: the waiter is a ring's completion queue and
-the caller is `kernel::io_uring::enter`. Same invariant
-(`toyos-sched/src/waitq.rs:124`, over `set_waiting()` in
-`toyos-sched/src/task.rs`), two ways in — so the flag being left set is the
-subject, and neither site is.
+**The stimulus is not the site.** The same assertion was recorded twice more
+from a keyboard flood into a thread blocked in `sys_read` on stdin, reaching it
+through `scheduler::wait_until::<kernel::keyboard::has_data>`: `Profile::MetalUsb`
+under a few thousand injected key events a second, once with the i8042 present
+and once with `q35,i8042=off`, so both the PS/2 and the USB delivery paths reach
+it, and the victim both times was the in-guest runner blocked on stdin at
+`===READY===`. It does not reproduce at ordinary typing rates. Two ways in, one
+subject: a `waiting` flag left set by a previous wait of that thread, over
+`set_waiting()` in `toyos-sched/src/task.rs`.
 
 What the assertion says happened: this thread's task word still carried
 *waiting* when `enter` prepared a new wait. `enter`'s loop consumes its ticket
@@ -88,3 +87,18 @@ every exit from `completion::wait` either commits (and `pass_block` finishes
 the registration) or cancels (which dequeues) — but "smaller" is not "proved
 absent", and no reproduction has been run against the new shape. Whoever sees
 it again should re-read this: the backtrace will not look like the one above.
+
+## One way in, found and closed
+
+`WaitQueue::wake_one`/`wake_all` popped a waiter and cleared its flag as two
+steps, so a waiter withdrawing in between found `dequeue` empty and its own
+flag still set; `toyos-sched/loom/tests/loom_ticket.rs`'s
+`cancel_and_wake_agree_on_who_won` reds on that schedule. Both clear under the
+list lock now. It is a hole in the primitive rather than the capture above's
+path — `scheduler::wake_sched` claims through `wake_direct`, and no kernel
+caller of either reaches the list at all — so the entry stays open on every
+path that has not been ruled out.
+
+**Exit condition.** Reproducing the keyboard route deliberately, which means a
+guest-side key generator rather than a host-side flood, and then accounting for
+whichever wait left the flag set.

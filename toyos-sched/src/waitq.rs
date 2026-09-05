@@ -207,10 +207,9 @@ impl<M: SchedMsg, L: LeafLock<WaitList<M>>> WaitQueue<M, L> {
         preempt: &impl PreemptGuard,
     ) -> usize {
         loop {
-            let Some(shared) = self.list.with(|l| l.waiters.pop_front()) else {
+            let Some(shared) = self.pop_waiter() else {
                 return 0;
             };
-            shared.clear_waiting();
             match shared.claim_wake() {
                 Claim::Parked(cpu) => {
                     deliver_wake(&shared, cpu, cause, cpus, kicker, preempt);
@@ -235,10 +234,9 @@ impl<M: SchedMsg, L: LeafLock<WaitList<M>>> WaitQueue<M, L> {
     ) -> usize {
         let mut woken = 0;
         loop {
-            let Some(shared) = self.list.with(|l| l.waiters.pop_front()) else {
+            let Some(shared) = self.pop_waiter() else {
                 return woken;
             };
-            shared.clear_waiting();
             match shared.claim_wake() {
                 Claim::Parked(cpu) => {
                     deliver_wake(&shared, cpu, cause, cpus, kicker, preempt);
@@ -250,19 +248,29 @@ impl<M: SchedMsg, L: LeafLock<WaitList<M>>> WaitQueue<M, L> {
         }
     }
 
+    /// Off the list and registrable again in one critical section: a flag that
+    /// outlives its removal is one the waiter's own next `prepare_wait` finds.
+    fn pop_waiter(&self) -> Option<Arc<TaskShared<M>>> {
+        self.list.with(|l| {
+            let waiter = l.waiters.pop_front()?;
+            waiter.clear_waiting();
+            Some(waiter)
+        })
+    }
+
     /// Remove a waiter without waking it — the local deadline path, which has
     /// already won the claim on its own CPU. Idempotent.
     pub fn dequeue(&self, shared: &Arc<TaskShared<M>>) -> bool {
         let key = shared.key();
-        let removed = self.list.with(|l| {
+        self.list.with(|l| {
             let before = l.waiters.len();
             l.waiters.retain(|w| w.key() != key);
-            before != l.waiters.len()
-        });
-        if removed {
-            shared.clear_waiting();
-        }
-        removed
+            let removed = before != l.waiters.len();
+            if removed {
+                shared.clear_waiting();
+            }
+            removed
+        })
     }
 }
 
@@ -478,9 +486,7 @@ impl<'q, M: SchedMsg, L: LeafLock<WaitList<M>>> WaitTicket<'q, M, L> {
                 },
             ),
             ParkOutcome::AlreadyWoken => {
-                // Every claim path pops the waiter first; this only tidies up
-                // after a claim that did not (none today, and cheap insurance
-                // against a future one).
+                // `wake_direct` claims without popping: this is the withdrawal.
                 self.queue.dequeue(&self.shared);
                 Commit::AlreadyWoken
             }
