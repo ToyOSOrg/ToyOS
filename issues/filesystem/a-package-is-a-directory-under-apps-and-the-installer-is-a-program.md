@@ -48,17 +48,20 @@ track's job.
   is followed once.
 - **Running is the desktop's.** gbae opens a window through winit and
   softbuffer and plays through cpal, all three on the forks the SDK release
-  branches carry. It reads a ROM the user chose, from `/home/<user>`, through
-  the file picker. The first run is the milestone's end.
+  branches carry. It lists a directory itself and reads the ROM the user picks
+  out of it. The first run is the milestone's end.
 
 ## Stages, in order
 
-1. `pkg install <file>` from a local archive on the boot stick, with the
-   digest checked against a `SHA256SUMS` beside it: the layout, the
-   manifest, the launcher row, the consent prompt, removal. Judged in QEMU
-   by the harness placing the archive on the image and reading `/apps`
-   back off the DATA volume after the guest is gone. The archive is the
-   real gbae release asset, so this stage already runs gbae once.
+1. Landed. `pkg install <file>`, `pkg remove`, `pkg list`, judged by
+   `pkg_install_gbae`: gbae v0.2.0's own release archive verified against its
+   `SHA256SUMS`, unpacked into `/apps/gbae`, launched, and 1,621,313 bytes read
+   back off the DATA volume with the guest gone. **What a package holds is the
+   image's `[apps]` row, never its own `manifest.toml`** — that file names which
+   of the directory's binaries a launch starts and nothing else, so a writable
+   `/apps` cannot name a device or a right. gbae needs no `HOME`: its keyboard
+   layout is `toyos/src/surface.rs`'s fixed `LAYOUT_CONFIG`, whose directory the
+   kernel creates at boot, and it opens no file picker.
 2. The HTTPS fetch: TLS client under `pkg`, the GitHub redirect, the sums
    file from the same release. Judged in QEMU against a server the harness
    runs on the host in Rust, then once against GitHub itself, by hand, with
