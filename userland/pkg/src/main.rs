@@ -133,7 +133,7 @@ fn write_package(
 ) -> Result<(), String> {
     match write_all(dirs, files, manifest, text) {
         Ok(()) => Ok(()),
-        Err(why) => match remove_tree(Path::new(dir), 0) {
+        Err(why) => match remove_tree(Path::new(dir)) {
             Ok(()) => Err(format!("{why}; {dir} was taken back down")),
             Err(swept) => Err(format!("{why}; {swept}")),
         },
@@ -184,11 +184,11 @@ fn remove(name: &str) -> Result<(), String> {
             return Err(format!("pkg: {manifest} calls itself {:?}", p.name))
         }
         Some(p) => {
-            remove_tree(Path::new(&dir), 0)?;
+            remove_tree(Path::new(&dir))?;
             println!("pkg: removed {name} {}", p.version);
         }
         None if fs::metadata(&dir).is_ok() => {
-            remove_tree(Path::new(&dir), 0)?;
+            remove_tree(Path::new(&dir))?;
             println!("pkg: removed {dir}, which carried no manifest this installer wrote");
         }
         None => return Err(format!("pkg: {name} is not installed — there is no {dir}")),
@@ -197,36 +197,42 @@ fn remove(name: &str) -> Result<(), String> {
 }
 
 /// How deep this walk goes. Policy on the primitive: any process can plant a
-/// tree under `/apps/<name>`, so an unbounded recursion is that process
-/// choosing this program's stack depth.
-const MAX_REMOVE_DEPTH: usize = 32;
-
-/// Delete a directory and everything under it, depth first.
+/// Delete a directory and everything under it.
 ///
 /// **Not `fs::remove_dir_all`**: that one empties a directory and leaves it
 /// (`issues/filesystem/remove-dir-all-empties-a-directory-and-leaves-it.md`),
 /// and a package whose directory survives its removal is a name that can never
 /// be installed again.
-fn remove_tree(dir: &Path, depth: usize) -> Result<(), String> {
-    if depth > MAX_REMOVE_DEPTH {
-        return Err(format!(
-            "pkg: {} is more than {MAX_REMOVE_DEPTH} directories deep; the removal stopped there",
-            dir.display()
-        ));
-    }
-    let entries = fs::read_dir(dir).map_err(|e| format!("pkg: cannot read {}: {e}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("pkg: cannot read {}: {e}", dir.display()))?;
-        let path = entry.path();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            remove_tree(&path, depth + 1)?;
-        } else {
-            fs::remove_file(&path)
-                .map_err(|e| format!("pkg: cannot remove {}: {e}", path.display()))?;
+///
+/// **An explicit stack and no depth bound.** Recursion put the walk's depth in
+/// the gift of whoever wrote under `/apps/<name>`, and a bound only moved the
+/// harm: a refusal past it leaves the directory standing, which is the
+/// unfreeable name this exists to prevent. What is bounded is memory, by the
+/// number of directories rather than by anything a single path can spell.
+fn remove_tree(dir: &Path) -> Result<(), String> {
+    let mut unvisited = vec![dir.to_path_buf()];
+    // Every directory, each one before the ones inside it, so removing in
+    // reverse always meets an empty one.
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(at) = unvisited.pop() {
+        let entries =
+            fs::read_dir(&at).map_err(|e| format!("pkg: cannot read {}: {e}", at.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("pkg: cannot read {}: {e}", at.display()))?;
+            let path = entry.path();
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                unvisited.push(path);
+            } else {
+                fs::remove_file(&path)
+                    .map_err(|e| format!("pkg: cannot remove {}: {e}", path.display()))?;
+            }
         }
+        found.push(at);
     }
-    fs::remove_dir(dir).map_err(|e| format!("pkg: cannot remove {}: {e}", dir.display()))
+    for at in found.iter().rev() {
+        fs::remove_dir(at).map_err(|e| format!("pkg: cannot remove {}: {e}", at.display()))?;
+    }
+    Ok(())
 }
 
 fn list() -> Result<(), String> {
@@ -281,9 +287,11 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// No depth a tree can be planted at leaves the name behind: 33 was the
+    /// first the old bound refused, and 256 is far past any stack it had.
     #[test]
-    fn a_tree_deeper_than_the_bound_is_refused_and_one_at_it_is_removed() {
-        for (depth, deep) in [(MAX_REMOVE_DEPTH, false), (MAX_REMOVE_DEPTH + 2, true)] {
+    fn a_tree_of_any_depth_comes_off_and_leaves_no_directory() {
+        for depth in [33usize, 256] {
             let root = scratch(&format!("depth{depth}"));
             let mut at = root.clone();
             for _ in 0..depth {
@@ -291,16 +299,12 @@ mod tests {
             }
             fs::create_dir_all(&at).expect("a deep tree");
             fs::write(at.join("leaf"), b"x").expect("a leaf");
+            // A sibling branch as well, so the walk is a tree and not a chain.
+            fs::create_dir_all(root.join("wide/er")).expect("a second branch");
+            fs::write(root.join("wide/er/leaf"), b"y").expect("a second leaf");
 
-            let got = remove_tree(&root, 0);
-            if deep {
-                let why = got.expect_err("a tree past the bound was walked");
-                assert!(why.contains("directories deep"), "{why}");
-            } else {
-                got.expect("a tree at the bound");
-                assert!(!root.exists(), "the tree at the bound survived");
-            }
-            let _ = fs::remove_dir_all(&root);
+            remove_tree(&root).unwrap_or_else(|e| panic!("depth {depth}: {e}"));
+            assert!(!root.exists(), "a tree {depth} deep survived its removal");
         }
     }
 
