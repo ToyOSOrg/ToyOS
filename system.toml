@@ -23,9 +23,21 @@ assets = ["assets"]
 # the thing that needed fixing.
 start = ["logd", "compositor", "soundd", "netd", "filepicker"]
 
+# What every program launched out of `/apps` holds, whatever its own directory
+# says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
+# a row read out of one would be a directory deciding what the machine hands
+# out; this is the image's answer, one for all of them. Connectors only —
+# `devices` and `syscap` have no spelling here, so nothing installed claims
+# hardware or enters the RT band.
+[apps]
+receives = ["compositor", "soundd", "filepicker"]
+
 [programs]
 input-test = {}
 proctest = {}
+# The installer. It holds nothing: it writes under `/apps` because `/apps` is
+# writable to it, and a row that gave it more would make that untrue.
+pkg = {}
 toyos-ld = { path = "toyos-ld" }
 toyos-cc = { path = "toyos-cc" }
 # cargo = { path = "userland/cargo", no-default-features = true }

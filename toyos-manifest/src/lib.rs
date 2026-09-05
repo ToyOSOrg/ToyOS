@@ -22,7 +22,13 @@
 //! syscap <right>            a right on the SysCap dup init endows
 //! init-serve <name>         a name init serves itself
 //! start <name>              init starts this program at boot
+//! app-receive <name>        a connector every program launched from /apps holds
 //! ```
+//!
+//! [`package`] is the other half: what an installed package says about itself,
+//! which is which of its own binaries a launch starts and never what it holds.
+
+pub mod package;
 
 /// Where ROOT carries it, without a leading slash — that volume's own
 /// spelling. [`GUEST_PATH`] is what a process opens.
@@ -121,6 +127,11 @@ pub struct Manifest {
     /// Names init serves itself. init is in every image and is no `[programs]`
     /// key, so these have no declaration to come from.
     pub init_serves: Vec<String>,
+    /// The namespace every program launched from `/apps` is given: connectors,
+    /// and nothing else. A package directory is writable, so this row is the
+    /// image's rather than the package's — which is why a device class and a
+    /// `syscap` right have no spelling on the package side at all.
+    pub apps: Vec<String>,
     /// Program names, in the order `[boot] start` gave them — which orders
     /// nothing, because every port exists before any server runs.
     pub start: Vec<String>,
@@ -129,6 +140,17 @@ pub struct Manifest {
 impl Manifest {
     pub fn program(&self, name: &str) -> Option<&Program> {
         self.programs.iter().find(|p| p.name == name)
+    }
+
+    /// The row a launch of an installed package is built from: synthesized,
+    /// because a package has no `[programs]` key to hold one.
+    pub fn app_row(&self, name: &str, program: &str) -> Program {
+        Program {
+            name: name.to_string(),
+            path: program.to_string(),
+            receives: self.apps.clone(),
+            ..Program::default()
+        }
     }
 
     /// Every `serves` name in the whole manifest, not only the ones [`start`]
@@ -198,6 +220,10 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         check("init", "init_serves", name)?;
         out.push_str(&format!("init-serve {name}\n"));
     }
+    for name in &manifest.apps {
+        check("init", "apps", name)?;
+        out.push_str(&format!("app-receive {name}\n"));
+    }
     for name in &manifest.start {
         check("init", "start", name)?;
         out.push_str(&format!("start {name}\n"));
@@ -256,6 +282,7 @@ pub fn parse(text: &str) -> Manifest {
                 });
             }
             "init-serve" => manifest.init_serves.push(rest.to_string()),
+            "app-receive" => manifest.apps.push(rest.to_string()),
             "start" => manifest.start.push(rest.to_string()),
             "" => {}
             _ => {
@@ -311,8 +338,22 @@ mod tests {
                 },
             ],
             init_serves: vec!["launcher".into()],
+            apps: vec!["compositor".into(), "soundd".into()],
             start: vec!["compositor".into(), "soundd".into()],
         }
+    }
+
+    /// **An installed package holds connectors and nothing else**, and by the
+    /// row's construction rather than by a check.
+    #[test]
+    fn a_package_row_is_connectors_and_nothing_else() {
+        let row = sample().app_row("gbae", "/apps/gbae/gbae");
+        assert_eq!(row.receives, ["compositor", "soundd"]);
+        assert!(row.devices.is_empty());
+        assert!(row.syscap.is_empty());
+        assert!(row.serves.is_empty());
+        assert!(row.provides.is_empty());
+        assert_eq!(row.path, "/apps/gbae/gbae");
     }
 
     /// The one property both halves depend on, and the reason they live here.

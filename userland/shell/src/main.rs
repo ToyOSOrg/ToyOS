@@ -708,7 +708,12 @@ fn provided() -> &'static [(&'static str, Connector)] {
 
 fn build_command(cmd: &SimpleCommand) -> Option<Command> {
     if cmd.args.is_empty() { return None; }
-    let mut command = Command::new(&cmd.args[0]);
+    // The launcher refuses a path it would have to normalize, and the shell is
+    // the half that knows the cwd.
+    let cwd =
+        env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| String::from("/"));
+    let mut command =
+        Command::new(toyos_manifest::package::launch_path(&cmd.args[0], &cwd));
     command.args(&cmd.args[1..]);
     for (name, connector) in provided() {
         // A duplicate per child: this shell keeps its own for the next one.

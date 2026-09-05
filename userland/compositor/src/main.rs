@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use client::MAX_PENDING_CONNS;
 use toyos::poller::Poller;
+use toyos_manifest::package;
 
 pub const DOUBLE_CLICK_TIME: Duration = Duration::from_millis(400);
 pub const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667); // ~60fps
@@ -59,9 +60,34 @@ pub const MAX_WINDOW_SLOTS: u32 = Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX
 /// the size the software cursor damages.
 pub const CURSOR_PX: u32 = 20;
 
-/// What the launcher offers: the label it shows and the program it starts.
-pub const LAUNCHER_APPS: &[(&str, &str)] =
+/// What the launcher offers before `/apps` is read: the label it shows and the
+/// program it starts.
+pub const BUILT_IN_APPS: &[(&str, &str)] =
     &[("Terminal", "/system/bin/terminal"), ("Files", "/system/bin/files")];
+
+/// The launcher's list: this image's own programs, then every installed
+/// package under `/apps`, by what its `manifest.toml` says.
+///
+/// **Read on every open rather than once**: a package is a directory and
+/// registers with nothing, so the moment it is drawn is the only moment the
+/// list can be current. `package::listed` bounds it.
+pub fn launcher_apps() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> =
+        BUILT_IN_APPS.iter().map(|(l, p)| ((*l).to_string(), (*p).to_string())).collect();
+    let listing: Vec<(String, String)> = match std::fs::read_dir(package::DIR) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_string();
+                let text = std::fs::read_to_string(package::Package::path(&name)).ok()?;
+                Some((name, text))
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    out.extend(package::listed(&listing).into_iter().map(|p| (p.name, p.program)));
+    out
+}
 
 fn main() {
     let mut session = session::Session::start();
