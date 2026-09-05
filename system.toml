@@ -128,6 +128,7 @@ syscap = ["power", "roster"]
 "bin/net" = "/system/bin/toybox"
 "bin/ps" = "/system/bin/toybox"
 "bin/pwd" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"
 "bin/rm" = "/system/bin/toybox"
 "bin/screen" = "/system/bin/toybox"
 "bin/shutdown" = "/system/bin/toybox"

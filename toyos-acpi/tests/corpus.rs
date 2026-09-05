@@ -10,8 +10,9 @@ mod common;
 
 use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
 use toyos_acpi::{
-    dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, rtc_century,
-    Century, MadtEntry, MadtHalt, Phys, Table, TableError, MADT_ENTRIES, MAX_TABLE_LEN,
+    dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, reset_register,
+    rtc_century, Century, MadtEntry, MadtHalt, Phys, Reset, Table, TableError, MADT_ENTRIES,
+    MAX_TABLE_LEN,
 };
 
 const RSDP_AT: u64 = 0x1_0000;
@@ -391,6 +392,7 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                     let _ = hpet_base(m, rsdp_at);
                     let _ = rtc_century(m, rsdp_at);
                     let _ = iapc_boot_arch(m, rsdp_at);
+                    let _ = reset_register(m, rsdp_at);
                     if let Ok(t) = find_table(m, rsdp_at, b"APIC", MADT_ENTRIES) {
                         // Bounded by the table's own length, so a walk that has
                         // stopped advancing reds here instead of hanging: every
@@ -462,4 +464,65 @@ fn the_shared_reader_refuses_what_it_does_not_hold() {
     assert!(!m.readable(0x100, 5));
     assert!(!m.readable(0xff, 1));
     assert_eq!(m.byte(0x102), 3);
+}
+
+/// A FADT declaring `flags`, `gas` and `value`. Table offsets are absolute, so each body index is one less the 36-byte header.
+fn facp(flags: u32, gas: [u8; 12], value: u8) -> Vec<u8> {
+    let mut body = vec![0u8; 129 - 36];
+    body[112 - 36..116 - 36].copy_from_slice(&flags.to_le_bytes());
+    body[116 - 36..128 - 36].copy_from_slice(&gas);
+    body[128 - 36] = value;
+    sdt(b"FACP", 3, &body)
+}
+
+/// A Generic Address Structure. Access size stays 0, which is what QEMU's own reset register declares.
+fn gas(space: u8, bit_width: u8, bit_offset: u8, address: u64) -> [u8; 12] {
+    let mut g = [0u8; 12];
+    g[0] = space;
+    g[1] = bit_width;
+    g[2] = bit_offset;
+    g[4..].copy_from_slice(&address.to_le_bytes());
+    g
+}
+
+fn reset_of(table: &[u8]) -> Result<Reset, TableError> {
+    let head = rsdp(XSDT_AT, 2, 36);
+    let root = xsdt(&[TABLE_AT]);
+    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, table)];
+    reset_register(Machine { regions }, RSDP_AT)
+}
+
+/// The System I/O register, and the four fields that refuse one by name.
+#[test]
+fn a_reset_register_this_kernel_cannot_write_is_refused_by_the_field_that_refused_it() {
+    const SUP: u32 = 1 << 10;
+    let io = gas(1, 8, 0, 0xcf9);
+
+    assert_eq!(reset_of(&facp(SUP, io, 0x0f)), Ok(Reset::Port { port: 0xcf9, value: 0x0f }));
+    assert_eq!(reset_of(&facp(0, io, 0x0f)), Ok(Reset::Unsupported));
+    assert_eq!(reset_of(&facp(SUP, gas(0, 8, 0, 0xcf9), 0x0f)), Ok(Reset::Space(0)));
+    assert_eq!(reset_of(&facp(SUP, gas(2, 8, 0, 0xcf9), 0x0f)), Ok(Reset::Space(2)));
+    assert_eq!(
+        reset_of(&facp(SUP, gas(1, 32, 0, 0xcf9), 0x0f)),
+        Ok(Reset::Field { bit_width: 32, bit_offset: 0 })
+    );
+    assert_eq!(
+        reset_of(&facp(SUP, gas(1, 8, 2, 0xcf9), 0x0f)),
+        Ok(Reset::Field { bit_width: 8, bit_offset: 2 })
+    );
+    assert_eq!(
+        reset_of(&facp(SUP, gas(1, 8, 0, 0x1_0000), 0x0f)),
+        Ok(Reset::Address(0x1_0000))
+    );
+}
+
+/// A table stopping before the reset fields is a length refusal, never `Unsupported`.
+#[test]
+fn a_fadt_too_short_for_the_reset_fields_is_a_length_refusal() {
+    let mut short = facp(1 << 10, gas(1, 8, 0, 0xcf9), 0x0f);
+    declare_len(&mut short, 128);
+    assert_eq!(
+        reset_of(&short).err(),
+        Some(TableError::Length { declared: 128, needed: 129 })
+    );
 }

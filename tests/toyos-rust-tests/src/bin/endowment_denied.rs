@@ -116,6 +116,7 @@ const APPLET_NEEDS: &[(&str, &[&str])] = &[
     ("mv", &[]),
     ("ps", &["syscap roster"]),
     ("pwd", &[]),
+    ("reboot", &["syscap power"]),
     ("rm", &[]),
     ("shutdown", &["syscap power"]),
     ("tone", &["receive soundd"]),
@@ -123,7 +124,7 @@ const APPLET_NEEDS: &[(&str, &[&str])] = &[
 
 /// Every authority this image hands an applet that has no use for it: the exact
 /// size of `issues/isolation/toybox-is-one-row-for-nineteen-applets.md` here. It
-/// shrinks when the row is split per authority class and never grows.
+/// shrinks when the row is split, and grows by one for every applet added.
 const DECLARED_OVER_GRANTS: &[&str] = &[
     "cat: receive soundd",
     "cp: receive soundd",
@@ -136,6 +137,7 @@ const DECLARED_OVER_GRANTS: &[&str] = &[
     "mv: receive soundd",
     "ps: receive soundd",
     "pwd: receive soundd",
+    "reboot: receive soundd",
     "rm: receive soundd",
     "shutdown: receive soundd",
 ];

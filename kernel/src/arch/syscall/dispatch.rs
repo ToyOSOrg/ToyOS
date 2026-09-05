@@ -39,7 +39,7 @@ use super::ipc::{
     sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe, sys_pipe_map,
     sys_port_create, sys_shm_create, sys_shm_map,
 };
-use super::machine::{sys_log_read, sys_sched_info, sys_shutdown, sys_sysinfo};
+use super::machine::{sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo};
 #[cfg(feature = "test-actuators")]
 use super::machine::SYSINFO_BOUND_LOWERED;
 use super::proc::{
@@ -167,6 +167,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_delete(&path)
         }
         SYS_SHUTDOWN => sys_shutdown(RawHandle(a1 as u32)),
+        SYS_REBOOT => sys_reboot(RawHandle(a1 as u32)),
         SYS_CHDIR => {
             let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             sys_chdir(&path)

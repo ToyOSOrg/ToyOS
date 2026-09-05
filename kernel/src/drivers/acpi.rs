@@ -12,10 +12,12 @@
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile};
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use crate::log;
 use crate::DirectMap;
-use toyos_acpi::{Century, MadtEntry, Phys, CMOS_RAM, MADT_ENTRIES, SDT_HEADER_LEN, SDT_REVISION};
+use toyos_acpi::{
+    Century, MadtEntry, Phys, Reset, CMOS_RAM, MADT_ENTRIES, SDT_HEADER_LEN, SDT_REVISION,
+};
 
 pub use toyos_acpi::{IoApicEntry, SourceOverride, TableError};
 
@@ -81,6 +83,10 @@ const SLP_EN: u16 = 1 << 13;
 static PM1A_CNT_PORT: AtomicU16 = AtomicU16::new(0);
 static SLP_TYPA: AtomicU16 = AtomicU16::new(0);
 
+/// The FADT's reset register as `port << 8 | value`, sentinelled because port 0 with value 0 is a register a table may name.
+static RESET_REG: AtomicU32 = AtomicU32::new(NO_RESET);
+const NO_RESET: u32 = u32::MAX;
+
 /// Log a refusal with the reason, and hand the caller `None`.
 // Never a panic: a machine owner needs to see the reason, not have the kernel die on a firmware defect.
 fn refuse<T>(what: &str, error: TableError) -> Option<T> {
@@ -100,9 +106,12 @@ pub fn find_ecam_base(rsdp_addr: u64) -> Option<u64> {
     Some(base)
 }
 
-/// Parse FADT and DSDT to prepare for ACPI shutdown.
+/// Parse FADT and DSDT to prepare for ACPI shutdown and for the reset back to firmware.
 // A machine without them keeps booting without soft-off rather than panicking.
 pub fn init_power(rsdp_addr: u64) {
+    // Ahead of the soft-off returns below: a machine with no `\_S5_` can still be handed back to its firmware.
+    init_reset(rsdp_addr);
+
     const FADT_FOR_POWER: usize = toyos_acpi::FADT_PM1A_CNT_BLK + size_of::<u32>();
     const FADT_FOR_X_DSDT: usize = toyos_acpi::FADT_X_DSDT + size_of::<u64>();
 
@@ -183,6 +192,35 @@ pub fn rtc_century_register(rsdp_addr: u64) -> Result<Option<u8>, TableError> {
             Ok(Some(index))
         }
     }
+}
+
+/// Record the FADT's reset register, or say by name why this machine has none.
+fn init_reset(rsdp_addr: u64) {
+    match toyos_acpi::reset_register(DirectPhys, rsdp_addr) {
+        Ok(Reset::Port { port, value }) => {
+            RESET_REG.store(u32::from(port) << 8 | u32::from(value), Ordering::Relaxed);
+            log!("ACPI: reset register SystemIO {port:#x} <- {value:#04x}");
+        }
+        Ok(other) => log!("ACPI: no reset register this kernel writes ({other:?}) — no reboot"),
+        Err(e) => log!("ACPI: FADT unusable for the reset register: {e:?} — no reboot"),
+    }
+}
+
+/// The port and byte [`reboot`] would write, or `None` on a machine whose FADT named neither.
+pub fn reset_register() -> Option<(u16, u8)> {
+    let packed = RESET_REG.load(Ordering::Relaxed);
+    (packed != NO_RESET).then_some(((packed >> 8) as u16, packed as u8))
+}
+
+/// Return the machine to firmware through the FADT's reset register.
+// No fallback: 0xCF9, the keyboard controller and anything else are written only where a table named them.
+pub fn reboot(port: u16, value: u8) -> ! {
+    crate::drivers::serial::flush_final();
+
+    // SAFETY: the pair comes only from `init_reset`'s decode, which admits an 8-bit System I/O register and nothing else.
+    unsafe { crate::arch::cpu::outb(port, value) };
+
+    crate::arch::cpu::halt();
 }
 
 /// Trigger ACPI S5 (soft-off) shutdown.

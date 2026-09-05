@@ -7,58 +7,40 @@ opened: 2026-09-03
 # The T14 boots ToyOS unattended and reports through a log partition
 
 The T14 stopped being a GitHub Actions runner (owner ruling, 2026-09-03). What
-the tracker owes "on hardware" moves to this loop: a driver on the machine's
-Linux side flashes an image to the machine's own ToyOS partitions, sets one
-boot, reboots, and reads the verdict back off a partition. **There is no serial
-channel**: the 16550 loopback reads `0xFF`
+the tracker owes "on hardware" moves to this loop: a driver on this Mac reaches
+the machine over Tailscale, flashes an image to the USB stick left plugged into
+it, sets one boot, reboots, and reads the verdict back off a partition. **There
+is no serial channel**: the 16550 loopback reads `0xFF`
 (`issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md`), so the log
 partition and the screen are the only two channels there are, and the loop is
 built on the first.
 
+Owner rulings, 2026-09-05: the USB stick is ToyOS's disk for the first
+milestone and the internal NVMe is never written, mounted or stamped;
+passwordless sudo on the T14, scoped to exactly the commands the driver runs, is
+approved; the machine is reached over Tailscale.
+
 ## Stages
 
-1. **The T14 dual-boots.** Linux keeps the disk and runs the loop's driver;
-   ToyOS gets ESP entries and its own partitions, in the shape
-   `issues/filesystem/storage-is-layers-and-a-role-is-a-filesystem.md` gives
-   Block and Volume. Blocked on that track's root filesystem PR 1 — the
-   internal-disk boot — which is in flight.
-2. **One boot into ToyOS, set from Linux** (`efibootmgr --bootnext`, so a
-   failure to come back is one reboot and not a machine stuck in ToyOS). ToyOS
-   runs its job, writes the log to the log partition, and reboots. **The
-   reboot path does not exist**: `kernel/src/drivers/acpi.rs`'s `shutdown` is
-   ACPI S5 through `PM1a_CNT` and there is no reset path in this kernel — no
-   FADT reset register, no other. Something that returns the machine to the
-   firmware is stage 2's own work.
-
-   The table half is answered: QEMU 11.1.0's q35 FADT sets `RESET_REG_SUP`
-   (flags bit 10 of `0x000084a5` at offset 112) and carries RESET_REG =
-   SystemIO 8-bit `0x0cf9` with RESET_VALUE `0x0f`, in
-   `toyos-acpi/fixtures/qemu-11.1.0/facp.bin` bytes 112..=128; QEMU writes it
-   at `hw/i386/acpi-build.c:224` and acts on bit 2 of that port with
-   `qemu_system_reset_request` at `hw/isa/lpc_ich9.c:663`. **Reaching it from
-   userland needs an ABI word and so lands alone**: `SYS_SHUTDOWN` (19) is the
-   only power syscall and `Rights::POWER` (bit 10) its only bit, so the word is
-   `SYS_REBOOT` (116) on that same right, in `toyos-abi/src/syscall.rs` with its
-   `SysCap` wrapper, and it is its own pull request. `/system/bin/reboot` and
-   the test runner's `run reboot` do not exist yet and are built once it lands.
-
-   A chipset watchdog is a later stage, judged on the machine rather than in
-   QEMU. The T14 is Tiger Lake-LP — LPC `8086:a082`, SMBus `8086:a0a3` — and
-   Linux 6.8.0-138's `lpc_ich` claims neither id among its 237 PCI aliases: the
-   TCO block is reached through the SMBus controller's TCOBASE, which is why
+1. **The driver**, a small Rust program run on this Mac, no Python: assert the
+   pre-flash gate on the image, assert the stick's identity over SSH, flash it,
+   set `efibootmgr --bootnext` so a failure to come back is one reboot and not a
+   machine stuck in ToyOS, reboot, wait, mount the log partition, and answer
+   pass or fail from the log's verdict line. Every SSH command is one of a fixed
+   list and the sudoers rule permits exactly that list. The harness's `metal`
+   profile is its consumer.
+2. **A chipset watchdog**, so a wedged kernel is reset without a hand on the
+   power button. The T14 is Tiger Lake-LP — LPC `8086:a082`, SMBus `8086:a0a3` —
+   and Linux 6.8.0-138's `lpc_ich` claims neither id among its 237 PCI aliases:
+   the TCO block is reached through the SMBus controller's TCOBASE, which is why
    `i2c_i801` is the module claiming `8086:a0a3` here. QEMU's q35 models ICH9's
    PMBASE+`0x60` block instead (`hw/acpi/ich9_tco.c`,
-   `include/hw/southbridge/ich9.h:205`) and so cannot judge that path at all;
-   the register oracle is Intel's Tiger Lake-LP PCH datasheet and the judge is
-   the machine, which carries no watchdog today — no `/sys/class/watchdog`, no
-   WDAT among the firmware's tables. **The milestone does not wait on it**: a
-   finished run reboots itself, and until the watchdog exists a hang costs a
-   hand on the power button.
-3. **The driver**, a small Rust program on the Linux side, no Python: flash the
-   image to the ToyOS partitions, set bootnext, reboot, wait, mount the log
-   partition, and answer pass or fail from the log's verdict line. The
-   harness's `metal` profile is its consumer.
-4. **The measurements owed on hardware become its jobs**, by record:
+   `include/hw/southbridge/ich9.h:205`), so the register reference is Intel's
+   Tiger Lake-LP PCH datasheet and the judge is the machine, which carries no
+   watchdog today — no `/sys/class/watchdog`, no WDAT among the firmware's
+   tables. The budget is five minutes. **The milestone does not wait on it**: a
+   finished run reboots itself.
+3. **The measurements owed on hardware become its jobs**, by record:
    `issues/kernel/the-split-window-tlb-cost-is-unpriced.md`,
    `issues/kernel/ap-control-registers-inherit-init.md`,
    `issues/kernel/ap-tsc-trail-is-assumed-and-never-checked.md`,
@@ -71,5 +53,5 @@ built on the first.
    (`issues/kernel/the-iommu-refuses-nothing-yet.md` states the first two).
    `issues/hardware/a-metal-session-runs-a-pre-flash-gate-first.md` is the
    loop's admission check: no image is flashed that has not passed it.
-5. **The first milestone is one unattended boot with a log back** — flashed,
+4. **The first milestone is one unattended boot with a log back** — flashed,
    booted, verdict read, machine returned to Linux, nobody in the room.

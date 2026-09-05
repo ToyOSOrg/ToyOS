@@ -6,8 +6,8 @@ mod common;
 use common::Machine;
 use toyos_acpi::{
     century_of, dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries,
-    rtc_century, Century, IoApicEntry, MadtEntry, SourceOverride, TableError, FADT_PM1A_CNT_BLK,
-    MADT_ENTRIES,
+    reset_register, rtc_century, Century, IoApicEntry, MadtEntry, Reset, SourceOverride,
+    TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
 };
 
 /// Where each table sat in that guest's physical memory. The XSDT's entries
@@ -101,6 +101,15 @@ fn the_fadt_names_the_power_block_and_the_dsdt() {
     let fadt = find_table(m, RSDP, b"FACP", FADT_PM1A_CNT_BLK + 4).expect("FADT");
     assert_eq!(fadt.u32_at(FADT_PM1A_CNT_BLK), Some(0x604));
     assert_eq!(dsdt_address(&fadt), 0x7fb7_a000);
+}
+
+/// `ACPI: reset register SystemIO 0xcf9 <- 0x0f`, against QEMU 11.1.0's own
+/// source: `hw/i386/acpi-build.c:222-226` publishes `AML_AS_SYSTEM_IO`,
+/// `bit_width` 8, `ICH9_RST_CNT_IOPORT` (`include/hw/southbridge/ich9.h:122`,
+/// `0xCF9`), `reset_val` `0xf`; `hw/isa/lpc_ich9.c:657` resets on bit 2.
+#[test]
+fn the_fadt_names_the_reset_register_qemu_acts_on() {
+    assert_eq!(reset_register(machine(), RSDP), Ok(Reset::Port { port: 0xcf9, value: 0x0f }));
 }
 
 #[test]

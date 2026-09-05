@@ -3390,6 +3390,54 @@ impl Qmp {
     }
 }
 
+/// QEMU's own account of why a guest stopped, off the `SHUTDOWN` event. Held
+/// open across the stop: the event is emitted once and QEMU exits behind it, so
+/// a connection opened afterwards finds nothing.
+pub struct QmpShutdown(Qmp);
+
+impl QmpShutdown {
+    pub fn open(socket: &Path) -> Self {
+        Self(Qmp::connect(socket))
+    }
+
+    /// The `reason` the `SHUTDOWN` event names — `guest-reset`,
+    /// `guest-shutdown`, `host-signal` — or `None` if the guest never stopped.
+    ///
+    /// Each read is bounded by the timeout [`Qmp::connect_while`] set and this
+    /// bounds the whole wait; no fresh `setsockopt` is issued, because macOS
+    /// refuses one on a socket whose peer has already gone, which is the state
+    /// a stopped guest leaves.
+    pub fn reason(&mut self, timeout: Duration) -> Option<String> {
+        use std::io::Read;
+        let deadline = Instant::now() + timeout;
+        let qmp = &mut self.0;
+        loop {
+            if let Some(reason) = shutdown_reason(&qmp.pending) {
+                return Some(reason);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            let mut buf = [0u8; 4096];
+            match qmp.stream.read(&mut buf) {
+                // Timed out, or the socket ended: what it had is in `pending`.
+                Ok(0) | Err(_) => return shutdown_reason(&qmp.pending),
+                Ok(n) => qmp.pending.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+}
+
+/// The `reason` field of a `SHUTDOWN` event in `bytes`, scanned rather than parsed: [`Qmp`] carries no JSON dependency.
+fn shutdown_reason(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text.lines().find(|l| l.contains("\"SHUTDOWN\""))?;
+    let (_, after) = line.split_once("\"reason\"")?;
+    let (_, value) = after.split_once('"')?;
+    let (value, _) = value.split_once('"')?;
+    Some(value.to_string())
+}
+
 /// An open QMP connection to QEMU's human monitor, for the questions QMP has
 /// no command of its own for.
 pub struct QmpMonitor(Qmp);
