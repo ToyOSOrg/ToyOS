@@ -8,10 +8,7 @@ opened: 2026-09-04
 
 The milestone the owner set on 2026-09-03: download and install
 github.com/Japabu/gbae from its GitHub release and run it, in QEMU first,
-with no shortcut past what an ordinary OS target does. What this track
-rules is below; the five decisions still the owner's are in
-`issues/filesystem/five-package-decisions-are-the-owners.md`, each with the
-recommendation this track assumes until answered.
+with no shortcut past what an ordinary OS target does.
 
 ## What exists on the other side
 
@@ -20,11 +17,14 @@ gbae v0.2.0 publishes `gbae-v0.2.0-toyos-x86_64.tar.gz` (604,872 bytes:
 crates and the released toolchain; `gbae/LICENSE`; `gbae/README.md`) beside
 a `SHA256SUMS` covering every archive of the release, at
 `https://github.com/Japabu/gbae/releases/download/v<version>/<file>`. Its
-CI builds and links for ToyOS; nothing runs it there yet, and that is this
-track's job.
+CI builds and links for ToyOS and will not boot it (owner ruling): running
+the binary in a ToyOS guest is this track's harness's job, not gbae's.
 
 ## The shape
 
+- **A package is the release's built archive.** Binary only, for now:
+  fetching a source tree and building it on the machine waits for a hosted
+  compiler and is no part of this track.
 - **A package is a directory.** `/apps/<name>/` holds the binaries, data and
   licence the archive carried, unpacked as-is, plus one file the installer
   writes: `manifest.toml` naming the package, version, the archive's digest,
@@ -35,9 +35,11 @@ track's job.
 - **The installer is an ordinary program**, `/system/bin/pkg`, with no
   authority a shell does not have: it fetches, verifies, unpacks and writes
   under `/apps` because `/apps` is writable to it, and it asks the user
-  before it installs (decision 3). `pkg install <url>`, `pkg install
-  <file>`, `pkg remove <name>`, `pkg list`.
-- **Verification is by the release's own `SHA256SUMS` first** (decision 2):
+  before it installs — at install, the moment the user typed the command,
+  never at first run, so a refusal leaves nothing on disk and no answer has
+  to be stored. `pkg install <url>`, `pkg install <file>`, `pkg remove
+  <name>`, `pkg list`.
+- **Verification is by the release's own `SHA256SUMS` first**:
   the installer fetches the sums file from the same release, checks the
   archive against it, and refuses on mismatch or absence. Signatures are a
   later stage of the same file, not a different mechanism.
@@ -52,6 +54,8 @@ track's job.
   the file picker. The first run is the milestone's end.
 
 ## Stages, in order
+
+The storage track's users and mount-protocol stages do not block this one.
 
 1. `pkg install <file>` from a local archive on the boot stick, with the
    digest checked against a `SHA256SUMS` beside it: the layout, the
@@ -68,12 +72,7 @@ track's job.
    one is in place.
 4. Signatures over the sums file, from a key the owner publishes with the
    project.
-5. The users track's per-user `/home` decides where a package's own data
-   goes; until then a package writes under `/apps/<name>/` only.
-
-## Not decided here
-
-The five in the owner's file: binary-first or source-first, the trust
-chain's first form, consent at install versus at first run, whether gbae's
-CI should run its binary on ToyOS, and the sequencing against the storage
-track's remaining stages.
+5. The users track's per-user `/home`
+   (`issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`) decides
+   where a package's own data goes; until then a package writes under
+   `/apps/<name>/` only.
