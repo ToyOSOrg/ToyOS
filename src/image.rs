@@ -110,13 +110,14 @@ pub fn create_boot_image(
     // kernel. The kernel is given the partition by name; nothing anywhere goes
     // looking for one by type or by format.
     let log_guid = uuid::Uuid::new_v4();
+    let esp_guid = uuid::Uuid::new_v4();
     // ROOT is the one exception: its *type* selects candidates and its
     // superblock's UUID picks one, because a release puts several ROOTs on one
     // disk and the bootloader chooses by writing this argument.
     let cmdline = cmdline_with_root(root_uuid_of(root_bytes), params);
     let esp_volume = create_esp_volume(kernel_bytes, bl_bytes, log_guid, &cmdline);
     let log_volume = create_log_volume();
-    create_gpt_disk(esp_volume, root_bytes, log_volume, log_guid)
+    create_gpt_disk(esp_volume, root_bytes, log_volume, esp_guid, log_guid)
 }
 
 /// The boot parameter as [`CMDLINE`] carries it: ROOT's name, then `params`.
@@ -230,7 +231,7 @@ fn cmdline_of(path: &Path) -> Result<String, String> {
 const SECTOR: usize = 4096;
 
 /// The logical block a GPT on this image is written and read in.
-const LBA: u32 = 512;
+pub(crate) const LBA: u32 = 512;
 
 fn round_up_sectors(n: usize) -> usize {
     n.div_ceil(SECTOR) * SECTOR
@@ -572,6 +573,7 @@ fn create_gpt_disk(
     esp_volume: Vec<u8>,
     root_volume: &[u8],
     log_volume: Vec<u8>,
+    esp_guid: uuid::Uuid,
     log_guid: uuid::Uuid,
 ) -> Vec<u8> {
     // `add_partition` places each partition itself; this is the size the disk
@@ -620,17 +622,18 @@ fn create_gpt_disk(
         .add_partition("ToyOS log", log_volume.len() as u64, gpt::partition_types::BASIC, 0, align)
         .expect("failed to add the log partition");
 
-    // The GUID `add_partition` drew for the log partition is discarded for the
-    // one already written to the ESP. Both name the same partition and only one
-    // of them can be chosen second.
+    // The GUID `add_partition` drew for each of these is discarded: the log's
+    // for the one already written to the ESP, and the ESP's own because a
+    // firmware boot entry names a partition by GUID and every name is drawn once.
     let mut table = gdisk.partitions().clone();
+    table.get_mut(&esp_id).expect("the ESP was just added").part_guid = esp_guid;
     table
         .get_mut(&log_id)
         .expect("the log partition was just added")
         .part_guid = log_guid;
     gdisk
         .update_partitions(table)
-        .expect("failed to stamp the log partition's unique GUID");
+        .expect("failed to stamp the ESP's and the log partition's unique GUIDs");
 
     let start_of = |id: u32| {
         gdisk
@@ -833,7 +836,8 @@ mod tests {
         let log_uuid = uuid::Uuid::new_v4();
         let esp = create_esp_volume(b"kernel", b"bootloader", log_uuid, "");
         let root_image = tiny_root();
-        let disk = create_gpt_disk(esp, &root_image, create_log_volume(), log_uuid);
+        let disk =
+            create_gpt_disk(esp, &root_image, create_log_volume(), uuid::Uuid::new_v4(), log_uuid);
         let log = toyos_gpt::Guid(log_uuid.to_bytes_le());
         let root = root_partition_guid_of(&disk);
         let parts =

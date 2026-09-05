@@ -29,6 +29,14 @@ impl Guid {
         [0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B],
     );
 
+    /// `EBD0A0A2-B9E5-4433-87C0-68B6B72699C7` — Microsoft Basic Data, TOYOS-LOG's type.
+    pub const MICROSOFT_BASIC: Self = Self::from_fields(
+        0xEBD0_A0A2,
+        0xB9E5,
+        0x4433,
+        [0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7],
+    );
+
     /// `B350BC93-BB6A-4C5E-9589-A5C3CFD555FD` — the TOYOS-ROOT partition type.
     ///
     /// A *type*, so it selects candidates and never a filesystem: which ROOT a
