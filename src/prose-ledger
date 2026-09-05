@@ -9,13 +9,13 @@ bcachefs/src/superblock.rs 56 0
 bcachefs/src/upstream/bkey.rs 65 0
 bcachefs/src/upstream/btree.rs 25 0
 bcachefs/src/upstream/csum.rs 22 0
-bcachefs/src/upstream/fs.rs 120 0
+bcachefs/src/upstream/fs.rs 119 0
 bcachefs/src/upstream/mod.rs 23 0
 bcachefs/src/upstream/node.rs 58 0
 bcachefs/src/upstream/raw.rs 10 0
 bcachefs/src/upstream/sb.rs 100 0
 bcachefs/tests/integration.rs 120 0
-bcachefs/tests/upstream_fixture.rs 33 0
+bcachefs/tests/upstream_fixture.rs 29 0
 bootloader/src/main.rs 202 0
 examples/imgstat.rs 15 0
 kernel-loom/src/lib.rs 154 0

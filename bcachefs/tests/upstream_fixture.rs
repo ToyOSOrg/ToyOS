@@ -25,11 +25,7 @@ const LINK_TARGET: &str = "../a.txt";
 /// The line count of the multi-extent file, and what makes it predictable.
 const SEQ_LINES: u32 = 40_000;
 
-/// A fixture as a read-only block device.
-///
-/// The volume is decompressed into memory: it is 16 MB of which almost all is
-/// zeros, and holding it as bytes keeps the committed artifact at a hundred and
-/// some kilobytes.
+/// A fixture as a read-only block device, decompressed into memory.
 struct FixtureIo {
     bytes: Vec<u8>,
 }

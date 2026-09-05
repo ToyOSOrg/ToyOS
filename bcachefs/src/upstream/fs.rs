@@ -635,8 +635,7 @@ mod tests {
     #[test]
     fn a_crc_entry_states_the_extent_it_covers() {
         // csum_type crc32c, compression none, uncompressed 80 sectors,
-        // compressed 80, offset 0 — the second extent of the file the oracle
-        // writes, as the guest laid it out.
+        // compressed 80, offset 0 — the second extent of the fixture's seq.txt.
         let word: u32 = 0b10 | (79 << 2) | (79 << 9) | (5 << 24);
         let mut entry = word.to_le_bytes().to_vec();
         entry.extend_from_slice(&0xc522_c42fu32.to_le_bytes());
