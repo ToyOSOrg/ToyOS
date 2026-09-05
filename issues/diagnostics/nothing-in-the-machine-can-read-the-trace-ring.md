@@ -16,7 +16,7 @@ built and the other's stated blocker is gone.
 takes a `Process` handle and fills `ProcessStats`: wall and CPU, syscall count
 and total, demand and zero faults with their time, read ops and bytes, blocked
 time split five ways (io, futex, pipe, ipc, other), runqueue wait, peak memory,
-allocation count. `/bin/stats <command>` spawns, waits and prints it. Per-syscall
+allocation count. `/system/bin/stats <command>` spawns, waits and prints it. Per-syscall
 counts exist too — `ProcessData::syscall_counts`, 128 bins — and nothing reads
 them out. What is still owed there is who may ask:
 `issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md`, a policy gap now rather

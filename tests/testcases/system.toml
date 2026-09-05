@@ -24,7 +24,7 @@ syscap = ["rt"]
 # a spawned binary: a `SysCap` dup is not part of the namespace test-runner
 # hands down.
 # `power` because `run shutdown` is how a dozen host-side gates end their guest
-# and read what reached the volume, and test-runner spawns `/bin/shutdown`
+# and read what reached the volume, and test-runner spawns `/system/bin/shutdown`
 # directly — it holds no `launcher` connector, so the applet's authority is the
 # dup it is endowed here rather than the `toybox` row.
 # `roster` because four guest binaries read `SYS_SYSINFO`'s per-thread entries —
@@ -40,20 +40,20 @@ syscap = ["device", "dup", "logread", "power", "roster"]
 receives = ["soundd"]
 
 [symlinks]
-"bin/cat" = "/bin/toybox"
-"bin/cp" = "/bin/toybox"
-"bin/echo" = "/bin/toybox"
-"bin/free" = "/bin/toybox"
-"bin/grep" = "/bin/toybox"
-"bin/hexdump" = "/bin/toybox"
-"bin/ls" = "/bin/toybox"
-"bin/mkdir" = "/bin/toybox"
-"bin/mv" = "/bin/toybox"
-"bin/ps" = "/bin/toybox"
-"bin/pwd" = "/bin/toybox"
-"bin/rm" = "/bin/toybox"
-"bin/shutdown" = "/bin/toybox"
+"bin/cat" = "/system/bin/toybox"
+"bin/cp" = "/system/bin/toybox"
+"bin/echo" = "/system/bin/toybox"
+"bin/free" = "/system/bin/toybox"
+"bin/grep" = "/system/bin/toybox"
+"bin/hexdump" = "/system/bin/toybox"
+"bin/ls" = "/system/bin/toybox"
+"bin/mkdir" = "/system/bin/toybox"
+"bin/mv" = "/system/bin/toybox"
+"bin/ps" = "/system/bin/toybox"
+"bin/pwd" = "/system/bin/toybox"
+"bin/rm" = "/system/bin/toybox"
+"bin/shutdown" = "/system/bin/toybox"
 # The shipped audio client, and the one the T14 hangs on. The raw-API tone in
 # `toyos-rust-tests` drains the same sink perfectly, so a suite that ran only
 # that one certified a path no user takes.
-"bin/tone" = "/bin/toybox"
+"bin/tone" = "/system/bin/toybox"

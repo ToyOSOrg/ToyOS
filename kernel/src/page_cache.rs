@@ -44,6 +44,53 @@ pub fn init(part: Partition) -> Arc<Cached> {
     Arc::new(Cached { cache: Lock::new(cache), part })
 }
 
+/// The block every `BlockDevice` transfers.
+const PAGE: u64 = PAGE_BYTES as u64;
+
+/// A cache over the partition `candidate` names, or `None` with the reason
+/// logged under `what`. Every number below is one the disk chose, so each
+/// refusal says which; nothing here decides what the volume holds.
+pub fn over_candidate(candidate: &crate::gpt::Candidate, what: &str) -> Option<Arc<Cached>> {
+    let volume = candidate.volume;
+    let guid = candidate.guid;
+    let Some(handle) = block::open(volume.device) else {
+        log!("{what}: candidate {guid} is on device {} and no driver here registered it", volume.device);
+        return None;
+    };
+
+    let lba = volume.lba_bytes as u64;
+    let (Some(start), Some(len)) =
+        (volume.start_lba.checked_mul(lba), volume.blocks.checked_mul(lba))
+    else {
+        log!(
+            "{what}: candidate {guid} claims LBA {}+{} of {lba} bytes, which is not a byte range \
+             — refusing it",
+            volume.start_lba,
+            volume.blocks
+        );
+        return None;
+    };
+    // Whole device blocks or nothing: a view that began or ended inside one
+    // would share it with the table or with the next partition.
+    if start % PAGE != 0 || len % PAGE != 0 {
+        log!(
+            "{what}: candidate {guid} is at {start}+{len} bytes, which is not whole {PAGE}-byte \
+             blocks — refusing it"
+        );
+        return None;
+    }
+    let device_blocks = handle.block_count();
+    let Some(part) = Partition::of(handle, start / PAGE, len / PAGE) else {
+        log!(
+            "{what}: candidate {guid} is at {start}+{len} on a device of {} bytes — refusing to \
+             read past the end of it",
+            device_blocks.saturating_mul(PAGE)
+        );
+        return None;
+    };
+    Some(init(part))
+}
+
 impl Cached {
     pub fn partition(&self) -> &Partition {
         &self.part

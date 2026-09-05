@@ -8,7 +8,7 @@
 //! has gone, and wrong for the log, which outlives every handle that can name
 //! it. Every `SysCap` maps to `Source::Log`, so any process closing any
 //! capability posted `-NotFound` into every pending log poll there was. Latent
-//! while nothing parked on one; live the moment `/bin/logd`'s whole loop is
+//! while nothing parked on one; live the moment `/system/bin/logd`'s whole loop is
 //! read-then-park.
 //!
 //! The two processes in the real failure need not know about each other at all,
@@ -141,7 +141,7 @@ fn still_armed(
     // A child that runs and exits, because `process::exit_process` logs
     // `exit: <name> pid=… code=…` — one kernel record, from userland, with no
     // actuator and no privilege.
-    let mut child = Command::new("/bin/echo")
+    let mut child = Command::new("/system/bin/echo")
         .arg("log-close")
         .spawn()
         .map_err(|e| format!("the record-making child would not start: {e}"))?;

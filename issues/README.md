@@ -160,7 +160,7 @@ the adapter's author did not have to rediscover it.
 
 **`boot-media`** — `/boot` and `/log` are both `kernel/src/fat32_adapter.rs` over
 `toyos-fat32`, mounted from `gpt::boot_volume()` and `gpt::log_volume()`;
-the kernel writes no log file — `/bin/logd` does, an ordinary user process that
+the kernel writes no log file — `/system/bin/logd` does, an ordinary user process that
 owns "every policy about files — where they go, what they are called, how many
 there are, what happens when the stick stops answering"
 (`userland/logd/src/main.rs:1-10`). Gated by `esp_filesystem`,

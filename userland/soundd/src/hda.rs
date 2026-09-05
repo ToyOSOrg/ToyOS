@@ -106,7 +106,7 @@ impl core::fmt::Display for Refusal {
 impl Hda {
     /// Walk the controller's codecs, choose an output and configure it.
     ///
-    /// The claim is the argument: `/bin/init` minted it and endowed it, so
+    /// The claim is the argument: `/system/bin/init` minted it and endowed it, so
     /// "does this machine have an HDA?" was already answered before soundd's
     /// first instruction.
     pub fn claim(dev: HdaDev) -> Result<(Self, OutputPath, u8), Refusal> {

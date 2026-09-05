@@ -23,7 +23,7 @@
 //! `/boot` at runtime; the log partition is the only writable FAT32 volume on
 //! the stick with room, and it starts with 33 MiB free.
 //!
-//! Which means sharing with `/bin/logd`. [`LEAVE_FREE`] is set so that after the
+//! Which means sharing with `/system/bin/logd`. [`LEAVE_FREE`] is set so that after the
 //! copy that succeeds there are still about two megabytes for this boot's log —
 //! a boot's log is a few tens of kilobytes, and logd stops and says so if a
 //! write ever fails, so a squeeze here would be visible rather
@@ -106,7 +106,7 @@ fn write_file(volume: &mut [u8], path: &str, bytes: &[u8]) -> Result<(), String>
 /// Drive one command through the in-guest runner and say what it did.
 ///
 /// `run_test` sends the whole string after `run `, and the runner splits it
-/// into a binary and its arguments — so this is the real `/bin/cp`, invoked the
+/// into a binary and its arguments — so this is the real `/system/bin/cp`, invoked the
 /// way a user invokes it, and the exit code is the one it returned.
 ///
 /// The serial window is appended to `log` rather than judged here: a `cp` that

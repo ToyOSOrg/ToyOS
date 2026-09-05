@@ -1,5 +1,5 @@
 fn main() {
-    let lib = unsafe { libloading::Library::new("/lib/libtls_cranelift.so") }
+    let lib = unsafe { libloading::Library::new("/system/lib/libtls_cranelift.so") }
         .expect("failed to dlopen tls-cranelift");
 
     let compile = unsafe { lib.get::<unsafe extern "C" fn() -> u64>(b"cl_compile_trivial") }

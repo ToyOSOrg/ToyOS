@@ -1,4 +1,4 @@
-//! `cp`, `mv` and `hexdump` as a user reaches them: spawned from `/bin`, judged
+//! `cp`, `mv` and `hexdump` as a user reaches them: spawned from `/system/bin`, judged
 //! on their exit code and on their bytes.
 //!
 //! The three claims that are not "it works":
@@ -30,7 +30,7 @@
 //! until recently the broken one: `cp x emptydir/` wrote a *file* named
 //! `emptydir`, because both halves of `is_dir` read "no entries" as "no such
 //! path". Both halves are fixed and this is where the pair is judged together —
-//! `/bin/cp` asks `fs::metadata`, which asks `readdir`, which asks the kernel.
+//! `/system/bin/cp` asks `fs::metadata`, which asks `readdir`, which asks the kernel.
 
 use std::fs;
 use std::path::Path;
@@ -71,13 +71,13 @@ fn big() -> Vec<u8> {
     (0..BIG).map(|i| (i.wrapping_mul(31).wrapping_add(i >> 9) ^ 0xA5) as u8).collect()
 }
 
-/// Spawn `/bin/<cmd>` with one of its two output streams on a pipe.
+/// Spawn `/system/bin/<cmd>` with one of its two output streams on a pipe.
 ///
 /// One stream at a time rather than `Command::output()`: the stream that is
 /// not piped is inherited, so a command that says something unexpected says it
 /// on the console instead of into a buffer no assertion reads.
 fn spawn(cmd: &str, args: &[&str], errors: bool) -> std::process::Output {
-    let mut command = Command::new(format!("/bin/{cmd}"));
+    let mut command = Command::new(format!("/system/bin/{cmd}"));
     command.args(args);
     if errors {
         command.stderr(Stdio::piped());
@@ -86,9 +86,9 @@ fn spawn(cmd: &str, args: &[&str], errors: bool) -> std::process::Output {
     }
     command
         .spawn()
-        .unwrap_or_else(|e| panic!("spawn /bin/{cmd}: {e}"))
+        .unwrap_or_else(|e| panic!("spawn /system/bin/{cmd}: {e}"))
         .wait_with_output()
-        .unwrap_or_else(|e| panic!("wait for /bin/{cmd}: {e}"))
+        .unwrap_or_else(|e| panic!("wait for /system/bin/{cmd}: {e}"))
 }
 
 fn must_pass(cmd: &str, args: &[&str]) -> String {
@@ -180,9 +180,9 @@ fn cp_refusals() {
     );
     println!("  PASS cp refuses a missing source, and the destination is unchanged");
 
-    // `/bin` rather than a directory made here: it is the one that is populated
+    // `/system/bin` rather than a directory made here: it is the one that is populated
     // without this test having to populate it.
-    must_refuse("cp", &["/bin", "/tmp/toybox_fromdir.bin"], "is a directory");
+    must_refuse("cp", &["/system/bin", "/tmp/toybox_fromdir.bin"], "is a directory");
     assert!(fs::read("/tmp/toybox_fromdir.bin").is_err(), "cp of a directory created a file");
     println!("  PASS cp refuses a directory by name");
 

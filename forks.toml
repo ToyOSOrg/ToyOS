@@ -308,7 +308,7 @@ hashing each file and comparing against every commit on master.
 delta = "none"
 tier = "source"
 why = """
-The C half of /bin/doom — 56,726 lines descended from id Software's Doom, via
+The C half of /system/bin/doom — 56,726 lines descended from id Software's Doom, via
 Chocolate Doom. `userland/doom/build.rs` fetches the commit's archive into
 `userland/doom/doomgeneric/`, which is gitignored, and compiles it with
 `toyos-cc`. Every ToyOS-side change lives beside it rather than in it:

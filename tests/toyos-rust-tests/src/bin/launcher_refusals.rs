@@ -1,4 +1,4 @@
-//! What a client can make `/bin/init` do by sending it a bad launch.
+//! What a client can make `/system/bin/init` do by sending it a bad launch.
 //!
 //! **init is the one process the machine cannot lose.** It holds the only
 //! `SysCap`, every unhanded acceptor and the `launcher` port, and nothing
@@ -25,7 +25,7 @@
 //!
 //! The fourth arm is what stops the other three passing on a dead launcher: an
 //! ordinary spawn, which goes through init because this process holds a
-//! `launcher` connector and `/bin/toybox` is a declared program. It runs last,
+//! `launcher` connector and `/system/bin/toybox` is a declared program. It runs last,
 //! so it also asserts init survived all three.
 //!
 //! **A fourth shape, and it is the one init could not survive at all: a client
@@ -77,7 +77,7 @@ const QUIET_CLIENTS: usize = 8;
 
 /// A program `tests/netcase` declares that serves nothing and provides
 /// nothing, so a refused launch of it takes no acceptor with it.
-const DECLARED: &str = "/bin/toybox";
+const DECLARED: &str = "/system/bin/toybox";
 
 fn main() {
     the_kernel_answers_rather_than_faults();
@@ -146,7 +146,7 @@ fn a_quiet_client_does_not_wedge_the_launcher() {
     let conn = launcher();
     let mut buf = [0u8; 512];
     let request = Launch {
-        program: "/bin/no-such-program",
+        program: "/system/bin/no-such-program",
         argv: b"",
         env: b"",
         cwd: "/",
@@ -247,7 +247,7 @@ fn refused_with(extras: &[(&str, RawHandle)]) -> u32 {
     answer_within(&conn, ANSWER_BUDGET).expect("init answered the launch")
 }
 
-/// The non-vacuity arm. `/bin/toybox` is a `[programs]` key, so a caller
+/// The non-vacuity arm. `/system/bin/toybox` is a `[programs]` key, so a caller
 /// holding a `launcher` connector reaches it through init and not through
 /// `SYS_SPAWN` — this only passes while init is alive and still launching.
 fn the_launcher_still_works() {

@@ -1,5 +1,5 @@
 //! A file round trip on `/home`, which is the only mount backed by the NVMe
-//! device. Every other filesystem test reads `/bin` out of ROOT or
+//! device. Every other filesystem test reads `/system/bin` out of ROOT or
 //! writes `/tmp` into tmpfs, so nothing else in the suite makes the block
 //! layer allocate, cache and write back a block.
 

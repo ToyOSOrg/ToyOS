@@ -282,7 +282,7 @@ fn shrink_then_write_above_the_mark(dir: &str, seed_len: usize) {
 
 /// A spawn settles the write-back queue, so a just-closed file has left the cache.
 fn drained() {
-    let echo = Command::new("/bin/echo").arg("drained").output().expect("run echo");
+    let echo = Command::new("/system/bin/echo").arg("drained").output().expect("run echo");
     assert!(echo.status.success());
 }
 

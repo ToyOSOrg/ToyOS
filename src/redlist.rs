@@ -473,10 +473,10 @@ pub const KNOWN_RED: &[Red] = &[
              runs on `main` (33485669019, 33603832656, 33728852421), one shard reading `[dump] \
              10 threads, 10 parked, all 8 cpus answered; 0 overdue, 0 absurd, 0 unheld, 0 never \
              ran` and `PASS blocked_dump (3s)`. Neither of this row's two reasons recurred: the \
-             census half is that line, and `/bin/terminal` racing the compositor was closed by \
+             census half is that line, and `/system/bin/terminal` racing the compositor was closed by \
              the capability endowment branch",
         ),
-        what: "two *different* reasons in the two reps — the census half, and /bin/terminal racing \
+        what: "two *different* reasons in the two reps — the census half, and /system/bin/terminal racing \
                the compositor",
         evidence: "probe-rate run 31258202923, tree f8f73e1, five reps",
         source: "issues/hardware/eleven-names-red-on-ci.md",
@@ -811,13 +811,13 @@ pub const KNOWN_RED: &[Red] = &[
         finding: Finding::fires(2, 10),
         standing: Standing::Retired(
             "shape changed: `the surface owner exited before it said it was ready`, the \
-             `/bin/terminal` boot race, -> `the windowed child never reported leaving`. The race \
+             `/system/bin/terminal` boot race, -> `the windowed child never reported leaving`. The race \
              is closed — a port exists before either end's process does — and the last three \
              nightly `ci` runs on `main` (33485669019, 33603832656, 33728852421) carry this name \
              as `XFAIL desktop_window_child` on the second message at 93, 73 and 68 s, never on \
              the first. The row measured 2026-09-03 is that shape",
         ),
-        what: "the surface owner exited before it said it was ready — the /bin/terminal boot race, \
+        what: "the surface owner exited before it said it was ready — the /system/bin/terminal boot race, \
                2 of 10 **on a runner with one guest on it and nothing to contend with**. Rep 2 has \
                the compositor spawned at 0.347 s, the terminal at 0.349 s, and the terminal exiting \
                at 0.849 s one millisecond before the compositor maps its framebuffer",
@@ -1461,7 +1461,7 @@ pub const KNOWN_RED: &[Red] = &[
                time. `kill_releases_ring` asks `SYS_SYSINFO` for the **machine's** free memory \
                either side of a kill, and it shares the `tests/testcases` boot with every other \
                Rust guest binary — so the verdict is only sound while nothing else in that guest \
-               holds or releases a page across the window, which nothing arranges. `/bin/logd` \
+               holds or releases a page across the window, which nothing arranges. `/system/bin/logd` \
                joining every image is what made it loud: it holds an `io_uring`, a 64 KiB record \
                buffer and a `File` whose page-cache pages come and go",
         evidence: "a same-session A/B of two seven-suite arms, 12 wide, on one dev host: 0 of 7 at \
@@ -2072,7 +2072,7 @@ pub const KNOWN_RED: &[Red] = &[
                write-up's own finding is that the std fork flattens every `io::Error` kind to \
                the string `netd error`, so four candidate paths print this line and no capture \
                of it can say which one ran. **What matches beyond the message is the timing \
-               shape**, which is the part worth recording: `spawn: /bin/sshd pid=6` at 0.559 s \
+               shape**, which is the part worth recording: `spawn: /system/bin/sshd pid=6` at 0.559 s \
                and `exit: netd pid=5 code=0` at 0.566 s, so the bind went into a teardown \
                already in progress — the same direction as the earlier CI capture, where the \
                gap was 23 ms, and the opposite of the clean-exit arm in the same write-up, \
@@ -2363,7 +2363,7 @@ pub const KNOWN_RED: &[Red] = &[
              transmission) that is 5 of 5 red before and 0 of 5 after",
         ),
         what: "`the fatal report never took the screen back from the console — which would make \
-               /bin/console a downgrade on the machine it is for`, at 96 s against the suite's \
+               /system/bin/console a downgrade on the machine it is for`, at 96 s against the suite's \
                usual seconds, so the shape is a handoff waited for and never observed. First \
                sighting: `--known-red` answered `NOT ON THE LIST`. **Not about the diff it was \
                found on**, which is PR #141's merge-queue package — workflow triggers and \
@@ -2971,11 +2971,11 @@ pub const KNOWN_RED: &[Red] = &[
              echo of the whole line as the verdict, three tries — a lost byte is retyped \
              instead of stalling the marker wait",
         ),
-        what: "`STALLED: waiting for the wizard to ask for a key under /bin/console — the \
+        what: "`STALLED: waiting for the wizard to ask for a key under /system/bin/console — the \
                console did not lend it the keyboard — it never stopped talking and never got \
                there`. Same shape as `desktop_locale_detect`'s terminal-boot-race family — a \
-               wizard waiting for a key it was never handed — but against `/bin/console` rather \
-               than `/bin/terminal`, so it is not provably the same race and is not folded into \
+               wizard waiting for a key it was never handed — but against `/system/bin/console` rather \
+               than `/system/bin/terminal`, so it is not provably the same race and is not folded into \
                it. First sighting: `--known-red` answered `NOT ON THE LIST`. **Not about the \
                diff it was found on**, which is #142's log-redesign decision record, no kernel \
                byte. `ALONE: GREEN, and it was alone both times — a rate and not a \
@@ -3177,7 +3177,7 @@ pub const KNOWN_RED: &[Red] = &[
              neither name can produce this string. Both arms of the rate ran both names, and \
              `fault_gates` supplied 1 of the 3 pre-fix rounds — its concession was the `rip:` \
              line of a #DE report whose backtrace named every frame including the one above it, \
-             at 0.418 s against `spawn: /bin/test_rs_fault_gate_child pid=8 … symbols=2048KiB \
+             at 0.418 s against `spawn: /system/bin/test_rs_fault_gate_child pid=8 … symbols=2048KiB \
              (total=6ms)` at 0.409 s, with that child's own 2,798 us demand-paged instruction \
              fetch inside the window",
         ),
@@ -3487,7 +3487,7 @@ pub const KNOWN_RED: &[Red] = &[
         instrument: Instrument::DevHostLoaded,
         finding: Finding::fires(1, 6),
         standing: Standing::Stands,
-        what: "`STALLED: waiting for the wizard to ask for a key under /bin/console — the \
+        what: "`STALLED: waiting for the wizard to ask for a key under /system/bin/console — the \
                console did not lend it the keyboard — it never stopped talking and never got \
                there`, **891 s**, and `ALONE: GREEN — it fails only beside other guests`. The \
                guest kept talking through the whole guard, so this is the input path stopping \
@@ -3498,6 +3498,21 @@ pub const KNOWN_RED: &[Red] = &[
         evidence: "six full `cargo test` fast tiers in one worktree on 2026-09-04, each with \
                    single-test runs of the same suite beside it; red in one, and green in the \
                    three nightly `ci` runs of the same week",
+        source: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
+        measured: "2026-09-04",
+    },
+    Red {
+        test: "console_locale_detect",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "the row above's shape on the hosted shard: `STALLED: waiting for the wizard to ask \
+               for a key under /system/bin/console — the console did not lend it the keyboard — \
+               it never stopped talking and never got there`, **349 s**, then `ALONE: GREEN, and \
+               it was alone both times`. Not about the diff it appeared on: root filesystem PR 2b \
+               moves paths and touches no input path, and the same shape fired 1 of 6 on the loaded \
+               dev host the same day",
+        evidence: "pull-request `ci` run 33844151499, `guest (3)`, headSha fba3d88e, 2026-09-04",
         source: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
         measured: "2026-09-04",
     },

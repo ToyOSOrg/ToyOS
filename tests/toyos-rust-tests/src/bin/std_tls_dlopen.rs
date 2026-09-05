@@ -14,7 +14,7 @@ fn main() {
     println!("PASS: exe TLS before dlopen");
 
     // Test 2: dlopen a library with TLS
-    let lib = unsafe { libloading::Library::new("/lib/libtls_dlopen_lib.so") }
+    let lib = unsafe { libloading::Library::new("/system/lib/libtls_dlopen_lib.so") }
         .expect("failed to dlopen tls-dlopen-lib");
 
     let get_a = unsafe { lib.get::<unsafe extern "C" fn() -> u64>(b"dl_tls_get_a") }.expect("dl_tls_get_a");
@@ -143,7 +143,7 @@ fn main() {
     });
 
     // Dlopen again (thread is waiting at barrier)
-    let lib2 = unsafe { libloading::Library::new("/lib/libtls_dlopen_lib.so") }
+    let lib2 = unsafe { libloading::Library::new("/system/lib/libtls_dlopen_lib.so") }
         .expect("failed to dlopen tls-dlopen-lib (second time)");
     let get_a2 = unsafe { lib2.get::<unsafe extern "C" fn() -> u64>(b"dl_tls_get_a") }.expect("dl_tls_get_a");
     let inc_a2 = unsafe { lib2.get::<unsafe extern "C" fn() -> u64>(b"dl_tls_increment_a") }.expect("dl_tls_increment_a");

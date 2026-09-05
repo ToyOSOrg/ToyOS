@@ -2,7 +2,7 @@
 //!
 //! Two things live here because two programs need them and the host is where
 //! either can be tested: the kernel decodes an RTC into a [`Civil`] and stamps
-//! FAT directory entries from it, and `/bin/logd` names one file per boot from
+//! FAT directory entries from it, and `/system/bin/logd` names one file per boot from
 //! the same calendar in the same zone. Before this crate there was one
 //! implementation in `kernel/src/clock.rs` that userland could not reach, and
 //! the second copy would have been the one whose correctness argument mattered

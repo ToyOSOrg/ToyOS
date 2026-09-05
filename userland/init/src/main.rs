@@ -2,7 +2,7 @@
 //! system capability.
 //!
 //! Everything else is started from here, holding exactly what
-//! `/etc/system.manifest` says it holds. **Every port exists before any server
+//! `/system/etc/system.manifest` says it holds. **Every port exists before any server
 //! runs**: init creates one per `serves` name in the whole manifest, then
 //! builds each program's namespace out of the connectors and spawns it with the
 //! acceptor moved in. So a client's connection works from its first
@@ -342,7 +342,7 @@ fn serve_launch<'a>(
 
     // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
     // has already established that the two name one binary, so this grants
-    // nothing extra — and `/bin/echo` spawned as `/bin/toybox` is a toybox that
+    // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
     // was never told which applet it is.
     let mut command = Command::new(request.program);
     for (slot, handle) in request.slot_numbers().zip(slots.0.iter().copied()) {
@@ -378,7 +378,7 @@ fn serve_launch<'a>(
             // **Which side owns the handle is the whole of what the two arms
             // differ by.** A refused `handle_send` leaves it in init's table
             // and init must close it — init keeps no `Process` handle from a
-            // launch, or a client launching `/bin/true` in a loop exhausts the
+            // launch, or a client launching `/system/bin/true` in a loop exhausts the
             // one table the machine cannot do without. A send that *took* it
             // and a frame that then did not go leaves it queued on a connection
             // this call is about to drop, which releases it — and closing it
@@ -421,7 +421,7 @@ impl Drop for Moved {
 
 /// The `[programs]` row a launch's path names, following one symlink.
 ///
-/// `/bin/ls` is a symlink to `/bin/toybox`, and what an applet may hold is
+/// `/system/bin/ls` is a symlink to `/system/bin/toybox`, and what an applet may hold is
 /// `toybox`'s row: the granularity of least authority is the granularity of the
 /// binary.
 ///

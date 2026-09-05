@@ -139,7 +139,7 @@ fn aligned_at_ceiling_is_refused_not_fatal() {
 
 /// One page over the ceiling: the caller dies, and nothing else does.
 fn over_ceiling_kills_only_the_caller() {
-    let status = Command::new("/bin/test_rs_test_panic_child")
+    let status = Command::new("/system/bin/test_rs_test_panic_child")
         .arg(HEAP_OVER_CEILING.to_string())
         .status()
         .expect("failed to spawn child");
@@ -161,7 +161,7 @@ fn over_ceiling_kills_only_the_caller() {
 /// all of it kernel heap traffic, and on this guest all of it on the one CPU
 /// that recovered.
 fn heap_still_works() {
-    let output = Command::new("/bin/echo")
+    let output = Command::new("/system/bin/echo")
         .arg("still alive")
         .output()
         .expect("failed to run echo after the over-ceiling panic");

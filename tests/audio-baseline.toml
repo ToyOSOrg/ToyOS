@@ -3,7 +3,7 @@
 # Every config must appear here. A missing section is a hard error, not a
 # pass: an ungated config would go green by omission.
 #
-# What no config here covers: `/bin/tone` and tests/toyos-rust-tests/src/tone.rs
+# What no config here covers: `/system/bin/tone` and tests/toyos-rust-tests/src/tone.rs
 # are two implementations of the same generator and gate A captures only the
 # second, so nothing in the suite ever hears the tone the owner judges the
 # machine by.

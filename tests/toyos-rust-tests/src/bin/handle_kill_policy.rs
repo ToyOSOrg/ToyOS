@@ -65,7 +65,7 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, debug_action, MmapFlags, MmapProt, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 
-const SELF_PATH: &str = "/bin/test_rs_handle_kill_policy";
+const SELF_PATH: &str = "/system/bin/test_rs_handle_kill_policy";
 
 /// How long a `POLL_ADD` that cannot ever fire is given to say so.
 ///
@@ -369,7 +369,7 @@ fn fill_the_table() -> ! {
 fn spawn_naming(handle: RawHandle) -> Result<RawHandle, SyscallError> {
     const REGION: usize = 4096;
     const SLOT_MAP_OFF: usize = 2048;
-    const ARGV: &str = "/bin/no-such-program\0";
+    const ARGV: &str = "/system/bin/no-such-program\0";
 
     let region = unsafe {
         syscall::mmap(

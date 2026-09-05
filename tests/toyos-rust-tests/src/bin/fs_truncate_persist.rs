@@ -71,7 +71,7 @@ fn truncate_round_trip(path: &str) {
 /// program on ROOT, and guarantees the thing being loaded is a real
 /// std PIE rather than something small enough to avoid the interesting path.
 fn spawn_from_tmpfs() {
-    const SRC: &str = "/bin/test_rs_fs_truncate_persist";
+    const SRC: &str = "/system/bin/test_rs_fs_truncate_persist";
     const DST: &str = "/tmp/spawned_from_tmpfs";
 
     let image = fs::read(SRC).expect("read this binary out of ROOT");

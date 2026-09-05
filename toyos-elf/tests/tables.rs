@@ -130,7 +130,7 @@ fn validation_refuses_a_write_outside_the_window_by_name() {
 /// A table the loader reads while it writes must not lie inside the range it
 /// writes, and the refusal names which one.
 ///
-/// The window is `/bin/shell`'s own, `(0x145000, 0x155000)` — the number
+/// The window is `/system/bin/shell`'s own, `(0x145000, 0x155000)` — the number
 /// `real.rs` reads off the committed `toyos-ld` header fixture — against the
 /// range the loader used to permit, which is that window's start rounded down
 /// to the 2 MiB page: `[0, 0x200000)`. That file's `.rela.dyn` sits at

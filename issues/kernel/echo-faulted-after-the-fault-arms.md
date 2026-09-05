@@ -11,11 +11,11 @@ against the reference 1320 ms` on a filtered re-run minutes later). Seen once,
 not reproduced by the full suite immediately after it, which was 253/253 green.
 
 `fault_gates` raises every Ring 3 fault it has an arm for and then spawns
-`/bin/echo` as its liveness probe — "the machine survived every fault but can no
+`/system/bin/echo` as its liveness probe — "the machine survived every fault but can no
 longer start a process" is the assertion. On this run the probe itself faulted:
 
 ```
-[kernel 4.828 cpu1] spawn: /bin/echo pid=69 tid=0 base=0x10000000000 entry=0x1000002ebd4 cr3=0x2ce6000 ...
+[kernel 4.828 cpu1] spawn: /system/bin/echo pid=69 tid=0 base=0x10000000000 entry=0x1000002ebd4 cr3=0x2ce6000 ...
 [kernel 4.951 cpu1] #PF UNHANDLED: cr2=0x1 rip=0x100000328dd err=0x4 user=true tid=Some(Tid(0))
 [kernel 4.951 cpu1] SEGFAULT tid=0: read unmapped address at 0x1
 [kernel 4.951 cpu1]   Page walk for 0x1 [PML4=0x2cd1000 PCID=66 PML4[0] PDPT[0] PD[0] PT[0]]:
@@ -37,7 +37,7 @@ killed QEMU looks exactly like this from the harness. The segfault itself is not
 explained either way: it is a userland fault the kernel handled correctly.
 
 **What to read if it happens again.** `err=0x4` is a user-mode read of a
-not-present page, so it is `/bin/echo`'s own dereference of 1 and not the
+not-present page, so it is `/system/bin/echo`'s own dereference of 1 and not the
 loader's. Two candidates and one run cannot separate them: a `Command::output()`
 path whose child inherits something the fault arms disturbed, and demand paging
 handing the binary a page it had not finished relocating (`relocs=2600` is on the
@@ -46,9 +46,9 @@ trace). Capture the guest with QMP rather than letting the harness kill it —
 whether any other CPU is still running.
 
 **2026-08-25, promoted to `defect`.** A guest died taking 147 tests with it and
-nothing in the tree explains why; a dereference of `1` in `/bin/echo` is not an
+nothing in the tree explains why; a dereference of `1` in `/system/bin/echo` is not an
 observation about the host. The act is not a fix — it is the capture, because
 the two candidate readings cannot be separated without it, and letting the
 harness kill the guest destroys the only evidence there is. Owed by whoever next
-sees a `fault_gates` red naming `/bin/echo`: boot that lane with `BootOptions {
+sees a `fault_gates` red naming `/system/bin/echo`: boot that lane with `BootOptions {
 qmp: true, .. }` before doing anything else.

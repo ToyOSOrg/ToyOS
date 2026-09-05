@@ -895,7 +895,7 @@ fn check_geometry(log: &str, bytes: u64, lba: u32) -> Result<(), String> {
 /// SYNCHRONIZE CACHE (0x35) is optional in SBC and a great many USB flash
 /// drives answer ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE. `msc_flush`
 /// read that as a failed flush; `FatFs::sync` logged the failure and returned
-/// `()`; the line it logged was new pending content in the shard `/bin/logd` was
+/// `()`; the line it logged was new pending content in the shard `/system/bin/logd` was
 /// draining, and `Sink::flush` still said `Ok`, so the sink's disable path
 /// never ran. Every idle pass was then a file write, a FAT write and another
 /// SYNCHRONIZE CACHE on the stick the machine booted from, forever — and
@@ -1024,7 +1024,7 @@ fn optional_flush_keeps_the_log(
 /// Boot with a stick whose flush genuinely fails. The writer says so once and
 /// stops, rather than writing the device that just refused it.
 ///
-/// **Re-pointed at `/bin/logd` at L6, and the policy it observes changed shape
+/// **Re-pointed at `/system/bin/logd` at L6, and the policy it observes changed shape
 /// with the writer.** The kernel sink disabled itself on the *first* error,
 /// because the alternative from an idle loop was an error every pass. logd's
 /// give-up is a *duration* — `LOG_WRITE_BUDGET`, five seconds — because a
@@ -3004,7 +3004,7 @@ pub fn usb_boot_stick_pulled(
     /// never carries on.
     const ANSWERED: usize = 8;
 
-    // metalcase's machine shape with `/bin/logd` rotating at 256 bytes rather
+    // metalcase's machine shape with `/system/bin/logd` rotating at 256 bytes rather
     // than a mebibyte, so the log writer is not just appending when the device
     // goes: every few probes it creates a file, sweeps the volume, deletes the
     // oldest and syncs the mount. That is FAT allocation and directory writes
@@ -3043,7 +3043,7 @@ pub fn usb_boot_stick_pulled(
 
     // And it has to be writing to the stick, or the pull is a disconnect with
     // nothing in flight — which is not the state the owner's machine is in.
-    // `/bin/logd` names the file it opened on `/log`, and that volume is on the
+    // `/system/bin/logd` names the file it opened on `/log`, and that volume is on the
     // device this test is about to take away.
     if !console.contains("logd: this boot's kernel log is /log/") {
         return Err(format!(

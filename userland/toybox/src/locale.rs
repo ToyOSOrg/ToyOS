@@ -165,7 +165,7 @@ fn detect() {
         Err(GrabError::HostGone) => {
             eprintln!(
                 "locale: nothing is hosting this program's keyboard. The wizard reads key \
-                 positions, which only a surface — a terminal, /bin/console, a window — can \
+                 positions, which only a surface — a terminal, /system/bin/console, a window — can \
                  hand over. Run it from one, or pick a layout by name: locale <name>."
             );
             return;

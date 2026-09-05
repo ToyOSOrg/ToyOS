@@ -2,7 +2,7 @@
 //!
 //! Every other test in this crate hands the parser bytes no linker would emit,
 //! and a parser that refused everything would pass all of them. The fixture is
-//! the first 4 KiB of `/bin/shell` as `toyos-ld` linked it — which is all
+//! the first 4 KiB of `/system/bin/shell` as `toyos-ld` linked it — which is all
 //! [`Layout::parse`] ever reads — so this is the shape the loader actually
 //! meets at every boot.
 //!

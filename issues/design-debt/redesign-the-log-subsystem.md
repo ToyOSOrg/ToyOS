@@ -48,7 +48,7 @@ writers and readers never observe a torn record"
 and filled at `:158`. The three files the table
 calls the log's own are gone: `kernel/src/log.rs`,
 `kernel/src/drivers/log_ring.rs` and `kernel/src/log_file.rs` are none of them
-in the tree. The file sink is not a kernel module at all — `/bin/logd` is an
+in the tree. The file sink is not a kernel module at all — `/system/bin/logd` is an
 ordinary user process, and "the kernel keeps the record ring and the console;
 every policy about files — where they go, what they are called, how many there
 are, what happens when the stick stops answering — is here"

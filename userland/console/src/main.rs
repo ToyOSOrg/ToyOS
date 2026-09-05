@@ -1,4 +1,4 @@
-//! The machine's console: `/bin/shell` on the raw framebuffer, no compositor.
+//! The machine's console: `/system/bin/shell` on the raw framebuffer, no compositor.
 //!
 //! It exists for a machine with no serial port. `--diag-boot` freezes the
 //! kernel's boot log on the panel, which answers "how far did it get and what
@@ -17,7 +17,7 @@
 //!   `SCREEN_OWNED_BY_USERLAND` entirely — only boot checkpoints honour it —
 //!   so the report paints over whatever this program drew.
 //!   `screen_console_panic` is the gate.
-//! - **The emulator is `/bin/terminal`'s**, unchanged. `Console::new` always
+//! - **The emulator is `/system/bin/terminal`'s**, unchanged. `Console::new` always
 //!   took a raw mapping; the compositor was never below it. This is the caller
 //!   whose mapping is the scanout, so it is the one that pays for a read.
 
@@ -37,9 +37,9 @@ use toyos::{FramebufferDev, Keyboard};
 use toyos_abi::syscall::DeviceType;
 use window::Screen;
 
-const FONT: &str = "/share/fonts/JetBrainsMono-Regular-8x16.font";
+const FONT: &str = "/system/share/fonts/JetBrainsMono-Regular-8x16.font";
 
-/// Where `/bin/logd` puts one file per boot, each named for the wall clock at
+/// Where `/system/bin/logd` puts one file per boot, each named for the wall clock at
 /// the moment that boot's logd opened it.
 const KERNEL_LOG_DIR: &str = "/log";
 
@@ -84,7 +84,7 @@ fn main() {
     let mut host = Host::serve(acceptor);
     let mut translator = window::configured_translator();
 
-    // Spawned first so it initialises while the font loads, as `/bin/terminal`
+    // Spawned first so it initialises while the font loads, as `/system/bin/terminal`
     // does.
     let mut shell = Shell::spawn(&connector);
 
@@ -264,7 +264,7 @@ fn main() {
 
 /// The newest [`SEED_FILES`] kernel logs on `/log`, oldest first.
 ///
-/// By name, which is by time: `/bin/logd` names each boot's file for the wall
+/// By name, which is by time: `/system/bin/logd` names each boot's file for the wall
 /// clock in a form that sorts chronologically, and a boot's continuation parts
 /// sort directly after the file they continue.
 ///
@@ -288,7 +288,7 @@ fn newest_kernel_logs() -> Vec<std::path::PathBuf> {
 /// Push this boot's kernel log into the scrollback; returns the bytes written.
 ///
 /// Reading a file rather than a cursor is a **choice this program has not made
-/// yet**, not a workaround. `/bin/logd` starts from a fresh `LogTail`, which is
+/// yet**, not a workaround. `/system/bin/logd` starts from a fresh `LogTail`, which is
 /// the oldest record every shard still holds, so the file opens at this boot's
 /// first line and carries everything logd has written. What it cannot carry is
 /// anything logged after this program read it — for that the owner has a shell
@@ -360,13 +360,13 @@ impl Shell {
         let surface_copy = surface
             .duplicate()
             .expect("console: the kernel refused a duplicate of its own surface connector");
-        let mut child = Command::new("/bin/shell")
+        let mut child = Command::new("/system/bin/shell")
             .provide(surface::SERVICE, surface_copy.into_raw().0)
             .stdin(process::tty_piped())
             .stdout(process::tty_piped())
             .stderr(process::tty_piped())
             .spawn()
-            .expect("console: failed to spawn /bin/shell");
+            .expect("console: failed to spawn /system/bin/shell");
         Shell {
             stdin: child.stdin.take().expect("console: shell stdin"),
             stdout: child.stdout.take().expect("console: shell stdout"),

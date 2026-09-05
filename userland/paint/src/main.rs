@@ -170,7 +170,7 @@ impl PaintApp {
         let pixel_format = fb.pixel_format_raw();
         let canvas_buf = Self::make_canvas_buf(canvas_w, canvas_h, pixel_format);
 
-        let font_bytes = std::fs::read("/share/fonts/JetBrainsMono-Regular-8x16.font")
+        let font_bytes = std::fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font")
             .expect("failed to read font");
         let font = Font::from_prebuilt(&font_bytes);
 

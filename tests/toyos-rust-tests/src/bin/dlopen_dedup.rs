@@ -10,18 +10,18 @@ use std::sync::{Arc, Barrier};
 
 use toyos_abi::syscall;
 
-const LIB: &[u8] = b"/lib/libtls_dlopen_lib.so";
+const LIB: &[u8] = b"/system/lib/libtls_dlopen_lib.so";
 /// A name this binary loads nowhere else, so the concurrent arm starts clean.
-const OTHER_LIB: &[u8] = b"/lib/libtls_multi_crate.so";
+const OTHER_LIB: &[u8] = b"/system/lib/libtls_multi_crate.so";
 const LOADS: usize = 64;
 
 /// A directory only this test spawns from, so the `DT_NEEDED` fallback caches
 /// under a spelling nothing else can produce; `check_dlopen_dedup` in
 /// `tests/toyos.rs` holds the verdict. The binary beside it `DT_NEEDED`s a
-/// library that is in `/lib` and not there.
+/// library that is in `/system/lib` and not there.
 const FROM: &str = "/tmp/dlopen-dedup";
-const NEEDS_A_LIB: &str = "/bin/test_rs_std_tls";
-const BY_PATH: &[u8] = b"/lib/libtls_lib.so";
+const NEEDS_A_LIB: &str = "/system/bin/test_rs_std_tls";
+const BY_PATH: &[u8] = b"/system/lib/libtls_lib.so";
 
 fn main() {
     let handles = handle_identity();
@@ -31,7 +31,7 @@ fn main() {
     println!("all dlopen dedup checks passed");
 }
 
-/// A library reached through the `/lib` fallback and then by its own path is one
+/// A library reached through the `/system/lib` fallback and then by its own path is one
 /// module, not two. **The verdict is the kernel's and this arm only stages it:**
 /// a guest cannot count physical images, so it puts the fallback's spelling
 /// somewhere unique — a `DT_NEEDED`-carrying binary in [`FROM`], which holds no
@@ -49,7 +49,7 @@ fn one_library_under_two_spellings() {
     assert_eq!(
         status.code(),
         Some(0),
-        "the copy in {FROM} did not run, so its DT_NEEDED never took the /lib fallback",
+        "the copy in {FROM} did not run, so its DT_NEEDED never took the /system/lib fallback",
     );
 
     syscall::dl_open(BY_PATH).expect("the same library by its own path");

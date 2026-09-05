@@ -56,7 +56,7 @@ fn main() {
         eprintln!("terminal: {e}");
         std::process::exit(1);
     });
-    let font_data = std::fs::read("/share/fonts/JetBrainsMono-Regular-8x16.font").expect("failed to read font");
+    let font_data = std::fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font").expect("failed to read font");
     let font = font::Font::from_prebuilt(&font_data);
     let mut console = Console::new(window.screen(), font);
 
@@ -219,7 +219,7 @@ fn shell(surface: &toyos::port::Connector) -> std::process::Child {
     let handed = surface
         .duplicate()
         .expect("terminal: the kernel refused a duplicate of its own surface connector");
-    Command::new("/bin/shell")
+    Command::new("/system/bin/shell")
         .provide(surface::SERVICE, handed.into_raw().0)
         .stdin(process::tty_piped())
         .stdout(process::tty_piped())

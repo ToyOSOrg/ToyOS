@@ -66,7 +66,7 @@ const MAX_BOOT_DRIFT_SECS: i64 = 300;
 /// enough to be one `write`.
 const WINDOW_MARKER: &str = "between-tests-window-is-captured";
 
-/// How many logs `/bin/logd`'s `MAX_LOG_FILES` keeps. Mirrored rather than shared,
+/// How many logs `/system/bin/logd`'s `MAX_LOG_FILES` keeps. Mirrored rather than shared,
 /// so moving the kernel's bound without looking at this fails here rather than
 /// quietly weakening the gate.
 pub const MAX_LOG_FILES: usize = 16;

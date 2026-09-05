@@ -112,7 +112,10 @@ hierarchy is a convention, and `/boot`'s mount guard is the one restriction.
   `.local/<app>` for saves and caches.
 - `/log`, `/tmp` — as today.
 - `/media/<label>` — foreign and unassigned volumes; a Windows disk is
-  `/media/windows`.
+  `/media/windows`. A mount point is exactly one top-level name
+  (`kernel/src/vfs.rs`, `ROOT_ENTRIES` and the array indexed by it), so
+  `/media/<label>` is a nested mount the structure cannot represent: stage 5
+  owes that, and stage 2 left `/media` an empty directory.
 
 Users are a track of their own: a `/home/<user>` tree plus a login session
 whose namespace init builds from a per-user row. The sshd key path already has
@@ -133,7 +136,7 @@ entry.
 1. ROOT is a partition, the kernel argument names it, and the initrd — the
    in-RAM image the bootloader used to load whole — is deleted. Landed.
 2. The hierarchy: a synthesized `/`, ROOT at `/system`, DATA at `/apps` and
-   `/home`, `/media`, and the `/bin` sweep that follows.
+   `/home`, `/media`, and the `/bin` sweep that follows. Landed.
 3. The users track filed and built.
 4. The mount protocol, and FAT32 as the first userland filesystem server.
 5. NTFS read-only.

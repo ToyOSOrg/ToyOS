@@ -1,6 +1,6 @@
 //! A client that plays through the null sink must finish and exit.
 //!
-//! `/bin/tone` and not this crate's own tone: the T14 hangs on the shipped
+//! `/system/bin/tone` and not this crate's own tone: the T14 hangs on the shipped
 //! binary, which reaches soundd through `cpal`, while the raw-API tone that
 //! `metal_sim_null_audio` runs drains perfectly on the same sink. Whatever the
 //! defect is, only the path a user actually takes shows it — which is why this
@@ -23,11 +23,11 @@ const PATIENCE: Duration = Duration::from_secs(15);
 
 fn play(round: u32) {
     let start = Instant::now();
-    let mut child = Command::new("/bin/tone")
+    let mut child = Command::new("/system/bin/tone")
         .arg("440")
         .arg(SECONDS)
         .spawn()
-        .unwrap_or_else(|e| panic!("round {round}: /bin/tone did not spawn: {e}"));
+        .unwrap_or_else(|e| panic!("round {round}: /system/bin/tone did not spawn: {e}"));
 
     // `try_wait` in a loop rather than `wait`, so the failure is this test's
     // own message and a wall-clock number rather than the harness's timeout —
@@ -38,7 +38,7 @@ fn play(round: u32) {
                 let took = start.elapsed();
                 assert!(
                     status.success(),
-                    "round {round}: /bin/tone exited {status:?} after {took:?}"
+                    "round {round}: /system/bin/tone exited {status:?} after {took:?}"
                 );
                 println!("round {round}: tone exited after {:.2?}", took);
                 return;
@@ -48,7 +48,7 @@ fn play(round: u32) {
         }
         assert!(
             start.elapsed() < PATIENCE,
-            "round {round}: /bin/tone has not exited after {:?} — the null sink is not \
+            "round {round}: /system/bin/tone has not exited after {:?} — the null sink is not \
              draining its client",
             start.elapsed()
         );

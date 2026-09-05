@@ -3,7 +3,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
-use crate::hasher::HashMap;
 
 use core::ops::{Deref, DerefMut};
 use toyos_abi::syscall::SyscallError;
@@ -119,12 +118,36 @@ pub enum UserAccess {
     KernelOnly,
 }
 
+/// The entries `/` has, in listing order. `/` is synthesized rather than
+/// mounted: it is no filesystem, and nothing outside this set can be mounted.
+pub const ROOT_ENTRIES: [&str; 7] = ["apps", "boot", "home", "log", "media", "system", "tmp"];
+
 struct Mount {
     fs: Box<dyn FileSystem>,
     access: UserAccess,
+    names: Vec<&'static str>,
     /// The device commit this mount still owes: raised by every flush that may
     /// have reached the device, settled only by a [`FileSystem::sync`] that returned `Ok`.
     commit: Owed,
+}
+
+/// A name at `/`, and where in its filesystem that name begins.
+#[derive(Clone, Copy)]
+struct MountPoint {
+    fs: usize,
+    /// Empty for a filesystem one name reaches; the name itself for one several
+    /// reach, which is how DATA is `/apps` and `/home` at once.
+    prefix: &'static str,
+}
+
+impl MountPoint {
+    fn path(&self, file: &str) -> String {
+        match (self.prefix.is_empty(), file.is_empty()) {
+            (true, _) => String::from(file),
+            (false, true) => String::from(self.prefix),
+            (false, false) => format!("{}/{}", self.prefix, file),
+        }
+    }
 }
 
 /// A path with every symlink followed, minted only by [`Vfs::resolve_for_open`]:
@@ -142,11 +165,13 @@ pub enum ResolveIntent {
     UserModify,
 }
 
-/// Virtual filesystem that dispatches to named mount points.
+/// Virtual filesystem that dispatches to the mount points `/` synthesizes.
 pub struct Vfs {
-    root: Option<Box<dyn FileSystem>>,
-    root_commit: Owed,
-    mounts: HashMap<String, Mount>,
+    /// Indexed by position in [`ROOT_ENTRIES`], so a name outside that set has
+    /// no slot to be mounted in.
+    at: [Option<MountPoint>; ROOT_ENTRIES.len()],
+    /// Each mounted filesystem once, however many names reach it.
+    mounts: Vec<Mount>,
     created_dirs: BTreeSet<String>,
 }
 
@@ -198,40 +223,43 @@ fn normalize(path: &str) -> String {
 impl Vfs {
     fn new() -> Self {
         Self {
-            root: None,
-            root_commit: Owed::new(),
-            mounts: HashMap::default(),
+            at: [const { None }; ROOT_ENTRIES.len()],
+            mounts: Vec::new(),
             created_dirs: BTreeSet::new(),
         }
     }
 
-    pub fn set_root(&mut self, fs: Box<dyn FileSystem>) {
-        self.root = Some(fs);
+    /// Mount one filesystem under `names`, each a [`ROOT_ENTRIES`] name. Several
+    /// names put each under its own directory of it: one filesystem, one sync.
+    pub fn mount(&mut self, names: &[&'static str], fs: Box<dyn FileSystem>, access: UserAccess) {
+        let index = self.mounts.len();
+        self.mounts.push(Mount { fs, access, names: names.to_vec(), commit: Owed::new() });
+        for name in names {
+            let prefix = if names.len() == 1 { "" } else { *name };
+            let slot = Self::entry(name).expect("a mount name is one of the root's entries");
+            self.at[slot] = Some(MountPoint { fs: index, prefix });
+        }
     }
 
-    pub fn mount(&mut self, name: &str, fs: Box<dyn FileSystem>, access: UserAccess) {
-        self.mounts.insert(String::from(name), Mount { fs, access, commit: Owed::new() });
+    fn entry(name: &str) -> Option<usize> {
+        ROOT_ENTRIES.iter().position(|e| *e == name)
     }
 
-    /// May a syscall acting for userland change what is at `path`?
+    /// What is mounted at `name`; `None` for a bare mount point and a name `/` has not.
+    fn point(&self, name: &str) -> Option<MountPoint> {
+        self.at[Self::entry(name)?]
+    }
+
+    /// May a syscall acting for userland change what is at `path`? `/` itself,
+    /// and a bare mount point, answer no: the read-only refusal, not a missing name.
     pub fn user_may_modify(&self, path: &str) -> bool {
         let (mount, _) = self.resolve_path("/", path);
-        self.mounts.get(&mount).is_none_or(|m| m.access == UserAccess::ReadWrite)
+        self.point(&mount).is_some_and(|p| self.mounts[p.fs].access == UserAccess::ReadWrite)
     }
 
     fn resolve_fs(&mut self, mount: &str, file: &str) -> Option<(&mut dyn FileSystem, String)> {
-        if let Some(mount) = self.mounts.get_mut(mount) {
-            return Some((mount.fs.as_mut(), String::from(file)));
-        }
-        if let Some(root) = self.root.as_deref_mut() {
-            let root_path = if file.is_empty() {
-                String::from(mount)
-            } else {
-                format!("{}/{}", mount, file)
-            };
-            return Some((root, root_path));
-        }
-        None
+        let point = self.point(mount)?;
+        Some((self.mounts[point.fs].fs.as_mut(), point.path(file)))
     }
 
     pub fn resolve_absolute(&self, cwd: &str, path: &str) -> String {
@@ -285,8 +313,8 @@ impl Vfs {
             return Ok(abs);
         }
 
-        let is_named = self.mounts.contains_key(&mount);
-        if subdir.is_empty() && is_named {
+        // A mount point exists whether or not anything is mounted on it.
+        if subdir.is_empty() && Self::entry(&mount).is_some() {
             return Ok(abs);
         }
 
@@ -310,32 +338,17 @@ impl Vfs {
         };
 
         if mount.is_empty() {
-            let mut result = Vec::new();
-            let mut seen_dirs = BTreeSet::new();
-
-            for name in self.mounts.keys() {
-                let dir_name = format!("{}/", name);
-                if seen_dirs.insert(dir_name.clone()) {
-                    result.push((dir_name, 0));
-                }
-            }
-
-            if let Some(root) = self.root.as_deref_mut() {
-                for (name, _size) in root.list("", MAX_LIST_ENTRIES)? {
-                    if let Some(slash_pos) = name.find('/') {
-                        let dir_name = format!("{}/", &name[..slash_pos]);
-                        if seen_dirs.insert(dir_name.clone()) {
-                            result.push((dir_name, 0));
-                        }
-                    }
-                }
-            }
-
-            return Ok(result);
+            return Ok(ROOT_ENTRIES.iter().map(|name| (format!("{name}/"), 0)).collect());
         }
 
-        let (fs, fs_path) = self.resolve_fs(&mount, &subdir)
-            .ok_or(SyscallError::NotFound)?;
+        let Some((fs, fs_path)) = self.resolve_fs(&mount, &subdir) else {
+            // A mount point with nothing mounted on it is an empty directory;
+            // anything under it, and any other name, is not there at all.
+            return match Self::entry(&mount) {
+                Some(_) if subdir.is_empty() => Ok(Vec::new()),
+                _ => Err(SyscallError::NotFound),
+            };
+        };
         let all_files = fs.list(&fs_path, MAX_LIST_ENTRIES)?;
 
         let prefix = if fs_path.is_empty() {
@@ -376,7 +389,7 @@ impl Vfs {
         // that represents directories, `created_dirs` on one the VFS carries.
         if result.is_empty()
             && !saw_self
-            && !prefix.is_empty()
+            && !subdir.is_empty()
             && !self.created_dirs.contains(&directory(&mount, &subdir))
         {
             return Err(SyscallError::NotFound);
@@ -385,6 +398,11 @@ impl Vfs {
     }
 
     pub fn resolve_for_open(&mut self, path: &str, intent: ResolveIntent) -> Result<OpenTarget, SyscallError> {
+        // Before the resolution as well as after: a name at `/` resolves to
+        // nothing, and "no such file" is the wrong answer to "may I make one".
+        if intent == ResolveIntent::UserModify && !self.user_may_modify(path) {
+            return Err(SyscallError::PermissionDenied);
+        }
         let target = self.resolve_for_open_depth(path, 0)?;
         if intent == ResolveIntent::UserModify && !self.user_may_modify(target.as_str()) {
             return Err(SyscallError::PermissionDenied);
@@ -395,27 +413,26 @@ impl Vfs {
     fn resolve_for_open_depth(&mut self, path: &str, depth: u32) -> Result<OpenTarget, SyscallError> {
         if depth > 10 { return Err(SyscallError::InvalidArgument); }
         let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() { return Err(SyscallError::NotFound); }
-        let is_named = self.mounts.contains_key(&mount);
+        // A mount point is a directory, never a file to open.
+        if file.is_empty() { return Err(SyscallError::NotFound); }
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if fs_path.is_empty() { return Err(SyscallError::NotFound); }
         if let Some(target) = fs.read_link(&fs_path)? {
-            let next = if is_named {
-                format!("/{}/{}", mount, target)
+            // An absolute target names the whole hierarchy; a relative one is
+            // read against the mount the link is on.
+            let next = if target.starts_with('/') {
+                target
             } else {
-                format!("/{}", target)
+                format!("/{}/{}", mount, target)
             };
             return self.resolve_for_open_depth(&next, depth + 1);
         }
-        Ok(OpenTarget(if file.is_empty() { format!("/{mount}") } else { format!("/{mount}/{file}") }))
+        Ok(OpenTarget(format!("/{mount}/{file}")))
     }
 
     fn fs_for_target(&mut self, target: &OpenTarget) -> Result<(&mut dyn FileSystem, String), SyscallError> {
         let (mount, file) = self.resolve_path("/", target.as_str());
-        if mount.is_empty() { return Err(SyscallError::NotFound); }
-        let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if fs_path.is_empty() { return Err(SyscallError::NotFound); }
-        Ok((fs, fs_path))
+        if file.is_empty() { return Err(SyscallError::NotFound); }
+        self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)
     }
 
     pub fn open_target(&mut self, target: &OpenTarget) -> Result<FileId, SyscallError> {
@@ -435,9 +452,8 @@ impl Vfs {
     /// Create a new empty file. Returns FileId.
     pub fn create_file(&mut self, path: &str, mtime: u64) -> Result<FileId, SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() { return Err(SyscallError::InvalidArgument); }
+        if file.is_empty() { return Err(SyscallError::InvalidArgument); }
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
         fs.create(&fs_path, mtime)
     }
 
@@ -447,12 +463,13 @@ impl Vfs {
     pub fn flush_file(&mut self, path: &str, file_id: FileId, mtime: u64) -> Result<(), SyscallError> {
         let plan = crate::file_cache::begin_flush(file_id);
         let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() { return Err(SyscallError::InvalidArgument); }
+        if file.is_empty() { return Err(SyscallError::InvalidArgument); }
+        let point = self.point(&mount).ok_or(SyscallError::NotFound)?;
         // Raised before the first write, not after the last: a flush that failed
         // half-way may already have reached the device's cache.
-        self.commit_of(&mount).record_write();
-        let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
+        self.mounts[point.fs].commit.record_write();
+        let fs_path = point.path(&file);
+        let fs = self.mounts[point.fs].fs.as_mut();
 
         // Before the pages: a page rewritten above the mark must outlive the trim.
         // Settled by the trim itself and not by the metadata write below, which
@@ -495,7 +512,7 @@ impl Vfs {
     /// Close a file (release filesystem state when last ref drops).
     pub fn close_file(&mut self, path: &str, file_id: FileId) {
         let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() { return; }
+        if file.is_empty() { return; }
         if let Some((fs, _fs_path)) = self.resolve_fs(&mount, &file) {
             fs.close_file(file_id);
         }
@@ -504,28 +521,19 @@ impl Vfs {
     /// Unlink `path` on its mount.
     pub fn delete_file(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() { return Err(SyscallError::InvalidArgument); }
+        if file.is_empty() { return Err(SyscallError::InvalidArgument); }
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
         fs.delete(&fs_path)
     }
 
     pub fn rename(&mut self, old_path: &str, new_path: &str) -> Result<(), SyscallError> {
         let (old_mount, old_file) = self.resolve_path("/", old_path);
         let (new_mount, new_file) = self.resolve_path("/", new_path);
-        if old_mount.is_empty() || new_mount.is_empty() { return Err(SyscallError::InvalidArgument); }
+        if old_file.is_empty() || new_file.is_empty() { return Err(SyscallError::InvalidArgument); }
         if old_mount != new_mount { return Err(SyscallError::NotSupported); }
-        let is_named = self.mounts.contains_key(&old_mount);
-        let (fs, old_fs_path) = self.resolve_fs(&old_mount, &old_file).ok_or(SyscallError::NotFound)?;
-        let new_fs_path = if is_named {
-            String::from(&new_file)
-        } else if new_file.is_empty() {
-            String::from(&new_mount)
-        } else {
-            format!("{}/{}", new_mount, new_file)
-        };
-        if old_fs_path.is_empty() || new_fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
-        fs.rename(&old_fs_path, &new_fs_path)
+        let point = self.point(&old_mount).ok_or(SyscallError::NotFound)?;
+        let (old_fs_path, new_fs_path) = (point.path(&old_file), point.path(&new_file));
+        self.mounts[point.fs].fs.rename(&old_fs_path, &new_fs_path)
     }
 
     /// The `Result` is as much the point as the bound: a caller that discards it and reports success anyway turns the bound into a silent failure.
@@ -606,34 +614,24 @@ impl Vfs {
 
     pub fn create_symlink(&mut self, path: &str, target: &str) -> Result<(), SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() {
+        if file.is_empty() {
             return Err(SyscallError::InvalidArgument);
         }
         let (fs, fs_path) = self.resolve_fs(&mount, &file).ok_or(SyscallError::NotFound)?;
-        if fs_path.is_empty() { return Err(SyscallError::InvalidArgument); }
         fs.create_symlink(&fs_path, target)
     }
 
     pub fn read_link(&mut self, path: &str) -> Result<Option<String>, SyscallError> {
         let (mount, file) = self.resolve_path("/", path);
-        if mount.is_empty() {
+        if file.is_empty() {
             return Ok(None);
         }
         let Some((fs, fs_path)) = self.resolve_fs(&mount, &file) else { return Ok(None) };
-        if fs_path.is_empty() { return Ok(None); }
         fs.read_link(&fs_path)
     }
 
     pub fn delete(&mut self, path: &str) -> Result<(), SyscallError> {
         self.delete_file(path)
-    }
-
-    /// The commit debt `mount` names — the named mount's, or the root's.
-    fn commit_of(&mut self, mount: &str) -> &mut Owed {
-        match self.mounts.get_mut(mount) {
-            Some(m) => &mut m.commit,
-            None => &mut self.root_commit,
-        }
     }
 
     /// Whether `SYS_FSYNC` still owes this file work: its own flush, or the
@@ -644,15 +642,14 @@ impl Vfs {
             return true;
         }
         let (mount, _) = self.resolve_path("/", path);
-        match self.mounts.get(&mount) {
-            Some(m) => m.commit.is_owed(),
-            None => self.root_commit.is_owed(),
-        }
+        self.point(&mount).is_some_and(|p| self.mounts[p.fs].commit.is_owed())
     }
 
-    /// Make one named mount's writes durable.
+    /// Make one mount point's filesystem durable — and with it every other name
+    /// that reaches it, because one filesystem has one device commit.
     pub fn sync_mount(&mut self, name: &str) -> Result<(), SyscallError> {
-        let mount = self.mounts.get_mut(name).ok_or(SyscallError::NotFound)?;
+        let point = self.point(name).ok_or(SyscallError::NotFound)?;
+        let mount = &mut self.mounts[point.fs];
         let upto = mount.commit.snapshot();
         mount.fs.sync()?;
         mount.commit.settle(upto);
@@ -661,41 +658,26 @@ impl Vfs {
 
     /// Is there a filesystem mounted under `name`?
     pub fn has_mount(&self, name: &str) -> bool {
-        self.mounts.contains_key(name)
+        self.point(name).is_some()
     }
 
-    /// `/bin/logd` publishes `LOG_DURABLE_NS` off this call's result and a panicking kernel waits on that word, so `sync_for_path` must reach the device's write cache, not stop at the page cache.
+    /// `/system/bin/logd` publishes `LOG_DURABLE_NS` off this call's result and a panicking kernel waits on that word, so `sync_for_path` must reach the device's write cache, not stop at the page cache.
     pub fn sync_for_path(&mut self, path: &str) -> Result<(), SyscallError> {
         let (mount, _) = self.resolve_path("/", path);
-        if self.mounts.contains_key(&mount) {
-            return self.sync_mount(&mount);
+        // Nothing mounted is not an error: the write being made durable cannot have happened.
+        if self.point(&mount).is_none() {
+            return Ok(());
         }
-        // No root is not an error: the write being made durable cannot have happened.
-        match &mut self.root {
-            Some(root) => {
-                let upto = self.root_commit.snapshot();
-                root.sync()?;
-                self.root_commit.settle(upto);
-                Ok(())
-            }
-            None => Ok(()),
-        }
+        self.sync_mount(&mount)
     }
 
     /// A refusal is logged, not returned, so one mount failing does not stop the rest.
     pub fn sync_all(&mut self) {
-        if let Some(root) = &mut self.root {
-            let upto = self.root_commit.snapshot();
-            match root.sync() {
-                Ok(()) => self.root_commit.settle(upto),
-                Err(e) => log!("vfs: the root filesystem would not sync: {e}"),
-            }
-        }
-        for (name, mount) in self.mounts.iter_mut() {
+        for mount in self.mounts.iter_mut() {
             let upto = mount.commit.snapshot();
             match mount.fs.sync() {
                 Ok(()) => mount.commit.settle(upto),
-                Err(e) => log!("vfs: /{name} would not sync: {e}"),
+                Err(e) => log!("vfs: {:?} would not sync: {e}", mount.names),
             }
         }
     }

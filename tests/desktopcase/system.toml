@@ -54,5 +54,5 @@ receives = ["compositor", "surface"]
 receives = ["compositor"]
 
 [symlinks]
-"bin/echo" = "/bin/toybox"
-"bin/locale" = "/bin/toybox"
+"bin/echo" = "/system/bin/toybox"
+"bin/locale" = "/system/bin/toybox"

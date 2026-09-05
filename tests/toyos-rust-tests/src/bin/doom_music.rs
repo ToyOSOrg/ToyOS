@@ -9,11 +9,11 @@
 use std::process::Command;
 
 fn main() {
-    let mut child = Command::new("/bin/doom")
+    let mut child = Command::new("/system/bin/doom")
         .arg("--music-check")
         .spawn()
-        .expect("spawn /bin/doom --music-check");
-    let status = child.wait().expect("wait for /bin/doom");
+        .expect("spawn /system/bin/doom --music-check");
+    let status = child.wait().expect("wait for /system/bin/doom");
     assert!(status.success(), "doom could not play its own music: {status:?}");
     println!("doom played its music");
 }

@@ -53,7 +53,7 @@ struct DmaNic {
 }
 
 impl DmaNic {
-    /// Bring up the DMA rings behind a claim `/bin/init` minted and endowed.
+    /// Bring up the DMA rings behind a claim `/system/bin/init` minted and endowed.
     ///
     /// Whether this machine *has* a NIC is answered before netd's first
     /// instruction — metal-sim has none, and neither does the target laptop

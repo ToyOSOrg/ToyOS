@@ -1,13 +1,13 @@
 //! Resolves the partitions the bootloader handed off ([`KernelArgs`]) to
-//! locations on a probed block device ([`probe`]), and collects every ROOT
-//! candidate those devices carry.
+//! locations on a probed block device ([`probe`]), and collects every ROOT and
+//! DATA candidate those devices carry.
 //!
 //! The boot partition's location must match firmware's account or is
 //! refused; the log partition is trusted only on the device already found
 //! to carry the boot partition, since its GUID names a file on that volume.
-//! A ROOT candidate is selected by partition *type* and nothing more — which
-//! of them is the root filesystem is `rootfs`'s question, answered against
-//! each one's superblock. Nothing here writes.
+//! A ROOT or DATA candidate is selected by partition *type* and nothing more —
+//! which of them is a role's filesystem is answered against each one's own
+//! superblock, by `rootfs` and by `bcachefs_adapter::probe`. Nothing here writes.
 
 use alloc::vec::Vec;
 
@@ -44,9 +44,9 @@ enum Resolution {
     Ambiguous,
 }
 
-/// One TOYOS-ROOT-typed partition, on a device that answered for it.
+/// One partition of a ToyOS type, on a device that answered for it.
 #[derive(Clone, Copy, Debug)]
-pub struct RootCandidate {
+pub struct Candidate {
     pub volume: Volume,
     pub guid: Guid,
 }
@@ -55,14 +55,15 @@ static FIRMWARE: Lock<Option<BootPartition>> = Lock::new(None);
 /// The log partition's identity; `None` only before [`init`] runs.
 static LOG_GUID: Lock<Option<Guid>> = Lock::new(None);
 static RESOLVED: Lock<Resolution> = Lock::new(Resolution::Unknown);
-static ROOTS: Lock<Vec<RootCandidate>> = Lock::new(Vec::new());
+static ROOTS: Lock<Vec<Candidate>> = Lock::new(Vec::new());
+static DATA: Lock<Vec<Candidate>> = Lock::new(Vec::new());
 
-/// How many TOYOS-ROOT partitions one device may offer this kernel.
+/// How many partitions of one ToyOS type one device may offer this kernel.
 ///
 /// A bound rather than a `Vec` because [`toyos_gpt::locate_type`] fills a
 /// caller's slice; a device carrying more says so in the log, and a boot that
 /// then finds no match panics naming what it did see.
-const MAX_ROOTS_PER_DEVICE: usize = 4;
+const MAX_PER_DEVICE: usize = 4;
 
 /// Take both partitions' identities out of the bootloader's handoff.
 pub fn init(args: &KernelArgs) {
@@ -112,16 +113,22 @@ pub fn log_volume() -> Option<Volume> {
 }
 
 /// Every ROOT candidate seen so far, across every device probed.
-pub fn root_candidates() -> Vec<RootCandidate> {
+pub fn root_candidates() -> Vec<Candidate> {
     ROOTS.lock().clone()
 }
 
-/// Ask one registered block device what it carries: ROOT candidates always,
-/// and the boot partition when firmware named one.
+/// Every DATA candidate seen so far, across every device probed.
+pub fn data_candidates() -> Vec<Candidate> {
+    DATA.lock().clone()
+}
+
+/// Ask one registered block device what it carries: ROOT and DATA candidates
+/// always, and the boot partition when firmware named one.
 pub fn probe(handle: &Handle, lba_bytes: u32) {
     let id = handle.device_id();
     let mut sectors = DeviceSectors::new(handle, lba_bytes);
-    collect_roots(&mut sectors, id, lba_bytes);
+    collect(&mut sectors, id, lba_bytes, "ROOT", Guid::TOYOS_ROOT, &ROOTS);
+    collect(&mut sectors, id, lba_bytes, "DATA", Guid::TOYOS_DATA, &DATA);
 
     let Some(firmware) = boot_partition() else {
         return;
@@ -194,23 +201,30 @@ pub fn probe(handle: &Handle, lba_bytes: u32) {
     }
 }
 
-/// Record every TOYOS-ROOT-typed partition on this device.
+/// Record every partition on this device whose type is `ty`.
 ///
 /// Each type match is then located again by its own *unique* GUID, because
 /// that road is the one carrying the range and overlap checks: a candidate this
 /// records has passed everything `toyos-gpt` refuses a partition for.
-fn collect_roots(sectors: &mut DeviceSectors<'_>, id: DeviceId, lba_bytes: u32) {
-    let mut found = [BLANK; MAX_ROOTS_PER_DEVICE];
-    let scan = match toyos_gpt::locate_type(sectors, Guid::TOYOS_ROOT, &mut found) {
+fn collect(
+    sectors: &mut DeviceSectors<'_>,
+    id: DeviceId,
+    lba_bytes: u32,
+    what: &str,
+    ty: Guid,
+    into: &Lock<Vec<Candidate>>,
+) {
+    let mut found = [BLANK; MAX_PER_DEVICE];
+    let scan = match toyos_gpt::locate_type(sectors, ty, &mut found) {
         Ok(scan) => scan,
         Err(e) => {
-            log!("gpt: device {id} carries no ROOT this kernel can read: {e:?}");
+            log!("gpt: device {id} carries no {what} this kernel can read: {e:?}");
             return;
         }
     };
     if scan.matched as usize > scan.listed {
         log!(
-            "gpt: device {id} carries {} ROOT partitions and this kernel looks at {}",
+            "gpt: device {id} carries {} {what} partitions and this kernel looks at {}",
             scan.matched,
             scan.listed
         );
@@ -220,19 +234,19 @@ fn collect_roots(sectors: &mut DeviceSectors<'_>, id: DeviceId, lba_bytes: u32) 
             Ok(located) => located.partition,
             Err(e) => {
                 log!(
-                    "gpt: device {id} names a ROOT {} its own table then refuses: {e:?}",
+                    "gpt: device {id} names a {what} {} its own table then refuses: {e:?}",
                     candidate.unique_guid
                 );
                 continue;
             }
         };
         log!(
-            "gpt: device {id} carries the ROOT candidate {} at LBA {}+{}",
+            "gpt: device {id} carries the {what} candidate {} at LBA {}+{}",
             checked.unique_guid,
             checked.first_lba,
             checked.lba_count()
         );
-        ROOTS.lock().push(RootCandidate {
+        into.lock().push(Candidate {
             volume: Volume {
                 device: id,
                 lba_bytes,

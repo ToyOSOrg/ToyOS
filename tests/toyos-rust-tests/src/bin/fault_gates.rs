@@ -45,7 +45,7 @@ const ARMS: &[(&str, Expect)] = &[
 
 fn main() {
     for (kind, expect) in ARMS {
-        let status = Command::new("/bin/test_rs_fault_gate_child")
+        let status = Command::new("/system/bin/test_rs_fault_gate_child")
             .arg(kind)
             .status()
             .unwrap_or_else(|e| panic!("failed to spawn fault_gate_child {kind}: {e}"));
@@ -61,7 +61,7 @@ fn main() {
         println!("  {kind}: killed={}", !status.success());
     }
 
-    let out = Command::new("/bin/echo")
+    let out = Command::new("/system/bin/echo")
         .arg("still alive")
         .output()
         .expect("failed to spawn a process after the fault arms");

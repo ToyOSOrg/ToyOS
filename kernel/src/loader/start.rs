@@ -125,7 +125,7 @@ pub(crate) fn make_name(path: &str) -> [u8; crate::process::THREAD_NAME_LEN] {
 /// A child's table, and the endowments that have not left the parent yet.
 // The move must be last: an earlier move leaves a failed spawn's parent holding handles that name nothing.
 pub enum PendingHandles {
-    /// Built by the kernel and owing nobody anything — the boot's `/bin/init`.
+    /// Built by the kernel and owing nobody anything — the boot's `/system/bin/init`.
     Ready(HandleTable, Endowments),
     /// A caller's request: `endow` has not left the caller's table yet.
     Moving { table: HandleTable, endow: Vec<u8>, labels: Vec<u8> },

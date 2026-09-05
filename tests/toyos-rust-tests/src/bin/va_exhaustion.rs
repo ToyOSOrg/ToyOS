@@ -55,7 +55,7 @@ fn main() {
     // and `dlopen` is the path whose refusal used to be an `.expect`. It has to
     // come while the arena is still full, and it must not allocate here: the
     // path is a byte-string literal for that reason.
-    let dlopen_full = syscall::dl_open(b"/lib/libtls_lib.so");
+    let dlopen_full = syscall::dl_open(b"/system/lib/libtls_lib.so");
 
     // Give the address space back before doing anything that allocates again.
     for &p in &addrs[..n] {
@@ -75,7 +75,7 @@ fn main() {
     // And the refusal was the arena, not the library: the same call works once
     // the space is back. This is what makes the assertion above mean "refused",
     // rather than "this .so never loads".
-    syscall::dl_open(b"/lib/libtls_lib.so")
+    syscall::dl_open(b"/system/lib/libtls_lib.so")
         .expect("dlopen failed after the arena was released");
 
     println!("va exhausted after {n} mappings, dlopen refused, kernel intact");

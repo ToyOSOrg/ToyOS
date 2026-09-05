@@ -86,7 +86,7 @@ fn main() {
 }
 
 /// The device-minting capability the test estate is endowed. A claim is
-/// `/bin/init`'s to mint everywhere else; here test-runner passes a `DEVICE`
+/// `/system/bin/init`'s to mint everywhere else; here test-runner passes a `DEVICE`
 /// duplicate down, so a boot can run several binaries that each need an input
 /// device.
 fn capability() -> SysCap {

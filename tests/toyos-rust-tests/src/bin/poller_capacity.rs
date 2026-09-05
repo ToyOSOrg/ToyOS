@@ -20,7 +20,7 @@ use std::process::Command;
 use toyos::poller::{Poller, READABLE};
 use toyos_abi::syscall;
 
-const SELF_PATH: &str = "/bin/test_rs_poller_capacity";
+const SELF_PATH: &str = "/system/bin/test_rs_poller_capacity";
 
 /// Each pipe is one 2 MiB kernel page, so this is 128 MiB of ring — enough to
 /// be a real batch, small enough to leave the machine alone.

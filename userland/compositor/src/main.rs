@@ -61,7 +61,7 @@ pub const CURSOR_PX: u32 = 20;
 
 /// What the launcher offers: the label it shows and the program it starts.
 pub const LAUNCHER_APPS: &[(&str, &str)] =
-    &[("Terminal", "/bin/terminal"), ("Files", "/bin/files")];
+    &[("Terminal", "/system/bin/terminal"), ("Files", "/system/bin/files")];
 
 fn main() {
     let mut session = session::Session::start();

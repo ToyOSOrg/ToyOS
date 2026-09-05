@@ -30,7 +30,7 @@ use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 use toyos_abi::RawHandle;
 
-const SELF_PATH: &str = "/bin/test_rs_abuse_shared_grant";
+const SELF_PATH: &str = "/system/bin/test_rs_abuse_shared_grant";
 const SECRET: &[u8] = b"owner-private-bytes-do-not-share";
 const REGION: usize = 4096;
 const SERVICE: &str = "region";

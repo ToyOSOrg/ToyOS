@@ -26,7 +26,7 @@ fn main() {
         return child();
     }
 
-    let victim = Command::new("/bin/test_rs_abuse_pipe_map")
+    let victim = Command::new("/system/bin/test_rs_abuse_pipe_map")
         .arg("child")
         .stdout(Stdio::piped())
         .spawn()
@@ -54,7 +54,7 @@ fn main() {
 
     // The kernel took a fault in a page it had handed back. It must still be
     // running, and running well enough to spawn.
-    let echo = Command::new("/bin/echo")
+    let echo = Command::new("/system/bin/echo")
         .arg("still alive")
         .output()
         .expect("run echo after the child faulted");

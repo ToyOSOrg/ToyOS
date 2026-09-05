@@ -24,7 +24,7 @@ typed can be ended by whoever sent it.** The sender needs nothing but
 
 ## Where it is reachable today
 
-- `/bin/init`'s launcher takes `extra` connectors from a client and hands them
+- `/system/bin/init`'s launcher takes `extra` connectors from a client and hands them
   to `SYS_NAMESPACE_BUILD`. That one is closed by making that call's `add` arm
   answer `InvalidArgument` rather than fault, and `launcher_refusals` gates it —
   but that is one call site, not the class.
@@ -57,7 +57,7 @@ change, and a new syscall is the owner's to approve.
 Judged while clearing PR #22's blockers, with the reasoning written down because
 the next reader will ask why a class this wide was left open.
 
-- **The one instance a hostile *client* can reach is closed.** `/bin/init`'s
+- **The one instance a hostile *client* can reach is closed.** `/system/bin/init`'s
   launcher takes `extra` connectors from anybody holding a `launcher` connector
   and hands them to `SYS_NAMESPACE_BUILD`, and that call answers
   `InvalidArgument` for a wrong type rather than ending the caller. It is the

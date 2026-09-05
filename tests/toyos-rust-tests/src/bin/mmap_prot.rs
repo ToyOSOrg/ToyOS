@@ -185,7 +185,7 @@ extern "C" fn returns_a_marker() -> u32 {
 }
 
 fn dies(mode: &str, what: &str) {
-    let child = Command::new("/bin/test_rs_mmap_prot")
+    let child = Command::new("/system/bin/test_rs_mmap_prot")
         .arg(mode)
         .stdout(Stdio::piped())
         .spawn()
@@ -207,7 +207,7 @@ fn dies(mode: &str, what: &str) {
 /// The other half of every refusal: the kernel is unharmed by a fault it
 /// delivered.
 fn still_alive() {
-    let out = Command::new("/bin/echo")
+    let out = Command::new("/system/bin/echo")
         .arg("still alive")
         .output()
         .expect("run echo after six protection faults");

@@ -55,7 +55,7 @@ use toyos::{endow, namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SyscallError, SERVE_PREFIX, SVC_LABEL};
 use toyos_abi::RawHandle;
 
-const SELF_PATH: &str = "/bin/test_rs_kill_while_blocked";
+const SELF_PATH: &str = "/system/bin/test_rs_kill_while_blocked";
 const SERVICE: &str = "blocked";
 
 /// The label arm 4's killer finds the spinner under. A local name in one

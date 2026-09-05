@@ -18,7 +18,7 @@ use std::time::Duration;
 use super::qemu::{BootOptions, QemuInstance};
 
 /// The in-guest gate's name in the `run <name>` protocol. It is a `test-runner`
-/// builtin rather than a `/bin` entry, and the marker protocol is the same
+/// builtin rather than a `/system/bin` entry, and the marker protocol is the same
 /// either way.
 const GATE: &str = "log-gate";
 
@@ -313,7 +313,7 @@ const INVERSION: &str = "within a shard the sequence order is the timestamp orde
 /// wrong for a stream that outlives every handle. Every `SysCap` maps to
 /// `Source::Log`, so any process closing any capability posted `-NotFound` into
 /// every pending log poll there was. It was latent while nothing parked on one
-/// and live from the moment `/bin/logd`'s whole loop is read-then-park.
+/// and live from the moment `/system/bin/logd`'s whole loop is read-then-park.
 ///
 /// The verdict is the guest's and it has two halves: closing a second handle to
 /// the same capability completes nothing, and a record afterwards still

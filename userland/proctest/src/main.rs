@@ -46,7 +46,7 @@ fn subcmd_repl() {
 
 fn test_status() {
     print!("test Command::status()... ");
-    let status = Command::new("/bin/echo")
+    let status = Command::new("/system/bin/echo")
         .arg("hi")
         .status()
         .expect("failed to run echo");
@@ -56,7 +56,7 @@ fn test_status() {
 
 fn test_output() {
     print!("test Command::output()... ");
-    let output = Command::new("/bin/echo")
+    let output = Command::new("/system/bin/echo")
         .args(&["hello", "world"])
         .output()
         .expect("failed to run echo");
@@ -68,7 +68,7 @@ fn test_output() {
 
 fn test_piped_stdout() {
     print!("test spawn() with piped stdout... ");
-    let mut child = Command::new("/bin/echo")
+    let mut child = Command::new("/system/bin/echo")
         .args(&["piped", "test"])
         .stdout(Stdio::piped())
         .spawn()
@@ -83,7 +83,7 @@ fn test_piped_stdout() {
 
 fn test_piped_stdin_stdout() {
     print!("test spawn() with piped stdin+stdout... ");
-    let mut child = Command::new("/bin/proctest")
+    let mut child = Command::new("/system/bin/proctest")
         .arg("echo")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -103,7 +103,7 @@ fn test_piped_stdin_stdout() {
 
 fn test_interactive() {
     print!("test interactive subprocess... ");
-    let mut child = Command::new("/bin/proctest")
+    let mut child = Command::new("/system/bin/proctest")
         .arg("repl")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

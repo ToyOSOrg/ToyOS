@@ -1,5 +1,5 @@
 fn main() {
-    let lib = unsafe { libloading::Library::new("/lib/libtls_dlopen_lib.so") }
+    let lib = unsafe { libloading::Library::new("/system/lib/libtls_dlopen_lib.so") }
         .expect("failed to dlopen tls-dlopen-lib");
 
     // Test 1: catch_unwind works inside a cdylib .so

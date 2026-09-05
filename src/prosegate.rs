@@ -89,7 +89,7 @@ pub(crate) const UNLEDGERED: &[&str] = &["rust", "target", ".git"];
 /// edit here as well as there. It only goes down: a sweep that removes
 /// chronology lowers this and the rows together.
 #[cfg(test)]
-const DATED_TOTAL: usize = 211;
+const DATED_TOTAL: usize = 208;
 
 /// The sentence a raised entry has to be worth.
 #[cfg(test)]

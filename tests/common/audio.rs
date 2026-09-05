@@ -1056,7 +1056,7 @@ pub fn null_sink_real_rate(
 /// Four assertions, three of them in-guest facts the host reads back and one
 /// on the wire:
 ///
-/// 1. **The game lives.** `/bin/doom --sound-stress` exits 0. On the tree this
+/// 1. **The game lives.** `/system/bin/doom --sound-stress` exits 0. On the tree this
 ///    replaced the same burst aborts on its 65th command.
 /// 2. **The burst was real.** `stalled_burst` commands were issued with the
 ///    callback's period count unchanged — 4096 of them, 64x the retired ring.

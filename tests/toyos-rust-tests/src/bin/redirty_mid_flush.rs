@@ -65,7 +65,7 @@ fn parent() {
         junk.sync_all().expect("junk fsync");
     }
 
-    let mut child = Command::new("/bin/test_rs_redirty_mid_flush")
+    let mut child = Command::new("/system/bin/test_rs_redirty_mid_flush")
         .arg("child")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

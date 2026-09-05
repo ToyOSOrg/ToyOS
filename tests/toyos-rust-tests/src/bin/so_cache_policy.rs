@@ -13,8 +13,8 @@ use toyos_abi::syscall::{self, SyscallError};
 /// Mirrored in `so_cache_refusals`, which reads its bytes off the device.
 const STALE: &str = "/home/so-cache-stale.so";
 const SAME_SIZE: &str = "/home/so-cache-same-size.so";
-const FIRST: &str = "/lib/libtls_lib.so";
-const SECOND: &str = "/lib/libtls_dlopen_lib.so";
+const FIRST: &str = "/system/lib/libtls_lib.so";
+const SECOND: &str = "/system/lib/libtls_dlopen_lib.so";
 /// A symbol `FIRST` exports and `SECOND` does not: the verdict is a name.
 const ONLY_IN_FIRST: &[u8] = b"tls_get_label";
 
@@ -22,7 +22,7 @@ const ONLY_IN_FIRST: &[u8] = b"tls_get_label";
 /// out of attempts and says so rather than looping.
 const BUDGET_ATTEMPTS: usize = 12;
 
-const SELF_PATH: &str = "/bin/test_rs_so_cache_policy";
+const SELF_PATH: &str = "/system/bin/test_rs_so_cache_policy";
 
 fn main() {
     match std::env::args().nth(1) {

@@ -19,7 +19,7 @@ for the guest to do something and, when the number expires, reports the
 the cause. Every entry below that says `nothing typed at the terminal window reached a
 shell` — `desktop_typing_damage`, `desktop_locale_detect`, `blocked_dump`, and
 `desktop_audio_client` — is now known to be the
-`/bin/terminal` boot race (its kernel entry since
+`/system/bin/terminal` boot race (its kernel entry since
 closed by the capability endowment branch: a port exists before either end's
 process does) reported through a wall-clock guard that could
 say nothing else: three of three such reds in an eight-suite session carried the
@@ -63,7 +63,7 @@ changes.
   is a twenty-second ceiling on a desktop coming up; the retry window is now
   `qemu::budget(20 s)`, the phase's. Still `Sched::Parallel`. **The duration
   profile's share of this is closed**: nothing is retyped against a clock any
-  more — `/bin/terminal` prints `terminal: ready` and `shell_echoes` waits on
+  more — `/system/bin/terminal` prints `terminal: ready` and `shell_echoes` waits on
   that (`tests/toyos.rs`'s `SURFACE_UP`) — and the four-minute lane holder that
   the profile used to seat a second desktop beside, `desktop_window_child`, is
   `Tier::Nightly` and so never in a pull request's parallel phase.
@@ -257,11 +257,11 @@ changes.
 - **`console_locale_detect`** — added 2026-08-20, first push-triggered `main`
   sighting: `ci` run `32314166262`, `guest (9)`, headSha `eba06ad6`, found
   auditing the merge-health backfill (`issues/build/the-eased-merge-law-carries-a-threshold.md`).
-  `STALLED: waiting for the wizard to ask for a key under /bin/console — the
+  `STALLED: waiting for the wizard to ask for a key under /system/bin/console — the
   console did not lend it the keyboard — it never stopped talking and never got
   there`, `ALONE … GREEN` on the harness's own re-run. Same shape as
   `desktop_locale_detect` above — a wizard waiting for a key it was never
-  handed — but against `/bin/console` rather than `/bin/terminal`, so it is not
+  handed — but against `/system/bin/console` rather than `/system/bin/terminal`, so it is not
   provably the same boot race and is filed separately. `cargo run --
   --known-red console_locale_detect` answered `NOT ON THE LIST`.
 
@@ -431,6 +431,6 @@ more refused launches left more live objects behind: [("PipeWrite", 0, 1),
 both times, in 4 s and 5 s — nowhere near the 192 s ceiling the paragraph above
 describes. `ALONE: GREEN` both times, and green again when re-run alone by hand
 (3 s, 2 s). So the name flakes for two different reasons and only one of them
-is the ceiling this section corrects; what a contended host does to `/bin/init`'s
+is the ceiling this section corrects; what a contended host does to `/system/bin/init`'s
 handle accounting on a *refused* launch is not explained here, and nobody has a
 mechanism for it. `src/redlist.rs` carries the sighting.

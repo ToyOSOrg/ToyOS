@@ -675,7 +675,7 @@ struct NeededLibs {
 /// 2 MiB window, so a `DT_NEEDED` list naming more is refused rather than loaded.
 const MAX_NEEDED_LIBS: usize = 64;
 
-/// Load each distinct `DT_NEEDED` library, from the executable's own directory first and `/lib` second.
+/// Load each distinct `DT_NEEDED` library, from the executable's own directory first and `/system/lib` second.
 fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallError> {
     let mut out = NeededLibs { libs: Vec::new(), paths: Vec::new() };
     if exe.needed.is_empty() {
@@ -707,15 +707,15 @@ fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallEr
         // Which spelling opens is decided before the cache is consulted, and is
         // the key from here on: keyed by the exe-dir string it never found, a
         // library loaded through the fallback was mapped a second time by any
-        // later `dlopen("/lib/…")`. Fallback only for NotFound — any other error
-        // would repeat on `/lib` too and produce a misleading second log line.
+        // later `dlopen("/system/lib/…")`. Fallback only for NotFound — any other error
+        // would repeat on `/system/lib` too and produce a misleading second log line.
         let (so_backing, id, lib_path) = {
             let in_exe_dir = alloc::format!("{}/{}", exe_dir, lib_name);
             let opened = vfs::lock().open_backing_identified(&in_exe_dir);
             match opened {
                 Ok((b, id)) => (b, id, in_exe_dir),
                 Err(SyscallError::NotFound) => {
-                    let fallback = alloc::format!("/lib/{}", lib_name);
+                    let fallback = alloc::format!("/system/lib/{}", lib_name);
                     match vfs::lock().open_backing_identified(&fallback) {
                         Ok((b, id)) => (b, id, fallback),
                         Err(e) => {
@@ -868,9 +868,9 @@ fn exe_tpoff(
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every
 /// image, so a missing one is a bad build, not a different boot.
-pub const INIT_PATH: &str = "/bin/init";
+pub const INIT_PATH: &str = "/system/bin/init";
 
-/// Start `/bin/init`, holding the machine's one full-rights `SysCap`.
+/// Start `/system/bin/init`, holding the machine's one full-rights `SysCap`.
 ///
 /// Nothing else can construct one: what init endows is the entire set of
 /// processes that can ever claim a device, enter the RT band, or power off.

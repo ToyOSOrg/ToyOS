@@ -1441,7 +1441,7 @@ fn main() {
     });
     let mut fb = window.framebuffer();
 
-    let font_data = fs::read("/share/fonts/JetBrainsMono-Regular-8x16.font")
+    let font_data = fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font")
         .expect("Failed to load font");
     let font = Font::from_prebuilt(&font_data);
 

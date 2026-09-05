@@ -7,7 +7,7 @@ use std::fs;
 use std::process::Command;
 
 const DIR: &str = "/home/disk_backtrace";
-const IN_ROOT: &str = "/bin/test_rs_disk_backtrace_child";
+const IN_ROOT: &str = "/system/bin/test_rs_disk_backtrace_child";
 const ON_DISK: &str = "/home/disk_backtrace/child";
 
 fn main() {

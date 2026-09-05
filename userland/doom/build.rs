@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs, path::Path};
 
-/// The upstream doomgeneric commit `/bin/doom` is built from. `forks.toml`
+/// The upstream doomgeneric commit `/system/bin/doom` is built from. `forks.toml`
 /// records it as the estate's one non-crate third-party source.
 ///
 /// Everything this project measures about doom is a measurement of *these*
@@ -179,11 +179,10 @@ fn main() {
 /// object it prints a `ranlib: warning: ... not a mach-o file`, writes a 96-byte
 /// archive whose only member is an empty `__.SYMDEF SORTED`, and exits 0. Every
 /// object is gone and nothing says so; the first report is one undefined symbol
-/// out of the linker, from a library that appeared to build. Measured 2026-08-24:
-/// `AR=/usr/bin/ar cargo run -- --build-only` on the dev host reproduces the
-/// macOS portability run's `toyos-ld: undefined symbol: DG_ScreenBuffer` exactly.
-/// The dev host only ever worked because Homebrew's binutils put a GNU `ar`
-/// earlier in `PATH`.
+/// out of the linker, from a library that appeared to build. `AR=/usr/bin/ar
+/// cargo run -- --build-only` on the dev host reproduces the macOS portability
+/// run's `toyos-ld: undefined symbol: DG_ScreenBuffer` exactly; the dev host
+/// only ever works because Homebrew's binutils put a GNU `ar` earlier in `PATH`.
 ///
 /// So the archive is written here. A `.a` is a byte format, not a tool:
 /// `!<arch>\n`, then per member a 60-byte ASCII header and the member's bytes
@@ -195,9 +194,9 @@ fn main() {
 /// the header's 16-byte field; the assert below is what keeps that true.
 ///
 /// Every header field is fixed — zero timestamp, zero uid and gid, mode 100644
-/// — so the same objects archive to the same bytes on any host, on any day.
-/// Measured 2026-08-24: this archive links `/bin/doom` to the same 4,185,664
-/// bytes, sha256 `28c3f361…`, that GNU `ar`'s archive of the same objects does.
+/// — so the same objects archive to the same bytes on any host, on any day, and
+/// this archive links `/system/bin/doom` to the bytes GNU `ar`'s archive of the
+/// same objects does.
 ///
 /// `src/libc.rs`'s `merge_rlibs` writes the other one of these, for
 /// `libtoyos_c.a`. The two are not shared code and cannot be: `userland/` is

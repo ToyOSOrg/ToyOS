@@ -284,7 +284,7 @@ const RUST_SKIP: &[&str] = &[
     // printed four hundred lines to a console nothing was reading and passed
     // on its exit code.
     "test_screen_churn",
-    // Spawns `/bin/doom`, which `tests/testcases` does not carry — doom is
+    // Spawns `/system/bin/doom`, which `tests/testcases` does not carry — doom is
     // 4 MiB and every other test boots that config. `doom_sound_flood` runs it
     // on `tests/doomcase`.
     "doom_sound_flood",
@@ -374,6 +374,7 @@ const RUST_SKIP: &[&str] = &[
 /// what the host staged: the shipping build here, `sched_check_build`'s
 /// assert-carrying build there.
 const DRIVEN_AND_SHARED: &[&str] = &[
+    "hierarchy_paths",
     "null_sink_client_exits",
     "nvme_home_roundtrip",
     "sched_stress",
@@ -453,13 +454,13 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
 /// a whole trimmed row, so the echoed `/home/root> echo zqjxk` cannot satisfy
 /// it either.
 const CONSOLE_NONCE: &str = "zqjxk";
-/// `/bin/shell` cds to `$HOME` before its first prompt, and prints
+/// `/system/bin/shell` cds to `$HOME` before its first prompt, and prints
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
 const CONSOLE_PROMPT: &str = "/home/root>";
 /// The seed's witness on the panel.
 ///
-/// `/bin/console` pushes the newest logs on `/log` into its scrollback before
+/// `/system/bin/console` pushes the newest logs on `/log` into its scrollback before
 /// its first prompt, so a panel carrying one of their lines is a console that
 /// read them. This one is written hundreds of lines into a boot, which is what
 /// makes its *absence* two different things — see `screen_console_shell`.
@@ -571,6 +572,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
     // The shared-object cache's two refusals. Body in `tests/common/storage.rs`.
     ("so_cache_refusals", Sched::Parallel, Tier::Fast),
+    // One filesystem under two paths: the guest writes under each of /apps and
+    // /home, the host finds both in one volume on the image. Body in
+    // `tests/common/storage.rs`.
+    ("apps_and_home_are_one_filesystem", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
@@ -1935,7 +1940,7 @@ fn check_audio_idle_suspend(result: &TestResult) -> bool {
 
 /// Two clients through the null sink, and what soundd said about each leaving.
 ///
-/// The exit code already says both `/bin/tone` runs finished cleanly — that is
+/// The exit code already says both `/system/bin/tone` runs finished cleanly — that is
 /// the test's own assertion — so this window is exactly the case soundd used to
 /// misreport: `client N died` for a process that exited `code=0`, because the
 /// mix loop's signal pipe broke before the control thread read the peer. What
@@ -2110,7 +2115,7 @@ fn settle_null_sink_client_exits(qemu: &mut QemuInstance, result: &mut TestResul
 fn no_settle(_: &mut QemuInstance, _: &mut TestResult) {}
 
 fn spawned_pid(log: &str, name: &str) -> Option<u32> {
-    let want = format!("/bin/test_rs_{name} ");
+    let want = format!("/system/bin/test_rs_{name} ");
     log.lines()
         .rev()
         .find(|l| l.contains("spawn: ") && l.contains(&want))?
@@ -2288,7 +2293,7 @@ const STORM_CALLS: [(u64, usize); 3] = [
 /// The parent is the *first* `spawn:` line, since every later one is a child of
 /// it; `spawned_pid` reads the last and would answer with a child.
 fn storm_parent(log: &str) -> Option<u32> {
-    let want = format!("/bin/test_rs_{STORM} ");
+    let want = format!("/system/bin/test_rs_{STORM} ");
     log.lines()
         .find(|l| l.contains("spawn: ") && l.contains(&want))?
         .split("pid=")
@@ -2325,7 +2330,7 @@ fn check_exit_wait_storm(result: &TestResult) -> bool {
     }
     let Some(parent) = storm_parent(&result.serial) else {
         eprintln!(
-            "FAIL rs::{STORM}: no `spawn: /bin/test_rs_{STORM}` line reached the capture, so \
+            "FAIL rs::{STORM}: no `spawn: /system/bin/test_rs_{STORM}` line reached the capture, so \
              nothing here says what the kernel saw{}",
             kernel_account(result)
         );
@@ -3614,7 +3619,7 @@ fn run_screen_test(
             // The third boot mode, on the machine shape that gets flashed.
             // What is under test is the whole chain a question travels on a
             // machine with no serial port: the i8042 pin, the kernel's
-            // translation, `/bin/console`, the shell's stdin, its stdout, and
+            // translation, `/system/bin/console`, the shell's stdin, its stdout, and
             // the panel. **A test that asserted only that a prompt rendered
             // would pass on a console that cannot read the keyboard**, which
             // is exactly the path this program exists to bring up.
@@ -4249,7 +4254,7 @@ fn run_screen_test(
             if !text.contains(FATAL_HALT_NONCE) {
                 return Err(format!(
                     "the fatal report never took the screen back from the console — which \
-                     would make `/bin/console` a downgrade on the machine it is for\n\
+                     would make `/system/bin/console` a downgrade on the machine it is for\n\
                      decoded screen (kernel font):\n{text}\n\
                      decoded screen (console font):\n{}",
                     dump.console_text(&font)
@@ -4917,7 +4922,7 @@ fn run_screen_test(
             // **Asserted as the disjunction the kernel actually promises.**
             // `apic::LOG_FILE_DRAIN` is a `Budget`, so its expiry is a
             // *degraded answer* and not a broken one: the kernel gives
-            // `/bin/logd` half a second and, when that is spent, says
+            // `/system/bin/logd` half a second and, when that is spent, says
             // `LOG_DRAIN_EXPIRED` where the reader of a muted machine is. So
             // there are three outcomes and only the third is a defect — the
             // report is on the stick; it is not, and the panel says why; or it
@@ -4939,7 +4944,7 @@ fn run_screen_test(
             let on_the_stick = on_device.contains("PANIC:");
             if !on_the_stick && !expired.get() {
                 // The third outcome, and it carries its evidence: what a red
-                // here needs is where `/bin/logd` stopped and whether the
+                // here needs is where `/system/bin/logd` stopped and whether the
                 // volume it stopped on is intact, and a muted guest has no
                 // console to have said either on.
                 let volume = std::fs::read(&image_path)
@@ -5421,7 +5426,7 @@ fn boot_i8042_trace(
 /// activates one input handler per device class, so with a USB HID present the
 /// injected keys would not reach the i8042 — and these tests are about which
 /// HID usage a physical key position reports. `tests/testcases` boots neither
-/// the compositor nor `/bin/console`, so the keyboard claim is free for
+/// the compositor nor `/system/bin/console`, so the keyboard claim is free for
 /// `locale_gate` to take — which it does, because it is standing in for a
 /// surface and a surface holds the keyboard.
 fn boot_locale(
@@ -6494,7 +6499,7 @@ const ECHO_TRY: Duration = Duration::from_secs(2);
 /// How long one burst of typing has to reach the panel.
 ///
 /// The same ceiling every console test already gives the prompt itself, and for
-/// the same guest: a `/bin/console` that has painted a prompt and then stops
+/// the same guest: a `/system/bin/console` that has painted a prompt and then stops
 /// echoing for this long has stopped, it is not slow. Nothing expires on the
 /// healthy path — the wait ends the instant the echo is there, and
 /// `screendump_while_rendering` keeps waiting past the deadline while the panel
@@ -6565,7 +6570,7 @@ fn ps2_bursts(line: &str) -> Vec<String> {
     bursts
 }
 
-/// Type `line` at `/bin/console`'s prompt and press Enter, **paced against the
+/// Type `line` at `/system/bin/console`'s prompt and press Enter, **paced against the
 /// guest's own echo and never against a wall clock**.
 ///
 /// [`QEMU_PS2_QUEUE`] holds sixteen set-1 bytes and drops the seventeenth
@@ -6654,12 +6659,12 @@ const SHELL_TYPE_TRIES: usize = 3;
 /// before the next one goes in.
 ///
 /// **A choice with no default, because the two surfaces cannot answer the same
-/// question.** `/bin/console` draws each echoed character onto glass this
+/// question.** `/system/bin/console` draws each echoed character onto glass this
 /// harness decodes; a windowed shell renders into a window the compositor
 /// places and mirrors to a line-buffered stdout, so nothing of a line under
 /// construction reaches the console at all.
 enum Drained {
-    /// The decoded input row, for a shell behind `/bin/console`.
+    /// The decoded input row, for a shell behind `/system/bin/console`.
     Panel(screen::ConsoleFont),
     /// The kernel's drain report, for a shell behind a compositor: the device
     /// path rather than the surface, counting the bytes the queue is measured
@@ -6872,10 +6877,10 @@ fn shell_echoes(
     // Whichever surface owner this config put a shell behind, printed once its
     // screen exists and the shell's stdin is a pipe it holds. Before that a
     // keystroke lands nowhere and leaves no trace. Both, because `shell_answers`
-    // is asked of a terminal under the compositor and of `/bin/console` on the
+    // is asked of a terminal under the compositor and of `/system/bin/console` on the
     // raw framebuffer, and the question is the same one.
     const SURFACE_UP: [&str; 2] = ["terminal: ready", "console: ready"];
-    // **And the state in which it is never coming.** `/bin/terminal` exits when
+    // **And the state in which it is never coming.** `/system/bin/terminal` exits when
     // it loses the race with the compositor (`issues/kernel/`), which is a fact
     // the log states outright at 0.6 s — so waiting for a ready marker that
     // cannot arrive is not a slow guest but a defect, and the only thing a
@@ -6888,7 +6893,7 @@ fn shell_echoes(
     await_guest(qemu, log, "a surface to say it is up", |log| up(log) || gone(log))?;
     if !up(log) {
         return Err(
-            "the surface owner exited before it ever said it was ready — /bin/terminal races \
+            "the surface owner exited before it ever said it was ready — /system/bin/terminal races \
              the compositor at boot, `issues/kernel/`"
                 .to_string(),
         );
@@ -7022,7 +7027,7 @@ fn doom_music(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let opened = result
         .stdout
         .lines()
-        .find(|line| line.contains("[doom-sound] /share/soundfont.sf2:"))
+        .find(|line| line.contains("[doom-sound] /system/share/soundfont.sf2:"))
         .ok_or_else(|| {
             format!(
                 "doom said nothing about the SoundFont, so this image has none:\n{}",
@@ -7389,10 +7394,10 @@ fn desktop_typing_damage() -> Result<(), String> {
     Ok(())
 }
 
-/// The wizard under `/bin/console`, which is the whole of the surface tree on
+/// The wizard under `/system/bin/console`, which is the whole of the surface tree on
 /// a machine with no compositor — and the image that gets flashed.
 ///
-/// This is one of the two tests that replaced the refusal gate. `/bin/console`
+/// This is one of the two tests that replaced the refusal gate. `/system/bin/console`
 /// claims the keyboard for its entire run, which is exactly the state that
 /// used to make `locale detect` print "cannot read the keyboard directly" and
 /// stop; the wizard now asks the console for the transitions instead. The
@@ -7412,7 +7417,7 @@ fn console_locale_detect() -> Result<(), String> {
     // The panel, because this is the surface that has one.
     let ack = Drained::Panel(screen::ConsoleFont::load());
     if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
-        return Err(format!("{why}\nnothing typed at /bin/console reached a shell:\n{log}"));
+        return Err(format!("{why}\nnothing typed at /system/bin/console reached a shell:\n{log}"));
     }
 
     shell_type_line(&mut qemu, "locale detect", &ack)?;
@@ -7420,14 +7425,14 @@ fn console_locale_detect() -> Result<(), String> {
         &mut qemu,
         &mut log,
         "Press the key labelled",
-        "the wizard to ask for a key under /bin/console — the console did not lend it \
+        "the wizard to ask for a key under /system/bin/console — the console did not lend it \
          the keyboard",
     )
     .map_err(|why| format!("{why}\n{log}"))?;
-    answer_swiss_wizard(&mut qemu, &mut log, "under /bin/console")?;
+    answer_swiss_wizard(&mut qemu, &mut log, "under /system/bin/console")?;
 
     for want in ["That is 'swiss-german'", "Keyboard layout set to 'swiss-german'"] {
-        await_marker(&mut qemu, &mut log, want, &format!("{want:?} under /bin/console"))
+        await_marker(&mut qemu, &mut log, want, &format!("{want:?} under /system/bin/console"))
             .map_err(|why| format!("{why}\n{log}"))?;
     }
     // The console acted on the notification. A prefix, not the whole line: the
@@ -7475,7 +7480,7 @@ fn console_locale_detect() -> Result<(), String> {
     Ok(())
 }
 
-/// The wizard under `/bin/terminal`, on a desktop.
+/// The wizard under `/system/bin/terminal`, on a desktop.
 ///
 /// The other half of the refusal gate's replacement, and the deepest the
 /// surface tree goes: the compositor claims the keyboard and forwards whole
@@ -7816,7 +7821,7 @@ fn blocked_dump() -> Result<(), String> {
     //
     // Matched with the ` cpu=` that follows the name on the census line, because
     // a bare name appears in every one of these programs' own log lines and
-    // `/bin/init` speaks in a program's name before that program runs
+    // `/system/bin/init` speaks in a program's name before that program runs
     // (`tests/CLAUDE.md`).
     let unnamed: Vec<&str> = ["klogd", "usbd", "iod"]
         .into_iter()
@@ -8657,6 +8662,9 @@ fn run_machine_test(
             storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
         }
         "so_cache_refusals" => storage::so_cache_refusals(test_config, c_bins, rust_bins),
+        "apps_and_home_are_one_filesystem" => {
+            storage::apps_and_home_are_one_filesystem(test_config, c_bins, rust_bins)
+        }
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
@@ -9978,14 +9986,18 @@ fn run_machine_test(
             // the *device* received, so this is the one place a storage claim
             // does not rest on the guest's account of itself. The clean flag
             // reaches the platter only through `PageCache::sync`, and the
-            // backup superblock only through a write at byte 256,060,510,208 —
-            // the far end of a 244 GB device.
-            for (name, block) in [("primary", 0), ("backup", qemu::NVME_T14_BLOCKS - 1)] {
+            // backup superblock only through a write at the far end of DATA on
+            // a 244 GB device. Where DATA is comes out of the table, never out
+            // of an offset this side computed.
+            let (data_at, data_bytes) = toyos_build::image::data_partition_of(&image)?;
+            let (first, data_blocks) = (data_at / 4096, data_bytes / 4096);
+            for (name, block) in [("primary", first), ("backup", first + data_blocks - 1)] {
                 let sb = read_superblock(&image, block)
                     .map_err(|e| format!("{name} superblock at block {block}: {e}"))?;
-                if sb.block_count != qemu::NVME_T14_BLOCKS {
+                if sb.block_count != data_blocks {
                     return Err(format!(
-                        "the {name} superblock was formatted for {} blocks, not {}",
+                        "the {name} superblock was formatted for {} blocks, not the \
+                         {data_blocks} of the DATA partition on a {}-block device",
                         sb.block_count,
                         qemu::NVME_T14_BLOCKS
                     ));
@@ -10881,7 +10893,7 @@ fn run_machine_test(
             //
             // `smp: 1` is what makes the claim precise. The property is that
             // *the recovered CPU* survives its next allocation; on a wider
-            // machine `/bin/echo` could run somewhere else and pass without
+            // machine `/system/bin/echo` could run somewhere else and pass without
             // touching it. With one CPU there is nowhere else.
             //
             // The actuator is SYS_DEBUG 5, 6 and 7, and the reason it is not
@@ -13180,7 +13192,7 @@ fn run_machine_test(
             Ok(())
         }
         "launcher_refusals" => {
-            // **`/bin/init` is the one process the machine cannot lose**, and
+            // **`/system/bin/init` is the one process the machine cannot lose**, and
             // every launcher client — the compositor, every terminal, every
             // shell, sshd — can send it whatever it likes. The guest carries
             // the verdicts: init answered, init is still launching, and the
@@ -13586,12 +13598,7 @@ fn parse_page_cache_index(log: &str) -> Option<u64> {
 /// Decode one bcachefs superblock straight out of a disk image, with the
 /// same parser the kernel uses — magic, version and CRC all checked.
 fn read_superblock(image: &Path, block: u64) -> Result<bcachefs::Superblock, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = fs::File::open(image).map_err(|e| format!("open {}: {e}", image.display()))?;
-    f.seek(SeekFrom::Start(block * 4096)).map_err(|e| format!("seek: {e}"))?;
-    let mut buf = bcachefs::BlockBuf::zeroed();
-    f.read_exact(buf.as_bytes_mut()).map_err(|e| format!("read: {e}"))?;
-    bcachefs::Superblock::parse(&buf).map_err(|e| format!("{e:?}"))
+    common::storage::superblock_at(image, block)
 }
 
 /// A disk image's apparent size and the bytes it actually occupies. The gap
@@ -15698,7 +15705,7 @@ fn suite_split() -> Result<(), String> {
     let staged = vec![
         ("a_listed_one".to_string(), "syscall::debug(3)".to_string()),
         ("an_unlisted_one".to_string(), "SYS_DEBUG".to_string()),
-        ("its_parent".to_string(), "Command::new(\"/bin/test_rs_an_unlisted_one\")".to_string()),
+        ("its_parent".to_string(), "Command::new(\"/system/bin/test_rs_an_unlisted_one\")".to_string()),
         ("a_censor".to_string(), "use toyos::census::Census;".to_string()),
         ("a_debug_with_user".to_string(), "syscall::debug_with(3, 4)".to_string()),
         ("innocent".to_string(), "println!()".to_string()),
@@ -15744,7 +15751,7 @@ fn suite_split() -> Result<(), String> {
     // for it to act on.
     let staged_driven = [
         String::from("qemu.run_test(\"test_rs_a_driven_one\", Duration::from_secs(30))"),
-        String::from("Command::new(\"/bin/test_rs_another_driven\")"),
+        String::from("Command::new(\"/system/bin/test_rs_another_driven\")"),
         String::from("qemu.run_test(&format!(\"test_rs_{name}\"), ceiling)"),
     ];
     let found = driven_binaries(&staged_driven);

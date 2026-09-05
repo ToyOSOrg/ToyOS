@@ -461,7 +461,7 @@ fn volume_lines(log: &str) -> String {
 }
 
 /// The kernel's own log, written to the log partition of the stick it booted
-/// from — **by `/bin/logd` since L6, and this gate is what says the hand-over
+/// from — **by `/system/bin/logd` since L6, and this gate is what says the hand-over
 /// kept its promise**.
 ///
 /// The claim under test is *continuity*: not that a log file exists at the end,
@@ -539,7 +539,7 @@ pub fn kernel_log_file(
     }
 
     // Mid-run, with the guest still up and nothing shut down. Whatever is here
-    // was put there by `/bin/logd` while the machine was running.
+    // was put there by `/system/bin/logd` while the machine was running.
     //
     // Polled rather than read once, because the claim is "promptly", not
     // "instantly": the ready marker is printed by a userland process and logd
@@ -665,7 +665,7 @@ fn log_names(volume: &[u8]) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// The bound, from `tests/logrotatecase`: `/bin/logd` rotating at 256 bytes
+/// The bound, from `tests/logrotatecase`: `/system/bin/logd` rotating at 256 bytes
 /// rather than a mebibyte, which one boot's own log crosses many times over, so
 /// both the continuation path and the retention path run on the shipped code.
 ///
@@ -751,7 +751,7 @@ fn rotation(
     // It used to look at the two newest and that was an assumption about the
     // *writer*: the kernel sink drained everything it was owed in one flush and
     // then looked at the size, so the tail was in the last part or in the one
-    // before it. `/bin/logd` writes a batch, syncs it, publishes `durable` and
+    // before it. `/system/bin/logd` writes a batch, syncs it, publishes `durable` and
     // then looks at the size, and at a 256-byte bound a batch is a part — so
     // records the machine emits while `SYS_SHUTDOWN` is waiting push the line
     // several parts back. That is the bound doing what it is set to do, and an
@@ -1934,7 +1934,7 @@ pub fn log_on_device(
 ///
 /// **What stages it is a host-written file, and that is the deterministic form
 /// rather than the only one.** The log's own writer reaches the same hazard:
-/// `/bin/logd` is an ordinary process appending to an ordinary file and
+/// `/system/bin/logd` is an ordinary process appending to an ordinary file and
 /// `fsync`s every batch, which clears the dirty bit and leaves its tail page an
 /// ordinary eviction candidate — so a boot that loses that page re-fetches it
 /// on the next append, exactly as this does. Staging it from the guest's own
@@ -2505,18 +2505,11 @@ pub const NO_LOG_ALERT: &str = "log: no /log";
 /// The other arm of the same table: what the kernel says when both halves are
 /// there. `screen_diag_boot` is the gate on it.
 ///
-/// **One declaration, beside [`NO_LOG_ALERT`], because the last hand-copied
-/// spelling of this line outlived the kernel's by two commits and a nightly.**
-/// `screen_diag_boot` carried `"log: this boot is on the console and in"` inline
-/// at its assertion — the shape the line had while the kernel opened the log
-/// file and could name it. `9ca7631` cut it when `/bin/logd` took the file over
-/// and `ecede44` restored the half the kernel still knows, correcting
-/// `screen_log_absent` and not this one; the gate then reded on `main` through
-/// two nightly dispatches with nothing to say why, and `src/redlist.rs` carries
-/// the two runs. The writer is `report_log_destination` in `kernel/src/main.rs`,
-/// whose `(true, true)` arm formats exactly this — a test asserting on a log
-/// line reads it from one named declaration that cites its writer, never from
-/// a literal copied at the assertion.
+/// **One declaration, beside [`NO_LOG_ALERT`].** The writer is
+/// `report_log_destination` in `kernel/src/main.rs`, whose `(true, true)` arm
+/// formats exactly this — a test asserting on a log line reads it from one
+/// named declaration that cites its writer, never from a literal copied at the
+/// assertion, which is how a hand-copied spelling outlives the kernel's.
 pub const LOG_ON_CONSOLE_AND_FILE: &str = "log: this boot is on the console and on /log";
 
 /// The log partition is named, never discovered — proved by moving the name.

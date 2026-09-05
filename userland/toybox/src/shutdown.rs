@@ -1,11 +1,11 @@
 //! Power the machine off.
 //!
-//! **The endowment is the whole of the authority.** `/bin/shutdown` is
-//! `/bin/toybox` under another name, so what this holds is what the image's
+//! **The endowment is the whole of the authority.** `/system/bin/shutdown` is
+//! `/system/bin/toybox` under another name, so what this holds is what the image's
 //! `[programs.toybox]` row declares — a config that does not name `power`
 //! there builds an image whose shutdown applet says it cannot and changes
 //! nothing else. Nothing here asks for the capability: it is either in the
-//! endowment table `/bin/init` filled at spawn or it does not exist for this
+//! endowment table `/system/bin/init` filled at spawn or it does not exist for this
 //! process.
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};

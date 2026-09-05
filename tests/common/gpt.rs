@@ -127,14 +127,20 @@ pub fn boot_partition_identity(
         ));
     }
 
-    // A GPT disk is not a ToyOS volume and carries no designation stamp, so
-    // the interlock that keeps the kernel off other people's disks has to
-    // still refuse it — a boot partition on a disk is not consent to format
-    // the disk.
-    if !log.contains("this disk is not ours") {
+    // A boot partition on a disk is not consent to write the disk. This one
+    // carries no TOYOS-DATA partition, so the kernel takes no volume off it and
+    // says which count it saw; `foreign_disk_untouched` is where a ToyOS-typed
+    // partition that is somebody else's is refused at block 0.
+    if !log.contains("TOYOS-DATA partitions, and a data volume is one") {
         return Err(format!(
-            "finding our boot partition on a disk made the kernel treat the disk as \
-             ours:\n{}",
+            "the kernel did not say what it found on a disk carrying our boot partition and \
+             no data volume:\n{}",
+            gpt_lines(&log)
+        ));
+    }
+    if log.contains("formatting it") {
+        return Err(format!(
+            "finding our boot partition on a disk made the kernel format it:\n{}",
             gpt_lines(&log)
         ));
     }

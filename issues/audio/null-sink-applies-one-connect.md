@@ -34,7 +34,7 @@ with a terminal opened afterwards.
 
 **Eliminated, each with a run behind it.** CPU count. The cpal client path
 (`null_sink_shipped_client`, adopted from `wt/toyos-hdaprobe` `fa47241`, two
-`/bin/tone` in series at 1.16 s and 1.15 s). soundd blocking on a client
+`/system/bin/tone` in series at 1.16 s and 1.15 s). soundd blocking on a client
 (`signal_clients` uses `write_nonblock`; there is no blocking write in the mix
 loop). The accept path being held by a stuck client (accept and mix are
 separate threads and the control thread ran for 14 s afterwards). A CQ overflow

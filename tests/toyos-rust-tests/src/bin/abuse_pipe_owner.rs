@@ -32,7 +32,7 @@ use toyos::AsHandle;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
-const SELF_PATH: &str = "/bin/test_rs_abuse_pipe_owner";
+const SELF_PATH: &str = "/system/bin/test_rs_abuse_pipe_owner";
 
 /// `process::HANDLE_FAULT_EXIT_CODE`.
 const HANDLE_FAULT: i32 = 139;

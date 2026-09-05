@@ -6,7 +6,7 @@ Loads when you read a file under `src/` — the root cargo project, package name
 
 - `cargo run -- --gop` boots a UEFI GOP display (`-vga std`) instead of virtio-gpu: the config where the on-screen panic console renders.
 - `cargo run -- --diag-boot --build-only` builds `target/bootable-diag.img`, the diagnostic boot for a machine with no serial port: its config declares no `devices`, so the kernel's log stays readable off the panel. Same kernel and bootloader binaries as the ordinary build. **A flashable artifact is built from a committed tree** — `cargo` builds the working tree.
-- `cargo run -- --console-boot --build-only` builds `target/bootable-console.img` — `/bin/console`, the shell on the raw framebuffer, for asking a machine questions instead of reflashing it.
+- `cargo run -- --console-boot --build-only` builds `target/bootable-console.img` — `/system/bin/console`, the shell on the raw framebuffer, for asking a machine questions instead of reflashing it.
 - `cargo run -- --kernel-param <name>` (repeatable, any boot mode) arms an actuator at boot; every actuator lives in one kernel built with `boot-actuators` (`kernel/src/actuator.rs`), so it decides no kernel build. `--kernel-feature <name>` *is* a build; it accepts any feature `kernel/Cargo.toml` declares, and that set is closed by `cargo test --lib`. An undeclared name is refused by name before any lock.
 - `cargo run -- --metal-sim` boots the T14's hardware shape (GOP + NVMe + xHCI + i8042, no virtio, no USB HID, with a 16550); `--mute` takes the serial away, the T14's literal shape.
 

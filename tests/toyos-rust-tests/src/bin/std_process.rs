@@ -14,7 +14,7 @@ fn main() {
 }
 
 fn test_status() {
-    let status = Command::new("/bin/echo")
+    let status = Command::new("/system/bin/echo")
         .arg("hi")
         .status()
         .expect("failed to run echo");
@@ -23,7 +23,7 @@ fn test_status() {
 }
 
 fn test_output() {
-    let output = Command::new("/bin/echo")
+    let output = Command::new("/system/bin/echo")
         .arg("hello world")
         .output()
         .expect("failed to run echo");
@@ -42,7 +42,7 @@ fn test_output_stderr() {
     let path = "/tmp/std_process_stderr";
     fs::write(path, b"on stdout\n").expect("write the file cat reads");
 
-    let output = Command::new("/bin/cat")
+    let output = Command::new("/system/bin/cat")
         .args([path, "/nonexistent_file"])
         .output()
         .expect("failed to run cat");
@@ -60,14 +60,14 @@ fn test_output_stderr() {
 /// A child reading stdin to EOF must get one: `output()` inherits nothing, so
 /// the parent's write end has to go before the read of stdout begins.
 fn test_output_closes_stdin() {
-    let output = Command::new("/bin/cat").output().expect("failed to run cat");
+    let output = Command::new("/system/bin/cat").output().expect("failed to run cat");
     assert!(output.status.success(), "cat on an empty stdin should succeed");
     assert!(output.stdout.is_empty(), "cat echoed {:?}", output.stdout);
     println!("  Command::output() closes stdin: ok");
 }
 
 fn test_exit_code() {
-    let status = Command::new("/bin/cat")
+    let status = Command::new("/system/bin/cat")
         .arg("/nonexistent_file")
         .status()
         .expect("failed to run cat");
@@ -76,7 +76,7 @@ fn test_exit_code() {
 }
 
 fn test_spawn_and_wait() {
-    let mut child = Command::new("/bin/echo")
+    let mut child = Command::new("/system/bin/echo")
         .arg("spawned")
         .spawn()
         .expect("failed to spawn echo");
@@ -89,7 +89,7 @@ fn test_piped_stdin() {
     use std::io::Write;
     use std::process::Stdio;
 
-    let mut child = Command::new("/bin/cat")
+    let mut child = Command::new("/system/bin/cat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -109,7 +109,7 @@ fn test_write_to_a_gone_reader() {
     use std::io::{ErrorKind, Write};
     use std::process::Stdio;
 
-    let mut child = Command::new("/bin/echo")
+    let mut child = Command::new("/system/bin/echo")
         .arg("gone")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

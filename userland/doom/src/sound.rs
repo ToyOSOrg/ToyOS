@@ -514,7 +514,7 @@ unsafe extern "C" fn toyos_sound_is_playing(handle: i32) -> bool {
 // through it unchanged. `toyos_music_init` says which it opened and says so
 // again when there is none, because an image without music must not be an image
 // that is merely quiet.
-const SOUNDFONT_PATH: &str = "/share/soundfont.sf2";
+const SOUNDFONT_PATH: &str = "/system/share/soundfont.sf2";
 
 // ~3s of render-ahead at 44100Hz. On a saturated single core the game thread
 // starves the midi-synth thread for hundreds of ms at a time, and a ring this
@@ -1145,7 +1145,7 @@ pub fn sound_stress() -> i32 {
 const MUSIC_CHECK_LUMP: &[u8; 6] = b"D_E1M1";
 
 /// Where the WAD is in the image. `main.rs` passes the same path to doomgeneric.
-const WAD_PATH: &str = "/share/doom1.wad";
+const WAD_PATH: &str = "/system/share/doom1.wad";
 
 /// How much of the track to put on the wire. Long enough that the host's
 /// capture has a stretch of music in it and not just an onset, short enough

@@ -14,7 +14,7 @@ passes, and the success line says the opposite.
 
 **For the virtio half there is an oracle and it is simply not wired**:
 `kernel/src/device.rs`'s `try_claim` answers `ClaimError::Absent` for
-`DeviceType::Nic` exactly when `net::nic_info()` is `None`, and `/bin/init` prints
+`DeviceType::Nic` exactly when `net::nic_info()` is `None`, and `/system/bin/init` prints
 `init: <program>: no <class> on this machine (<err>)` per refused claim
 (`userland/init/src/main.rs`). This boot's config claims no NIC, so that line is
 not on its console and reaching it means giving the config a claimant.

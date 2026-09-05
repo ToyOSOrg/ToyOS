@@ -65,7 +65,7 @@ fn main() {
         let mut words = name.split_whitespace();
         let Some(name) = words.next() else { continue };
         let args: Vec<&str> = words.collect();
-        let path = format!("/bin/{name}");
+        let path = format!("/system/bin/{name}");
 
         println!("===TEST_START {name}===");
         let _ = io::stdout().flush();

@@ -28,7 +28,7 @@ use std::process::{exit, Command};
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
-const SELF_PATH: &str = "/bin/test_rs_console_line_atomicity";
+const SELF_PATH: &str = "/system/bin/test_rs_console_line_atomicity";
 
 /// Lines each writer emits.
 ///

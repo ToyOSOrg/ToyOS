@@ -1,7 +1,7 @@
 //! A netd that goes away *while* a client is binding is still a netd that is
 //! not there.
 //!
-//! `/bin/sshd` has one clean exit for a machine with no network and it is keyed
+//! `/system/bin/sshd` has one clean exit for a machine with no network and it is keyed
 //! on an error kind: `ErrorKind::NotConnected`, which is what
 //! `NetError::NetdNotFound` becomes. Anything else panics, by design — a
 //! machine that *has* a NIC and cannot bind must be loud. On a NIC-less machine
@@ -25,7 +25,7 @@
 //!    `SYS_NAMESPACE_OPEN` refuses — `SyscallError::Gone`. This is the arm that
 //!    already worked, and it is asserted through `std::net::TcpListener` as
 //!    well as through the SDK, because `ErrorKind::NotConnected` is the literal
-//!    thing `/bin/sshd` matches on.
+//!    thing `/system/bin/sshd` matches on.
 //! 2. **Gone between the connect and the handle transfer.** The client is
 //!    connected and queued when the port closes. `tcp_bind` hands netd a pipe
 //!    end, and a request that carries handles moves them *before* it writes the
@@ -59,7 +59,7 @@ use toyos::net::{
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 
-const SELF_PATH: &str = "/bin/test_rs_netd_gone_mid_bind";
+const SELF_PATH: &str = "/system/bin/test_rs_netd_gone_mid_bind";
 
 /// The name `NetdConn::connect` resolves, and it is not configurable — so the
 /// port this test hands its children has to be called that.
@@ -160,7 +160,7 @@ fn already_gone() -> ! {
         "the kernel's own word for a closed port is not `Gone`",
     );
 
-    // The same call `/bin/sshd` makes, through `std`, on the kind its quiet
+    // The same call `/system/bin/sshd` makes, through `std`, on the kind its quiet
     // exit is keyed to. A `SocketAddr` built here rather than parsed, so no
     // resolver is anywhere on this path.
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, SSH_PORT));
@@ -218,7 +218,7 @@ fn mid_flight(request: Request) -> ! {
         err,
         NetError::NetdNotFound,
         "a netd that left mid-request is a netd that is not there, and this said {err:?} — \
-         which `std` maps to ErrorKind::Other and `/bin/sshd` panics on",
+         which `std` maps to ErrorKind::Other and `/system/bin/sshd` panics on",
     );
 
     say("netd not found");

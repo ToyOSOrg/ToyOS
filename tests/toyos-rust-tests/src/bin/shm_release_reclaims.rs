@@ -21,7 +21,7 @@ use toyos::shm::SharedMemory;
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 
-const SELF_PATH: &str = "/bin/test_rs_shm_release_reclaims";
+const SELF_PATH: &str = "/system/bin/test_rs_shm_release_reclaims";
 const PAYLOAD: &[u8] = b"sent-before-the-maker-let-go";
 /// Sixteen rather than one because the arrival check has to be able to fail: a
 /// loop that made no region would leave nothing for the reclaim assertion to

@@ -242,11 +242,8 @@ fn round_up_sectors(n: usize) -> usize {
 /// transfers whole 4 KiB blocks and each mounted volume keeps its own resident
 /// copies of the blocks it has touched (`fat32_adapter::FatDevice`); two
 /// partitions sharing one device block would make each other's copies stale
-/// with nothing able to notice. Unaligned, the ESP ended 1024 bytes into a
-/// device block that the log partition then began in.
-///
-/// 1 MiB rather than the 4096 the kernel needs, because that is what every
-/// partitioner uses and what a flash device's erase block wants.
+/// with nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
+/// because that is what every partitioner uses and what an erase block wants.
 const PARTITION_ALIGN: usize = 1024 * 1024;
 
 /// The smallest volume there is a FAT32 for.
@@ -259,21 +256,12 @@ const FAT32_MIN_BYTES: usize = 34 * 1024 * 1024;
 
 /// What a guest can write into `/boot` after the three files are on it.
 ///
-/// The `64/63` beside this at the one call site is headroom for the
-/// filesystem's own metadata, and it is why this cannot be the flat slack it
-/// used to be. `fatfs` picks the cluster size from the volume size, and at the
-/// 512-byte clusters it gives the smaller ones the two FAT copies cost one
-/// byte of table per 64 bytes of volume — 4.1 MiB of the test image's 257 MiB,
-/// more than the 4 MiB the size used to add. So the slack was entirely
-/// metadata, and what a guest could write was whatever rounding happened to
-/// leave: measured before the change at **48,640 bytes**, against `esp_files`'
-/// own 41,097-byte blob. One more guest test binary in the image took it
-/// negative, and the symptom is an fsync that fails while the host-side volume
-/// still reports megabytes free.
-///
-/// `64/63` is the 512-byte-cluster worst case, so where `fatfs` picks larger
-/// clusters it over-provisions rather than under: the same image measures
-/// **7,901,184 bytes** free after the change, on 4096-byte clusters.
+/// The `64/63` beside this at the one call site is headroom for the two FAT
+/// copies, which cost a byte of table per 64 bytes of volume at the 512-byte
+/// clusters `fatfs` gives a small one — the worst case, so a volume whose
+/// clusters are larger is over-provisioned rather than under. A flat slack
+/// leaves a guest whatever the rounding did, and an fsync that fails while the
+/// host-side volume reports megabytes free is the symptom of getting it wrong.
 const ESP_FREE_BYTES: usize = 4 * 1024 * 1024;
 
 fn align_up(n: usize, to: usize) -> usize {
@@ -368,26 +356,18 @@ fn build_time() -> FatTime {
 /// and leave the free-cluster count recorded.
 ///
 /// Written with **our** FAT32 driver rather than with the crate that formatted
-/// the volume, and that is the whole of the fix for a defect every image this
-/// project ever produced carried: `fatfs`'s `create_dir` writes a long-name
-/// entry ahead of each `.` and `..`, which the format requires to be a
-/// subdirectory's first two entries, and gives `..` the root's cluster number
-/// where the format requires zero. Twelve `fsck_msdos` complaints, present
-/// before any guest ran, and neither reachable through that crate's API.
+/// the volume: `fatfs`'s `create_dir` writes a long-name entry ahead of each
+/// `.` and `..`, which the format requires to be a subdirectory's first two
+/// entries, and gives `..` the root's cluster number where the format requires
+/// zero — neither reachable through that crate's API. `toyos-fat32` is also the
+/// driver the kernel appends `kernel.log` with and the one its own host suite
+/// runs the volume checker against, so "the image we build is clean" is a claim
+/// about the writer that is judged. `fatfs` keeps the format call, where an
+/// empty volume has no subdirectory for either bug to live in.
 ///
-/// Using `toyos-fat32` is not a way round them. It deletes the second FAT32
-/// writer from the project: this is the one the kernel appends `kernel.log`
-/// with, the one `toyos-fat32`'s host suite runs the volume checker and a real
-/// macOS mount against on every `cargo test` in that crate, and now the one the
-/// claim "the image we build is clean" is a claim about. `fatfs` keeps the
-/// format call, where it has never had a complaint against it — an empty volume
-/// has no subdirectory for either bug to live in.
-///
-/// The free-cluster count is the third thing the checker asks for:
-/// `format_volume` leaves FSInfo's field 0xFFFFFFFF, which FAT32 defines as
-/// "unknown" and every host then reports this volume's free space from.
-/// `free_bytes` counts the FAT when the volume arrived without a hint and
-/// `sync` writes it.
+/// `format_volume` leaves FSInfo's free-cluster field 0xFFFFFFFF, which FAT32
+/// defines as "unknown" and every host reports free space from; `free_bytes`
+/// counts the FAT when the volume arrived without a hint and `sync` writes it.
 fn populate(volume: &mut [u8], label: &str, files: &[(&str, &[u8])]) {
     let time = build_time();
     let mut fs = Fat32::mount(VolumeIo(volume))
@@ -455,7 +435,7 @@ fn create_esp_volume(
 /// The partition the kernel's log lives on, empty until a machine boots.
 ///
 /// Exactly [`FAT32_MIN_BYTES`], because the floor is not ours to choose and the
-/// log cannot use much of it: sixteen boots at `/bin/logd`'s `MAX_LOG_BYTES`
+/// log cannot use much of it: sixteen boots at `/system/bin/logd`'s `MAX_LOG_BYTES`
 /// come to 16 MiB, under half of what this volume has free, and there is no
 /// smaller FAT32 to cut it down to.
 fn create_log_volume() -> Vec<u8> {
@@ -473,6 +453,120 @@ const TOYOS_ROOT: gpt::partition_types::Type = gpt::partition_types::Type {
     guid: toyos_gpt::Guid::TOYOS_ROOT_TEXT,
     os: gpt::partition_types::OperatingSystem::None,
 };
+
+/// `064E3777-…`, the TOYOS-DATA partition type, the same way round.
+const TOYOS_DATA: gpt::partition_types::Type = gpt::partition_types::Type {
+    guid: toyos_gpt::Guid::TOYOS_DATA_TEXT,
+    os: gpt::partition_types::OperatingSystem::None,
+};
+
+/// Lay a table on the disk at `path`, already `len` bytes long, carrying one
+/// TOYOS-DATA partition, stamp the designation at its first block, and answer
+/// where it landed. The table and the stamp are all this writes, so a sparse
+/// file stays sparse. The stamp names that partition's own block count, so a
+/// copy of this image designates no partition of another size.
+pub fn designate_data_disk(path: &Path, len: u64) -> (u64, u64) {
+    use std::io::Write;
+
+    let Some(data_bytes) = len
+        .checked_sub(2 * PARTITION_ALIGN as u64)
+        .map(|b| b / SECTOR as u64 * SECTOR as u64)
+        .filter(|b| *b > 0)
+    else {
+        panic!("a {len}-byte disk has no room for a DATA partition");
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open {} to partition it: {e}", path.display()));
+    let mbr =
+        gpt::mbr::ProtectiveMBR::with_lb_size(u32::try_from(len / 512 - 1).unwrap_or(0xFF_FF_FF_FF));
+    mbr.overwrite_lba0(&mut file).expect("write the protective MBR");
+
+    let mut gdisk = gpt::GptConfig::default()
+        .initialized(false)
+        .writable(true)
+        .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
+        .create_from_device(Box::new(file), None)
+        .expect("create a GPT on the data disk");
+    gdisk
+        .update_partitions(BTreeMap::<u32, gpt::partition::Partition>::new())
+        .expect("initialize the data disk's partition table");
+    let id = gdisk
+        .add_partition("ToyOS data", data_bytes, TOYOS_DATA, 0, Some((PARTITION_ALIGN / 512) as u64))
+        .expect("add the data partition");
+    let placed = gdisk.partitions().get(&id).expect("the partition was just added");
+    let start = placed
+        .bytes_start(gpt::disk::LogicalBlockSize::Lb512)
+        .expect("the data partition's start");
+    let bytes = placed
+        .bytes_len(gpt::disk::LogicalBlockSize::Lb512)
+        .expect("the data partition's length");
+    assert_eq!(start % SECTOR as u64, 0, "the data partition starts at byte {start}");
+    assert_eq!(bytes % SECTOR as u64, 0, "the data partition is {bytes} bytes");
+
+    let mut device = gdisk.write().expect("write the data disk's GPT");
+    device.seek(SeekFrom::Start(start)).expect("seek to the data partition");
+    device.write_all(&designation(bytes / SECTOR as u64)).expect("stamp the data partition");
+    device.flush().expect("flush the data disk");
+    (start, bytes)
+}
+
+/// Block 0 of a volume the kernel may format: the magic and its block count.
+fn designation(blocks: u64) -> [u8; SECTOR] {
+    let mut block = [0u8; SECTOR];
+    block[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);
+    let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;
+    block[at..at + 8].copy_from_slice(&blocks.to_le_bytes());
+    block
+}
+
+/// Where the one TOYOS-DATA partition on `path` is, by the parser the kernel
+/// selects it with.
+pub fn data_partition_of(path: &Path) -> Result<(u64, u64), String> {
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut out = [BLANK_PARTITION; 2];
+    let scan =
+        toyos_gpt::locate_type(&mut FileSectors(&mut file), toyos_gpt::Guid::TOYOS_DATA, &mut out)
+            .map_err(|e| format!("{} has no readable partition table: {e:?}", path.display()))?;
+    if scan.matched != 1 {
+        return Err(format!("{} carries {} TOYOS-DATA partitions", path.display(), scan.matched));
+    }
+    Ok((out[0].first_lba * u64::from(LBA), out[0].lba_count() * u64::from(LBA)))
+}
+
+/// A slot [`toyos_gpt::locate_type`] has not filled in.
+const BLANK_PARTITION: toyos_gpt::Partition = toyos_gpt::Partition {
+    index: 0,
+    type_guid: toyos_gpt::Guid::ZERO,
+    unique_guid: toyos_gpt::Guid::ZERO,
+    first_lba: 0,
+    last_lba: 0,
+};
+
+/// A disk file as logical blocks, for a reader that may not hold the image.
+struct FileSectors<'a>(&'a mut std::fs::File);
+
+impl toyos_gpt::Sectors for FileSectors<'_> {
+    fn lba_bytes(&self) -> u32 {
+        LBA
+    }
+
+    fn lba_count(&self) -> u64 {
+        self.0.metadata().map(|m| m.len()).unwrap_or(0) / u64::from(LBA)
+    }
+
+    fn lba_count_granularity(&self) -> NonZeroU64 {
+        NonZeroU64::new(1).expect("one is not zero")
+    }
+
+    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
+        self.0.seek(SeekFrom::Start(lba * u64::from(LBA))).is_ok() && self.0.read_exact(buf).is_ok()
+    }
+}
 
 fn create_gpt_disk(
     esp_volume: Vec<u8>,
@@ -712,19 +806,10 @@ mod tests {
     }
 
     /// The two volumes this build writes break no rule of the format, and the
-    /// gate is silence rather than sameness.
-    ///
-    /// The ESP did break some, from the first image this project ever built
-    /// until [`populate`] stopped writing it with `fatfs` — twelve complaints,
-    /// before any guest ran, from two format violations that crate's
-    /// `create_dir` has. The consequence was not only a dirty volume:
-    /// `esp_filesystem` could only ask that the guest add no *new* complaint,
-    /// so a complaint the guest produced for its own reason would have hidden
-    /// inside the twelve.
-    ///
-    /// Here rather than in the boot suite because it needs no guest, no QEMU
-    /// and no kernel: it is a claim about the writer, and it fails in seconds
-    /// on `cargo test --lib`.
+    /// gate is silence rather than sameness: a suite that could only ask the
+    /// guest to add no *new* complaint hides every complaint the writer left.
+    /// Here rather than in the boot suite because it needs no guest, no QEMU and
+    /// no kernel — a claim about the writer, failing in seconds.
     #[test]
     fn the_volumes_this_build_writes_break_no_format_rule() {
         for (what, volume) in [
@@ -830,15 +915,10 @@ mod tests {
     /// answer comes out of the image rather than from whoever built it.
     ///
     /// **This is what makes a staged boot image answerable.** The actuators are
-    /// baked in at build time, so a caller that supplies its own image cannot
-    /// arm anything by asking — and until [`param_conflict`] existed nothing
-    /// refused the pair: the harness took the parameters, built a kernel for
-    /// them, booted the supplied image instead, and reported the arm as taken.
-    /// A green run with an inert arm is the worst kind of harness defect,
-    /// because every negative control staged through one proves nothing.
-    ///
-    /// Both directions, over images this file's own writer produced: the reader
-    /// is the writer's inverse and a round trip is the only thing that says so.
+    /// baked in at build time, so a caller supplying its own image cannot arm
+    /// anything by asking, and a green run with an inert arm is the worst kind
+    /// of harness defect: every negative control staged through one proves
+    /// nothing. Both directions, because the reader is the writer's inverse.
     #[test]
     fn an_image_says_what_it_is_armed_with() {
         let dir = std::env::temp_dir().join(format!("toyos-image-params-{}", std::process::id()));
@@ -868,9 +948,8 @@ mod tests {
             );
         }
 
-        // The recorded defect, 2026-08-22: an actuator armed beside an image
-        // built without it. It has to name both sides — the reader gets the
-        // message and nothing else.
+        // An actuator armed beside an image built without it names both sides:
+        // the reader gets the message and nothing else.
         for (image, asked, name) in [
             (&shipping, &["usb-flush-fails"][..], "usb-flush-fails"),
             (&armed, &[][..], "fat-boot-reads-fail"),
@@ -902,9 +981,9 @@ mod tests {
             ("share/empty".to_string(), Vec::new()),
         ];
         let symlinks = vec![
-            ("bin/ls".to_string(), "/bin/toybox".to_string()),
-            ("bin/cat".to_string(), "/bin/toybox".to_string()),
-            ("bin/echo".to_string(), "/bin/toybox".to_string()),
+            ("bin/ls".to_string(), "/system/bin/toybox".to_string()),
+            ("bin/cat".to_string(), "/system/bin/toybox".to_string()),
+            ("bin/echo".to_string(), "/system/bin/toybox".to_string()),
         ];
 
         let forwards = create_root_image(&files, &symlinks, true);
@@ -958,7 +1037,7 @@ mod tests {
             ("etc/system.manifest".to_string(), b"[start]\ninit\n".to_vec()),
             ("share/empty".to_string(), Vec::new()),
         ];
-        let symlinks = vec![("bin/ls".to_string(), "/bin/toybox".to_string())];
+        let symlinks = vec![("bin/ls".to_string(), "/system/bin/toybox".to_string())];
 
         let root_image = create_root_image(&files, &symlinks, true);
         let disk = create_boot_image(b"kernel", b"bootloader", &root_image, "");
@@ -1029,5 +1108,96 @@ mod tests {
             Some(fs.uuid().to_string().as_str()),
             "the boot parameter {cmdline:?} does not name the ROOT this image carries"
         );
+    }
+
+    /// **The independent oracle for the hierarchy.** ROOT mounts at `/system`, so
+    /// every absolute path the shipped image declares is `/system/` plus a name
+    /// ROOT carries, the two the kernel opens by hard-coded path included. Asked
+    /// of a finished image by readers that did not write it: `toyos-gpt` finds
+    /// ROOT by type where the table says, `bcachefs` mounts it, and
+    /// `toyos-manifest` parses the records out of the volume.
+    ///
+    /// `INIT_PATH` comes from the kernel source, and that is a **text scan of
+    /// one spelling** — the `pub const INIT_PATH: &str = "…";` line — so a
+    /// kernel computing its spawn path otherwise is walked past. Not finding
+    /// the line fails here rather than skipping.
+    #[test]
+    fn every_declared_path_resolves_inside_the_root_partition() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (manifest, symlinks) = crate::build::manifest_and_symlinks(&root.join("system.toml"));
+        let declared = toyos_manifest::parse(
+            std::str::from_utf8(&manifest).expect("the manifest this build renders is text"),
+        );
+
+        // Placeholders: what this judges is the path scheme, and the bytes of a
+        // real binary say nothing about it.
+        let mut files: Vec<(String, Vec<u8>)> = declared
+            .programs
+            .iter()
+            .map(|p| (under_system(&p.path).to_string(), b"placeholder".to_vec()))
+            .collect();
+        files.push(("bin/init".to_string(), b"init".to_vec()));
+        files.push((toyos_manifest::PATH.to_string(), manifest.clone()));
+
+        let disk = create_boot_image(
+            b"kernel",
+            b"bootloader",
+            &create_root_image(&files, &symlinks, true),
+            "",
+        );
+
+        let mut out = [BLANK_PARTITION; 2];
+        let scan =
+            toyos_gpt::locate_type(&mut ImageSectors(&disk), toyos_gpt::Guid::TOYOS_ROOT, &mut out)
+                .expect("the image this build wrote has a partition table");
+        assert_eq!(scan.matched, 1, "a boot image carries exactly one TOYOS-ROOT partition");
+        let at = out[0].first_lba as usize * LBA as usize;
+        let bytes = out[0].lba_count() as usize * LBA as usize;
+        let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(
+            disk[at..at + bytes].to_vec(),
+        ))
+        .expect("the ROOT partition mounts");
+
+        // As the volume holds it, not as the renderer returned it.
+        let on_root = fs
+            .read_file(toyos_manifest::PATH)
+            .expect("ROOT carries the manifest where the guest path names it");
+        assert_eq!(on_root, manifest, "the manifest on ROOT is not the one the build rendered");
+        assert_eq!(
+            toyos_manifest::GUEST_PATH,
+            format!("/system/{}", toyos_manifest::PATH),
+            "the path a process opens is not where ROOT carries the manifest"
+        );
+
+        let init = init_path_of_the_kernel(root);
+        let names: std::collections::BTreeSet<String> = fs
+            .list(usize::MAX, &|_| true)
+            .expect("list the ROOT partition")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for path in std::iter::once(&init).chain(declared.programs.iter().map(|p| &p.path)) {
+            let name = under_system(path);
+            assert_ne!(name, path.as_str(), "{path} is not under the mount ROOT gets");
+            assert!(names.contains(name), "ROOT has no {name} for the declared path {path}");
+        }
+        assert!(names.contains("bin/init"), "ROOT carries {names:?} and no bin/init");
+    }
+
+    /// A declared absolute path as ROOT carries it; unchanged off that mount.
+    fn under_system(path: &str) -> &str {
+        path.strip_prefix("/system/").unwrap_or(path)
+    }
+
+    /// The literal in `kernel/src/loader/mod.rs`'s `INIT_PATH`.
+    fn init_path_of_the_kernel(root: &Path) -> String {
+        const ITEM: &str = "pub const INIT_PATH: &str = \"";
+        let source = std::fs::read_to_string(root.join("kernel/src/loader/mod.rs"))
+            .expect("kernel/src/loader/mod.rs");
+        source
+            .lines()
+            .find_map(|line| line.trim_start().strip_prefix(ITEM)?.split('"').next())
+            .expect("no `pub const INIT_PATH: &str = \"…\";` in kernel/src/loader/mod.rs")
+            .to_string()
     }
 }

@@ -8,11 +8,11 @@
 use std::process::Command;
 
 fn main() {
-    let mut child = Command::new("/bin/doom")
+    let mut child = Command::new("/system/bin/doom")
         .arg("--sound-stress")
         .spawn()
-        .expect("spawn /bin/doom --sound-stress");
-    let status = child.wait().expect("wait for /bin/doom");
+        .expect("spawn /system/bin/doom --sound-stress");
+    let status = child.wait().expect("wait for /system/bin/doom");
     assert!(
         status.success(),
         "doom did not survive its own sound producer: {status:?}"

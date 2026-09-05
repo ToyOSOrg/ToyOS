@@ -422,7 +422,7 @@ mod tests {
     /// exit sweeps the process and a third thread is being built.
     ///
     /// The three doors out of a process at once, which is what the T14 log
-    /// shows: `/bin/ls` spawning while a shell reaps and a terminal exits.
+    /// shows: `/system/bin/ls` spawning while a shell reaps and a terminal exits.
     #[test]
     fn a_sibling_exit_a_spawn_and_the_processs_own_exit() {
         let mut world = World::new();

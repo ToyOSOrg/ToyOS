@@ -91,8 +91,8 @@ of kernel objects and false of the filesystem.
 **Smallest decision:** is the filesystem inside the capability model or
 deliberately outside it? **Recommendation: deliberately outside, and say so.** A
 directory capability would be a second namespace mechanism beside `Namespace`
-for no caller that exists, and the ambient path space is what makes `/bin/init`
-able to start `/bin/toybox` at all. What does not follow from that ruling is
+for no caller that exists, and the ambient path space is what makes `/system/bin/init`
+able to start `/system/bin/toybox` at all. What does not follow from that ruling is
 `SYS_SHUTDOWN`: it is not path authority, and it was separated — the syscall
 demands the POWER capability now, and the isolation entry that tracked it is
 closed.
@@ -103,7 +103,7 @@ Identity-only, with one named exception that is itself gated. Every arm taking a
 pid: `SYS_GETPID` answers the caller's own
 (`kernel/src/arch/syscall.rs:490`), and `SYS_PROCESS_OPEN` turns a pid into a
 `Process` handle only when the caller also presents a `SysCap` carrying
-`Rights::MANAGE` (`:1602`), which the kernel mints once, for `/bin/init`
+`Rights::MANAGE` (`:1602`), which the kernel mints once, for `/system/bin/init`
 (`kernel/src/loader/mod.rs:938`). `ProcessStats.pid` says so at the field: "Not
 authority — nothing takes a pid but `SYS_PROCESS_OPEN`, which takes a `SysCap`
 beside it" (`toyos-abi/src/syscall.rs:1803`). Tids are process-local names:
@@ -121,13 +121,13 @@ reused — 26 `SYS_WAITPID`, 33 `SYS_FIND_PID`, 37 `SYS_GRANT_SHARED`, 65
 `toyos_manifest`'s `SYSCAP_RIGHTS` (`toyos-manifest/src/lib.rs`), demanded by
 `sys_sysinfo` before a single per-process entry is collected or written
 (`kernel/src/arch/syscall.rs`), and endowed by `system.toml` to `toybox` —
-which is what `/bin/ps` is under another name — exactly as `logread` is endowed
+which is what `/system/bin/ps` is under another name — exactly as `logread` is endowed
 to `logd`. The machine header the same call answers first stays ambient, which
 is question 5's committed set: `free`, netd's memory budget and the compositor's
 taskbar read it and nothing else, and which of the two answers a call is asking
 for is the buffer's own length. `endowment_denied` is the gate — a capability
 without the bit refused an entry, the same capability answered one byte of
-buffer earlier, and `/bin/ps` run twice on either side of it. Landed as PR #209
+buffer earlier, and `/system/bin/ps` run twice on either side of it. Landed as PR #209
 (the ABI half) and PR #211.
 
 The rest of the object graph was clean when this was audited and is unchanged.
@@ -275,7 +275,7 @@ Four sites, and they cannot disagree. `system.toml` declares `devices` per
 program; `src/build.rs:1923` refuses a config where two programs name one class
 and `src/build.rs:1953` refuses a class the ABI does not have, so arbitration is
 a build-time fact rather than a runtime race. At boot the kernel mints one
-full-rights `SysCap` for `/bin/init` and nothing else can construct one
+full-rights `SysCap` for `/system/bin/init` and nothing else can construct one
 (`kernel/src/loader/mod.rs:938`). init reads the manifest and calls
 `SYS_DEVICE_CLAIM` per declared class (`userland/init/src/main.rs:506`), which
 demands `Rights::DEVICE` on a `SysCap` (`kernel/src/arch/syscall.rs:1627`) and
@@ -368,7 +368,7 @@ exist, and all three are started at the end of `kernel_main`
 - **`iod`** — owns the deferred write-back queue, because `OpenFileState::drop`
   must flush under a lock that is becoming a sleep lock and a `Drop` impl cannot
   hold a `Parkable`. `OnPanic::Recover`, because a killed `iod` costs deferred
-  write-back and both `SYS_FSYNC`'s error path and `/bin/logd`'s give-up policy
+  write-back and both `SYS_FSYNC`'s error path and `/system/bin/logd`'s give-up policy
   can see that (`kernel/src/iod.rs:1`, spawn at `:52`). Its body is one park
   today — nothing pushes yet. **One `iod` machine-wide is a decision with a
   measurement owed** at the 128-core target, recorded at its own site

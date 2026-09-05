@@ -1,11 +1,11 @@
 //! Every process in the machine, by name.
 //!
-//! **The endowment is the whole of the authority**, as `/bin/shutdown`'s is.
-//! `/bin/ps` is `/bin/toybox` under another name, so what this holds is what
+//! **The endowment is the whole of the authority**, as `/system/bin/shutdown`'s is.
+//! `/system/bin/ps` is `/system/bin/toybox` under another name, so what this holds is what
 //! the image's `[programs.toybox]` row declares — a config that does not name
 //! `roster` there builds an image whose `ps` says it cannot and changes nothing
 //! else. Nothing here asks for the capability: it is either in the endowment
-//! table `/bin/init` filled at spawn or it does not exist for this process.
+//! table `/system/bin/init` filled at spawn or it does not exist for this process.
 //!
 //! `free` is the other half of the same syscall and needs none of this: the
 //! machine header is ambient.

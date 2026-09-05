@@ -1,7 +1,7 @@
 //! What a process may learn about the machine, and the one thing it may do to it.
 //!
 //! [`sys_log_read`], the roster half of [`sys_sysinfo`], and [`sys_shutdown`]
-//! each require a `SysCap` bit from `/bin/init`'s `system.toml`; `SYS_SYSINFO`'s
+//! each require a `SysCap` bit from `/system/bin/init`'s `system.toml`; `SYS_SYSINFO`'s
 //! header is ambient, and [`sys_sched_info`] demands nothing.
 
 use alloc::vec::Vec;

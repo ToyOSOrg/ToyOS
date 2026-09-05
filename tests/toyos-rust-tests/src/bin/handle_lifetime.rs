@@ -31,7 +31,7 @@ use toyos::{namespace, port, AsHandle};
 use toyos_abi::inbox::RingLayout;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom, SyscallError, SERVE_PREFIX};
 
-const SELF_PATH: &str = "/bin/test_rs_handle_lifetime";
+const SELF_PATH: &str = "/system/bin/test_rs_handle_lifetime";
 /// The name this test's own namespaces map to the port under test. Private to
 /// this process and its children, which is the whole of what a namespace is.
 const SERVICE: &str = "handle-lifetime-service";

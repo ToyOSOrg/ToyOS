@@ -48,7 +48,7 @@ controller" from "the console stopped reading the kernel's queue", and it needs
   measured here.
 - **Seen once on the dev host under load**, unarmed, on the `iommu-domains`
   branch: `console_locale_detect` STALLED with "waiting for the wizard to ask
-  for a key under /bin/console — the console did not lend it the keyboard — it
+  for a key under /system/bin/console — the console did not lend it the keyboard — it
   never stopped talking and never got there", in a run whose 1-minute load was
   9.7 with two other worktrees holding guest slots and which took 1833 s against
   198 s for the same tree alone. The harness called it a blown liveness guard;

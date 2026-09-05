@@ -24,7 +24,7 @@ use toyos_abi::syscall::debug_action::{CANARY_ADDR, CANARY_CHANGED};
 
 /// The one the TLS tests load, chosen because it exists in this image and has
 /// an `init_array` — so a successful call has something to report.
-const LIB: &[u8] = b"/lib/libtls_dlopen_lib.so";
+const LIB: &[u8] = b"/system/lib/libtls_dlopen_lib.so";
 
 const PAGE_2M: u64 = 2 * 1024 * 1024;
 

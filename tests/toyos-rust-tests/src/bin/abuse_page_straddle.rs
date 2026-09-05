@@ -66,7 +66,7 @@ fn main() {
     let boundary = base + PAGE_2M;
     assert_eq!(base % PAGE_2M, 0, "mmap did not return a 2 MiB-aligned region");
 
-    let handle = syscall::open(b"/bin/test_rs_abuse_page_straddle", OpenFlags::READ).expect("open self");
+    let handle = syscall::open(b"/system/bin/test_rs_abuse_page_straddle", OpenFlags::READ).expect("open self");
 
     // 1. A `Stat` eight bytes below the boundary: eight bytes of it are in this
     //    page and sixteen are not.
@@ -108,7 +108,7 @@ fn main() {
     //    reads it out of one translation gets a *correct* argv — and spawns.
     //    That is the observation: a child means the kernel acted on forty bytes
     //    it never validated.
-    let argv = b"/bin/echo\0straddle\0";
+    let argv = b"/system/bin/echo\0straddle\0";
     unsafe {
         core::ptr::copy_nonoverlapping(argv.as_ptr(), base as *mut u8, argv.len());
     }

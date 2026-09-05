@@ -35,7 +35,7 @@ use toyos::port::Acceptor;
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SyscallError, SVC_LABEL};
 
-const SELF_PATH: &str = "/bin/test_rs_connect_before_serve";
+const SELF_PATH: &str = "/system/bin/test_rs_connect_before_serve";
 const SERVICE: &str = "before-serve";
 /// Where the server role finds its acceptor. A test binary is not a `[programs]`
 /// key, so no manifest row can name what it serves and the label is the test's

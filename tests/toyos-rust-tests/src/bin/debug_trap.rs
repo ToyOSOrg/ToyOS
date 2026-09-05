@@ -24,7 +24,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const SELF_PATH: &str = "/bin/test_rs_debug_trap";
+const SELF_PATH: &str = "/system/bin/test_rs_debug_trap";
 
 /// The two ways Ring 3 reaches vector 1, and what each is.
 const ARMS: &[(&str, &str)] = &[
@@ -79,7 +79,7 @@ fn dies(role: &str, what: &str) {
 /// delivered. A `#DB` that took the machine down — or one whose handler resumed
 /// into a `TF` storm — fails here rather than above.
 fn still_alive() {
-    let out = Command::new("/bin/echo")
+    let out = Command::new("/system/bin/echo")
         .arg("still alive")
         .output()
         .expect("run echo after two debug traps");
