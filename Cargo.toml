@@ -128,6 +128,19 @@ toyos-ld = { path = "toyos-ld" }
 # from this workspace with its own lockfile, so nothing here reaches the kernel's
 # resolution of the same crate.
 toyos-sched = { path = "toyos-sched", features = ["check"] }
+# The gbae release asset `pkg_install_gbae` installs, and the second reader it
+# is judged against. **Nothing of the asset is committed** — no binary in this
+# tree is — so the harness fetches it over HTTPS into a digest-named cache
+# under `target/`, which is why an HTTP client is here at all. They are four of
+# the five `userland/doom/build.rs` already fetches and unpacks doomgeneric
+# with — the root store comes with ureq's `rustls-webpki-roots` feature and
+# needs no dependency of its own — and `tar` is the differential oracle: what
+# is read back off the guest's volume is compared against a third party's
+# decoding of the same archive, never against `userland/pkg`'s own.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+rustls-rustcrypto = "0.0.2-alpha"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
 
 [profile.release]
 opt-level = 2

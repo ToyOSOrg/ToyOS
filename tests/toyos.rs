@@ -11,7 +11,7 @@ use common::qemu::{
     self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance, TestResult,
     STALLED,
 };
-use common::{audio, bcachefs_oracle, compile, faults, hostload, screen, serial, stats, storage, usb};
+use common::{audio, bcachefs_oracle, compile, faults, hostload, pkg, screen, serial, stats, storage, usb};
 use toyos_build::day::Day;
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
@@ -365,6 +365,10 @@ const RUST_SKIP: &[&str] = &[
     "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
+    // Needs a package installed under `/apps` and a config whose `[apps]` row
+    // is what a launch out of it holds; `pkg_install_gbae` gives both, and on
+    // any other boot this exits on a launch nothing could satisfy.
+    "pkg_launch_gbae",
 ];
 
 /// Binaries a machine test drives that the shared boot also runs on purpose.
@@ -593,6 +597,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // /home, the host finds both in one volume on the image. Body in
     // `tests/common/storage.rs`.
     ("apps_and_home_are_one_filesystem", Sched::Parallel, Tier::Fast),
+    // `pkg install <file>` from a local archive and gbae's first run: the whole
+    // package path in one boot, judged off the DATA volume once the guest is
+    // gone. Body in `tests/common/pkg.rs`.
+    ("pkg_install_gbae", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
@@ -8686,6 +8694,7 @@ fn run_machine_test(
         "apps_and_home_are_one_filesystem" => {
             storage::apps_and_home_are_one_filesystem(test_config, c_bins, rust_bins)
         }
+        "pkg_install_gbae" => pkg::pkg_install_gbae(test_config, c_bins, rust_bins),
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.

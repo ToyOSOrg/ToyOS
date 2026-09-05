@@ -1,0 +1,16 @@
+[package]
+name = "pkg"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# The decoders are a library so the archive and the sums file can be attacked
+# without a guest, and the binary beside it is the filesystem. `doctest = false`
+# because the `toyos` toolchain builds rustc and no rustdoc.
+[lib]
+doctest = false
+
+[dependencies]
+toyos-manifest = { path = "../../toyos-manifest" }
+sha2 = "0.10"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

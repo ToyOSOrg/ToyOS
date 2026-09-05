@@ -291,6 +291,7 @@ page_cache_partition_offset 6984 shards=12
 panic_recovery 130 shards=12
 pci_capability_walk 5775 shards=12
 pipe_flag_forgery 12 shards=12
+pkg_install_gbae 6688 shards=12
 poll_wake_pipe 16 shards=12
 poller_capacity 36 shards=12
 port_poll_churn 84 shards=12

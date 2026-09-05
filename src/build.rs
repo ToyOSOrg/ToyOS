@@ -89,12 +89,24 @@ struct SystemConfig {
     /// `args` instead.
     #[serde(default)]
     boot: BootConfig,
+    /// What every program launched out of `/apps` holds. One row for all of
+    /// them, because a package directory is writable.
+    #[serde(default)]
+    apps: AppsConfig,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 struct BootConfig {
     start: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+struct AppsConfig {
+    /// Connectors, and no `devices` or `syscap` beside it: an installed package
+    /// reaches servers and claims no hardware.
+    receives: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -545,6 +557,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
             })
             .collect(),
         init_serves: INIT_SERVED.iter().map(|s| (*s).to_string()).collect(),
+        apps: config.apps.receives.clone(),
         start: config.boot.start.clone(),
     };
     toyos_manifest::render(&manifest)
@@ -2133,6 +2146,7 @@ mod tests {
         "tests/logrotatecase/system.toml",
         "tests/metalcase/system.toml",
         "tests/netcase/system.toml",
+        "tests/pkgcase/system.toml",
         "tests/sshdcase/system.toml",
         "tests/testcases/system.toml",
     ];
@@ -2171,6 +2185,38 @@ mod tests {
         let bad: SystemConfig =
             toml::from_str("init = []\n[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(receives_have_providers(&bad).is_err());
+    }
+
+    /// `[apps] receives` is narrower than a program's: a `provides` name is one
+    /// port per instance and nobody makes one for a package, so naming one here
+    /// is a namespace init cannot build.
+    fn apps_receive_a_served_name(cfg: &SystemConfig) -> Result<(), String> {
+        let mut served: Vec<&str> = INIT_SERVED.to_vec();
+        for prog in cfg.programs.values() {
+            served.extend(prog.serves.iter().map(String::as_str));
+        }
+        for name in &cfg.apps.receives {
+            if !served.contains(&name.as_str()) {
+                return Err(format!("`[apps] receives` names `{name}`, which no program serves"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_installed_app_receives_only_names_init_holds() {
+        for cfg in ALL_CONFIGS {
+            apps_receive_a_served_name(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let provided: SystemConfig = toml::from_str(
+            "init = []\n[apps]\nreceives = [\"surface\"]\n\
+             [programs.terminal]\nprovides = [\"surface\"]\n",
+        )
+        .unwrap();
+        assert!(apps_receive_a_served_name(&provided).is_err());
+        let ghost: SystemConfig =
+            toml::from_str("init = []\n[apps]\nreceives = [\"ghost\"]\n").unwrap();
+        assert!(apps_receive_a_served_name(&ghost).is_err());
     }
 
     /// A `serves` name is one port machine-wide; a `provides` name is one port

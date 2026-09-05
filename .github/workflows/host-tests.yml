@@ -825,6 +825,12 @@ jobs:
       # caller's clock against a stick that cannot flush — has no guest that
       # stages both arms cheaply.
       #
+      # `pkg` because everything a downloaded archive can say is decided in its
+      # `lib.rs`: the ustar names that leave the package directory, the entry
+      # types it refuses, the `SHA256SUMS` line it will not take twice. Those
+      # are the boundary the installer's write path rests on, and a guest boot
+      # runs one archive against it while these run the hostile ones.
+      #
       # These stay a loop, and cannot stop being one: that same
       # `.cargo/config.toml` is why `userland` is *excluded* from the host
       # workspace, and cargo refuses to merge an inherited `build.target` away.
@@ -835,7 +841,7 @@ jobs:
         run: |
           set -e -o pipefail
           host=$(rustc -vV | sed -n 's/^host: //p')
-          for crate in sshd calc soundd logd; do
+          for crate in sshd calc soundd logd pkg; do
             echo "=== userland/$crate" | tee -a /tmp/host.log
             cargo test --manifest-path "userland/$crate/Cargo.toml" --target "$host" 2>&1 \
               | tee -a /tmp/host.log
