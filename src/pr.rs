@@ -539,20 +539,29 @@ fn inseparable(line: &str) -> Option<bool> {
 
 /// `<base>..HEAD` oldest first, merges excluded.
 ///
-/// One `git log` and not one call per commit: `\x01` starts a header line and
-/// `\x02` a body line, and no path can contain either byte.
+/// **Two calls, because one log cannot say which of its lines is a path.** Only
+/// the first line of `%b` can carry a sentinel, so under `--name-only` a message
+/// quoting `toyos-abi/src/…` at the start of a line was read as a changed file.
 fn branch_commits(root: &Path, base: &str) -> Result<Vec<Commit>, String> {
-    let out = git(
+    let range = format!("{base}..HEAD");
+    let messages =
+        git(root, &["log", "--reverse", "--no-merges", "--format=\x01%h %s%n%b", &range])?;
+    let paths = git(
         root,
-        &[
-            "log",
-            "--reverse",
-            "--no-merges",
-            "--name-only",
-            "--format=\x01%h %s%n\x02%b",
-            &format!("{base}..HEAD"),
-        ],
+        &["log", "--reverse", "--no-merges", "--name-only", "--format=\x01%h", &range],
     )?;
+
+    let mut commits = parse_messages(&messages);
+    for (sha, path) in parse_paths(&paths) {
+        if let Some(commit) = commits.iter_mut().find(|c| c.sha == sha) {
+            commit.touches_sysroot |= in_sysroot(&path);
+        }
+    }
+    Ok(commits)
+}
+
+/// Headers and message text, from a log that asked for no paths — so no line here is one.
+fn parse_messages(out: &str) -> Vec<Commit> {
     let mut commits: Vec<Commit> = Vec::new();
     for line in out.lines() {
         if let Some(header) = line.strip_prefix('\x01') {
@@ -567,27 +576,34 @@ fn branch_commits(root: &Path, base: &str) -> Result<Vec<Commit>, String> {
             continue;
         }
         let Some(last) = commits.last_mut() else { continue };
-        if let Some(body) = line.strip_prefix('\x02') {
-            match inseparable(body) {
-                Some(true) => last.declares_inseparable = true,
-                Some(false) => last.bare_inseparable = true,
-                None => {}
-            }
-            continue;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
         match inseparable(line) {
             Some(true) => last.declares_inseparable = true,
             Some(false) => last.bare_inseparable = true,
             None => {}
         }
-        last.touches_sysroot |= crate::toolchain::SYSROOT_SOURCES
-            .iter()
-            .any(|tree| line.starts_with(tree));
     }
-    Ok(commits)
+    commits
+}
+
+/// Each changed path against the commit that changed it, from a log whose format carries no message.
+fn parse_paths(out: &str) -> Vec<(String, String)> {
+    let mut sha = String::new();
+    let mut changed = Vec::new();
+    for line in out.lines() {
+        match line.strip_prefix('\x01') {
+            Some(header) => sha = header.to_string(),
+            None if !line.trim().is_empty() => changed.push((sha.clone(), line.to_string())),
+            None => {}
+        }
+    }
+    changed
+}
+
+/// A path inside one of the sysroot's trees; the prefix ends at a directory boundary, so `toyos-abi/srcs` is not `toyos-abi/src`.
+fn in_sysroot(path: &str) -> bool {
+    crate::toolchain::SYSROOT_SOURCES
+        .iter()
+        .any(|tree| path.strip_prefix(tree).is_some_and(|rest| rest.starts_with('/')))
 }
 
 fn merging(root: &Path) -> bool {
@@ -691,6 +707,59 @@ pub(crate) mod tests {
         assert!(refusal.contains("vfs: the work"), "the rest is not named:\n{refusal}");
         assert!(refusal.contains("git switch -c wt-abi"), "no remedy for a prefix:\n{refusal}");
         assert!(refusal.contains(ABI_INSEPARABLE), "{refusal}");
+    }
+
+    /// **A commit message is not a list of paths.** Only the first line of `%b`
+    /// can carry a sentinel, so a body wrapping a sysroot path to the start of a
+    /// line was counted as a change to that tree, and a branch was refused for a
+    /// split it had not made.
+    #[test]
+    fn a_sysroot_path_quoted_in_a_commit_body_is_not_a_changed_file() {
+        let (_origin, wt) = repo("abi-quoted");
+        fs::write(wt.join("note.md"), "a record\n").unwrap();
+        sh(&wt, &["add", "note.md"]);
+        sh(&wt, &[
+            "commit",
+            "-qm",
+            "tracker: the reboot needs an ABI word\n\n\
+             It is blocked on a new syscall number in\n\
+             toyos-abi/src/syscall.rs and on the wrapper beside it, since\n\
+             toyos-abi/src toyos/src userland/libc/src carry no reboot today.",
+        ]);
+
+        let listed = git(&wt, &[
+            "log",
+            "--reverse",
+            "--no-merges",
+            "--name-only",
+            "--format=\x01%h",
+            "origin/main..HEAD",
+        ])
+        .expect("list the branch's paths");
+        let changed: Vec<String> = parse_paths(&listed).into_iter().map(|(_, p)| p).collect();
+        assert_eq!(changed, ["note.md"], "the paths call saw something that is not a path");
+
+        let commits = branch_commits(&wt, "origin/main").expect("read the branch");
+        assert_eq!(commits.len(), 1);
+        assert!(
+            !commits[0].touches_sysroot,
+            "a body quoting {:?} was read as a change to one",
+            crate::toolchain::SYSROOT_SOURCES,
+        );
+
+        commit(&wt, "g", "mine\n", "vfs: work that depends on none of it");
+        abi_lands_alone(&wt, "origin/main")
+            .expect("a markdown commit beside a code commit is not a sysroot split");
+    }
+
+    /// The prefix ends at a directory boundary, so a sibling is not the tree.
+    #[test]
+    fn a_sysroot_prefix_matches_the_tree_and_not_its_siblings() {
+        assert!(in_sysroot("toyos-abi/src/syscall.rs"));
+        assert!(in_sysroot("userland/libc/src/stdio.c"));
+        assert!(!in_sysroot("toyos-abi/srcs/syscall.rs"));
+        assert!(!in_sysroot("toyos-abi/src"));
+        assert!(!in_sysroot("toyos-acpi/src/fadt.rs"));
     }
 
     /// The escape is a trailer rather than a flag, because CI has no command
