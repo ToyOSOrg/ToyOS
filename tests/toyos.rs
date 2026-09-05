@@ -582,8 +582,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("apps_and_home_are_one_filesystem", Sched::Parallel, Tier::Fast),
     // `pkg install <file>` from a local archive and gbae's first run: the whole
     // package path in one boot, judged off the DATA volume once the guest is
-    // gone. Body in `tests/common/pkg.rs`. It carries the `UNMEASURED` marker
-    // its registration buys, so its tier is provisional until a shard prices it.
+    // gone. Body in `tests/common/pkg.rs`.
     ("pkg_install_gbae", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
