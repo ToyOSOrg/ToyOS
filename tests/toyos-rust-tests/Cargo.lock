@@ -224,7 +224,7 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation",
- "toyos",
+ "toyos 0.2.0",
  "toyos-abi 0.2.0",
  "web-sys",
  "windows",
@@ -1434,8 +1434,17 @@ dependencies = [
 [[package]]
 name = "toyos"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e0bacea3763413cb3e0cfcf1f1be9b3a449ba9e9ff7124682277099d50e9b3f"
 dependencies = [
  "toyos-abi 0.2.0",
+]
+
+[[package]]
+name = "toyos"
+version = "0.3.0"
+dependencies = [
+ "toyos-abi 0.3.0",
 ]
 
 [[package]]
@@ -1447,6 +1456,12 @@ checksum = "fce2965bd320e8da58a50d08e58e90a16438919cf647cf3c8af119b0841e28cd"
 [[package]]
 name = "toyos-abi"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec119a115b619cec7ca5e56858e98db6558658d6cc9b400906187e62f2877f48"
+
+[[package]]
+name = "toyos-abi"
+version = "0.3.0"
 
 [[package]]
 name = "toyos-font"
@@ -1466,8 +1481,8 @@ dependencies = [
  "rustls-pki-types",
  "rustls-rustcrypto",
  "sha2",
- "toyos",
- "toyos-abi 0.2.0",
+ "toyos 0.3.0",
+ "toyos-abi 0.3.0",
  "toyos-window",
  "ureq",
  "webpki-roots",
@@ -1475,10 +1490,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-window"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
- "toyos",
- "toyos-abi 0.2.0",
+ "toyos 0.3.0",
+ "toyos-abi 0.3.0",
  "toyos-font",
  "toyos-keymap",
 ]
