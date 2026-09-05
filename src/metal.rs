@@ -318,8 +318,16 @@ impl Pattern {
         self.0.len() == argv.len() && self.0.iter().zip(argv).all(|(w, got)| w.admits(got))
     }
 
+    /// **A command written with no arguments permits any arguments**
+    /// (`sudoers(5)`, "Command Arguments"), so a one-word pattern renders the
+    /// explicit empty argument list `""` instead of bare. Measured on the
+    /// machine: with the bare form, `sudo -n /usr/bin/true extra` ran.
     pub fn sudoers(&self) -> String {
-        self.0.iter().map(Word::sudoers).collect::<Vec<_>>().join(" ")
+        let words: Vec<String> = self.0.iter().map(Word::sudoers).collect();
+        match words.len() {
+            1 => format!("{} \"\"", words[0]),
+            _ => words.join(" "),
+        }
     }
 }
 
@@ -727,6 +735,11 @@ impl Driver {
             return Ok(id);
         }
         let created = self.as_root("creating the boot entry", &self.target.create_entry()?, None)?;
+        if self.dry_run {
+            // A dry run created nothing, so the id it would go on to set is the
+            // firmware's answer and not this loop's; `0000` stands for it.
+            return Ok("0000".to_string());
+        }
         entry_labelled(&created, &self.target.label)
             .ok_or_else(|| Refusal::BootEntry(created.trim().to_string()))
     }
@@ -890,16 +903,33 @@ pub fn install_sudoers(target: &Target, password: &Path) -> Result<(), Refusal> 
     }
     driver.ssh("checking the rule", &format!("/usr/sbin/visudo -c -f {STAGED}"))?;
 
-    let secret = std::fs::File::open(password)
+    // The password crosses this process as bytes on one pipe and reaches no
+    // argument, no formatter and no output. `sudo -S` reads one line, so the
+    // trailing newline is supplied here whether or not the file carries one.
+    let mut secret = std::fs::read(password)
         .map_err(|e| Refusal::File { path: password.display().to_string(), why: e.to_string() })?;
+    while secret.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+        secret.pop();
+    }
+    secret.push(b'\n');
     let command = format!(
         "sudo -S -p '' /usr/bin/install -m 0440 -o root -g root {STAGED} \
          /etc/sudoers.d/toyos-metal"
     );
-    let out = Command::new("ssh")
+    let mut install = Command::new("ssh")
         .args(target.ssh_argv(&command))
-        .stdin(Stdio::from(secret))
-        .output()
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| unstarted("installing the rule", &e))?;
+    install
+        .stdin
+        .take()
+        .expect("the pipe was just asked for")
+        .write_all(&secret)
+        .map_err(|e| unstarted("installing the rule", &e))?;
+    let out = install
+        .wait_with_output()
         .map_err(|e| unstarted("installing the rule", &e))?;
     answer("installing the rule", &out)?;
     driver.ssh("clearing the staged rule", &format!("rm -f {STAGED}"))?;
@@ -938,19 +968,16 @@ pub fn run(args: &Args) -> Result<Option<Verdict>, Refusal> {
     );
 
     driver.as_root("flashing the stick", &args.target.flash()?, Some(&image.path))?;
+    let entry = driver.boot_entry()?;
+    driver.as_root("setting bootnext", &args.target.bootnext(&entry)?, None)?;
+    driver.as_root("rebooting", &args.target.reboot()?, None)?;
     if driver.dry_run {
-        println!("  would run: {}", args.target.create_entry()?.remote());
-        println!("  would run: {}", args.target.bootnext("NNNN")?.remote());
-        println!("  would run: {}", args.target.reboot()?.remote());
-        println!("  would run: {}", args.target.mount_log()?.remote());
-        println!("  would run: {}", args.target.umount_log()?.remote());
+        driver.as_root("mounting the log partition", &args.target.mount_log()?, None)?;
+        driver.as_root("unmounting the log partition", &args.target.umount_log()?, None)?;
         println!("dry run: nothing was written and the machine was not rebooted");
         return Ok(None);
     }
 
-    let entry = driver.boot_entry()?;
-    driver.as_root("setting bootnext", &args.target.bootnext(&entry)?, None)?;
-    driver.as_root("rebooting", &args.target.reboot()?, None)?;
     let back = driver.wait_for_return(args.wait_secs)?;
     println!("the machine answered ssh again after {back} s");
     let log = driver.read_log()?;
@@ -1064,8 +1091,8 @@ mod tests {
              [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]\n\
              t14 ALL=(root) NOPASSWD: /usr/bin/mount -o ro /dev/sda3 /home/t14/toyos-log\n\
              t14 ALL=(root) NOPASSWD: /usr/bin/umount /home/t14/toyos-log\n\
-             t14 ALL=(root) NOPASSWD: /usr/sbin/reboot\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/true\n"
+             t14 ALL=(root) NOPASSWD: /usr/sbin/reboot \"\"\n\
+             t14 ALL=(root) NOPASSWD: /usr/bin/true \"\"\n"
         );
     }
 
