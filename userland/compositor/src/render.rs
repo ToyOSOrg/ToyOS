@@ -75,7 +75,7 @@ pub struct Assets<'a> {
     pub font: &'a font::Font,
     pub icons: &'a TitleBarIcons,
     pub wallpaper: &'a [u8],
-    pub apps: &'a [(&'static str, &'static str)],
+    pub apps: &'a [(String, String)],
 }
 
 fn fill(surface: &Framebuffer, r: Rect, color: Color) {

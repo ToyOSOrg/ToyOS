@@ -33,8 +33,8 @@ use crate::client::{
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::FrameStats;
 use crate::{
-    CURSOR_PX, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES, FLAG_HARDWARE_CURSOR,
-    FRAME_INTERVAL, LAUNCHER_APPS, MAX_WINDOW_SLOTS, STATS_INTERVAL,
+    launcher_apps, CURSOR_PX, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
+    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, STATS_INTERVAL,
 };
 
 struct Cursors {
@@ -112,6 +112,8 @@ pub struct Session {
     last_click_at: Instant,
     clipboard: String,
     launcher_open: bool,
+    /// `(label, program)`, re-read from `/apps` every time the launcher opens.
+    apps: Vec<(String, String)>,
     total_mem: u64,
     max_windows: usize,
 
@@ -203,7 +205,8 @@ impl Session {
             close: read_sprite("/system/share/icons/x-bold.svg", 14, [255, 255, 255]),
         };
 
-        let desk = desk_of(&screen, &font);
+        let apps = launcher_apps();
+        let desk = desk_of(&screen, &font, apps.len());
         let total_mem = total_memory();
         let max_windows =
             toyos_desktop::max_windows(total_mem, desk.screen, MAX_WINDOW_SLOTS as usize);
@@ -265,6 +268,7 @@ impl Session {
             last_click_at: now,
             clipboard: String::new(),
             launcher_open: false,
+            apps,
             total_mem,
             max_windows,
             dead: Vec::new(),
@@ -558,12 +562,21 @@ impl Session {
                 self.damage_all();
             }
             Hit::TaskbarNew => {
+                // Both rectangles, because reading `/apps` may change the
+                // popup's height between them.
+                self.damage.add(self.launcher_rect());
+                if !self.launcher_open {
+                    self.apps = launcher_apps();
+                    self.desk.apps = self.apps.len();
+                }
                 self.launcher_open = !self.launcher_open;
                 self.damage.add(self.launcher_rect());
                 self.damage.add(self.desk.taskbar(self.stack.len()).strip());
             }
             Hit::LauncherItem(idx) => {
-                Command::new(LAUNCHER_APPS[idx].1).spawn().ok();
+                if let Some((_, program)) = self.apps.get(idx) {
+                    Command::new(program).spawn().ok();
+                }
                 self.launcher_open = false;
                 self.damage.add(self.launcher_rect());
             }
@@ -961,7 +974,7 @@ impl Session {
         // zero.
         self.reported_traffic = self.screen.traffic();
         self.reported_composed = self.back.surface.traffic();
-        self.desk = desk_of(&self.screen, &self.font);
+        self.desk = desk_of(&self.screen, &self.font, self.apps.len());
         // What a window costs moved, so what we can afford moved with it.
         // Windows already open are left alone if the new figure is below their
         // count — the cap gates creation, it does not evict.
@@ -1080,7 +1093,7 @@ impl Session {
             font: &self.font,
             icons: &self.icons,
             wallpaper: &self.wallpaper.scaled,
-            apps: LAUNCHER_APPS,
+            apps: &self.apps,
         };
         for region in &regions {
             render::paint(
@@ -1264,12 +1277,12 @@ impl Session {
     }
 }
 
-fn desk_of(screen: &Screen, font: &font::Font) -> Desk {
+fn desk_of(screen: &Screen, font: &font::Font, apps: usize) -> Desk {
     Desk {
         chrome: Chrome::DEFAULT,
         screen: Rect::new(0, 0, screen.width() as i32, screen.height() as i32),
         font_w: font.width() as i32,
-        apps: LAUNCHER_APPS.len(),
+        apps,
     }
 }
 
