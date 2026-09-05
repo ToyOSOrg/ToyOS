@@ -93,24 +93,20 @@ pub fn dispatch_sync(root: &Path) {
 }
 
 /// The ABI-first rule as a check something other than a human can run.
+///
+/// `--base <ref>` exists because CI has no local `main`: a pull-request
+/// checkout of the head branch knows `origin/main` and nothing else.
 pub fn dispatch_abi_check(root: &Path, args: &[String]) {
-    let base = base_arg(args);
-    report(abi_lands_alone(root, &base).map(|()| {
-        format!("[abi] this branch's commits against {base} do not mix the shared sysroot's \
-                 sources with work that depends on them.")
-    }));
-}
-
-/// The `--base <ref>` both checks take, because CI has no local `main`: a
-/// pull-request checkout of the head branch knows `origin/main` and nothing
-/// else.
-fn base_arg(args: &[String]) -> String {
-    args.iter()
+    let base = args
+        .iter()
         .position(|a| a == "--base")
         .map_or("origin/main", |pos| {
             args.get(pos + 1).map_or("origin/main", String::as_str)
-        })
-        .to_string()
+        });
+    report(abi_lands_alone(root, base).map(|()| {
+        format!("[abi] this branch's commits against {base} do not mix the shared sysroot's \
+                 sources with work that depends on them.")
+    }));
 }
 
 /// `--land` is retired, and it answers rather than going missing.

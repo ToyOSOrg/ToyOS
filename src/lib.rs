@@ -1,7 +1,6 @@
-/// The actuator-state coupling gate, read by nothing but its own tests like
-/// `sourcegate` below.
+/// The actuator-state coupling gate, read by nothing but its own tests.
 #[cfg(test)]
-pub mod actuatorflow;
+pub mod actuatorstate;
 pub mod assets;
 pub mod build;
 pub mod buildlock;
@@ -15,7 +14,7 @@ pub mod forkcheck;
 pub mod hostws;
 pub mod image;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
-/// but its own tests, like `sourcegate` below.
+/// but its own tests.
 #[cfg(test)]
 pub mod kernelkeys;
 pub mod libc;

@@ -269,10 +269,8 @@ mod tests {
         );
     }
 
-    /// Teeth, against the recorded defect's own shape and across files the
-    /// way it happened: the i8042 fault flag was stored under its actuator
-    /// and loaded on every shipping status read. The bare load is refused;
-    /// put under the accessor's own condition, the same sources pass.
+    /// A flag stored under a guard in one file and loaded bare in another is
+    /// refused; put under the accessor's condition, the same sources pass.
     #[test]
     fn the_gate_refuses_the_unguarded_load_that_shipped() {
         let armer = concat!(
@@ -302,11 +300,8 @@ mod tests {
         assert!(good.is_empty(), "{good:?}");
     }
 
-    /// The regression `BOOT_SCAN_DONE` recorded stays caught from today's
-    /// tree: its store is guarded now, so an extra unconditional store —
-    /// exactly the line that shipped — is a refusal, while shipping state an
-    /// actuator merely reads stays free, and a `#[cfg(...-actuators)]` item's
-    /// touches are the actuator kernel's own business.
+    /// A second unconditional store of guarded state is a refusal; state an
+    /// actuator only reads is free, and a `#[cfg(...-actuators)]` item exempt.
     #[test]
     fn the_gate_takes_writes_as_the_coupling_and_exempts_cfg_items() {
         let guarded = concat!(
