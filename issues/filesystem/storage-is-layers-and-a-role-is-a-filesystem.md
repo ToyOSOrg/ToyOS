@@ -8,9 +8,8 @@ opened: 2026-09-03
 
 What the installed product's disks look like, from the block device up to a
 path, and the order the pieces land in. Ruled by the orchestrator on
-2026-09-03 from the discussion with the owner; the eight decisions still the
-owner's are in `issues/filesystem/eight-storage-decisions-are-the-owners.md`,
-and this file takes their answers.
+2026-09-03 from the discussion with the owner; the eight decisions that were
+still the owner's were answered on 2026-09-05 and are written in below.
 
 ## Block
 
@@ -87,9 +86,11 @@ reachable. The block layer stays dumb. LVM- and md-shaped aggregation is
 refused: it cannot tell metadata from data, place a file's replicas on
 different disks, or snapshot.
 
-**Foreign filesystems.** NTFS read-only first: Windows fast startup leaves a
-mounted NTFS hibernated, and a write corrupts it, so the server refuses write
-access on a volume whose dirty or hibernation flag is set, by name. BitLocker
+**Foreign filesystems.** NTFS is postponed behind every other stage here by
+the owner's ruling, and when it comes it is read-only: Windows fast startup
+leaves a mounted NTFS hibernated, and a write corrupts it, so the server
+refuses write access on a volume whose dirty or hibernation flag is set, by
+name. BitLocker
 volumes are reported unreadable rather than mounted. The outside judge for an
 NTFS driver is Windows itself in a QEMU guest reading a volume ToyOS wrote —
 a differential oracle that needs no host binary. ext4 follows NTFS by the same
@@ -117,9 +118,9 @@ hierarchy is a convention, and `/boot`'s mount guard is the one restriction.
   `/media/<label>` is a nested mount the structure cannot represent: stage 5
   owes that, and stage 2 left `/media` an empty directory.
 
-Users are a track of their own: a `/home/<user>` tree plus a login session
-whose namespace init builds from a per-user row. The sshd key path already has
-that shape.
+Users are a track of their own,
+`issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`: a `/home/<user>`
+tree plus a login session whose namespace init builds from a per-user row.
 
 ## Dual boot
 
@@ -137,16 +138,21 @@ entry.
    in-RAM image the bootloader used to load whole — is deleted. Landed.
 2. The hierarchy: a synthesized `/`, ROOT at `/system`, DATA at `/apps` and
    `/home`, `/media`, and the `/bin` sweep that follows. Landed.
-3. The users track filed and built.
+3. The users track, filed as
+   `issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`, built.
 4. The mount protocol, and FAT32 as the first userland filesystem server.
-5. NTFS read-only.
-6. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
-7. The installer: GPT, ESP, ROOT, a designated DATA, one boot entry.
-8. Updates: a second ROOT beside the first, the bootloader choosing.
-9. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
+5. Real bcachefs under ROOT and DATA — the format swap; nothing above changes.
+6. The installer, written together with the layout it lays down: GPT, ESP,
+   ROOT, a designated DATA, one boot entry.
+7. Updates: one ROOT partition per release, a second beside the first, the
+   bootloader choosing — no snapshot logic in the kernel's read path.
+8. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
    them.
+9. A full secure boot chain, the end state of `/system`'s immutability:
+   firmware verifies the bootloader, the bootloader the kernel, the kernel the
+   ROOT image it mounts, and a link that fails is refused by name.
+10. NTFS read-only, postponed here by the owner.
 
-**Not decided here** (the owner's file names each): how ROOT is versioned,
-whether LOG survives as its own partition past the dev phase, the hierarchy's
-names, where the hierarchy lands, when the users track is filed, NTFS's write
-policy, the installer's shape, and verified boot.
+LOG stays its own FAT32 partition through the dev phase, because a Mac has to
+read the stick; folding it into DATA is the installed product's shape and no
+stage above owes it yet.
