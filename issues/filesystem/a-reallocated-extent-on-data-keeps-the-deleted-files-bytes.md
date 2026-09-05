@@ -39,10 +39,7 @@ byte.
 
 ## What it is not
 
-Not `issues/filesystem/an-overwrite-on-home-can-read-back-as-zero-bytes.md`:
-that is a same-length overwrite of one path where the *guest* loses the file and
-the device has it, and this is the mirror — different paths, a delete between
-them, the guest right and the device stale. Not
+Not
 `issues/filesystem/a-page-faulted-through-an-old-backing-is-nobodys.md` either:
 no mapping is taken across the write here.
 
