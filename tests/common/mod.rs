@@ -19,6 +19,8 @@ pub mod hda;
 #[allow(dead_code)]
 pub mod hostload;
 #[allow(dead_code)]
+pub mod https;
+#[allow(dead_code)]
 pub mod iommu;
 #[allow(dead_code)]
 pub mod irqcensus;
