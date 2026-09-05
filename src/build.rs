@@ -1405,8 +1405,7 @@ pub fn build_test_image(
 }
 
 /// The two host binaries `https_tls13` drives, built here rather than inside the
-/// test: a judge that compiles rustls before it fetches a byte prices the
-/// compiler, which CI measured at 50,800 ms against a fetch of seconds.
+/// test: a judge's price is its fetch and not a compile.
 pub fn build_https_hosts(root: &Path, quiet: bool) {
     let _slot = buildlock::build_slot(root, "the TLS judge's host binaries");
     for (dir, _) in HTTPS_HOSTS {
