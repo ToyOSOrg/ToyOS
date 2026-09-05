@@ -319,7 +319,7 @@ tests/toyos-rust-tests/src/bin/heap_ceiling.rs 69 0
 tests/toyos-rust-tests/src/bin/hierarchy_paths.rs 25 0
 tests/toyos-rust-tests/src/bin/home_backing_revoked.rs 34 0
 tests/toyos-rust-tests/src/bin/home_fsync_budget.rs 5 0
-tests/toyos-rust-tests/src/bin/home_overwrite_zero.rs 17 0
+tests/toyos-rust-tests/src/bin/home_overwrite_zero.rs 19 0
 tests/toyos-rust-tests/src/bin/i8042_keyboard.rs 24 0
 tests/toyos-rust-tests/src/bin/i8042_mouse.rs 17 0
 tests/toyos-rust-tests/src/bin/inbox_cancel_wakes.rs 31 0
