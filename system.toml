@@ -99,7 +99,8 @@ receives = ["compositor", "filepicker"]
 [programs.files]
 receives = ["compositor", "filepicker"]
 
-# `power` is `/system/bin/shutdown`'s and `roster` is `/system/bin/ps`'s, and each of those is
+# `power` is `/system/bin/shutdown`'s and `/system/bin/reboot`'s, `roster` is
+# `/system/bin/ps`'s, and each of those is
 # this binary under another name: init resolves the symlink to this row, so the
 # applets are endowed a `SysCap` carrying `Rights::POWER | Rights::ROSTER` and
 # nothing else in the image is. The row's granularity is the binary, so every
@@ -128,6 +129,7 @@ syscap = ["power", "roster"]
 "bin/net" = "/system/bin/toybox"
 "bin/ps" = "/system/bin/toybox"
 "bin/pwd" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"
 "bin/rm" = "/system/bin/toybox"
 "bin/screen" = "/system/bin/toybox"
 "bin/shutdown" = "/system/bin/toybox"

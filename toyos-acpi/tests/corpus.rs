@@ -10,8 +10,9 @@ mod common;
 
 use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
 use toyos_acpi::{
-    dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, rtc_century,
-    Century, MadtEntry, MadtHalt, Phys, Table, TableError, MADT_ENTRIES, MAX_TABLE_LEN,
+    dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, reset_register,
+    rtc_century, Century, MadtEntry, MadtHalt, Phys, Reset, Table, TableError, MADT_ENTRIES,
+    MAX_TABLE_LEN,
 };
 
 const RSDP_AT: u64 = 0x1_0000;
@@ -391,6 +392,9 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                     let _ = hpet_base(m, rsdp_at);
                     let _ = rtc_century(m, rsdp_at);
                     let _ = iapc_boot_arch(m, rsdp_at);
+                    if let Ok(t) = find_table(m, rsdp_at, b"FACP", 36) {
+                        let _ = reset_register(&t);
+                    }
                     if let Ok(t) = find_table(m, rsdp_at, b"APIC", MADT_ENTRIES) {
                         // Bounded by the table's own length, so a walk that has
                         // stopped advancing reds here instead of hanging: every
@@ -462,4 +466,63 @@ fn the_shared_reader_refuses_what_it_does_not_hold() {
     assert!(!m.readable(0x100, 5));
     assert!(!m.readable(0xff, 1));
     assert_eq!(m.byte(0x102), 3);
+}
+
+/// A revision-`rev` FADT declaring `flags`, `gas` and `value`. Table offsets are absolute, so each body index is one less the 36-byte header.
+fn facp(rev: u8, flags: u32, gas: [u8; 12], value: u8) -> Vec<u8> {
+    let mut body = vec![0u8; 129 - 36];
+    body[112 - 36..116 - 36].copy_from_slice(&flags.to_le_bytes());
+    body[116 - 36..128 - 36].copy_from_slice(&gas);
+    body[128 - 36] = value;
+    sdt(b"FACP", rev, &body)
+}
+
+fn gas(space: u8, bit_width: u8, bit_offset: u8, address: u64) -> [u8; 12] {
+    let mut g = [0u8; 12];
+    g[0] = space;
+    g[1] = bit_width;
+    g[2] = bit_offset;
+    g[4..].copy_from_slice(&address.to_le_bytes());
+    g
+}
+
+fn reset_of(table: &[u8]) -> Reset {
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, table)];
+    let fadt = Table::open(Machine { regions }, TABLE_AT, b"FACP", 36).expect("a sealed FADT");
+    reset_register(&fadt)
+}
+
+#[test]
+fn a_reset_register_this_kernel_cannot_write_is_refused_by_the_field_that_refused_it() {
+    const SUP: u32 = 1 << 10;
+    let io = gas(1, 8, 0, 0xcf9);
+
+    assert_eq!(reset_of(&facp(3, SUP, io, 0x0f)), Reset::Port { port: 0xcf9, value: 0x0f });
+    assert_eq!(reset_of(&facp(3, 0, io, 0x0f)), Reset::Unsupported);
+    assert_eq!(reset_of(&facp(3, SUP, gas(0, 8, 0, 0xcf9), 0x0f)), Reset::SystemMemory);
+    assert_eq!(reset_of(&facp(3, SUP, gas(2, 8, 0, 0xcf9), 0x0f)), Reset::PciConfig);
+    assert_eq!(reset_of(&facp(3, SUP, gas(4, 8, 0, 0xcf9), 0x0f)), Reset::Space(4));
+    assert_eq!(
+        reset_of(&facp(3, SUP, gas(1, 32, 0, 0xcf9), 0x0f)),
+        Reset::Field { bit_width: 32, bit_offset: 0 }
+    );
+    assert_eq!(
+        reset_of(&facp(3, SUP, gas(1, 8, 2, 0xcf9), 0x0f)),
+        Reset::Field { bit_width: 8, bit_offset: 2 }
+    );
+    assert_eq!(reset_of(&facp(3, SUP, gas(1, 8, 0, 0x1_0000), 0x0f)), Reset::Address(0x1_0000));
+    assert_eq!(reset_of(&facp(3, SUP, gas(1, 8, 0, 0), 0x0f)), Reset::Address(0));
+}
+
+/// Below revision 3 those offsets are reserved bytes, and decoding them yields a port firmware never named.
+#[test]
+fn reset_fields_are_read_only_from_a_revision_that_defines_them() {
+    const SUP: u32 = 1 << 10;
+    let io = gas(1, 8, 0, 0xcf9);
+    assert_eq!(reset_of(&facp(1, SUP, io, 0x0f)), Reset::Absent);
+    assert_eq!(reset_of(&facp(2, SUP, io, 0x0f)), Reset::Absent);
+
+    let mut short = facp(3, SUP, io, 0x0f);
+    declare_len(&mut short, 128);
+    assert_eq!(reset_of(&short), Reset::Absent);
 }
