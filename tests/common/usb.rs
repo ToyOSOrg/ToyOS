@@ -1162,15 +1162,12 @@ pub fn xhci_deaf_registers(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    // The whole machine boots off this controller's stick, so refusing it also
-    // costs `/boot` — which is the honest cost and the reason the line has to
-    // name the controller rather than the mount that went missing.
     let log = boot_and_shutdown(
         test_config,
         c_bins,
         rust_bins,
         BootOptions {
-            profile: Profile::Metal,
+            profile: Profile::MetalXhciDeaf,
             kernel_params: &["xhci-deaf-controller"],
             ..Default::default()
         },
@@ -1197,7 +1194,7 @@ pub fn xhci_deaf_registers(
         c_bins,
         rust_bins,
         BootOptions {
-            profile: Profile::Metal,
+            profile: Profile::MetalXhciDeaf,
             kernel_params: &["xhci-deaf-port"],
             ..Default::default()
         },
@@ -1211,13 +1208,13 @@ pub fn xhci_deaf_registers(
     if !log.contains("xHCI: controller started") {
         return Err(format!("the controller did not start; this is not the port path\n{log}"));
     }
-    if !log.contains("usb-storage: 0 device(s)") {
-        return Err(format!("a port that never reset still bound a disk\n{log}"));
+    if !log.contains("xHCI: 1 controller(s), 0 HID device(s)") {
+        return Err(format!("a port that never reset still bound its device\n{log}"));
     }
     if !log.contains("Boot: complete") {
         return Err(format!("the boot did not finish past a port that would not reset\n{log}"));
     }
-    let port_wait = waited_out_the_budget(&log, "port 1 connected", "never finished its reset")
+    let port_wait = waited_out_the_budget(&log, "xHCI: port ", "never finished its reset")
         .map_err(|e| format!("{e}\n{log}"))?;
     eprintln!(
         "  [usb] a controller that will not halt is refused by name after {controller_wait:.3} s; \

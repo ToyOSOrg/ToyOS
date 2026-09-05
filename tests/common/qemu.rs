@@ -1276,6 +1276,10 @@ pub enum Profile {
     /// boots, and the HID on the crippled one is refused by name rather than
     /// enumerated and left mute.
     MetalXhciNoIrq,
+    /// One controller carrying HID alone, the boot volume on its own NVMe: the
+    /// machine a deafened controller or port costs no filesystem, where the
+    /// keyboard is what a port that never resets has to fail to bind.
+    MetalXhciDeaf,
     /// Two controllers, and every input device arrives *after* the boot.
     ///
     /// The T14's shape for the one thing no profile stages: its Thunderbolt
@@ -1977,6 +1981,20 @@ impl Profile {
                 xhci: &[XHCI_DEFAULT, XHCI_NO_IRQ_SECOND],
                 storage_bus: "xhci.0",
                 usb: &["usb-kbd,bus=xhci1.0", "usb-mouse,bus=xhci1.0"],
+                nvme_bytes: NVME_SMALL,
+                nvme_lba_bytes: NVME_LBA_DEFAULT,
+                usb_disks: &[],
+                hda: &[],
+                iommu: Some(IOMMU_DEFAULT),
+            },
+            Self::MetalXhciDeaf => Shape {
+                vga: "std",
+                panel: None,
+                gpu: None,
+                virtio: Virtio::Absent,
+                xhci: &[XHCI_DEFAULT],
+                storage_bus: "",
+                usb: &["usb-kbd,bus=xhci.0"],
                 nvme_bytes: NVME_SMALL,
                 nvme_lba_bytes: NVME_LBA_DEFAULT,
                 usb_disks: &[],
