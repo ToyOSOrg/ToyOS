@@ -1975,6 +1975,20 @@ pub const KNOWN_RED: &[Red] = &[
         measured: "2026-08-15",
     },
     Red {
+        test: "screen_fatal_halt",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`[qemu] Boot timed out waiting for ===READY===`, with test-runner spawned at 0.635 s \
+               and `usb-storage: 00:02.0 slot 1 transport broke on SCSI 0x35: no answer in the \
+               status phase in 2000 ms` at 2.718 s; `ALONE screen_fatal_halt: GREEN, and it was \
+               alone both times`",
+        evidence: "merge-queue `ci` run 33996725574 (#422 on main 5962c745), job 101388609567 \
+                   `guest (10)`",
+        source: "issues/boot-media/screen-fatal-halt-reds-on-ci-with-a-usb-storage-transport-break-during-boot.md",
+        measured: "2026-09-05",
+    },
+    Red {
         test: "double_fault_stack",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
