@@ -289,7 +289,10 @@ impl FileSystem for BcacheFsAdapter {
 
     fn close_file(&mut self, file_id: FileId) {
         if let Some(info) = self.open_files.remove(&file_id) {
-            self.name_to_id.remove(&info.name);
+            // Only while the name is still this file's: `delete` and a rename leave a pinned file holding a name its replacement answers to.
+            if self.name_to_id.get(&info.name) == Some(&file_id) {
+                self.name_to_id.remove(&info.name);
+            }
         }
     }
 
