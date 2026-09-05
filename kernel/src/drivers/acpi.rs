@@ -205,7 +205,6 @@ fn init_reset(fadt: &Table) {
     }
 }
 
-/// Whether [`reboot`] has a register to write, which only a decoded FADT gives it.
 pub fn can_reboot() -> bool {
     RESET_PORT.load(Ordering::Relaxed) != 0
 }
@@ -216,11 +215,11 @@ pub fn reboot() -> ! {
     crate::drivers::serial::flush_final();
 
     let port = RESET_PORT.load(Ordering::Relaxed);
+    // Kernel-internal, so a bug rather than a machine quiesced and then left halted quietly.
+    assert!(port != 0, "reboot: no reset register, and the caller did not ask can_reboot() first");
 
-    if port != 0 {
-        // SAFETY: the port is non-zero only where `init_reset` decoded an 8-bit System I/O register, and the value is that register's.
-        unsafe { crate::arch::cpu::outb(port, RESET_VALUE.load(Ordering::Relaxed)) };
-    }
+    // SAFETY: the port is non-zero only where `init_reset` decoded an 8-bit System I/O register, and the value is that register's.
+    unsafe { crate::arch::cpu::outb(port, RESET_VALUE.load(Ordering::Relaxed)) };
 
     crate::arch::cpu::halt();
 }
