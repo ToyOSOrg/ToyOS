@@ -1,0 +1,19 @@
+# A boot that ends itself: no host is on the other end of the console, so the
+# job list is the manifest's own and the last thing it does is hand the machine
+# back to firmware. This is the shape a T14 boot has.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+# `dup` because the applet is spawned holding a duplicate, and `power` because
+# the one job ends the machine. Nothing else: this estate spawns no test binary.
+[programs.test-runner]
+args = ["run reboot"]
+syscap = ["dup", "power"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"

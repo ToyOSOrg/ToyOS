@@ -58,3 +58,55 @@ pub fn machine_reboot(
     eprintln!("  [power] QEMU stopped the guest for guest-reset");
     Ok(())
 }
+
+/// A boot with no host on the console runs its manifest's jobs and ends itself.
+/// `Rebooting.` reaching the log partition is the assertion the T14 rests on;
+/// `Boot: complete` is written long before the reset and survives one that
+/// outran logd, so it cannot carry the claim alone.
+pub fn metal_job_reboot(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+
+    // Built here, because a boot deletes the image it built and this one is read after the guest is gone.
+    let image_path = super::lane::dir().join("jobcase-boot.img");
+    let image = qemu::build_boot_image(case, &[], &[], &[]);
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
+
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions { boot_image: Some(image_path.clone()), ..Default::default() },
+    );
+    serial::Serial::boot(&qemu).must_be_clean()?;
+
+    // Nothing is sent: the manifest's job list is the whole of what runs, so a
+    // runner that ignored its arguments leaves this drain spending its ceiling.
+    let tail = qemu.drain_serial(WAIT);
+    let drain = serial::Serial::named("job drain", tail.as_str());
+    drain.must_be_clean()?;
+    drain.must_say("===TEST_START reboot===")?;
+    drain.must_say("Rebooting.")?;
+    drop(qemu);
+
+    let (name, log) = super::volumes::newest_log(&image_path, start, len)?;
+    let text = String::from_utf8_lossy(&log);
+    // The volume is born clean in an image built moments ago, so every record in it is this boot's.
+    for record in ["Boot: complete", "Rebooting."] {
+        if !text.contains(record) {
+            return Err(format!(
+                "{record:?} is not in {name} on the log partition: the reset outran logd, so a \
+                 machine with no console would have no account of this boot\n{text}"
+            ));
+        }
+    }
+
+    let _ = std::fs::remove_file(&image_path);
+    eprintln!("  [power] {name} carries this boot's last line, written before the reset");
+    Ok(())
+}

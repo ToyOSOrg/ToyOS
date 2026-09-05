@@ -2036,8 +2036,9 @@ mod tests {
     /// over every record every CPU wrote, and a right with no caller is a
     /// capability handed out for a plan. Two programs read a cursor —
     /// `/system/bin/logd`, which writes the file, and `test-runner`, which runs the
-    /// conservation gates inside itself — so those two carry it and nothing
-    /// else may. `/system/bin/console` is the near miss: it *could* show this boot's
+    /// conservation gates inside itself — and nothing else may; an estate that
+    /// runs no gate that reads one holds none of it either.
+    /// `/system/bin/console` is the near miss: it *could* show this boot's
     /// records live off a cursor instead of seeding from the previous boot's
     /// files, and it does not hold the right until something in it reads one.
     ///
@@ -2062,12 +2063,10 @@ mod tests {
             );
             for (name, program) in &parsed.programs {
                 let holds = program.syscap.iter().any(|s| s == "logread");
-                assert_eq!(
-                    holds,
-                    READERS.contains(&name.as_str()),
-                    "{config}: `{name}` {} `logread`, and the programs that read a cursor are \
-                     exactly {READERS:?}",
-                    if holds { "holds" } else { "does not hold" },
+                assert!(
+                    !holds || READERS.contains(&name.as_str()),
+                    "{config}: `{name}` holds `logread`, and the only programs that read a \
+                     cursor are {READERS:?}",
                 );
             }
         }
@@ -2143,6 +2142,7 @@ mod tests {
         "tests/desktopaudiocase/system.toml",
         "tests/doomcase/system.toml",
         "tests/doommusiccase/system.toml",
+        "tests/jobcase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/metalcase/system.toml",
         "tests/netcase/system.toml",

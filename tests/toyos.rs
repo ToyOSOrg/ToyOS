@@ -600,6 +600,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel, Tier::Fast),
+    // Its own boot and its own case: no host speaks to it, and it ends itself.
+    ("metal_job_reboot", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
@@ -8695,6 +8697,7 @@ fn run_machine_test(
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
+        "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),
         "usb_storage_shapes" => usb::usb_storage_shapes(test_config, c_bins, rust_bins),

@@ -208,7 +208,7 @@ kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
 src/assets.rs 123 0
-src/build.rs 722 3
+src/build.rs 723 3
 src/buildlock.rs 378 5
 src/ci.rs 117 0
 src/clippy.rs 35 0
@@ -254,7 +254,7 @@ tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
 tests/common/pkg.rs 77 0
-tests/common/power.rs 9 0
+tests/common/power.rs 17 0
 tests/common/qemu.rs 1670 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
@@ -409,7 +409,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5181 23
+tests/toyos.rs 5182 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 101 0
 toyos-abi/src/handle.rs 108 0
@@ -725,7 +725,7 @@ userland/terminal/src/main.rs 46 0
 userland/test-runner/src/kbd_close.rs 62 0
 userland/test-runner/src/log_close.rs 63 0
 userland/test-runner/src/log_gate.rs 251 1
-userland/test-runner/src/main.rs 39 0
+userland/test-runner/src/main.rs 43 0
 userland/toybox/src/cat.rs 0 0
 userland/toybox/src/cp.rs 29 0
 userland/toybox/src/echo.rs 0 0
