@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use crate::block_io::{BlockBuf, BlockIO, BlockNum, BLOCK_SIZE};
 
-use super::bkey::{Bpos, BkeyFormat, Key, BKEY_BYTES, BPOS_BYTES, FORMAT_BYTES};
+use super::bkey::{Bpos, BkeyFormat, Key, BPOS_BYTES, FORMAT_BYTES};
 use super::csum::CsumType;
 use super::raw::{bits, Raw};
 use super::sb::{Superblock, BSET_MAGIC, SECTOR};
@@ -150,6 +150,12 @@ impl Node {
         if min_key > max_key {
             return Err(UpstreamError::Refused("btree node's key range runs backwards"));
         }
+        // `bch2_btree_node_read_done` holds the node's own low bound against
+        // its parent's: a node that starts below where its pointer says covers
+        // keys the parent gave to its sibling.
+        if min_key != ptr.min_key {
+            return Err(UpstreamError::Refused("btree node's first key is not the one its pointer names"));
+        }
         let format = BkeyFormat::read(&node, NODE_FORMAT)?;
 
         let node_sectors = bytes.len() / SECTOR;
@@ -230,6 +236,12 @@ impl Node {
                 if key.u64s == 0 {
                     return Err(UpstreamError::Refused("bset holds a key of no length"));
                 }
+                // The node's declared range is what the descent placed it by,
+                // so a key outside it belongs to a sibling that will never be
+                // asked for it.
+                if key.pos < self.min_key || key.pos > self.max_key {
+                    return Err(UpstreamError::Refused("btree node holds a key outside the range it declares"));
+                }
                 out.push((generation, key.with_base(at)));
                 at += key.u64s as usize * 8;
             }
@@ -244,9 +256,6 @@ impl Node {
         Raw::new(&self.bytes, "key's value runs past its node").sub(at, len, "key's value runs past its node")
     }
 }
-
-/// The unpacked-key length, for a caller sizing a value window.
-pub const UNPACKED_KEY_BYTES: usize = BKEY_BYTES;
 
 /// `BCH_JSET_ENTRY_btree_root`.
 const JSET_ENTRY_BTREE_ROOT: u8 = 1;
@@ -266,7 +275,7 @@ pub fn clean_roots(sb: &Superblock) -> Result<Vec<(u32, u8, BtreePtr)>, Upstream
     let mut roots = Vec::new();
     let mut at = 0usize;
 
-    while at + JSET_ENTRY_HEADER <= entries.len() {
+    while at + JSET_ENTRY_HEADER <= entries.bytes().len() {
         let u64s = entries.u16(at)? as usize;
         let btree_id = entries.u8(at + 2)? as u32;
         let level = entries.u8(at + 3)?;
@@ -274,7 +283,7 @@ pub fn clean_roots(sb: &Superblock) -> Result<Vec<(u32, u8, BtreePtr)>, Upstream
         let bytes = JSET_ENTRY_HEADER
             .checked_add(u64s.checked_mul(8).ok_or(SHORT_ENTRY)?)
             .ok_or(SHORT_ENTRY)?;
-        if at + bytes > entries.len() {
+        if at + bytes > entries.bytes().len() {
             return Err(SHORT_ENTRY);
         }
         if kind == JSET_ENTRY_BTREE_ROOT && u64s != 0 {

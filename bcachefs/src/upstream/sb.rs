@@ -19,7 +19,6 @@ pub const BCHFS_MAGIC: [u8; 16] = [
     0xc6, 0x85, 0x73, 0xf6, 0x66, 0xce, 0x90, 0xa9, 0xd9, 0x6a, 0x60, 0xcf, 0x80, 0x3d, 0xf7, 0xef,
 ];
 pub const BSET_MAGIC: u64 = 0x9013_5c78_b99e_07f5;
-pub const JSET_MAGIC: u64 = 0x2452_35c1_a362_5032;
 
 /// `bcachefs_metadata_version_max - 1` at the pinned commit: what `bcachefs
 /// format` writes today, and the only version this reader claims to know.
@@ -32,9 +31,6 @@ const SB_VERSION: usize = 16;
 const SB_VERSION_MIN: usize = 18;
 const SB_MAGIC: usize = 24;
 const SB_UUID: usize = 40;
-const SB_USER_UUID: usize = 56;
-const SB_LABEL: usize = 72;
-pub const SB_LABEL_SIZE: usize = 32;
 const SB_OFFSET: usize = 104;
 const SB_SEQ: usize = 112;
 const SB_BLOCK_SIZE: usize = 120;
@@ -43,7 +39,6 @@ const SB_NR_DEVICES: usize = 123;
 const SB_U64S: usize = 124;
 const SB_FLAGS: usize = 144;
 const SB_FEATURES: usize = 208;
-const SB_COMPAT: usize = 224;
 const SB_LAYOUT: usize = 240;
 /// `offsetof(struct bch_sb, _data)`: the fixed header, layout included.
 const SB_FIELDS_START: usize = 752;
@@ -58,6 +53,9 @@ const LAYOUT_SIZE_BITS_MAX: u8 = 16;
 const FIELD_MEMBERS_V1: u32 = 1;
 const FIELD_CLEAN: u32 = 6;
 const FIELD_MEMBERS_V2: u32 = 11;
+const FIELD_EXTENT_TYPE_U64S: u32 = 16;
+/// `bch_sb_field_clean`'s flags, clocks and `journal_seq`, before its entries.
+const CLEAN_ENTRIES_AT: usize = 16;
 
 /// Feature bits `BCH_SB_FEATURES()` numbers, in the two words `features[2]`.
 const FEATURE_LZ4: u32 = 0;
@@ -66,6 +64,7 @@ const FEATURE_ZSTD: u32 = 2;
 const FEATURE_EC: u32 = 4;
 const FEATURE_INCOMPRESSIBLE: u32 = 10;
 const FEATURE_CASEFOLDING: u32 = 20;
+const FEATURE_NO_DEFAULT_SB: u32 = 23;
 
 /// The features a volume `bcachefs format` writes carries, and which this
 /// reader therefore has to tolerate. A bit outside this set is refused by
@@ -86,7 +85,7 @@ const FEATURES_KNOWN: u64 = (1 << 5) // journal_seq_blacklist_v3
     | (1 << 19) // incompat_version_field
     | (1 << 21) // no_alloc_info
     | (1 << 22) // small_image
-    | (1 << 23); // no_default_sb
+    | (1 << 23); // no_default_sb, refused by name above rather than honoured
 
 /// One member device, as the members section describes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,8 +100,6 @@ pub struct Member {
 /// A superblock this reader has agreed to mount from.
 pub struct Superblock {
     bytes: Vec<u8>,
-    /// The sector the copy that parsed was read from.
-    pub read_at: u64,
 }
 
 impl Superblock {
@@ -122,21 +119,6 @@ impl Superblock {
     /// its first eight bytes.
     pub fn uuid(&self) -> [u8; 16] {
         self.raw().uuid(SB_UUID).unwrap_or([0; 16])
-    }
-
-    pub fn user_uuid(&self) -> [u8; 16] {
-        self.raw().uuid(SB_USER_UUID).unwrap_or([0; 16])
-    }
-
-    /// The label, without its NUL padding; empty when unset.
-    pub fn label(&self) -> &[u8] {
-        let field = self.raw().slice(SB_LABEL, SB_LABEL_SIZE).unwrap_or(&[]);
-        let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
-        &field[..end]
-    }
-
-    pub fn seq(&self) -> u64 {
-        self.raw().u64(SB_SEQ).unwrap_or(0)
     }
 
     /// Filesystem block size in bytes.
@@ -175,17 +157,6 @@ impl Superblock {
 
     pub fn data_csum(&self) -> Result<CsumType, UpstreamError> {
         csum_from_opt(bits(self.flags(0), 44, 48))
-    }
-
-    /// `BCH_SB_STR_HASH_TYPE` holds the *option*, which `new_siphash` promotes
-    /// to the current siphash; the read path needs only to know it is not one
-    /// it would have to compute.
-    pub fn str_hash_opt(&self) -> u64 {
-        bits(self.flags(1), 0, 4)
-    }
-
-    pub fn shard_inode_bits(&self) -> u64 {
-        bits(self.flags(6), 0, 4)
     }
 
     /// Walk the variable-length sections, handing each `(type, payload)`.
@@ -231,7 +202,43 @@ impl Superblock {
         let clean = self
             .section(FIELD_CLEAN)
             .ok_or(UpstreamError::Refused("volume has no clean section: it needs journal replay"))?;
-        clean.sub(16, clean.len() - 16, "clean section ends before its entries")
+        // A section shorter than its own fixed part is a subtraction that
+        // panics under the kernel's overflow checks, not a short read.
+        let entries = clean
+            .bytes()
+            .len()
+            .checked_sub(CLEAN_ENTRIES_AT)
+            .ok_or(UpstreamError::Refused("clean section is shorter than its own header"))?;
+        clean.sub(CLEAN_ENTRIES_AT, entries, "clean section ends before its entries")
+    }
+
+    /// How many u64s each `bch_extent_entry` type occupies.
+    ///
+    /// **A size that is wrong by one word makes the walker step onto a pointer
+    /// and serve arbitrary device blocks as file contents.** The sizes for the
+    /// types this reader decodes are compiled in, because they are what its
+    /// own field offsets assume; the superblock's `extent_type_u64s` section
+    /// supplies the rest, so an entry type written after this was is stepped
+    /// over rather than guessed at. A section that disagrees with a compiled-in
+    /// size is refused: one of the two is describing another format.
+    pub fn extent_entry_u64s(&self) -> Result<[u8; EXTENT_TYPES_MAX], UpstreamError> {
+        let section = self.section(FIELD_EXTENT_TYPE_U64S).ok_or(UpstreamError::Refused(
+            "volume has no extent_type_u64s section: this reader cannot size an extent's entries",
+        ))?;
+        let mut sizes = EXTENT_ENTRY_U64S_KNOWN;
+        for (kind, size) in sizes.iter_mut().enumerate() {
+            let Ok(stated) = section.u8(kind) else { break };
+            if stated == 0 {
+                break;
+            }
+            if kind < EXTENT_ENTRY_TYPES_KNOWN && stated != *size {
+                return Err(UpstreamError::Refused(
+                    "volume sizes an extent entry this reader decodes differently than it does",
+                ));
+            }
+            *size = stated;
+        }
+        Ok(sizes)
     }
 
     /// Refuse, by name, every format feature this reader does not implement.
@@ -271,8 +278,17 @@ impl Superblock {
         if bits(self.flags(2), 0, 4) != 0 || bits(self.flags(4), 60, 64) != 0 {
             return refuse("volume has background compression enabled");
         }
-        if bits(self.flags(0), 48, 52) > 1 || bits(self.flags(0), 52, 56) > 1 {
-            return refuse("volume asks for more than one replica");
+        // Wanted and required, both kinds: a zero is as much "not one replica"
+        // as a two is, and this reader reads exactly one copy of everything.
+        for (word, start, end) in [(0, 48, 52), (0, 52, 56), (1, 20, 24), (1, 24, 28)] {
+            if bits(self.flags(word), start, end) != 1 {
+                return refuse("volume does not ask for exactly one replica of everything");
+            }
+        }
+        // A volume that checksums nothing would have this reader verifying
+        // every extent against a checksum nobody computed.
+        if self.metadata_csum()? == CsumType::None || self.data_csum()? == CsumType::None {
+            return refuse("volume checksums its metadata or its data with nothing");
         }
         if bits(self.flags(3), 0, 16) != 0 {
             return refuse("volume has erasure coding enabled");
@@ -290,6 +306,7 @@ impl Superblock {
             (FEATURE_INCOMPRESSIBLE, "volume carries compression metadata"),
             (FEATURE_EC, "volume carries erasure-coded stripes"),
             (FEATURE_CASEFOLDING, "volume carries casefolded directories"),
+            (FEATURE_NO_DEFAULT_SB, "volume keeps no superblock at the sector this reader looks at"),
         ] {
             if self.features(0) & (1u64 << bit) != 0 {
                 return refuse(why);
@@ -319,6 +336,20 @@ impl Superblock {
         Ok(())
     }
 }
+
+/// The largest entry type this reader will size, one past `BCH_EXTENT_ENTRY_MAX`
+/// so the superblock can name a type written after this code was.
+pub const EXTENT_TYPES_MAX: usize = 16;
+/// `BCH_EXTENT_ENTRY_MAX`: how many of those this reader has read the layout of.
+pub const EXTENT_ENTRY_TYPES_KNOWN: usize = 9;
+/// `extent_entry_u64s_known`, as `sizeof` gives it at the pinned commit: ptr,
+/// crc32, crc64, crc128, stripe_ptr, rebalance_v1, flags, reconcile,
+/// reconcile_bp. The last four are each one 64-bit bitfield.
+const EXTENT_ENTRY_U64S_KNOWN: [u8; EXTENT_TYPES_MAX] =
+    [1, 1, 2, 3, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+
+#[cfg(test)]
+pub(crate) const EXTENT_ENTRY_U64S_KNOWN_FOR_TESTS: [u8; EXTENT_TYPES_MAX] = EXTENT_ENTRY_U64S_KNOWN;
 
 const MEMBER_V1_BYTES: usize = 56;
 /// Everything before `last_mount`: the fields this reader takes.
@@ -465,7 +496,7 @@ fn read_one(io: &dyn BlockIO, sector: u64, device_sectors: u64) -> Result<Superb
         return Err(UpstreamError::Refused("superblock checksum does not match its bytes"));
     }
 
-    let sb = Superblock { bytes, read_at: sector };
+    let sb = Superblock { bytes };
     sb.check_supported(device_sectors)?;
     Ok(sb)
 }
@@ -498,30 +529,41 @@ pub(crate) mod fixture {
             section[4..8].copy_from_slice(&FIELD_CLEAN.to_le_bytes());
             section
         };
+        let extent_types = {
+            let mut section = vec![0u8; 24];
+            section[0..4].copy_from_slice(&3u32.to_le_bytes());
+            section[4..8].copy_from_slice(&FIELD_EXTENT_TYPE_U64S.to_le_bytes());
+            section[8..8 + EXTENT_ENTRY_TYPES_KNOWN]
+                .copy_from_slice(&EXTENT_ENTRY_U64S_KNOWN[..EXTENT_ENTRY_TYPES_KNOWN]);
+            section
+        };
+        let sections = [members.as_slice(), clean.as_slice(), extent_types.as_slice()].concat();
 
-        let mut sb = vec![0u8; SB_FIELDS_START + members.len() + clean.len()];
+        let mut sb = vec![0u8; SB_FIELDS_START + sections.len()];
         sb[SB_VERSION..SB_VERSION + 2].copy_from_slice(&VERSION_CURRENT.to_le_bytes());
         sb[SB_VERSION_MIN..SB_VERSION_MIN + 2].copy_from_slice(&VERSION_CURRENT.to_le_bytes());
         sb[SB_MAGIC..SB_MAGIC + 16].copy_from_slice(&BCHFS_MAGIC);
         sb[SB_OFFSET..SB_OFFSET + 8].copy_from_slice(&SB_SECTOR.to_le_bytes());
         sb[SB_BLOCK_SIZE..SB_BLOCK_SIZE + 2].copy_from_slice(&8u16.to_le_bytes());
         sb[SB_NR_DEVICES] = 1;
-        let u64s = ((members.len() + clean.len()) / 8) as u32;
+        let u64s = (sections.len() / 8) as u32;
         sb[SB_U64S..SB_U64S + 4].copy_from_slice(&u64s.to_le_bytes());
 
         // initialized, clean, csum type crc32c_nonzero, 256 KB nodes, one
-        // replica of each kind checksummed crc32c.
+        // replica of each kind wanted, each checksummed crc32c.
         let flags0 = 1 | (1 << 1) | (1 << 2) | (512u64 << 12) | (1 << 40) | (1 << 44)
             | (1 << 48) | (1 << 52);
         sb[SB_FLAGS..SB_FLAGS + 8].copy_from_slice(&flags0.to_le_bytes());
+        // One replica of each kind required.
+        let flags1 = (1u64 << 20) | (1 << 24);
+        sb[SB_FLAGS + 8..SB_FLAGS + 16].copy_from_slice(&flags1.to_le_bytes());
 
         sb[SB_LAYOUT..SB_LAYOUT + 16].copy_from_slice(&BCHFS_MAGIC);
         sb[SB_LAYOUT + 17] = 11;
         sb[SB_LAYOUT + 18] = 1;
         sb[SB_LAYOUT + 24..SB_LAYOUT + 32].copy_from_slice(&SB_SECTOR.to_le_bytes());
 
-        sb[SB_FIELDS_START..SB_FIELDS_START + members.len()].copy_from_slice(&members);
-        sb[SB_FIELDS_START + members.len()..].copy_from_slice(&clean);
+        sb[SB_FIELDS_START..].copy_from_slice(&sections);
         reseal(&mut sb);
         sb
     }
@@ -612,7 +654,7 @@ pub(crate) mod fixture {
         cases.push(("volume is encrypted", flag(1, 10, 1)));
         cases.push(("volume has compression enabled", flag(1, 4, 3)));
         cases.push(("volume has background compression enabled", flag(2, 0, 3)));
-        cases.push(("volume asks for more than one replica", flag(0, 53, 1)));
+        cases.push(("volume does not ask for exactly one replica of everything", flag(0, 53, 1)));
         cases.push(("volume has erasure coding enabled", flag(3, 0, 1)));
         cases.push(("volume is casefolded", flag(6, 22, 1)));
         cases.push(("volume is a multi-device filesystem", flag(3, 63, 1)));
@@ -685,6 +727,42 @@ pub(crate) mod fixture {
         no_buckets[sections + 42..sections + 44].copy_from_slice(&0u16.to_le_bytes());
         reseal(&mut no_buckets);
         assert_eq!(refusal(&no_buckets), "member's bucket size is zero");
+    }
+
+    /// A clean section shorter than its own fixed part reaches the read path
+    /// through every mount, and the subtraction that finds its entries panics
+    /// under the overflow checks the kernel and root are built with.
+    #[test]
+    fn a_clean_section_shorter_than_its_header_is_refused() {
+        let at = SB_FIELDS_START + 48;
+        for u64s in [1u32, 2] {
+            let mut short = valid();
+            short[at..at + 4].copy_from_slice(&u64s.to_le_bytes());
+            reseal(&mut short);
+            let sb = read(&device(&short)).expect("the superblock itself still parses");
+            assert_eq!(
+                sb.clean().err(),
+                Some(UpstreamError::Refused("clean section is shorter than its own header")),
+                "a clean section of {u64s} word(s) was not refused"
+            );
+        }
+    }
+
+    /// **The committed negative control.** The crate's other reader — the
+    /// interim ToyOS format the kernel still links — must not accept a volume
+    /// in upstream's format, and the two magics are what settle it. Without
+    /// this the branch's only red-on-base arm would live in a pull request
+    /// body.
+    #[test]
+    fn the_interim_format_s_reader_refuses_an_upstream_volume() {
+        let io = device(&valid());
+        let refused = crate::Superblock::read(&io).expect_err("the interim reader must refuse this");
+        assert!(
+            matches!(refused, crate::FsError::BadMagic { expected, .. } if expected == *b"BCFS"),
+            "the interim reader answered {refused:?} rather than refusing the magic"
+        );
+        // And the reverse: the upstream reader is what does accept it.
+        assert!(read(&io).is_ok(), "the upstream reader must accept what it wrote the fixture for");
     }
 
     /// A volume that was not unmounted cleanly is refused by name, because

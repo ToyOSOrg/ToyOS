@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::block_io::BlockIO;
 
-use super::bkey::{Bpos, Key, TYPE_DELETED, TYPE_HASH_WHITEOUT, TYPE_WHITEOUT};
+use super::bkey::{Bpos, Key, TYPE_DELETED, TYPE_EXTENT_WHITEOUT, TYPE_HASH_WHITEOUT, TYPE_WHITEOUT};
 use super::node::{clean_roots, BtreePtr, Node, MAX_DEPTH};
 use super::sb::Superblock;
 use super::UpstreamError;
@@ -43,8 +43,12 @@ pub fn merged(node: &Node) -> Result<Vec<(usize, Key)>, UpstreamError> {
 }
 
 /// Types that say "nothing is here", whatever an older bset said.
+///
+/// `extent_whiteout` is one of them: it is what the extents btree writes where
+/// a snapshot deletion took data away, and a reader that served it back would
+/// hand out an extent with no value.
 fn is_tombstone(kind: u8) -> bool {
-    matches!(kind, TYPE_DELETED | TYPE_WHITEOUT | TYPE_HASH_WHITEOUT)
+    matches!(kind, TYPE_DELETED | TYPE_WHITEOUT | TYPE_HASH_WHITEOUT | TYPE_EXTENT_WHITEOUT)
 }
 
 /// A btree, opened at its root.

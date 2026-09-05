@@ -14,6 +14,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,9 @@ const SCRATCH_MB: u64 = 1024;
 const SEQ_LINES: u32 = 40_000;
 const HELLO: &str = "hello-toyos";
 const LINK_TARGET: &str = "../a.txt";
+/// The prefix the guest puts on each line of its own listing, so the host can
+/// pick the listing out of a console that carries a whole distribution boot.
+const TREE_MARK: &str = "TREEENTRY";
 
 /// A guest whose console the test reads and types at.
 struct Guest {
@@ -105,14 +109,48 @@ impl Guest {
         stdin.flush().map_err(|e| format!("typing at the guest: {e}"))
     }
 
-    /// Run one shell line and block until it has finished.
+    /// Run one shell line, block until it has finished, and refuse a non-zero
+    /// exit.
     ///
-    /// The done-marker is assembled by the shell so the line the tty echoes
-    /// back never contains it — otherwise every wait would return on the echo
-    /// of its own command.
+    /// **The exit code is the whole point of waiting**: a `bcachefs format`
+    /// that failed prints its marker exactly like one that worked, and every
+    /// assertion after it would then be about an empty disk. The done-marker is
+    /// assembled by the shell so the line the tty echoes back never contains
+    /// it — otherwise every wait would return on the echo of its own command.
     fn run(&mut self, tag: &str, command: &str, budget: Duration) -> Result<(), String> {
         self.send(&format!("{command}; echo \"DO\"\"NE_{tag} rc=$?\"\n"))?;
-        self.wait_for(&format!("DONE_{tag} rc="), budget)
+        self.wait_for(&format!("DONE_{tag} rc="), budget)?;
+        let console = self.console();
+        let line = console
+            .rmatch_indices(&format!("DONE_{tag} rc="))
+            .next()
+            .map(|(at, m)| console[at + m.len()..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .unwrap_or_default();
+        if line != "0" {
+            let tail: String = console.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
+            return Err(format!("the guest's {tag} exited {line:?}, not 0. Console tail:\n{tail}"));
+        }
+        Ok(())
+    }
+
+    /// Wait for a marker, then type — so nothing is typed at a guest that has
+    /// not asked for it yet.
+    fn after(&mut self, marker: &str, budget: Duration, text: &str) -> Result<(), String> {
+        self.wait_for(marker, budget)?;
+        self.send(text)
+    }
+
+    /// Block until the guest is gone, so the disk it wrote is closed before the
+    /// host reads it.
+    fn wait_gone(&mut self, budget: Duration) -> Result<(), String> {
+        let until = Instant::now() + budget;
+        while Instant::now() < until {
+            if self.child.try_wait().map_err(|e| format!("{e}"))?.is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Err(format!("the oracle guest was still running {}s after poweroff", budget.as_secs()))
     }
 }
 
@@ -152,52 +190,6 @@ fn seq_text() -> Vec<u8> {
     out
 }
 
-/// A whole raw image as 4096-byte blocks.
-struct WholeFile {
-    file: std::cell::RefCell<std::fs::File>,
-    blocks: u64,
-}
-
-struct HostIoFailed;
-impl bcachefs::TransferError for HostIoFailed {
-    fn refused_before_attempt(&self) -> bool {
-        false
-    }
-}
-
-impl bcachefs::BlockIO for WholeFile {
-    fn read_block(
-        &self,
-        block: bcachefs::BlockNum,
-        buf: &mut bcachefs::BlockBuf,
-    ) -> Result<(), bcachefs::DeviceError> {
-        use std::io::{Seek, SeekFrom};
-        let mut file = self.file.borrow_mut();
-        file.seek(SeekFrom::Start(block.raw() * 4096))
-            .map_err(|_| bcachefs::DeviceError::classify(&HostIoFailed))?;
-        file.read_exact(buf.as_bytes_mut())
-            .map_err(|_| bcachefs::DeviceError::classify(&HostIoFailed))
-    }
-
-    fn write_block(
-        &self,
-        _block: bcachefs::BlockNum,
-        _buf: &bcachefs::BlockBuf,
-    ) -> Result<(), bcachefs::DeviceError> {
-        Err(bcachefs::DeviceError::classify(&HostIoFailed))
-    }
-
-    fn block_count(&self) -> u64 {
-        self.blocks
-    }
-}
-
-fn open_whole(path: &Path) -> Result<WholeFile, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let blocks = file.metadata().map_err(|e| format!("{e}"))?.len() / 4096;
-    Ok(WholeFile { file: std::cell::RefCell::new(file), blocks })
-}
-
 /// The whole judgement: upstream writes a volume, ToyOS reads it back.
 pub fn bcachefs_upstream_read() -> Result<(), String> {
     let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
@@ -213,17 +205,15 @@ pub fn bcachefs_upstream_read() -> Result<(), String> {
 
     // The install medium's syslinux mirrors its menu to the serial line and
     // takes input there; Tab opens the highlighted entry's command line, which
-    // is the only way to ask this image for a serial console.
-    guest.wait_for("Press [Tab] to edit options", Duration::from_secs(300))?;
-    std::thread::sleep(Duration::from_secs(3));
-    guest.send("\t")?;
-    std::thread::sleep(Duration::from_secs(3));
-    guest.send(" console=ttyS0,115200\n")?;
-
-    guest.wait_for("archiso login:", Duration::from_secs(1200))?;
-    std::thread::sleep(Duration::from_secs(2));
-    guest.send("root\n")?;
-    std::thread::sleep(Duration::from_secs(5));
+    // is the only way to ask this image for a serial console. The menu echoes
+    // the line it is about to boot, so the edit is driven off that echo rather
+    // than off a timer that could type into an already-expired menu.
+    guest.after("Press [Tab] to edit options", Duration::from_secs(300), "\t")?;
+    guest.after("vmlinuz-linux", Duration::from_secs(120), " console=ttyS0,115200\n")?;
+    guest.after("archiso login:", Duration::from_secs(1200), "root\n")?;
+    // The medium's own message of the day, printed once the login has taken and
+    // before the first prompt — so nothing is typed at a guest still logging in.
+    guest.wait_for("installation guide", Duration::from_secs(300))?;
     guest.run("LOGIN", "true", Duration::from_secs(300))?;
 
     guest.run(
@@ -238,9 +228,12 @@ pub fn bcachefs_upstream_read() -> Result<(), String> {
         Duration::from_secs(300),
     )?;
     guest.run("FORMAT", "bcachefs format --fs_label=toyosjudge /dev/vda", Duration::from_secs(600))?;
+    // `fusemount` forks into the background, so the mount is waited for by the
+    // mount table saying it is there rather than by a sleep.
     guest.run(
         "MOUNT",
-        "mkdir -p /mnt/bch; bcachefs fusemount /dev/vda /mnt/bch >/tmp/fuse.log 2>&1 & sleep 10; mount | grep -c fuse.bcachefs",
+        "mkdir -p /mnt/bch; bcachefs fusemount /dev/vda /mnt/bch >/tmp/fuse.log 2>&1 & \
+         until mount | grep -q fuse.bcachefs; do true; done",
         Duration::from_secs(300),
     )?;
     guest.run("COPY", "cp -a /tmp/src/. /mnt/bch/ && sync", Duration::from_secs(600))?;
@@ -249,10 +242,24 @@ pub fn bcachefs_upstream_read() -> Result<(), String> {
         "sha256sum /mnt/bch/Documents/a.txt /mnt/bch/Documents/deep/seq.txt /mnt/bch/Documents/deep/big.bin",
         Duration::from_secs(300),
     )?;
-    guest.run("UMOUNT", "fusermount3 -u /mnt/bch; sleep 3; sync", Duration::from_secs(300))?;
+    // What upstream says is on the volume, in full: the host diffs its own
+    // listing against this in both directions, so a file ToyOS invents and a
+    // file ToyOS loses are both red.
+    // The mark is assembled by the shell, so the command line the tty echoes
+    // back does not itself look like a listing entry.
+    guest.run(
+        "TREE",
+        "find /mnt/bch -mindepth 1 -printf 'TREE''ENTRY %y %p\\n' | LC_ALL=C sort",
+        Duration::from_secs(300),
+    )?;
+    guest.run(
+        "UMOUNT",
+        "fusermount3 -u /mnt/bch; until ! mount | grep -q fuse.bcachefs; do true; done; sync",
+        Duration::from_secs(300),
+    )?;
     guest.run("FSCK", "bcachefs fsck -y /dev/vda", Duration::from_secs(900))?;
     guest.send("poweroff -f\n")?;
-    std::thread::sleep(Duration::from_secs(5));
+    guest.wait_gone(Duration::from_secs(300))?;
 
     let console = guest.console();
     drop(guest);
@@ -280,7 +287,7 @@ pub fn bcachefs_upstream_read() -> Result<(), String> {
         })
         .collect::<Result<_, _>>()?;
 
-    let volume = Volume::open(open_whole(&scratch)?)
+    let volume = Volume::open(super::storage::FileBlocks::whole(&scratch)?)
         .map_err(|e| format!("ToyOS could not open the volume upstream wrote: {e:?}\n{console}"))?;
 
     let read = |path: &str| -> Result<Vec<u8>, String> {
@@ -351,17 +358,69 @@ pub fn bcachefs_upstream_read() -> Result<(), String> {
         return Err(format!("/empty listed {entries} entries"));
     }
 
-    let mut names = Vec::new();
-    volume
-        .readdir(volume.root(), &mut |name, _, _| {
-            names.push(name.to_string());
-            true
-        })
-        .map_err(|e| format!("listing the root: {e:?}"))?;
-    names.sort();
-    let want = ["Documents", "empty", "lost+found"];
-    if names != want {
-        return Err(format!("the root listed {names:?}, and upstream put {want:?} there"));
+    // **The whole tree, diffed against what upstream said it wrote, in both
+    // directions.** A listing compared to a constant this file carries proves
+    // only that this file and the reader agree; the guest's own `find` is what
+    // makes it a judgement.
+    let stated_tree = guest_tree(&console)?;
+    let read_tree = walk(&volume, volume.root(), "/mnt/bch")?;
+    let missing: Vec<&String> = stated_tree.iter().filter(|e| !read_tree.contains(*e)).collect();
+    let invented: Vec<&String> = read_tree.iter().filter(|e| !stated_tree.contains(*e)).collect();
+    if !missing.is_empty() || !invented.is_empty() {
+        return Err(format!(
+            "the tree upstream wrote and the tree ToyOS read differ.\n  \
+             upstream wrote and ToyOS did not read: {missing:?}\n  \
+             ToyOS read and upstream did not write: {invented:?}"
+        ));
+    }
+    if stated_tree.len() < 7 {
+        return Err(format!("upstream stated only {} tree entries; it wrote more", stated_tree.len()));
     }
     Ok(())
+}
+
+/// Every line the guest's `find` printed, as `<kind> <path>`.
+fn guest_tree(console: &str) -> Result<BTreeSet<String>, String> {
+    let tree: BTreeSet<String> = console
+        .lines()
+        .filter_map(|line| line.split_once(TREE_MARK).map(|(_, rest)| rest.trim().to_string()))
+        .filter(|entry| !entry.is_empty() && entry.contains(' '))
+        .collect();
+    if tree.is_empty() {
+        return Err("the guest never listed the tree it wrote".to_string());
+    }
+    Ok(tree)
+}
+
+/// The same listing, taken from ToyOS's reader, in the guest's own words.
+fn walk<IO: bcachefs::BlockIO>(
+    volume: &Volume<IO>,
+    dir: u64,
+    prefix: &str,
+) -> Result<BTreeSet<String>, String> {
+    let mut here = Vec::new();
+    volume
+        .readdir(dir, &mut |name, inum, kind| {
+            here.push((name.to_string(), inum, kind));
+            true
+        })
+        .map_err(|e| format!("listing {prefix}: {e:?}"))?;
+
+    let mut out = BTreeSet::new();
+    for (name, inum, kind) in here {
+        let path = format!("{prefix}/{name}");
+        // `find -printf %y`'s letters, so the two listings are comparable
+        // without either side translating the other's vocabulary.
+        let letter = match kind {
+            FileKind::Dir => "d",
+            FileKind::Regular => "f",
+            FileKind::Symlink => "l",
+            FileKind::Other(_) => "?",
+        };
+        out.insert(format!("{letter} {path}"));
+        if kind == FileKind::Dir {
+            out.extend(walk(volume, inum, &path)?);
+        }
+    }
+    Ok(out)
 }

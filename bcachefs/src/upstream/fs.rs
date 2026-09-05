@@ -14,12 +14,15 @@ use super::bkey::{
 use super::btree::{Btree, BTREE_DIRENTS, BTREE_EXTENTS, BTREE_INODES, BTREE_SUBVOLUMES};
 use super::csum::CsumType;
 use super::raw::{bits, Raw};
-use super::sb::{Superblock, SECTOR};
+use super::sb::{Superblock, EXTENT_TYPES_MAX, SECTOR};
 use super::UpstreamError;
 
 /// `BCACHEFS_ROOT_SUBVOL` and `BCACHEFS_ROOT_INO`.
 const ROOT_SUBVOL: u64 = 1;
 const ROOT_INO: u64 = 4096;
+/// The snapshot id `bch2_fs_initialize` gives the root subvolume and every key
+/// under it, and the only one this reader serves a key from.
+const NO_SNAPSHOT: u32 = u32::MAX;
 /// `BCH_NAME_MAX`.
 pub const NAME_MAX: usize = 512;
 /// `INODEv3_FIELDS_START_CUR`: `bch_inode_v3`'s fixed part, in u64s.
@@ -81,27 +84,46 @@ pub struct Attrs {
 pub struct Volume<IO: BlockIO> {
     io: IO,
     sb: Superblock,
-    snapshot: u32,
     root: u64,
+    entry_u64s: [u8; EXTENT_TYPES_MAX],
+    /// The largest byte offset any file on this volume can have data at.
+    device_bytes: u64,
 }
 
 impl<IO: BlockIO> Volume<IO> {
-    /// Open a volume: validate the superblock, then find the root subvolume's
-    /// snapshot and root inode.
+    /// Open a volume: validate the superblock, then take the root subvolume's
+    /// root inode.
+    ///
+    /// **Snapshots are refused here rather than filtered later.** Every key a
+    /// volume with none carries sits at one snapshot id; serving a file means
+    /// deciding which of several versions of a key is visible, and this reader
+    /// does not make that decision, so a root subvolume at any other id is
+    /// refused by name.
     pub fn open(io: IO) -> Result<Self, UpstreamError> {
         let sb = super::sb::read(&io)?;
-        let (snapshot, root) = {
+        let entry_u64s = sb.extent_entry_u64s()?;
+        let root = {
             let subvols = Btree::open(&io, &sb, BTREE_SUBVOLUMES)?;
-            let (val, _) = subvols
+            let (val, key) = subvols
                 .get(Bpos::new(0, ROOT_SUBVOL, 0))?
                 .ok_or(UpstreamError::Refused("volume has no root subvolume"))?;
+            if key.kind != TYPE_SUBVOLUME {
+                return Err(UpstreamError::Refused("root subvolume's key is not a subvolume"));
+            }
             let raw = Raw::new(&val, "root subvolume's value ends early");
-            (raw.u32(4)?, raw.u64(8)?)
+            if raw.u32(4)? != NO_SNAPSHOT {
+                return Err(UpstreamError::Refused("volume has snapshots"));
+            }
+            raw.u64(8)?
         };
         if root != ROOT_INO {
             return Err(UpstreamError::Refused("root subvolume does not name the root inode"));
         }
-        Ok(Self { io, sb, snapshot, root })
+        let device_bytes = io
+            .block_count()
+            .checked_mul(BLOCK_SIZE as u64)
+            .ok_or(UpstreamError::Refused("device size in bytes overflows"))?;
+        Ok(Self { io, sb, root, entry_u64s, device_bytes })
     }
 
     pub fn superblock(&self) -> &Superblock {
@@ -112,8 +134,20 @@ impl<IO: BlockIO> Volume<IO> {
         self.root
     }
 
+    /// The one snapshot every key on a volume without snapshots sits at.
     fn pos(&self, inode: u64, offset: u64) -> Bpos {
-        Bpos::new(inode, offset, self.snapshot)
+        Bpos::new(inode, offset, NO_SNAPSHOT)
+    }
+
+    /// **A scanned range spans every snapshot id, so each key it hands back is
+    /// checked rather than assumed.** `Volume::open` refuses a volume whose
+    /// root subvolume is not at [`NO_SNAPSHOT`]; this is the same refusal for
+    /// a key that claims otherwise, so no version of a key is silently chosen.
+    fn one_snapshot(key: &Key) -> Result<(), UpstreamError> {
+        if key.pos.snapshot != NO_SNAPSHOT {
+            return Err(UpstreamError::Refused("volume holds a key at a snapshot other than its root subvolume's"));
+        }
+        Ok(())
     }
 
     /// The inode `inum`, or `None` when the btree holds no such key.
@@ -156,6 +190,7 @@ impl<IO: BlockIO> Volume<IO> {
         let dirents = Btree::open(&self.io, &self.sb, BTREE_DIRENTS)?;
         let mut failure = None;
         dirents.range(self.pos(dir, 0), self.pos(dir, u64::MAX), &mut |node, _, key| {
+            Self::one_snapshot(key)?;
             if key.kind != TYPE_DIRENT {
                 return Err(UpstreamError::Refused("dirents btree holds a key that is not a dirent"));
             }
@@ -213,15 +248,25 @@ impl<IO: BlockIO> Volume<IO> {
     ///
     /// A range no extent covers is a hole and reads as zeros, which is what
     /// makes the inode's size — not the extents — the length of the answer.
+    ///
+    /// **`bi_size` is a `u64` off the disk and it sizes this buffer**, which is
+    /// the allocator-sizing defect this crate's `alloc_probe` exists to catch.
+    /// The device is the bound: a file cannot be longer than the disk it is on,
+    /// whatever its inode says, so an inode claiming more is refused before a
+    /// byte of it is allocated.
     pub fn read(&self, inum: u64) -> Result<Vec<u8>, UpstreamError> {
         let attrs = self
             .stat(inum)?
             .ok_or(UpstreamError::Refused("a file whose inode the btree does not hold"))?;
-        let mut out = vec![0u8; usize::try_from(attrs.size).map_err(|_| TOO_LARGE)?];
+        if attrs.sectors > self.device_bytes / SECTOR as u64 {
+            return Err(UpstreamError::Refused("inode claims more sectors than the device has"));
+        }
+        let mut out = output_buffer(attrs.size, self.device_bytes)?;
 
         let extents = Btree::open(&self.io, &self.sb, BTREE_EXTENTS)?;
         let mut failure = None;
         extents.range(self.pos(inum, 0), self.pos(inum, u64::MAX), &mut |node, _, key| {
+            Self::one_snapshot(key)?;
             let val = node.value(key)?;
             if let Err(err) = self.place(key, &val, &mut out) {
                 failure = Some(err);
@@ -251,7 +296,12 @@ impl<IO: BlockIO> Volume<IO> {
         let start_sectors = end_sectors
             .checked_sub(key.size as u64)
             .ok_or(UpstreamError::Refused("extent ends before it starts"))?;
-        let at = usize::try_from(start_sectors * SECTOR as u64).map_err(|_| TOO_LARGE)?;
+        // A key's offset is a number the btree chose, and `1 << 60` sectors is
+        // inside the scanned range and outside a `u64` of bytes.
+        let at = start_sectors
+            .checked_mul(SECTOR as u64)
+            .ok_or(UpstreamError::Refused("extent starts past any byte offset"))?;
+        let at = usize::try_from(at).map_err(|_| TOO_LARGE)?;
         if at >= out.len() {
             return Ok(());
         }
@@ -259,7 +309,7 @@ impl<IO: BlockIO> Volume<IO> {
 
         match key.kind {
             TYPE_INLINE_DATA => {
-                let take = want.min(val.len());
+                let take = want.min(val.bytes().len());
                 out[at..at + take].copy_from_slice(&val.bytes()[..take]);
                 Ok(())
             }
@@ -283,36 +333,8 @@ impl<IO: BlockIO> Volume<IO> {
     /// is read whole, verified, and then sliced — a checksum over the live part
     /// alone would verify nothing, because nobody ever computed one.
     fn read_extent(&self, key: &Key, val: &Raw<'_>) -> Result<Vec<u8>, UpstreamError> {
-        let mut crc: Option<Crc> = None;
-        let mut at = 0usize;
-        while at < val.len() {
-            let word = val.u64(at)?;
-            if word == 0 {
-                return Err(UpstreamError::Refused("extent holds an entry of no type"));
-            }
-            let kind = word.trailing_zeros();
-            let u64s = entry_u64s(kind)?;
-            let entry = val.sub(at, u64s * 8, "extent entry runs past its value")?;
-            match kind {
-                ENTRY_PTR => {
-                    let crc = crc.unwrap_or(Crc::unchecksummed(key.size));
-                    return self.read_ptr(&entry, crc, key.size);
-                }
-                ENTRY_CRC32 => crc = Some(Crc::crc32(&entry)?),
-                ENTRY_CRC64 => crc = Some(Crc::crc64(&entry)?),
-                ENTRY_CRC128 => {
-                    return Err(UpstreamError::Refused("extent carries a 128-bit checksum, which is encryption"))
-                }
-                ENTRY_STRIPE_PTR => {
-                    return Err(UpstreamError::Refused("extent points into an erasure-coded stripe"))
-                }
-                // Rebalance, flags and reconcile entries say nothing about
-                // where the bytes are; their length is what matters.
-                _ => {}
-            }
-            at += u64s * 8;
-        }
-        Err(UpstreamError::Refused("extent has no device pointer"))
+        let (ptr, crc) = find_ptr(val, &self.entry_u64s)?;
+        self.read_ptr(&ptr, crc, key.size)
     }
 
     fn read_ptr(&self, entry: &Raw<'_>, crc: Crc, live_sectors: u32) -> Result<Vec<u8>, UpstreamError> {
@@ -335,10 +357,8 @@ impl<IO: BlockIO> Volume<IO> {
 
         let start = bits(word, 4, 48);
         let whole = self.read_sectors(start, crc.stored_sectors)?;
-        if let Some(csum) = crc.csum {
-            if !crc.csum_type.verify(&whole, csum) {
-                return Err(UpstreamError::Refused("extent's data does not match its checksum"));
-            }
+        if !crc.csum_type.verify(&whole, crc.csum) {
+            return Err(UpstreamError::Refused("extent's data does not match its checksum"));
         }
         let from = crc.offset as usize * SECTOR;
         let len = live_sectors as usize * SECTOR;
@@ -374,14 +394,78 @@ const ENTRY_CRC32: u32 = 1;
 const ENTRY_CRC64: u32 = 2;
 const ENTRY_CRC128: u32 = 3;
 const ENTRY_STRIPE_PTR: u32 = 4;
-/// `BCH_EXTENT_ENTRY_MAX`, and the sizes `extent_entry_u64s_known` gives.
-const ENTRY_U64S: [usize; 9] = [1, 1, 2, 3, 1, 3, 1, 2, 3];
 
-fn entry_u64s(kind: u32) -> Result<usize, UpstreamError> {
-    ENTRY_U64S
-        .get(kind as usize)
-        .copied()
-        .ok_or(UpstreamError::Refused("extent holds an entry type this reader has never read"))
+/// The buffer a file's contents are read into, sized by its inode.
+///
+/// **The bound and the allocation are one function** so nothing can size a
+/// `Vec` from `bi_size` without passing the device it is on: a file cannot be
+/// longer than the disk holding it, whatever its inode claims.
+fn output_buffer(size: u64, device_bytes: u64) -> Result<Vec<u8>, UpstreamError> {
+    if size > device_bytes {
+        return Err(UpstreamError::Refused("inode claims a file longer than the device it is on"));
+    }
+    Ok(vec![0u8; usize::try_from(size).map_err(|_| TOO_LARGE)?])
+}
+
+/// Walk an extent's interleaved entries to its first device pointer, carrying
+/// whatever checksum entry preceded it.
+///
+/// **Each entry's length comes from the volume's own table, and one word of
+/// error here is arbitrary device blocks served as file contents**: a value of
+/// `[rebalance_v1, crc32, ptr]` walked with a three-word `rebalance_v1` lands
+/// on the pointer word, reads it as a checksum entry, and then takes the next
+/// eight bytes as the pointer.
+fn find_ptr<'a>(
+    val: &Raw<'a>,
+    sizes: &[u8; EXTENT_TYPES_MAX],
+) -> Result<(Raw<'a>, Crc), UpstreamError> {
+    let mut crc: Option<Crc> = None;
+    let mut at = 0usize;
+    while at < val.bytes().len() {
+        let word = val.u64(at)?;
+        if word == 0 {
+            return Err(UpstreamError::Refused("extent holds an entry of no type"));
+        }
+        let kind = word.trailing_zeros();
+        let u64s = entry_u64s(sizes, kind)?;
+        let entry = val.sub(at, u64s * 8, "extent entry runs past its value")?;
+        match kind {
+            // **A bset with no checksum is refused, so an extent with none is
+            // too.** A pointer with no crc entry before it is data nobody
+            // computed a checksum over, on a volume whose superblock says it
+            // checksums its data — which `check_supported` has already required.
+            ENTRY_PTR => {
+                return match crc {
+                    Some(crc) => Ok((entry, crc)),
+                    None => Err(UpstreamError::Refused("extent carries no checksum entry")),
+                }
+            }
+            ENTRY_CRC32 => crc = Some(Crc::crc32(&entry)?),
+            ENTRY_CRC64 => crc = Some(Crc::crc64(&entry)?),
+            ENTRY_CRC128 => {
+                return Err(UpstreamError::Refused("extent carries a 128-bit checksum, which is encryption"))
+            }
+            ENTRY_STRIPE_PTR => {
+                return Err(UpstreamError::Refused("extent points into an erasure-coded stripe"))
+            }
+            // Rebalance, flags and reconcile entries say nothing about where
+            // the bytes are; their length is the whole of what matters.
+            _ => {}
+        }
+        at += u64s * 8;
+    }
+    Err(UpstreamError::Refused("extent has no device pointer"))
+}
+
+/// How far the next entry of an extent's value is, from the table the volume's
+/// own superblock states. A type it sizes at zero is one nothing can step over.
+fn entry_u64s(sizes: &[u8; EXTENT_TYPES_MAX], kind: u32) -> Result<usize, UpstreamError> {
+    match sizes.get(kind as usize).copied() {
+        Some(0) | None => {
+            Err(UpstreamError::Refused("extent holds an entry type this volume gives no size for"))
+        }
+        Some(u64s) => Ok(u64s as usize),
+    }
 }
 
 /// The checksum and geometry one `bch_extent_crc*` entry states about the
@@ -394,43 +478,43 @@ struct Crc {
     offset: u32,
     compression: u64,
     csum_type: CsumType,
-    csum: Option<(u64, u64)>,
+    csum: (u64, u64),
 }
 
 impl Crc {
-    /// An extent with no crc entry is neither checksummed nor trimmed.
-    fn unchecksummed(sectors: u32) -> Self {
-        Self {
-            stored_sectors: sectors,
-            offset: 0,
-            compression: 0,
-            csum_type: CsumType::None,
-            csum: None,
+    /// A checksum entry that states no checksum verifies everything, so it is
+    /// refused where a bset's `none` is.
+    fn checked(self) -> Result<Self, UpstreamError> {
+        if self.csum_type == CsumType::None {
+            return Err(UpstreamError::Refused("extent's checksum entry names no checksum"));
         }
+        Ok(self)
     }
 
     /// `bch_extent_crc32`; its sizes are stored biased by one.
     fn crc32(entry: &Raw<'_>) -> Result<Self, UpstreamError> {
         let w = entry.u32(0)? as u64;
-        Ok(Self {
+        Self {
             stored_sectors: bits(w, 9, 16) as u32 + 1,
             offset: bits(w, 16, 23) as u32,
             compression: bits(w, 28, 32),
             csum_type: CsumType::from_disk(bits(w, 24, 28))?,
-            csum: Some((entry.u32(4)? as u64, 0)),
-        })
+            csum: (entry.u32(4)? as u64, 0),
+        }
+        .checked()
     }
 
     /// `bch_extent_crc64`; its 64-bit checksum is split across two fields.
     fn crc64(entry: &Raw<'_>) -> Result<Self, UpstreamError> {
         let w = entry.u64(0)?;
-        Ok(Self {
+        Self {
             stored_sectors: bits(w, 12, 21) as u32 + 1,
             offset: bits(w, 21, 30) as u32,
             compression: bits(w, 44, 48),
             csum_type: CsumType::from_disk(bits(w, 40, 44))?,
-            csum: Some((entry.u64(8)? | (bits(w, 48, 64) << 48), 0)),
-        })
+            csum: (entry.u64(8)? | (bits(w, 48, 64) << 48), 0),
+        }
+        .checked()
     }
 }
 
@@ -438,7 +522,7 @@ impl Crc {
 /// last word's trailing NULs are taken off.
 fn decode_dirent<'a>(val: &Raw<'a>) -> Result<(&'a str, u64, FileKind), UpstreamError> {
     let short = UpstreamError::Refused("dirent is shorter than its header");
-    if val.len() < DIRENT_NAME_AT + 1 || !val.len().is_multiple_of(8) {
+    if val.bytes().len() < DIRENT_NAME_AT + 1 || !val.bytes().len().is_multiple_of(8) {
         return Err(short);
     }
     let d_type_byte = val.u8(8)?;
@@ -450,9 +534,10 @@ fn decode_dirent<'a>(val: &Raw<'a>) -> Result<(&'a str, u64, FileKind), Upstream
         return Err(UpstreamError::Refused("dirent points at a subvolume"));
     }
 
-    let last = val.u64(val.len() - 8)?;
+    let last = val.u64(val.bytes().len() - 8)?;
     let trailing_nuls = if last == 0 { 8 } else { last.leading_zeros() as usize / 8 };
     let len = val
+        .bytes()
         .len()
         .checked_sub(DIRENT_NAME_AT + trailing_nuls)
         .ok_or(UpstreamError::Refused("dirent has no name"))?;
@@ -468,9 +553,6 @@ fn decode_dirent<'a>(val: &Raw<'a>) -> Result<(&'a str, u64, FileKind), Upstream
     Ok((name, val.u64(0)?, FileKind::from_dirent(d_type)))
 }
 
-/// The one key type outside a file's own btrees this module names, so a caller
-/// reading the subvolume can tell what it got.
-pub const KEY_TYPE_SUBVOLUME: u8 = TYPE_SUBVOLUME;
 
 #[cfg(test)]
 mod tests {
@@ -562,15 +644,70 @@ mod tests {
         assert_eq!(crc.offset, 0);
         assert_eq!(crc.compression, 0);
         assert_eq!(crc.csum_type, CsumType::Crc32c);
-        assert_eq!(crc.csum, Some((0xc522_c42f, 0)));
+        assert_eq!(crc.csum, (0xc522_c42f, 0));
     }
 
-    /// An entry type past the table is refused rather than stepped over by a
-    /// length nobody knows.
+    /// An inode claiming 256 TiB is refused having asked the allocator for
+    /// nothing like it.
     #[test]
-    fn an_unknown_extent_entry_is_refused() {
-        assert!(entry_u64s(9).is_err());
-        assert_eq!(entry_u64s(0), Ok(1));
-        assert_eq!(entry_u64s(2), Ok(2));
+    fn a_file_longer_than_its_device_is_refused_without_allocating_it() {
+        let device = 1u64 << 20;
+        let _ = crate::alloc_probe::take_peak();
+        let refused = output_buffer(1 << 48, device);
+        let peak = crate::alloc_probe::take_peak();
+        assert_eq!(
+            refused.err(),
+            Some(UpstreamError::Refused("inode claims a file longer than the device it is on"))
+        );
+        assert!(peak < 1 << 16, "refusing a 256 TiB file asked the allocator for {peak} bytes");
+
+        assert_eq!(output_buffer(0, device).map(|b| b.len()), Ok(0));
+        assert_eq!(output_buffer(device, device).map(|b| b.len()), Ok(device as usize));
+        assert!(output_buffer(device + 1, device).is_err());
+    }
+
+    /// The sizes `sizeof` gives at the pinned commit, and the refusal for a
+    /// type the volume gives no size for.
+    #[test]
+    fn an_entry_this_volume_cannot_size_is_refused() {
+        let sizes = super::super::sb::EXTENT_ENTRY_U64S_KNOWN_FOR_TESTS;
+        for (kind, want) in [(0u32, 1usize), (1, 1), (2, 2), (3, 3), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1)] {
+            assert_eq!(entry_u64s(&sizes, kind), Ok(want), "entry type {kind}");
+        }
+        assert!(entry_u64s(&sizes, 9).is_err(), "a type the table sizes at zero must be refused");
+        assert!(entry_u64s(&sizes, 99).is_err(), "a type past the table must be refused");
+    }
+
+    /// **The extent the oracle cannot write, because a default format never
+    /// carries one.** Upstream emits a `rebalance_v1` entry as soon as an inode
+    /// carries a background target or a per-inode replica count, and the value
+    /// is then `[rebalance_v1, crc32, ptr]`: sized right the walk lands on the
+    /// pointer with the checksum applied, and one word out it does not.
+    #[test]
+    fn a_rebalance_entry_does_not_move_the_pointer() {
+        // type field widths: rebalance_v1 is 6 bits, so its low word is 1 << 5.
+        let rebalance: u64 = 1 << 5;
+        let crc32_lo: u32 = 0b10 | (79 << 2) | (79 << 9) | (5 << 24);
+        let ptr: u64 = 1 | (0xE000u64 << 4);
+
+        let mut value = rebalance.to_le_bytes().to_vec();
+        value.extend_from_slice(&crc32_lo.to_le_bytes());
+        value.extend_from_slice(&0xc522_c42fu32.to_le_bytes());
+        value.extend_from_slice(&ptr.to_le_bytes());
+        let val = Raw::new(&value, "extent");
+
+        let right = super::super::sb::EXTENT_ENTRY_U64S_KNOWN_FOR_TESTS;
+        let (entry, crc) = find_ptr(&val, &right).expect("the pointer");
+        assert_eq!(entry.u64(0), Ok(ptr), "the walk did not land on the pointer");
+        assert_eq!(crc.stored_sectors, 80, "the checksum entry was skipped");
+        assert_eq!(crc.csum, (0xc522_c42f, 0));
+
+        let mut wrong = right;
+        wrong[5] = 3;
+        let walked = find_ptr(&val, &wrong);
+        assert!(
+            walked.map(|(e, _)| e.u64(0)) != Ok(Ok(ptr)),
+            "a rebalance entry sized three words still landed on the pointer"
+        );
     }
 }

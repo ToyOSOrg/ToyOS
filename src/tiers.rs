@@ -844,12 +844,10 @@ pub const RELEGATED: &[Relegated] = &[
         test: "bcachefs_upstream_read",
         // A committed dev-host measurement rather than an `UNMEASURED` marker,
         // because only a Fast name may carry one and fast CI does not run
-        // this. Nearly all of it is a whole Linux distribution booting, which
-        // is emulated on the dev host and on a hosted shard alike — the guest
-        // is x86-64 and no lane gives it KVM. The first nightly shard reprices
-        // it. Measured on the dev host at 93,900 ms, of which the guest's own
-        // boot to a login prompt is 72-94 s across four runs.
-        ci_ms: 93_900,
+        // this. Most of it is a whole Linux distribution booting, which is
+        // emulated on the dev host and on a hosted shard alike — the guest is
+        // x86-64 and no lane gives it KVM. The first nightly shard reprices it.
+        ci_ms: 90_600,
         why: Why::Cost,
         guards: "That `bcachefs/`'s upstream read path reads what upstream writes. A Linux \
                  guest carrying bcachefs-tools at the release the crate's format citation \

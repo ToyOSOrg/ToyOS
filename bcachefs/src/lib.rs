@@ -1,8 +1,6 @@
-//! The `/home` filesystem, named for its destination rather than its present
-//! contents: ToyOS will implement bcachefs and be compatible with its on-disk
-//! format, and this crate is where that lands. What it holds today is an
-//! interim ToyOS-designed format sharing nothing with bcachefs but the
-//! ambition.
+//! The `/home` filesystem. [`upstream`] implements the real bcachefs on-disk
+//! format, read side; the modules beside it are the interim ToyOS format the
+//! kernel still links.
 //!
 //! **Every number this crate parses came off a disk it does not own, and a
 //! CRC is not authentication — whoever writes the image writes the CRC.** Each

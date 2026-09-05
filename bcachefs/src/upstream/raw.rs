@@ -17,14 +17,6 @@ impl<'a> Raw<'a> {
         Self { bytes, what }
     }
 
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }

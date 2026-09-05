@@ -1,12 +1,9 @@
 //! Fetching the outside judge's disk image, by content hash.
 //!
-//! **The rules leave exactly one way to do this.** Only Rust and QEMU may be
-//! depended on, so `curl` is not available to a committed test; and the only
-//! host that serves Arch's permanent ISO archive over plain HTTP is
-//! `mirror.pkgbuild.com`, which is what removes TLS and therefore removes the
-//! dependency. That costs nothing here: the artifact is named by its SHA-256
-//! and refused when the bytes do not hash to it, so the transport is not what
-//! is being trusted.
+//! **Plain HTTP, because the artifact is named by its SHA-256 and refused when
+//! the bytes do not hash to it — the transport is not what is being trusted.**
+//! Only Rust and QEMU may be depended on, so `curl` is not available to a
+//! committed test and TLS would have cost a crate.
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
