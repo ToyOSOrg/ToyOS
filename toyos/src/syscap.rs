@@ -54,7 +54,7 @@ impl SysCap {
         syscall::shutdown(self.0.raw())
     }
 
-    /// Return the machine to firmware, on the same right and refused the same way as [`Self::shutdown`].
+    /// Back to firmware, on [`Self::shutdown`]'s right, refused the same way.
     pub fn reboot(&self) -> SyscallError {
         syscall::reboot(self.0.raw())
     }
