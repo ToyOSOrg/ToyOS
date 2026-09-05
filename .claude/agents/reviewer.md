@@ -146,10 +146,7 @@ orchestrator's brief authorised it and the body quotes that authorisation.
 ## The actuator law
 
 An actuator's doc that names a test names one that exists — in `kernel/src` or
-in the test tree — and a name resolving to neither is a dead pointer. A static
-that an actuator-guarded site writes is actuator state: every touch of it
-stands under an `actuator::` guard or inside a `#[cfg(...-actuators)]` item, or
-it runs with nothing armed on the shipping kernel too.
+in the test tree — and a name resolving to neither is a dead pointer.
 
 ## What to check on every branch
 

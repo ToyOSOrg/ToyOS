@@ -13,19 +13,21 @@ might even be able to get rid of the worktree code."
 
 ## What stays in code
 
-A prompt reads the branch in front of it and cannot see, after the fact, what
-the branch quietly failed to declare. So these are not moved into prompting:
-`src/sourcegate.rs`'s `HOST_SPAWNS` and `COMMITTED_FILES` tables, which
-enumerate a population and red on an arrival into it or a departure from it;
-`src/kernelkeys.rs`; the QEMU pin in `.github/qemu-version` that `src/ci.rs`
-refuses a guest-booting workflow for not naming; and the harness.
+A prompt reads the branch in front of it; it cannot see what the branch quietly
+failed to declare, and it does not run a semantic walk over the tree. So these
+are not moved into prompting: `src/sourcegate.rs`'s `HOST_SPAWNS` and
+`COMMITTED_FILES` tables, which enumerate a population and red on an arrival
+into it or a departure from it; `src/kernelkeys.rs`; `src/actuatorflow.rs`,
+which walks `kernel/src` for a touch of actuator state outside every guard;
+the QEMU pin in `.github/qemu-version` that `src/ci.rs` refuses a guest-booting
+workflow for not naming; and the harness.
 
 ## The stages
 
 1. `.claude/agents/reviewer.md` is the review prompt. Then the comment ratchet
    and its ledger, the prose-per-code law and its flag and CI step, the issue
-   frontmatter and citation gate, and the actuator gate all go. Nothing of this
-   stage has landed yet.
+   frontmatter and citation gate, and the actuator doc-names-a-test gate all
+   go. Nothing of this stage has landed yet.
 2. A test is green and fast, or it is deleted in the same pull request and
    filed. Then `src/redlist.rs`, `src/tiers.rs`, `src/durations.rs` and
    `tests/test-durations` have no subject left and go.

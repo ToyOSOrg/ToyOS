@@ -1,3 +1,7 @@
+/// The actuator-state coupling gate, read by nothing but its own tests like
+/// `sourcegate` below.
+#[cfg(test)]
+pub mod actuatorflow;
 pub mod assets;
 pub mod build;
 pub mod buildlock;
