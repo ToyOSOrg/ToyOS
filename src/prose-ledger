@@ -207,7 +207,7 @@ kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
 src/assets.rs 123 0
-src/build.rs 720 3
+src/build.rs 722 3
 src/buildlock.rs 378 5
 src/ci.rs 117 0
 src/clippy.rs 35 0
@@ -224,7 +224,7 @@ src/libc.rs 29 0
 src/main.rs 72 0
 src/mergehealth.rs 229 3
 src/oracle.rs 32 0
-src/pr.rs 212 5
+src/pr.rs 228 5
 src/prosegate.rs 128 0
 src/qemu.rs 115 0
 src/redlist.rs 517 23
@@ -247,6 +247,7 @@ tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 89 0
 tests/common/hostload.rs 48 1
+tests/common/https.rs 22 0
 tests/common/iommu.rs 327 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
@@ -263,6 +264,7 @@ tests/common/toybox.rs 74 0
 tests/common/usb.rs 959 4
 tests/common/volumes.rs 655 3
 tests/common/wallclock.rs 142 0
+tests/https-server-host/src/main.rs 29 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
 tests/toyos-rust-tests/src/bin/abuse_elf_loader.rs 162 0
@@ -331,6 +333,7 @@ tests/toyos-rust-tests/src/bin/hierarchy_paths.rs 25 0
 tests/toyos-rust-tests/src/bin/home_backing_revoked.rs 34 0
 tests/toyos-rust-tests/src/bin/home_fsync_budget.rs 5 0
 tests/toyos-rust-tests/src/bin/home_overwrite_zero.rs 19 0
+tests/toyos-rust-tests/src/bin/https_fetch.rs 22 0
 tests/toyos-rust-tests/src/bin/i8042_keyboard.rs 24 0
 tests/toyos-rust-tests/src/bin/i8042_mouse.rs 17 0
 tests/toyos-rust-tests/src/bin/inbox_cancel_wakes.rs 31 0
@@ -406,7 +409,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5177 23
+tests/toyos.rs 5183 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 101 0
 toyos-abi/src/handle.rs 108 0
