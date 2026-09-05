@@ -6,14 +6,14 @@ bcachefs/src/crc32c.rs 9 0
 bcachefs/src/fs.rs 350 0
 bcachefs/src/lib.rs 19 0
 bcachefs/src/superblock.rs 56 0
-bcachefs/src/upstream/bkey.rs 62 0
+bcachefs/src/upstream/bkey.rs 65 0
 bcachefs/src/upstream/btree.rs 25 0
 bcachefs/src/upstream/csum.rs 22 0
-bcachefs/src/upstream/fs.rs 116 0
+bcachefs/src/upstream/fs.rs 120 0
 bcachefs/src/upstream/mod.rs 23 0
-bcachefs/src/upstream/node.rs 56 0
+bcachefs/src/upstream/node.rs 58 0
 bcachefs/src/upstream/raw.rs 10 0
-bcachefs/src/upstream/sb.rs 103 0
+bcachefs/src/upstream/sb.rs 100 0
 bcachefs/tests/integration.rs 120 0
 bootloader/src/main.rs 202 0
 examples/imgstat.rs 15 0
@@ -239,7 +239,7 @@ src/wallpaper.rs 124 0
 src/worktree.rs 74 0
 src/writinglaw.rs 24 0
 tests/common/audio.rs 397 0
-tests/common/bcachefs_oracle.rs 65 0
+tests/common/bcachefs_oracle.rs 79 0
 tests/common/clock.rs 66 0
 tests/common/compile.rs 16 0
 tests/common/console.rs 256 2

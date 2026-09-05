@@ -32,12 +32,22 @@ const LINK_TARGET: &str = "../a.txt";
 /// The prefix the guest puts on each line of its own listing, so the host can
 /// pick the listing out of a console that carries a whole distribution boot.
 const TREE_MARK: &str = "TREEENTRY";
+/// What follows an exit status, so a chunk that ends inside one is waited out
+/// rather than read short.
+const RC_END: &str = ".";
+const RC_WAIT: Duration = Duration::from_secs(60);
 
 /// A guest whose console the test reads and types at.
 struct Guest {
     child: Child,
     log: Arc<Mutex<String>>,
     started: Instant,
+    /// How much of the console has been matched already. **Every wait is for
+    /// something the guest has not said yet**: a marker matched against the
+    /// whole accumulated console matches retroactively, so a step would fire on
+    /// a line printed long before it and type into a guest that is not
+    /// listening for it.
+    cursor: usize,
 }
 
 impl Guest {
@@ -68,21 +78,33 @@ impl Guest {
                     .push_str(&String::from_utf8_lossy(&buf[..read]));
             }
         });
-        Ok(Self { child, log, started: Instant::now() })
+        Ok(Self { child, log, started: Instant::now(), cursor: 0 })
     }
 
     fn console(&self) -> String {
         self.log.lock().expect("the console log's lock").clone()
     }
 
-    /// Block until `marker` appears, or say how long was spent not seeing it.
+    /// What the guest has said since the last thing this test matched.
+    fn unread(console: &str, cursor: usize) -> &str {
+        console.get(cursor..).unwrap_or("")
+    }
+
+    fn tail(console: &str) -> String {
+        console.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect()
+    }
+
+    /// Block until `marker` appears in what the guest has not said yet, and
+    /// consume through it.
     ///
     /// The guest is polled rather than timed: the boot's wall clock moves with
     /// the host, and every wait here is for a sentence the guest prints.
     fn wait_for(&mut self, marker: &str, budget: Duration) -> Result<(), String> {
         let until = Instant::now() + budget;
         loop {
-            if self.console().contains(marker) {
+            let console = self.console();
+            if let Some(at) = Self::unread(&console, self.cursor).find(marker) {
+                self.cursor += at + marker.len();
                 return Ok(());
             }
             if let Some(status) = self.child.try_wait().map_err(|e| format!("{e}"))? {
@@ -92,11 +114,10 @@ impl Guest {
                 ));
             }
             if Instant::now() >= until {
-                let log = self.console();
-                let tail: String = log.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
                 return Err(format!(
-                    "the oracle guest did not print {marker:?} within {}s. Console tail:\n{tail}",
-                    budget.as_secs()
+                    "the oracle guest did not print {marker:?} within {}s. Console tail:\n{}",
+                    budget.as_secs(),
+                    Self::tail(&console)
                 ));
             }
             std::thread::sleep(Duration::from_millis(500));
@@ -118,19 +139,35 @@ impl Guest {
     /// assembled by the shell so the line the tty echoes back never contains
     /// it — otherwise every wait would return on the echo of its own command.
     fn run(&mut self, tag: &str, command: &str, budget: Duration) -> Result<(), String> {
-        self.send(&format!("{command}; echo \"DO\"\"NE_{tag} rc=$?\"\n"))?;
+        self.send(&format!("{command}; echo \"DO\"\"NE_{tag} rc=$?{RC_END}\"\n"))?;
         self.wait_for(&format!("DONE_{tag} rc="), budget)?;
-        let console = self.console();
-        let line = console
-            .rmatch_indices(&format!("DONE_{tag} rc="))
-            .next()
-            .map(|(at, m)| console[at + m.len()..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
-            .unwrap_or_default();
-        if line != "0" {
-            let tail: String = console.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
-            return Err(format!("the guest's {tag} exited {line:?}, not 0. Console tail:\n{tail}"));
+
+        // **The terminator is what makes the digits complete.** A serial chunk
+        // can end between `rc=` and the code, and a snapshot taken then reads
+        // an empty exit status off a guest that succeeded.
+        let until = Instant::now() + RC_WAIT;
+        loop {
+            let console = self.console();
+            let rest = Self::unread(&console, self.cursor);
+            if let Some(end) = rest.find(RC_END) {
+                let code = rest[..end].to_string();
+                self.cursor += end + RC_END.len();
+                if code == "0" {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "the guest's {tag} exited {code:?}, not 0. Console tail:\n{}",
+                    Self::tail(&console)
+                ));
+            }
+            if Instant::now() >= until {
+                return Err(format!(
+                    "the guest's {tag} never finished stating its exit status. Console tail:\n{}",
+                    Self::tail(&console)
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(200));
         }
-        Ok(())
     }
 
     /// Wait for a marker, then type — so nothing is typed at a guest that has
@@ -229,11 +266,14 @@ pub fn bcachefs_upstream_read() -> Result<(), String> {
     )?;
     guest.run("FORMAT", "bcachefs format --fs_label=toyosjudge /dev/vda", Duration::from_secs(600))?;
     // `fusemount` forks into the background, so the mount is waited for by the
-    // mount table saying it is there rather than by a sleep.
+    // mount table saying it is there — bounded, and printing the mounter's own
+    // log when it does not, because a `fusemount` that died would otherwise
+    // surface as a host timeout with nothing said about why.
     guest.run(
         "MOUNT",
         "mkdir -p /mnt/bch; bcachefs fusemount /dev/vda /mnt/bch >/tmp/fuse.log 2>&1 & \
-         until mount | grep -q fuse.bcachefs; do true; done",
+         for _ in $(seq 1 600); do mount | grep -q fuse.bcachefs && break; sleep 0.1; done; \
+         mount | grep -q fuse.bcachefs || { echo 'fusemount never mounted:'; cat /tmp/fuse.log; false; }",
         Duration::from_secs(300),
     )?;
     guest.run("COPY", "cp -a /tmp/src/. /mnt/bch/ && sync", Duration::from_secs(600))?;
@@ -244,17 +284,20 @@ pub fn bcachefs_upstream_read() -> Result<(), String> {
     )?;
     // What upstream says is on the volume, in full: the host diffs its own
     // listing against this in both directions, so a file ToyOS invents and a
-    // file ToyOS loses are both red.
-    // The mark is assembled by the shell, so the command line the tty echoes
-    // back does not itself look like a listing entry.
+    // file ToyOS loses are both red. The mark is split by the shell so the
+    // command line the tty echoes back is not itself a listing entry, and it is
+    // split out of the constant the host matches, so a drift is a diff.
+    let (mark_head, mark_tail) = TREE_MARK.split_at(TREE_MARK.len() / 2);
     guest.run(
         "TREE",
-        "find /mnt/bch -mindepth 1 -printf 'TREE''ENTRY %y %p\\n' | LC_ALL=C sort",
+        &format!("find /mnt/bch -mindepth 1 -printf '{mark_head}''{mark_tail} %y %p\\n' | LC_ALL=C sort"),
         Duration::from_secs(300),
     )?;
     guest.run(
         "UMOUNT",
-        "fusermount3 -u /mnt/bch; until ! mount | grep -q fuse.bcachefs; do true; done; sync",
+        "fusermount3 -u /mnt/bch; \
+         for _ in $(seq 1 600); do mount | grep -q fuse.bcachefs || break; sleep 0.1; done; \
+         mount | grep -q fuse.bcachefs && { echo 'the mount outlived its unmount'; false; }; sync",
         Duration::from_secs(300),
     )?;
     guest.run("FSCK", "bcachefs fsck -y /dev/vda", Duration::from_secs(900))?;

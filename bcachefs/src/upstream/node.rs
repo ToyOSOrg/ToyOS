@@ -152,7 +152,9 @@ impl Node {
         }
         // `bch2_btree_node_read_done` holds the node's own low bound against
         // its parent's: a node that starts below where its pointer says covers
-        // keys the parent gave to its sibling.
+        // keys the parent gave to its sibling. Upstream instead *overwrites*
+        // `min_key` where the pointer sets `BTREE_PTR_RANGE_UPDATED`, so a
+        // volume that has been through topology repair is refused here.
         if min_key != ptr.min_key {
             return Err(UpstreamError::Refused("btree node's first key is not the one its pointer names"));
         }

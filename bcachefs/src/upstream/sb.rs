@@ -748,13 +748,10 @@ pub(crate) mod fixture {
         }
     }
 
-    /// **The committed negative control.** The crate's other reader — the
-    /// interim ToyOS format the kernel still links — must not accept a volume
-    /// in upstream's format, and the two magics are what settle it. Without
-    /// this the branch's only red-on-base arm would live in a pull request
-    /// body.
+    /// The two readers in this crate answer a bcachefs superblock differently:
+    /// the interim ToyOS format's refuses the magic, and this one accepts it.
     #[test]
-    fn the_interim_format_s_reader_refuses_an_upstream_volume() {
+    fn the_interim_reader_rejects_bcachefs_s_magic() {
         let io = device(&valid());
         let refused = crate::Superblock::read(&io).expect_err("the interim reader must refuse this");
         assert!(

@@ -109,11 +109,11 @@ impl BkeyFormat {
             }
             total += *bits as u32;
         }
+        // No separate bound against an unpacked key's length: every field is
+        // capped at the width it unpacks into, so `total` cannot pass 312 bits
+        // and this equality already forces five words or fewer.
         if key_u64s as u32 != total.div_ceil(64) {
             return Err(UpstreamError::Refused("btree node's key format is not as many words as its fields need"));
-        }
-        if key_u64s as usize > BKEY_U64S {
-            return Err(UpstreamError::Refused("btree node's key format is longer than an unpacked key"));
         }
         Ok(Self { key_u64s, bits_per_field, field_offset })
     }

@@ -847,7 +847,7 @@ pub const RELEGATED: &[Relegated] = &[
         // this. Most of it is a whole Linux distribution booting, which is
         // emulated on the dev host and on a hosted shard alike — the guest is
         // x86-64 and no lane gives it KVM. The first nightly shard reprices it.
-        ci_ms: 90_600,
+        ci_ms: 92_600,
         why: Why::Cost,
         guards: "That `bcachefs/`'s upstream read path reads what upstream writes. A Linux \
                  guest carrying bcachefs-tools at the release the crate's format citation \

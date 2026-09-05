@@ -411,10 +411,11 @@ fn output_buffer(size: u64, device_bytes: u64) -> Result<Vec<u8>, UpstreamError>
 /// whatever checksum entry preceded it.
 ///
 /// **Each entry's length comes from the volume's own table, and one word of
-/// error here is arbitrary device blocks served as file contents**: a value of
-/// `[rebalance_v1, crc32, ptr]` walked with a three-word `rebalance_v1` lands
-/// on the pointer word, reads it as a checksum entry, and then takes the next
-/// eight bytes as the pointer.
+/// error here is arbitrary device blocks served as file contents.** An entry
+/// can precede the checksum and the pointer: `bch2_bkey_extent_flags_set`
+/// inserts a `flags` entry at `ptrs.start` through `__extent_entry_insert`, so
+/// a value is `[flags, crc32, ptr]` and a walk that oversizes the first entry
+/// lands somewhere other than the pointer.
 fn find_ptr<'a>(
     val: &Raw<'a>,
     sizes: &[u8; EXTENT_TYPES_MAX],
@@ -678,19 +679,20 @@ mod tests {
         assert!(entry_u64s(&sizes, 99).is_err(), "a type past the table must be refused");
     }
 
-    /// **The extent the oracle cannot write, because a default format never
-    /// carries one.** Upstream emits a `rebalance_v1` entry as soon as an inode
-    /// carries a background target or a per-inode replica count, and the value
-    /// is then `[rebalance_v1, crc32, ptr]`: sized right the walk lands on the
-    /// pointer with the checksum applied, and one word out it does not.
+    /// An entry ahead of the checksum and the pointer, sized right and sized
+    /// one word out.
+    ///
+    /// `bch2_bkey_extent_flags_set` inserts a `flags` entry at `ptrs.start`, so
+    /// `[flags, crc32, ptr]` is a value upstream writes; one word of size error
+    /// on it puts the walk on the checksum entry and the pointer out of reach.
     #[test]
-    fn a_rebalance_entry_does_not_move_the_pointer() {
-        // type field widths: rebalance_v1 is 6 bits, so its low word is 1 << 5.
-        let rebalance: u64 = 1 << 5;
+    fn an_entry_before_the_checksum_does_not_move_the_pointer() {
+        // The type field's width is the type: `flags` is 7 bits, so 1 << 6.
+        let flags: u64 = 1 << 6;
         let crc32_lo: u32 = 0b10 | (79 << 2) | (79 << 9) | (5 << 24);
         let ptr: u64 = 1 | (0xE000u64 << 4);
 
-        let mut value = rebalance.to_le_bytes().to_vec();
+        let mut value = flags.to_le_bytes().to_vec();
         value.extend_from_slice(&crc32_lo.to_le_bytes());
         value.extend_from_slice(&0xc522_c42fu32.to_le_bytes());
         value.extend_from_slice(&ptr.to_le_bytes());
@@ -702,12 +704,14 @@ mod tests {
         assert_eq!(crc.stored_sectors, 80, "the checksum entry was skipped");
         assert_eq!(crc.csum, (0xc522_c42f, 0));
 
+        // One word out: the walk steps over the checksum entry and reads the
+        // pointer with no checksum to verify it against.
         let mut wrong = right;
-        wrong[5] = 3;
-        let walked = find_ptr(&val, &wrong);
-        assert!(
-            walked.map(|(e, _)| e.u64(0)) != Ok(Ok(ptr)),
-            "a rebalance entry sized three words still landed on the pointer"
+        wrong[6] = 2;
+        assert_eq!(
+            find_ptr(&val, &wrong).err(),
+            Some(UpstreamError::Refused("extent carries no checksum entry")),
+            "a `flags` entry sized one word out still produced a checksummed pointer"
         );
     }
 }
