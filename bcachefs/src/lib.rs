@@ -23,6 +23,7 @@ mod superblock;
 mod alloc_bitmap;
 mod btree;
 mod fs;
+pub mod upstream;
 
 pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, TransferError};
 #[cfg(feature = "std")]
