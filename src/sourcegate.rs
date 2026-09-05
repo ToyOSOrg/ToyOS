@@ -842,6 +842,14 @@ const COMMITTED_FILES: &[(&str, &str, &str)] = &[
         "701b192931e243a094a83f59f9b82d28204f1b3a0d11ac4d813e7769966427df",
         "ours: QEMU's own XSDT, captured by the commit that added toyos-acpi",
     ),
+    // A bcachefs volume upstream's own tools wrote, gzipped. The bytes inside
+    // it are this repository's test material; `NOTICE` carries the raw digest,
+    // the commands, and the fsck that called it clean.
+    (
+        "bcachefs/tests/fixtures/crc32c.img.gz",
+        "7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e",
+        "NOTICE",
+    ),
     (
         "assets/DOOM1.WAD",
         "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",

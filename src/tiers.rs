@@ -841,23 +841,6 @@ pub const RELEGATED: &[Relegated] = &[
                  name and is not what this row costs.",
     },
     Relegated {
-        test: "bcachefs_upstream_read",
-        // A committed dev-host measurement rather than an `UNMEASURED` marker,
-        // because only a Fast name may carry one and fast CI does not run
-        // this. Most of it is a whole Linux distribution booting, which is
-        // emulated on the dev host and on a hosted shard alike — the guest is
-        // x86-64 and no lane gives it KVM. The first nightly shard reprices it.
-        ci_ms: 92_600,
-        why: Why::Cost,
-        guards: "That `bcachefs/`'s upstream read path reads what upstream writes. A Linux \
-                 guest carrying bcachefs-tools at the release the crate's format citation \
-                 names formats a volume, mounts it through libbcachefs, writes a nested tree \
-                 with a symlink, an inline-data file and a multi-extent file into it, states \
-                 each file's SHA-256 and runs fsck; the host then reads the same disk with \
-                 ToyOS's reader and has to agree. Nothing else in the tree judges that reader \
-                 against anything but its author's reading of a header.",
-    },
-    Relegated {
         test: "kernel_log_file",
         ci_ms: 43_056,
         why: Why::Cost,

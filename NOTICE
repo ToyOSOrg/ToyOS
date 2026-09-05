@@ -240,3 +240,70 @@ and found them permissive throughout: Apache-2.0, MIT, or MIT OR Apache-2.0.
 
 `rust/` is a submodule of a fork of the Rust compiler and standard library, and
 carries upstream's own licensing.
+
+
+bcachefs/tests/fixtures/ — volumes upstream's tools wrote
+---------------------------------------------------------
+
+    bcachefs/tests/fixtures/crc32c.img.gz
+    144,978 bytes gzip -9, of a 33,554,432-byte raw volume
+    sha256 7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e
+    raw    021c816a064fc2fca2402c8b2a87a9e6124e0b2f4a32779ef14654e908bcacff
+    Terms: ours — see below
+
+`bcachefs/src/upstream` implements upstream's on-disk format, and the only
+honest judge of a format reader is bytes the format's own implementation wrote.
+This fixture is those bytes. It was produced by `bcachefs-tools` v1.39.4 running
+in a QEMU guest booted from the Arch Linux 2026.09.01 install medium, as a
+development instrument: neither the tools nor that medium is a dependency of
+this repository, nothing fetches either, and the suite reads only what is
+committed here.
+
+The commands, in the guest, against a 32 MiB raw disk on `/dev/vdc`:
+
+    mkdir -p /tmp/src/Documents/deep /tmp/src/empty
+    printf hello-toyos > /tmp/src/Documents/a.txt
+    seq 1 40000       > /tmp/src/Documents/deep/seq.txt
+    ln -s ../a.txt      /tmp/src/Documents/deep/link
+    bcachefs format --block_size=4096 --fs_label=toyosfix /dev/vdc
+    bcachefs fusemount /dev/vdc /mnt/vdc
+    cp -a /tmp/src/. /mnt/vdc/ && sync
+    fusermount3 -u /mnt/vdc
+    bcachefs fsck -y /dev/vdc
+
+`--block_size=4096` is explicit because `bcachefs format` picks a smaller block
+for a small device, and 4096 is the only block size this crate reads. 32 MiB is
+the smallest volume that formats, fills and passes fsck at that block size: 16
+and 24 MiB both fail during format, and 8 and 12 MiB fail even at the default
+block size. `bcachefs show-super` on the result:
+
+    block_size:                              4.00k
+
+`bcachefs fsck -y` on the committed volume, every pass:
+
+    check_snapshot_trees... done (0 seconds)
+    check_snapshots... done (0 seconds)
+    check_subvols... done (0 seconds)
+    check_subvol_children... done (0 seconds)
+    check_inodes... done (0 seconds)
+    check_extents... done (0 seconds)
+    check_indirect_extents... done (0 seconds)
+    check_dirents... done (0 seconds)
+    check_xattrs... done (0 seconds)
+    check_damage... done (0 seconds)
+    check_root... done (0 seconds)
+    check_unreachable_inodes... done (0 seconds)
+    check_subvolume_structure... done (0 seconds)
+    check_directory_structure... done (0 seconds)
+    check_nlinks... done (0 seconds)
+    check_reconcile_work... done (0 seconds)
+    clean shutdown complete, journal seq 31
+
+**The contents are this project's own test bytes.** Every file in the volume was
+written by the commands above out of this repository's own material — an
+eleven-byte string, the output of `seq`, an empty directory, a symlink — so
+nothing third-party is stored here. bcachefs-tools is GPL-2.0, and that covers
+the tool, not the bytes a user's own data becomes when the tool writes it: the
+layout is a published on-disk format, not a copyrightable work of the program,
+and the file contents are ours. The tool is not distributed with this repository
+in any form.
