@@ -91,6 +91,8 @@ it.
 ## 6. SOURCES
 
 - Open every reference cited by file and line and read it: it says what the author says it says.
+- Every number in the body and in each commit message traces to the command that produced it, and
+  you re-run it. One you cannot reproduce is a finding; a fabricated one is a send-back by itself.
 - A number from a datasheet, a specification or an estimate says so in the same sentence, or it
   reads as measured and is a finding.
 - A sha, a run id or an artifact id is checked to exist before it is believed.

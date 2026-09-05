@@ -272,7 +272,7 @@ mod tests {
     /// A flag stored under a guard in one file and loaded bare in another is
     /// refused; put under the accessor's condition, the same sources pass.
     #[test]
-    fn the_gate_refuses_the_unguarded_load_that_shipped() {
+    fn a_guarded_store_with_a_bare_load_across_files_is_refused() {
         let armer = concat!(
             "fn init() {\n",
             "    if crate::actuator::i8042_fault() {\n",

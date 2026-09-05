@@ -21,7 +21,7 @@ rg -c '' issues/audio/              # how much audio owes
 
 ## Frontmatter
 
-Four fields, all required, no defaults.
+Four fields, three required, no defaults.
 
 | field | values | means |
 |---|---|---|
