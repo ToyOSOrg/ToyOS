@@ -42,6 +42,11 @@ runs on the dev host — `ALONE` pass, 0 of 6 further runs, not on
     usb-storage: ... transport broke on SCSI 0x2a: no answer in the status phase in 2000 ms
     log-volume: delete of fstx_keep_dst.bin: the device would not answer in the caller's own budget
 
+Seen a second time on the dev host, on a `kernel-userland-reach` fast tier of
+103 guests with four sibling worktrees running beside it: the same two lines,
+`cleanup: Kind(WouldBlock)` at `fs_transactional.rs:48`, `ALONE` pass again.
+Two sightings, both beside other guests, and still no rate.
+
 That is the two-deadlines-in-series producer `src/redlist.rs:2994` retired for
 `esp_filesystem` on 2026-08-23 — `USB_TIMEOUT_NS` breached on a WRITE(10) status
 phase, then `block::OPERATION` refusing the retry unissued. The retry that
