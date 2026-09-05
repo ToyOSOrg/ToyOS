@@ -207,7 +207,7 @@ kernel/src/vma.rs 11 0
 kernel/src/writeback.rs 29 0
 src/actuatorgate.rs 67 0
 src/assets.rs 123 0
-src/build.rs 713 3
+src/build.rs 720 3
 src/buildlock.rs 378 5
 src/ci.rs 117 0
 src/clippy.rs 35 0
@@ -253,7 +253,8 @@ tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/qemu.rs 1656 11
+tests/common/pkg.rs 79 0
+tests/common/qemu.rs 1661 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
@@ -355,6 +356,7 @@ tests/toyos-rust-tests/src/bin/null_sink_client_exits.rs 18 0
 tests/toyos-rust-tests/src/bin/nvme_home_roundtrip.rs 7 0
 tests/toyos-rust-tests/src/bin/panic_recovery.rs 13 0
 tests/toyos-rust-tests/src/bin/pipe_flag_forgery.rs 15 0
+tests/toyos-rust-tests/src/bin/pkg_launch_gbae.rs 20 0
 tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs 12 0
 tests/toyos-rust-tests/src/bin/poller_capacity.rs 33 0
 tests/toyos-rust-tests/src/bin/port_poll_churn.rs 49 0
@@ -404,7 +406,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5171 23
+tests/toyos.rs 5177 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 101 0
 toyos-abi/src/handle.rs 107 0
@@ -537,7 +539,8 @@ toyos-ld/tests/archive_dialects.rs 47 0
 toyos-ld/tests/common/mod.rs 74 0
 toyos-ld/tests/determinism.rs 26 0
 toyos-ld/tests/output_mode.rs 3 0
-toyos-manifest/src/lib.rs 122 0
+toyos-manifest/src/lib.rs 134 0
+toyos-manifest/src/package.rs 65 0
 toyos-mixer/src/channel.rs 38 0
 toyos-mixer/src/corpus.rs 179 1
 toyos-mixer/src/dll.rs 37 0
@@ -661,9 +664,9 @@ userland/calc/src/prog.rs 17 0
 userland/calc/src/rational.rs 23 0
 userland/calc/tests/parser_identities.rs 26 0
 userland/compositor/src/client.rs 92 0
-userland/compositor/src/main.rs 37 0
+userland/compositor/src/main.rs 44 0
 userland/compositor/src/render.rs 40 0
-userland/compositor/src/session.rs 158 0
+userland/compositor/src/session.rs 161 0
 userland/compositor/src/stats.rs 24 0
 userland/console/src/main.rs 117 0
 userland/doom/build.rs 62 0
@@ -675,7 +678,7 @@ userland/editor/src/main.rs 45 0
 userland/filepicker-api/src/lib.rs 21 0
 userland/filepicker/src/main.rs 46 0
 userland/files/src/main.rs 5 0
-userland/init/src/main.rs 196 0
+userland/init/src/main.rs 215 0
 userland/input-test/src/main.rs 0 0
 userland/libc/src/ctype.rs 0 0
 userland/libc/src/lib.rs 14 0
@@ -695,8 +698,12 @@ userland/logd/src/store.rs 109 0
 userland/logd/src/wall.rs 100 3
 userland/netd/src/main.rs 241 0
 userland/paint/src/main.rs 25 0
+userland/pkg/src/archive.rs 31 0
+userland/pkg/src/lib.rs 27 0
+userland/pkg/src/main.rs 50 0
+userland/pkg/src/sums.rs 13 0
 userland/proctest/src/main.rs 0 0
-userland/shell/src/main.rs 54 0
+userland/shell/src/main.rs 56 0
 userland/snake/build.rs 0 0
 userland/snake/src/main.rs 8 0
 userland/soundd/src/backend.rs 56 0
