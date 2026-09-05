@@ -32,6 +32,7 @@ use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program};
 use toyos::endow::Endowments;
 use toyos::ipc::{self, Connection, RxStep};
@@ -331,13 +332,26 @@ fn serve_launch<'a>(
         .map(|(name, handle)| (name, unsafe { Connector::from_raw(handle) }))
         .collect();
 
-    let Some(program) = declared(system, request.program) else {
-        // **`try_signal` and not `send`.** A bare header is what every answer
-        // here is, and a blocking write is the other half of the rule that made
-        // the read side an event loop: a client that never drains its end
-        // decides when init runs again.
-        let _ = conn.try_signal(launch::MSG_NOT_DECLARED);
-        return;
+    let installed;
+    let program = match resolve(system, request.program) {
+        Resolved::Row(row) => row,
+        Resolved::Package(row) => {
+            installed = row;
+            &installed
+        }
+        Resolved::NotDeclared => {
+            // **`try_signal` and not `send`.** A bare header is what every
+            // answer here is, and a blocking write is the other half of the
+            // rule that made the read side an event loop: a client that never
+            // drains its end decides when init runs again.
+            let _ = conn.try_signal(launch::MSG_NOT_DECLARED);
+            return;
+        }
+        Resolved::Refused(why) => {
+            say!("init: launcher: {why}");
+            let _ = conn.try_signal(launch::MSG_REFUSED);
+            return;
+        }
     };
 
     // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
@@ -440,6 +454,50 @@ fn declared<'a>(system: &'a Manifest, path: &str) -> Option<&'a Program> {
     row(target.to_str()?)
 }
 
+/// What a launch's path resolves to.
+enum Resolved<'a> {
+    Row(&'a Program),
+    /// An installed package, whose row is the image's `[apps]` list.
+    Package(Program),
+    /// Nothing in the image declares it, and the caller spawns it itself.
+    NotDeclared,
+    /// A path under `/apps` whose package does not answer for it.
+    Refused(String),
+}
+
+/// The row a launch's path names, `/apps` included.
+///
+/// **A package's manifest chooses the binary and never the authority**: the
+/// directory is writable, so the namespace comes from the image's `[apps]` row.
+/// A path under `/apps` that no manifest answers for is refused rather than
+/// answered undeclared, because the caller's fallback for undeclared is a
+/// direct spawn carrying the caller's own namespace.
+fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
+    if let Some(row) = declared(system, path) {
+        return Resolved::Row(row);
+    }
+    let Some(name) = package::package_of(path) else { return Resolved::NotDeclared };
+    let file = Package::path(name);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) => return Resolved::Refused(format!("{file} cannot be read: {e}")),
+    };
+    let installed = match Package::parse(&text) {
+        Ok(installed) => installed,
+        Err(why) => return Resolved::Refused(why),
+    };
+    if installed.name != name {
+        return Resolved::Refused(format!("{file} calls itself {:?}", installed.name));
+    }
+    if installed.program != path {
+        return Resolved::Refused(format!(
+            "{file} launches {:?} and this asks for {path:?}",
+            installed.program
+        ));
+    }
+    Resolved::Package(system.app_row(name, path))
+}
+
 /// Build one program's authority and spawn it holding exactly that.
 ///
 /// `extras` are connectors a launching client transferred: names the manifest
@@ -449,7 +507,7 @@ fn declared<'a>(system: &'a Manifest, path: &str) -> Option<&'a Program> {
 /// launch confers the row and nothing beyond it.
 fn start<'a>(
     mut command: Command,
-    program: &'a Program,
+    program: &Program,
     system: &Manifest,
     syscap: &SysCap,
     acceptors: &mut BTreeMap<&'a str, Acceptor>,
@@ -492,7 +550,9 @@ fn start<'a>(
     }
 
     for name in &program.serves {
-        let acceptor = acceptors.remove(name.as_str()).unwrap_or_else(|| {
+        // `remove_entry` and not `remove`: the key is the map's own `&'a str`,
+        // which is what lets a package's synthesized row start through here.
+        let (key, acceptor) = acceptors.remove_entry(name.as_str()).unwrap_or_else(|| {
             // An acceptor is endowed by move, so a `serves` program can be
             // started exactly once per boot. A second start with no acceptor
             // left is refused by name rather than spawned with a hole where
@@ -500,7 +560,7 @@ fn start<'a>(
             panic!("init: `{}` has already been given the `{name}` acceptor", program.name)
         });
         command.endow(&format!("{SERVE_PREFIX}{name}"), acceptor.as_handle().0);
-        taken.push((name.as_str(), acceptor));
+        taken.push((key, acceptor));
     }
 
     for class in &program.devices {

@@ -481,6 +481,7 @@ dependencies = [
  "toyos-abi 0.2.0",
  "toyos-desktop",
  "toyos-font",
+ "toyos-manifest",
  "toyos-window",
 ]
 
@@ -2451,6 +2452,15 @@ dependencies = [
  "pkcs5 0.8.0-rc.13",
  "rand_core 0.10.0",
  "spki 0.8.0-rc.4",
+]
+
+[[package]]
+name = "pkg"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "sha2 0.10.9",
+ "toyos-manifest",
 ]
 
 [[package]]
