@@ -10,6 +10,12 @@ toyos = { path = "../../toyos" }
 toyos-window = { path = "../../userland/toyos-window" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.2" }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "logging"] }
+rustls-rustcrypto = "0.0.2-alpha"
+rustls-pki-types = "1"
+webpki-roots = "1"
+sha2 = { version = "0.10", default-features = false }
 
 # Separate workspace from userland/, so it needs its own redirects: the forks
 # above depend on ToyOS crates by version, and only a patch maps those to the
@@ -17,6 +23,7 @@ cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0-sdk-0.
 [patch.crates-io]
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
+getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2", package = "getrandom" }
 
 [lints.rust]
 warnings = "deny"
