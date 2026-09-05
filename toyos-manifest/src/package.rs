@@ -146,6 +146,29 @@ pub fn is_canonical(path: &str) -> bool {
         && !path.split('/').skip(1).any(|part| part.is_empty() || part == "." || part == "..")
 }
 
+/// What a shell hands the launcher for a program its user typed: a bare name
+/// left alone for `PATH`, anything with a `/` made absolute against `cwd` and
+/// normalized the way the kernel does. It lives beside [`is_canonical`] because
+/// a resolver that drifted from the gate would refuse every relative command.
+pub fn launch_path(program: &str, cwd: &str) -> String {
+    if !program.contains('/') {
+        return program.to_string();
+    }
+    let joined =
+        if program.starts_with('/') { program.to_string() } else { format!("{cwd}/{program}") };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() { String::from("/") } else { format!("/{}", parts.join("/")) }
+}
+
 /// The package a launch path belongs to, or `None` for a path outside `/apps`.
 /// The one segment after `/apps`, so `..` and an empty segment answer `None`
 /// rather than resolving to some other package's row.
@@ -250,6 +273,29 @@ mod tests {
         .is_err());
         let upper = sample().digest.to_uppercase();
         assert!(check_digest(&upper).is_err());
+    }
+
+    /// Checked against the gate itself, not a shape written down twice.
+    #[test]
+    fn what_a_shell_resolves_is_what_the_launcher_accepts() {
+        let cwd = "/home/root/reltest";
+        for (typed, want) in [
+            ("./foo", "/home/root/reltest/foo"),
+            ("../bin/foo", "/home/root/bin/foo"),
+            ("./a/./b/../c", "/home/root/reltest/a/c"),
+            ("sub/foo", "/home/root/reltest/sub/foo"),
+            ("/system/bin/toybox", "/system/bin/toybox"),
+            ("/system//bin/./toybox", "/system/bin/toybox"),
+            ("/../system/bin/toybox", "/system/bin/toybox"),
+        ] {
+            let got = launch_path(typed, cwd);
+            assert_eq!(got, want, "{typed:?} from {cwd:?}");
+            assert!(is_canonical(&got), "{typed:?} resolved to {got:?}, which init refuses");
+        }
+        // A bare name is `PATH`'s, and that rule is left where it was.
+        for bare in ["foo", "echo", "toybox"] {
+            assert_eq!(launch_path(bare, cwd), bare);
+        }
     }
 
     /// The four `package_of` answers `None` for while every path syscall lands

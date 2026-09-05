@@ -3254,6 +3254,7 @@ name = "shell"
 version = "0.1.0"
 dependencies = [
  "toyos 0.2.0",
+ "toyos-manifest",
 ]
 
 [[package]]

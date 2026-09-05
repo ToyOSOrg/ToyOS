@@ -18,8 +18,10 @@ const PLANTED: &str = "/apps/toy/echo";
 const DECLARED: &str = "/system/bin/toybox";
 
 fn main() -> std::process::ExitCode {
-    if std::env::args().nth(1).as_deref() == Some("symlink-row") {
-        return symlink_row();
+    match std::env::args().nth(1).as_deref() {
+        Some("symlink-row") => return symlink_row(),
+        Some("relative-path") => return relative_path(),
+        _ => {}
     }
     // The refusal arm is a first-class outcome and not a panic: the same
     // binary runs before the package is installed and after it is removed,
@@ -76,6 +78,43 @@ fn symlink_row() -> std::process::ExitCode {
         std::process::ExitCode::SUCCESS
     } else {
         println!("pkg-symlink: {refused} of {} spellings refused", SPELLINGS.len());
+        std::process::ExitCode::FAILURE
+    }
+}
+
+/// The real shell binary through `shell -c`, rather than a second copy of what
+/// it does. `-c` roots the cwd at `/`, so the dotted forms are rooted there.
+fn relative_path() -> std::process::ExitCode {
+    const DIR: &str = "/home/root/reltest";
+    const NONCE: &str = "relpath-ran-9c41";
+    std::fs::create_dir_all(DIR).expect("/home is writable");
+    let link = format!("{DIR}/echo");
+    let _ = std::fs::remove_file(&link);
+    toyos_abi::syscall::symlink(DECLARED.as_bytes(), link.as_bytes())
+        .expect("a symlink under /home is allowed");
+
+    let mut ran = 0;
+    for typed in ["./home/root/reltest/echo", "../home/root/reltest/echo"] {
+        let out = Command::new("/system/bin/shell")
+            .arg("-c")
+            .arg(format!("{typed} {NONCE}"))
+            .output();
+        match out {
+            Ok(out) => {
+                let said = String::from_utf8_lossy(&out.stdout).into_owned();
+                if said.contains(NONCE) {
+                    println!("pkg-relpath: {typed} ran and said {NONCE}");
+                    ran += 1;
+                } else {
+                    println!("pkg-relpath: {typed} said {said:?}, not {NONCE}");
+                }
+            }
+            Err(e) => println!("pkg-relpath: the shell did not start: {e}"),
+        }
+    }
+    if ran == 2 {
+        std::process::ExitCode::SUCCESS
+    } else {
         std::process::ExitCode::FAILURE
     }
 }

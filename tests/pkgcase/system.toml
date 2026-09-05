@@ -44,6 +44,11 @@ syscap = ["rt"]
 [programs.toybox]
 syscap = ["power"]
 
+# The half that knows a cwd: `relative-path` drives this binary with `-c` and
+# asks it to run a dotted path the launcher refuses raw.
+[programs.shell]
+receives = ["launcher"]
+
 # `launcher` and no `compositor`, which is this config's whole point.
 # `logread` is the estate's everywhere, and it is not dup-able — so test-runner
 # endows a child nothing, and a child's spawn goes through the launcher.

@@ -243,7 +243,7 @@ tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/pkg.rs 77 0
+tests/common/pkg.rs 79 0
 tests/common/qemu.rs 1656 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
@@ -345,7 +345,7 @@ tests/toyos-rust-tests/src/bin/null_sink_client_exits.rs 18 0
 tests/toyos-rust-tests/src/bin/nvme_home_roundtrip.rs 7 0
 tests/toyos-rust-tests/src/bin/panic_recovery.rs 13 0
 tests/toyos-rust-tests/src/bin/pipe_flag_forgery.rs 15 0
-tests/toyos-rust-tests/src/bin/pkg_launch_gbae.rs 18 0
+tests/toyos-rust-tests/src/bin/pkg_launch_gbae.rs 20 0
 tests/toyos-rust-tests/src/bin/poll_wake_pipe.rs 12 0
 tests/toyos-rust-tests/src/bin/poller_capacity.rs 33 0
 tests/toyos-rust-tests/src/bin/port_poll_churn.rs 49 0
@@ -529,7 +529,7 @@ toyos-ld/tests/common/mod.rs 74 0
 toyos-ld/tests/determinism.rs 26 0
 toyos-ld/tests/output_mode.rs 3 0
 toyos-manifest/src/lib.rs 134 0
-toyos-manifest/src/package.rs 59 0
+toyos-manifest/src/package.rs 65 0
 toyos-mixer/src/channel.rs 38 0
 toyos-mixer/src/corpus.rs 179 1
 toyos-mixer/src/dll.rs 37 0
@@ -692,7 +692,7 @@ userland/pkg/src/lib.rs 27 0
 userland/pkg/src/main.rs 50 0
 userland/pkg/src/sums.rs 13 0
 userland/proctest/src/main.rs 0 0
-userland/shell/src/main.rs 54 0
+userland/shell/src/main.rs 56 0
 userland/snake/build.rs 0 0
 userland/snake/src/main.rs 8 0
 userland/soundd/src/backend.rs 56 0
