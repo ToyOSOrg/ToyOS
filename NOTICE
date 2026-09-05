@@ -215,6 +215,45 @@ instead — which would put it inside the "comes with QEMU" allowance and delete
 6,291,456 bytes from the repository.
 
 
+tests/fixtures/gbae-v0.2.0-* — gbae, MIT
+-----------------------------------------
+
+    gbae-v0.2.0-toyos-x86_64.tar.gz  604,872 bytes
+      sha256 99fcd8a7263b5c25cd90cead1baaa7200ef272100fc2226e008a4e8205ba2916
+    SHA256SUMS                           394 bytes
+      sha256 b13611227aac3fddb6daa20fdc9929fc96eeea46270f168887f9f6acb7403861
+
+    Copyright (c) 2025-2026 japabu
+    Upstream: https://github.com/Japabu/gbae, release v0.2.0
+    Licence text: licenses/MIT-gbae.txt
+
+A Game Boy Advance emulator built for `x86_64-unknown-toyos`, and the release's
+own sums file covering every asset of that release. `pkg_install_gbae` installs
+the archive with `/system/bin/pkg` and runs the binary, which is what makes the
+package path a thing that has been done rather than a thing that compiles.
+
+gbae's own terms are read out of `gbae/LICENSE` **inside the archive**, so the notice
+MIT requires travels with the bytes as well as sitting in `licenses/`. Copying,
+distributing and sublicensing are permitted outright, so committing it here puts
+no constraint on a ToyOS build the way `assets/DOOM1.WAD` does.
+
+**These are committed because a test may not fetch.** Owner ruling, 2026-09-05:
+*"do not use external resources as gbae for testing. we must keep our
+dependencies minimal and stay independent."* They were downloaded once, by hand,
+with
+
+    gh release download v0.2.0 --repo Japabu/gbae \
+        --pattern 'gbae-v0.2.0-toyos-x86_64.tar.gz' --pattern 'SHA256SUMS'
+
+and checked with `shasum -a 256` against the release's own `SHA256SUMS`. Nothing
+in this repository fetches them, and `gh` is a development tool no test runs.
+
+`SHA256SUMS` is text and outside `assets/`, so `src/sourcegate.rs`'s two
+populations do not walk it and only the archive has a row there. What holds it is
+`tests/common/pkg.rs`, which refuses to run unless the archive hashes to the
+digest above and that file carries the matching line.
+
+
 tests/testcases/ — TinyCC's corpus, LGPL-2.1, and picoc, BSD-3-Clause
 ---------------------------------------------------------------------
 

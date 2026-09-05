@@ -8,27 +8,26 @@
 //! no `compositor` connector of its own, so a window is proof the row was
 //! built.
 //!
-//! Two oracles, neither of them this file's: the release's `SHA256SUMS`, which
-//! a third party wrote and the guest verifies against; and the `tar` crate,
+//! Two checks, neither of them this file's: the release's `SHA256SUMS`, which
+//! gbae's own release pipeline wrote and the guest verifies against; and the `tar` crate,
 //! which decodes the same archive on the host so the bytes read back off the
 //! guest's DATA volume are compared with a decoder `userland/pkg` shares no
 //! code with.
 
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::storage::{superblock_at, FileBlocks};
 
-/// gbae v0.2.0's release, pinned.
-const RELEASE: &str = "https://github.com/Japabu/gbae/releases/download/v0.2.0";
+/// gbae v0.2.0's release archive and the sums file published beside it, both
+/// committed under `tests/fixtures` and named in `NOTICE`.
 const ASSET: &str = "gbae-v0.2.0-toyos-x86_64.tar.gz";
 const SUMS: &str = "SHA256SUMS";
 
-/// The release's own line for [`ASSET`], copied from its `SHA256SUMS`. The
-/// fetch below is verified against it, so a mirror, a proxy or a re-cut release
-/// is refused on the host before the guest is handed anything.
+/// The release's own line for [`ASSET`], copied from its `SHA256SUMS` — the
+/// digest `NOTICE` records for the committed file, held against it below.
 const ASSET_SHA256: &str = "99fcd8a7263b5c25cd90cead1baaa7200ef272100fc2226e008a4e8205ba2916";
 const ASSET_BYTES: usize = 604_872;
 
@@ -378,71 +377,35 @@ fn third_party_entries(archive: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String>
     Ok(out)
 }
 
-/// The release asset and its sums file, fetched once per checkout.
+/// The release asset and its sums file, read out of the tree.
 ///
-/// **Nothing of it is committed** — no binary in this tree is — so it is kept
-/// under `target/` in a directory named by the digest this file pins. A cache
-/// that does not hash to that digest is a miss, so a tampered one can never be
-/// a hit.
+/// **Committed, and fetched by nothing.** The digest is held again here, so a
+/// fixture edited in place is a refusal rather than a different subject.
 fn fixture() -> Result<(Vec<u8>, String), String> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/pkg-fixtures")
-        .join(ASSET_SHA256);
-    let archive_at = dir.join(ASSET);
-    let sums_at = dir.join(SUMS);
-    if let (Ok(archive), Ok(sums)) =
-        (std::fs::read(&archive_at), std::fs::read_to_string(&sums_at))
-    {
-        if digest(&archive) == ASSET_SHA256 {
-            return Ok((archive, sums));
-        }
-    }
-
-    let agent = agent();
-    let archive = get(&agent, &format!("{RELEASE}/{ASSET}"))?;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let at = dir.join(ASSET);
+    let archive = std::fs::read(&at).map_err(|e| format!("read {}: {e}", at.display()))?;
     if archive.len() != ASSET_BYTES || digest(&archive) != ASSET_SHA256 {
         return Err(format!(
-            "{RELEASE}/{ASSET} answered {} bytes hashing to {}, and this test pins {ASSET_BYTES} \
-             bytes hashing to {ASSET_SHA256}",
+            "{} is {} bytes hashing to {}, and NOTICE records {ASSET_BYTES} bytes hashing to \
+             {ASSET_SHA256}",
+            at.display(),
             archive.len(),
             digest(&archive)
         ));
     }
-    let sums = String::from_utf8(get(&agent, &format!("{RELEASE}/{SUMS}"))?)
-        .map_err(|e| format!("{RELEASE}/{SUMS} is not UTF-8: {e}"))?;
-    // The release has to say about itself what this file says about it, or the
-    // guest would be verifying against a statement nobody checked.
+    let sums_at = dir.join(SUMS);
+    let sums =
+        std::fs::read_to_string(&sums_at).map_err(|e| format!("read {}: {e}", sums_at.display()))?;
+    // The release's own statement has to cover the archive beside it, or the
+    // guest below verifies against a line nobody checked.
     if !sums.contains(&format!("{ASSET_SHA256}  {ASSET}")) {
-        return Err(format!("{RELEASE}/{SUMS} carries no `{ASSET_SHA256}  {ASSET}` line:\n{sums}"));
+        return Err(format!(
+            "{} carries no `{ASSET_SHA256}  {ASSET}` line:\n{sums}",
+            sums_at.display()
+        ));
     }
-
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    std::fs::write(&archive_at, &archive)
-        .map_err(|e| format!("write {}: {e}", archive_at.display()))?;
-    std::fs::write(&sums_at, &sums).map_err(|e| format!("write {}: {e}", sums_at.display()))?;
     Ok((archive, sums))
-}
-
-fn agent() -> ureq::Agent {
-    let tls = ureq::tls::TlsConfig::builder()
-        .provider(ureq::tls::TlsProvider::Rustls)
-        .root_certs(ureq::tls::RootCerts::WebPki)
-        .unversioned_rustls_crypto_provider(std::sync::Arc::new(rustls_rustcrypto::provider()))
-        .build();
-    ureq::Agent::config_builder().tls_config(tls).build().new_agent()
-}
-
-fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
-    let mut body = Vec::new();
-    agent
-        .get(url)
-        .call()
-        .map_err(|e| format!("GET {url}: {e}"))?
-        .into_body()
-        .into_reader()
-        .read_to_end(&mut body)
-        .map_err(|e| format!("reading {url}: {e}"))?;
-    Ok(body)
 }
 
 fn digest(bytes: &[u8]) -> String {

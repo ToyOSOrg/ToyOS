@@ -29,6 +29,31 @@ built on the first.
    ACPI S5 through `PM1a_CNT` and there is no reset path in this kernel — no
    FADT reset register, no other. Something that returns the machine to the
    firmware is stage 2's own work.
+
+   The table half is answered: QEMU 11.1.0's q35 FADT sets `RESET_REG_SUP`
+   (flags bit 10 of `0x000084a5` at offset 112) and carries RESET_REG =
+   SystemIO 8-bit `0x0cf9` with RESET_VALUE `0x0f`, in
+   `toyos-acpi/fixtures/qemu-11.1.0/facp.bin` bytes 112..=128; QEMU writes it
+   at `hw/i386/acpi-build.c:224` and acts on bit 2 of that port with
+   `qemu_system_reset_request` at `hw/isa/lpc_ich9.c:663`. **Reaching it from
+   userland needs an ABI word and so lands alone**: `SYS_SHUTDOWN` (19) is the
+   only power syscall and `Rights::POWER` (bit 10) its only bit, so the word is
+   `SYS_REBOOT` (116) on that same right, in `toyos-abi/src/syscall.rs` with its
+   `SysCap` wrapper, and it is its own pull request. `/system/bin/reboot` and
+   the test runner's `run reboot` do not exist yet and are built once it lands.
+
+   A chipset watchdog is a later stage, judged on the machine rather than in
+   QEMU. The T14 is Tiger Lake-LP — LPC `8086:a082`, SMBus `8086:a0a3` — and
+   Linux 6.8.0-138's `lpc_ich` claims neither id among its 237 PCI aliases: the
+   TCO block is reached through the SMBus controller's TCOBASE, which is why
+   `i2c_i801` is the module claiming `8086:a0a3` here. QEMU's q35 models ICH9's
+   PMBASE+`0x60` block instead (`hw/acpi/ich9_tco.c`,
+   `include/hw/southbridge/ich9.h:205`) and so cannot judge that path at all;
+   the register oracle is Intel's Tiger Lake-LP PCH datasheet and the judge is
+   the machine, which carries no watchdog today — no `/sys/class/watchdog`, no
+   WDAT among the firmware's tables. **The milestone does not wait on it**: a
+   finished run reboots itself, and until the watchdog exists a hang costs a
+   hand on the power button.
 3. **The driver**, a small Rust program on the Linux side, no Python: flash the
    image to the ToyOS partitions, set bootnext, reboot, wait, mount the log
    partition, and answer pass or fail from the log's verdict line. The

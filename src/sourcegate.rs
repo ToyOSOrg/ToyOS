@@ -573,6 +573,18 @@ const HOST_SPAWNS: &[Spawn] = &[
         sites: &[("toyos-ld/tests/common/mod.rs", 2), ("toyos-ld/tests/determinism.rs", 1)],
         why: "our own linker, the same way",
     },
+    Spawn {
+        arg: "toyos_build::build::https_fetch_host(&compile::repo_root())",
+        sites: &[("tests/common/https.rs", 1)],
+        why: "the guest's own TLS client compiled for the host, which is the differential \
+              oracle `https_tls13` judges the ToyOS arm against",
+    },
+    Spawn {
+        arg: "toyos_build::build::https_test_server(&compile::repo_root())",
+        sites: &[("tests/common/https.rs", 1)],
+        why: "that judge's servers, this repository's Rust built by cargo like every other \
+              crate here",
+    },
 ];
 
 /// One package a CI image or workflow installs on a machine this project's
@@ -943,6 +955,11 @@ const COMMITTED_FILES: &[(&str, &str, &str)] = &[
     (
         "ovmf/OVMF_VARS-pure-efi.fd",
         "c653de93db67e4f2213a35598efb379a13ef4a12c241e003699d4d7afd193635",
+        "NOTICE",
+    ),
+    (
+        "tests/fixtures/gbae-v0.2.0-toyos-x86_64.tar.gz",
+        "99fcd8a7263b5c25cd90cead1baaa7200ef272100fc2226e008a4e8205ba2916",
         "NOTICE",
     ),
     (
