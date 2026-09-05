@@ -161,30 +161,13 @@ fn answer(stdout: &str) -> Option<String> {
 }
 
 fn fetch_on_host(url: &str, ca: &Path) -> Result<String, String> {
-    let dir = compile::repo_root().join("tests/https-fetch-host");
-    build_host_crate(&dir)?;
-    let out = Command::new(dir.join("target/release/https_fetch"))
+    let out = Command::new(toyos_build::build::https_fetch_host(&compile::repo_root()))
         .args([url, "--ca"])
         .arg(ca)
         .output()
         .map_err(|e| format!("run the host arm: {e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     answer(&stdout).ok_or_else(|| format!("the host arm printed no verdict:\n{stdout}"))
-}
-
-fn build_host_crate(dir: &Path) -> Result<(), String> {
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--quiet"])
-        .current_dir(dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC")
-        .env_remove("RUSTFLAGS")
-        .status()
-        .map_err(|e| format!("build {}: {e}", dir.display()))?;
-    if !status.success() {
-        return Err(format!("{} did not build: {status}", dir.display()));
-    }
-    Ok(())
 }
 
 /// The host servers, killed when this goes out of scope.
@@ -198,11 +181,9 @@ struct Server {
 
 impl Server {
     fn start() -> Result<Self, String> {
-        let dir = compile::repo_root().join("tests/https-server-host");
-        build_host_crate(&dir)?;
         let out = super::lane::dir().join("https-judge");
         std::fs::create_dir_all(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
-        let mut child = Command::new(dir.join("target/release/https_test_server"))
+        let mut child = Command::new(toyos_build::build::https_test_server(&compile::repo_root()))
             .arg("--out")
             .arg(&out)
             .stdout(Stdio::piped())

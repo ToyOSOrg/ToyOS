@@ -16840,6 +16840,7 @@ fn main() {
     let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
     eprintln!("[toyos] Building Rust tests...");
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
+    toyos_build::build::build_https_hosts(&common::compile::repo_root(), !nocapture && !debug_mode);
 
     // --list: print test names and exit
     if list_mode {

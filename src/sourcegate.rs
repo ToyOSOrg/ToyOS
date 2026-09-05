@@ -574,13 +574,13 @@ const HOST_SPAWNS: &[Spawn] = &[
         why: "our own linker, the same way",
     },
     Spawn {
-        arg: "dir.join(\"target/release/https_fetch\")",
+        arg: "toyos_build::build::https_fetch_host(&compile::repo_root())",
         sites: &[("tests/common/https.rs", 1)],
         why: "the guest's own TLS client compiled for the host, which is the differential \
               oracle `https_tls13` judges the ToyOS arm against",
     },
     Spawn {
-        arg: "dir.join(\"target/release/https_test_server\")",
+        arg: "toyos_build::build::https_test_server(&compile::repo_root())",
         sites: &[("tests/common/https.rs", 1)],
         why: "that judge's servers, this repository's Rust built by cargo like every other \
               crate here",
