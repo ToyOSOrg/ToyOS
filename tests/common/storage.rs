@@ -427,6 +427,105 @@ pub fn home_budget_refusal_retried(
     Ok(())
 }
 
+/// A same-length overwrite on `/home` read back through the name it rebound.
+///
+/// The oracle is outside the guest and outside the kernel: with the machine
+/// gone the file is read off the NVMe image by this crate's own build of the
+/// `bcachefs` reader over a plain seek-and-read device, and its length held
+/// against the length the guest printed for its own read of the same name. The
+/// recorded defect is exactly those two disagreeing.
+pub fn home_overwrite_reads_back(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/home_overwrite_zero.rs`.
+    const PINNED: &str = "home/overwrite-pinned.bin";
+    const LEN: usize = 1_902_104;
+    fn payload(seed: u8) -> Vec<u8> {
+        (0..LEN).map(|i| (i.wrapping_mul(131) ^ seed as usize) as u8).collect()
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::MetalDisk, ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    if boot.contains("are a tmpfs") {
+        return Err(format!(
+            "/apps and /home fell back to tmpfs, so nothing below touches the NVMe path:\n{boot}"
+        ));
+    }
+
+    let result = qemu.run_test("test_rs_home_overwrite_zero", Duration::from_secs(240));
+    let log = format!("{boot}\n{}{}{}", result.before, result.stdout, result.serial);
+    let said = log.lines().find(|l| l.contains("HOME-OVERWRITE")).map(str::trim).map(String::from);
+    let guest_len: Option<usize> = said
+        .as_deref()
+        .and_then(|l| l.split_whitespace().rev().nth(1))
+        .and_then(|n| n.parse().ok());
+
+    let image = qemu.nvme_image().to_path_buf();
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    for bad in ["PANIC:", "panicked at"] {
+        if tail.contains(bad) {
+            return Err(format!("{bad:?} on the way down\n{tail}"));
+        }
+    }
+
+    let io = FileBlocks::open(&image)?;
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
+        .map_err(|e| format!("the NVMe image does not mount on the host: {e:?}"))?;
+    let got = fs
+        .read_file(PINNED)
+        .map_err(|e| format!("reading {PINNED} off the image: {e:?}"))?;
+
+    // Before the exit code: that disagreement is the defect's sentence, and an exit code does not say it.
+    let Some(guest_len) = guest_len else {
+        return Err(format!(
+            "the guest printed no HOME-OVERWRITE line, and the device holds {} bytes at \
+             {PINNED}:\n{}{}{}",
+            got.len(),
+            result.before,
+            result.stdout,
+            result.serial
+        ));
+    };
+    if guest_len != got.len() {
+        return Err(format!(
+            "the guest read {guest_len} bytes back from /{PINNED} and the device holds {} — \
+             the overwrite reached the device and the name did not answer for it\n{}",
+            got.len(),
+            said.unwrap_or_default()
+        ));
+    }
+    if got != payload(0x22) {
+        let at = got.iter().zip(payload(0x22)).position(|(a, b)| *a != b);
+        return Err(format!(
+            "{PINNED} on the device is {} bytes, first differing at {at:?}",
+            got.len()
+        ));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "home_overwrite_zero guest failed:\n{}\nkernel log while it ran:\n{}{}",
+            result.stdout, result.before, result.serial
+        ));
+    }
+
+    eprintln!(
+        "  [overwrite] the guest's {guest_len} bytes and the device's {} agree at /{PINNED}, off \
+         the NVMe image via the host's own bcachefs reader",
+        got.len()
+    );
+    Ok(())
+}
+
 /// `/apps` and `/home` are two paths into one filesystem, judged off the device.
 ///
 /// The guest writes one file under each and shuts down; the host then finds
