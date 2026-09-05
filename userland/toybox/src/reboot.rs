@@ -1,8 +1,6 @@
-//! Return the machine to firmware.
-//!
-//! **The endowment is the whole of the authority**, on the shutdown applet's
-//! terms: this is `/system/bin/toybox` under another name, so what it holds is
-//! what the image's `[programs.toybox]` row declares.
+//! Return the machine to firmware. **The endowment is the whole of the
+//! authority**, on the shutdown applet's terms: this is `/system/bin/toybox`
+//! under another name, holding what `[programs.toybox]` declares.
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;

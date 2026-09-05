@@ -1,10 +1,7 @@
-//! The two ways the machine stops, told apart by QEMU rather than by the guest.
-//!
-//! A guest that resets, one that powers off and one that triple-faults all end
-//! a `-no-reboot` QEMU with status 0, so the exit says nothing about which
-//! happened. QEMU's `SHUTDOWN` event carries the cause it classified the stop
-//! as, and that is what is asserted here: a reboot implemented as a power-off
-//! reds on `guest-shutdown`.
+//! The two ways the machine stops, told apart by QEMU rather than by the guest:
+//! a reset, a power-off and a triple fault all end a `-no-reboot` QEMU with
+//! status 0, so what is asserted is the cause its `SHUTDOWN` event names — and
+//! a reboot implemented as a power-off reds on `guest-shutdown`.
 
 use std::io::Write;
 use std::path::Path;

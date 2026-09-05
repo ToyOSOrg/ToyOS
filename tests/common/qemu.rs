@@ -3402,11 +3402,9 @@ impl QmpShutdown {
 
     /// The `reason` the `SHUTDOWN` event names — `guest-reset`,
     /// `guest-shutdown`, `host-signal` — or `None` if the guest never stopped.
-    ///
     /// Each read is bounded by the timeout [`Qmp::connect_while`] set and this
     /// bounds the whole wait; no fresh `setsockopt` is issued, because macOS
-    /// refuses one on a socket whose peer has already gone, which is the state
-    /// a stopped guest leaves.
+    /// refuses one on a socket whose peer is already gone.
     pub fn reason(&mut self, timeout: Duration) -> Option<String> {
         use std::io::Read;
         let deadline = Instant::now() + timeout;

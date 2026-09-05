@@ -61,10 +61,8 @@ pub fn century_of(index: u8) -> Century {
 }
 
 /// What the FADT says about returning the machine to firmware: a register, or
-/// which field refused one — `RESET_REG_SUP` clear, an address space that is
-/// not System I/O, a width or offset that is not the whole byte, or an address
-/// outside the port space. The alternative to naming them is a guessed port,
-/// and a guess writes a byte to whatever else lives there.
+/// the field that refused one. The alternative to naming them is a guessed
+/// port, and a guess writes a byte to whatever else lives there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reset {
     /// An 8-bit System I/O port, and the byte the firmware asks be written to it.
