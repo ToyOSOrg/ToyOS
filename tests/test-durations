@@ -205,6 +205,7 @@ heap_ceiling_recovery 10371 shards=12
 hierarchy_paths 87 shards=12
 home_backing_revoked 663 shards=12
 home_budget_refusal_retried 18661 shards=12
+https_tls13 18446744073709551615 shards=none
 i8042_absent 9221 shards=12
 i8042_budget_expiry 3135 shards=12
 i8042_fadt_denial 5736 shards=12

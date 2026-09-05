@@ -573,6 +573,18 @@ const HOST_SPAWNS: &[Spawn] = &[
         sites: &[("toyos-ld/tests/common/mod.rs", 2), ("toyos-ld/tests/determinism.rs", 1)],
         why: "our own linker, the same way",
     },
+    Spawn {
+        arg: "dir.join(\"target/release/https_fetch\")",
+        sites: &[("tests/common/https.rs", 1)],
+        why: "the guest's own TLS client compiled for the host, which is the differential \
+              oracle `https_tls13` judges the ToyOS arm against",
+    },
+    Spawn {
+        arg: "dir.join(\"target/release/https_test_server\")",
+        sites: &[("tests/common/https.rs", 1)],
+        why: "that judge's servers, this repository's Rust built by cargo like every other \
+              crate here",
+    },
 ];
 
 /// One package a CI image or workflow installs on a machine this project's

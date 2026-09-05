@@ -2158,6 +2158,14 @@ pub struct BootOptions {
     /// than discover it. Short lists are allowed: the disks past the end get
     /// the blank image their size would have given them anyway.
     pub usb_images: Vec<PathBuf>,
+    /// Data files to put on ROOT beside the test binaries, as
+    /// `(path under /system, bytes)`.
+    ///
+    /// The image is keyed on its contents, so a file minted per run gives that
+    /// run its own image — which is the point where the file is a certificate
+    /// nothing may commit. A `bin/` path here reaches the same refusal a
+    /// program file does; anything else is data the guest can open.
+    pub root_files: Vec<(String, Vec<u8>)>,
     /// What the emulated RTC reads when the machine starts, as
     /// `YYYY-MM-DDTHH:MM:SS`.
     ///
@@ -2196,6 +2204,7 @@ impl Default for BootOptions {
             nvme_image: None,
             boot_image: None,
             usb_images: Vec::new(),
+            root_files: Vec::new(),
             rtc_base: None,
         }
     }
@@ -2338,7 +2347,7 @@ pub fn build_boot_image(
 ) -> Vec<u8> {
     let kernel: &[&str] =
         if kernel_params.is_empty() { &[] } else { toyos_build::build::TEST_KERNEL };
-    build_boot_image_with(test_crate, c_tests, rust_tests, kernel, kernel_params, false)
+    build_boot_image_with(test_crate, c_tests, rust_tests, &[], kernel, kernel_params, false)
 }
 
 /// Refuse a staged [`BootOptions::boot_image`] that is not the image this
@@ -2378,6 +2387,14 @@ fn refuse_a_staged_image_this_boot_did_not_ask_for(image: &Path, options: &BootO
         toyos_build::build::DEBUG_KERNEL_BUILD,
         image.display(),
     );
+    assert!(
+        options.root_files.is_empty(),
+        "[qemu] this boot stages {} files onto ROOT and hands the guest {}; a staged image \
+         carries what it was built with and this call builds nothing, so the files would never \
+         reach the guest",
+        options.root_files.len(),
+        image.display(),
+    );
     if let Some(why) = toyos_build::image::param_conflict(image, options.kernel_params) {
         panic!(
             "[qemu] {why}. `BootOptions::boot_image` replaces the image this call would have \
@@ -2414,6 +2431,7 @@ fn build_boot_image_with(
     test_crate: &Path,
     c_tests: &[(String, Vec<u8>)],
     rust_tests: &[(String, Vec<u8>)],
+    root_files: &[(String, Vec<u8>)],
     kernel_features: &[&str],
     kernel_params: &[&str],
     debug_wait: bool,
@@ -2463,6 +2481,8 @@ fn build_boot_image_with(
             extra_files.push((format!("bin/test_rs_{name}"), data.clone()));
         }
     }
+
+    extra_files.extend(root_files.iter().cloned());
 
     let config_path = test_crate.join("system.toml");
     assert!(
@@ -2572,6 +2592,7 @@ impl QemuInstance {
                     test_crate,
                     c_tests,
                     rust_tests,
+                    &options.root_files,
                     &features,
                     options.kernel_params,
                     options.debug_wait,

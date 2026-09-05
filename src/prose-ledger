@@ -237,13 +237,14 @@ tests/common/faults.rs 357 0
 tests/common/gpt.rs 67 0
 tests/common/hda.rs 89 0
 tests/common/hostload.rs 48 1
+tests/common/https.rs 22 0
 tests/common/iommu.rs 327 0
 tests/common/irqcensus.rs 57 0
 tests/common/lane.rs 29 0
 tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
-tests/common/qemu.rs 1651 11
+tests/common/qemu.rs 1658 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
@@ -252,6 +253,7 @@ tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
 tests/common/volumes.rs 655 3
 tests/common/wallclock.rs 142 0
+tests/https-server-host/src/main.rs 29 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
 tests/toyos-rust-tests/src/bin/abuse_cwd_growth.rs 90 0
 tests/toyos-rust-tests/src/bin/abuse_elf_loader.rs 162 0
@@ -319,6 +321,7 @@ tests/toyos-rust-tests/src/bin/heap_ceiling.rs 69 0
 tests/toyos-rust-tests/src/bin/hierarchy_paths.rs 25 0
 tests/toyos-rust-tests/src/bin/home_backing_revoked.rs 34 0
 tests/toyos-rust-tests/src/bin/home_fsync_budget.rs 5 0
+tests/toyos-rust-tests/src/bin/https_fetch.rs 22 0
 tests/toyos-rust-tests/src/bin/i8042_keyboard.rs 24 0
 tests/toyos-rust-tests/src/bin/i8042_mouse.rs 17 0
 tests/toyos-rust-tests/src/bin/inbox_cancel_wakes.rs 31 0
@@ -393,7 +396,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5165 23
+tests/toyos.rs 5171 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 101 0
 toyos-abi/src/handle.rs 107 0
