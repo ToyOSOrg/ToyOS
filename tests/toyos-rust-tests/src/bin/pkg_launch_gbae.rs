@@ -36,11 +36,8 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Every spelling of the planted link the kernel's normalizer accepts.
-///
 /// The first is what `package_of` classifies; the other four it answers `None`
-/// for while `sys_readlink` lands them all on the same file, which is the whole
-/// of what a canonical-path gate is for.
+/// for while `sys_readlink` lands them all on the same file.
 const SPELLINGS: [&str; 5] = [
     "/apps/toy/echo",
     "/apps/./toy/echo",

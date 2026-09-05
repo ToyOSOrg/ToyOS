@@ -182,8 +182,8 @@ fn guest_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String>
     // so running it earlier would judge that record instead of this one.
     let at = log.len();
     passed(qemu, log, "test_rs_pkg_launch_gbae symlink-row")?;
-    // The canonical spelling classifies as a package carrying no manifest; the
-    // four the kernel would normalize reach no classifier at all.
+    // The canonical spelling classifies as a package with no manifest; the four
+    // the kernel would normalize reach no classifier at all.
     for said in [
         "init: launcher: /apps/toy/manifest.toml cannot be read",
         "init: launcher: \"/apps/./toy/echo\" is not a canonical path",

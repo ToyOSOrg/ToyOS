@@ -204,11 +204,10 @@ fn remove(name: &str) -> Result<(), String> {
 /// and a package whose directory survives its removal is a name that can never
 /// be installed again.
 ///
-/// **An explicit stack and no depth bound.** Recursion put the walk's depth in
-/// the gift of whoever wrote under `/apps/<name>`, and a bound only moved the
-/// harm: a refusal past it leaves the directory standing, which is the
-/// unfreeable name this exists to prevent. What is bounded is memory, by the
-/// number of directories rather than by anything a single path can spell.
+/// **An explicit stack and no depth bound.** A bound only moved the harm: a
+/// refusal past it leaves the directory standing, which is the unfreeable name
+/// `install`'s unwind exists to prevent. Memory is bounded by the number of
+/// directories instead, which no single path can spell.
 fn remove_tree(dir: &Path) -> Result<(), String> {
     let mut unvisited = vec![dir.to_path_buf()];
     // Every directory, each one before the ones inside it, so removing in
@@ -287,8 +286,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// No depth a tree can be planted at leaves the name behind: 33 was the
-    /// first the old bound refused, and 256 is far past any stack it had.
+    /// 33 is the first depth the old bound refused; 256 is far past it.
     #[test]
     fn a_tree_of_any_depth_comes_off_and_leaves_no_directory() {
         for depth in [33usize, 256] {
@@ -299,7 +297,7 @@ mod tests {
             }
             fs::create_dir_all(&at).expect("a deep tree");
             fs::write(at.join("leaf"), b"x").expect("a leaf");
-            // A sibling branch as well, so the walk is a tree and not a chain.
+            // A second branch, so the walk is a tree and not a chain.
             fs::create_dir_all(root.join("wide/er")).expect("a second branch");
             fs::write(root.join("wide/er/leaf"), b"y").expect("a second leaf");
 

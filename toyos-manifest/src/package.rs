@@ -136,11 +136,11 @@ pub fn listed(entries: &[(String, String)]) -> Vec<Package> {
 
 /// Whether `path` is already the string every path syscall will act on.
 ///
-/// **A launch is classified by the string it is spawned with**, and the kernel
-/// normalizes before it opens anything (`kernel/src/vfs.rs`'s `normalize` drops
-/// an empty component and `.`, and pops on `..`). A path meaning something else
-/// after that is one nothing can both classify and spawn: `/apps/./x` is
-/// outside `/apps` to [`package_of`] and inside it to every syscall.
+/// The kernel normalizes before it opens anything (`kernel/src/vfs.rs`'s
+/// `normalize` drops an empty component and `.`, and pops on `..`), so a path
+/// meaning something else after that is one nothing can both classify and
+/// spawn: `/apps/./x` is outside `/apps` to [`package_of`] and inside it to
+/// every syscall.
 pub fn is_canonical(path: &str) -> bool {
     path.starts_with('/')
         && !path.split('/').skip(1).any(|part| part.is_empty() || part == "." || part == "..")
@@ -252,9 +252,8 @@ mod tests {
         assert!(check_digest(&upper).is_err());
     }
 
-    /// **Every spelling the kernel's normalizer would change is refused before
-    /// anything classifies it**: `package_of` answers `None` for four of them
-    /// while every path syscall lands them inside `/apps`.
+    /// The four `package_of` answers `None` for while every path syscall lands
+    /// them inside `/apps` — the hole the gate above closes.
     #[test]
     fn a_path_the_normalizer_would_change_is_not_canonical_and_classifies_as_nothing() {
         assert!(is_canonical("/apps/toy/echo"));
@@ -265,10 +264,9 @@ mod tests {
         {
             assert!(!is_canonical(bad), "{bad:?} passed as canonical");
         }
-        for escaping in
-            ["/apps/./toy/echo", "/apps//toy/echo", "apps/toy/echo", "/tmp/../apps/toy/echo"]
+        for e in ["/apps/./toy/echo", "/apps//toy/echo", "apps/toy/echo", "/tmp/../apps/toy/echo"]
         {
-            assert_eq!(package_of(escaping), None, "{escaping:?} classified as a package");
+            assert_eq!(package_of(e), None, "{e:?} classified as a package");
         }
     }
 
