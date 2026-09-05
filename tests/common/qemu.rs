@@ -1592,7 +1592,7 @@ pub const BOOT_STICK_ID: &str = "bootstick";
 
 /// What every profile but [`Profile::MetalDisk`] gives the guest. Large
 /// enough for a filesystem, small enough that a boot formats it quickly.
-const NVME_SMALL: u64 = 128 * 1024 * 1024;
+pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
 
 /// What every namespace but [`Profile::NvmeWideSector`]'s reports — QEMU's
 /// implicit default, and the T14's.

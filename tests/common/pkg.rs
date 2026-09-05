@@ -58,9 +58,16 @@ pub fn pkg_install_gbae(
         return Err(String::from("the pkg_launch_gbae client was not built"));
     }
 
+    // **Its own disk.** The lane's shared image keeps what the last boot left,
+    // and this test asserts what `/apps` does *not* hold as much as what it
+    // does.
+    let image = super::lane::dir().join("pkg-data.img");
+    toyos_build::build::create_sparse(&image, qemu::NVME_SMALL);
+
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pkgcase");
     let options = BootOptions {
         profile: qemu::Profile::Metal,
+        nvme_image: Some(image),
         extra_root_files: vec![
             (format!("{GOOD_DIR}/{ASSET}"), archive.clone()),
             (format!("{GOOD_DIR}/{SUMS}"), sums.clone().into_bytes()),
@@ -126,23 +133,6 @@ fn guest_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String>
         return Err(format!("init never said {WHY:?}:\n{}", &log[at.min(log.len())..]));
     }
 
-    // A symlink under `/apps` to a declared binary: the probe's exit 0 is the
-    // refusal.
-    let at = log.len();
-    passed(qemu, log, "test_rs_pkg_launch_gbae symlink-row")?;
-    const PLANTED: &str = "init: launcher: /apps/toy/manifest.toml cannot be read";
-    if !log[at.min(log.len())..].contains(PLANTED) {
-        return Err(format!(
-            "a symlink under /apps was not classified by /apps — init never said {PLANTED:?}:\n{}",
-            &log[at.min(log.len())..]
-        ));
-    }
-
-    // And the directory it left comes off, because a name `install` refuses to
-    // write over is a name nothing else could free.
-    passed(qemu, log, "pkg remove toy")?;
-    refused(qemu, log, "pkg remove toy", "pkg: toy is not installed — there is no /apps/toy")?;
-
     // Consent: `test-runner` closes a child's stdin, so this asks and is
     // answered with nothing.
     refused(qemu, log, &format!("pkg install {good}"), "pkg: not installing gbae")?;
@@ -185,6 +175,25 @@ fn guest_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String>
         ));
     }
     eprintln!("  [pkg] gbae opened a window through the /apps row alone");
+
+    // **Last, and the order is load-bearing**: a block this frees and the next
+    // file takes reads back off the device holding what it used to hold
+    // (`issues/filesystem/a-reallocated-extent-on-data-keeps-the-deleted-files-bytes.md`),
+    // so running it earlier would judge that record instead of this one.
+    let at = log.len();
+    passed(qemu, log, "test_rs_pkg_launch_gbae symlink-row")?;
+    const PLANTED: &str = "init: launcher: /apps/toy/manifest.toml cannot be read";
+    if !log[at.min(log.len())..].contains(PLANTED) {
+        return Err(format!(
+            "a symlink under /apps was not classified by /apps — init never said {PLANTED:?}:\n{}",
+            &log[at.min(log.len())..]
+        ));
+    }
+
+    // And the directory it left comes off, because a name `install` refuses to
+    // write over is a name nothing else could free.
+    passed(qemu, log, "pkg remove toy")?;
+    refused(qemu, log, "pkg remove toy", "pkg: toy is not installed — there is no /apps/toy")?;
     Ok(())
 }
 
@@ -269,12 +278,17 @@ fn readback(image: &Path, archive: &[u8]) -> Result<(), String> {
             .read_file(&on_disk)
             .map_err(|e| format!("reading {on_disk} off the DATA partition: {e:?}"))?;
         if got != want {
-            let first = got.iter().zip(&want).position(|(a, b)| a != b);
+            let first = got.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(0);
+            let head = |b: &[u8]| {
+                b.iter().skip(first).take(16).map(|x| format!("{x:02x}")).collect::<Vec<_>>().join("")
+            };
             return Err(format!(
                 "{on_disk} is {} bytes on the device against the archive's {}, first differing \
-                 at {first:?}",
+                 at {first}: device {} against archive {}",
                 got.len(),
-                want.len()
+                want.len(),
+                head(&got),
+                head(&want),
             ));
         }
         total += want.len();
