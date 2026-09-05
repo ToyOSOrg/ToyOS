@@ -51,6 +51,7 @@ receives = ["soundd"]
 "bin/mv" = "/system/bin/toybox"
 "bin/ps" = "/system/bin/toybox"
 "bin/pwd" = "/system/bin/toybox"
+"bin/reboot" = "/system/bin/toybox"
 "bin/rm" = "/system/bin/toybox"
 "bin/shutdown" = "/system/bin/toybox"
 # The shipped audio client, and the one the T14 hangs on. The raw-API tone in

@@ -9,8 +9,8 @@ opened: 2026-08-20
 Noticed while giving `/system/bin/shutdown` the `power` right
 (`toyos-abi/src/handle.rs`'s `Rights::POWER`).
 
-A manifest row's granularity is the **binary**, and `/system/bin/toybox` is nineteen
-programs behind nineteen symlinks. `/system/bin/init`'s `declared` resolves
+A manifest row's granularity is the **binary**, and `/system/bin/toybox` is many
+programs behind that many symlinks. `/system/bin/init`'s `declared` resolves
 `/system/bin/shutdown` through `std::fs::read_link` to `/system/bin/toybox` and endows the
 `toybox` row (`userland/init/src/main.rs`), so every applet in the image is
 spawned holding the union of what any of them needs.
@@ -46,15 +46,15 @@ if the union keeps growing.
 `endowment_denied`'s `every_applet_holds_only_what_its_policy_names` reads the
 links off `/system/bin` and the rows off `/system/etc/system.manifest`, neither through
 `declared`, and holds each applet against a per-applet policy table. On the
-image a guest test boots it answers `14 links behind /system/bin/toybox, 13 declared
-over-grants` — thirteen applets endowed a connector to soundd because `tone`
+image a guest test boots it answers `15 links behind /system/bin/toybox, 14 declared
+over-grants` — every applet but `tone` endowed a connector to soundd because it
 needs one. `DECLARED_OVER_GRANTS` is that list, so the over-grant cannot grow
 without a red naming what grew, and it shrinks when the row is split.
 
 The shipped image is not that image and is still unmeasured: a guest boots
 `tests/testcases/system.toml`, whose `toybox` row carries no `syscap` at all, so
 nothing yet sees `/system/bin/echo` holding `Rights::POWER`.
-`issues/isolation/one-manifest-row-grants-nineteen-applets-and-one-is-compared.md`
+`issues/isolation/one-manifest-row-grants-every-applet-and-one-is-compared.md`
 carries what closing that costs.
 
 **Promoted to `defect` 2026-08-25** (finding-lifecycle ruling). `/system/bin/echo` in

@@ -11,7 +11,7 @@ use common::qemu::{
     self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance, TestResult,
     STALLED,
 };
-use common::{audio, compile, faults, hostload, pkg, screen, serial, stats, storage, usb};
+use common::{audio, compile, faults, hostload, pkg, power, screen, serial, stats, storage, usb};
 use toyos_build::day::Day;
 use toyos_build::metal::boot_millis;
 use toyos_build::testargs::Shard;
@@ -598,6 +598,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // gone. Body in `tests/common/pkg.rs`.
     ("pkg_install_gbae", Sched::Parallel, Tier::Fast),
     ("boot_partition_identity", Sched::Parallel, Tier::Fast),
+    // One boot of its own, because it ends the machine. Every verdict is a
+    // kernel line or the stop reason QEMU reported; no clock is in either.
+    ("machine_reboot", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
@@ -8692,6 +8695,7 @@ fn run_machine_test(
         "pkg_install_gbae" => pkg::pkg_install_gbae(test_config, c_bins, rust_bins),
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
+        "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),
         "usb_storage_shapes" => usb::usb_storage_shapes(test_config, c_bins, rust_bins),
