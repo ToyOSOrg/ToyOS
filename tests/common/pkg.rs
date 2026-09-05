@@ -8,8 +8,8 @@
 //! no `compositor` connector of its own, so a window is proof the row was
 //! built.
 //!
-//! Two oracles, neither of them this file's: the release's `SHA256SUMS`, which
-//! a third party wrote and the guest verifies against; and the `tar` crate,
+//! Two checks, neither of them this file's: the release's `SHA256SUMS`, which
+//! gbae's own release pipeline wrote and the guest verifies against; and the `tar` crate,
 //! which decodes the same archive on the host so the bytes read back off the
 //! guest's DATA volume are compared with a decoder `userland/pkg` shares no
 //! code with.
@@ -379,10 +379,8 @@ fn third_party_entries(archive: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String>
 
 /// The release asset and its sums file, read out of the tree.
 ///
-/// **Committed, and fetched by nothing.** The suite reaches no third party at
-/// test time; these two were downloaded once by hand, verified, and recorded in
-/// `NOTICE` with their digests. The digest is held again here, so a fixture
-/// edited in place is a refusal rather than a different subject.
+/// **Committed, and fetched by nothing.** The digest is held again here, so a
+/// fixture edited in place is a refusal rather than a different subject.
 fn fixture() -> Result<(Vec<u8>, String), String> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let at = dir.join(ASSET);

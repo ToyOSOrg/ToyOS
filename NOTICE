@@ -232,7 +232,7 @@ own sums file covering every asset of that release. `pkg_install_gbae` installs
 the archive with `/system/bin/pkg` and runs the binary, which is what makes the
 package path a thing that has been done rather than a thing that compiles.
 
-Its terms are read out of `gbae/LICENSE` **inside the archive**, so the notice
+gbae's own terms are read out of `gbae/LICENSE` **inside the archive**, so the notice
 MIT requires travels with the bytes as well as sitting in `licenses/`. Copying,
 distributing and sublicensing are permitted outright, so committing it here puts
 no constraint on a ToyOS build the way `assets/DOOM1.WAD` does.
