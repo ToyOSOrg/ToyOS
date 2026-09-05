@@ -211,6 +211,9 @@ const RUST_SKIP: &[&str] = &[
     "gpu_set_resolution",
     "gpu_scanout_swap",
     "va_exhaustion",
+    // Needs a NIC in front of netd, a host serving TLS behind it and a CA
+    // minted for that boot. `https_tls13` stages all three.
+    "https_fetch",
     // Needs a NIC in front of netd; only `tests/netcase` has one.
     // `netd_listener_forgery` runs it there.
     "netd_listener_forgery",
@@ -551,6 +554,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // floor on audio recorded in real time, not a fraction of the capture and
     // not compute-bound: timer-anchored, and Nightly for that reason.
     ("doom_music", Sched::Parallel, Tier::Nightly),
+    // ureq and rustls from crates.io, fetching over TLS 1.3 from a host this
+    // test mints a CA for. Every verdict is a printed line or a digest; the
+    // only clock is `run_test`'s ceiling. Fast with the UNMEASURED bootstrap
+    // marker until CI prices it.
+    ("https_tls13", Sched::Parallel, Tier::Fast),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -13006,6 +13014,7 @@ fn run_machine_test(
             );
             Ok(())
         }
+        "https_tls13" => common::https::tls13_judge(rust_bins),
         "netd_connection_caps" => {
             // The only boot that runs netd at all. Its `main` opens the NIC
             // first and returns on `NotFound`, so metal-sim never reaches a
@@ -16853,6 +16862,7 @@ fn main() {
     let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
     eprintln!("[toyos] Building Rust tests...");
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
+    toyos_build::build::build_https_hosts(&common::compile::repo_root(), !nocapture && !debug_mode);
 
     // --list: print test names and exit
     if list_mode {

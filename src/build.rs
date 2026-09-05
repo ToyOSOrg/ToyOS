@@ -1417,6 +1417,46 @@ pub fn build_test_image(
     image::create_boot_image(&kernel_bytes, &bl_bytes, &root_bytes, &params)
 }
 
+/// The two host binaries `https_tls13` drives, built here rather than inside the
+/// test: a judge's price is its fetch and not a compile.
+pub fn build_https_hosts(root: &Path, quiet: bool) {
+    let _slot = buildlock::build_slot(root, "the TLS judge's host binaries");
+    for (dir, _) in HTTPS_HOSTS {
+        let at = root.join(dir);
+        let mut cmd = Command::new("cargo");
+        cmd.args(["build", "--release"]);
+        if quiet {
+            cmd.arg("--quiet");
+        }
+        let status = cmd
+            .current_dir(&at)
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .env_remove("RUSTC")
+            .env_remove("RUSTFLAGS")
+            .status()
+            .unwrap_or_else(|e| panic!("cargo failed to launch in {}: {e}", at.display()));
+        assert!(status.success(), "{dir} did not build");
+    }
+}
+
+const HTTPS_HOSTS: [(&str, &str); 2] = [
+    ("tests/https-server-host", "https_test_server"),
+    ("tests/https-fetch-host", "https_fetch"),
+];
+
+pub fn https_test_server(root: &Path) -> PathBuf {
+    https_host(root, 0)
+}
+
+pub fn https_fetch_host(root: &Path) -> PathBuf {
+    https_host(root, 1)
+}
+
+fn https_host(root: &Path, which: usize) -> PathBuf {
+    let (dir, bin) = HTTPS_HOSTS[which];
+    root.join(dir).join("target/release").join(bin)
+}
+
 /// Build all binaries in a multi-binary crate. Returns vec of (binary_name, bytes).
 /// Also builds any cdylib subcrates and includes their .so files.
 ///

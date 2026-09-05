@@ -1,0 +1,24 @@
+# The differential arm of `https_tls13`: the guest program's own source, built
+# by the host's std instead of the ToyOS fork's. Nothing here may differ from
+# `tests/toyos-rust-tests`'s dependency lines but the target the compiler is
+# pointed at — that is the whole of what the oracle compares.
+[package]
+name = "https-fetch-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "https_fetch"
+path = "../toyos-rust-tests/src/bin/https_fetch.rs"
+
+[dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "logging"] }
+rustls-rustcrypto = "0.0.2-alpha"
+rustls-pki-types = "1"
+webpki-roots = "1"
+sha2 = { version = "0.10", default-features = false }
+
+[lints.rust]
+warnings = "deny"

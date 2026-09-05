@@ -1,0 +1,30 @@
+# The host end of `https_tls13`: it mints a CA and four servers at run time and
+# never commits a key. It is a crate of its own rather than a harness module
+# because the harness is a target of the root package, and rustls, x509-cert
+# and p256 have no business in the build system's resolution.
+[package]
+name = "https-server-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "https_test_server"
+path = "src/main.rs"
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging"] }
+rustls-rustcrypto = "0.0.2-alpha"
+rustls-pki-types = "1"
+x509-cert = { version = "0.3", features = ["builder", "pem"] }
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+der = { version = "0.8", features = ["pem"] }
+rand_core = "0.10"
+getrandom = { version = "0.4", features = ["sys_rng"] }
+sha2 = "0.11"
+
+[lints.rust]
+warnings = "deny"
+
+[profile.release]
+opt-level = 2
