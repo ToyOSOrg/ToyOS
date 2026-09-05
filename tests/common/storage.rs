@@ -429,19 +429,17 @@ pub fn home_budget_refusal_retried(
 
 /// A same-length overwrite on `/home` read back through the name it rebound.
 ///
-/// The oracle is outside the guest and outside the kernel: once the machine is
+/// The oracle is outside the guest and outside the kernel: with the machine
 /// gone the file is read off the NVMe image by this crate's own build of the
-/// `bcachefs` reader over a plain seek-and-read device, and its length is
-/// compared against the length the guest printed for its own read of the same
-/// name. The recorded defect is exactly those two disagreeing — the guest read
-/// 0 bytes while the device held the whole file.
+/// `bcachefs` reader over a plain seek-and-read device, and its length held
+/// against the length the guest printed for its own read of the same name. The
+/// recorded defect is exactly those two disagreeing.
 pub fn home_overwrite_reads_back(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    /// Mirrored in `tests/toyos-rust-tests/src/bin/home_overwrite_zero.rs`,
-    /// under the `/home` directory of DATA the host reader sees.
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/home_overwrite_zero.rs`.
     const PINNED: &str = "home/overwrite-pinned.bin";
     const LEN: usize = 1_902_104;
     fn payload(seed: u8) -> Vec<u8> {
@@ -487,8 +485,7 @@ pub fn home_overwrite_reads_back(
         .read_file(PINNED)
         .map_err(|e| format!("reading {PINNED} off the image: {e:?}"))?;
 
-    // The device against the guest's own read, before the exit code: that
-    // disagreement is the defect's sentence, and an exit code does not say it.
+    // Before the exit code: that disagreement is the defect's sentence, and an exit code does not say it.
     let Some(guest_len) = guest_len else {
         return Err(format!(
             "the guest printed no HOME-OVERWRITE line, and the device holds {} bytes at \

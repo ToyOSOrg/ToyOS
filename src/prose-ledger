@@ -64,7 +64,7 @@ kernel/src/arch/syscall/mod.rs 5 0
 kernel/src/arch/syscall/proc.rs 31 0
 kernel/src/arch/syscall/vm.rs 93 0
 kernel/src/arch/tlb.rs 43 0
-kernel/src/bcachefs_adapter.rs 80 0
+kernel/src/bcachefs_adapter.rs 81 0
 kernel/src/block.rs 63 0
 kernel/src/clock.rs 25 0
 kernel/src/completion/inbox.rs 40 0
@@ -247,7 +247,7 @@ tests/common/qemu.rs 1651 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
-tests/common/storage.rs 114 0
+tests/common/storage.rs 123 0
 tests/common/toybox.rs 74 0
 tests/common/usb.rs 962 4
 tests/common/volumes.rs 655 3
@@ -319,6 +319,7 @@ tests/toyos-rust-tests/src/bin/heap_ceiling.rs 69 0
 tests/toyos-rust-tests/src/bin/hierarchy_paths.rs 25 0
 tests/toyos-rust-tests/src/bin/home_backing_revoked.rs 34 0
 tests/toyos-rust-tests/src/bin/home_fsync_budget.rs 5 0
+tests/toyos-rust-tests/src/bin/home_overwrite_zero.rs 18 0
 tests/toyos-rust-tests/src/bin/i8042_keyboard.rs 24 0
 tests/toyos-rust-tests/src/bin/i8042_mouse.rs 17 0
 tests/toyos-rust-tests/src/bin/inbox_cancel_wakes.rs 31 0
@@ -393,7 +394,7 @@ tests/toyos-rust-tests/tls-dlopen-lib/src/lib.rs 10 0
 tests/toyos-rust-tests/tls-lib/src/lib.rs 0 0
 tests/toyos-rust-tests/tls-multi-crate/dep/src/lib.rs 3 0
 tests/toyos-rust-tests/tls-multi-crate/src/lib.rs 10 0
-tests/toyos.rs 5165 23
+tests/toyos.rs 5167 23
 toyos-abi/src/audio.rs 21 0
 toyos-abi/src/boot.rs 101 0
 toyos-abi/src/handle.rs 107 0
