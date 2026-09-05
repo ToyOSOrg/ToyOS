@@ -1,0 +1,55 @@
+# The package machine: a desktop, a sound daemon, the installer, and a test
+# estate that holds a `launcher` connector and no `compositor` one.
+#
+# **That absence is the judge.** A guest binary here inherits test-runner's
+# namespace, which reaches no desktop, so an installed package that opens a
+# window can only have got there through the `[apps]` row init builds for it.
+# On `tests/metalcase`, where test-runner receives `compositor` itself, the same
+# launch would draw a window by inheritance and prove nothing.
+
+assets = ["assets"]
+
+[boot]
+start = ["logd", "compositor", "soundd", "test-runner"]
+
+# What every program launched out of `/apps` holds. gbae needs both: it opens
+# its window through the compositor and its cpal stream through soundd.
+[apps]
+receives = ["compositor", "soundd"]
+
+# **Every image that carries a `TOYOS-LOG` partition runs this**, and every
+# image does. The kernel keeps the record ring and writes no file at all, so a
+# boot config without `logd` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logd` is what refuses one.
+[programs.logd]
+syscap = ["logread"]
+
+[programs.compositor]
+serves = ["compositor"]
+receives = ["soundd", "launcher"]
+devices = ["framebuffer", "keyboard", "mouse"]
+
+[programs.soundd]
+serves = ["soundd"]
+devices = ["hda-audio", "virtio-sound"]
+syscap = ["rt"]
+
+# The installer holds nothing: it writes under `/apps` because `/apps` is
+# writable, and a row that gave it anything more would make that a lie.
+[programs.pkg]
+
+# `launcher` and nothing else. `power` is `/system/bin/shutdown`'s, which is
+# this binary under another name — the host ends the guest with `run shutdown`
+# and then reads `/apps` off the volume.
+[programs.toybox]
+syscap = ["power"]
+
+# `launcher` and no `compositor`, which is this config's whole point.
+# `logread` is the estate's everywhere, and it is not dup-able — so test-runner
+# endows a child nothing, and a child's spawn goes through the launcher.
+[programs.test-runner]
+receives = ["launcher"]
+syscap = ["logread"]
+
+[symlinks]
+"bin/shutdown" = "/system/bin/toybox"
