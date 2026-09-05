@@ -2,9 +2,7 @@
 //!
 //! **A package is a directory**, so installing one is: agree with the archive
 //! on a single top-level name, find the program inside it that name promises,
-//! and write the manifest recording where the bytes came from. All three are
-//! total functions over the archive's own bytes, so the whole decision is
-//! attacked on the host and `main.rs` keeps only the writing.
+//! and write the manifest recording where the bytes came from.
 
 pub mod archive;
 pub mod sums;
@@ -60,12 +58,15 @@ pub fn plan<'a>(
     }
     dirs.sort();
     dirs.dedup();
+    // One path, one kind, over both lists: the write order is directories then
+    // files, so a path named as both would decide by that order what is at it.
     let mut seen: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+    seen.extend(dirs.iter().map(String::as_str));
     seen.sort_unstable();
     let count = seen.len();
     seen.dedup();
     if seen.len() != count {
-        return Err(format!("pkg: {file_name} carries one path twice"));
+        return Err(format!("pkg: {file_name} names one path twice"));
     }
 
     let manifest = Package {
@@ -163,6 +164,22 @@ mod tests {
         let not_executable =
             vec![entry("gbae", Kind::Dir, b"", 0o755), entry("gbae/gbae", Kind::File, b"x", 0o644)];
         assert!(plan(ASSET, DIGEST, &not_executable).is_err());
+    }
+
+    #[test]
+    fn a_path_the_archive_names_as_both_a_file_and_a_directory_is_refused() {
+        let mut both = gbae();
+        both.push(entry("gbae/README.md", Kind::Dir, b"", 0o755));
+        let why = plan(ASSET, DIGEST, &both).err().expect("a path named twice was planned");
+        assert!(why.contains("names one path twice"), "{why}");
+
+        let mut twice = gbae();
+        twice.push(entry("gbae/LICENSE", Kind::File, b"other", 0o644));
+        assert!(plan(ASSET, DIGEST, &twice).is_err());
+
+        let mut program = gbae();
+        program.push(entry("gbae/gbae", Kind::Dir, b"", 0o755));
+        assert!(plan(ASSET, DIGEST, &program).is_err());
     }
 
     #[test]

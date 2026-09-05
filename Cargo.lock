@@ -1794,7 +1794,6 @@ dependencies = [
  "toyos-sched",
  "ureq",
  "uuid",
- "webpki-roots",
 ]
 
 [[package]]

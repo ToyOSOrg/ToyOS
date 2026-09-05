@@ -16,11 +16,13 @@ use std::path::Path;
 use flate2::read::GzDecoder;
 use pkg::{archive, sums};
 use sha2::{Digest, Sha256};
-use toyos_manifest::package::Package;
+use toyos_manifest::package::{self, Package};
 
 /// Answers the consent prompt in advance, for a caller with no terminal.
 /// Spelled out rather than `-y`: installing without asking says so in full.
 const ASSUME_YES: &str = "--yes";
+
+const MAX_INFLATED: u64 = 256 * 1024 * 1024;
 
 /// The release publishes one covering every asset, so it is found by sitting
 /// beside the archive rather than by being named on the command line.
@@ -70,9 +72,7 @@ fn install(file: &Path, assume_yes: bool) -> Result<(), String> {
     }
     println!("pkg: verified {name} against {SUMS} ({got})");
 
-    let mut tar = Vec::new();
-    std::io::Read::read_to_end(&mut GzDecoder::new(&bytes[..]), &mut tar)
-        .map_err(|e| format!("pkg: {name} is not gzip: {e}"))?;
+    let tar = inflate(&name, &bytes, MAX_INFLATED)?;
     let entries = archive::entries(&tar)?;
     let plan = pkg::plan(&name, &got, &entries)?;
     let package = &plan.manifest;
@@ -87,22 +87,72 @@ fn install(file: &Path, assume_yes: bool) -> Result<(), String> {
         return Err(format!("pkg: not installing {}", package.name));
     }
 
-    for dir in &plan.dirs {
-        fs::create_dir_all(dir).map_err(|e| format!("pkg: cannot create {dir}: {e}"))?;
-    }
-    for (path, data) in &plan.files {
-        fs::write(path, data).map_err(|e| format!("pkg: cannot write {path}: {e}"))?;
-    }
-    // **Last, so a directory carrying one is a finished install**: init and the
-    // launcher both reach a package through its manifest.
-    let manifest = Package::path(&package.name);
-    fs::write(&manifest, package.render()?)
-        .map_err(|e| format!("pkg: cannot write {manifest}: {e}"))?;
+    // The manifest is written last, so a directory carrying one is a finished
+    // install: init and the launcher both reach a package through it.
+    write_package(
+        &dir,
+        &plan.dirs,
+        &plan.files,
+        &Package::path(&package.name),
+        &package.render()?,
+    )?;
     println!(
         "pkg: installed {} {} at {dir}, launching {}",
         package.name, package.version, package.program
     );
     Ok(())
+}
+
+/// Inflate `bytes`, refusing an archive that claims more than `ceiling`.
+///
+/// **The inflated size is the archive's claim and `SHA256SUMS` says nothing
+/// about it**, so the reader is bounded rather than the output measured after:
+/// measuring is the allocation this refuses.
+fn inflate(name: &str, bytes: &[u8], ceiling: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut tar = Vec::new();
+    GzDecoder::new(bytes)
+        .take(ceiling + 1)
+        .read_to_end(&mut tar)
+        .map_err(|e| format!("pkg: {name} is not gzip: {e}"))?;
+    if tar.len() as u64 > ceiling {
+        return Err(format!("pkg: {name} inflates past {ceiling} bytes and is refused unread"));
+    }
+    Ok(tar)
+}
+
+/// Write a package's directory, and take it back down if any write fails: a
+/// verified archive can still run out of volume half way, and a directory with
+/// no `manifest.toml` is a name `install` refuses for the volume's life.
+fn write_package(
+    dir: &str,
+    dirs: &[String],
+    files: &[(String, &[u8])],
+    manifest: &str,
+    text: &str,
+) -> Result<(), String> {
+    match write_all(dirs, files, manifest, text) {
+        Ok(()) => Ok(()),
+        Err(why) => match remove_tree(Path::new(dir), 0) {
+            Ok(()) => Err(format!("{why}; {dir} was taken back down")),
+            Err(swept) => Err(format!("{why}; {swept}")),
+        },
+    }
+}
+
+fn write_all(
+    dirs: &[String],
+    files: &[(String, &[u8])],
+    manifest: &str,
+    text: &str,
+) -> Result<(), String> {
+    for dir in dirs {
+        fs::create_dir_all(dir).map_err(|e| format!("pkg: cannot create {dir}: {e}"))?;
+    }
+    for (path, data) in files {
+        fs::write(path, data).map_err(|e| format!("pkg: cannot write {path}: {e}"))?;
+    }
+    fs::write(manifest, text).map_err(|e| format!("pkg: cannot write {manifest}: {e}"))
 }
 
 /// The question, asked where the user typed the command. A closed or empty
@@ -119,21 +169,37 @@ fn consented(package: &Package, file: &Path) -> Result<bool, String> {
     Ok(answer == "y" || answer == "yes")
 }
 
-/// Removing a package is deleting its directory — and only a directory that
-/// answers as a package, so a mistyped name deletes nothing.
+/// **A directory that answers as no package is still removed**, and said so by
+/// name: `/apps/<name>` is what `install` refuses to write over, so a name it
+/// cannot take is a name nothing else could free.
 fn remove(name: &str) -> Result<(), String> {
-    let manifest = Package::path(name);
-    let text = fs::read_to_string(&manifest)
-        .map_err(|e| format!("pkg: {name} is not installed ({manifest}: {e})"))?;
-    let package = Package::parse(&text)?;
-    if package.name != name {
-        return Err(format!("pkg: {manifest} calls itself {:?}", package.name));
+    if package::package_of(&format!("{}/x", Package::dir(name))) != Some(name) {
+        return Err(format!("pkg: {name:?} is not a package name"));
     }
     let dir = Package::dir(name);
-    remove_tree(Path::new(&dir))?;
-    println!("pkg: removed {name} {}", package.version);
+    let manifest = Package::path(name);
+    let installed = fs::read_to_string(&manifest).ok().and_then(|t| Package::parse(&t).ok());
+    match installed {
+        Some(p) if p.name != name => {
+            return Err(format!("pkg: {manifest} calls itself {:?}", p.name))
+        }
+        Some(p) => {
+            remove_tree(Path::new(&dir), 0)?;
+            println!("pkg: removed {name} {}", p.version);
+        }
+        None if fs::metadata(&dir).is_ok() => {
+            remove_tree(Path::new(&dir), 0)?;
+            println!("pkg: removed {dir}, which carried no manifest this installer wrote");
+        }
+        None => return Err(format!("pkg: {name} is not installed — there is no {dir}")),
+    }
     Ok(())
 }
+
+/// How deep this walk goes. Policy on the primitive: any process can plant a
+/// tree under `/apps/<name>`, so an unbounded recursion is that process
+/// choosing this program's stack depth.
+const MAX_REMOVE_DEPTH: usize = 32;
 
 /// Delete a directory and everything under it, depth first.
 ///
@@ -141,14 +207,20 @@ fn remove(name: &str) -> Result<(), String> {
 /// (`issues/filesystem/remove-dir-all-empties-a-directory-and-leaves-it.md`),
 /// and a package whose directory survives its removal is a name that can never
 /// be installed again.
-fn remove_tree(dir: &Path) -> Result<(), String> {
+fn remove_tree(dir: &Path, depth: usize) -> Result<(), String> {
+    if depth > MAX_REMOVE_DEPTH {
+        return Err(format!(
+            "pkg: {} is more than {MAX_REMOVE_DEPTH} directories deep; the removal stopped there",
+            dir.display()
+        ));
+    }
     let entries = fs::read_dir(dir).map_err(|e| format!("pkg: cannot read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("pkg: cannot read {}: {e}", dir.display()))?;
         let path = entry.path();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
-            remove_tree(&path)?;
+            remove_tree(&path, depth + 1)?;
         } else {
             fs::remove_file(&path)
                 .map_err(|e| format!("pkg: cannot remove {}: {e}", path.display()))?;
@@ -178,4 +250,71 @@ fn list() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(what: &str) -> std::path::PathBuf {
+        let at = std::env::temp_dir().join(format!("pkg-{what}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&at);
+        fs::create_dir_all(&at).expect("a scratch directory");
+        at
+    }
+
+    #[test]
+    fn an_install_that_cannot_finish_takes_its_directory_back_down() {
+        let root = scratch("unwind");
+        let dir = root.join("gbae");
+        let dir_s = dir.to_str().unwrap().to_string();
+        let good = format!("{dir_s}/gbae");
+        // `gbae` is a file, so a write to `gbae/inside` cannot succeed.
+        let doomed = format!("{good}/inside");
+        let files: Vec<(String, &[u8])> = vec![(good.clone(), b"ELF".as_slice()), (doomed, b"x")];
+
+        let why = write_package(&dir_s, &[dir_s.clone()], &files, "unreached", "unreached")
+            .expect_err("the second write cannot succeed");
+        assert!(why.contains("was taken back down"), "{why}");
+        assert!(!dir.exists(), "{dir_s} survived a failed install");
+        assert!(root.exists(), "the unwind went past the package's own directory");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_tree_deeper_than_the_bound_is_refused_and_one_at_it_is_removed() {
+        for (depth, deep) in [(MAX_REMOVE_DEPTH, false), (MAX_REMOVE_DEPTH + 2, true)] {
+            let root = scratch(&format!("depth{depth}"));
+            let mut at = root.clone();
+            for _ in 0..depth {
+                at = at.join("d");
+            }
+            fs::create_dir_all(&at).expect("a deep tree");
+            fs::write(at.join("leaf"), b"x").expect("a leaf");
+
+            let got = remove_tree(&root, 0);
+            if deep {
+                let why = got.expect_err("a tree past the bound was walked");
+                assert!(why.contains("directories deep"), "{why}");
+            } else {
+                got.expect("a tree at the bound");
+                assert!(!root.exists(), "the tree at the bound survived");
+            }
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn an_archive_that_inflates_past_the_ceiling_is_refused_unread() {
+        use std::io::Write;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(&vec![0u8; 64 * 1024]).expect("deflate");
+        let bomb = gz.finish().expect("a gzip stream");
+        assert!(bomb.len() < 1024, "the fixture is not a bomb: {} bytes", bomb.len());
+
+        let why = inflate("bomb.tar.gz", &bomb, 4096).expect_err("64 KiB past a 4 KiB ceiling");
+        assert!(why.contains("inflates past 4096 bytes"), "{why}");
+        assert_eq!(inflate("bomb.tar.gz", &bomb, 128 * 1024).expect("under it").len(), 64 * 1024);
+        assert!(inflate("not.tar.gz", b"not gzip at all", 4096).is_err());
+    }
 }
