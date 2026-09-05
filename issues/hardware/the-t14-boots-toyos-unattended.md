@@ -37,9 +37,10 @@ built on the first.
    at `hw/i386/acpi-build.c:224` and acts on bit 2 of that port with
    `qemu_system_reset_request` at `hw/isa/lpc_ich9.c:663`. **Reaching it from
    userland needs an ABI word and so lands alone**: `SYS_SHUTDOWN` (19) is the
-   only power syscall and `Rights::POWER` (bit 10) its only bit, so
-   `/system/bin/reboot` and the test runner's `run reboot` are blocked on a new
-   syscall number in `toyos-abi/src/syscall.rs` and its `SysCap` wrapper.
+   only power syscall and `Rights::POWER` (bit 10) its only bit, so the word is
+   `SYS_REBOOT` (116) on that same right, in `toyos-abi/src/syscall.rs` with its
+   `SysCap` wrapper, and it is its own pull request. `/system/bin/reboot` and
+   the test runner's `run reboot` do not exist yet and are built once it lands.
 
    A chipset watchdog is a later stage, judged on the machine rather than in
    QEMU. The T14 is Tiger Lake-LP — LPC `8086:a082`, SMBus `8086:a0a3` — and

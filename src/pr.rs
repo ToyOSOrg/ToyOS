@@ -49,6 +49,9 @@ use crate::buildlock;
 /// flag could never be, because CI has no command line from the author.
 const ABI_INSEPARABLE: &str = "Abi-Inseparable:";
 
+/// The trailer read as git parses trailers, not as text anywhere in a message.
+const ABI_TRAILER_FORMAT: &str = "trailers:key=Abi-Inseparable";
+
 /// The flag that says the caller will re-run the gates on the merged shape.
 const ACCEPTS_MERGE: &str = "--gates-after-merge";
 
@@ -533,8 +536,9 @@ struct Commit {
 /// is the contract — CLAUDE.md declares "the split that genuinely cannot be
 /// made" — so the keyword alone is a word typed, not a declaration. "There"
 /// means one non-whitespace byte; a reason that says nothing is a reviewer's.
+/// Fed only from `%(trailers:key=…)`, so quoting this gate's advice declares nothing.
 fn inseparable(line: &str) -> Option<bool> {
-    line.trim_start().strip_prefix(ABI_INSEPARABLE).map(|why| !why.trim().is_empty())
+    line.strip_prefix(ABI_INSEPARABLE).map(|why| !why.trim().is_empty())
 }
 
 /// `<base>..HEAD` oldest first, merges excluded.
@@ -544,23 +548,27 @@ fn inseparable(line: &str) -> Option<bool> {
 /// quoting `toyos-abi/src/…` at the start of a line was read as a changed file.
 fn branch_commits(root: &Path, base: &str) -> Result<Vec<Commit>, String> {
     let range = format!("{base}..HEAD");
-    let messages =
-        git(root, &["log", "--reverse", "--no-merges", "--format=\x01%h %s%n%b", &range])?;
+    let trailer = format!("--format=\x01%h %s%n%({ABI_TRAILER_FORMAT})");
+    let messages = git(root, &["log", "--reverse", "--no-merges", &trailer, &range])?;
     let paths = git(
         root,
-        &["log", "--reverse", "--no-merges", "--name-only", "--format=\x01%h", &range],
+        &["log", "--reverse", "--no-merges", "-z", "--name-only", "--format=\x01%h", &range],
     )?;
 
     let mut commits = parse_messages(&messages);
     for (sha, path) in parse_paths(&paths) {
-        if let Some(commit) = commits.iter_mut().find(|c| c.sha == sha) {
-            commit.touches_sysroot |= in_sysroot(&path);
-        }
+        let Some(commit) = commits.iter_mut().find(|c| c.sha == sha) else {
+            return Err(format!(
+                "[abi] git listed {path} under {sha}, which its own message log did not report. \
+                 The two logs disagree, so nothing here can be trusted and nothing was pushed."
+            ));
+        };
+        commit.touches_sysroot |= in_sysroot(&path);
     }
     Ok(commits)
 }
 
-/// Headers and message text, from a log that asked for no paths — so no line here is one.
+/// Headers and parsed trailers, from a log that asked for no paths — so no line here is one.
 fn parse_messages(out: &str) -> Vec<Commit> {
     let mut commits: Vec<Commit> = Vec::new();
     for line in out.lines() {
@@ -586,20 +594,26 @@ fn parse_messages(out: &str) -> Vec<Commit> {
 }
 
 /// Each changed path against the commit that changed it, from a log whose format carries no message.
+///
+/// `-z` records, not lines: git's default quotes a non-ASCII path into
+/// `"toyos-abi/src/nai\303\274.rs"`, which begins with `"` and is inside no tree.
 fn parse_paths(out: &str) -> Vec<(String, String)> {
     let mut sha = String::new();
     let mut changed = Vec::new();
-    for line in out.lines() {
-        match line.strip_prefix('\x01') {
+    for record in out.split('\0') {
+        // The one newline the format prints per commit, ahead of that commit's first path.
+        let record = record.strip_prefix('\n').unwrap_or(record);
+        match record.strip_prefix('\x01') {
             Some(header) => sha = header.to_string(),
-            None if !line.trim().is_empty() => changed.push((sha.clone(), line.to_string())),
+            None if !record.is_empty() => changed.push((sha.clone(), record.to_string())),
             None => {}
         }
     }
     changed
 }
 
-/// A path inside one of the sysroot's trees; the prefix ends at a directory boundary, so `toyos-abi/srcs` is not `toyos-abi/src`.
+/// A path inside one of the sysroot's trees; the prefix ends at a directory
+/// boundary, so `toyos-abi/srcs` is not `toyos-abi/src`.
 fn in_sysroot(path: &str) -> bool {
     crate::toolchain::SYSROOT_SOURCES
         .iter()
@@ -709,10 +723,7 @@ pub(crate) mod tests {
         assert!(refusal.contains(ABI_INSEPARABLE), "{refusal}");
     }
 
-    /// **A commit message is not a list of paths.** Only the first line of `%b`
-    /// can carry a sentinel, so a body wrapping a sysroot path to the start of a
-    /// line was counted as a change to that tree, and a branch was refused for a
-    /// split it had not made.
+    /// A commit message is not a list of paths.
     #[test]
     fn a_sysroot_path_quoted_in_a_commit_body_is_not_a_changed_file() {
         let (_origin, wt) = repo("abi-quoted");
@@ -727,16 +738,7 @@ pub(crate) mod tests {
              toyos-abi/src toyos/src userland/libc/src carry no reboot today.",
         ]);
 
-        let listed = git(&wt, &[
-            "log",
-            "--reverse",
-            "--no-merges",
-            "--name-only",
-            "--format=\x01%h",
-            "origin/main..HEAD",
-        ])
-        .expect("list the branch's paths");
-        let changed: Vec<String> = parse_paths(&listed).into_iter().map(|(_, p)| p).collect();
+        let changed = listed_paths(&wt);
         assert_eq!(changed, ["note.md"], "the paths call saw something that is not a path");
 
         let commits = branch_commits(&wt, "origin/main").expect("read the branch");
@@ -760,6 +762,60 @@ pub(crate) mod tests {
         assert!(!in_sysroot("toyos-abi/srcs/syscall.rs"));
         assert!(!in_sysroot("toyos-abi/src"));
         assert!(!in_sysroot("toyos-acpi/src/fadt.rs"));
+    }
+
+    /// The branch's changed paths, as `branch_commits` reads them.
+    fn listed_paths(wt: &Path) -> Vec<String> {
+        let listed = git(wt, &[
+            "log",
+            "--reverse",
+            "--no-merges",
+            "-z",
+            "--name-only",
+            "--format=\x01%h",
+            "origin/main..HEAD",
+        ])
+        .expect("list the branch's paths");
+        parse_paths(&listed).into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// git quotes a non-ASCII path by default, and a quoted one starts with `"`.
+    #[test]
+    fn a_non_ascii_sysroot_path_is_still_inside_the_tree() {
+        let (_origin, wt) = repo("abi-nonascii");
+        commit(&wt, "toyos-abi/src/naiü.rs", "pub struct A;\n", "abi: a name with a diaeresis");
+
+        assert_eq!(listed_paths(&wt), ["toyos-abi/src/naiü.rs"], "the path came back quoted");
+        let commits = branch_commits(&wt, "origin/main").expect("read the branch");
+        assert!(commits[0].touches_sysroot, "a non-ASCII sysroot path was read as outside it");
+
+        commit(&wt, "g", "mine\n", "vfs: the work that depends on it");
+        abi_lands_alone(&wt, "origin/main").expect_err("this branch really does mix");
+    }
+
+    /// The escape is what git parses as a trailer, never what a message says.
+    #[test]
+    fn the_gates_own_advice_quoted_in_a_message_declares_nothing() {
+        let (_origin, wt) = repo("abi-advice");
+        commit(&wt, "toyos-abi/src/lib.rs", "pub struct A(pub u64);\n", "abi: widen A");
+        fs::write(wt.join("g"), "mine\n").unwrap();
+        sh(&wt, &["add", "g"]);
+        sh(&wt, &[
+            "commit",
+            "-qm",
+            "vfs: every caller of A\n\n\
+             The refusal told me to put\n\
+             Abi-Inseparable: <why>\n\
+             in one of this branch's commit messages, which is advice and not a\n\
+             declaration that anything here cannot be split.",
+        ]);
+
+        let commits = branch_commits(&wt, "origin/main").expect("read the branch");
+        assert!(
+            !commits.iter().any(|c| c.declares_inseparable),
+            "a message quoting the trailer was read as declaring it",
+        );
+        abi_lands_alone(&wt, "origin/main").expect_err("nothing here declared the escape");
     }
 
     /// The escape is a trailer rather than a flag, because CI has no command
