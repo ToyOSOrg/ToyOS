@@ -244,13 +244,13 @@ tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
 tests/common/pkg.rs 79 0
-tests/common/qemu.rs 1656 11
+tests/common/qemu.rs 1661 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
 tests/common/stats.rs 44 0
 tests/common/storage.rs 114 0
 tests/common/toybox.rs 74 0
-tests/common/usb.rs 962 4
+tests/common/usb.rs 959 4
 tests/common/volumes.rs 655 3
 tests/common/wallclock.rs 142 0
 tests/toyos-rust-tests/src/bin/abuse_connect_flood.rs 41 0
