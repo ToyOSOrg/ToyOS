@@ -57,19 +57,17 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 
 The storage track's users and mount-protocol stages do not block this one.
 
-1. Landed. `pkg install <file>`, `pkg remove`, `pkg list`, judged by
-   `pkg_install_gbae`: gbae v0.2.0's own release archive verified against its
-   `SHA256SUMS`, unpacked into `/apps/gbae`, launched, and 1,621,313 bytes read
-   back off the DATA volume with the guest gone. **What a package holds is the
-   image's `[apps]` row, never its own `manifest.toml`** — that file names which
-   of the directory's binaries a launch starts and nothing else, so a writable
-   `/apps` cannot name a device or a right. gbae needs no `HOME`: its keyboard
-   layout is `toyos/src/surface.rs`'s fixed `LAYOUT_CONFIG`, whose directory the
-   kernel creates at boot, and it opens no file picker.
+1. Landed: `pkg install <file>`, `pkg remove`, `pkg list`, judged by
+   `pkg_install_gbae` against gbae's release archive committed under
+   `tests/fixtures`. **What a package holds is the image's `[apps]` row, never
+   its own `manifest.toml`** — that file names which of the directory's
+   binaries a launch starts and nothing else, so a writable `/apps` cannot name
+   a device or a right.
 2. The HTTPS fetch: TLS client under `pkg`, the GitHub redirect, the sums
    file from the same release. Judged in QEMU against a server the harness
-   runs on the host in Rust, then once against GitHub itself, by hand, with
-   the owner watching.
+   runs on the host in Rust, serving the bytes already committed under
+   `tests/fixtures`; then once against GitHub itself, by hand, with the owner
+   watching. No registered test fetches anything.
 3. Updates: `pkg install` of a newer version replaces the directory whole
    after the new archive verified; the old one is gone only after the new
    one is in place.
