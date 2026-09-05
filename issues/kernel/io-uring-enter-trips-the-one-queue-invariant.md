@@ -35,10 +35,13 @@ that, in logd's next `Poller::submit`.
 
 **The stimulus is not the site.** The same assertion was recorded twice more
 from a keyboard flood into a thread blocked in `sys_read` on stdin, reaching it
-through `scheduler::wait_until::<kernel::keyboard::has_data>` under thousands
-of injected key events a second. Two ways in, one subject: a `waiting` flag
-left set by a previous wait of that thread, over `set_waiting()` in
-`toyos-sched/src/task.rs`.
+through `scheduler::wait_until::<kernel::keyboard::has_data>`: `Profile::MetalUsb`
+under a few thousand injected key events a second, once with the i8042 present
+and once with `q35,i8042=off`, so both the PS/2 and the USB delivery paths reach
+it, and the victim both times was the in-guest runner blocked on stdin at
+`===READY===`. It does not reproduce at ordinary typing rates. Two ways in, one
+subject: a `waiting` flag left set by a previous wait of that thread, over
+`set_waiting()` in `toyos-sched/src/task.rs`.
 
 What the assertion says happened: this thread's task word still carried
 *waiting* when `enter` prepared a new wait. `enter`'s loop consumes its ticket
@@ -95,3 +98,7 @@ list lock now. It is a hole in the primitive rather than the capture above's
 path — `scheduler::wake_sched` claims through `wake_direct`, and no kernel
 caller of either reaches the list at all — so the entry stays open on every
 path that has not been ruled out.
+
+**Exit condition.** Reproducing the keyboard route deliberately, which means a
+guest-side key generator rather than a host-side flood, and then accounting for
+whichever wait left the flag set.
