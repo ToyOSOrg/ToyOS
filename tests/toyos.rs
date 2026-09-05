@@ -355,6 +355,8 @@ const RUST_SKIP: &[&str] = &[
     "home_fsync_budget",
     // Needs `so-cache-tiny` and the NVMe `/home`. `so_cache_refusals` gives both.
     "so_cache_policy",
+    // Needs the NVMe `/home` and a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
+    "home_overwrite_zero",
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
     "redirty_mid_flush",
@@ -585,6 +587,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("home_budget_refusal_retried", Sched::Parallel, Tier::Nightly),
     // The shared-object cache's two refusals. Body in `tests/common/storage.rs`.
     ("so_cache_refusals", Sched::Parallel, Tier::Fast),
+    // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
+    ("home_overwrite_reads_back", Sched::Parallel, Tier::Fast),
     // One filesystem under two paths: the guest writes under each of /apps and
     // /home, the host finds both in one volume on the image. Body in
     // `tests/common/storage.rs`.
@@ -8676,6 +8680,9 @@ fn run_machine_test(
             storage::home_budget_refusal_retried(test_config, c_bins, rust_bins)
         }
         "so_cache_refusals" => storage::so_cache_refusals(test_config, c_bins, rust_bins),
+        "home_overwrite_reads_back" => {
+            storage::home_overwrite_reads_back(test_config, c_bins, rust_bins)
+        }
         "apps_and_home_are_one_filesystem" => {
             storage::apps_and_home_are_one_filesystem(test_config, c_bins, rust_bins)
         }

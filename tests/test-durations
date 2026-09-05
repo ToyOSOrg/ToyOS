@@ -138,9 +138,7 @@ alone_line_reports_the_alone_run 0 shards=12
 apps_and_home_are_one_filesystem 7263 shards=12
 audio_idle_suspend 1013 shards=12
 audio_tone (smp=1) 8450 shards=12
-audio_tone (smp=8) 8471 shards=12
 audio_tone_load (smp=1) 18139 shards=12
-audio_tone_load (smp=8) 16048 shards=12
 bcachefs_upstream_read 92600 shards=1
 block_duplicate_id 6997 shards=12
 blocked_dump 3400 shards=12
@@ -207,6 +205,7 @@ hierarchy_paths 87 shards=12
 home_backing_revoked 663 shards=12
 home_budget_refusal_retried 18661 shards=12
 https_tls13 5166 shards=12
+home_overwrite_reads_back 4835 shards=12
 i8042_absent 9221 shards=12
 i8042_budget_expiry 3135 shards=12
 i8042_fadt_denial 5736 shards=12
