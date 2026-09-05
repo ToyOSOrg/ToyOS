@@ -41,13 +41,18 @@ built on the first.
    `/system/bin/reboot` and the test runner's `run reboot` are blocked on a new
    syscall number in `toyos-abi/src/syscall.rs` and its `SysCap` wrapper.
 
-   A chipset watchdog is not a substitute on this machine. The T14 is Tiger
-   Lake-LP — LPC `8086:a082`, SMBus `8086:a0a3` — and Linux 6.8.0-138's
-   `lpc_ich` claims neither of those ids among its 237 PCI aliases, registers
-   no `/sys/class/watchdog`, and finds no WDAT among the firmware's tables. So
-   ICH9's PMBASE+`0x60` TCO block, which QEMU's q35 models
-   (`hw/acpi/ich9_tco.c`, `include/hw/southbridge/ich9.h:205`), is not this
-   machine's, and a driver green on QEMU says nothing about it.
+   A chipset watchdog is a later stage, judged on the machine rather than in
+   QEMU. The T14 is Tiger Lake-LP — LPC `8086:a082`, SMBus `8086:a0a3` — and
+   Linux 6.8.0-138's `lpc_ich` claims neither id among its 237 PCI aliases: the
+   TCO block is reached through the SMBus controller's TCOBASE, which is why
+   `i2c_i801` is the module claiming `8086:a0a3` here. QEMU's q35 models ICH9's
+   PMBASE+`0x60` block instead (`hw/acpi/ich9_tco.c`,
+   `include/hw/southbridge/ich9.h:205`) and so cannot judge that path at all;
+   the register oracle is Intel's Tiger Lake-LP PCH datasheet and the judge is
+   the machine, which carries no watchdog today — no `/sys/class/watchdog`, no
+   WDAT among the firmware's tables. **The milestone does not wait on it**: a
+   finished run reboots itself, and until the watchdog exists a hang costs a
+   hand on the power button.
 3. **The driver**, a small Rust program on the Linux side, no Python: flash the
    image to the ToyOS partitions, set bootnext, reboot, wait, mount the log
    partition, and answer pass or fail from the log's verdict line. The
