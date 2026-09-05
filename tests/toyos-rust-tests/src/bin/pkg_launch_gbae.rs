@@ -36,27 +36,49 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Every spelling of the planted link the kernel's normalizer accepts.
+///
+/// The first is what `package_of` classifies; the other four it answers `None`
+/// for while `sys_readlink` lands them all on the same file, which is the whole
+/// of what a canonical-path gate is for.
+const SPELLINGS: [&str; 5] = [
+    "/apps/toy/echo",
+    "/apps/./toy/echo",
+    "/apps//toy/echo",
+    "apps/toy/echo",
+    "/tmp/../apps/toy/echo",
+];
+
 /// `toybox`'s row carries `syscap = ["power"]` here and this estate holds none,
 /// so a launch resolving through the link is a process handed a capability
-/// nothing gave it. Exit 0 is the refusal.
+/// nothing gave it. Exit 0 is every spelling refused.
 fn symlink_row() -> std::process::ExitCode {
     std::fs::create_dir_all(PLANTED_DIR).expect("/apps is writable");
     toyos_abi::syscall::symlink(DECLARED.as_bytes(), PLANTED.as_bytes())
         .expect("a symlink under /apps is allowed");
-    let target = std::fs::read_link(PLANTED).expect("the link was planted");
-    assert_eq!(target.to_str(), Some(DECLARED), "the link does not point where it was aimed");
+    for spelling in SPELLINGS {
+        let target = std::fs::read_link(spelling).expect("every spelling reaches the link");
+        assert_eq!(target.to_str(), Some(DECLARED), "{spelling} does not reach the planted link");
+    }
 
-    match Command::new(PLANTED).spawn() {
-        Ok(child) => {
-            println!(
-                "pkg-symlink: {PLANTED} started as pid {} — a link under /apps reached {DECLARED}'s row",
+    let mut refused = 0;
+    for spelling in SPELLINGS {
+        match Command::new(spelling).spawn() {
+            Ok(child) => println!(
+                "pkg-symlink: {spelling} started as pid {} — a link under /apps reached \
+                 {DECLARED}'s row",
                 child.id()
-            );
-            std::process::ExitCode::FAILURE
+            ),
+            Err(e) => {
+                println!("pkg-symlink: {spelling} refused: {e}");
+                refused += 1;
+            }
         }
-        Err(e) => {
-            println!("pkg-symlink: {PLANTED} refused: {e}");
-            std::process::ExitCode::SUCCESS
-        }
+    }
+    if refused == SPELLINGS.len() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        println!("pkg-symlink: {refused} of {} spellings refused", SPELLINGS.len());
+        std::process::ExitCode::FAILURE
     }
 }

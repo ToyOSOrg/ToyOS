@@ -182,12 +182,21 @@ fn guest_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String>
     // so running it earlier would judge that record instead of this one.
     let at = log.len();
     passed(qemu, log, "test_rs_pkg_launch_gbae symlink-row")?;
-    const PLANTED: &str = "init: launcher: /apps/toy/manifest.toml cannot be read";
-    if !log[at.min(log.len())..].contains(PLANTED) {
-        return Err(format!(
-            "a symlink under /apps was not classified by /apps — init never said {PLANTED:?}:\n{}",
-            &log[at.min(log.len())..]
-        ));
+    // The canonical spelling classifies as a package carrying no manifest; the
+    // four the kernel would normalize reach no classifier at all.
+    for said in [
+        "init: launcher: /apps/toy/manifest.toml cannot be read",
+        "init: launcher: \"/apps/./toy/echo\" is not a canonical path",
+        "init: launcher: \"/apps//toy/echo\" is not a canonical path",
+        "init: launcher: \"apps/toy/echo\" is not a canonical path",
+        "init: launcher: \"/tmp/../apps/toy/echo\" is not a canonical path",
+    ] {
+        if !log[at.min(log.len())..].contains(said) {
+            return Err(format!(
+                "a symlink under /apps was not classified by /apps — init never said {said:?}:\n{}",
+                &log[at.min(log.len())..]
+            ));
+        }
     }
 
     // And the directory it left comes off, because a name `install` refuses to
@@ -278,7 +287,16 @@ fn readback(image: &Path, archive: &[u8]) -> Result<(), String> {
             .read_file(&on_disk)
             .map_err(|e| format!("reading {on_disk} off the DATA partition: {e:?}"))?;
         if got != want {
-            let first = got.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(0);
+            // A length that differs and a byte that differs are two findings,
+            // and this message is the evidence either one rests on.
+            let Some(first) = got.iter().zip(&want).position(|(a, b)| a != b) else {
+                return Err(format!(
+                    "{on_disk} is {} bytes on the device against the archive's {}, and agrees on \
+                     every byte they share",
+                    got.len(),
+                    want.len()
+                ));
+            };
             let head = |b: &[u8]| {
                 b.iter().skip(first).take(16).map(|x| format!("{x:02x}")).collect::<Vec<_>>().join("")
             };

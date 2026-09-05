@@ -470,12 +470,18 @@ enum Resolved<'a> {
 /// **A launch path under a writable directory is classified by that directory
 /// before any symlink is followed, never after.** `declared` follows one link,
 /// so asking it first would let `/apps/<anything>/x` — a symlink any process
-/// can plant — resolve to the whole `[programs]` row of the binary it points at.
+/// can plant — resolve to the whole `[programs]` row of the binary it points
+/// at. A path the kernel would normalize is refused before either happens: it
+/// classifies as one thing and opens as another, and `start` spawns the string
+/// the client sent, so the two need not even name one file.
 ///
 /// A path under `/apps` that no manifest answers for is refused rather than
 /// answered undeclared, because the caller's fallback for undeclared is a
 /// direct spawn carrying the caller's own namespace.
 fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
+    if !package::is_canonical(path) {
+        return Resolved::Refused(format!("{path:?} is not a canonical path"));
+    }
     let Some(name) = package::package_of(path) else {
         return match declared(system, path) {
             Some(row) => Resolved::Row(row),

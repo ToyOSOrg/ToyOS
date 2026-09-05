@@ -134,6 +134,18 @@ pub fn listed(entries: &[(String, String)]) -> Vec<Package> {
     out
 }
 
+/// Whether `path` is already the string every path syscall will act on.
+///
+/// **A launch is classified by the string it is spawned with**, and the kernel
+/// normalizes before it opens anything (`kernel/src/vfs.rs`'s `normalize` drops
+/// an empty component and `.`, and pops on `..`). A path meaning something else
+/// after that is one nothing can both classify and spawn: `/apps/./x` is
+/// outside `/apps` to [`package_of`] and inside it to every syscall.
+pub fn is_canonical(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.split('/').skip(1).any(|part| part.is_empty() || part == "." || part == "..")
+}
+
 /// The package a launch path belongs to, or `None` for a path outside `/apps`.
 /// The one segment after `/apps`, so `..` and an empty segment answer `None`
 /// rather than resolving to some other package's row.
@@ -238,6 +250,26 @@ mod tests {
         .is_err());
         let upper = sample().digest.to_uppercase();
         assert!(check_digest(&upper).is_err());
+    }
+
+    /// **Every spelling the kernel's normalizer would change is refused before
+    /// anything classifies it**: `package_of` answers `None` for four of them
+    /// while every path syscall lands them inside `/apps`.
+    #[test]
+    fn a_path_the_normalizer_would_change_is_not_canonical_and_classifies_as_nothing() {
+        assert!(is_canonical("/apps/toy/echo"));
+        assert!(is_canonical("/system/bin/toybox"));
+        for bad in
+            ["/apps/./toy/echo", "/apps//toy/echo", "apps/toy/echo", "/tmp/../apps/toy/echo",
+             "/apps/toy/echo/", "./echo", "", "/"]
+        {
+            assert!(!is_canonical(bad), "{bad:?} passed as canonical");
+        }
+        for escaping in
+            ["/apps/./toy/echo", "/apps//toy/echo", "apps/toy/echo", "/tmp/../apps/toy/echo"]
+        {
+            assert_eq!(package_of(escaping), None, "{escaping:?} classified as a package");
+        }
     }
 
     /// The launcher shows what init would start, in a bounded list.
