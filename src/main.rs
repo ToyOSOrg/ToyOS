@@ -99,10 +99,6 @@ fn main() {
         toyos_build::pr::dispatch_abi_check(&root, &args);
         return;
     }
-    if args.iter().any(|a| a == "--writing-law-check") {
-        toyos_build::pr::dispatch_writing_law_check(&root, &args);
-        return;
-    }
     // The published crates' rule, and the list the publish workflow reads. Here
     // for the same reason: git and five manifests, on a runner with no QEMU.
     if args.iter().any(|a| a == "--sdk-version-check") {

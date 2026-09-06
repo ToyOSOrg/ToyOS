@@ -162,8 +162,7 @@ By `kind` alone: defect 222, finding 95, track 33, rejected 8, and one file
 under `issues/diagnostics/` carrying `kind: design-debt` — one of the ten
 closed *area* names, not one of the five defined `kind` values. Filed as its own build entry rather than
 fixed, per this repository's own rule against fixing what a bookkeeping pass
-finds; `src/issuegate.rs` has since closed that entry by gating the two
-fields.<sup>3</sup>
+finds.<sup>3</sup>
 
 **Opened this week vs. closed/deleted this week.** The README's "Closing
 one" section is unambiguous: *"Delete the file. Git keeps the story."* — so a

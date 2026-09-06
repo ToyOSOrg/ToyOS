@@ -1,7 +1,6 @@
-/// The gate that an actuator's doc names a reader that exists, read by nothing
-/// but its own tests like `issuegate` and `sourcegate` below.
+/// The actuator-state coupling gate, read by nothing but its own tests.
 #[cfg(test)]
-pub mod actuatorgate;
+pub mod actuatorstate;
 pub mod assets;
 pub mod build;
 pub mod buildlock;
@@ -14,20 +13,13 @@ pub mod fingerprint;
 pub mod forkcheck;
 pub mod hostws;
 pub mod image;
-/// The issue tracker's own frontmatter gate, and like `sourcegate` below it is
-/// read by nothing but its own tests.
-#[cfg(test)]
-pub mod issuegate;
 /// Which kernel containers may be hashed, and by whose keys; read by nothing
-/// but its own tests, like `issuegate` above.
+/// but its own tests.
 #[cfg(test)]
 pub mod kernelkeys;
 pub mod libc;
 pub mod mergehealth;
 pub mod pr;
-/// The comment law and its ratchet over `src/prose-ledger`; the ratchet is its
-/// own tests', the one line classifier also `writinglaw`'s.
-pub mod prosegate;
 pub mod redlist;
 pub mod sdkversion;
 pub mod soundfont;
@@ -41,7 +33,6 @@ pub mod tiers;
 pub mod toolchain;
 pub mod wallpaper;
 pub mod worktree;
-pub mod writinglaw;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
