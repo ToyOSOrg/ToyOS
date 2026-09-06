@@ -229,6 +229,8 @@ pub fn watchdog_fed(
 /// The kernel's read-back above its own arm, in
 /// `kernel/src/drivers/watchdog.rs`: whole clauses, one per branch.
 const ARMED_ON_ARRIVAL: &str = "so the bootloader had already armed the timer";
+/// Unreachable from this suite: every guest that reaches the kernel's arm
+/// passed the parameter, and the loader read the same one first.
 const UNARMED_ON_ARRIVAL: &str = "so nothing had armed the timer";
 
 /// The tail of the loader's own arm line, which names the shipped bound and so
@@ -249,10 +251,8 @@ fn armed_on_arrival() -> String {
 /// inside the bound.
 ///
 /// What the kernel's read-back must report is the register value the loader
-/// wrote, not merely a running timer: `TCO_TMR_HLT` is clear out of reset on
-/// q35, and with the loader's arm silenced this line reads `TCO_TMR=4`. The
-/// other way is the same guest without the parameter, where neither half arms
-/// and the kernel says nothing about a timer at all.
+/// wrote, never merely a running timer: `TCO_TMR_HLT` is clear out of reset on
+/// q35.
 pub fn loader_watchdog_arms(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -297,6 +297,12 @@ fn starved() -> BootOptions {
 }
 
 /// The line `arm` logs on q35 at the fast bound; both tests demand it first.
-const ARMED: &str = "watchdog: 8086:2918 TCO at 0x660 TCO_TMR=2";
+///
+/// The tail is what makes it the kernel's: the loader prints the same port and
+/// a `TCO_TMR=` of its own on every guest that passes the parameter, and
+/// `TCO_TMR=2` is a prefix of its `TCO_TMR=250`.
+const ARMED: &str =
+    "watchdog: 8086:2918 TCO at 0x660 TCO_TMR=2 — this machine resets if no scheduler pass runs \
+     for 2400ms";
 
 const FED_FOR: Duration = Duration::from_secs(20);

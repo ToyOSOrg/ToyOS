@@ -1010,14 +1010,36 @@ fn params_of(text: &str) -> Vec<String> {
     let Some((body, _)) = body.split_once("];") else { return Vec::new() };
     let mut names: Vec<String> = body.split('"').skip(1).step_by(2).map(str::to_string).collect();
     names.extend(body.matches("toyos_tco::PARAM").map(|_| toyos_tco::PARAM.to_string()));
-    // The value's `&[`, not the type's: the rows are what follows the last one.
-    let rows = body.rsplit_once("&[").map_or(0, |(_, rows)| rows.matches('(').count());
     assert!(
-        names.len() == rows,
-        "`PARAMS` lists {rows} row(s) and this reads {} name(s) out of them: {names:?}",
+        names.len() == rows_of(body),
+        "`PARAMS` lists {} row(s) and this reads {} name(s) out of them: {names:?}",
+        rows_of(body),
         names.len()
     );
     names
+}
+
+/// How many `(name, flag)` rows the list holds: an opening paren at the slice's
+/// own depth, so a paren inside a row is part of that row and not another.
+///
+/// The value's `&[`, not the type's, which is the last one before the rows.
+fn rows_of(body: &str) -> usize {
+    let Some((_, rows)) = body.rsplit_once("&[") else { return 0 };
+    let mut depth = 0usize;
+    let mut count = 0;
+    for c in rows.chars() {
+        match c {
+            '(' => {
+                if depth == 0 {
+                    count += 1;
+                }
+                depth += 1;
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    count
 }
 
 #[derive(Deserialize)]
@@ -1942,6 +1964,11 @@ mod tests {
         assert_eq!(
             params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[(toyos_tco::PARAM, &W)];"),
             vec![toyos_tco::PARAM.to_string()]
+        );
+        // A paren inside a row is that row's, not another row's.
+        assert_eq!(
+            params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[(\"a (one)\", &A)];"),
+            vec!["a (one)".to_string()]
         );
         // A row it cannot read is refused rather than dropped, which the count
         // is for: without it the two-row table below would read as one name.

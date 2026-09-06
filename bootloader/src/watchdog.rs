@@ -135,16 +135,17 @@ fn described(system_table: &SystemTable<Boot>, at: u64, len: u64) -> bool {
     };
     let Ok(map) = bs.memory_map(buffer) else { return false };
     let Some(end) = at.checked_add(len) else { return false };
+    // Every field here is firmware's, so a region whose own end overflows
+    // describes nothing rather than wrapping into one that covers `at`.
     map.entries().any(|region| {
-        let region_end = region.phys_start + region.page_count * PAGE_SIZE as u64;
+        let Some(bytes) = region.page_count.checked_mul(PAGE_SIZE as u64) else { return false };
+        let Some(region_end) = region.phys_start.checked_add(bytes) else { return false };
         region.phys_start <= at && end <= region_end
     })
 }
 
 /// One configuration dword of a function on bus 0, through the ECAM window.
 fn config_u32(ecam: u64, device: u8, function: u8, offset: u16) -> u32 {
-    // Masked here and not asserted: every field is this file's own, and the
-    // address the SAFETY clause below bounds is the one this expression makes.
     let at = ecam
         + (u64::from(device & 0x1f) << 15)
         + (u64::from(function & 7) << 12)
