@@ -57,9 +57,6 @@ const REPORT_CHECK: Cadence = Cadence::every(
     "PROBES uncached reads per check, on the CPU that took an interrupt anyway",
 );
 
-/// Framebuffers below this are reachable before [`remap`] runs; above it, only after.
-const LOW_MAP_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
-
 #[derive(Clone, Copy)]
 struct Fb {
     ptr: *mut u8,
@@ -399,8 +396,12 @@ const _: () = {
     assert!(framebuffer_is_reclaimed_ram(&SPLIT, 0xE000_0000, 0x0080_0000).is_none());
 };
 
-/// Arm the console from `KernelArgs`, before `serial::init`; covers
-/// everything up to `mm::init`, which the bootloader's identity+high map already reaches.
+/// Arm the console from `KernelArgs`, before `serial::init`; covers everything
+/// up to `mm::init`.
+///
+/// Where the scanout is is the bootloader's to answer, and it asserts at the
+/// handoff that its own map reaches it — so nothing here holds a second,
+/// weaker belief about how far that map goes.
 pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     if args.gop_framebuffer == 0 {
         return;
@@ -438,24 +439,16 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     RAW_PHYS.store(args.gop_framebuffer, Ordering::Relaxed);
     RAW_SIZE.store(args.gop_framebuffer_size, Ordering::Relaxed);
 
-    match args.gop_framebuffer.checked_add(args.gop_framebuffer_size) {
-        Some(end) if end <= LOW_MAP_LIMIT => {
-            publish(fb);
-            EARLY.store(true, Ordering::Relaxed);
-            log!(
-                "panic console: armed {}x{} stride={} format={} at {:#x}",
-                fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
-            );
-        }
-        _ => log!(
-            "panic console: framebuffer at {:#x} is above the boot map, armed after mm::init",
-            args.gop_framebuffer
-        ),
-    }
+    publish(fb);
+    EARLY.store(true, Ordering::Relaxed);
+    log!(
+        "panic console: armed {}x{} stride={} format={} at {:#x}",
+        fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
+    );
 }
 
 /// Re-establish the mapping after `mm::init` replaces the bootloader's page
-/// tables, and arm a framebuffer above [`LOW_MAP_LIMIT`]'s reach.
+/// tables.
 pub fn remap() {
     let phys = RAW_PHYS.load(Ordering::Relaxed);
     if phys == 0 {
@@ -464,9 +457,6 @@ pub fn remap() {
     let size = RAW_SIZE.load(Ordering::Relaxed);
     mm::paging::map_mmio(phys, align_2m(size as usize) as u64, MmioPolicy::WriteCombining);
     rearm();
-    // Not in `rearm`, which a `set_resolution` window also calls: this runs
-    // once, and it is where a framebuffer above the boot map first has a panel.
-    EARLY.store(true, Ordering::Relaxed);
 }
 
 /// Render the newest records into the console's static scratch, before
