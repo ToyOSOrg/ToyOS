@@ -120,21 +120,27 @@ it.
 
 ## Output
 
-Your findings are a GitHub review on the pull request: `gh pr review <N> --request-changes
---body-file <file>`, or `--approve` in its place. The verdict is the first line of the body, alone,
-exactly one of LAND, LAND AFTER NAMED CODE CHANGES, SEND BACK — LAND is the `--approve` and the
-other two are the `--request-changes`. Then the findings, one line each — `path:line — what — why it
-fails the rule` — under the heading CODE, then the heading PROSE. No praise, no summary of what the
-branch does.
+Implementer and reviewer are one GitHub identity, and GitHub refuses `--approve` and
+`--request-changes` on a pull request that identity opened. Your findings are therefore a pull
+request comment — `gh pr comment <N> --body-file <file>` — never a GitHub review, and they carry no
+per-line threads: a review comment on a line outside the diff is refused as well, and a finding may
+cite any line in the tree.
 
-Each CODE finding is its own review thread on the file and line it cites, because a thread is what
-the implementer answers; the PROSE lines stay in the body.
+The verdict is the first line of the body, alone, exactly one of LAND, LAND AFTER NAMED CODE
+CHANGES, SEND BACK. It is addressed to the implementer: LAND AFTER NAMED CODE CHANGES says the
+findings below are the whole list and the branch lands once each is answered, SEND BACK says they
+are not and the branch is reworked and re-reviewed whole. Then the findings, one line each —
+`path:line — what — why it fails the rule` — under the heading CODE, then the heading PROSE. No
+praise, no summary of what the branch does.
 
-A re-review reads the implementer's replies and every commit since your last review, and posts the
+A re-review reads the implementer's replies and every commit since your last comment, and posts the
 same way. A reply is a claim like any other, and a refusal stands only on the rule or measurement it
-names. A finding the branch neither fixed nor refused is repeated, never dropped.
+names. A finding the branch neither fixed nor refused is repeated. A finding it refused and you
+still hold is repeated marked DISPUTED, which is the orchestrator's to settle and the only thing
+that ends a disagreement neither of you will drop.
 
-Your report to the orchestrator is exactly one line, and carries no finding:
+Your report to the orchestrator is exactly one line, and carries no finding. LAND is the approve;
+the other two verdicts are the request-changes:
 
 ```
 #N: request-changes
