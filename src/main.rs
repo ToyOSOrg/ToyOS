@@ -175,9 +175,25 @@ fn main() {
     let diag = args.iter().any(|a| a == "--diag-boot");
     let console = args.iter().any(|a| a == "--console-boot");
     assert!(!(diag && console), "--diag-boot and --console-boot are two images; build one");
-    let boot = match (diag, console) {
-        (true, _) => toyos_build::build::Boot::Diag,
-        (_, true) => toyos_build::build::Boot::Console,
+    // `--boot-config <path>` builds a named `system.toml` — the metal loop's
+    // case, and any other. It names the config itself, so the two modes that
+    // name their own are refused beside it rather than silently outranked, and
+    // it is a build and not a boot: `qemu::launch` has no case to run.
+    let boot_config = parse_valued(&args, "--boot-config");
+    if let Some(asked) = &boot_config {
+        assert!(
+            !(diag || console),
+            "--boot-config {asked} and --diag-boot/--console-boot each name a config; pass one"
+        );
+        assert!(build_only, "--boot-config {asked} builds an image; pass --build-only");
+    }
+    let boot = match (&boot_config, diag, console) {
+        (Some(asked), _, _) => toyos_build::build::Boot::Config(
+            toyos_build::build::boot_config(&root, asked)
+                .unwrap_or_else(|refusal| panic!("{refusal}")),
+        ),
+        (None, true, _) => toyos_build::build::Boot::Diag,
+        (None, _, true) => toyos_build::build::Boot::Console,
         _ => toyos_build::build::Boot::Normal,
     };
     assert!(
@@ -260,6 +276,14 @@ fn main() {
 /// the difference is one word he typed on one command line, and a parameter is
 /// not even that: `--diag-boot --kernel-param heartbeat` and
 /// `--diag-boot --kernel-param control-regs-bench` are one kernel binary.
+/// `<flag> <value>`, once. A second use is refused rather than resolved: two
+/// answers to "which config" is a command line whose author meant one of them.
+fn parse_valued(args: &[String], flag: &str) -> Option<String> {
+    let mut found = parse_repeated(args, flag);
+    assert!(found.len() < 2, "{flag} takes one value; this asks for {found:?}");
+    found.pop()
+}
+
 fn parse_repeated(args: &[String], flag: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut rest = args.iter();

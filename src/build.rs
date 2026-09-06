@@ -740,7 +740,7 @@ fn unnamed_program(
 /// diagnostic image's kernel and bootloader are byte-identical to the ordinary
 /// one's, so what the owner reads off a diag boot is what the shipping kernel
 /// does. A `#[cfg]` could not have given us that.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Boot {
     Normal,
     /// `diag/system.toml`: the config declares no `devices`, so nothing
@@ -755,28 +755,64 @@ pub enum Boot {
     /// machine that wedges before userland is readable in that mode and in no
     /// other. `screen_console_shell` boots this config.
     Console,
+    /// One `system.toml` named on the command line, repository-relative. The
+    /// image is built by [`build_test_image`] — the same function the harness
+    /// boots a case with — so what is flashed is what a guest test booted.
+    Config(PathBuf),
 }
 
 impl Boot {
-    fn config(self) -> &'static str {
+    fn config(&self) -> PathBuf {
         match self {
-            Self::Normal => "system.toml",
-            Self::Diag => "diag/system.toml",
-            Self::Console => "console/system.toml",
+            Self::Normal => PathBuf::from("system.toml"),
+            Self::Diag => PathBuf::from("diag/system.toml"),
+            Self::Console => PathBuf::from("console/system.toml"),
+            Self::Config(at) => at.clone(),
         }
     }
 
     /// A separate output, so a diag build never leaves `bootable.img` quietly
     /// contradicting the committed config. The previous flashed artifact was
     /// made by editing `system.toml` and reverting it afterwards, which is
-    /// exactly the state this avoids.
-    fn image(self) -> &'static str {
-        match self {
-            Self::Normal => "target/bootable.img",
-            Self::Diag => "target/bootable-diag.img",
-            Self::Console => "target/bootable-console.img",
-        }
+    /// exactly the state this avoids. A named config takes its directory's
+    /// name for the same reason.
+    fn image(&self) -> PathBuf {
+        PathBuf::from(match self {
+            Self::Normal => "target/bootable.img".to_string(),
+            Self::Diag => "target/bootable-diag.img".to_string(),
+            Self::Console => "target/bootable-console.img".to_string(),
+            Self::Config(at) => match case_name(at) {
+                Some(name) => format!("target/bootable-{name}.img"),
+                None => "target/bootable.img".to_string(),
+            },
+        })
     }
+}
+
+/// The name a `--boot-config` image is written under: its config's directory.
+/// `None` for a config directly at the repository root, which is the shipped
+/// one and keeps the shipped name.
+fn case_name(config: &Path) -> Option<String> {
+    let parent = config.parent()?.file_name()?.to_string_lossy().to_string();
+    (!parent.is_empty()).then_some(parent)
+}
+
+/// The `system.toml` a `--boot-config` names, repository-relative, or the
+/// refusal by name.
+///
+/// The file name is part of the check: `Boot::image` takes the *directory* for
+/// the artifact's name, so a config called anything else would be built into an
+/// image named after a directory that does not describe it.
+pub fn boot_config(root: &Path, asked: &str) -> Result<PathBuf, String> {
+    let at = Path::new(asked);
+    let full = if at.is_absolute() { at.to_path_buf() } else { root.join(at) };
+    if full.file_name().and_then(|n| n.to_str()) != Some("system.toml") {
+        return Err(format!("--boot-config {asked}: a boot config is a file named system.toml"));
+    }
+    if !full.is_file() {
+        return Err(format!("--boot-config {asked}: {} is not a file", full.display()));
+    }
+    Ok(full.strip_prefix(root).unwrap_or(&full).to_path_buf())
 }
 
 /// The cargo feature list this build's kernel is compiled with, as one comma-
@@ -1140,6 +1176,19 @@ pub fn build(
     // every later build into a refusal, which is what a dead gate and 156
     // identical refusals looked like on 2026-08-04.
     let _claim = claim_sysroot.then(|| buildlock::claim_sysroot(root, "--claim-sysroot"));
+
+    // A named config takes the harness's own builder rather than a second copy
+    // of the sequence below: it holds its own build slot, lock and toolchain
+    // check, so this returns before the ones this function takes.
+    if let Boot::Config(config) = &boot {
+        let features: Vec<&str> = kernel_features.split(',').filter(|f| !f.is_empty()).collect();
+        let params: Vec<&str> = kernel_param.iter().map(String::as_str).collect();
+        let bytes = build_test_image(root, &root.join(config), &features, &params, false, &[]);
+        let image_path = root.join(boot.image());
+        fs::write(&image_path, bytes)
+            .unwrap_or_else(|e| panic!("write {}: {e}", image_path.display()));
+        return image_path;
+    }
 
     // After the sysroot lock and before every build lock, which is the order
     // the module header fixes. What it bounds is the host: ten agents' builds
@@ -2054,16 +2103,59 @@ mod tests {
     /// absent on a fresh install, so on a default boot it would be a port that
     /// accepts connections and refuses all of them. Whoever wants it runs
     /// `/system/bin/sshd` themselves. It stays in `[programs]` — the gate is on what
+    /// **What `--boot-config` hands [`build_test_image`] is the path it was
+    /// given**, unchanged, for every config this tree holds — and each builds
+    /// to an artifact of its own, so two cases cannot share one image file.
+    #[test]
+    fn a_named_boot_config_reaches_the_builder_unchanged() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut images = BTreeSet::new();
+        for asked in ALL_CONFIGS {
+            let resolved = boot_config(root, asked).unwrap_or_else(|e| panic!("{e}"));
+            let boot = Boot::Config(resolved.clone());
+            assert_eq!(boot.config(), Path::new(asked), "{asked}");
+            assert!(root.join(boot.config()).is_file(), "{asked}");
+            assert!(images.insert(boot.image()), "{asked} builds to an image another one does");
+        }
+        // The shipped config keeps the shipped artifact, so naming it changes
+        // nothing about where it lands.
+        assert_eq!(Boot::Config(PathBuf::from("system.toml")).image(), Boot::Normal.image());
+        assert_eq!(
+            Boot::Config(PathBuf::from("tests/jobcase/system.toml")).image(),
+            Path::new("target/bootable-jobcase.img")
+        );
+    }
+
+    /// A config the tree does not hold is refused by name rather than reaching
+    /// `parse_config`, which would panic about a file instead of about a flag.
+    #[test]
+    fn a_boot_config_that_is_not_a_config_is_refused() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for asked in [
+            "tests/nosuchcase/system.toml",
+            "system.toml/system.toml",
+            "/nowhere/system.toml",
+        ] {
+            let refusal = boot_config(root, asked).expect_err(asked);
+            assert!(refusal.contains("is not a file"), "{asked}: {refusal}");
+        }
+        for asked in ["tests/jobcase", "Cargo.toml", "tests/jobcase/System.toml"] {
+            let refusal = boot_config(root, asked).expect_err(asked);
+            assert!(refusal.contains("named system.toml"), "{asked}: {refusal}");
+        }
+    }
+
     /// init starts, not on the binary being present.
     #[test]
     fn no_shipped_boot_config_starts_sshd() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for boot in [Boot::Normal, Boot::Diag, Boot::Console] {
             let config = boot.config();
-            let start = parse_config(&root.join(config)).boot.start;
+            let start = parse_config(&root.join(&config)).boot.start;
             assert!(
                 !start.iter().any(|p| p == "sshd"),
-                "{config} starts sshd: {start:?}",
+                "{} starts sshd: {start:?}",
+                config.display(),
             );
         }
     }
