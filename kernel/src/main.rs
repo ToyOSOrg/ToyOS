@@ -342,11 +342,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     mm::init(maps, &reserved);
     drivers::panic_console::remap();
 
-    // Exception handlers first: a bug in a later phase then diagnoses instead of triple-faulting.
+    // `init_bsp` loads the IDT partway through, as early as this CPU's `gs:`
+    // allows: a fault in any later phase then diagnoses instead of stopping in
+    // a handler the firmware left behind.
     let madt = acpi::parse_madt(kernel_args.rsdp_addr).expect("ACPI: MADT not found");
     apic::init();
     percpu::init_bsp(apic::id());
-    idt::init();
     ioapic::init(&madt);
     idt::enable_interrupts();
     // Read back, because `sti` is the first instruction at which this machine's

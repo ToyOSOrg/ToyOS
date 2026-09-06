@@ -4,73 +4,78 @@ kind: defect
 opened: 2026-09-06
 ---
 
-# The T14's boot stops inside `percpu::init_bsp`, after `control_regs`
+# The T14's boot stops inside `fpu::init`
 
-Run 4 (metal `e6494990`, parameters `watchdog` and `early-panel`) painted its
-last record and never painted another:
+Runs 4 (`e6494990`) and 5 (`4af1cafe`, a different image — the partition GUIDs
+differ) both painted the same last record and never painted another:
 
 ```
 [0.000 cpu0 boot] control_regs: cpu0 cr0=0x80010033 cr4=0x00320e68 efer=0x0d01 smep smap pcid umip nx
 ```
 
-`loader.log` shows the handoff completed, so the kernel was entered and ran at
-least to that line.
+Both `loader.log`s show the handoff completed, so the kernel was entered and ran
+to that line. Both machines were returned by the owner's hand.
 
-## Where, and why it is that narrow
+## Where
 
-The window is **not** `main.rs`'s phase list. `control_regs::init(0)` is called
-from `percpu::init_bsp` itself (`arch/percpu.rs`), and the next record in
-program order is that same function's own `percpu: BSP cpu_id=0 lapic_id=…` —
-separated only by `fpu::init()`, the `wrmsr` that makes `gs:` valid, and the
-`PERCPU_READY` store. That line is absent, so nothing after it ran, and every
-later candidate the window seemed to hold — the I/O APIC, `sti`, `syscall::init`,
-the HPET — is downstream of a stop that already happened.
+Run 4 narrowed it to `percpu::init_bsp`: `control_regs::init(0)` is called from
+there, and the next record in program order was that same function's own
+`percpu: BSP cpu_id=0 …`, separated only by `fpu::init`, the `wrmsr` that makes
+`gs:` valid, and the `PERCPU_READY` store.
 
-Two things that would have widened the window are ruled out from the tree:
+Run 5 carried a record between `fpu::init` and the `wrmsr` — `fpu::log_state`,
+moved there — and **it did not print**. So the stop is inside `fpu::init`, or in
+`log_state`'s own `cpuid`/`xgetbv` before its record.
 
-- **The panel can see the next record.** `alloc_log_shard` gives cpu0 the boot
-  shard itself, so the record after `PERCPU_READY` goes to the shard the panel
-  already renders; `log::emit` repaints after every record while `EARLY` holds.
-  A boot that got further would have painted further.
-- **It hung; it did not fault.** No IDT is loaded yet, so a fault here is a
-  triple fault, and a triple fault resets the machine. The panel still held the
-  same stale text 14+ minutes later and needed the power button, so the CPU
-  never reset.
+That the panel would have shown it is settled: `alloc_log_shard` gives cpu0 the
+boot shard itself, so the record lands in the shard the panel already renders,
+and `log::emit` repaints after every record while `EARLY` holds.
 
-## What is left, and how the next run says which
+## Why it is silent, which was read wrong at first
 
-`fpu::init()` is the first suspect and the only one that touches state QEMU
-models differently from Tiger Lake: `load_initial` (`fninit`, `ldmxcsr`) then
-`self_check`, whose `UserFpState::saved_from_cpu()` reads the CPU's
-architectural default. Its assertion message calls `percpu::cpu_id()`, which
-reads `gs:` — and `gs:` is not valid until the `wrmsr` three lines later, so on
-a machine where that assertion *fails* the failure path itself faults before it
-can report. The `wrmsr`, the store, and the first `emit` past `PERCPU_READY` are
-the rest.
+Run 4's entry here said "it hung; it did not fault, because a fault with no IDT
+is a triple fault and a triple fault resets". **That is wrong**, and it was the
+one thing pointing away from the answer. `ExitBootServices` does not clear
+`IDTR`: the table still loaded is the firmware's, and its handlers are in
+identity-mapped memory this kernel's boot map still covers. A fault there
+vectors into firmware code that dead-loops — no reset, no triple fault, and
+nothing on this kernel's panel. A fault and a hang look identical from the
+outside, so the silence never argued for either.
 
-`fpu::log_state` now runs between `fpu::init` and the `wrmsr`, rather than after
-this function's own line, on the pre-`PERCPU_READY` boot-shard path that
-`control_regs` proved reaches the panel. It takes its CPU id as an argument
-instead of reading `gs:`, which is what lets it run there at all — and which
-removes the same latent hazard from the AP path. It prints this CPU's extended
-state, so it is a machine fact rather than a breadcrumb, and the next photograph
-reads:
+`kernel/src/arch/idt` is therefore loaded partway through `init_bsp` now,
+immediately after the `wrmsr` and before `control_regs::init` and `fpu::init` —
+as early as it can be, because the naked stubs open on `gs:[preempt_count]` and
+the `wrmsr` is what makes that address mean anything. A fault in either step now
+prints its vector, registers and backtrace on the armed panel. **That is the
+change that makes the next photograph name the cause**, and it costs the kernel
+nothing: `main.rs` no longer calls `idt::init`, APs are untouched (the
+trampoline's own `lidt` loads the same table after setting their `gs:`), and the
+IDT was already the first thing `main` did after this function.
 
-- no `fpu:` line — the stop is inside `fpu::init`, whose `xcr0` was never reached
-- an `fpu:` line, no `percpu: BSP` — the `wrmsr`/store/first-`emit` group
-- neither, still ending at `control_regs` — `control_regs::init`'s own tail
+## What in `fpu::init` can do it
 
-No record was added before `fpu::init`: `control_regs::init` has no wait after
-its own printed line, so a record there would discriminate nothing.
+`CR4` in the photograph is `0x00320e68`, and **bit 18, `OSXSAVE`, is clear** —
+so this kernel never executes `xsetbv`, never writes `XCR0`, never sizes an
+`xsave` area, and never issues `xsave`/`xsaveopt`/`xsaves`. `UserFpState` is
+`FXSAVE64` layout and says so. Tiger Lake's AVX-512 components are therefore not
+reachable and cannot be what faults: the whole class the run-5 brief raised is
+ruled out by one bit in the photograph.
 
-The steps that produced no record now print what they established: `idt::init`
-the table it loaded and how many vectors carry only the unclaimed stub, the
-`sti` its `RFLAGS` read back, `syscall::init` the three MSRs the CPU holds, and
-`clock::init` the HPET's period and its counter's first reading before it waits
-on that counter.
+What is left in the function is `fninit`, `ldmxcsr` of `0x1F80` (the SDM
+power-on default, which sets no reserved bit), `fxsave64` into a
+`repr(C, align(16))` buffer, and two comparisons. None of those has a reading
+this tree can show is wrong on Tiger Lake, which is exactly why the IDT change
+matters more than another guess.
 
-**Exit condition**: one metal run whose panel shows which of those records is
-last. The T14 is the only judge — QEMU boots this path on every test.
+One real defect was found there and fixed: `self_check`'s assertion *message*
+called `percpu::cpu_id()`, which reads `gs:` — on the BSP that runs before the
+`wrmsr`, so a CPU that genuinely disagreed about the default FPU state would
+have faulted inside the message reporting the disagreement, and reported
+nothing. `init` and `self_check` now take the id, as `log_state` already did.
+
+**Exit condition**: one metal run whose panel shows either the `fpu:` record, or
+an exception report naming the vector and the faulting instruction. The T14 is
+the only judge — QEMU boots this path on every test.
 
 Related: `issues/hardware/an-armed-tco-has-never-reset-the-t14.md` is why this
 wedge needs a hand on the power button instead of resetting itself.

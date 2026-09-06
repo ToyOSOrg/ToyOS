@@ -299,6 +299,23 @@ changes.
   build on the host, which is what turns this into either a contention class the
   harness should schedule around or a defect in the storm's own pacing.
 
+- **`fs_transactional`, `fs_dirs_durable`, `wake_storm_cost`** — added
+  2026-09-06 on `t14-run5`, whose kernel delta is the boot-order change loading
+  the IDT inside `percpu::init_bsp`. Three names across two of three full
+  `cargo test` runs, all three `ALONE … GREEN`, none previously on this list.
+  `fs_transactional` died at `cleanup: Kind(WouldBlock)`, the other two in the
+  run after it.
+
+  **The A/B was run and did not convict the diff.** `origin/metal` `6a715b6f`
+  with the working tree stashed: 325/325 in 185.9 s. The branch again minutes
+  later: 325/325 in 186.7 s. The two red runs were 178.9 s (one name) and
+  242.4 s (two names), and every run's `[host-slots]` lines show **both** guest
+  slots held by other worktrees throughout — four other metal worktrees were
+  live on this host. Mechanism argues the same way as the A/B: the diff moves
+  `lidt` four statements earlier with interrupts still masked, and no path from
+  there reaches a userland filesystem cleanup returning `WouldBlock`. Not
+  investigated further; filed so a fourth sighting is not re-derived.
+
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
 twelve guests across every worktree. It recurred on 2026-08-07: **eight

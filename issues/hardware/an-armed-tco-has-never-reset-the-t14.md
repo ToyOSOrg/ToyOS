@@ -6,59 +6,76 @@ opened: 2026-09-06
 
 # An armed TCO has never reset the T14, at any bound
 
-Every metal run so far has needed a hand on the power button. Runs 3 and 4 both
-armed the chipset watchdog and both had to be power-cycled by the owner (owner
-ruling, 2026-09-06); no earlier claim that the machine reset itself survives —
-run 3's 465 s down interval was the owner, not the timer.
+Every metal run so far has needed a hand on the power button. Runs 3, 4 and 5
+all armed the chipset watchdog and all were power-cycled by the owner (owner
+ruling, 2026-09-06). No claim that this machine reset itself survives — run 3's
+465 s down interval was the owner's hand, and so was run 5's.
 
-Run 4's `loader.log` is the strongest evidence there is, because it is the arm
-and the read-back in one line:
+## What run 5 read back
+
+Run 5's `loader.log` is the first evidence with registers in it:
 
 ```
 watchdog: 8086:a0a3 TCO at 0x400 TCO_TMR=8 armed for 9600ms, and the kernel takes it over
+watchdog: read back TCO_RLD=0x0008 TCO_TMR=0x0008 TCO1_CNT=0x1000 TCO2_STS=0x0000
+watchdog: TCO_RLD still reads 0x0008 after 700ms, ...
 ```
 
-So the block was found, the port was `toyos-tco`'s Tiger Lake row, `TCO_TMR`
-took the value, and `TCO1_CNT` read back with `TCO_TMR_HLT` **clear** — the
-loader refuses by name when it does not, and did not refuse. The kernel then ran
-to its `control_regs` line and stopped
-(`issues/kernel/the-t14-stops-inside-percpu-init-bsp.md`), never reaching its
-own arm, so nothing fed or re-armed the timer. It sat 14+ minutes at a 9.6 s
-bound and the machine was still showing the same panel.
+**`TCO1_CNT` came back `0x1000` from a write of `0x0000`**, and the loader
+reported the machine armed anyway: it judged that register on `TCO_TMR_HLT`
+alone, which is clear inside `0x1000`. That is now fixed — the register is
+declared whole and judged whole.
 
-That leaves the reset gate, and it is **not in the TCO block**: the second
-expiry reboots only while the PCH's `NO_REBOOT` is clear, and that bit lives in
-the power-management controller's own space at an address no source in this tree
-cites. `toyos-tco::RESET_GATE_IS_OUTSIDE_THIS_BLOCK` is that sentence at the
-site. This tree will not write a guessed MMIO offset on the owner's laptop to
-find out — that is the same sin as guessing the I/O port, in a space where the
-wrong write is worse. Ubuntu on this machine exposes no
-`/sys/class/watchdog` and the firmware publishes no `WDAT`, which is consistent
-with a gate the firmware sets and does not advertise.
+## What the datasheet says the bits are
 
-What the tree could decide, it has: the loader now prints `TCO_RLD`, `TCO_TMR`,
-`TCO1_CNT` and `TCO2_STS` as whole words right after arming, then stalls one
-tick plus a margin and reads `TCO_RLD` again. That second read is the question
-no single read answers — *does this timer count at all* — and it splits the
-remaining candidates cleanly:
+*Intel 500 Series Chipset Family On-Package PCH Datasheet, Volume 2 of 2*,
+document 631120-002 rev 002 — Tiger Lake-LP is `8086:a0xx`, and the TCO block is
+the 32-byte I/O range at `TCOBAR` in SMBus configuration space (D31:F4), which
+is the row `toyos-tco` already had right.
 
-- **`TCO_RLD` did not move**: the timer is not running, and no bound it was
-  armed with could ever expire. The halt bit read back clear, so the cause is
-  elsewhere in the block, and the printed words are the evidence.
-- **`TCO_RLD` moved**: the timer counts and the reset is gated downstream —
-  `NO_REBOOT`, or a first-expiry SMI the firmware services.
+- **`TCO1_CNT` bit 12 is `TCO_LOCK`** (§32.1.6): "Once this bit is set to 1, it
+  can not be cleared by software writing a 0 to this bit location. A core-well
+  reset is required." So `0x1000` is firmware's lock, surviving the loader's
+  write exactly as documented — **it is the one bit a read-back may not be
+  judged on**, and judging on it would have disarmed the machine for run 6.
+- **`TCO1_CNT` bit 0 is `NO_REBOOT_MSUS`** (§32.1.6): "When set, the TCO timer
+  will count down and generate the SMI# on the first timeout, but will not
+  reboot on the second timeout." **It reads 0 on the T14.** So the no-reboot
+  gate is *not* what is stopping this machine from resetting.
 
-Only four registers, because only those four have a citation here. The first
-expiry's own latch would separate the last two candidates on the boot after —
-an expiry that happened with only the reboot suppressed — but this tree has no
-datasheet text naming its offset, and a read at a guessed one would report a
-guess as a finding. It is the first thing to add once that section is cited.
+That last point corrects this file's own earlier claim, which said `NO_REBOOT`
+lived in the PMC at an uncited address and could not be read. It is in the TCO
+block on this generation, the loader has been reading it since run 4 without
+knowing what it was, and it is clear. **The bit is not portable**: on the 100
+Series (document 332691-003EN) `TCO1_CNT`'s low byte is reserved and the
+no-reboot bit is elsewhere, so any row added for another generation owes its own
+citation. `toyos-tco`'s module header says this.
 
-q35 is the positive control and prints the moved branch
-(`TCO_RLD went 0x0007 -> 0x0006 over 700ms`), asserted by
-`loader_watchdog_arms`. **The T14 is the judge for which branch it prints.**
+## What is left
 
-**Exit condition**: one metal run's `loader.log` carrying the two new
-`watchdog:` lines, and — if the timer counts — the datasheet section naming
-`NO_REBOOT`'s address on Tiger Lake-LP, cited in `toyos-tco` before anything
-writes it.
+Two candidates, and the tree can no longer decide between them:
+
+1. **The timer is not counting.** `TCO_RLD` read `0x0008` twice. But the 700 ms
+   between those reads was barely one 600 ms tick, and a counter reloaded at an
+   unknown phase inside a tick can legitimately still read its loaded value —
+   so run 5's line claiming "not counting" **overstated its evidence**. The
+   stall is now two ticks plus a margin, which one cannot argue with.
+2. **The first expiry's SMI is serviced by firmware.** `SMI_EN.TCO_EN` (bit 13
+   of the SMI control register at offset 30h from the PMC's BAR2, §4.2.5) routes
+   the first timeout to an SMI. `TCO_LOCK` being set is exactly what prevents
+   this tree from clearing `TCO_EN` — the datasheet's own words for bit 12 are
+   that it "prevents writes from changing the TCO_EN bit". Nothing is programmed
+   for this: the PMC's BAR2 is a base this tree does not compute, and the lock
+   makes the write pointless on this machine anyway.
+
+`TCO1_STS` bit 3, whose datasheet name is `TIMEOUT` and not the `TCO_TMR_STS`
+other sources use (§32.1.4), separates them: it latches on the first expiry, so
+a boot that stayed up with it set expired and only the reboot was suppressed.
+The loader now prints it.
+
+q35 is the positive control and prints the counting branch
+(`TCO_RLD went 0x0007 -> 0x0005 over 1300ms`) with `no_reboot=0`, both asserted
+by `loader_watchdog_arms`. **The T14 is the judge for which branch it prints.**
+
+**Exit condition**: one metal run's `loader.log` carrying the two-tick read and
+`TCO1_STS`, which decides between the two above; then whatever that names.

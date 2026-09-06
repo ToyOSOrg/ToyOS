@@ -568,7 +568,13 @@ fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
     (0..len / 8).map(move |i| unsafe { core::ptr::read_volatile((base as *const u64).add(i)) })
 }
 
-/// Initialize per-CPU data for the BSP. Call after paging + allocator but before IDT/syscall.
+/// Initialize per-CPU data for the BSP, and bring this CPU's exception
+/// handlers up. Call after paging + allocator, before `syscall::init`.
+///
+/// The IDT is loaded here rather than by the caller because the two are one
+/// dependency: `idt`'s naked stubs open on `gs:[preempt_count]`, so the table
+/// may not be loaded before the `wrmsr` below and must not be loaded after
+/// anything that can fault.
 pub fn init_bsp(lapic_id: u32) {
     let ptr = alloc_percpu(0);
     // SAFETY: `alloc_percpu` just returned a live, initialised `PerCpu` with no other reference until the `wrmsr` below.
@@ -582,18 +588,24 @@ pub fn init_bsp(lapic_id: u32) {
 
     // SAFETY: `load_gdt`'s once-per-CPU contract — this is the BSP's call; `init_ap` is every AP's.
     unsafe { percpu.load_gdt(); }
-    super::control_regs::init(0);
-    super::fpu::init();
-    // Between `fpu::init` and the `wrmsr`, not after this function's own line:
-    // this is the gap with no record of its own, and these are the facts
-    // `fpu::init` just established on a CPU whose extended state QEMU and a
-    // Tiger Lake do not agree about.
-    super::fpu::log_state(0);
 
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
+    // Before the first step that can fault. Until `lidt` runs, the loaded table
+    // is the one firmware left across `ExitBootServices`, whose handlers report
+    // on no channel of this kernel's — so a fault in `control_regs` or `fpu`
+    // below would stop the machine with the panel holding the record before it.
+    super::idt::init();
 
-    // Ordering matters: gs: is invalid until the wrmsr above runs.
+    super::control_regs::init(0);
+    super::fpu::init(0);
+    // Between `fpu::init` and this function's own line: the facts `fpu::init`
+    // established, on a CPU whose extended state QEMU and a Tiger Lake do not
+    // agree about.
+    super::fpu::log_state(0);
+
+    // Ordering matters: every `preempt` accessor no-ops until this is set, and
+    // the fault path above depends on that while the scheduler does not exist.
     crate::log::PERCPU_READY.store(true, core::sync::atomic::Ordering::Release);
 
     log!("percpu: BSP cpu_id=0 lapic_id={lapic_id}");
@@ -617,7 +629,7 @@ pub fn init_ap(percpu_ptr: *mut PerCpu) {
     // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(percpu.cpu_id);
-    super::fpu::init();
+    super::fpu::init(percpu.cpu_id);
     super::fpu::log_state(percpu.cpu_id);
 }
 
