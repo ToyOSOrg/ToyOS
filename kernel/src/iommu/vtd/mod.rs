@@ -415,7 +415,7 @@ fn enable(
     let Plan { width, records } = plan;
     // Before any table is built: what a domain of a driver's own can be is the
     // narrowest thing every translating unit on this machine agrees to.
-    domain::unit_agrees(width, unit.caps.domains());
+    domain::unit_agrees(width, unit.caps.domains(), unit.caps.mgaw());
 
     let (root, queue) = {
         let mut tables = TABLES.lock();

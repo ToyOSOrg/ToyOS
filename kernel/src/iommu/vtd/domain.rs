@@ -28,8 +28,10 @@ const FIRST: u16 = table::KERNEL_DOMAIN + 1;
 /// What every enabled unit agreed on, which is what a domain can be built to.
 enum Agreement {
     None,
-    /// The width every unit reported, and the smallest `CAP.ND` among them.
-    One(AddressWidth, u32),
+    /// The width every unit reported, the smallest `CAP.ND` among them, and the
+    /// smallest `CAP.MGAW` — the last two are minima because a domain has to
+    /// hold on the narrowest unit that will ever translate for it.
+    One(AddressWidth, u32, u8),
     Split,
 }
 
@@ -43,12 +45,12 @@ struct Domains {
 static DOMAINS: Lock<Domains> =
     Lock::new(Domains { agreement: Agreement::None, live: Vec::new() });
 
-pub fn unit_agrees(width: AddressWidth, ceiling: u32) {
+pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
     let mut domains = DOMAINS.lock();
     domains.agreement = match domains.agreement {
-        Agreement::None => Agreement::One(width, ceiling),
-        Agreement::One(seen, cap) if seen == width => {
-            Agreement::One(width, cap.min(ceiling))
+        Agreement::None => Agreement::One(width, ceiling, mgaw),
+        Agreement::One(seen, cap, seen_mgaw) if seen == width => {
+            Agreement::One(width, cap.min(ceiling), seen_mgaw.min(mgaw))
         }
         _ => Agreement::Split,
     };
@@ -56,20 +58,21 @@ pub fn unit_agrees(width: AddressWidth, ceiling: u32) {
 
 pub fn create() -> Result<DomainId, IommuError> {
     let mut domains = DOMAINS.lock();
-    let (width, ceiling) = match domains.agreement {
+    let (width, ceiling, mgaw) = match domains.agreement {
         Agreement::None => return Err(IommuError::NoUnit),
         Agreement::Split => return Err(IommuError::WidthsDisagree),
-        Agreement::One(width, ceiling) => (width, ceiling),
+        Agreement::One(width, ceiling, mgaw) => (width, ceiling, mgaw),
     };
     let id = FIRST + domains.live.len() as u16;
     if u32::from(id) >= ceiling {
         return Err(IommuError::DomainsExhausted(ceiling));
     }
-    let domain = Domain::new(&mut TABLES.lock(), id, width);
+    let domain = Domain::new(&mut TABLES.lock(), id, width, mgaw)?;
     log!(
-        "iommu: domain{id} root={:#x} aw={} addresses from {:#x}",
+        "iommu: domain{id} root={:#x} aw={} mgaw={} addresses from {:#x}",
         domain.root().phys(),
         width.bits(),
+        mgaw,
         domain.floor()
     );
     domains.live.push(domain);
@@ -84,7 +87,9 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
     let domain = domains.at(id);
     let at = domain
         .reserve(bytes)
-        .ok_or(IommuError::AddressesExhausted(domain.width().bits()))?;
+        // Named by what actually ran out: the unit's translatable width, which
+        // on a machine whose `MGAW` is under its `SAGAW` is not the table depth.
+        .ok_or(IommuError::AddressesExhausted(domain.translatable()))?;
     let (did, domain) = (domain.id(), *domain);
     let mut units = UNITS.lock();
     table::map(&mut TABLES.lock(), &domain, at, phys, bytes);
