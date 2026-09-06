@@ -60,9 +60,8 @@ pub fn machine_reboot(
 }
 
 /// A boot with no host on the console runs its manifest's jobs and ends itself.
-/// `Rebooting.` reaching the log partition is the assertion the T14 rests on;
-/// `Boot: complete` is written long before the reset and survives one that
-/// outran logd, so it cannot carry the claim alone.
+/// `Rebooting.` on the log partition is the assertion: `Boot: complete` is
+/// written long before the reset and survives one that outran logd.
 pub fn metal_job_reboot(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -85,8 +84,7 @@ pub fn metal_job_reboot(
     );
     serial::Serial::boot(&qemu).must_be_clean()?;
 
-    // Nothing is sent: the manifest's job list is the whole of what runs, so a
-    // runner that ignored its arguments leaves this drain spending its ceiling.
+    // Nothing is sent: a runner ignoring its arguments spends this whole ceiling.
     let tail = qemu.drain_serial(WAIT);
     let drain = serial::Serial::named("job drain", tail.as_str());
     drain.must_be_clean()?;
