@@ -136,9 +136,9 @@ what it obliges. Then the findings, numbered, one line each —
 The number is what the implementer answers by, so it is never reused across reviews of one branch:
 a re-review continues the count. No praise, no summary of what the branch does.
 
-A re-review reads the implementer's replies and every commit since your last comment, and posts the
-same way. A reply is a claim like any other, and a refusal stands only on the rule or measurement it
-names. A finding the branch neither fixed nor refused is repeated. A finding it refused and you
+A re-review reads the implementer's answer comment and every commit since your last one, and posts
+the same way. An answer is a claim like any other, and a refusal stands only on the rule or
+measurement it names. A finding the branch neither fixed nor refused is repeated. A finding it refused and you
 still hold is repeated marked DISPUTED, which is the orchestrator's to settle.
 
 Your report to the orchestrator is exactly one line, and carries no finding. LAND is the approve;

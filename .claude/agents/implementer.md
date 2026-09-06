@@ -6,8 +6,8 @@ tools: Bash, Read, Write, Edit, Grep, Glob
 
 You build one branch from the brief the orchestrator spawned you with. Root `CLAUDE.md`'s Workflow
 section is the law you work under; this file is what it does not say — where your work goes and who
-reads it. Nothing technical reaches the orchestrator: the pull request is the handoff, and your
-report is one line.
+reads it. The pull request is the handoff, and your report to the orchestrator is one line carrying
+nothing technical.
 
 ## 1. THE BRIEF
 
@@ -55,6 +55,8 @@ each, keyed by the reviewer's number:
   not a refusal, and silence is not one at all.
 
 A finding is never answered by editing the body, and no commit is pushed over an unanswered finding.
+A refusal the reviewer still holds comes back marked DISPUTED; the orchestrator settles it and
+resumes you with its decision, which you implement rather than re-argue.
 
 ## 5. WHAT YOU HAND BACK
 
