@@ -399,6 +399,70 @@ mod tests {
         );
     }
 
+    /// A workflow's top-level `pull_request:` trigger and the `branches:`
+    /// line immediately beneath it, if any — the same crude shape [`jobs`]
+    /// and [`runs_on`] read rather than a YAML parser. `None` means the file
+    /// has no `pull_request:` trigger at all.
+    fn pull_request_branches(text: &str) -> Option<String> {
+        let mut lines = text.lines();
+        while let Some(line) = lines.next() {
+            if line == "  pull_request:" {
+                return Some(
+                    lines
+                        .next()
+                        .and_then(|l| l.trim_start().strip_prefix("branches:"))
+                        .map(|v| v.trim().to_string())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        None
+    }
+
+    /// Integration branches (`metal` today) develop locally and fast; CI
+    /// starts only once the work reaches the pull request to `main`. A
+    /// `pull_request:` trigger with no `branches:` filter runs its whole job
+    /// list on a pull request whatever its base — a draft PR into `metal` ran
+    /// the full CI before this rule existed. The `seen` count is the teeth:
+    /// a workflow that gains or drops the trigger without updating it is the
+    /// silent drift this exists to catch.
+    #[test]
+    fn every_pull_request_trigger_runs_only_against_main() {
+        let dir = repo_root().join(".github/workflows");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect(".github/workflows is not readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "yml"))
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "the workflow scan found no workflow, so it is wrong");
+
+        let mut seen = 0usize;
+        let mut bad = Vec::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("{} decides where CI runs: {e}", path.display()));
+            let Some(branches) = pull_request_branches(&text) else { continue };
+            seen += 1;
+            if branches != "[main]" {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                bad.push(format!("{name}: branches: {branches:?}"));
+            }
+        }
+        assert_eq!(
+            seen, 4,
+            "ci.yml, host-tests.yml, landing.yml and toolchain.yml are the four workflows this \
+             rule was written for; the scan found a different count, so a workflow gained or \
+             lost a `pull_request:` trigger and this count needs to move with it"
+        );
+        assert!(
+            bad.is_empty(),
+            "a draft PR against an integration branch runs the whole workflow before the work \
+             is ready for main:\n  {}",
+            bad.join("\n  ")
+        );
+    }
+
     /// The declaration is read by a shell and by this crate, so both have to
     /// agree that it holds one version and nothing else.
     #[test]
