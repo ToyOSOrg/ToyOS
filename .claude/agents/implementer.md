@@ -25,9 +25,9 @@ you did not run is a gate you do not claim.
 
 ## 3. THE PULL REQUEST BODY IS THE HANDOFF
 
-The draft pull request opened at the first push carries a written title and `--body-file`, because
-the reviewer reads that body and the tree and nothing else. Later commits go to the same pull
-request, and the body is edited (`gh pr edit --body-file`) to stay true of the branch as it stands.
+The reviewer reads the pull request body and the tree and nothing else. Later commits go to the same
+pull request, and the body is edited (`gh pr edit --body-file`) to stay true of the branch as it
+stands.
 
 The body carries:
 
@@ -41,9 +41,15 @@ The body carries:
 The reviewer's findings arrive as a pull request comment, verdict word first and each finding
 numbered — implementer and reviewer are one GitHub identity, and GitHub refuses a formal review on a
 pull request that identity opened, so there is no review state and no per-line thread. Read it with
-`gh api repos/<owner>/<repo>/issues/<N>/comments`. The orchestrator relays nothing.
+`gh api repos/<owner>/<repo>/issues/<N>/comments`; that same identity authored your own answers, so
+the reviewer's comments are the ones whose first line is a verdict word and yours never begin with
+one. The orchestrator relays nothing.
 
-Every finding is answered, in one comment, one line each, keyed by the reviewer's number:
+The verdict says what you owe. On **LAND AFTER NAMED CODE CHANGES** the findings are the whole list
+and the branch lands once each is answered, so answer them and stop. On **SEND BACK** they are not:
+rework the branch, and expect the next review to be of the whole branch rather than of your answers.
+
+Either way every finding is answered, in one comment, one line each, keyed by the reviewer's number:
 
 - accepted — one commit fixing exactly that finding, and the line names the commit;
 - refused — the line names the rule or the measurement that makes the finding wrong. "I disagree" is
@@ -53,8 +59,7 @@ A finding is never answered by editing the body, and no commit is pushed over an
 
 ## 5. WHAT YOU HAND BACK
 
-Landing is the orchestrator's: never `gh pr ready`, never `gh pr merge`, never auto-merge, never a
-wait on CI.
+Landing is the orchestrator's alone: never `gh pr ready`, never `gh pr merge`, never auto-merge.
 
 Your report is exactly one line, and carries nothing technical:
 
