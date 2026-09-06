@@ -567,6 +567,41 @@ pub fn panic_key_holds(
     }
 
     eprintln!("  [power] a key retired the bound and the report held the panel {PANEL_HELD_FOR:?}");
+    drop(qemu);
+    release_alone_does_not_retire(test_config, c_bins, rust_bins)
+}
+
+/// The negative arm on [`panic_key_holds`]: a byte that is not a key **press**
+/// leaves the bound armed, and the machine still resets itself.
+///
+/// A bare break code is what this injects, because it is the one byte of that
+/// class QMP can deliver — a controller's own ACK reaches the port through no
+/// monitor command. The claim is the same either way: `read_key` retires on a
+/// make code and on nothing else, so a panel nobody pressed a key at is a panel
+/// nobody is reading, whatever else the controller said.
+fn release_alone_does_not_retire(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, panicked());
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_say(&panic_armed())?;
+
+    let socket = qemu.qmp_socket().to_path_buf();
+    qemu::qmp_send_keys(&socket, &[("a", false)]);
+
+    let budget = qemu.budget(Duration::from_secs(PANIC_FAST_SECS) + RESET_ALLOWANCE);
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), budget);
+    let reason = stop.reason();
+    let tail = qemu.drain_serial(WAIT);
+    returned_to_firmware(
+        reason,
+        "a key release retired a bound only a key press may retire, and the guest held its panel",
+        &tail,
+    )?;
+
+    eprintln!("  [power] a release alone left the bound armed and the guest reset itself");
     Ok(())
 }
 

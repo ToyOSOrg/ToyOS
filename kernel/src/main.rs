@@ -193,6 +193,20 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     apic::halt_all_cpus();
 }
 
+/// The four `KernelArgs` offsets [`_start`] spells as literals, before it has a
+/// stack to name a field with.
+///
+/// Here rather than in `toyos-abi`'s own layout gate because the literals are
+/// here: this is the file that would be wrong if a field moved, and asserting it
+/// from the reader costs no edit to a crate the shared sysroot is built from.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(KernelArgs, gop_framebuffer) == 72);
+    assert!(offset_of!(KernelArgs, gop_width) == 88);
+    assert!(offset_of!(KernelArgs, gop_stride) == 96);
+    assert!(offset_of!(KernelArgs, gop_pixel_format) == 100);
+};
+
 /// Entry point: the bootloader jumps here with `rdi = &KernelArgs`, switches to the kernel's own stack, calls `kernel_main`.
 /// # Safety
 /// Only the bootloader may call this, fresh from firmware, with `rdi` holding a live [`KernelArgs`].
@@ -208,9 +222,8 @@ pub unsafe extern "sysv64" fn _start(_kernel_args: &KernelArgs) -> ! {
         // here says the jump landed whatever happens next. Registers only —
         // there is no stack yet — and `rdi` is preserved for `kernel_main`.
         //
-        // The offsets are `KernelArgs`' own, which `toyos-abi`'s layout gate
-        // holds: `gop_framebuffer` at 72, `gop_width` at 88, `gop_stride` at 96
-        // and `gop_pixel_format` at 100.
+        // The offsets are `KernelArgs`' own, held by the assertion above this
+        // function.
         "mov rsi, [rdi + 72]",              // the scanout, physical and identity-mapped here
         "test rsi, rsi",
         "jz 30f",                           // a machine with no panel has no band
@@ -297,10 +310,8 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     drivers::panic_console::arm(&kernel_args, maps);
     // Beside it, and out of the raw buffer: a panic between here and
     // `params::init` — inside `serial::init`, or on the parameter line's own
-    // UTF-8 check — is one this machine renders and then resets on, and the page
-    // is what carries it past the reset. The owner's laptop did exactly that
-    // with the page still reading the loader's `ARMED`, because this used to run
-    // after all three.
+    // UTF-8 check — is one the page has to carry past the reset, and neither
+    // the console nor that line has been decided yet.
     blackbox::arm(if kernel_args.cmdline_len == 0 {
         &[]
     } else {
@@ -427,11 +438,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     percpu::init_bsp(apic::id());
     ioapic::init(&madt);
     idt::enable_interrupts();
-    // Read back, because `sti` is the first instruction at which this machine's
-    // own devices can reach the kernel: a CPU not holding `IF` here took
-    // something that cleared it again before this record was stamped.
-    let flags = cpu::rflags();
-    log!("interrupts: cpu0 rflags={:#x} if={}", flags, u8::from(flags & cpu::RFLAGS_IF != 0));
     syscall::init();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     if !kernel_elf.is_empty() {

@@ -146,12 +146,12 @@ fn with_page(write: impl FnOnce(&mut [u8; BYTES], u64)) {
 /// Write the page out of this CPU's caches, and every other CPU's.
 ///
 /// **A reset does not write dirty lines back.** INIT and RESET invalidate the
-/// caches without flushing them (SDM Vol. 3A §11.5.3 on cache invalidation
-/// across a reset), so a page sealed into write-back memory and then reset over
-/// is a page whose bytes never reached DRAM — which is the one failure this
-/// whole mechanism cannot survive, and it looks exactly like a seal that never
-/// happened. `CLFLUSH` is coherent across every CPU in the machine, so one
-/// caller's flush is the whole machine's.
+/// caches without flushing them, so a page sealed into write-back memory and
+/// then reset over is a page whose bytes never reached DRAM — the one failure
+/// this mechanism cannot survive, and it looks exactly like a seal that never
+/// happened. The section number that states it is left out rather than cited
+/// wrong. `CLFLUSH` is coherent across every CPU, so one caller's flush is the
+/// whole machine's.
 fn flush(at: u64) {
     let mut line = 0u64;
     while line < BYTES as u64 {
