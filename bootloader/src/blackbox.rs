@@ -20,6 +20,7 @@ use uefi::prelude::*;
 use uefi::table::boot::{AllocateType, MemoryType};
 
 use toyos_blackbox::{BYTES, PHYS, State};
+use toyos_wallclock::Civil;
 
 /// The line a harvested report is written under; a reader of the stick and the
 /// judge both look for this and nothing else.
@@ -75,9 +76,11 @@ pub struct Finding {
 /// first boot, or DRAM a reset did not preserve, which are one answer — and the
 /// caller boots the kernel normally.
 pub fn harvest(page: Option<Page>) -> Option<Finding> {
-    let page = bytes(page?);
-    let (state, text) = toyos_blackbox::recover(page)?;
+    let at = page?;
+    let page = bytes(at);
+    let (state, stamp, text) = toyos_blackbox::recover(page)?;
     let mut lines = Vec::new();
+    lines.push(when(stamp));
     match state {
         State::Panic => {
             lines.push(alloc::format!("{PREVIOUS_PANIC} {} bytes off {PHYS:#x}", text.len()));
@@ -112,9 +115,58 @@ pub fn harvest(page: Option<Page>) -> Option<Finding> {
         },
     }
     // Cleared once it has been read, so the boot after this one does not report
-    // a death two boots old as its predecessor's.
+    // a death two boots old as its predecessor's — **and written back, and then
+    // read again to see that it was**. A clear that stays in this CPU's cache is
+    // a clear a reset discards, and the boot after it reports the same crash a
+    // second time off a stick that was freshly flashed; that is what run 13 did.
     toyos_blackbox::clear(page);
+    flush(at);
+    if toyos_blackbox::recover(page).is_some() {
+        lines.push(alloc::format!(
+            "{HEAD} {PHYS:#x} still reads as a record after being cleared and written back, so \
+             the boot after this one will report the crash above a second time"
+        ));
+    }
     Some(Finding { lines, ends_the_chain: true })
+}
+
+/// When the boot this record came from was armed, as the loader stamped it.
+///
+/// **The first line of every report**, because a record the next boot finds is
+/// either this boot's predecessor's or a stale one nothing cleared, and until
+/// run 13 there was no way to tell those apart from the stick.
+fn when(stamp: u64) -> String {
+    if stamp == 0 {
+        return alloc::format!("{HEAD} the record below carries no date, so this machine's \
+                               firmware would not say what time that boot was armed");
+    }
+    alloc::format!("{HEAD} the record below is from the boot armed at {}", Civil::from_unix_secs(stamp).stem())
+}
+
+/// Write the page back out of this CPU's caches, and every other CPU's.
+///
+/// The kernel's `blackbox::flush` is the same loop for the same reason; the
+/// instruction is each binary's because `toyos-blackbox` forbids unsafe code,
+/// and `toyos_blackbox::CACHE_LINE` is the one decision they share.
+fn flush(page: Page) {
+    let mut line = 0usize;
+    while line < BYTES {
+        // SAFETY: `CLFLUSH` writes back and invalidates the line containing the
+        // address and touches nothing else; the address is inside the page this
+        // image allocated, and the instruction faults on nothing a canonical
+        // address can be.
+        unsafe {
+            core::arch::asm!(
+                "clflush [{addr}]",
+                addr = in(reg) (page.0 + line as u64) as *const u8,
+                options(nostack, preserves_flags),
+            );
+        }
+        line += toyos_blackbox::CACHE_LINE;
+    }
+    // SAFETY: `SFENCE` orders those writebacks ahead of whatever ends this
+    // machine; it touches no memory or register.
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }
 
 /// A sealed [`toyos_blackbox::Fault`] as lines for the log.
@@ -156,11 +208,19 @@ fn fault_lines(fault: &toyos_blackbox::Fault) -> Vec<String> {
     lines
 }
 
-/// Seal `ARMED` into the page, which is what makes the next boot's silence a finding.
-pub fn arm(page: Option<Page>) {
+/// Seal `ARMED` into the page, which is what makes the next boot's silence a
+/// finding, stamped with the time this pass armed it.
+pub fn arm(page: Option<Page>, stamp: u64) {
     let Some(page) = page else { return };
-    toyos_blackbox::seal(bytes(page), State::Armed, &[]);
-    println!("{HEAD} {PHYS:#x} armed, and the kernel is told so on its parameter line");
+    toyos_blackbox::seal(bytes(page), State::Armed, stamp, &[]);
+    // Written back before the handoff: everything after this point either ends
+    // in a reset or hands the machine to a kernel, and neither writes this line
+    // out for us.
+    flush(page);
+    println!(
+        "{HEAD} {PHYS:#x} armed at {}, and the kernel is told so on its parameter line",
+        Civil::from_unix_secs(stamp).stem()
+    );
 }
 
 /// The parameter word naming the page, to be appended to what the ESP carried.

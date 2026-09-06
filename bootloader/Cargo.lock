@@ -25,6 +25,7 @@ dependencies = [
  "toyos-bootmap",
  "toyos-elf",
  "toyos-tco",
+ "toyos-wallclock",
  "uefi",
  "uefi-services",
 ]
@@ -127,6 +128,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-tco"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-wallclock"
 version = "0.1.0"
 
 [[package]]

@@ -52,8 +52,20 @@ pub const PARAM: &str = "blackbox=";
 /// `PANC`, big-endian ASCII, so a hexdump of the page reads.
 const MAGIC: u32 = 0x5041_4E43;
 
-/// Magic, state, length, checksum.
-const HEADER: usize = 16;
+/// Magic, state, length, checksum, and the stamp.
+const HEADER: usize = 24;
+
+/// The cache line every writer of this page writes it back in.
+///
+/// **A reset invalidates the caches without writing them back**, so a page
+/// written into write-back memory and then reset over is a page whose bytes
+/// never reached DRAM — which looks, from the next boot, exactly like a write
+/// that never happened. It has been both failures already: a kernel's seal that
+/// read back as the loader's `ARMED`, and a loader's clear that read back as the
+/// report it had just made. Every writer flushes; the instruction is each
+/// binary's, because this crate forbids unsafe code, and the size is here so
+/// that neither of them decides it.
+pub const CACHE_LINE: usize = 64;
 
 /// What one report may leave behind. Longer is truncated at its head, because
 /// the tail of a panel is the crash and the head is how the boot went.
@@ -118,7 +130,7 @@ impl State {
 /// nothing-may-panic region, so nothing here indexes or unwraps: a bounds check
 /// that could panic would take the machine down inside the report about why it
 /// went down.
-pub fn seal(page: &mut [u8; BYTES], state: State, text: &[u8]) -> usize {
+pub fn seal(page: &mut [u8; BYTES], state: State, stamp: u64, text: &[u8]) -> usize {
     let from = text.len().saturating_sub(TEXT_BYTES);
     let kept = text.get(from..).unwrap_or(&[]);
     if let Some(slot) = page.get_mut(HEADER..HEADER.saturating_add(kept.len())) {
@@ -127,10 +139,25 @@ pub fn seal(page: &mut [u8; BYTES], state: State, text: &[u8]) -> usize {
     put(page, 0, MAGIC);
     put(page, 4, state.code());
     put(page, 8, kept.len() as u32);
+    put64(page, 16, stamp);
     // Written last, so a machine that stopped mid-copy leaves a header the
     // checksum then refuses, rather than a report with a hole in it.
-    put(page, 12, checksum(state, kept));
+    put(page, 12, checksum(state, stamp, kept));
     kept.len()
+}
+
+/// The stamp a page carries, read without checking anything.
+///
+/// **Carried forward and not trusted**: the kernel's seals happen where nothing
+/// may be verified — the panic path and the exception entry — so they read this
+/// word, write it back, and let the checksum they then write cover it. A page
+/// that was never armed hands them a zero, which is what an unknown stamp is.
+pub fn stamp_of(page: &[u8; BYTES]) -> u64 {
+    let mut out = [0u8; 8];
+    if let Some(slot) = page.get(16..24) {
+        out.copy_from_slice(slot);
+    }
+    u64::from_le_bytes(out)
 }
 
 fn put(page: &mut [u8; BYTES], at: usize, value: u32) {
@@ -139,16 +166,24 @@ fn put(page: &mut [u8; BYTES], at: usize, value: u32) {
     }
 }
 
+fn put64(page: &mut [u8; BYTES], at: usize, value: u64) {
+    if let Some(slot) = page.get_mut(at..at + 8) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
 /// What a previous boot sealed into `page`, or `None` for a page that carries
 /// nothing this tree wrote — never written, cleared, reused, or corrupted.
-pub fn recover(page: &[u8; BYTES]) -> Option<(State, &[u8])> {
+pub fn recover(page: &[u8; BYTES]) -> Option<(State, u64, &[u8])> {
     if u32::from_le_bytes(head(page, 0)) != MAGIC {
         return None;
     }
     let state = State::of(u32::from_le_bytes(head(page, 4)))?;
     let len = u32::from_le_bytes(head(page, 8)) as usize;
+    let stamp = stamp_of(page);
     let text = page.get(HEADER..HEADER.checked_add(len)?)?;
-    (checksum(state, text) == u32::from_le_bytes(head(page, 12))).then_some((state, text))
+    (checksum(state, stamp, text) == u32::from_le_bytes(head(page, 12)))
+        .then_some((state, stamp, text))
 }
 
 /// Take the magic off, so the same report is not harvested by a third boot.
@@ -170,14 +205,15 @@ fn head(page: &[u8; BYTES], at: usize) -> [u8; 4] {
 /// FNV-1a, 32-bit, over the state, the length and then the bytes.
 ///
 /// The state is folded in so one sealed page cannot be re-read as another
-/// state, and the length so a report truncated to a prefix of itself does not
-/// keep checking out — a torn write is exactly that shape.
-fn checksum(state: State, text: &[u8]) -> u32 {
+/// state, the length so a report truncated to a prefix of itself does not keep
+/// checking out — a torn write is exactly that shape — and the stamp so a
+/// record carried forward from an older boot cannot be re-dated.
+fn checksum(state: State, stamp: u64, text: &[u8]) -> u32 {
     const OFFSET_BASIS: u32 = 0x811c_9dc5;
     const PRIME: u32 = 0x0100_0193;
     let mut hash = OFFSET_BASIS;
-    let stamp = [state.code().to_le_bytes(), (text.len() as u32).to_le_bytes()];
-    for byte in stamp.iter().flatten().chain(text) {
+    let head = [state.code().to_le_bytes(), (text.len() as u32).to_le_bytes()];
+    for byte in head.iter().flatten().chain(&stamp.to_le_bytes()).chain(text) {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(PRIME);
     }
@@ -318,6 +354,9 @@ mod tests {
 
     use super::*;
 
+    /// A stamp the tests can tell from zero, which is what an unarmed page has.
+    const STAMP: u64 = 1_757_000_000;
+
     const STATES: [State; 4] = [State::Armed, State::Panic, State::Done, State::Fault];
 
     fn blank() -> [u8; BYTES] {
@@ -328,8 +367,8 @@ mod tests {
     fn a_sealed_page_comes_back_as_what_went_in() {
         for state in STATES {
             let mut page = blank();
-            assert_eq!(seal(&mut page, state, b"PANIC: nobody was there"), 23);
-            assert_eq!(recover(&page), Some((state, &b"PANIC: nobody was there"[..])));
+            assert_eq!(seal(&mut page, state, STAMP, b"PANIC: nobody was there"), 23);
+            assert_eq!(recover(&page), Some((state, STAMP, &b"PANIC: nobody was there"[..])));
         }
     }
 
@@ -349,7 +388,7 @@ mod tests {
     #[test]
     fn a_cleared_page_is_not_harvested_twice() {
         let mut page = blank();
-        seal(&mut page, State::Panic, b"the first boot's panic");
+        seal(&mut page, State::Panic, STAMP, b"the first boot's panic");
         assert!(recover(&page).is_some());
         clear(&mut page);
         assert_eq!(recover(&page), None);
@@ -362,7 +401,7 @@ mod tests {
     fn no_state_can_be_read_as_another() {
         for state in STATES {
             let mut page = blank();
-            seal(&mut page, state, b"whatever the last boot said");
+            seal(&mut page, state, STAMP, b"whatever the last boot said");
             for other in STATES.into_iter().filter(|s| *s != state) {
                 let mut forged = page;
                 forged[4..8].copy_from_slice(&other.code().to_le_bytes());
@@ -378,13 +417,13 @@ mod tests {
     fn one_flipped_bit_anywhere_refuses_the_whole_page() {
         let text = b"PANIC: kernel/src/main.rs:1:1: this machine is on fire";
         let mut sealed = blank();
-        seal(&mut sealed, State::Panic, text);
+        seal(&mut sealed, State::Panic, STAMP, text);
         for at in 0..HEADER + text.len() {
             let mut page = sealed;
             page[at] ^= 0x40;
             assert_ne!(
                 recover(&page),
-                Some((State::Panic, &text[..])),
+                Some((State::Panic, STAMP, &text[..])),
                 "byte {at} was allowed to change"
             );
         }
@@ -397,6 +436,7 @@ mod tests {
         let mut page = blank();
         put(&mut page, 0, MAGIC);
         put(&mut page, 4, State::Panic.code());
+        put64(&mut page, 16, STAMP);
         put(&mut page, 8, u32::MAX);
         assert_eq!(recover(&page), None);
         put(&mut page, 8, TEXT_BYTES as u32 + 1);
@@ -410,8 +450,8 @@ mod tests {
         let mut text = vec![b'.'; TEXT_BYTES + 100];
         text.extend_from_slice(b"PANIC: the last line");
         let mut page = blank();
-        assert_eq!(seal(&mut page, State::Panic, &text), TEXT_BYTES);
-        let (state, back) = recover(&page).expect("a truncated report is still sealed");
+        assert_eq!(seal(&mut page, State::Panic, STAMP, &text), TEXT_BYTES);
+        let (state, _, back) = recover(&page).expect("a truncated report is still sealed");
         assert_eq!(state, State::Panic);
         assert_eq!(back.len(), TEXT_BYTES);
         assert!(back.ends_with(b"PANIC: the last line"));
@@ -421,8 +461,8 @@ mod tests {
     #[test]
     fn an_armed_page_with_nothing_in_it_is_still_a_state() {
         let mut page = blank();
-        assert_eq!(seal(&mut page, State::Armed, b""), 0);
-        assert_eq!(recover(&page), Some((State::Armed, &b""[..])));
+        assert_eq!(seal(&mut page, State::Armed, STAMP, b""), 0);
+        assert_eq!(recover(&page), Some((State::Armed, STAMP, &b""[..])));
     }
 
     /// The loader writes the address with `{:#x}` and the kernel reads it back
@@ -476,6 +516,8 @@ mod fault_tests {
     extern crate std;
     use super::*;
 
+    const STAMP: u64 = 1_757_000_001;
+
     fn sample() -> Fault {
         let mut registers = [0u64; REGISTERS.len()];
         for (i, slot) in registers.iter_mut().enumerate() {
@@ -508,8 +550,8 @@ mod fault_tests {
     fn a_fault_survives_the_page_it_is_sealed_into() {
         let fault = sample();
         let mut page = [0u8; BYTES];
-        assert_eq!(seal(&mut page, State::Fault, &fault.to_bytes()), Fault::BYTES);
-        let (state, text) = recover(&page).expect("a sealed fault");
+        assert_eq!(seal(&mut page, State::Fault, STAMP, &fault.to_bytes()), Fault::BYTES);
+        let (state, _, text) = recover(&page).expect("a sealed fault");
         assert_eq!(state, State::Fault);
         assert_eq!(Fault::from_bytes(text), Some(fault));
     }
@@ -525,4 +567,34 @@ mod fault_tests {
     }
 
 
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    extern crate std;
+    use super::*;
+
+    /// **The stamp is inside the checksum**, so a record carried forward from an
+    /// older boot cannot be re-dated into this one's -- which is the whole of
+    /// what makes a stale report visible as stale rather than believed.
+    #[test]
+    fn a_records_date_cannot_be_changed_under_it() {
+        let mut page = [0u8; BYTES];
+        seal(&mut page, State::Panic, 1_757_000_000, b"a report from an older boot");
+        assert_eq!(stamp_of(&page), 1_757_000_000);
+        put64(&mut page, 16, 1_757_009_999);
+        assert_eq!(recover(&page), None);
+    }
+
+    /// A page nothing armed hands the kernel's seals a zero, which is what an
+    /// unknown date is; they carry it forward rather than inventing one.
+    #[test]
+    fn an_unstamped_page_reads_as_no_date() {
+        let page = [0u8; BYTES];
+        assert_eq!(stamp_of(&page), 0);
+        let mut page = page;
+        let stamp = stamp_of(&page);
+        seal(&mut page, State::Fault, stamp, &Fault::default().to_bytes());
+        assert_eq!(recover(&page).map(|(s, at, _)| (s, at)), Some((State::Fault, 0)));
+    }
 }

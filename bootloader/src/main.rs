@@ -762,6 +762,25 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     entry(&kernel_args);
 }
 
+/// When this pass armed the page, in Unix seconds, or 0 where firmware would
+/// not say.
+///
+/// The zone is not applied and does not need to be: what a reader of the stick
+/// asks of this number is whether the record beside it is *this* boot's
+/// predecessor's or one left over, and an hour either way answers that.
+fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
+    let Ok(t) = system_table.runtime_services().get_time() else { return 0 };
+    toyos_wallclock::Civil {
+        year: u64::from(t.year()),
+        month: u64::from(t.month()),
+        day: u64::from(t.day()),
+        hour: u64::from(t.hour()),
+        min: u64::from(t.minute()),
+        sec: u64::from(t.second()),
+    }
+    .to_unix_secs()
+}
+
 /// End a pass that read the black box and boots no kernel, by resetting the
 /// machine rather than returning to the boot manager.
 ///
@@ -896,7 +915,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Last before the handoff, and both before anything the exit path touches:
     // the page says a kernel is running, and `BootNext` says this loader gets
     // the machine again however that kernel ends.
-    blackbox::arm(page);
+    blackbox::arm(page, armed_at(&system_table));
     bootnext::point_at_us(handle, &system_table);
 
     println!("Starting kernel...");

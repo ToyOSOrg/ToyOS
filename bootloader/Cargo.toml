@@ -21,6 +21,9 @@ toyos-bootband = { path = "../toyos-bootband" }
 # The page this loader claims for the next boot to read, and the three states it
 # can hold; the kernel writes two of them and this loader writes the third.
 toyos-blackbox = { path = "../toyos-blackbox" }
+# The calendar the black box's records are stamped with, which is `logd`'s own:
+# a date on the stick means the same thing whoever wrote it.
+toyos-wallclock = { path = "../toyos-wallclock" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-tco = { path = "../toyos-tco" }
 # `alloc`: `variable_keys` and `get_variable_boxed`, which are how the boot

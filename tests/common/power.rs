@@ -732,11 +732,27 @@ pub fn blackbox_panic_chain(
     // have said so, and this one must not have.
     second.must_not_say(HANDS_OFF)?;
     ended_in_a_reset(&mut resets)?;
+
+    // **The third pass, and it is the judge of the clear.** Run 13 flashed a
+    // fresh stick and read run 12's panic back off it: the second pass had
+    // reported the record and cleared it, the clear stayed in that CPU's cache,
+    // and the boot after it found the same crash and reported it again instead
+    // of booting a kernel. So the pass after the report must hand off, and must
+    // not report anything.
+    let third = after_the_reset(&mut qemu, HANDS_OFF);
+    third.must_say(HANDS_OFF)?;
+    if let Some(line) = third.text().lines().find(|l| l.contains(PREVIOUS_PANIC)) {
+        return Err(format!(
+            "the pass after the report found a record and reported it again ({line:?}), so the \
+             clear did not reach the page and this machine reports one crash for ever\n{}",
+            third.text()
+        ));
+    }
     drop(qemu);
 
     eprintln!(
-        "  [power] the panic crossed the reset, and the pass that read it ended in a reset of \
-         its own"
+        "  [power] the panic crossed the reset, the pass that read it reset in turn, and the \
+         pass after that booted a kernel"
     );
     Ok(())
 }
@@ -889,9 +905,9 @@ pub fn blackbox_early_panic_sealed(
 /// the page until something overwrites it. That the record is a real one, with
 /// this machine's vector and a canonical `rip`, is what says the entry wrote it.
 ///
-/// The cache write-back the seal also does cannot be judged here at all: this
-/// guest is TCG and has no caches for `CLFLUSH` to have anything to do
-/// (`issues/panic-path/the-seals-cache-writeback-runs-on-no-guest-this-tree-boots.md`).
+/// The cache write-back every writer of the page also does cannot be judged
+/// here at all: this guest is TCG and has no caches for `CLFLUSH` to act on
+/// (`issues/panic-path/the-pages-cache-writeback-runs-on-no-guest-this-tree-boots.md`).
 pub fn blackbox_fault_sealed(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -908,7 +924,7 @@ pub fn blackbox_fault_sealed(
     let page = qemu.guest_page(PHYS)?;
     let page: &[u8; toyos_blackbox::BYTES] =
         page.as_slice().try_into().map_err(|_| "pmemsave returned the wrong length".to_string())?;
-    let Some((state, text)) = toyos_blackbox::recover(page) else {
+    let Some((state, _, text)) = toyos_blackbox::recover(page) else {
         return Err(format!("the page at {PHYS:#x} carries nothing: {:02x?}", &page[..32]))
     };
     if state != State::Fault {
@@ -1043,8 +1059,8 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
             .try_into()
             .map_err(|_| "pmemsave returned the wrong length".to_string())?;
         match toyos_blackbox::recover(page) {
-            Some((State::Panic, text)) => return Ok((State::Panic, text.to_vec())),
-            Some((state, text)) => last = Some((state, text.to_vec())),
+            Some((State::Panic, _, text)) => return Ok((State::Panic, text.to_vec())),
+            Some((state, _, text)) => last = Some((state, text.to_vec())),
             None if last.is_none() => {
                 last = None;
             }

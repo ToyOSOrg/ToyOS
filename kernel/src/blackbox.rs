@@ -117,12 +117,13 @@ fn seal(state: State, text: &[u8]) {
     // `PAINTING` and the quiesce path has stopped every other CPU, so the one
     // CPU still running is the only writer.
     let page = unsafe { &mut *(at as *mut [u8; BYTES]) };
-    toyos_blackbox::seal(page, state, text);
+    // Carried forward and not verified: this runs where nothing may be checked,
+    // and the checksum written below is what covers it. A page nothing armed
+    // hands back a zero, which is what an unknown date is.
+    let stamp = toyos_blackbox::stamp_of(page);
+    toyos_blackbox::seal(page, state, stamp, text);
     flush(at);
 }
-
-/// One cache line per `CLFLUSH`, which is what the page has to be written back in.
-const CACHE_LINE: u64 = 64;
 
 /// Write the page out of this CPU's caches, and every other CPU's.
 ///
@@ -147,7 +148,7 @@ fn flush(at: u64) {
                 options(nostack, preserves_flags),
             );
         }
-        line += CACHE_LINE;
+        line += toyos_blackbox::CACHE_LINE as u64;
     }
     // SAFETY: `SFENCE` orders those writebacks ahead of whatever ends this
     // machine; it touches no memory or register.
