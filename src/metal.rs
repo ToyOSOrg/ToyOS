@@ -316,11 +316,8 @@ impl Word {
 }
 
 /// The account name as the rule's *user* field, which [`Word::sudoers`] cannot
-/// render: a word there escapes a backslash once where an argument escapes it
-/// four times, and `(` and `)` are escaped there and not here. Every character
-/// the two would disagree about is refused, so the disagreement cannot arise —
-/// along with `,` and `:`, which separate a user list and a `Runas`, and `%`
-/// and `+`, which make the name a group and a netgroup.
+/// render: every character the two escape differently is refused, along with
+/// the four that carry meaning in that field — `,`, `:`, `%` and `+`.
 fn user_word(user: &str) -> Result<Word, Refusal> {
     if user.contains([',', ':', '%', '+', '\\', '(', ')']) {
         return Err(Refusal::Word(user.to_string()));
@@ -588,6 +585,25 @@ fn entries_labelled(listing: &str, label: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The id a create left behind, or the refusal it earned: the order it must not
+/// have moved, and the entry it must have made.
+fn entry_after_create(
+    before: &str,
+    after: &str,
+    label: &str,
+    guid: &str,
+) -> Result<String, Refusal> {
+    let (was, now) = (boot_order(before), boot_order(after));
+    if was != now {
+        return Err(Refusal::BootOrder { before: was, now });
+    }
+    entries_labelled(after, label)
+        .into_iter()
+        .find(|(_, made)| made == guid)
+        .map(|(id, _)| id)
+        .ok_or_else(|| Refusal::BootEntry(after.trim().to_string()))
+}
+
 /// The firmware's boot order, out of `efibootmgr`'s `BootOrder:` line. Empty
 /// where there is none, which is a machine whose order this loop did not move
 /// either.
@@ -730,23 +746,30 @@ impl Driver {
         for (id, _) in stale {
             self.as_root("deleting a stale boot entry", Job::Delete, Some(&id), None)?;
         }
+        // Read after those deletions, because a delete takes its entry out of
+        // the order too: what the create is judged against is the state the
+        // create acts on.
+        let before = self.ssh("listing boot entries", EFIBOOTMGR)?;
         self.as_root("creating the boot entry", Job::Create, None, None)?;
         // Read back rather than parsed out of the create's own output: the
         // firmware's list is what the next command names, and one parser reads
-        // it. A dry run created nothing, so `0000` stands for the id it would
-        // have been given — the only value here that is not the real run's.
+        // it.
         let after = self.ssh("listing boot entries", EFIBOOTMGR)?;
-        // **The entry this loop adds is one boot's, never an order's.** A
-        // create that reached BootOrder would outlive `--bootnext` and every
-        // later boot would pick ToyOS.
-        let (before, now) = (boot_order(&listing), boot_order(&after));
-        if before != now {
-            return Err(Refusal::BootOrder { before, now });
-        }
-        match (ours(&after).0.first(), self.dry_run) {
-            (Some((id, _)), _) => Ok(id.clone()),
-            (None, true) => Ok("0000".to_string()),
-            (None, false) => Err(Refusal::BootEntry(after.trim().to_string())),
+        match entry_after_create(&before, &after, &self.target.label, &want) {
+            Ok(id) => Ok(id),
+            // A dry run created nothing, so `0000` stands for the id the
+            // firmware would have given it — the only value in the run that is
+            // not the real run's.
+            Err(_) if self.dry_run => Ok("0000".to_string()),
+            Err(refusal) => {
+                // Whichever way the create went, what it made does not stay: a
+                // refusal that left an entry behind is one the next run inherits.
+                for (id, _) in ours(&after).0 {
+                    let what = "deleting the entry this create made";
+                    self.as_root(what, Job::Delete, Some(&id), None)?;
+                }
+                Err(refusal)
+            }
         }
     }
 
@@ -1196,16 +1219,40 @@ mod tests {
         );
     }
 
-    /// The order the entry must not reach: `--create` would have put ToyOS at
-    /// its head, and every boot after the one `--bootnext` bought would take it.
     #[test]
-    fn the_boot_order_is_read_and_compared_whole() {
-        let before = "BootCurrent: 0001\nBootOrder: 0001,001D,0000\nBoot0001* Ubuntu\tHD(1)\n";
-        assert_eq!(boot_order(before), "0001,001D,0000");
-        // What `--create` does, and what the refusal is against.
-        let after = before.replace("BootOrder: 0001", "BootOrder: 0002,0001");
-        assert_ne!(boot_order(&after), boot_order(before));
-        // A machine with no order at all moved no order either.
+    fn a_create_that_moved_the_boot_order_is_refused() {
+        let guid = "69ddc8f6-fab2-423f-9818-93bb0ba7349c";
+        let before = "BootCurrent: 0001\nBootOrder: 0001,001D\n\
+             Boot0001* Ubuntu\tHD(1,GPT,16c1f60f-0f7b-4c3d-ba3f-5d75df1fe7bf,0x800,0x1000)\
+             /File(\\EFI\\ubuntu\\shimx64.efi)\n";
+        let made = format!(
+            "Boot0002* ToyOS\tHD(1,GPT,{guid},0x800,0x11000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"
+        );
+
+        let created_only = format!("{before}{made}");
+        assert_eq!(entry_after_create(before, &created_only, "ToyOS", guid), Ok("0002".to_string()));
+
+        let ordered = created_only.replace("BootOrder: 0001,001D", "BootOrder: 0002,0001,001D");
+        assert_eq!(
+            entry_after_create(before, &ordered, "ToyOS", guid),
+            Err(Refusal::BootOrder {
+                before: "0001,001D".to_string(),
+                now: "0002,0001,001D".to_string(),
+            })
+        );
+
+        // A create that made nothing, and one that made an entry for another
+        // partition, are both a boot this loop cannot name.
+        assert!(matches!(
+            entry_after_create(before, before, "ToyOS", guid),
+            Err(Refusal::BootEntry(_))
+        ));
+        let elsewhere = created_only.replace(guid, "11111111-1111-1111-1111-111111111111");
+        assert!(matches!(
+            entry_after_create(before, &elsewhere, "ToyOS", guid),
+            Err(Refusal::BootEntry(_))
+        ));
+
         assert_eq!(boot_order("BootCurrent: 0001\n"), "");
         assert_eq!(boot_order(""), "");
         assert!(!Refusal::BootOrder { before: String::new(), now: "0002".to_string() }
