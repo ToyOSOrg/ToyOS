@@ -739,7 +739,6 @@ const CONFIG: &str = "system.toml";
 
 /// Everything one image is built from: the config, the kernel's feature list,
 /// and the parameters that kernel is armed with.
-#[derive(Clone)]
 pub struct Plan {
     pub config: PathBuf,
     pub features: Vec<String>,
@@ -756,9 +755,12 @@ impl Plan {
     }
 }
 
-/// **The one place a plan is made**, over the words a command line carried:
-/// [`build`] consumes this and computes none of it, so no second reading of
-/// the same argv can disagree with it.
+/// The plan a `cargo run` command line names. [`build`] consumes one and
+/// computes none of it; the harness builds its own with [`Plan::new`].
+///
+/// **`--kernel-param` and `--kernel-feature` are orthogonal to the boot mode**:
+/// the config decides which programs start and these decide what the kernel is,
+/// so every mode reaches every parameter and no mode implies one.
 pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan {
     let feature = repeated(args, "--kernel-feature");
     let param = repeated(args, "--kernel-param");
@@ -766,7 +768,7 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
     // build: a misspelling is the command line's and has to come back before
     // anything waits on a lock.
     let features = kernel_features(root, debug, &feature, &param);
-    actuator_params(root, &param);
+    check_params(root, &param);
     Plan {
         config: boot.config.clone(),
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
@@ -801,7 +803,6 @@ pub fn valued(args: &[String], flag: &str) -> Option<String> {
 /// only ever a different directory — the kernel and the bootloader in a diag
 /// image are byte-identical to the shipping one's, which a `#[cfg]` could not
 /// have given us.
-#[derive(Clone)]
 pub struct Boot {
     config: PathBuf,
     image: PathBuf,
@@ -963,16 +964,16 @@ fn kernel_features(
     features.join(",")
 }
 
-/// The actuator half of the boot parameter, with every name checked
-/// against `kernel/src/actuator.rs`.
+/// Every `--kernel-param` checked against what `kernel/src/actuator.rs` and
+/// `kernel/src/params.rs` declare.
 ///
 /// Refused here as well as in the kernel, and before any lock, so that deleting
 /// an actuator takes its stale command lines down with it instead of quietly
 /// producing an image that arms nothing — the same rule `--kernel-feature` runs
 /// on, one layer further in.
-fn actuator_params(root: &Path, params: &[String]) -> String {
+fn check_params(root: &Path, params: &[String]) {
     if params.is_empty() {
-        return String::new();
+        return;
     }
     let declared = declared_actuators(root);
     let own = declared_params(root);
@@ -986,7 +987,6 @@ fn actuator_params(root: &Path, params: &[String]) -> String {
             own.join(", "),
         );
     }
-    params.join(",")
 }
 
 /// The boot parameters the kernel itself answers to, off `kernel/src/params.rs`.
@@ -2229,19 +2229,20 @@ mod tests {
         assert!(plan.features.is_empty(), "{:?}", plan.features);
         assert_eq!(boot.image, Path::new("target/bootable-jobcase.img"));
 
-        // Every config this tree holds builds to an artifact of its own, and
-        // each is reached by the constructor that owns it.
+        // Every config this tree holds builds to an artifact of its own,
+        // reached by the constructor its directory decides — and a case that
+        // will not construct reds here rather than falling back to a mode.
         let mut images = BTreeSet::new();
         for at in ALL_CONFIGS {
             let dir = Path::new(at).parent().expect("a config sits in a directory");
-            let boot = if dir.as_os_str().is_empty() {
-                Boot::shipped(root)
-            } else {
-                Boot::case(root, &dir.to_string_lossy())
-                    .unwrap_or_else(|_| Boot::mode(root, &root.join(dir)))
+            let boot = match dir.to_string_lossy().as_ref() {
+                "" => Boot::shipped(root),
+                "diag" => Boot::diag(root),
+                "console" => Boot::console(root),
+                case => Boot::case(root, case).unwrap_or_else(|why| panic!("{at}: {why}")),
             };
             assert_eq!(boot.config, root.join(at), "{at}");
-            assert!(images.insert(boot.image.clone()), "{at} shares an image with another config");
+            assert!(images.insert(boot.image), "{at} shares an image with another config");
         }
         for mode in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
             assert!(images.contains(&mode.image), "{}", mode.image.display());
