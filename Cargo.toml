@@ -111,6 +111,9 @@ toyos-manifest = { path = "toyos-manifest" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "toyos-tco" }
+# `classify`, so the host reading a log volume and `logd` writing it cannot
+# disagree about which files on it are `logd`'s.
+toyos-wallclock = { path = "toyos-wallclock" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # The digest behind two readings that must not be able to agree by accident:
 # `NOTICE`'s record of every committed binary file (`src/sourcegate.rs`), and a

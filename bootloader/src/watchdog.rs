@@ -16,7 +16,6 @@
 use core::ptr::read_volatile;
 
 use toyos_acpi::Phys;
-use uefi_services::println;
 use toyos_tco::{Chipset, TCO1_CNT, TCO1_CNT_RUN, TCO_RLD, TCO_TMR, TCO_TMR_HLT};
 
 /// x86-64's 52-bit physical-address ceiling, as `kernel/src/drivers/acpi.rs`
