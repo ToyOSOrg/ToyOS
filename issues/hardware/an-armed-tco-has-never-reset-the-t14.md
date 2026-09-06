@@ -37,18 +37,22 @@ wrong write is worse. Ubuntu on this machine exposes no
 with a gate the firmware sets and does not advertise.
 
 What the tree could decide, it has: the loader now prints `TCO_RLD`, `TCO_TMR`,
-`TCO1_CNT`, `TCO1_STS` and `TCO2_STS` as whole words right after arming, then
-stalls one 600 ms tick and reads `TCO_RLD` again. That second read is the
-question no single read answers — *does this timer count at all* — and it splits
-the remaining candidates cleanly:
+`TCO1_CNT` and `TCO2_STS` as whole words right after arming, then stalls one
+tick plus a margin and reads `TCO_RLD` again. That second read is the question
+no single read answers — *does this timer count at all* — and it splits the
+remaining candidates cleanly:
 
 - **`TCO_RLD` did not move**: the timer is not running, and no bound it was
   armed with could ever expire. The halt bit read back clear, so the cause is
   elsewhere in the block, and the printed words are the evidence.
 - **`TCO_RLD` moved**: the timer counts and the reset is gated downstream —
-  `NO_REBOOT`, or a first-expiry SMI the firmware services. `TCO1_STS` on the
-  *next* boot then separates those two: a latched first-timeout bit means the
-  expiry happened and only the reboot was suppressed.
+  `NO_REBOOT`, or a first-expiry SMI the firmware services.
+
+Only four registers, because only those four have a citation here. The first
+expiry's own latch would separate the last two candidates on the boot after —
+an expiry that happened with only the reboot suppressed — but this tree has no
+datasheet text naming its offset, and a read at a guessed one would report a
+guess as a finding. It is the first thing to add once that section is cited.
 
 q35 is the positive control and prints the moved branch
 (`TCO_RLD went 0x0007 -> 0x0006 over 700ms`), asserted by

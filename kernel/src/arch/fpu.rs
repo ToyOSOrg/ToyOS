@@ -137,7 +137,11 @@ unsafe fn xgetbv0() -> u64 {
 
 /// Logs one line per CPU naming what state exists; per CPU because two CPUs
 /// disagreeing about `XCR0` would fault on migration, invisibly if summarized.
-pub fn log_state() {
+///
+/// Takes its own id rather than reading `gs:`: the BSP calls this between
+/// [`init`] and the `wrmsr` that makes `gs:` valid, so that a boot which stops
+/// in that gap has still said what this CPU's extended state is.
+pub fn log_state(cpu_id: u32) {
     let (max_leaf, _, _, _) = super::cpu::cpuid(0, 0);
     let (_, _, ecx1, _) = super::cpu::cpuid(1, 0);
     let xsave = ecx1 & (1 << 26) != 0;
@@ -149,7 +153,7 @@ pub fn log_state() {
     log!(
         "fpu: cpu{} xsave={} osxsave={} xcr0={:#x} \
          cpuid.d.0=({:#x},{},{}) cpuid.d.1.eax={:#x}",
-        super::percpu::cpu_id(),
+        cpu_id,
         xsave as u8,
         osxsave as u8,
         xcr0,

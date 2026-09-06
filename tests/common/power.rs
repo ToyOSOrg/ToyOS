@@ -286,6 +286,21 @@ fn armed_on_arrival() -> String {
     format!("TCO_TMR={} on arrival, {ARMED_ON_ARRIVAL}", toyos_tco::TIMER)
 }
 
+/// The `0x…` word printed straight after `label`, so a register is compared as
+/// a number and not as the spelling the loader happened to use for it.
+fn hex_field(line: &str, label: &str) -> Result<u64, String> {
+    let rest = line
+        .split_once(label)
+        .ok_or_else(|| format!("no {label:?} in {line:?}"))?
+        .1
+        .trim_start();
+    let digits = rest
+        .strip_prefix("0x")
+        .ok_or_else(|| format!("{label:?} is not followed by a hex word in {line:?}"))?;
+    let end = digits.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(digits.len());
+    u64::from_str_radix(&digits[..end], 16).map_err(|e| format!("{label:?} in {line:?}: {e}"))
+}
+
 /// The loader arms the chipset's watchdog before it jumps, so the handoff is
 /// inside the bound.
 ///
@@ -306,14 +321,25 @@ pub fn loader_watchdog_arms(
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let line = boot.must_say(&loader_armed())?.to_string();
-    // The read-back is what a machine with no serial port answers with, so the
-    // guest that has one is where it is proven to print at all.
-    boot.must_say("watchdog: read back TCO_RLD=")?;
-    // q35 is the positive control for the one question a single read cannot
-    // answer: a timer that is armed and running has moved by one tick. A T14
-    // that prints the other branch is a chipset that never counts, not a
-    // loader that never armed.
+    // The words, not the line: a read-back that printed a register the loader
+    // never wrote would satisfy the line and is the failure worth catching.
+    let read_back = boot.must_say("watchdog: read back TCO_RLD=")?.to_string();
+    let tmr = hex_field(&read_back, "TCO_TMR=")?;
+    if tmr != u64::from(toyos_tco::TIMER) {
+        return Err(format!(
+            "the loader read TCO_TMR={tmr} back from the chipset and wrote {}\n{read_back}",
+            toyos_tco::TIMER
+        ));
+    }
+    // q35 is the positive control for the question a single read cannot answer:
+    // an armed timer counts down. A T14 printing the other branch is a chipset
+    // that never counts, not a loader that never armed.
     let counts = boot.must_say("so the timer counts")?.to_string();
+    let from = hex_field(&counts, "TCO_RLD went ")?;
+    let to = hex_field(&counts, "-> ")?;
+    if to >= from {
+        return Err(format!("an armed TCO went {from} -> {to} over one tick\n{counts}"));
+    }
     boot.must_say(&armed_on_arrival())?;
     drop(qemu);
 

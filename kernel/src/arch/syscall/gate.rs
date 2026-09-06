@@ -35,6 +35,18 @@ pub fn init() {
         let df = if cfg!(feature = "entry-df-unclean") { 0 } else { DF };
         cpu::wrmsr(MSR_FMASK, TF | IF | AC | df);
     }
+
+    // The three MSRs as the CPU holds them, not as they were written: a gate
+    // aimed anywhere but `LSTAR` here is a Ring 3 entry into the wrong address,
+    // and `control_regs` reports its own registers the same way for the same
+    // reason.
+    crate::log!(
+        "syscall: cpu{} star={:#018x} lstar={:#018x} fmask={:#x}",
+        percpu::cpu_id(),
+        cpu::rdmsr(MSR_STAR),
+        cpu::rdmsr(MSR_LSTAR),
+        cpu::rdmsr(MSR_FMASK),
+    );
 }
 
 // GS permanently points to kernel per-CPU data here; no swapgs.

@@ -347,14 +347,13 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     apic::init();
     percpu::init_bsp(apic::id());
     idt::init();
-    log!("boot: IDT loaded; the I/O APIC's MADT entries are next");
     ioapic::init(&madt);
-    // Said before the flag is set, not after: a pin this machine's firmware left
-    // armed storms the moment `sti` retires, and a record written after that
-    // would never be reached.
-    log!("boot: interrupt handlers are in place, enabling interrupts");
     idt::enable_interrupts();
-    log!("boot: interrupts enabled; SYSCALL/SYSRET is next");
+    // Read back, because `sti` is the first instruction at which this machine's
+    // own devices can reach the kernel: a CPU not holding `IF` here took
+    // something that cleared it again before this record was stamped.
+    let flags = cpu::rflags();
+    log!("interrupts: cpu0 rflags={:#x} if={}", flags, u8::from(flags & cpu::RFLAGS_IF != 0));
     syscall::init();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     if !kernel_elf.is_empty() {

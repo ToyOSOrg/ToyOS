@@ -48,21 +48,29 @@ a machine where that assertion *fails* the failure path itself faults before it
 can report. The `wrmsr`, the store, and the first `emit` past `PERCPU_READY` are
 the rest.
 
-Two records now bracket those steps, both on the pre-`PERCPU_READY` boot-shard
-path that `control_regs` proved reaches the panel:
+`fpu::log_state` now runs between `fpu::init` and the `wrmsr`, rather than after
+this function's own line, on the pre-`PERCPU_READY` boot-shard path that
+`control_regs` proved reaches the panel. It takes its CPU id as an argument
+instead of reading `gs:`, which is what lets it run there at all — and which
+removes the same latent hazard from the AP path. It prints this CPU's extended
+state, so it is a machine fact rather than a breadcrumb, and the next photograph
+reads:
 
-- `percpu: cpu0 gdt loaded and control registers applied; the FPU's initial state is next`
-- `percpu: cpu0 FPU initial state accepted; gs base and the per-CPU log path are next`
+- no `fpu:` line — the stop is inside `fpu::init`, whose `xcr0` was never reached
+- an `fpu:` line, no `percpu: BSP` — the `wrmsr`/store/first-`emit` group
+- neither, still ending at `control_regs` — `control_regs::init`'s own tail
 
-The next photograph names the step: stopping at the first means `fpu::init`,
-stopping at the second means the `wrmsr`/store/first-`emit` group, and stopping
-at `control_regs` still would mean `control_regs::init`'s own tail.
+No record was added before `fpu::init`: `control_regs::init` has no wait after
+its own printed line, so a record there would discriminate nothing.
 
-Three more cover the steps in `main.rs` that produce no record of their own
-(`idt::init`, the `sti`, `syscall::init`), and one covers the HPET calibration.
+The steps that produced no record now print what they established: `idt::init`
+the table it loaded and how many vectors carry only the unclaimed stub, the
+`sti` its `RFLAGS` read back, `syscall::init` the three MSRs the CPU holds, and
+`clock::init` the HPET's period and its counter's first reading before it waits
+on that counter.
 
-**Exit condition**: one metal run whose panel shows which of the bracketed steps
-is last. The T14 is the only judge — QEMU boots this path on every test.
+**Exit condition**: one metal run whose panel shows which of those records is
+last. The T14 is the only judge — QEMU boots this path on every test.
 
 Related: `issues/hardware/an-armed-tco-has-never-reset-the-t14.md` is why this
 wedge needs a hand on the power button instead of resetting itself.

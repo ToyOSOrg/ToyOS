@@ -16,14 +16,15 @@ order is the timestamp order, and `emit` stamps inside the same bracket it
 reserves in
 ```
 
-Three full-tier runs on this host, one of them on `origin/metal` (`b3c314cf`)
+Four full-tier runs on this host, one of them on `origin/metal` (`b3c314cf`)
 with no working-tree diff at all:
 
-| run | tree | shard | inversion | outcome |
-|---|---|---|---|---|
-| 1 | `t14-run4` | cpu5 | 650224011 behind 651750439 ns (1.5 ms) | `FAIL sched_stress`, 324/325 |
-| 2 | `b3c314cf` (base) | cpu6 | 742053639 behind 743716169 ns (1.7 ms) | 325/325 green |
-| 3 | `t14-run4` | cpu6 | 736451308 behind 739564366 ns (3.1 ms) | 325/325 green |
+| run | tree | shard | seq | inversion | outcome |
+|---|---|---|---|---|---|
+| 1 | `t14-run4` | cpu5 | 517 | 650224011 behind 651750439 ns (1.5 ms) | `FAIL sched_stress`, 324/325 |
+| 2 | `b3c314cf` (base) | cpu6 | 517 | 742053639 behind 743716169 ns (1.7 ms) | 325/325 green |
+| 3 | `t14-run4` | cpu6 | 517 | 736451308 behind 739564366 ns (3.1 ms) | 325/325 green |
+| 4 | `t14-run4`, one more boot record | cpu6 | 518 | 736406061 behind 737807237 ns (1.4 ms) | 325/325 green |
 
 So it is **not** the `t14-run4` diff — it fires on the untouched base — and it is
 not the retired `sched_stress` entry in `src/redlist.rs` either, whose signature
@@ -31,10 +32,11 @@ is a `BTreeMap` panic at `navigate.rs:161`. It is a third thing, and the only
 reason it is not a permanent red is that the boot it lands in is usually not one
 a test is judging.
 
-Two things about it are stable across all three runs and worth an eye: it is
-always **`seq 517`**, and it is always an AP's shard, never cpu0's. A constant
-sequence number across three runs and two different CPUs says the record's
-position in the shard is what selects it, not the wall time or the CPU.
+It is always an AP's shard, never cpu0's, and always **one fixed position** in
+that shard. Run 4 is what shows that: this branch added one boot record ahead of
+it and the inversion moved 517 -> 518 with it. So what selects the record is its
+index in the shard, not its sequence number, not the wall time, and not the CPU
+— which is a much narrower thing to look for than a race that happens to recur.
 
 The gate's own sentence names the invariant that is broken: `emit` stamps
 `record.at_ns` and reserves the shard slot inside one `LogCommitGuard` bracket,
