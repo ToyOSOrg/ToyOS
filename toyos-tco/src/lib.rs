@@ -16,7 +16,9 @@ pub const TCO1_CNT: u16 = 0x08;
 pub const TCO_TMR: u16 = 0x12;
 
 /// `TCO2_STS`'s two bits are how a chipset that reset the machine last time
-/// says it was this timer that did it.
+/// says it was this timer that did it. **Whether writing them back clears them
+/// is verified on QEMU only**, whose store masks both out; a PCH that keeps
+/// them reports one reset on every boot after it.
 pub const TCO_TMR_HLT: u16 = 1 << 11;
 pub const TCO_SECOND_TO_STS: u16 = 1 << 1;
 pub const TCO_BOOT_STS: u16 = 1 << 2;
@@ -105,7 +107,11 @@ pub const CHIPSETS: &[Chipset] = &[
         enable: Enable { reg: 0x40, bit: 1 },
     },
     // Tiger Lake-LP's SMBus function: a 32-byte I/O base of its own, the block
-    // at its start, and bit 0 of the register not part of the address.
+    // at its start, and bit 0 of the register not part of the address. Read on
+    // a T14: firmware enables the block and programs it at port 0x400, leaves
+    // `TCO_TMR_HLT` clearable, and lets an expiry reset the machine — so
+    // neither `TCO_LOCK` nor the `NO_REBOOT` strap holds there, and the double
+    // expiry `timer_for` derives is the count that PCH keeps.
     Chipset {
         vendor: 0x8086,
         device: 0xa0a3,
