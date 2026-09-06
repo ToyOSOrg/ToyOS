@@ -12,8 +12,9 @@
 //! and the arm line says so instead of resetting on a guess.
 //!
 //! The reset is the FADT's, through [`acpi::reboot`]; a machine whose reset
-//! register this kernel has not decoded yet — every panic before
-//! `acpi::init_power` — is refused by name and holds, with no fallback.
+//! register this kernel could not decode is refused by name and holds, with no
+//! fallback. That register is decoded before `percpu::init_bsp` loads the IDT,
+//! so every panic that can reach this path at all has one to write.
 //!
 //! [`acpi::reboot`]: crate::drivers::acpi::reboot
 
