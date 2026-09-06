@@ -32,6 +32,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use toyos_build::bootlog;
 use toyos_fat32_check::{check, describe};
 
 use fatfs::FsOptions;
@@ -656,11 +657,27 @@ pub fn newest_log(image_path: &Path, start: usize, len: usize) -> Result<(String
     Ok((newest.clone(), need(found.pop().flatten(), newest)?))
 }
 
-/// Every `.log` file on the volume, in the order their names sort.
+/// The loader's own file on the volume, line by line.
+pub fn loader_log_lines(
+    image_path: &Path,
+    start: usize,
+    len: usize,
+) -> Result<Vec<String>, String> {
+    let image = std::fs::read(image_path).map_err(|e| format!("read the image: {e}"))?;
+    let volume =
+        image.get(start..start + len).ok_or("the image shrank under the log partition")?;
+    let mut found = read_files(volume, &[bootlog::LOADER_LOG])?;
+    let bytes = need(found.pop().flatten(), bootlog::LOADER_LOG)?;
+    let text = String::from_utf8(bytes)
+        .map_err(|e| format!("{} is not UTF-8: {e}", bootlog::LOADER_LOG))?;
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+/// Every file `logd` wrote, in the order their names sort.
 fn log_names(volume: &[u8]) -> Result<Vec<String>, String> {
     Ok(root_entries(volume)?
         .into_iter()
-        .filter(|e| e.name.ends_with(".log"))
+        .filter(|e| bootlog::is_logd_file(&e.name))
         .map(|e| e.name)
         .collect())
 }
@@ -716,7 +733,7 @@ fn rotation(
 
     let image = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
     let entries = root_entries(&image[start..start + len])?;
-    let logs: Vec<&Entry> = entries.iter().filter(|e| e.name.ends_with(".log")).collect();
+    let logs: Vec<&Entry> = entries.iter().filter(|e| bootlog::is_logd_file(&e.name)).collect();
     // A part is a flush batch that crossed the bound rather than 256 bytes of
     // log — the sink drains everything pending before it looks at the size —
     // so a metal-sim boot makes a handful, measured at four. That is under the
