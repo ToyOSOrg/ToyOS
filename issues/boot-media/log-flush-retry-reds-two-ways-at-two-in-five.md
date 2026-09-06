@@ -7,8 +7,8 @@ opened: 2026-09-01
 # `log_flush_retry` reds two out of five runs, on two different assertions, and is not on the redlist
 
 Measured on the dev host in one session while gating a branch whose whole diff
-is doc comments, one tracker file and one `src/prose-ledger` row. Five runs of
-`cargo test --test toyos-build -- --nightly log_flush_retry` on the branch head
+is doc comments and one tracker file. Five runs of `cargo test --test
+toyos-build -- --nightly log_flush_retry` on the branch head
 (`08ba695e`, `main` `750b1a72` merged in): **runs 1, 3, 4 green; runs 2 and 5
 red.** Five runs of the same command on `750b1a72` itself, same session, same
 host, detached: **run 2 red, four green.** So it reds on `main` alone, and this
