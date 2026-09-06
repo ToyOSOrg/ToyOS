@@ -463,8 +463,8 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let framebuffer = fb.as_mut_ptr() as u64;
     let framebuffer_size = fb.size() as u64;
 
-    println!("GOP: {}x{} stride={} format={} fb={:#x} size={}",
-        width, height, stride, pixel_format, framebuffer, framebuffer_size);
+    println!("{} {}x{} stride={} format={} fb={:#x} size={}",
+        loaderlog::GOP_AT, width, height, stride, pixel_format, framebuffer, framebuffer_size);
 
     Some(GopInfo {
         framebuffer,
@@ -685,6 +685,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // answers die with Boot Services.
     let rtc_offset = rtc_utc_offset(&system_table);
 
-    println!("{}", loaderlog::HANDS_OFF_AT);
+    println!("Starting kernel...");
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);
 }

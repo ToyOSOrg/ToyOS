@@ -175,13 +175,14 @@ impl Ppm {
 
     /// How many rows of text are on the panel, counted without decoding a
     /// glyph: no firmware font is committed here, so a row one drew is
-    /// invisible to [`Ppm::text`] and countable only as lit scanlines.
+    /// invisible to [`Ppm::text`].
     ///
-    /// The pitch is the median distance between band tops — a stray scanline
-    /// would set a minimum of one, and a mean would follow the same outlier.
     /// A band taller than the pitch is a logo or two rows that touch, and
-    /// neither is one row of text.
-    pub fn text_row_bands(&self) -> usize {
+    /// neither is one row of text; the pitch is the median distance between
+    /// band tops, because a stray scanline sets a minimum of one and drags a
+    /// mean as well. A panel with fewer than two bands has no pitch to take,
+    /// and is refused rather than counted as none.
+    pub fn text_row_bands(&self) -> Result<usize, String> {
         let mut bands: Vec<(usize, usize)> = Vec::new();
         let mut top = None;
         for y in 0..self.height {
@@ -201,11 +202,22 @@ impl Ppm {
         }
         let mut gaps: Vec<usize> = bands.windows(2).map(|pair| pair[1].0 - pair[0].0).collect();
         if gaps.is_empty() {
-            return 0;
+            return Err(format!(
+                "the panel carries {} band(s) of lit scanlines, too few to take a row pitch from",
+                bands.len()
+            ));
         }
         gaps.sort_unstable();
         let pitch = gaps[gaps.len() / 2];
-        bands.iter().filter(|(from, to)| to - from <= pitch).count()
+        let rows = bands.iter().filter(|(from, to)| to - from <= pitch).count();
+        if rows == 0 {
+            return Err(format!(
+                "every one of the panel's {} band(s) is taller than the {pitch}-pixel pitch, so \
+                 none of them is a row of text",
+                bands.len()
+            ));
+        }
+        Ok(rows)
     }
 
     /// The fill colour, read from the bottom-right pixel. The renderer paints

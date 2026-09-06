@@ -23,9 +23,9 @@ use uefi::{prelude::*, CStr16, Handle};
 /// The loader's first line, which is also the file's: [`open`] runs before it.
 pub const BEGINS_AT: &str = "ToyOS Bootloader 1.0";
 
-/// The line before the jump; [`close`] runs first inside it, so [`ENDS_AT`] is
-/// what follows this one and not the other way round.
-pub const HANDS_OFF_AT: &str = "Starting kernel...";
+/// What `query_gop` prints once it has opened the protocol, and the word that
+/// tells this line from the kernel's own `GOP:` line on a console with both.
+pub const GOP_AT: &str = "GOP: mode";
 
 /// The file's last line: [`close`] runs before the memory map is sized, and a
 /// write after that could grow the map the kernel is about to be handed.

@@ -21,6 +21,10 @@ pub const LOADER_LOG: &str = "loader.log";
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
 pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so this file ends here";
 
+/// The line the loader prints once it has opened `GraphicsOutput`, which the
+/// kernel's own `GOP:` line does not begin with.
+pub const LOADER_GOP_LINE: &str = "GOP: mode";
+
 /// Whether `name` on the log volume is one of `logd`'s files, which is
 /// `logd`'s own allow-list and not a suffix: the loader's file ends in `.log`
 /// too, and a `toybox` run can leave anything there.
@@ -151,6 +155,7 @@ mod tests {
             format!("cstr16!(\"{LOADER_LOG}\")"),
             format!("\"{LOADER_FIRST_LINE}\""),
             format!("\"{LOADER_LAST_LINE}\""),
+            format!("\"{LOADER_GOP_LINE}\""),
         ];
         for rhs in wanted {
             assert!(

@@ -13,7 +13,7 @@ use common::qemu::{
 };
 use common::{audio, compile, faults, hostload, pkg, power, screen, serial, stats, storage, usb};
 use toyos_build::day::Day;
-use toyos_build::bootlog::boot_millis;
+use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
 
@@ -479,11 +479,6 @@ const CONSOLE_PROMPT: &str = "/home/root>";
 /// read them. This one is written hundreds of lines into a boot, which is what
 /// makes its *absence* two different things — see `screen_console_shell`.
 const CONSOLE_SEED_WITNESS: &str = "i8042:";
-
-/// The line `query_gop` prints right after it opens the protocol. `fb=` is the
-/// bootloader's spelling of a GOP line and `at 0x` is the kernel's, so this
-/// picks the loader's wherever both are on one console.
-const GOP_QUERY_LINE: &str = "fb=0x";
 
 /// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
 /// the brightest channel and a colour a glyph could contain would let a
@@ -3309,11 +3304,6 @@ fn run_screen_test(
             // An EXCLUSIVE open of `GraphicsOutput` calls `Stop` on the
             // firmware's graphics console, so with one the panel stops at the
             // GOP query and every later loader line is on serial alone.
-            //
-            // Differential across that query, because a single count would be
-            // the firmware's own preamble as well; and rows are counted rather
-            // than read, because the kernel's font is the only one `screen.rs`
-            // has and every row here was drawn by the firmware's.
             let dump_at = |marker: &'static str| -> Result<(usize, String), String> {
                 let options = BootOptions {
                     profile: qemu::Profile::Metal,
@@ -3340,11 +3330,28 @@ fn run_screen_test(
                         dump.text()
                     ));
                 }
-                Ok((dump.text_row_bands(), console))
+                Ok((dump.text_row_bands()?, console))
             };
 
-            let (before, _) = dump_at(GOP_QUERY_LINE)?;
-            let (after, console) = dump_at(toyos_build::bootlog::LOADER_LAST_LINE)?;
+            let (before, at_query) = dump_at(bootlog::LOADER_GOP_LINE)?;
+            let (after, console) = dump_at(bootlog::LOADER_LAST_LINE)?;
+
+            // The growth below subtracts one boot's rows from the other's, and
+            // says nothing unless the two drew the same number before the
+            // query. Their lines are not compared: each boot builds its own
+            // image, so the partition GUIDs on two of them differ by design.
+            let upto = |text: &str| {
+                text.lines().take_while(|line| !line.contains(bootlog::LOADER_GOP_LINE)).count()
+            };
+            if upto(&at_query) != upto(&console) {
+                return Err(format!(
+                    "one boot printed {} lines before the GOP query and the other {}, so their \
+                     row counts are not each other's baseline\n--- first\n{at_query}\n--- \
+                     second\n{console}",
+                    upto(&at_query),
+                    upto(&console)
+                ));
+            }
 
             // What the loader printed after the query, off its own console.
             let lines: Vec<&str> = console.lines().collect();
@@ -3354,21 +3361,21 @@ fn run_screen_test(
                     .position(|seen| seen.contains(line))
                     .ok_or_else(|| format!("the loader never printed {line:?}\n{console}"))
             };
-            let (query, last) = (at(GOP_QUERY_LINE)?, at(toyos_build::bootlog::LOADER_LAST_LINE)?);
+            let (query, last) =
+                (at(bootlog::LOADER_GOP_LINE)?, at(bootlog::LOADER_LAST_LINE)?);
             if last <= query {
                 return Err(format!(
-                    "the console carries {:?} at line {last} and {GOP_QUERY_LINE:?} at {query}, \
-                     so there is nothing between them",
-                    toyos_build::bootlog::LOADER_LAST_LINE
+                    "the console carries {:?} at line {last} and {:?} at line {query}, so there \
+                     is nothing between them",
+                    bootlog::LOADER_LAST_LINE,
+                    bootlog::LOADER_GOP_LINE
                 ));
             }
             let printed = last - query;
 
-            // A range and not an equality: each panel is dumped after its
-            // marker reached the console, so a line drawn in between is on the
-            // panel and not in the count. Both ends are the claim — the console
-            // kept drawing past the query, and drew no more than the loader
-            // printed — and the defect this exists for makes the growth zero.
+            // A range and not an equality: each panel is dumped after its marker
+            // reached the console, so a line drawn in between is on the panel
+            // and not in the count.
             let grew = after as i64 - before as i64;
             if !(1..=printed as i64).contains(&grew) {
                 return Err(format!(
