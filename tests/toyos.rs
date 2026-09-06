@@ -618,6 +618,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
     ("watchdog_fed", Sched::Serial, Tier::Nightly),
+    // The panicked kernel's own bound, which is what ends a boot on a machine
+    // whose chipset timer does not count. Both verdicts are QEMU's stop reason
+    // against a bound the guest printed, so both are destined for
+    // `Why::TimerAnchored` and Nightly once their one CI price is measured.
+    ("panic_reboots", Sched::Parallel, Tier::Fast),
+    // Serial like `watchdog_fed`: its verdict is that nothing happened for a span of host clock.
+    ("panic_key_holds", Sched::Serial, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
@@ -4583,7 +4590,17 @@ fn run_screen_test(
             let dump = qemu.screendump_until("PANIC:", Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
-            for want in ["PANIC:", "test-late-panic: on-screen console check"] {
+            // The arm line is here and nowhere else: this is the machine whose
+            // panel is its only account, so it is the only one whose capture
+            // `halt_all_cpus` refreshes to carry it. Newest record, so it sits
+            // at the foot of the same `Page::Last` the two lines above are on.
+            // The bound is derived: a panel promising a minute while the kernel
+            // counts something else is the failure this line exists to catch.
+            let armed = format!(
+                "panic: rebooting in {} s unless a key is pressed",
+                toyos_tco::PANIC_BOUND_MS / 1_000
+            );
+            for want in ["PANIC:", "test-late-panic: on-screen console check", &armed] {
                 if !text.contains(want) {
                     return Err(format!(
                         "{want:?} not on screen of a guest with no serial port at all\ndecoded screen:\n{text}"
@@ -8890,6 +8907,8 @@ fn run_machine_test(
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
+        "panic_reboots" => power::panic_reboots(test_config, c_bins, rust_bins),
+        "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),
         "usb_storage_shapes" => usb::usb_storage_shapes(test_config, c_bins, rust_bins),

@@ -342,6 +342,9 @@ actuators! {
 
     /// Stop feeding it once boot is done, which is what a wedge looks like to the chipset.
     watchdog_starve = "tco-starve";
+
+    /// Shorten the panicked kernel's own reboot bound from a minute to seconds, so a guest reaches the reset.
+    panic_reboot_fast = "panic-reboot-fast";
 }
 
 #[cfg(feature = "boot-actuators")]

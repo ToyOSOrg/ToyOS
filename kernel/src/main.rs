@@ -29,6 +29,7 @@ mod actuator;
 mod params;
 mod mm;
 mod panic;
+mod panic_reboot;
 
 mod keyboard;
 mod mouse;
@@ -126,21 +127,30 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     if depth.fetch_add(1, core::sync::atomic::Ordering::SeqCst) > 0 {
         // UART only: percpu and the log path are what just panicked.
         panic::last_words("PANIC REENTRY: CPU halted", None, info, false);
+        // Off the record like the report above it: the log path is what just panicked here.
+        let bound = panic_reboot::arm(false);
         // No capture(): the outer panic's snapshot is the one worth showing.
         // render() is safe by construction here: a fault inside the renderer itself would find PAINTING already held, and return without touching a pixel.
-        drivers::panic_console::render();
+        // Only the CPU that took the panel watches the bound; a reentry inside the pager finds it held and halts.
+        if drivers::panic_console::render() {
+            drivers::panic_console::hold_the_panel(bound);
+        }
         cpu::halt();
     }
 
-    // Early boot: percpu not ready, just halt (single CPU at this point)
+    // Early boot: percpu not ready (single CPU at this point), and neither is the calibrated clock — the bound comes off CPUID there.
     if !log::PERCPU_READY.load(core::sync::atomic::Ordering::Relaxed) {
         alert!("EARLY PANIC: {}", info);
+        // Before the capture, so the arm line is the panel's last one.
+        let bound = panic_reboot::arm(true);
         // Halts directly instead of via halt_all_cpus: idt::init hasn't run yet, so a renderer fault would triple-fault.
         drivers::panic_console::capture();
         // SAFETY: no other writer can be mid-transmission — IF is clear here and every other CPU is about to halt.
         unsafe { drivers::serial::panic_flush(); }
         // Flush before render: the serial report survives even if render then faults.
-        drivers::panic_console::render();
+        if drivers::panic_console::render() {
+            drivers::panic_console::hold_the_panel(bound);
+        }
         cpu::halt();
     }
 

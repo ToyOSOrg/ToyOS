@@ -34,10 +34,16 @@ const RETURN_ALLOWANCE_SECS: u64 = 300;
 
 /// Every bound a metal boot runs under, by the constant that arms it: the
 /// firmware's over the span before the handoff, the TCO the loader arms there
-/// and the kernel keeps feeding, and the runner's own over its job list — which
-/// no watchdog covers, because a kernel with an unfinished job is alive.
-const WATCHDOG_BOUNDS_MS: &[u64] =
-    &[toyos_tco::FIRMWARE_BOUND_MS, toyos_tco::BOUND_MS, toyos_tco::JOB_BOUND_MS];
+/// and the kernel keeps feeding, the runner's own over its job list — which no
+/// watchdog covers, because a kernel with an unfinished job is alive — and the
+/// panicked kernel's own over its panel, which is what ends a boot on a machine
+/// whose chipset watchdog does not count.
+const WATCHDOG_BOUNDS_MS: &[u64] = &[
+    toyos_tco::FIRMWARE_BOUND_MS,
+    toyos_tco::BOUND_MS,
+    toyos_tco::JOB_BOUND_MS,
+    toyos_tco::PANIC_BOUND_MS,
+];
 
 /// How long the machine has to answer `ssh` again after `reboot`.
 ///
@@ -1333,11 +1339,13 @@ mod tests {
         assert_eq!(toyos_tco::FIRMWARE_BOUND_MS, 60_000);
         assert_eq!(toyos_tco::BOUND_MS, 9_600);
         assert_eq!(toyos_tco::JOB_BOUND_MS, 60_000);
+        assert_eq!(toyos_tco::PANIC_BOUND_MS, 60_000);
         assert_eq!(RETURN_ALLOWANCE_SECS, 300);
         assert_eq!(return_secs(), 360);
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::FIRMWARE_BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::JOB_BOUND_MS));
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::PANIC_BOUND_MS));
     }
 
     #[test]

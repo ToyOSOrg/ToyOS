@@ -112,6 +112,13 @@ pub const FIRMWARE_BOUND_MS: u64 = 60_000;
 /// while a job never finishes is no wedge to it and nothing else ends the boot.
 pub const JOB_BOUND_MS: u64 = 60_000;
 
+/// The bound a panicked kernel holds its panel for before it returns the
+/// machine to firmware itself, in milliseconds. Nothing feeds this one: a key
+/// press retires it, because a key means somebody is reading the panel, and
+/// nobody pressing one inside the bound means nobody is there to. A minute is
+/// this project's bound for every watchdog.
+pub const PANIC_BOUND_MS: u64 = 60_000;
+
 /// [`BOUND_MS`]'s timer, which is neither a value this tree can fail to have
 /// nor one the hardware would ignore.
 pub const TIMER: u16 = match timer_for(BOUND_MS) {

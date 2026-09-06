@@ -383,3 +383,136 @@ const ARMED: &str =
      for 2400ms";
 
 const FED_FOR: Duration = Duration::from_secs(20);
+
+/// The kernel's fast panic bound in seconds — `kernel/src/panic_reboot.rs`'s
+/// `FAST_BOUND`, which `panic-reboot-fast` swaps in for the shipped minute.
+///
+/// A kernel constant does not cross into the harness, so it is written here and
+/// then *read back*: [`panic_armed`] is the whole arm line including this
+/// number, and both tests demand it before they judge anything. A bound that
+/// moved in the kernel and not here reds on that line rather than on a stop
+/// reason nobody could attribute.
+const PANIC_FAST_SECS: u64 = 5;
+
+/// The panic path's arm line, which is also this boot's ready marker: the guest
+/// has stopped scheduling by the time it is printed, and it is the instant the
+/// bound starts running.
+const PANIC_ARMED_HEAD: &str = "panic: rebooting in";
+
+fn panic_armed() -> String {
+    format!("{PANIC_ARMED_HEAD} {PANIC_FAST_SECS} s unless a key is pressed, timed by ")
+}
+
+/// A guest whose kernel panicked and armed the bound. `Profile::Metal` for the
+/// same reason `screen_pager_keys` needs it: QEMU routes injected keys to one
+/// handler per device class, and this is the only GOP profile with an i8042 and
+/// no `usb-kbd` to send them to instead.
+fn panicked() -> BootOptions {
+    BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        kernel_params: &["test-late-panic", "panic-reboot-fast"],
+        ready_marker: PANIC_ARMED_HEAD,
+        ..Default::default()
+    }
+}
+
+/// What a panicked guest that never stopped means where the bound should have
+/// ended it.
+const PANICKED_AND_STAYED_UP: &str =
+    "QEMU never reported stopping: nobody pressed a key and the panicked guest held its panel \
+     anyway";
+
+/// A panicked kernel nobody is at returns the machine to firmware itself.
+/// [`panic_key_holds`] is the same guest with a key pressed inside the bound.
+///
+/// The verdict is QEMU's stop reason arriving inside the bound the arm line
+/// names, which is what the budget below is: a reset that had to wait longer
+/// than the bound plus what a reset costs is not this bound firing.
+pub fn panic_reboots(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, panicked());
+    let boot = serial::Serial::boot(&qemu);
+    // Not `must_be_clean`: this boot panics on purpose, and the arm line is
+    // what says the panic path — not something else — is holding the machine.
+    let line = boot.must_say(&panic_armed())?.to_string();
+
+    let budget = qemu.budget(Duration::from_secs(PANIC_FAST_SECS) + RESET_ALLOWANCE);
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), budget);
+    let reason = stop.reason();
+    // A guest that came back to firmware pays none of this: `-no-reboot` exits and the reader disconnects.
+    let tail = qemu.drain_serial(WAIT);
+    returned_to_firmware(reason, PANICKED_AND_STAYED_UP, &tail)?;
+
+    let drain = serial::Serial::named("panic reboot drain", tail.as_str());
+    drain.must_say(PANIC_REBOOTING)?;
+
+    eprintln!("  [power] the panicked guest reset itself inside {budget:?} of: {}", line.trim());
+    Ok(())
+}
+
+/// What the reset itself is allowed to cost on top of the bound: the flush the
+/// reset path makes before it writes the register, and the host seeing QEMU's
+/// event. Scaled by [`QemuInstance::budget`] at the call site.
+const RESET_ALLOWANCE: Duration = Duration::from_secs(20);
+
+/// The panic path's second line, written raw because the log is already drained
+/// by then (`kernel/src/panic_reboot.rs`'s `reboot_now`).
+const PANIC_REBOOTING: &str = "panic: no key inside the bound, so nobody is here";
+
+/// The control on [`panic_reboots`]: the same guest with one key pressed inside
+/// the bound holds its panel and is still there several bounds later.
+///
+/// The key is `a`, not a page key: what retires the bound is that somebody is at
+/// the machine, and `screen_pager_keys` is where the pager's own two keys are judged.
+pub fn panic_key_holds(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, panicked());
+    let boot = serial::Serial::boot(&qemu);
+    // Demanded before the key, so a control that never armed a bound cannot
+    // pass by holding a panel nothing was counting down.
+    boot.must_say(&panic_armed())?;
+
+    let socket = qemu.qmp_socket().to_path_buf();
+    qemu::qmp_send_keys(&socket, &[("a", true), ("a", false)]);
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(PANEL_HELD_FOR));
+    if let Some(seen) = stop.reason() {
+        let tail = qemu.drain_serial(WAIT);
+        return Err(format!(
+            "a key was pressed inside the bound and QEMU stopped this guest anyway, for \
+             {seen:?}\n{tail}"
+        ));
+    }
+
+    // One monitor per `-qmp` socket, so the shutdown watch is given up before
+    // the screendump connects.
+    drop(stop);
+    // QEMU not exiting is not the claim in this test's name; the panel still
+    // carrying the report is. The fill and not a line of it, because a key that
+    // is not a page key leaves the pager unsteered and which page is up when the
+    // dump is taken is nobody's to say.
+    let fill = qemu.screendump().fill();
+    if fill != FILL_FATAL {
+        return Err(format!(
+            "the guest is still up {PANEL_HELD_FOR:?} after the key, but its panel fills \
+             {fill:?} and not the fatal {FILL_FATAL:?}: whatever it holds is not the report"
+        ));
+    }
+
+    eprintln!("  [power] a key retired the bound and the report held the panel {PANEL_HELD_FOR:?}");
+    Ok(())
+}
+
+/// What `panic_console`'s `Fill::Fatal` paints behind a report — the one thing
+/// on that panel which does not depend on the page the pager has up.
+const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
+
+/// Several bounds, so the control is not a race the guest won once.
+const PANEL_HELD_FOR: Duration = Duration::from_secs(PANIC_FAST_SECS * 4);

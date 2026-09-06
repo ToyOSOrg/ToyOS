@@ -6,6 +6,10 @@
 //! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. A
 //! recovered panic must call [`discard_capture`]. virtio-gpu is
 //! unsupported: its scanout needs the unbounded-poll wedge this module avoids.
+//!
+//! The two holds this module ends a panic in — [`page_forever`] and
+//! [`hold_the_panel`] — are also where `crate::panic_reboot`'s bound is
+//! watched, because the keyboard poll that retires it is here.
 
 mod access;
 mod latch;
@@ -17,6 +21,7 @@ use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_ps2::{KeyDecoder, KeyOutcome};
 
 use crate::log;
+use crate::panic_reboot::Bound;
 use crate::time::{Budget, Cadence, Duration};
 use crate::mm::paging::MmioPolicy;
 use crate::mm::{self, DirectMap, align_2m};
@@ -562,20 +567,21 @@ pub fn render() -> bool {
     true
 }
 
-/// Cycle the report across the screen until the machine is switched off.
-/// Reached only from `halt_all_cpus`, after `panic_flush`, on the CPU whose
-/// [`render`] took `PAINTING`; the handler's other two exits call
-/// [`render`] instead, since neither can safely loop in place.
-pub fn page_forever() {
+/// Cycle the report across the screen until the machine is switched off, or
+/// until `bound` returns it to firmware. Reached only from `halt_all_cpus`,
+/// after `panic_flush`, on the CPU whose [`render`] took `PAINTING`; the
+/// handler's other two exits reach [`hold_the_panel`] the same way, and every
+/// one of the three is the last call its CPU makes.
+pub fn page_forever(mut bound: Bound) -> ! {
     if !crate::clock::calibrated() {
-        return;
+        hold_the_panel(bound);
     }
     let text = fatal_text();
-    let Some(fb) = snapshot() else { return };
-    let Some((cols, grid_rows)) = geometry(&fb) else { return };
+    let Some(fb) = snapshot() else { hold_the_panel(bound) };
+    let Some((cols, grid_rows)) = geometry(&fb) else { hold_the_panel(bound) };
     let (_, pages, _) = pagination(text.text, cols, grid_rows);
     if pages < 2 {
-        return;
+        hold_the_panel(bound);
     }
     // `None` is the screenful [`render`] already painted, not a numbered page, so the first key reaches either end.
     let mut shown: Option<usize> = None;
@@ -584,7 +590,7 @@ pub fn page_forever() {
     let mut steered = false;
     // Spins rather than `hlt`: nothing would wake it, and re-arming the LAPIC timer would dispatch the scheduler mid-panic.
     loop {
-        let step = hold((!steered).then_some(PAGE_HOLD.nanos()), &mut keys);
+        let step = hold((!steered).then_some(PAGE_HOLD.nanos()), &mut keys, &mut bound);
         steered |= step.is_some();
         let next = match (shown, step.unwrap_or(PageKey::Down)) {
             (None, PageKey::Down) => 0,
@@ -595,6 +601,43 @@ pub fn page_forever() {
         paint(Fill::Fatal, text, Page::Nth(next), Watch::No);
         shown = Some(next);
     }
+}
+
+/// Keep the panel as it is until `bound` resets the machine, or for good once a
+/// key has retired it. The panic path's terminal hold wherever there is no
+/// second page to cycle — and the whole of it on a machine with no panel at all.
+///
+/// One poller: every caller is the CPU that took `PAINTING`, because two CPUs
+/// reading port 0x60 would each see half of every scancode.
+pub fn hold_the_panel(mut bound: Bound) -> ! {
+    let mut keys = KeyDecoder::new();
+    while bound.is_armed() {
+        read_key(&mut keys, &mut bound);
+        bound.check();
+        core::hint::spin_loop();
+    }
+    // Nothing left to wait for, so this CPU costs the machine no power.
+    crate::arch::cpu::halt()
+}
+
+/// One byte off the controller, folded into `keys`; any key transition retires
+/// `bound`, since a key is how the person reading the panel says he is there.
+/// `None` is a poll that found nothing, which is not the decoder's `Pending`.
+///
+/// The pointer shares the port; its packet bytes look like scancodes to
+/// anything that does not skip them. [`i8042::poll_byte`] is an `inb` — no
+/// lock, no MMIO.
+///
+/// [`i8042::poll_byte`]: crate::drivers::i8042::poll_byte
+fn read_key(keys: &mut KeyDecoder, bound: &mut Bound) -> Option<KeyOutcome> {
+    let (byte, false) = crate::drivers::i8042::poll_byte()? else {
+        return None;
+    };
+    let outcome = keys.feed(byte);
+    if matches!(outcome, KeyOutcome::Key { .. }) {
+        bound.retire();
+    }
+    Some(outcome)
 }
 
 /// Which way the next paint moves.
@@ -609,22 +652,21 @@ const HID_PAGE_UP: u8 = 0x4B;
 const HID_PAGE_DOWN: u8 = 0x4E;
 
 /// Wait for a page key, giving up after `nanos`; `None` means the deadline
-/// expired. [`i8042::poll_byte`] is an `inb` — no lock, no MMIO.
-///
-/// [`i8042::poll_byte`]: crate::drivers::i8042::poll_byte
-fn hold(nanos: Option<u64>, keys: &mut KeyDecoder) -> Option<PageKey> {
+/// expired. `bound` is retired by any key and resets the machine at its own
+/// expiry, so an unattended panel pages until it is over and no longer.
+fn hold(nanos: Option<u64>, keys: &mut KeyDecoder, bound: &mut Bound) -> Option<PageKey> {
     let target = nanos.map(|n| crate::clock::nanos_since_boot().saturating_add(n));
     while target.is_none_or(|t| crate::clock::nanos_since_boot() < t) {
-        // The pointer shares the port; its packet bytes look like scancodes to anything that does not skip them.
-        if let Some((byte, false)) = crate::drivers::i8042::poll_byte() {
-            match keys.feed(byte) {
-                KeyOutcome::Key { usage: HID_PAGE_UP, pressed: true } => return Some(PageKey::Up),
-                KeyOutcome::Key { usage: HID_PAGE_DOWN, pressed: true } => {
-                    return Some(PageKey::Down);
-                }
-                _ => {}
+        match read_key(keys, bound) {
+            Some(KeyOutcome::Key { usage: HID_PAGE_UP, pressed: true }) => {
+                return Some(PageKey::Up);
             }
+            Some(KeyOutcome::Key { usage: HID_PAGE_DOWN, pressed: true }) => {
+                return Some(PageKey::Down);
+            }
+            _ => {}
         }
+        bound.check();
         core::hint::spin_loop();
     }
     None
