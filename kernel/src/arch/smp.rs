@@ -44,6 +44,14 @@ pub fn set_ready() {
     ROSTER.release();
 }
 
+/// Whether [`set_ready`] has run: the machine's own word for "the scheduler is
+/// what runs now". `kernel_main` calls it immediately before
+/// `scheduler::enter_idle_loop`, so a `false` here means no task and no
+/// kernel thread can make progress, and the panic path waits for none of them.
+pub fn is_ready() -> bool {
+    ROSTER.released()
+}
+
 // Field offsets are hardcoded in the global_asm! trampoline below; the static assertion at the bottom checks the match.
 
 #[derive(Clone, Copy)]
@@ -404,7 +412,13 @@ global_asm!(
     "mov ecx, 0xC0000101",    // IA32_GS_BASE
     "wrmsr",
 
-    // Load kernel IDT (safe now — percpu/GS is set up)
+    // Load kernel IDT (safe now — percpu/GS is set up).
+    // The BSP's order is the opposite and deliberate: `init_bsp` applies the
+    // control registers before it loads this table, because an entry stub saves
+    // SSE state and `fxsave` without `CR4.OSFXSR` is `#UD`. This CR4 holds
+    // `PAE` alone until `init_ap` reaches `control_regs::init`, so a fault
+    // before that point faults again in its own handler —
+    // `issues/kernel/an-ap-loads-the-idt-before-its-control-registers.md`.
     "mov edi, 0x8F00",
     "lidt [rdi + 0x28]",       // TrampolineData.kernel_idt
 

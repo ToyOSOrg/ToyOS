@@ -651,6 +651,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // anything the kernel used to learn the page's address from. Its own boot,
     // and no clock in the verdict.
     ("blackbox_early_panic_sealed", Sched::Parallel, Tier::Fast),
+    // The same crash on the owner's machine's own shape — no serial port at all
+    // — where the panel and the page are the only two channels there are.
+    ("blackbox_early_panic_sealed_muted", Sched::Parallel, Tier::Fast),
     // The exception entry's own seal, off the page's bytes on an ordinary boot.
     ("blackbox_fault_sealed", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
@@ -9011,6 +9014,9 @@ fn run_machine_test(
         }
         "blackbox_early_panic_sealed" => {
             power::blackbox_early_panic_sealed(test_config, c_bins, rust_bins)
+        }
+        "blackbox_early_panic_sealed_muted" => {
+            power::blackbox_early_panic_sealed_muted(test_config, c_bins, rust_bins)
         }
         "blackbox_fault_sealed" => power::blackbox_fault_sealed(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.

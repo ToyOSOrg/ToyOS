@@ -18,11 +18,35 @@ const MXCSR_INITIAL: u32 = 0x1F80;
 // Field offsets in the FXSAVE64 image (SDM Vol. 1 Table 10-2).
 const OFF_FCW: usize = 0;
 const OFF_MXCSR: usize = 24;
-/// The CPU's own mask; not part of the state the self-check compares.
-const OFF_MXCSR_MASK: usize = 28;
-const OFF_ST0: usize = 32;
-/// Past the last XMM register; `FXSAVE` need not write bytes above this.
-const END_XMM: usize = 416;
+
+/// Every field `FNINIT` and `LDMXCSR` leave architecturally defined, as name,
+/// offset and width — and the whole of what [`self_check`] may compare.
+///
+/// `FNINIT` sets `FCW` to `0x037F` and zeroes `FSW`, `FTW`, `FIP`, `FDP` and
+/// `FOP` (SDM Vol. 2A, `FINIT/FNINIT`); `LDMXCSR` sets `MXCSR`. **Nothing else
+/// in the image is defined by either instruction**, and each exclusion is a
+/// field a real CPU is free to hand back differently from a fresh emulator:
+///
+/// - the x87 data registers at 32 and the XMM registers at 160, because
+///   `FNINIT` marks the stack empty *without clearing it* — the same fact
+///   [`INITIAL_IMAGE`] exists for — so they hold whatever firmware last left
+///   in them;
+/// - `MXCSR_MASK` at 28, which is the model's own and reads 0, `0xFFFF` or
+///   `0x1FFFF` depending on the part;
+/// - the reserved byte at 5 and everything from 464, which no specification
+///   defines at all.
+///
+/// `FTW` here is the abridged one-byte tag word `FXSAVE` writes, not the x87
+/// tag register: all-empty is `0x00` in it and `0xFFFF` in the register.
+const DEFINED: &[(&str, usize, usize)] = &[
+    ("FCW", 0, 2),
+    ("FSW", 2, 2),
+    ("FTW", 4, 1),
+    ("FOP", 6, 2),
+    ("FIP", 8, 8),
+    ("FDP", 16, 8),
+    ("MXCSR", OFF_MXCSR, 4),
+];
 
 impl UserFpState {
     /// The declared state a task that has never been in Ring 3 starts from.
@@ -55,15 +79,27 @@ impl UserFpState {
         state
     }
 
-    /// The bytes two `UserFpState`s are compared on.
-    fn defined(&self) -> (&[u8], &[u8]) {
-        (&self.0[..OFF_MXCSR_MASK], &self.0[OFF_ST0..END_XMM])
+    /// One [`DEFINED`] field, as the little-endian integer it is.
+    fn field(&self, at: usize, width: usize) -> u64 {
+        let mut value = 0u64;
+        let mut i = 0;
+        while i < width {
+            // Every (offset, width) in `DEFINED` is inside a 512-byte image.
+            value |= (self.0[at + i] as u64) << (8 * i);
+            i += 1;
+        }
+        value
     }
 
-    fn matches(&self, other: &Self) -> bool {
-        self.defined() == other.defined()
+    /// The first [`DEFINED`] field these two disagree about: name, offset, this
+    /// one's value, the other's. Named rather than reported as a byte range,
+    /// because a range says which bytes differ and never which field they were.
+    fn first_difference(&self, other: &Self) -> Option<(&'static str, usize, u64, u64)> {
+        DEFINED.iter().find_map(|&(name, at, width)| {
+            let (got, want) = (self.field(at, width), other.field(at, width));
+            (got != want).then_some((name, at, got, want))
+        })
     }
-
 }
 
 /// [`UserFpState::INITIAL`] in memory, for stackless trampolines to load in
@@ -105,21 +141,12 @@ fn self_check(cpu_id: u32) {
         "fpu: the initial image is misaligned, so every trampoline would #GP",
     );
     let live = UserFpState::saved_from_cpu();
-    assert!(
-        live.matches(&UserFpState::INITIAL),
-        "fpu: cpu{} disagrees about the architectural default state — \
-         fcw={:#06x} mxcsr={:#010x}, expected fcw={:#06x} mxcsr={:#010x}",
-        cpu_id,
-        u16::from_le_bytes([live.0[OFF_FCW], live.0[OFF_FCW + 1]]),
-        u32::from_le_bytes([
-            live.0[OFF_MXCSR],
-            live.0[OFF_MXCSR + 1],
-            live.0[OFF_MXCSR + 2],
-            live.0[OFF_MXCSR + 3],
-        ]),
-        FCW_INITIAL,
-        MXCSR_INITIAL,
-    );
+    if let Some((name, at, got, want)) = live.first_difference(&UserFpState::INITIAL) {
+        panic!(
+            "fpu: cpu{cpu_id} disagrees about the architectural default state — \
+             {name} at offset {at} reads {got:#x}, the declaration is {want:#x}"
+        );
+    }
 }
 
 /// XCR0: which state components `XSAVE` would move.

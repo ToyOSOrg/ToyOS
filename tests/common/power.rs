@@ -847,16 +847,14 @@ pub fn blackbox_early_panic_sealed(
     // without this line the seal below could only have come from the loader.
     boot.must_say(&kernel_took_it())?;
 
-    let page = qemu.guest_page(PHYS)?;
-    let page: &[u8; toyos_blackbox::BYTES] =
-        page.as_slice().try_into().map_err(|_| "pmemsave returned the wrong length".to_string())?;
-    let Some((state, text)) = toyos_blackbox::recover(page) else {
-        return Err(format!(
-            "the page at {PHYS:#x} carries nothing the next boot's loader would read, after a \
-             panic this kernel rendered: {:02x?}",
-            &page[..32]
-        ));
-    };
+    // **Polled, because the marker above precedes the seal rather than
+    // following it.** The console line is the panic's *first* act and the seal
+    // is one of its last — `render` seals inside the same call that paints — so
+    // a single read here is a race the guest wins only while the host is quiet,
+    // and a busy host loses it. Nothing else in this boot can write the page, so
+    // waiting for `Panic` cannot pass for the wrong reason; a page that stays
+    // `ARMED` for the whole bound is the defect this test is for.
+    let (state, text) = sealed_state(&mut qemu, Duration::from_secs(10))?;
     if state != State::Panic {
         return Err(format!(
             "the page reads {} after a panic, so the panic path did not reach it and the next \
@@ -864,7 +862,7 @@ pub fn blackbox_early_panic_sealed(
             state.named()
         ));
     }
-    let text = String::from_utf8_lossy(text);
+    let text = String::from_utf8_lossy(&text);
     if !text.contains(EARLY_WITNESS) {
         return Err(format!(
             "the page is sealed PANIC and does not carry {EARLY_WITNESS:?}, so what crossed is \
@@ -950,3 +948,117 @@ pub fn blackbox_fault_sealed(
 /// `#PF`, which is the vector a boot of this shape ends its exceptions on:
 /// demand paging is what a running machine faults for.
 const PAGE_FAULT_VECTOR: u64 = 14;
+
+/// The same early panic on a machine with no serial port at all: the panel and
+/// the page are the only two channels there are, and both must carry it.
+///
+/// **The combination nothing else covers.** `blackbox_early_panic_sealed` is
+/// this crash with a 16550 to report it on, and `screen_panic_muted` is a muted
+/// guest whose panic is late — clock calibrated, `logd` running, the machine
+/// released. The owner's laptop is neither: no serial port and a crash before
+/// any of that, which is the arm where `halt_all_cpus`' waits have nothing left
+/// to wait for and where `!has_console()` sends the panic path down branches no
+/// other guest executes.
+pub fn blackbox_early_panic_sealed_muted(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        mute: true,
+        kernel_params: &["test-panic-after-idt"],
+        ..Default::default()
+    };
+    // The muted profile is this test's whole premise, so it is checked and not assumed.
+    let argv = qemu::profile_argv(&options);
+    match argv.iter().position(|a| a == "-serial") {
+        Some(i) if argv.get(i + 1).is_some_and(|v| v == "none") => {}
+        _ => return Err(format!("the muted profile still has a 16550: {argv:?}")),
+    }
+
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    // Nothing announces it — there is no console for a marker to arrive on — so
+    // the screen is polled. The bound covers firmware plus the root read off USB.
+    let dump = qemu.screendump_until("PANIC:", Duration::from_secs(30));
+    let text = dump.text();
+    if !text.contains(EARLY_WITNESS) {
+        return Err(format!(
+            "the panel of a guest with no serial port does not carry {EARLY_WITNESS:?}, so the \
+             fatal text reached neither channel\ndecoded screen:\n{text}"
+        ));
+    }
+    // Nothing on this path may wait for a drainer that cannot run: before the
+    // machine is released there is no `logd` and no scheduler to carry one, so
+    // the budget must never be entered rather than entered and spent.
+    if text.contains(LOG_DRAIN_EXPIRED) {
+        return Err(format!(
+            "the panel carries {LOG_DRAIN_EXPIRED:?} on a boot that crashed before the machine \
+             was released, so the panic path spent a budget waiting for a drainer that could not \
+             exist\ndecoded screen:\n{text}"
+        ));
+    }
+
+    let (state, sealed) = sealed_state(&mut qemu, Duration::from_secs(10))?;
+    if state != State::Panic {
+        return Err(format!(
+            "the page reads {} after a panic on a machine whose only other channel is the \
+             panel\ndecoded screen:\n{text}",
+            state.named()
+        ));
+    }
+    let sealed = String::from_utf8_lossy(&sealed);
+    if !sealed.contains(EARLY_WITNESS) {
+        return Err(format!("the page is sealed PANIC without {EARLY_WITNESS:?}\n{sealed}"));
+    }
+    drop(qemu);
+
+    eprintln!(
+        "  [power] no serial port and a crash before the clock: the panel carries the report and \
+         the page carries {} sealed bytes",
+        sealed.len()
+    );
+    Ok(())
+}
+
+/// `kernel/src/arch/apic.rs`'s `LOG_DRAIN_EXPIRED`, which a boot that never had
+/// a drainer may not print.
+const LOG_DRAIN_EXPIRED: &str = "the report did not reach /log";
+
+/// The black-box page's state once the guest has finished writing it, or what
+/// it still read at the deadline.
+///
+/// The seal is one of the panic path's last acts and every console or panel
+/// marker a test can wait on comes before it, so the page is polled rather than
+/// read once. Only the panicking guest writes it, so a poll cannot observe a
+/// state some other writer put there.
+fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec<u8>), String> {
+    let deadline = std::time::Instant::now() + within;
+    let mut last = None;
+    loop {
+        let page = qemu.guest_page(PHYS)?;
+        let page: &[u8; toyos_blackbox::BYTES] = page
+            .as_slice()
+            .try_into()
+            .map_err(|_| "pmemsave returned the wrong length".to_string())?;
+        match toyos_blackbox::recover(page) {
+            Some((State::Panic, text)) => return Ok((State::Panic, text.to_vec())),
+            Some((state, text)) => last = Some((state, text.to_vec())),
+            None if last.is_none() => {
+                last = None;
+            }
+            None => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return match last {
+                Some(seen) => Ok(seen),
+                None => Err(format!(
+                    "the page at {PHYS:#x} carried nothing the next boot's loader would read for \
+                     {within:?} after a panic this kernel rendered"
+                )),
+            };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

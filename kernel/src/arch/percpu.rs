@@ -591,9 +591,13 @@ pub fn init_bsp(lapic_id: u32) {
 
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
-    // Before the first step that can fault. Until `lidt` runs, the loaded table
-    // is the one firmware left across `ExitBootServices`, whose handlers report
-    // on no channel of this kernel's — so a fault in `control_regs` or `fpu`
+    // INVARIANT: the control registers precede the IDT. Every entry stub saves
+    // SSE state, and `fxsave` without `CR4.OSFXSR` is `#UD`, so a fault taken
+    // between the two would fault again inside its own handler.
+    super::control_regs::init(0);
+    // Then the IDT, before the first step that can fault. Until `lidt` runs the
+    // loaded table is the one firmware left across `ExitBootServices`, whose
+    // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
     super::idt::init();
 
@@ -604,7 +608,6 @@ pub fn init_bsp(lapic_id: u32) {
         panic!("test-panic-after-idt: the IDT is loaded and nothing else is up");
     }
 
-    super::control_regs::init(0);
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`
     // established, on a CPU whose extended state QEMU and a Tiger Lake do not
