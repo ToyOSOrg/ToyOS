@@ -2036,9 +2036,8 @@ mod tests {
     /// over every record every CPU wrote, and a right with no caller is a
     /// capability handed out for a plan. Two programs read a cursor —
     /// `/system/bin/logd`, which writes the file, and `test-runner`, which runs the
-    /// conservation gates inside itself — and nothing else may; an estate that
-    /// runs no gate that reads one holds none of it either.
-    /// `/system/bin/console` is the near miss: it *could* show this boot's
+    /// conservation gates inside itself — and nothing else may, while an estate
+    /// running no such gate holds none. `/system/bin/console` is the near miss: it *could* show this boot's
     /// records live off a cursor instead of seeding from the previous boot's
     /// files, and it does not hold the right until something in it reads one.
     ///
