@@ -58,7 +58,7 @@ const REPORT_CHECK: Cadence = Cadence::every(
 );
 
 /// Framebuffers below this are reachable before [`remap`] runs; above it, only after.
-const LOW_MAP_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+pub(crate) const LOW_MAP_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct Fb {
@@ -1058,9 +1058,17 @@ pub fn graffiti() {
 /// ambiguous about which boot it came from. Proves the clamp once per row,
 /// not once per pixel: a boot checkpoint repaints several times over a
 /// multi-megapixel panel.
+///
+/// Stops above the crumb strip on a boot that armed one: the crumbs are the
+/// only account there is of the window before this console existed, and a boot
+/// that got far enough to paint a log has to leave a panel carrying both.
 fn fill_screen(fb: &Fb, color: u32) {
     let width = fb.width as usize;
-    for y in 0..fb.height as usize {
+    let last = match toyos_crumbs::strip(fb.height).filter(|_| crate::params::breadcrumbs()) {
+        Some((top, _)) => top as usize,
+        None => fb.height as usize,
+    };
+    for y in 0..last {
         let Some(row) = row_base(fb, y, width) else { return };
         for x in 0..width {
             // SAFETY: `row_base` returns a pointer, not a slice, so this

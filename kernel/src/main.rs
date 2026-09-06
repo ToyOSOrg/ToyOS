@@ -113,6 +113,7 @@ use alloc::sync::Arc;
 use arch::{apic, cpu, idt, pat, percpu, smp, syscall};
 use drivers::{acpi, gop, i8042, ioapic, nvme, pci, serial, virtio_console, virtio_gpu, virtio_net, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_crumbs::{crumb, Pen, Step};
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -228,6 +229,46 @@ fn report_log_destination() {
     }
 }
 
+/// The pen this boot's crumbs are painted with: `None` unless the boot
+/// parameter asked for them, this machine published a framebuffer, and that
+/// framebuffer is inside the boot map — the only mapping there is until
+/// `mm::init`, so a pen above it would fault where the boot it watches would not.
+///
+/// The parameter is read here rather than taken from [`params`], which has not
+/// run: every crumb before it exists to say whether the kernel got that far.
+///
+/// # Safety
+/// `args` must be the live `KernelArgs`, on the page tables the bootloader built.
+unsafe fn crumb_pen(args: &KernelArgs) -> Option<Pen> {
+    if args.gop_framebuffer == 0 || args.cmdline_len == 0 {
+        return None;
+    }
+    let cmdline = core::slice::from_raw_parts(
+        DirectMap::from_phys(args.cmdline_addr).as_ptr::<u8>(),
+        args.cmdline_len as usize,
+    );
+    // A parameter that is not text arms nothing; the decode below still refuses it by name.
+    if !core::str::from_utf8(cmdline).is_ok_and(toyos_crumbs::armed) {
+        return None;
+    }
+    let end = args.gop_framebuffer.checked_add(args.gop_framebuffer_size)?;
+    if end > drivers::panic_console::LOW_MAP_LIMIT {
+        return None;
+    }
+    // SAFETY: the framebuffer firmware published, whole, below the boot map's
+    // limit, so the direct map reaches every byte of it.
+    Some(unsafe {
+        Pen::new(
+            DirectMap::from_phys(args.gop_framebuffer).as_mut_ptr::<u32>(),
+            args.gop_framebuffer_size,
+            args.gop_stride,
+            args.gop_width,
+            args.gop_height,
+            args.gop_pixel_format,
+        )
+    })
+}
+
 unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // Copied onto the kernel stack: the original lives on the UEFI stack, unreachable once mm::init drops the identity map.
     let kernel_args = *kernel_args;
@@ -238,10 +279,15 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         entry_count,
     );
 
+    let crumbs = crumb_pen(&kernel_args);
+    crumb(&crumbs, Step::Entered);
+
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
+    crumb(&crumbs, Step::Armed);
 
     serial::init();
+    crumb(&crumbs, Step::Serial);
 
     // After both channels exist, before the first actuator site.
     // cmdline_len==0 is checked first: an empty bootloader Vec has no backing allocation to point at.
@@ -259,6 +305,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     actuator::init(cmdline);
     rootfs::init(cmdline);
+    // On `params`, not on the early scan: a block here says the kernel's own parameter table read the same token.
+    if params::breadcrumbs() {
+        crumb(&crumbs, Step::Params);
+    }
 
     // Before pat::init, which restores whatever CR0 it found — a firmware CD would ride straight through otherwise.
     arch::control_regs::init_cr0(0);

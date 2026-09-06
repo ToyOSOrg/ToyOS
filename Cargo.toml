@@ -20,6 +20,7 @@ members = [
     "toyos-abi",
     "toyos-acpi",
     "toyos-cc",
+    "toyos-crumbs",
     "toyos-desktop",
     "toyos-dma",
     "toyos-elf",
@@ -118,6 +119,10 @@ sha2 = "0.10"
 
 [dev-dependencies]
 toyos-cc = { path = "toyos-cc" }
+# The crumb geometry the bootloader and the kernel paint from, so
+# `screen_early_breadcrumbs` reads the blocks off the panel at the columns and
+# in the colours the guest was built to put them, and cannot drift from them.
+toyos-crumbs = { path = "toyos-crumbs" }
 toyos-ld = { path = "toyos-ld" }
 # The scheduler core, for the one type the check build publishes and the
 # harness judges: `cpu::PassCostReport` is the wire form of the pass-cost

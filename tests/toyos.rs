@@ -425,6 +425,9 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // finished, so a 2x slower machine changes nothing about the wait but the
     // wait is the verdict either way — timer-anchored.
     ("screen_diag_boot", Sched::Parallel, Tier::Nightly),
+    // Two boots of one image, the boot parameter apart: the armed one has to
+    // leave every block on the glass, the other has to leave the strip clean.
+    ("screen_early_breadcrumbs", Sched::Parallel, Tier::Fast),
     ("screen_log_absent", Sched::Parallel, Tier::Fast),
     ("screen_console_shell", Sched::Parallel, Tier::Fast),
     ("screen_console_clear", Sched::Parallel, Tier::Fast),
@@ -3567,6 +3570,76 @@ fn run_screen_test(
                     Some(f) => format!("log longer than the screen, footer reads {f}"),
                     None => "whole log on one screen, no footer".to_string(),
                 }
+            );
+            Ok(())
+        }
+        "screen_early_breadcrumbs" => {
+            // A crumb is painted where the log has no channel, so the panel is
+            // the only place one can be read back from. The diag config for
+            // `screen_diag_boot`'s reason — nothing in this image claims the
+            // framebuffer, so what the boot painted is still there at the end
+            // of it — and `Profile::Metal`, whose panel is the T14's 1920x1080
+            // and therefore the one whose strip below the last cell row is
+            // where the blocks go.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("diag");
+            let boot = |params: &'static [&'static str]| {
+                let options = BootOptions {
+                    profile: qemu::Profile::Metal,
+                    qmp: true,
+                    kernel_params: params,
+                    ready_marker: "Boot: complete",
+                    ..Default::default()
+                };
+                let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+                qemu.screendump_until("Boot: complete", Duration::from_secs(30));
+                qemu.screendump()
+            };
+            // The centre of `step`'s block, in the strip, as the dump reports it.
+            let read = |dump: &screen::Ppm, step: toyos_crumbs::Step| -> Result<[u8; 3], String> {
+                let width = dump.width as u32;
+                let height = dump.height as u32;
+                let (top, bottom) = toyos_crumbs::strip(height)
+                    .ok_or_else(|| format!("a {width}x{height} panel holds no strip"))?;
+                let (left, right) = toyos_crumbs::block(step, width)
+                    .ok_or_else(|| format!("a {width}x{height} panel holds no {step:?} block"))?;
+                let (x, y) = (left.midpoint(right), top.midpoint(bottom));
+                Ok(dump.pixels[y as usize * dump.width + x as usize])
+            };
+
+            let armed = boot(&[toyos_crumbs::PARAM]);
+            let mut on = Vec::new();
+            for step in toyos_crumbs::STEPS {
+                let (r, g, b) = toyos_crumbs::rgb(step);
+                let got = read(&armed, step)?;
+                on.push(format!("{step:?}={got:?}"));
+                if got != [r, g, b] {
+                    return Err(format!(
+                        "the boot reached `Boot: complete`, so every step ran, but {step:?}'s \
+                         block reads {got:?} and not the {:?} it paints; blocks read: {}",
+                        [r, g, b],
+                        on.join(" ")
+                    ));
+                }
+            }
+            eprintln!("  [crumbs] armed: {}", on.join(" "));
+
+            // The control, which is the same image booted without the
+            // parameter: without it a green arm would be satisfied by a panel
+            // that is those colours for some other reason.
+            let bare = boot(&[]);
+            for step in toyos_crumbs::STEPS {
+                let (r, g, b) = toyos_crumbs::rgb(step);
+                let got = read(&bare, step)?;
+                if got == [r, g, b] {
+                    return Err(format!(
+                        "{step:?}'s block is its crumb colour {got:?} on a boot that did not \
+                         ask for crumbs, so the armed arm above proves nothing"
+                    ));
+                }
+            }
+            eprintln!(
+                "  [crumbs] control: no block on a boot without {:?}",
+                toyos_crumbs::PARAM
             );
             Ok(())
         }

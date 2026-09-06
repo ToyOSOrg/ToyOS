@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }
+toyos-crumbs = { path = "../toyos-crumbs" }
 toyos-elf = { path = "../toyos-elf" }
 uefi = { version = "0.26.0", default-features = false }
 uefi-services = { version = "0.23.0", features = ["panic_handler", "logger"] }

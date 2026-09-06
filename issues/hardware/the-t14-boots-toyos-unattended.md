@@ -51,6 +51,11 @@ built on the first.
    loop's admission check: no image is flashed that has not passed it.
 4. **The first milestone is one unattended boot with a log back** — flashed,
    booted, verdict read, machine returned to Linux, nobody in the room.
+   The 2026-09-06 attempt stopped with the loader's `Applied 4275 relocations`
+   still the last thing on the panel and TOYOS-LOG empty, so what is built next
+   is `early-breadcrumbs`: one block per step across the strip below the
+   console's last cell row, which is the whole channel between
+   `ExitBootServices` and the kernel's first log record.
 
 `src/bootlog.rs` holds the reset word the verdict looks for, and the kernel
 spells it a second time at `kernel/src/arch/syscall/machine.rs`'s `quiesce`:

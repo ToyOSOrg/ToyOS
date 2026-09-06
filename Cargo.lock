@@ -1117,6 +1117,7 @@ dependencies = [
  "toml",
  "toyos-abi",
  "toyos-cc",
+ "toyos-crumbs",
  "toyos-fat32",
  "toyos-fat32-check",
  "toyos-gpt",
@@ -1138,6 +1139,13 @@ dependencies = [
  "object 0.38.1",
  "target-lexicon",
  "toyos-ld",
+]
+
+[[package]]
+name = "toyos-crumbs"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
 ]
 
 [[package]]
