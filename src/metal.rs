@@ -23,10 +23,23 @@ use crate::image::LBA;
 
 const CONNECT_SECS: u64 = 10;
 
-/// How long the machine has to go quiet after `reboot`, and how long it then
-/// has to answer again.
+/// How long the machine has to go quiet after `reboot`.
 const GOING_DOWN_SECS: u64 = 120;
-const RETURN_SECS: u64 = 420;
+
+/// What the machine spends between the reset that ends a ToyOS boot and `sshd`
+/// answering again: the firmware's pass and Ubuntu's own boot.
+const RETURN_ALLOWANCE_SECS: u64 = 300;
+
+/// How long the machine has to answer `ssh` again after `reboot`.
+///
+/// **Derived, because a literal is wrong the day either half moves.** The
+/// bootloader arms `toyos_tco`'s bound and the kernel keeps feeding that same
+/// timer, so a wedge anywhere after the loader's arm is reset inside it; then
+/// the machine spends [`RETURN_ALLOWANCE_SECS`] coming back. A wedge *before*
+/// that arm is under no bound at all, and no wait here reaches it.
+fn return_secs() -> u64 {
+    toyos_tco::BOUND_MS.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
+}
 
 const POLL_SECS: u64 = 5;
 
@@ -889,7 +902,7 @@ impl Args {
             target: Target::t14()?,
             dry_run: false,
             install_sudoers: None,
-            wait_secs: RETURN_SECS,
+            wait_secs: return_secs(),
         };
         let mut at = 0;
         while at < args.len() {
@@ -1302,11 +1315,20 @@ mod tests {
         assert_eq!(entries_labelled(listing, "Setup"), [("0010".to_string(), String::new())]);
     }
 
+    /// A wait shorter than the arm it is waiting out could never see the reset,
+    /// and a wait written down rather than derived stops moving when the arm
+    /// does.
+    #[test]
+    fn the_wait_is_derived_from_the_watchdog_the_loader_arms() {
+        assert_eq!(return_secs(), toyos_tco::BOUND_MS.div_ceil(1_000) + RETURN_ALLOWANCE_SECS);
+        assert!(return_secs() * 1_000 > toyos_tco::BOUND_MS);
+    }
+
     #[test]
     fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
-        assert!(Refusal::Silent { what: "come back", secs: RETURN_SECS }.about_the_boot());
+        assert!(Refusal::Silent { what: "come back", secs: return_secs() }.about_the_boot());
         assert!(!Refusal::Node("/dev/nvme0n1".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
@@ -1352,7 +1374,7 @@ mod tests {
         let args = Args::parse(&[]).unwrap();
         assert_eq!(args.target.user, "t14");
         assert_eq!(args.target.node.whole(), "/dev/sda");
-        assert_eq!(args.wait_secs, RETURN_SECS);
+        assert_eq!(args.wait_secs, return_secs());
         assert!(!args.dry_run);
 
         let words: Vec<String> = ["--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
