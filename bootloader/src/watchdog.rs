@@ -16,7 +16,10 @@ use core::mem::{align_of, size_of};
 use core::ptr::read_volatile;
 
 use toyos_acpi::Phys;
-use toyos_tco::{Chipset, TCO1_CNT, TCO1_CNT_RUN, TCO2_STS, TCO_RLD, TCO_TMR, TCO_TMR_HLT};
+use toyos_tco::{
+    Chipset, TCO1_CNT, TCO1_CNT_LOCK, TCO1_CNT_NO_REBOOT, TCO1_CNT_RUN, TCO1_STS, TCO2_STS,
+    TCO_RLD, TCO_TMR,
+};
 use uefi::prelude::*;
 use uefi::table::boot::{MemoryDescriptor, PAGE_SIZE};
 
@@ -83,11 +86,14 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
         // Reloading is also what returns the expiry count to zero.
         outw(port + TCO_RLD, 1);
     }
-    // Read back: firmware may have set `TCO_LOCK`, which makes `TCO_TMR_HLT`
-    // unclearable.
+    // `TCO1_CNT` is declared whole, so it is judged whole apart from
+    // `TCO1_CNT_LOCK`, which the datasheet says no write clears. Judging one bit
+    // is what let a T14 reading back `0x1000` be reported as armed for two runs.
     let cnt = inw(port + TCO1_CNT);
-    if cnt & TCO_TMR_HLT != 0 {
-        return refused(format_args!("{port:#x} kept the timer halted (TCO1_CNT={cnt:#06x})"));
+    if !toyos_tco::cnt_took_the_write(cnt) {
+        return refused(format_args!(
+            "{port:#x} did not take TCO1_CNT={TCO1_CNT_RUN:#06x}, it reads {cnt:#06x}"
+        ));
     }
     println!(
         "watchdog: {:04x}:{:04x} TCO at {port:#x} TCO_TMR={} armed for {}ms, and the kernel takes \
@@ -103,17 +109,25 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
 /// What the block holds once it is armed, as whole words.
 ///
 /// The second read of `TCO_RLD` is the question no single read answers — whether
-/// this timer counts at all — so the wait between them is one
-/// [`toyos_tco::TICK_MS`] plus a margin, the shortest wait a moving counter is
-/// guaranteed to be seen across. It is spent inside the bound it measures, and
-/// what remains of this loader is the page tables and the jump.
+/// this timer counts at all — across [`TICKS_OBSERVED`] ticks. It is spent
+/// inside the bound it measures, and what remains of this loader is the page
+/// tables and the jump.
 fn report(system_table: &SystemTable<Boot>, port: u16, cnt: u16) {
     let rld = inw(port + TCO_RLD);
     let tmr = inw(port + TCO_TMR);
+    let sts1 = inw(port + TCO1_STS);
     let sts2 = inw(port + TCO2_STS);
     println!(
         "watchdog: read back TCO_RLD={rld:#06x} TCO_TMR={tmr:#06x} TCO1_CNT={cnt:#06x} \
-         TCO2_STS={sts2:#06x}"
+         TCO1_STS={sts1:#06x} TCO2_STS={sts2:#06x}"
+    );
+    // The two bits of `TCO1_CNT` that decide whether a second expiry can reset
+    // this machine at all, named rather than left for a reader to mask out.
+    println!(
+        "watchdog: no_reboot={} tco_lock={}, so a second expiry {} reset this machine",
+        u8::from(cnt & TCO1_CNT_NO_REBOOT != 0),
+        u8::from(cnt & TCO1_CNT_LOCK != 0),
+        if cnt & TCO1_CNT_NO_REBOOT != 0 { "cannot" } else { "can" },
     );
 
     system_table.boot_services().stall(TICK_STALL_MICROS);
@@ -124,17 +138,18 @@ fn report(system_table: &SystemTable<Boot>, port: u16, cnt: u16) {
              not counting and no bound it was armed with can expire"
         );
     } else {
-        // One clause, because the argument for it is one issue and not this file.
         println!(
             "watchdog: TCO_RLD went {rld:#06x} -> {moved:#06x} over {TICK_STALL_MS}ms, so the \
-             timer counts and what a machine that stays up owes is the reset gate, which is not in \
-             this block"
+             timer counts and a machine that still stays up owes the first expiry's SMI"
         );
     }
 }
 
-/// One tick plus a margin, so a counting timer is seen to have moved.
-const TICK_STALL_MS: u64 = toyos_tco::TICK_MS + toyos_tco::TICK_MS / 6;
+/// Two ticks plus a margin. One is not enough to conclude anything: the reload
+/// lands at an unknown phase inside a tick, so a running counter can still read
+/// its loaded value one tick later and the line above would call it stopped.
+const TICKS_OBSERVED: u64 = 2;
+const TICK_STALL_MS: u64 = TICKS_OBSERVED * toyos_tco::TICK_MS + toyos_tco::TICK_MS / 6;
 const TICK_STALL_MICROS: usize = (TICK_STALL_MS * 1_000) as usize;
 
 /// The first function on bus 0 a row names, with the two config words that row

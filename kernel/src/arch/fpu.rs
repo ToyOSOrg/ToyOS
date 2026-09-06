@@ -72,9 +72,9 @@ pub static INITIAL_IMAGE: UserFpState = UserFpState::INITIAL;
 
 /// Puts this CPU's FPU into the declared state and asserts it matches.
 /// Call once per CPU after `CR4.OSFXSR` is set; `LDMXCSR` is `#UD` otherwise.
-pub fn init() {
+pub fn init(cpu_id: u32) {
     load_initial();
-    self_check();
+    self_check(cpu_id);
 }
 
 /// `FNINIT` then `LDMXCSR`; neither waits, so this is safe over a pending
@@ -94,7 +94,11 @@ fn load_initial() {
 
 /// Asserts the CPU's architectural default matches [`UserFpState::INITIAL`];
 /// a mismatch would be silently restored onto every new thread.
-fn self_check() {
+///
+/// Takes its own id for the same reason [`log_state`] does: the BSP runs this
+/// before the `wrmsr` that makes `gs:` valid, so reading the id from there
+/// would fault inside the message of the assertion reporting the mismatch.
+fn self_check(cpu_id: u32) {
     assert_eq!(
         (&raw const INITIAL_IMAGE) as usize % core::mem::align_of::<UserFpState>(),
         0,
@@ -105,7 +109,7 @@ fn self_check() {
         live.matches(&UserFpState::INITIAL),
         "fpu: cpu{} disagrees about the architectural default state — \
          fcw={:#06x} mxcsr={:#010x}, expected fcw={:#06x} mxcsr={:#010x}",
-        super::percpu::cpu_id(),
+        cpu_id,
         u16::from_le_bytes([live.0[OFF_FCW], live.0[OFF_FCW + 1]]),
         u32::from_le_bytes([
             live.0[OFF_MXCSR],

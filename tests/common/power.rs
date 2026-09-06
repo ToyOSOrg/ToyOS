@@ -331,6 +331,9 @@ pub fn loader_watchdog_arms(
             toyos_tco::TIMER
         ));
     }
+    // The reset gate is inside this block on the generations the table names, so
+    // a guest whose armed timer could not reset it is one the bound is a lie on.
+    boot.must_say("so a second expiry can reset this machine")?;
     // q35 is the positive control for the question a single read cannot answer:
     // an armed timer counts down. A T14 printing the other branch is a chipset
     // that never counts, not a loader that never armed.
