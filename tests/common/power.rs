@@ -8,12 +8,12 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+use toyos_build::metal::REBOOTING;
+
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
 
 const WAIT: Duration = Duration::from_secs(20);
-
-pub const REBOOTING: &str = "Rebooting.";
 
 /// What a guest that never stopped means where something asked it to.
 const ASKED_AND_STAYED_UP: &str =
@@ -108,17 +108,16 @@ pub fn metal_job_reboot(
     let (name, log) = super::volumes::newest_log(&image_path, start, len)?;
     let text = String::from_utf8_lossy(&log);
     // The volume is born clean in an image built moments ago, so every record in it is this boot's.
-    for record in ["Boot: complete", REBOOTING] {
-        if !text.contains(record) {
-            return Err(format!(
-                "{record:?} is not in {name} on the log partition: the reset outran logd, so a \
-                 machine with no console would have no account of this boot\n{text}"
-            ));
-        }
-    }
+    // Judged by the metal loop's own verdict, because a T14 run reads this same volume.
+    let boot_ms = toyos_build::metal::boot_verdict(&text).map_err(|refusal| {
+        format!(
+            "{name} on the log partition: {refusal}. A machine with no console would have no \
+             account of this boot\n{text}"
+        )
+    })?;
 
     let _ = std::fs::remove_file(&image_path);
-    eprintln!("  [power] {name} carries this boot's last line, written before the reset");
+    eprintln!("  [power] {name} carries Boot: complete ({boot_ms}ms) and this boot's last line");
     Ok(())
 }
 

@@ -77,6 +77,8 @@ pub enum Refusal {
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
     NoBootRecord,
+    /// The log does not end at the reset: the last line it carries instead.
+    Unfinished(String),
     Usage(String),
 }
 
@@ -84,7 +86,7 @@ impl Refusal {
     /// Whether the machine failed rather than the loop: the boot is the subject
     /// only once the stick is written and the reboot asked for.
     pub fn about_the_boot(&self) -> bool {
-        matches!(self, Self::Silent { .. } | Self::NoBootRecord)
+        matches!(self, Self::Silent { .. } | Self::NoBootRecord | Self::Unfinished(_))
     }
 }
 
@@ -145,6 +147,11 @@ impl fmt::Display for Refusal {
             Self::NoBootRecord => {
                 write!(f, "the log partition carries no `Boot: complete` record for this boot")
             }
+            Self::Unfinished(saw) => write!(
+                f,
+                "the log's last line is {saw:?} and not {REBOOTING:?}: either the boot never \
+                 handed the machine back to the firmware, or the reset outran logd"
+            ),
             Self::Usage(why) => write!(f, "{why}"),
         }
     }
@@ -537,11 +544,30 @@ fn one_partition(
     })
 }
 
-/// The kernel's own boot record, out of `Boot: complete (123ms)`. The QEMU
-/// harness judges the same line, so it reads it through here.
+/// The word the kernel writes as it hands the machine back to the firmware
+/// (`kernel/src/arch/syscall/machine.rs`'s `quiesce`). Declared once here
+/// because the metal loop and the QEMU harness both match it.
+pub const REBOOTING: &str = "Rebooting.";
+
+/// The kernel's own boot record, out of `Boot: complete (123ms)`.
 pub fn boot_millis(log: &str) -> Option<u64> {
     let tail = log.lines().find_map(|line| line.split("Boot: complete (").nth(1))?;
     tail.split("ms)").next()?.parse().ok()
+}
+
+/// What one boot's log has to carry to be a pass, answered as that boot's own
+/// millisecond count: the kernel's boot record, and [`REBOOTING`] as the last
+/// line it wrote. **Both, because either alone is a boot that told half a
+/// story** — a log ending anywhere else is a machine that did not come back on
+/// its own, whether or not it got as far as `Boot: complete`. The metal loop
+/// and the QEMU harness judge a log by this one function.
+pub fn boot_verdict(log: &str) -> Result<u64, Refusal> {
+    let boot_ms = boot_millis(log).ok_or(Refusal::NoBootRecord)?;
+    let last = log.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
+    if !last.contains(REBOOTING) {
+        return Err(Refusal::Unfinished(last.trim().to_string()));
+    }
+    Ok(boot_ms)
 }
 
 /// How many bytes `dd` says it copied, out of its own last line.
@@ -986,7 +1012,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     println!("the machine answered ssh again after {back} s");
     let log = driver.read_log()?;
     print!("{log}");
-    boot_millis(&log).map(Some).ok_or(Refusal::NoBootRecord)
+    boot_verdict(&log).map(Some)
 }
 
 #[cfg(test)]
@@ -1183,11 +1209,35 @@ mod tests {
     #[test]
     fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
         assert!(Refusal::NoBootRecord.about_the_boot());
+        assert!(Refusal::Unfinished("x".to_string()).about_the_boot());
         assert!(Refusal::Silent { what: "come back", secs: RETURN_SECS }.about_the_boot());
         assert!(!Refusal::Node("/dev/nvme0n1".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
         assert!(!Refusal::NoHome.about_the_boot());
+    }
+
+    /// The half-told boot: the kernel got all the way up and the log stops
+    /// there, so the machine either never asked for the reset or the reset
+    /// outran `logd`. Either way it is not a pass.
+    #[test]
+    fn a_boot_record_without_the_reset_word_is_not_a_pass() {
+        let booted = "[kernel 1.151 cpu0] Boot: complete (1151ms)\n";
+        let ended = format!("{booted}[logd 1.203 cpu1] {REBOOTING}\n");
+        assert_eq!(boot_verdict(&ended), Ok(1151));
+        // Trailing blank lines are not the last line.
+        assert_eq!(boot_verdict(&format!("{ended}\n  \n")), Ok(1151));
+
+        assert_eq!(
+            boot_verdict(booted),
+            Err(Refusal::Unfinished("[kernel 1.151 cpu0] Boot: complete (1151ms)".to_string()))
+        );
+        // The word somewhere other than the end is a boot that carried on.
+        let carried_on = format!("{ended}[kernel 1.400 cpu0] hda: codec 0 reset\n");
+        assert!(matches!(boot_verdict(&carried_on), Err(Refusal::Unfinished(_))));
+        // And the reset word without the boot record is the other half.
+        assert_eq!(boot_verdict(&format!("[logd 0.9 cpu1] {REBOOTING}\n")), Err(Refusal::NoBootRecord));
+        assert_eq!(boot_verdict(""), Err(Refusal::NoBootRecord));
     }
 
     #[test]
