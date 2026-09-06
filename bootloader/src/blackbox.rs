@@ -50,6 +50,8 @@ pub fn harvest(system_table: &SystemTable<Boot>) {
     // was asked for. No other reference to it exists — this is the only site in
     // the loader that names the address at all.
     let page = unsafe { &mut *(at as *mut [u8; BYTES]) };
+    // Remembered for `seal_loader_refusal`, which runs where nothing can be printed.
+    CLAIMED.store(at, core::sync::atomic::Ordering::Relaxed);
 
     let Some(text) = toyos_blackbox::recover(page) else {
         return println!(
@@ -86,4 +88,64 @@ impl core::fmt::Display for Ascii<'_> {
         }
         Ok(())
     }
+}
+
+/// The page's kernel-address twin for [`seal_loader_refusal`], remembered by
+/// [`harvest`]; 0 where this boot has no page.
+static CLAIMED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// What a loader that could not carry the whole memory map leaves for the next
+/// boot to report.
+///
+/// **Called after `ExitBootServices`, where the console, the allocator and
+/// `println!` are all gone**, so it formats into a fixed buffer and writes one
+/// page. It is the only channel a loader has left, and a truncated memory map
+/// that says nothing is memory the kernel silently never sees.
+pub fn seal_loader_refusal(dropped: usize, kept: usize) {
+    let at = CLAIMED.load(core::sync::atomic::Ordering::Relaxed);
+    if at == 0 {
+        return;
+    }
+    let mut text = [0u8; 128];
+    let mut n = 0;
+    let mut put = |bytes: &[u8], n: &mut usize| {
+        for byte in bytes {
+            if let Some(slot) = text.get_mut(*n) {
+                *slot = *byte;
+                *n += 1;
+            }
+        }
+    };
+    put(b"LOADER: the memory map did not fit: kept ", &mut n);
+    let mut kept_digits = [0u8; 20];
+    put(decimal(kept, &mut kept_digits), &mut n);
+    put(b" descriptors and dropped ", &mut n);
+    let mut dropped_digits = [0u8; 20];
+    put(decimal(dropped, &mut dropped_digits), &mut n);
+    put(b", so this kernel was handed less memory than the machine has", &mut n);
+    // SAFETY: `CLAIMED` is non-zero only where `harvest`'s `AllocatePages`
+    // answered with this page, which nothing else in this image names; boot
+    // services identity-map physical memory and that mapping outlives their
+    // exit, since the loader has not switched `cr3` yet.
+    let page = unsafe { &mut *(at as *mut [u8; BYTES]) };
+    toyos_blackbox::seal(page, text.get(..n).unwrap_or(&[]));
+}
+
+/// `value` in decimal, in the caller's own buffer.
+fn decimal(value: usize, out: &mut [u8; 20]) -> &[u8] {
+    let mut digits = [0u8; 20];
+    let mut n = 0;
+    let mut v = value;
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 || n == digits.len() {
+            break;
+        }
+    }
+    for i in 0..n {
+        out[i] = digits[n - 1 - i];
+    }
+    out.get(..n).unwrap_or(&[])
 }

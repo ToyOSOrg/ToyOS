@@ -47,6 +47,16 @@ mod watchdog;
 /// what a UEFI implementation would serve in one allocation.
 const MAX_ESP_FILE: u64 = 1024 * 1024 * 1024;
 
+/// Descriptors of room held above what the map measured, for the descriptors
+/// the two allocations between that measurement and `ExitBootServices` add: the
+/// vector below, and the buffer `exit_boot_services` takes the map into.
+///
+/// **The margin is not what makes the loop safe** — the loop refuses to grow
+/// the vector at all, and this only decides how much of a real map is kept.
+/// Each allocation splits at most one free region in two, so four would do;
+/// this is beyond any plausible firmware and costs 1.5 KiB.
+const MAP_MARGIN: usize = 64;
+
 fn alloc_kernel_memory(size: usize) -> vec::Vec<u8> {
     const KERNEL_ALIGN: usize = 2 * 1024 * 1024; // 2MB
     let layout = Layout::from_size_align(size, KERNEL_ALIGN).expect("invalid layout");
@@ -591,18 +601,38 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // handle drop can each add a descriptor, and the margin below is fixed.
     loaderlog::close();
     let mms = system_table.boot_services().memory_map_size();
-    let memory_map_entry_count = mms.map_size / mms.entry_size + 8;
+    let memory_map_entry_count = mms.map_size / mms.entry_size + MAP_MARGIN;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
 
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
 
+    // **Nothing below this line may allocate or panic.** Boot services are gone,
+    // so the allocator answers null and `println!` dereferences a system table
+    // uefi-services has already nulled; either one ends in a panic inside a
+    // panic, and a fault with no IDT of our own vectors into firmware's, which
+    // dead-loops. The machine then holds the loader's last line on the panel
+    // forever and says nothing — which is the failure this loop is written to
+    // be incapable of, not merely unlikely to reach.
+    let mut dropped = 0usize;
     uefi_memory_map.entries().for_each(|entry| {
+        if memory_map.len() == memory_map.capacity() {
+            // A `push` here would grow the vector, and growing it is the death above.
+            dropped += 1;
+            return;
+        }
         memory_map.push(MemoryMapEntry {
             uefi_type: entry.ty.0,
+            // Saturating: `overflow-checks` is on in this profile, so a
+            // descriptor whose extent does not fit an address would panic here
+            // rather than in a caller that could report it.
             start: entry.phys_start,
-            end: entry.phys_start + entry.page_count * PAGE_SIZE as u64,
+            end: entry.phys_start.saturating_add(entry.page_count.saturating_mul(PAGE_SIZE as u64)),
         });
     });
+    if dropped > 0 {
+        // The one channel still open: the page the next boot's loader reads.
+        blackbox::seal_loader_refusal(dropped, memory_map.len());
+    }
 
     let (gop_framebuffer, gop_framebuffer_size, gop_width, gop_height, gop_stride, gop_pixel_format) =
         match &gop {

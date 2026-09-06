@@ -411,17 +411,6 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
         return;
     }
 
-    if let Some(uefi_type) =
-        framebuffer_is_reclaimed_ram(maps, args.gop_framebuffer, args.gop_framebuffer_size)
-    {
-        log!(
-            "panic console: disarmed, framebuffer at {:#x} is UEFI type {} (PMM-owned RAM)",
-            args.gop_framebuffer,
-            uefi_type
-        );
-        return;
-    }
-
     let fb = Fb {
         ptr: DirectMap::from_phys(args.gop_framebuffer).as_mut_ptr::<u8>(),
         bytes: args.gop_framebuffer_size,
@@ -445,10 +434,32 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
 
     publish(fb);
     EARLY.store(true, Ordering::Relaxed);
+    // **The panel is taken before the memory map is read, and this record is
+    // what proves the kernel entered.** Every refusal below it, and every fault
+    // the walk itself can take, then reaches a panel that exists; when the walk
+    // came first a machine that died in it kept the loader's last line on the
+    // screen and said nothing about which of the two had happened. Painting
+    // twice into a scanout the check may yet call PMM-owned RAM costs nothing:
+    // the PMM does not exist until `mm::init`, hundreds of statements later.
     log!(
         "panic console: armed {}x{} stride={} format={} at {:#x}",
         fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
     );
+
+    if let Some(uefi_type) =
+        framebuffer_is_reclaimed_ram(maps, args.gop_framebuffer, args.gop_framebuffer_size)
+    {
+        log!(
+            "panic console: disarmed, framebuffer at {:#x} is UEFI type {} (PMM-owned RAM)",
+            args.gop_framebuffer,
+            uefi_type
+        );
+        // Cleared too, so a later `rearm` cannot resurrect a scanout the PMM owns.
+        // SAFETY: sound as `disable`'s write — one writer, in the single-threaded boot sequence.
+        unsafe { *PENDING.0.get() = Fb::DETACHED };
+        RAW_PHYS.store(0, Ordering::Relaxed);
+        detach();
+    }
 }
 
 /// Re-establish the mapping after `mm::init` replaces the bootloader's page
