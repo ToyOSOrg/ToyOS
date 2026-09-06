@@ -607,11 +607,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Two boots of its own; every verdict is a console line and no clock is in
     // either. Fast with the UNMEASURED bootstrap marker until CI prices it.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Fast),
-    // Two boots at the shipped five-minute bound. Serial, because the control's
-    // verdict is that nothing happened for a span of host clock — and so
-    // Nightly once its first measurement re-tiers it, which is the two cycles
-    // a new name costs. Fast with the UNMEASURED marker buys the first.
-    ("loader_watchdog_resets", Sched::Serial, Tier::Fast),
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
     ("watchdog_fed", Sched::Serial, Tier::Nightly),
@@ -8714,7 +8709,6 @@ fn run_machine_test(
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
-        "loader_watchdog_resets" => power::loader_watchdog_resets(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),
         "usb_storage_shapes" => usb::usb_storage_shapes(test_config, c_bins, rust_bins),
