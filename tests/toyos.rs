@@ -3574,65 +3574,84 @@ fn run_screen_test(
             Ok(())
         }
         "screen_early_panel" => {
-            // The guest halts here logging nothing, so the last record on the
-            // wire is `PAT:` and whatever is on the panel was painted at a
-            // record earlier than the one the boot waited for.
+            // `test-early-halt` stops the boot between `PAT:`'s commit and its
+            // repaint, so `PAT:` is on the console and the panel holds only what
+            // an earlier record's own repaint put there. That is what tells a
+            // repaint per record from one repaint at the end, which would have
+            // painted the same tail.
             const LAST: &str = "PAT: IA32_PAT";
-            // What `arm`, `serial::init`, `actuator::init` and `pat::init` log,
-            // in order, and the whole of what a boot can have said by then.
-            const EARLY_RECORDS: usize = 4;
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Metal,
-                    qmp: true,
-                    kernel_params: &["test-early-halt", "early-panel"],
-                    ready_marker: LAST,
-                    ..Default::default()
-                },
-            );
-            // Polled, not read once: `emit` drains a record to the console
-            // before it repaints, so the marker is on the wire first.
-            let dump = qemu.screendump_until(LAST, Duration::from_secs(30));
-            // The machine's panel, not the kernel's account of it: a geometry
-            // read off the guest's own `GOP:` line would agree with a guest
-            // that painted nothing.
+            // In order: `arm`, `serial::init`, then `actuator::init` — the first
+            // two before `params::init` and the third after it.
+            const BEFORE_PARAMS: [&str; 2] =
+                ["panic console: armed", "serial: 16550 loopback read"];
+            const AFTER_PARAMS: &str = "actuators:";
+
             let panel = qemu::Profile::Metal.panel().expect("metal-sim advertises a panel");
-            if (dump.width as u32, dump.height as u32) != panel {
-                return Err(format!(
-                    "the machine advertises {panel:?} and the screendump is {}x{}",
-                    dump.width, dump.height
-                ));
-            }
-            let text = dump.text();
-            print_screen(name, &text);
-            // The count, not just the presence: one repaint of the whole tail
-            // and a repaint per record put the same lines up, and only the
-            // number says the window was painted as far back as its first
-            // record. `panic console: armed` carries the framebuffer address,
-            // which is the line this whole window exists to deliver.
-            let records = text.lines().filter(|line| line.contains("cpu0")).count();
-            if records != EARLY_RECORDS || !text.contains("panic console: armed") {
-                return Err(format!(
-                    "the panel holds {records} kernel records and wanted {EARLY_RECORDS}, \
-                     ending at {LAST:?} and beginning at `panic console: armed`\n\
-                     decoded screen:\n{text}"
-                ));
-            }
-            // What rules the other two painters out. `boot_checkpoint` would
-            // have put its own `Boot:` record up with the rest, and the panic
-            // renderer would have put a panic up: neither ran.
-            for painter in ["Boot: ", "EARLY PANIC:"] {
-                if text.contains(painter) {
+            let halted_panel = |params: &'static [&'static str]| -> Result<String, String> {
+                let mut qemu = QemuInstance::boot_with_options(
+                    test_config,
+                    c_bins,
+                    rust_bins,
+                    BootOptions {
+                        profile: qemu::Profile::Metal,
+                        qmp: true,
+                        kernel_params: params,
+                        ready_marker: LAST,
+                        ..Default::default()
+                    },
+                );
+                // The marker is the record whose repaint never runs, so every
+                // paint this boot makes is already on the glass when it lands.
+                let dump = qemu.screendump();
+                // The machine's panel, not the kernel's account of it: a
+                // geometry read off the guest's own `GOP:` line would agree
+                // with a guest that painted nothing.
+                if (dump.width as u32, dump.height as u32) != panel {
                     return Err(format!(
-                        "{painter:?} is on the panel, so something other than the early repaint \
-                         painted it\ndecoded screen:\n{text}"
+                        "the machine advertises {panel:?} and the screendump is {}x{}",
+                        dump.width, dump.height
                     ));
                 }
-            }
-            eprintln!("  [panel] {records} kernel records on the {panel:?} panel, no boot phase");
+                let text = dump.text();
+                print_screen(name, &text);
+                Ok(text)
+            };
+            let holds = |text: &str, want: &[&str], unwanted: &[&str]| -> Result<(), String> {
+                for line in want {
+                    if !text.contains(line) {
+                        return Err(format!("{line:?} is not on the panel\n{text}"));
+                    }
+                }
+                for line in unwanted {
+                    if text.contains(line) {
+                        return Err(format!("{line:?} is on the panel\n{text}"));
+                    }
+                }
+                Ok(())
+            };
+
+            // Armed: every record up to the halt repaints, so the panel carries
+            // the three records before `PAT:` and not `PAT:` itself. `Boot: `
+            // and `EARLY PANIC:` are the two other painters, and neither ran.
+            let armed = halted_panel(&["test-early-halt", "early-panel"])?;
+            holds(
+                &armed,
+                &[BEFORE_PARAMS[0], BEFORE_PARAMS[1], AFTER_PARAMS],
+                &[LAST, "Boot: ", "EARLY PANIC:"],
+            )?;
+
+            // The shipping configuration, which names no parameter: the two
+            // records before `params::init` repaint because they have no other
+            // channel, and nothing after it does.
+            let bare = halted_panel(&["test-early-halt"])?;
+            holds(
+                &bare,
+                &BEFORE_PARAMS,
+                &[AFTER_PARAMS, LAST, "Boot: ", "EARLY PANIC:"],
+            )?;
+
+            eprintln!("  [panel] armed: three records up to the halt, and not {LAST:?}");
+            eprintln!("  [panel] no parameter: the two before params::init, and not {AFTER_PARAMS:?}");
             Ok(())
         }
         "screen_log_absent" => {

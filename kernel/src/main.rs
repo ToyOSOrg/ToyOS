@@ -260,6 +260,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     actuator::init(cmdline);
     rootfs::init(cmdline);
 
+    // Armed here so the next record — `PAT:` — reaches the console and the panel keeps the one before it.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::test_early_halt() {
+        log::halt_before_the_next_repaint();
+    }
+
     // Before pat::init, which restores whatever CR0 it found — a firmware CD would ride straight through otherwise.
     arch::control_regs::init_cr0(0);
 
@@ -271,10 +277,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // percpu, the allocator and our own paging aren't up yet, so a fault here only reaches the early-panic branch.
     if actuator::test_early_panic() {
         panic!("test-early-panic: on-screen console check");
-    }
-
-    if actuator::test_early_halt() {
-        cpu::halt();
     }
 
     #[cfg(feature = "debug-wait")]

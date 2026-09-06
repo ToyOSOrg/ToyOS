@@ -569,7 +569,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 
     report_reach("Scanout", gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
     report_reach(
-        "Boot parameter",
+        "Parameter buffer",
         (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64)),
     );
 

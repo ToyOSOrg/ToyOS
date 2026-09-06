@@ -37,9 +37,8 @@ actuators! {
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
-    /// Halt in the same window, logging nothing: the panic renderer would paint
-    /// the panel itself and a record of its own would be the one repainting it,
-    /// so neither can be what `screen_early_panel` reads.
+    /// Halt between a record's commit and its repaint, so the panel holds the
+    /// record before it and `screen_early_panel` reads a paint it can attribute.
     test_early_halt = "test-early-halt";
 
     /// Have `iod` null SS, force a switch, and report whether it reloaded — the
