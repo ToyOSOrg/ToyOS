@@ -2465,6 +2465,7 @@ mod tests {
         "tests/doomcase/system.toml",
         "tests/doommusiccase/system.toml",
         "tests/jobcase/system.toml",
+        "tests/jobdeadlinecase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/metalcase/system.toml",
         "tests/netcase/system.toml",

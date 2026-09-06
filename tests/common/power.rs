@@ -107,6 +107,9 @@ pub fn metal_job_reboot(
     let drain = serial::Serial::named("job drain", tail.as_str());
     drain.must_be_clean()?;
     drain.must_say("===TEST_START reboot===")?;
+    // The control for `job_deadline_reboots`: a list that finishes inside the
+    // bound is ended by its own last job and never by the deadline.
+    drain.must_not_say(toyos_tco::JOB_DEADLINE_SAID)?;
     drain.must_say(REBOOTING)?;
     returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
     drop(qemu);
@@ -149,6 +152,47 @@ pub fn metal_job_reboot(
         bootlog::LOADER_LOG,
         written.len()
     );
+    Ok(())
+}
+
+/// A job list that never finishes ends the boot anyway, on the runner's own
+/// deadline: the kernel is alive and its scheduler passes keep feeding the
+/// chipset, so no watchdog is what fires here.
+///
+/// `metal_job_reboot` is the control — the same shape whose job *does* finish,
+/// and which reboots without the line this one waits for.
+pub fn job_deadline_reboots(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobdeadlinecase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() },
+    );
+    serial::Serial::boot(&qemu).must_be_clean()?;
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let reason = stop.reason();
+    let tail = qemu.drain_serial(WAIT);
+
+    let drain = serial::Serial::named("deadline drain", tail.as_str());
+    drain.must_be_clean()?;
+    drain.must_say("===TEST_START park===")?;
+    // The writer's own constant, and the job it names: a deadline that fired
+    // without saying which job was running answers nothing on a machine whose
+    // only channel is this log.
+    drain.must_say(toyos_tco::JOB_DEADLINE_SAID)?;
+    drain.must_say("park was running")?;
+    drain.must_say(REBOOTING)?;
+    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
+
+    eprintln!("  [power] the job list did not finish and the runner ended the boot itself");
     Ok(())
 }
 

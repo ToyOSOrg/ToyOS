@@ -1,0 +1,22 @@
+# The job list that never finishes. `park` runs forever, so nothing but the
+# runner's own deadline ends this boot — the kernel stays alive and its
+# scheduler passes keep feeding the chipset's timer, which is the case no
+# watchdog covers.
+#
+# `--bound-ms` is the one argument that is not a job. The T14 leaves the bound
+# at `toyos_tco::JOB_BOUND_MS`; this shortens it because the fast tier's ceiling
+# is ten seconds, the way `tco-fast` shortens the chipset's.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.test-runner]
+args = ["--bound-ms=3000", "park"]
+syscap = ["dup", "power"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"

@@ -5,6 +5,8 @@ mod log_gate;
 use std::io::{self, BufRead, Write};
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
@@ -26,7 +28,20 @@ const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
     ("log-gate", log_gate::run),
     ("log-close", log_close::run),
     ("kbd-close", kbd_close::run),
+    ("park", park),
 ];
+
+/// A job that never finishes, which is the case the deadline below exists for.
+fn park(_cap: Option<&SysCap>) -> i32 {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+/// The job the runner is inside, and whether the list got through: written by
+/// the loop, read by the deadline watching it.
+static RUNNING: Mutex<String> = Mutex::new(String::new());
+static FINISHED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     // **The test estate's authority, and the one place least authority is not
@@ -43,17 +58,30 @@ fn main() {
 
     // **A machine with no host on the other end runs the jobs its manifest
     // names**, one binary name per argument through the stdin path's own [`run_one`].
-    let jobs: Vec<String> = std::env::args().skip(1).collect();
+    let mut jobs: Vec<String> = std::env::args().skip(1).collect();
+    // The one argument that is not a job: what the whole list gets. The T14
+    // leaves it at `toyos_tco::JOB_BOUND_MS`; a judge that cannot spend a
+    // minute shortens it in its own `system.toml`.
+    let mut bound_ms = toyos_tco::JOB_BOUND_MS;
+    if let Some(asked) = jobs.first().and_then(|a| a.strip_prefix("--bound-ms=")) {
+        let Ok(ms) = asked.parse() else { fatal(&format!("--bound-ms={asked}: not a number")) };
+        bound_ms = ms;
+        jobs.remove(0);
+    }
     if !jobs.is_empty() {
+        deadline(bound_ms, cap.as_ref());
         for job in &jobs {
             // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
             if job.split_whitespace().count() != 1 {
                 fatal(&format!("job {job:?} is not one binary name"));
             }
+            *RUNNING.lock().expect("the deadline thread does not panic holding this") =
+                job.clone();
             if !run_one(job, &[], cap.as_ref()) {
                 fatal(&format!("job {job:?} did not run"));
             }
         }
+        FINISHED.store(true, Ordering::Release);
         std::process::exit(0);
     }
 
@@ -62,6 +90,38 @@ fn main() {
         let Ok(line) = line else { break };
         command(&line, cap.as_ref());
     }
+}
+
+/// Watch the job list for `bound_ms` **from boot**, and hand the machine back to
+/// the firmware if it has not got through.
+///
+/// A boot whose job never finishes is not a wedge to the chipset — the kernel is
+/// alive and its scheduler passes keep feeding the TCO — so this is the only
+/// bound over that case, and it is a thread because the loop it watches is
+/// blocked inside a job.
+///
+/// `toyos_abi::syscall::clock_nanos` is nanoseconds since boot, so the deadline
+/// covers the boot before this program as well as the jobs after it.
+fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
+    let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) else {
+        // A boot list with no way back to the firmware would sit here forever
+        // whatever this thread did, so it is refused where it is asked for.
+        fatal("no capability to reboot with, so the job list has no deadline");
+    };
+    std::thread::spawn(move || {
+        loop {
+            let since_boot = toyos_abi::syscall::clock_nanos() / 1_000_000;
+            let Some(left) = bound_ms.checked_sub(since_boot) else { break };
+            std::thread::sleep(std::time::Duration::from_millis(left.max(1)));
+        }
+        if FINISHED.load(Ordering::Acquire) {
+            return;
+        }
+        let job = RUNNING.lock().map(|job| job.clone()).unwrap_or_default();
+        println!("{} {bound_ms} ms; {job} was running", toyos_tco::JOB_DEADLINE_SAID);
+        let _ = io::stdout().flush();
+        power.reboot();
+    });
 }
 
 /// Say why and end the boot, for the job path where no host is listening.

@@ -234,6 +234,7 @@ iommu_interrupt_remapping 5609 shards=12
 iommu_sound_foreign_dma 7537 shards=12
 iommu_virtio_platform 17259 shards=12
 irq_census_conservation 5056 shards=12
+job_deadline_reboots 18446744073709551615 shards=none
 kernel_heartbeat 5634 shards=12
 kernel_log_file 13152 shards=12
 keyboard_claim_close_spares_stdin 4580 shards=12
