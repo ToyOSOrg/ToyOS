@@ -38,8 +38,8 @@ actuators! {
     test_early_panic = "test-early-panic";
 
     /// Halt in the same window instead of panicking, so a screendump reads what
-    /// the panel was left showing rather than what the panic renderer painted
-    /// over it. `screen_early_panel` is the test.
+    /// the early repaint left rather than what the panic renderer painted over
+    /// it. `screen_early_panel` is the test.
     test_early_halt = "test-early-halt";
 
     /// Have `iod` null SS, force a switch, and report whether it reloaded — the

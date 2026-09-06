@@ -425,8 +425,8 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // finished, so a 2x slower machine changes nothing about the wait but the
     // wait is the verdict either way — timer-anchored.
     ("screen_diag_boot", Sched::Parallel, Tier::Nightly),
-    // Two boots halted in the same window, the parameter apart: the panel
-    // carries the kernel's early records or it carries none of them.
+    // A guest halted in the window, so the panel is read where only the repaint
+    // under test can have painted it.
     ("screen_early_panel", Sched::Parallel, Tier::Fast),
     ("screen_log_absent", Sched::Parallel, Tier::Fast),
     ("screen_console_shell", Sched::Parallel, Tier::Fast),

@@ -128,6 +128,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         panic::last_words("PANIC REENTRY: CPU halted", None, info, false);
         // No capture(): the outer panic's snapshot is the one worth showing.
         // render() is safe by construction here: a fault inside the renderer itself would find PAINTING already held, and return without touching a pixel.
+        drivers::panic_console::render();
         cpu::halt();
     }
 
@@ -139,6 +140,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         // SAFETY: no other writer can be mid-transmission — IF is clear here and every other CPU is about to halt.
         unsafe { drivers::serial::panic_flush(); }
         // Flush before render: the serial report survives even if render then faults.
+        drivers::panic_console::render();
         cpu::halt();
     }
 
