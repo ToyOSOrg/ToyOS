@@ -98,7 +98,7 @@ kernel/src/drivers/virtio_console.rs 33 0
 kernel/src/drivers/virtio_gpu.rs 42 0
 kernel/src/drivers/virtio_net.rs 52 0
 kernel/src/drivers/virtio_sound.rs 73 0
-kernel/src/drivers/watchdog.rs 39 0
+kernel/src/drivers/watchdog.rs 23 0
 kernel/src/drivers/xhci/device.rs 83 0
 kernel/src/drivers/xhci/hid.rs 26 0
 kernel/src/drivers/xhci/legacy.rs 31 0
@@ -255,7 +255,7 @@ tests/common/logread.rs 143 2
 tests/common/mod.rs 0 0
 tests/common/passcost.rs 237 4
 tests/common/pkg.rs 77 0
-tests/common/power.rs 26 0
+tests/common/power.rs 16 0
 tests/common/qemu.rs 1675 11
 tests/common/screen.rs 89 0
 tests/common/serial.rs 259 1
@@ -614,8 +614,8 @@ toyos-sched/src/timer.rs 38 0
 toyos-sched/src/waitq.rs 162 0
 toyos-symbols/src/lib.rs 65 0
 toyos-symbols/tests/real.rs 30 0
-toyos-tco/src/lib.rs 51 0
-toyos-tco/tests/decode.rs 17 0
+toyos-tco/src/lib.rs 28 0
+toyos-tco/tests/decode.rs 3 0
 toyos-untrusted/src/lib.rs 151 0
 toyos-userbound/src/fault.rs 111 1
 toyos-userbound/src/lib.rs 25 0

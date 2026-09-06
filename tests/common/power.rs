@@ -60,19 +60,15 @@ pub fn machine_reboot(
 }
 
 /// The chipset resets a machine whose kernel stops feeding its watchdog.
-///
-/// The reset is the chipset's, not the kernel's: `watchdog_fed` is the same
-/// guest with the feed left on, and it is what says the bound is real rather
-/// than a timer nothing was ever going to reload.
+/// `watchdog_fed` is the same guest with the feed on, and is what says the
+/// bound is real rather than a timer nothing was going to reload.
 pub fn watchdog_resets(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let options = starved();
-    // QEMU's chipset holds `NO_REBOOT` set unless the argv clears it, and an
-    // expiry under that strap does nothing at all — which is a green run for
-    // the wrong reason if the option ever goes silently inert.
+    // An expiry under QEMU's `NO_REBOOT` strap does nothing, so a boot whose argv lost the global is green for the wrong reason.
     let argv = qemu::profile_argv(&options);
     if !argv.windows(2).any(|w| w[0] == "-global" && w[1] == "ICH9-LPC.noreboot=false") {
         return Err(format!("the guest may not be reset by its own chipset: {argv:?}"));
@@ -114,8 +110,6 @@ pub fn watchdog_fed(
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
     serial::Serial::boot(&qemu).must_be_clean()?;
 
-    // Long enough for the bound the arm line reports to have passed several
-    // times over, which is what makes the absence below mean anything.
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), FED_FOR);
     if let Some(seen) = stop.reason() {
         let tail = qemu.drain_serial(WAIT);
@@ -124,8 +118,7 @@ pub fn watchdog_fed(
         ));
     }
 
-    // Not merely un-stopped: still answering, so the absence is a live machine
-    // rather than one that wandered off before the chipset could act.
+    // Still answering, so the absence above is a live machine.
     let result = qemu.run_test("pwd", Duration::from_secs(30));
     if result.exit_code != Some(0) {
         return Err(format!("the guest stopped answering after {FED_FOR:?}: {result:?}"));
@@ -135,8 +128,7 @@ pub fn watchdog_fed(
     Ok(())
 }
 
-/// The guest both watchdog tests boot: the target laptop's shape, its chipset
-/// allowed to reset it, and the TCO armed at seconds with the feed cut.
+/// Both watchdog tests boot the laptop's shape, its chipset allowed to reset it.
 fn starved() -> BootOptions {
     BootOptions {
         profile: qemu::Profile::Metal,
@@ -147,6 +139,4 @@ fn starved() -> BootOptions {
     }
 }
 
-/// Several times the bound `tco-fast` arms, so a machine that was going to be
-/// reset has been.
 const FED_FOR: Duration = Duration::from_secs(12);

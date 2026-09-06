@@ -1,17 +1,8 @@
-//! The chipset's TCO watchdog: armed on request, fed from the scheduler pass.
-//!
-//! **What it proves alive is that some CPU still reaches `sched::driver::pass`**,
-//! the one function an idle CPU and a busy one both run every trip. A machine
-//! where that stops for the whole bound is wedged by the only definition this
-//! kernel has, and the chipset resets it back to firmware — where, on the T14,
-//! the default boot entry is Linux and the loop can go and read the log.
-//!
-//! Armed only when the boot parameter names it: a watchdog nobody asked for is
-//! a machine that reboots under its owner. `toyos-tco` decides which port and
-//! which timer value; everything that touches the machine is here.
-//!
-//! **Only QEMU's q35 row is judged.** A row for another chipset is reachable on
-//! that machine and nowhere in this harness.
+//! The chipset's TCO watchdog, armed on request and fed from the scheduler
+//! pass — the one function an idle CPU and a busy one both run every trip, so
+//! **what it proves alive is that some CPU still reaches it**. Armed only when
+//! the boot parameter names it: a watchdog nobody asked for is a machine that
+//! reboots under its owner. Only QEMU's q35 row is judged anywhere.
 
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
@@ -21,17 +12,15 @@ use crate::drivers::pci::PciDevice;
 use crate::log;
 use crate::time::Duration;
 
-/// What the boot parameter asks for. One bound, not a per-machine choice: the
-/// chipset ignores anything under two ticks and holds ten bits of them.
+/// One bound, not a per-machine choice, and `FAST_BOUND` so a guest run is not
+/// five minutes long. Feeds per bound is 4, so three may be missed.
 const BOUND: Duration = Duration::from_secs(300);
-/// The bound the guest tests arm, short enough that a run is not five minutes.
 const FAST_BOUND: Duration = Duration::from_secs(3);
-/// Feeds fit in a bound before the chipset acts, so three may be missed.
 const FEEDS_PER_BOUND: u64 = 4;
 
-/// The port `TCO_RLD` is at, or zero on a machine that armed nothing.
+/// The port `TCO_RLD` is at, zero on a machine that armed nothing; and when the
+/// next feed is due, `u64::MAX` while nothing is armed.
 static PORT: AtomicU16 = AtomicU16::new(0);
-/// When the next feed is due; `u64::MAX` while nothing is armed.
 static NEXT_FEED: AtomicU64 = AtomicU64::new(u64::MAX);
 static FEED_EVERY_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -92,13 +81,11 @@ fn arm(row: &Chipset, port: u16, timer: u16) {
     );
 }
 
-/// Reload the timer, at most once per feed cadence across every CPU.
-///
-/// On the pass path, so what an unarmed machine pays is this load and this
-/// compare: `NEXT_FEED` starts at `u64::MAX` and answers without a port write.
+/// Reload the timer, at most once per feed cadence across every CPU. On the
+/// pass path, so an unarmed machine pays this load and this compare and no
+/// port write: `NEXT_FEED` starts at `u64::MAX`.
 pub fn feed(now: u64) {
-    // The wedge this exists to survive, staged: the machine goes on running and
-    // the chipset stops hearing from it.
+    // The wedge this exists to survive, staged: the machine runs on and the chipset stops hearing from it.
     if crate::actuator::watchdog_starve() {
         return;
     }
@@ -119,11 +106,8 @@ pub fn feed(now: u64) {
     unsafe { crate::arch::cpu::outw(port + TCO_RLD, 1) };
 }
 
-/// Halt the timer, so a machine on its way down is not reset on the way.
-///
-/// Both power paths call this before they quiesce: the sync and the log's
-/// durable wait can each outlast a feed cadence, and the pass that would have
-/// fed is not going to run again.
+/// Halt the timer: the sync and the log's durable wait that follow can each
+/// outlast a feed cadence, and no pass runs to feed again.
 pub fn disarm() {
     let port = PORT.swap(0, Ordering::AcqRel);
     if port == 0 {
