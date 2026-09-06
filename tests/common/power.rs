@@ -879,16 +879,34 @@ pub fn blackbox_early_panic_sealed(
         ));
     }
     let text = String::from_utf8_lossy(&text);
-    if !text.contains(EARLY_WITNESS) {
+    // **The first line, not somewhere in it.** Run 14's report was 4,072 bytes
+    // of the tail of the log and the crash's own message was off the top of it:
+    // what a panel carries after a panic is the register dump, the page walk and
+    // the backtrace, so a report cut to its tail is a report with the crash
+    // missing. The composed head is what fixes that and this is what holds it.
+    let first = text.lines().next().unwrap_or_default();
+    if !first.starts_with("PANIC (apic ") || !first.contains(EARLY_WITNESS) {
         return Err(format!(
-            "the page is sealed PANIC and does not carry {EARLY_WITNESS:?}, so what crossed is \
-             not this crash\n{text}"
+            "the report's first line is {first:?} and this crash's message is \
+             {EARLY_WITNESS:?}\n{text}"
         ));
+    }
+    // And the tail under it opens on a whole record. Only its *first* line is
+    // the claim: a record renders as several lines — the panic's own message is
+    // on one of its own — so a continuation below the first is a record being
+    // shown, not a cut.
+    if let Some(opened) = text.lines().nth(1) {
+        if !opened.starts_with('[') {
+            return Err(format!(
+                "the tail under the head opens {opened:?} and a record opens with its own \
+                 timestamp, so it was cut part-way into one\n{text}"
+            ));
+        }
     }
     drop(qemu);
 
     eprintln!(
-        "  [power] a panic before `params::init` sealed {} bytes, read off the page by QEMU",
+        "  [power] a panic before `params::init` sealed {} bytes under {first:?}",
         text.len()
     );
     Ok(())
@@ -921,7 +939,7 @@ pub fn blackbox_fault_sealed(
     );
     serial::Serial::boot(&qemu).must_be_clean()?;
 
-    let page = qemu.guest_page(PHYS)?;
+    let page = qemu.guest_memory(PHYS, toyos_blackbox::BYTES)?;
     let page: &[u8; toyos_blackbox::BYTES] =
         page.as_slice().try_into().map_err(|_| "pmemsave returned the wrong length".to_string())?;
     let Some((state, _, text)) = toyos_blackbox::recover(page) else {
@@ -1053,7 +1071,7 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
     let deadline = std::time::Instant::now() + within;
     let mut last = None;
     loop {
-        let page = qemu.guest_page(PHYS)?;
+        let page = qemu.guest_memory(PHYS, toyos_blackbox::BYTES)?;
         let page: &[u8; toyos_blackbox::BYTES] = page
             .as_slice()
             .try_into()

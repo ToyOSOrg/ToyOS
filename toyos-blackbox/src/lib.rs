@@ -41,8 +41,20 @@
 /// a panic before `mm::init` still reaches it through the boot map.
 pub const PHYS: u64 = 0x0800_0000;
 
-/// One page, which is what `AllocatePages` deals in and all a report needs.
-pub const BYTES: usize = 4096;
+/// Pages the box is, and the width of one.
+///
+/// **Four, because one is not a report.** A kernel that reaches PCI enumeration
+/// before it dies has thousands of records behind it, and a single page held
+/// 4,072 bytes of their tail — the crash's own message was already off the top
+/// of it. Four leaves room for the message, the registers, and a tail long
+/// enough to say what the machine was doing.
+pub const PAGES: usize = 4;
+pub const PAGE_BYTES: usize = 4096;
+
+/// The box, which is what every reader and writer of it deals in. Derived from
+/// [`PAGES`] and shared by all three binaries, so the size is on no wire and
+/// nobody can be handed a different one from the one they allocate.
+pub const BYTES: usize = PAGES * PAGE_BYTES;
 
 /// The parameter the loader appends to what it read off the ESP, with the
 /// page's address after it. The kernel claims the token (`kernel/src/params.rs`)
@@ -131,19 +143,113 @@ impl State {
 /// that could panic would take the machine down inside the report about why it
 /// went down.
 pub fn seal(page: &mut [u8; BYTES], state: State, stamp: u64, text: &[u8]) -> usize {
-    let from = text.len().saturating_sub(TEXT_BYTES);
-    let kept = text.get(from..).unwrap_or(&[]);
-    if let Some(slot) = page.get_mut(HEADER..HEADER.saturating_add(kept.len())) {
-        slot.copy_from_slice(kept);
-    }
+    let mut report = Report::new(page);
+    report.tail(text, RECORD_OPENS_WITH);
+    report.seal(state, stamp)
+}
+
+/// What the first line of one of this kernel's log records begins with, and so
+/// where a tail is cut. Declared beside the page because the kernel that cuts
+/// one and the loader that prints it read the same shape.
+pub const RECORD_OPENS_WITH: &[u8] = b"[";
+
+/// Close the envelope over `len` bytes already in the page's text area.
+fn seal_len(page: &mut [u8; BYTES], state: State, stamp: u64, len: usize) {
+    let text: [u8; 0] = [];
+    let kept = page.get(HEADER..HEADER.saturating_add(len)).unwrap_or(&text);
+    let sum = checksum(state, stamp, kept);
     put(page, 0, MAGIC);
     put(page, 4, state.code());
-    put(page, 8, kept.len() as u32);
+    put(page, 8, len as u32);
     put64(page, 16, stamp);
     // Written last, so a machine that stopped mid-copy leaves a header the
     // checksum then refuses, rather than a report with a hole in it.
-    put(page, 12, checksum(state, stamp, kept));
-    kept.len()
+    put(page, 12, sum);
+}
+
+/// A report being composed straight into the page.
+///
+/// **The head goes in first and the tail fills what is left**, because a report
+/// cut to its tail alone is a report with the crash missing: the panel's newest
+/// records are the ones after the panic, not the panic. Written into the page
+/// rather than into a buffer that is then copied, because the one caller is a
+/// panic path with no allocator and a stack it is already deep in.
+pub struct Report<'a> {
+    page: &'a mut [u8; BYTES],
+    at: usize,
+}
+
+impl<'a> Report<'a> {
+    pub fn new(page: &'a mut [u8; BYTES]) -> Self {
+        Self { page, at: 0 }
+    }
+
+    /// Append, dropping whatever does not fit. Nothing here indexes or unwraps:
+    /// the caller may not panic.
+    pub fn write(&mut self, bytes: &[u8]) {
+        let room = TEXT_BYTES.saturating_sub(self.at);
+        let take = bytes.get(..room.min(bytes.len())).unwrap_or(&[]);
+        let from = HEADER.saturating_add(self.at);
+        if let Some(slot) = self.page.get_mut(from..from.saturating_add(take.len())) {
+            slot.copy_from_slice(take);
+            self.at += take.len();
+        }
+    }
+
+    /// Fill what is left with the tail of `records`, **cut at a record
+    /// boundary**: a report that begins part-way into one begins with half a
+    /// word, or with the second line of something whose first line is gone, and
+    /// a reader cannot tell which.
+    ///
+    /// `opens_a_record` is what a record's first line begins with — the caller's
+    /// knowledge, not this crate's, so nothing here holds a second opinion about
+    /// the log's shape. A record that renders as several lines is entered at its
+    /// first, because that is the only line that carries what it is.
+    pub fn tail(&mut self, records: &[u8], opens_a_record: &[u8]) {
+        let room = TEXT_BYTES.saturating_sub(self.at);
+        if records.len() <= room {
+            return self.write(records);
+        }
+        let mut at = records.len() - room;
+        // Forward to the first record that begins at or after the cut.
+        loop {
+            let Some(rest) = records.get(at..) else { return };
+            if rest.starts_with(opens_a_record)
+                && (at == 0 || records.get(at - 1) == Some(&b'\n'))
+            {
+                return self.write(rest);
+            }
+            match rest.iter().position(|byte| *byte == b'\n') {
+                Some(next) => at += next + 1,
+                // No boundary left in the window: what is there is not records,
+                // and the head is what this report is for.
+                None => return,
+            }
+        }
+    }
+
+    /// Bytes of text written so far.
+    pub fn len(&self) -> usize {
+        self.at
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.at == 0
+    }
+
+    /// Close the envelope over what was written.
+    pub fn seal(self, state: State, stamp: u64) -> usize {
+        let at = self.at;
+        seal_len(self.page, state, stamp, at);
+        at
+    }
+}
+
+impl core::fmt::Write for Report<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.write(s.as_bytes());
+        Ok(())
+    }
 }
 
 /// The stamp a page carries, read without checking anything.
@@ -443,19 +549,84 @@ mod tests {
         assert_eq!(recover(&page), None);
     }
 
-    /// A report longer than the page keeps its tail, because the tail is the
-    /// crash and the head is how the boot went.
+    /// Records longer than the box keep their tail, **cut at a record
+    /// boundary**: a report that begins mid-line begins with half a word, and a
+    /// reader cannot tell which half. Run 14's stick began `| :1f.0 [0601]`.
     #[test]
-    fn an_over_long_report_keeps_its_tail() {
-        let mut text = vec![b'.'; TEXT_BYTES + 100];
-        text.extend_from_slice(b"PANIC: the last line");
+    fn an_over_long_run_of_records_is_cut_at_a_boundary() {
+        let mut records = std::string::String::new();
+        let mut n = 0usize;
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str(&format!("[0.{n:04} cpu0] a record of some width or other\n"));
+            n += 1;
+        }
+        records.push_str("[9.9999 cpu0] the last one\n");
         let mut page = blank();
-        assert_eq!(seal(&mut page, State::Panic, STAMP, &text), TEXT_BYTES);
-        let (state, _, back) = recover(&page).expect("a truncated report is still sealed");
-        assert_eq!(state, State::Panic);
-        assert_eq!(back.len(), TEXT_BYTES);
-        assert!(back.ends_with(b"PANIC: the last line"));
+        seal(&mut page, State::Panic, STAMP, records.as_bytes());
+        let (_, _, back) = recover(&page).expect("a cut report is still sealed");
+        let back = std::str::from_utf8(back).expect("records are text");
+        assert!(back.len() <= TEXT_BYTES);
+        assert!(back.ends_with("[9.9999 cpu0] the last one\n"));
+        // The first line kept is a whole one, which is the assertion.
+        assert!(back.starts_with('['), "the report begins mid-record: {:?}", &back[..40]);
+        // Every kept line here is a whole record, so the cut is a record's edge.
+        assert!(back.lines().all(|l| l.starts_with('[')));
+        // Every kept line here is a whole record, so the cut is a record's edge.
+        assert!(back.lines().all(|l| l.starts_with('[')));
+        assert!(records.ends_with(back));
     }
+
+    /// A head goes in before the tail and survives it: the crash's own message
+    /// is what a report is for, and the records after it are context.
+    #[test]
+    fn the_head_is_kept_and_the_tail_fills_what_is_left() {
+        const HEAD: &str = "PANIC: src/main.rs:1:1: this machine is on fire\n";
+        let mut records = std::string::String::new();
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str("[0.0000 cpu0] a record\n");
+        }
+        let mut page = blank();
+        let mut report = Report::new(&mut page);
+        report.write(HEAD.as_bytes());
+        report.tail(records.as_bytes(), RECORD_OPENS_WITH);
+        let len = report.seal(State::Panic, STAMP);
+        assert!(len <= TEXT_BYTES);
+        let (_, _, back) = recover(&page).expect("a composed report is sealed");
+        let back = std::str::from_utf8(back).expect("records are text");
+        assert!(back.starts_with(HEAD), "the head is not first: {:?}", &back[..60]);
+        assert!(back.ends_with("[0.0000 cpu0] a record\n"));
+    }
+
+    /// Records with no boundary in the window at all are not a run of records,
+    /// and the head is what the report is for: nothing of them is kept rather
+    /// than half of one line.
+    #[test]
+    fn a_window_with_no_boundary_keeps_none_of_it() {
+        let records = vec![b'.'; TEXT_BYTES + 100];
+        let mut page = blank();
+        assert_eq!(seal(&mut page, State::Panic, STAMP, &records), 0);
+        assert_eq!(recover(&page), Some((State::Panic, STAMP, &[][..])));
+    }
+
+    /// **A record that renders as several lines is entered at its first.** The
+    /// panel's panic record is exactly that shape, and a cut at the nearest
+    /// newline lands on its continuation — a sentence whose own first line is
+    /// gone, which reads as coming from nowhere.
+    #[test]
+    fn a_multi_line_record_is_never_entered_part_way() {
+        let mut records = std::string::String::new();
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str("[0.0000 cpu0] EARLY PANIC: panicked at src/main.rs:1:1:\n");
+            records.push_str("the message, on a line of its own\n");
+        }
+        let mut page = blank();
+        seal(&mut page, State::Panic, STAMP, records.as_bytes());
+        let (_, _, back) = recover(&page).expect("a cut report is still sealed");
+        let back = std::str::from_utf8(back).expect("records are text");
+        assert!(back.starts_with("[0.0000 cpu0] EARLY PANIC"), "{:?}", &back[..40]);
+        assert!(records.ends_with(back));
+    }
+
 
     /// ARMED carries no text at all, and that is not the same as no page.
     #[test]

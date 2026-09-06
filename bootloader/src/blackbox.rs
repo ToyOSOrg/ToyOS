@@ -43,7 +43,7 @@ pub fn claim(system_table: &SystemTable<Boot>) -> (Option<Page>, Option<String>)
     match system_table.boot_services().allocate_pages(
         AllocateType::Address(PHYS),
         MemoryType::LOADER_DATA,
-        1,
+        toyos_blackbox::PAGES,
     ) {
         Ok(at) => {
             // `AllocateType::Address` allocates that address or fails; firmware
@@ -54,8 +54,9 @@ pub fn claim(system_table: &SystemTable<Boot>) -> (Option<Page>, Option<String>)
         Err(e) => (
             None,
             Some(alloc::format!(
-                "{HEAD} firmware would not give {PHYS:#x} ({e}), so this boot leaves nothing \
-                 behind and the next one has nothing to read"
+                "{HEAD} firmware would not give {PHYS:#x}+{:#x} ({e}), so this boot leaves \
+                 nothing behind and the next one has nothing to read",
+                BYTES
             )),
         ),
     }
