@@ -858,20 +858,16 @@ pub fn declared_params(root: &Path) -> Vec<String> {
     let path = root.join("kernel/src/params.rs");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
-    let body = text
-        .split_once("pub const PARAMS: &[&str] = &[")
-        .expect("kernel/src/params.rs has no `PARAMS` list")
-        .1;
-    let body = body.split_once("];").expect("the `PARAMS` list does not end").0;
-    let names: Vec<String> = body
-        .split(',')
-        .filter_map(|token| {
-            let token = token.trim();
-            token.strip_prefix('"')?.strip_suffix('"').map(str::to_string)
-        })
-        .collect();
+    let names = params_of(&text);
     assert!(!names.is_empty(), "{} declares no boot parameters", path.display());
     names
+}
+
+/// Every string literal in `PARAMS`: anchored on the name and closed on `];`, so a reflow still reads and an unfound declaration is empty rather than guessed.
+fn params_of(text: &str) -> Vec<String> {
+    let Some((_, body)) = text.split_once("pub const PARAMS") else { return Vec::new() };
+    let Some((body, _)) = body.split_once("];") else { return Vec::new() };
+    body.split('"').skip(1).step_by(2).map(str::to_string).collect()
 }
 
 #[derive(Deserialize)]
@@ -1769,6 +1765,32 @@ mod tests {
     /// collapsing seven per-actuator features into `test-actuators` got out of.
     /// The two lists are read from the two files that declare them, so neither
     /// can be satisfied by editing this test.
+    #[test]
+    fn params_read_the_kernels_own_list() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let params = declared_params(root);
+        assert!(params.contains(&"watchdog".to_string()), "{params:?}");
+        assert!(
+            params.iter().all(|p| p.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')),
+            "a parameter name is ASCII `[a-z-]`, and these are not: {params:?}"
+        );
+        let actuators = declared_actuators(root);
+        let both: Vec<&String> = params.iter().filter(|p| actuators.contains(p)).collect();
+        assert!(both.is_empty(), "declared as both a parameter and an actuator: {both:?}");
+
+        assert_eq!(
+            params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[\n    (\"a\", &A),\n];"),
+            ["a"],
+            "the scan reads the declaration this kernel has",
+        );
+        assert_eq!(
+            params_of("pub const PARAMS:\n    &[(&str, &AtomicBool)] =\n    &[(\"a\", &A), (\"b\", &B)];"),
+            ["a", "b"],
+            "and the same declaration reflowed",
+        );
+        assert!(params_of("static PARAMS: u8 = 0;").is_empty(), "a declaration it cannot read");
+    }
+
     #[test]
     fn no_actuator_is_also_a_cargo_feature() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));

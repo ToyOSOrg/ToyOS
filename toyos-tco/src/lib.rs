@@ -15,8 +15,8 @@ pub const TCO2_STS: u16 = 0x06;
 pub const TCO1_CNT: u16 = 0x08;
 pub const TCO_TMR: u16 = 0x12;
 
-/// `TCO1_CNT` bit 11 halts the timer; `TCO2_STS` bits 1 and 2 are how a chipset
-/// that reset the machine last time says it was this timer that did it.
+/// `TCO2_STS`'s two bits are how a chipset that reset the machine last time
+/// says it was this timer that did it.
 pub const TCO_TMR_HLT: u16 = 1 << 11;
 pub const TCO_SECOND_TO_STS: u16 = 1 << 1;
 pub const TCO_BOOT_STS: u16 = 1 << 2;
@@ -62,9 +62,7 @@ pub struct Chipset {
     pub enable: Enable,
 }
 
-/// Every chipset this kernel will write a TCO register on. **Only the q35 row
-/// is judged anywhere**: QEMU models no SMBus TCO base, so the second row is
-/// reachable on its own machine and nowhere in this harness.
+/// Every chipset this kernel will write a TCO register on.
 pub const CHIPSETS: &[Chipset] = &[
     // q35's LPC bridge: the TCO block sits inside the ACPI PM I/O window.
     Chipset {

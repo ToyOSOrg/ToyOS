@@ -37,7 +37,6 @@ static PORT: AtomicU16 = AtomicU16::new(0);
 static NEXT_FEED: AtomicU64 = AtomicU64::new(u64::MAX);
 static FEED_EVERY_NS: AtomicU64 = AtomicU64::new(0);
 
-/// Arm the watchdog if the boot parameter named it and this machine has a row.
 pub fn init(devices: &[PciDevice]) {
     if !crate::params::watchdog() {
         return;
@@ -71,10 +70,15 @@ pub fn init(devices: &[PciDevice]) {
 }
 
 fn arm(row: &Chipset, port: u16, timer: u16) {
-    // Before the arm below, which is what would destroy it.
     let stale = crate::arch::cpu::inw(port + TCO2_STS);
     if stale & (TCO_SECOND_TO_STS | TCO_BOOT_STS) != 0 {
         log!("watchdog: the last boot ended in a TCO reset (TCO2_STS={stale:#06x})");
+        // Cleared, or the latches are sticky across resets and every later boot
+        // reports this one. They are write-one-to-clear on the PCH and masked
+        // out of QEMU's own store (`ich9_tco.c:167`), so this word clears them
+        // either way — and in QEMU zeroes the rest of the register with them.
+        // SAFETY: as the arm below.
+        unsafe { crate::arch::cpu::outw(port + TCO2_STS, TCO_SECOND_TO_STS | TCO_BOOT_STS) };
     }
 
     // SAFETY: `port` is `toyos_tco`'s answer for the row this machine's own PCI ids matched, and every offset is inside that row's block.
@@ -115,7 +119,6 @@ pub fn feed(now: u64) {
     if port == 0 {
         return;
     }
-    // The wedge this exists to survive, staged once boot is behind the machine.
     if crate::actuator::watchdog_starve() && now >= STARVE_AFTER.nanos() {
         return;
     }
@@ -128,8 +131,6 @@ pub fn feed(now: u64) {
     unsafe { crate::arch::cpu::outw(port + TCO_RLD, 1) };
 }
 
-/// Halt the timer: the sync and the log's durable wait that follow can each
-/// outlast a feed cadence, and no pass runs to feed again.
 pub fn disarm() {
     let port = PORT.swap(0, Ordering::Relaxed);
     if port == 0 {
