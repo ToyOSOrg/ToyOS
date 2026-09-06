@@ -16,9 +16,7 @@ pub const TCO1_CNT: u16 = 0x08;
 pub const TCO_TMR: u16 = 0x12;
 
 /// `TCO2_STS`'s two bits are how a chipset that reset the machine last time
-/// says it was this timer that did it. **Whether writing them back clears them
-/// is verified on QEMU only**, whose store masks both out; a PCH that keeps
-/// them reports one reset on every boot after it.
+/// says it was this timer that did it.
 pub const TCO_TMR_HLT: u16 = 1 << 11;
 pub const TCO_SECOND_TO_STS: u16 = 1 << 1;
 pub const TCO_BOOT_STS: u16 = 1 << 2;
