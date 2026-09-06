@@ -30,15 +30,22 @@ const GOING_DOWN_SECS: u64 = 120;
 /// answering again: the firmware's pass and Ubuntu's own boot.
 const RETURN_ALLOWANCE_SECS: u64 = 300;
 
+/// Every watchdog a metal boot runs under, by the constant that arms it. The
+/// bootloader arms this one before it jumps and the kernel keeps feeding the
+/// same timer, so today one constant is both.
+const WATCHDOG_BOUNDS_MS: &[u64] = &[toyos_tco::BOUND_MS];
+
 /// How long the machine has to answer `ssh` again after `reboot`.
 ///
-/// **Derived, because a literal is wrong the day either half moves.** The
-/// bootloader arms `toyos_tco`'s bound and the kernel keeps feeding that same
-/// timer, so a wedge anywhere after the loader's arm is reset inside it; then
-/// the machine spends [`RETURN_ALLOWANCE_SECS`] coming back. A wedge *before*
-/// that arm is under no bound at all, and no wait here reaches it.
+/// **Derived, because a literal is wrong the day any of it moves.** A boot is
+/// only certainly over once the longest of [`WATCHDOG_BOUNDS_MS`] could have
+/// fired; the machine then spends [`RETURN_ALLOWANCE_SECS`] coming back. A
+/// wedge *before* the loader's arm is under no bound at all, and no wait here
+/// reaches it.
 fn return_secs() -> u64 {
-    toyos_tco::BOUND_MS.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
+    let longest =
+        WATCHDOG_BOUNDS_MS.iter().copied().max().expect("a metal boot runs under a watchdog");
+    longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
 }
 
 const POLL_SECS: u64 = 5;
@@ -1315,13 +1322,17 @@ mod tests {
         assert_eq!(entries_labelled(listing, "Setup"), [("0010".to_string(), String::new())]);
     }
 
-    /// A wait shorter than the arm it is waiting out could never see the reset,
-    /// and a wait written down rather than derived stops moving when the arm
-    /// does.
+    /// A wait shorter than a watchdog it is waiting out could never see that
+    /// reset, and a wait written down rather than derived stops moving when the
+    /// bounds do.
     #[test]
-    fn the_wait_is_derived_from_the_watchdog_the_loader_arms() {
-        assert_eq!(return_secs(), toyos_tco::BOUND_MS.div_ceil(1_000) + RETURN_ALLOWANCE_SECS);
-        assert!(return_secs() * 1_000 > toyos_tco::BOUND_MS);
+    fn the_wait_outlasts_every_watchdog_a_boot_runs_under() {
+        let longest = WATCHDOG_BOUNDS_MS.iter().copied().max().expect("one watchdog");
+        assert_eq!(return_secs(), longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS);
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
+        for bound in WATCHDOG_BOUNDS_MS {
+            assert!(return_secs() * 1_000 > *bound, "{bound} ms outlasts the wait");
+        }
     }
 
     #[test]
