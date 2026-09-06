@@ -1,0 +1,13 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-bootmap and
+# toyos-blackbox. Four binaries name these three bands -- the loader either side
+# of `ExitBootServices`, the kernel's entry stub, and the harness that reads the
+# panel back -- and none of them could be asked what the others meant by a row.
+
+[package]
+name = "toyos-bootband"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]

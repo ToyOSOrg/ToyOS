@@ -429,6 +429,47 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     }
 }
 
+/// What painting a band takes, kept apart from [`GopInfo`] because it is read
+/// after boot services are gone and `GopInfo` is moved into `KernelArgs`.
+#[derive(Clone, Copy)]
+struct Scanout {
+    at: u64,
+    bytes: u64,
+    stride: u32,
+    width: u32,
+    format: u32,
+}
+
+/// Paint one [`toyos_bootband::Band`] across the top of the scanout.
+///
+/// **Nothing in here is a service, an allocation or a formatter**: the two
+/// callers straddle `ExitBootServices`, and after it a `println!` dereferences a
+/// system table uefi-services has already nulled. Physical memory is still
+/// identity-mapped by firmware's own tables at both call sites — the loader
+/// switches `cr3` later — so the address the GOP published is the address to write.
+fn paint_band(scanout: Option<Scanout>, band: toyos_bootband::Band) {
+    let Some(fb) = scanout else { return };
+    if fb.at == 0 || fb.stride < fb.width || fb.width == 0 {
+        return;
+    }
+    let pixel = band.pixel(fb.format);
+    for row in band.first_row()..band.end_row() {
+        for x in 0..fb.width as u64 {
+            let at = (row as u64 * fb.stride as u64 + x) * 4;
+            // Every write is inside the byte count the GOP published, checked
+            // here and not argued: a band that does not fit is not painted.
+            if at.saturating_add(4) > fb.bytes {
+                return;
+            }
+            // SAFETY: `fb.at` is the framebuffer base `GraphicsOutput` published
+            // for this machine, identity-mapped at both call sites, and the
+            // offset is inside the size it published alongside it. A volatile
+            // store to a scanout has no safe spelling.
+            unsafe { core::ptr::write_volatile((fb.at + at) as *mut u32, pixel) };
+        }
+    }
+}
+
 struct GopInfo {
     framebuffer: u64,
     framebuffer_size: u64,
@@ -597,6 +638,16 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         ),
     }
 
+    // Everything the bands need, read off `gop` before it is moved into
+    // `KernelArgs`: after the exit there is no protocol left to ask.
+    let scanout = gop.as_ref().map(|g| Scanout {
+        at: g.framebuffer,
+        bytes: g.framebuffer_size,
+        stride: g.stride,
+        width: g.width,
+        format: g.pixel_format,
+    });
+
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.
     loaderlog::close();
@@ -604,7 +655,15 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let memory_map_entry_count = mms.map_size / mms.entry_size + MAP_MARGIN;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
 
+    // **The first band, and it is painted before the call rather than after a
+    // failure of it.** `SystemTable::exit_boot_services` does not hand an error
+    // back — it resets the machine — so the state this marks is the one that
+    // cannot be reported any other way: the call that never returned at all.
+    paint_band(scanout, toyos_bootband::EXITING);
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
+    // The second: boot services are gone, and from here to the kernel's own
+    // band this is the only thing that can be said.
+    paint_band(scanout, toyos_bootband::EXITED);
 
     // **Nothing below this line may allocate or panic.** Boot services are gone,
     // so the allocator answers null and `println!` dereferences a system table

@@ -40,6 +40,7 @@ dependencies = [
  "toyos-abi",
  "toyos-acpi",
  "toyos-blackbox",
+ "toyos-bootband",
  "toyos-dma",
  "toyos-elf",
  "toyos-fat32",
@@ -80,6 +81,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-blackbox"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-bootband"
 version = "0.1.0"
 
 [[package]]

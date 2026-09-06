@@ -1104,6 +1104,10 @@ name = "toyos-blackbox"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-bootband"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-bootmap"
 version = "0.1.0"
 
@@ -1125,6 +1129,7 @@ dependencies = [
  "toml",
  "toyos-abi",
  "toyos-blackbox",
+ "toyos-bootband",
  "toyos-cc",
  "toyos-fat32",
  "toyos-fat32-check",

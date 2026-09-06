@@ -423,6 +423,11 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // marker. Every verdict is a count of rows against a count of lines off the
     // same boot's console; no clock is in either.
     ("screen_loader_lines", Sched::Parallel, Tier::Fast),
+    // The three bands the window between `ExitBootServices` and the kernel's
+    // first record leaves on the panel, read back by pixel row after the kernel
+    // has painted over everything else. Every verdict is a pixel or a decoded
+    // row; no clock is in any of it.
+    ("screen_boot_bands", Sched::Parallel, Tier::Fast),
     ("screen_gop_firmware_mode", Sched::Parallel, Tier::Nightly),
     // `thread::sleep(5 s)` is the measurement, not a ceiling: the assertion is
     // literally that the log is still on the panel five seconds after the boot
@@ -482,6 +487,12 @@ const CONSOLE_PROMPT: &str = "/home/root>";
 /// read them. This one is written hundreds of lines into a boot, which is what
 /// makes its *absence* two different things — see `screen_console_shell`.
 const CONSOLE_SEED_WITNESS: &str = "i8042:";
+
+/// Rows of its own the kernel must have on the panel before `screen_boot_bands`
+/// reads the bands above them: a repaint is what those bands have to survive,
+/// and a panel nothing ever painted proves nothing about surviving one. A boot
+/// of that shape fills the grid many times over, so this is a floor and not a count.
+const KERNEL_ROWS_ON_THE_PANEL: usize = 8;
 
 /// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
 /// the brightest channel and a colour a glyph could contain would let a
@@ -1296,7 +1307,7 @@ const FILL_BOOT: [u8; 3] = [0x00, 0x00, 0x00];
 /// mode its firmware sets *is* this panel — the test's screen and the laptop's
 /// share one geometry. Every geometry claim `screen_diag_boot` makes is made
 /// against these two numbers and not against the screen it is reading.
-const T14_ROWS: usize = 1080 / 16;
+const T14_ROWS: usize = (1080 - toyos_bootband::ROWS) / 16;
 const T14_COLS: usize = 1920 / 8;
 
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
@@ -3412,6 +3423,70 @@ fn run_screen_test(
             eprintln!(
                 "  [screen] the panel grew {grew} row(s) across the GOP query, {before} to \
                  {after}, for {printed} line(s) printed"
+            );
+            Ok(())
+        }
+        "screen_boot_bands" => {
+            // The loader paints two bands across `ExitBootServices` and the
+            // kernel's entry stub paints the third, and the panel's glyph grid
+            // starts below all three so the first repaint cannot wipe them.
+            // A healthy boot therefore carries all three *and* the kernel's own
+            // rows, which is what makes this a reading of a live panel rather
+            // than of one nothing ever drew on.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() },
+            );
+            serial::Serial::boot(&qemu).must_be_clean()?;
+            let dump = qemu.screendump();
+            let text = dump.text();
+            print_screen(name, &text);
+
+            // Demanded first: bands on a panel the kernel never painted would
+            // say nothing about whether a repaint spares them. Counted rather
+            // than named, because which record is on the newest screenful is
+            // the boot's business and not this test's.
+            let bands = toyos_bootband::ROWS / 16;
+            let painted =
+                dump.rows().iter().skip(bands).filter(|row| !row.trim().is_empty()).count();
+            if painted < KERNEL_ROWS_ON_THE_PANEL {
+                return Err(format!(
+                    "the panel carries {painted} row(s) below the bands, under the \
+                     {KERNEL_ROWS_ON_THE_PANEL} a boot of this shape fills it with: nothing here \
+                     has repainted, so the bands are not evidence\ndecoded screen:\n{text}"
+                ));
+            }
+
+            for band in toyos_bootband::BANDS {
+                let y = band.first_row() + toyos_bootband::BAND_ROWS / 2;
+                // Three columns, because a band is the whole width and a paint
+                // that stopped at the stride would still satisfy one of them.
+                for x in [0, dump.width / 2, dump.width - 1] {
+                    let seen = dump.pixels[y * dump.width + x];
+                    if seen != band.rgb() {
+                        return Err(format!(
+                            "row {y} column {x} is {seen:?}, and {band:?} paints {:?} there: the \
+                             half of the boot that band stands for did not run, or the panel \
+                             painted over it\ndecoded screen:\n{text}",
+                            band.rgb()
+                        ));
+                    }
+                }
+            }
+
+            // The grid starts under the bands, so nothing the kernel draws is in them.
+            if dump.rows().iter().take(bands).any(|row| !row.trim().is_empty()) {
+                return Err(format!(
+                    "the kernel drew a glyph inside the band rows, so its grid does not start \
+                     below them\ndecoded screen:\n{text}"
+                ));
+            }
+
+            eprintln!(
+                "  [screen] all {} bands are on the panel under a kernel that repainted it",
+                toyos_bootband::BANDS.len()
             );
             Ok(())
         }

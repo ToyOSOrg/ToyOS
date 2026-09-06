@@ -20,6 +20,7 @@ members = [
     "toyos-abi",
     "toyos-acpi",
     "toyos-blackbox",
+    "toyos-bootband",
     "toyos-bootmap",
     "toyos-cc",
     "toyos-desktop",
@@ -116,6 +117,9 @@ toyos-tco = { path = "toyos-tco" }
 # The black-box page's address and format: the harness names the same address
 # the loader claims and the kernel writes, rather than a fourth copy of it.
 toyos-blackbox = { path = "toyos-blackbox" }
+# The three bands a boot paints on the panel before it can say anything: the
+# harness reads them back by pixel row against the same declaration that paints them.
+toyos-bootband = { path = "toyos-bootband" }
 # `classify`, so the host reading a log volume and `logd` writing it cannot
 # disagree about which files on it are `logd`'s.
 toyos-wallclock = { path = "toyos-wallclock" }

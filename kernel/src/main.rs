@@ -200,6 +200,46 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[no_mangle]
 pub unsafe extern "sysv64" fn _start(_kernel_args: &KernelArgs) -> ! {
     core::arch::naked_asm!(
+        // **The kernel's band, and it is the first thing this kernel does.**
+        // Before the stack switch below, because the stack switch is itself a
+        // candidate: the `call` after it is this kernel's first memory write,
+        // and a stack that is not mapped faults into a handler firmware left
+        // behind, which dead-loops with nothing on the panel. A band painted
+        // here says the jump landed whatever happens next. Registers only —
+        // there is no stack yet — and `rdi` is preserved for `kernel_main`.
+        //
+        // The offsets are `KernelArgs`' own, which `toyos-abi`'s layout gate
+        // holds: `gop_framebuffer` at 72, `gop_width` at 88, `gop_stride` at 96
+        // and `gop_pixel_format` at 100.
+        "mov rsi, [rdi + 72]",              // the scanout, physical and identity-mapped here
+        "test rsi, rsi",
+        "jz 30f",                           // a machine with no panel has no band
+        "mov r11d, [rdi + 88]",             // width in pixels
+        "test r11d, r11d",
+        "jz 30f",
+        "mov eax, {band_rgb}",
+        "cmp dword ptr [rdi + 100], 0",     // gop_pixel_format: 0 is RGB, 1 is BGR
+        "je 10f",
+        "mov eax, {band_bgr}",
+        "10:",
+        "mov ecx, [rdi + 96]",              // stride in pixels
+        "mov r8d, ecx",
+        "imul r8d, r8d, {first_row}",
+        "shl r8, 2",
+        "add rsi, r8",                      // first byte of the band's first row
+        "mov r9d, {band_rows}",
+        "20:",                              // one row
+        "mov r10, rsi",
+        "mov edx, r11d",
+        "25:",                              // one pixel
+        "mov [r10], eax",
+        "add r10, 4",
+        "dec edx",
+        "jnz 25b",
+        "lea rsi, [rsi + rcx*4]",
+        "dec r9d",
+        "jnz 20b",
+        "30:",
         "mov rax, [rdi + 16]",  // kernel_memory_addr
         "add rax, [rdi + 32]",  // + kernel_stack_addr
         "add rax, [rdi + 40]",  // + kernel_stack_size
@@ -207,6 +247,10 @@ pub unsafe extern "sysv64" fn _start(_kernel_args: &KernelArgs) -> ! {
         "add rax, rbx",
         "mov rsp, rax",
         "call {kernel_main}",
+        band_rgb = const toyos_bootband::KERNEL.pixel(0),
+        band_bgr = const toyos_bootband::KERNEL.pixel(1),
+        first_row = const toyos_bootband::KERNEL.first_row() as u32,
+        band_rows = const toyos_bootband::BAND_ROWS as u32,
         phys_offset = const PHYS_OFFSET,
         kernel_main = sym kernel_main,
     );

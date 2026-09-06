@@ -33,6 +33,15 @@ static FONT: &[u8; 95 * 16] = include_bytes!("font8x16.bin");
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 16;
 
+/// The pixel row this console's grid starts on.
+///
+/// The rows above it are `toyos-bootband`'s, and nothing here paints into them:
+/// they carry how the machine got from `ExitBootServices` to this kernel, which
+/// is the one account of that window there is, and a `fill_screen` over them
+/// would erase it on the first record. A whole number of text rows, so the grid
+/// below still lands where every decoder of this panel counts it.
+const PANEL_TOP: usize = toyos_bootband::ROWS;
+
 /// Grid caps, chosen to bound the wrap pass's one stack array.
 const MAX_COLS: usize = 320;
 const MAX_ROWS: usize = 96;
@@ -801,7 +810,7 @@ enum Fill {
 /// The text grid a framebuffer offers, or `None` when it offers none.
 fn geometry(fb: &Fb) -> Option<(usize, usize)> {
     let cols = (fb.width as usize / GLYPH_W).min(MAX_COLS);
-    let rows = (fb.height as usize / GLYPH_H).min(MAX_ROWS);
+    let rows = ((fb.height as usize).saturating_sub(PANEL_TOP) / GLYPH_H).min(MAX_ROWS);
     (cols != 0 && rows != 0).then_some((cols, rows))
 }
 
@@ -951,7 +960,7 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch) {
             if watch == Watch::Yes {
                 if let Some((bx, by)) = glyph_ink(byte) {
                     if inked.is_multiple_of(PROBE_STRIDE) && probes < PROBES - GRID_PROBES {
-                        let (x, y) = (c * GLYPH_W + bx, r * GLYPH_H + by);
+                        let (x, y) = (c * GLYPH_W + bx, PANEL_TOP + r * GLYPH_H + by);
                         PROBE_AT[probes].store(((y as u32) << 16) | x as u32, Ordering::Relaxed);
                         probes += 1;
                     }
@@ -1125,7 +1134,7 @@ pub fn graffiti() {
 /// multi-megapixel panel.
 fn fill_screen(fb: &Fb, color: u32) {
     let width = fb.width as usize;
-    for y in 0..fb.height as usize {
+    for y in PANEL_TOP..fb.height as usize {
         let Some(row) = row_base(fb, y, width) else { return };
         for x in 0..width {
             // SAFETY: `row_base` returns a pointer, not a slice, so this
@@ -1163,7 +1172,7 @@ fn glyph_ink(byte: u8) -> Option<(usize, usize)> {
 
 fn draw_glyph(fb: &Fb, cell_x: usize, cell_y: usize, byte: u8, color: u32) {
     let ox = cell_x * GLYPH_W;
-    let oy = cell_y * GLYPH_H;
+    let oy = PANEL_TOP + cell_y * GLYPH_H;
     for (row, &bits) in glyph(byte).iter().enumerate() {
         if bits == 0 {
             continue;
