@@ -1,0 +1,20 @@
+# The job list that never finishes, so nothing but the runner's own deadline
+# ends this boot.
+#
+# `--bound-ms` is the one argument that is not a job. The T14 leaves the bound at
+# `toyos_tco::JOB_BOUND_MS`; this shortens it for the suite's ceiling.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.test-runner]
+args = ["--bound-ms=3000", "spin"]
+syscap = ["dup", "power"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"
+"bin/spin" = "/system/bin/toybox"

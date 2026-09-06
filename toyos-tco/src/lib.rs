@@ -60,6 +60,11 @@ pub const BOUND_MS: u64 = 9_600;
 /// this project's bound for every watchdog.
 pub const FIRMWARE_BOUND_MS: u64 = 60_000;
 
+/// The bound the test runner gives its whole job list, in milliseconds: the
+/// chipset's timer is fed from scheduler passes, so a kernel that is alive
+/// while a job never finishes is no wedge to it and nothing else ends the boot.
+pub const JOB_BOUND_MS: u64 = 60_000;
+
 /// [`BOUND_MS`]'s timer, which is neither a value this tree can fail to have
 /// nor one the hardware would ignore.
 pub const TIMER: u16 = match timer_for(BOUND_MS) {

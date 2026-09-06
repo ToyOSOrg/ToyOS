@@ -14,6 +14,13 @@ use std::fmt;
 /// in `kernel/src/arch/syscall/machine.rs`'s `quiesce`.
 pub const REBOOTING: &str = "Rebooting.";
 
+/// What `userland/test-runner` says when its job list runs past
+/// `toyos_tco::JOB_BOUND_MS`, with the job it was inside as the next word.
+/// **Console only**: a userland write reaches the serial backend and never a
+/// log record, so no stick carries it.
+pub const JOB_DEADLINE_SAID: &str =
+    "test-runner: the job list ran past its bound, and the job it was inside is";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
