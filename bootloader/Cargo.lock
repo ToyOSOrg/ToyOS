@@ -20,6 +20,7 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
  "toyos-acpi",
+ "toyos-bootmap",
  "toyos-elf",
  "toyos-tco",
  "uefi",
@@ -104,6 +105,10 @@ version = "0.3.0"
 
 [[package]]
 name = "toyos-acpi"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-bootmap"
 version = "0.1.0"
 
 [[package]]

@@ -11,6 +11,10 @@ toyos-abi = { path = "../toyos-abi" }
 # The ECAM window's address, and the TCO block the loader arms in it: the two
 # pure crates the kernel reads the same answers out of.
 toyos-acpi = { path = "../toyos-acpi" }
+# Where the transient page tables put memory and the scanout, decided apart
+# from the pointers that write it and host-tested against machines this one is
+# not.
+toyos-bootmap = { path = "../toyos-bootmap" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-tco = { path = "../toyos-tco" }
 uefi = { version = "0.26.0", default-features = false }

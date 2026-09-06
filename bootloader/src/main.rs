@@ -19,6 +19,7 @@ use uefi::{
     table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID},
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
 
 /// Every line this loader prints: the firmware's console, and the file on the
 /// stick once [`loaderlog::open`] has one.
@@ -280,9 +281,6 @@ const WATCHDOG_CODE: u64 = 0x0001_0000;
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
-/// How much physical memory the boot page tables cover, identity and high-half alike.
-const BOOT_MAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-
 /// `SHT_REL`, the relocation form whose addend lives in the destination word.
 ///
 /// Named here rather than taken from `toyos-elf`, which names only the section
@@ -488,96 +486,78 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     })
 }
 
-/// Build minimal boot page tables for kernel transition to high half.
-/// `pt_mem` is a pointer to PT_PAGES * 4096 bytes of zeroed memory.
-/// Returns the physical address of the PML4.
+/// Write `plan` into `pt_mem` and return the PML4's physical address.
 ///
-/// Maps first `size` bytes of physical memory at both identity (PML4[0]) and
-/// high-half (PML4[256] = PHYS_OFFSET). Uses 2MB large pages.
-unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
+/// # Safety
+/// `pt_mem` is [`toyos_bootmap::MAX_PAGES`] pages of zeroed memory, 4096-aligned.
+unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
     const PAGE_PRESENT: u64 = 1 << 0;
     const PAGE_WRITE: u64 = 1 << 1;
     const PAGE_SIZE_BIT: u64 = 1 << 7;
-    const PAGE_2M: u64 = 2 * 1024 * 1024;
-    const GB: u64 = 1 << 30;
 
     let mut next_page = 0usize;
-    let mut alloc_page = |pt_mem: *mut u8| -> *mut u64 {
-        let p = pt_mem.add(next_page * 4096) as *mut u64;
+    let mut alloc_page = || -> *mut u64 {
+        let page = pt_mem.add(next_page * 4096) as *mut u64;
         next_page += 1;
-        p
+        page
     };
 
-    let pml4 = alloc_page(pt_mem);
-    let identity_pdpt = alloc_page(pt_mem);
-    let high_pdpt = alloc_page(pt_mem);
-
-    let num_gb = size.div_ceil(GB) as usize;
-    for gi in 0..num_gb {
-        let pd = alloc_page(pt_mem);
-        for pdi in 0..512u64 {
-            let phys = gi as u64 * GB + pdi * PAGE_2M;
-            if phys < size {
-                *pd.add(pdi as usize) = phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT;
-            }
-        }
-        let pd_phys = pd as u64;
-        *identity_pdpt.add(gi) = pd_phys | PAGE_PRESENT | PAGE_WRITE;
-        *high_pdpt.add(gi) = pd_phys | PAGE_PRESENT | PAGE_WRITE;
+    let pml4 = alloc_page();
+    let identity_pdpt = alloc_page();
+    let high_pdpt = alloc_page();
+    let mut directories = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_DIRECTORIES];
+    for (slot, gib) in plan.directories().iter().enumerate() {
+        let pd = alloc_page();
+        directories[slot] = pd;
+        *identity_pdpt.add(*gib as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
+        *high_pdpt.add(*gib as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
     }
 
-    // PML4[0] = identity, PML4[256] = high-half (PHYS_OFFSET >> 39 = 256)
-    *pml4.add(0) = identity_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
-    *pml4.add(256) = high_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
+    for entry in plan.entries() {
+        *directories[entry.directory].add(entry.index) =
+            entry.phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT | entry.cache.bits();
+    }
+
+    *pml4.add(PML4_IDENTITY) = identity_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
+    *pml4.add(PML4_HIGH_HALF) = high_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
 
     pml4 as u64
-}
-
-/// Whether `[at, at + len)` is somewhere the kernel can read between the CR3
-/// switch and `mm::init`, when the boot map is the only mapping there is.
-///
-/// A line, not a refusal: the kernel goes on booting either way, and what it
-/// loses is the panel or a parameter rather than the boot.
-fn report_reach(what: &str, extent: Option<(u64, u64)>) {
-    // `None` is an empty extent — no framebuffer, or no boot parameter — whose
-    // pointer names nothing and must not be reported as reachable.
-    let Some((at, len)) = extent else {
-        println!("{what}: none");
-        return;
-    };
-    match at.checked_add(len) {
-        Some(end) if end <= BOOT_MAP_BYTES => {
-            println!("{what}: {at:#x}+{len:#x} is inside the {BOOT_MAP_BYTES:#x}-byte boot map")
-        }
-        _ => println!(
-            "{what}: {at:#x}+{len:#x} is outside the {BOOT_MAP_BYTES:#x}-byte boot map, so the \
-             kernel cannot reach it before mm::init"
-        ),
-    }
 }
 
 // Nine arguments because this is the handoff and they are what firmware leaves:
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
-    // Pre-allocate page table pages before exiting boot services.
-    // We need: 1 PML4 + 2 PDPTs + up to 8 PDs (for 8GB) = ~11 pages max.
-    // Allocate as a flat array and split into 512-entry pages.
-    const PT_PAGES: usize = 12;
-    let pt_layout = Layout::from_size_align(PT_PAGES * 4096, 4096).unwrap();
-    // SAFETY: `layout` has non-zero size (`PT_PAGES` is a fixed 12) and its
-    // 4096 alignment is what every page-table page below needs — the low 12
-    // bits of an entry are flags, not address bits.
+    // Pre-allocated before exiting boot services, and flat: `alloc_page` splits
+    // it into 512-entry pages.
+    let pt_layout = Layout::from_size_align(MAX_PAGES * 4096, 4096).unwrap();
+    // SAFETY: `layout` has non-zero size and its 4096 alignment is what every
+    // page-table page below needs — the low 12 bits of an entry are flags, not
+    // address bits.
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
     // Before the exit: `_print` unwraps a system table uefi-services nulls in its exit callback, so `println!` past it panics.
-    // SAFETY: `pt_mem` is the `PT_PAGES * 4096`-byte, 4096-aligned, zeroed
-    // allocation above, and `PT_PAGES` (12) covers what `BOOT_MAP_BYTES` (4
-    // GiB) needs: 1 PML4 + 2 PDPTs + up to 8 PDs, one PD per GiB — `size`
-    // here is `BOOT_MAP_BYTES` exactly, so `num_gb` inside is 4, well under
-    // the 8 the allocation has room for.
-    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, BOOT_MAP_BYTES) };
+    //
+    // Said before it is applied: a machine this refuses leaves the refusal in
+    // `loader.log`, which is the artifact a machine with no console has.
+    let planned = Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
+    match &planned {
+        Ok(plan) => match plan.scanout() {
+            Some((at, len)) => println!(
+                "Scanout: {at:#x}+{len:#x} mapped uncacheable in 2 MiB pages at identity and at \
+                 PHYS_OFFSET, in {} page directories",
+                plan.directories().len()
+            ),
+            None => println!("Scanout: this machine has none"),
+        },
+        Err(why) => println!("Scanout: NO BOOT MAP HOLDS IT, {why}"),
+    }
+    let plan = planned.unwrap_or_else(|why| panic!("the boot map cannot hold the scanout: {why}"));
+
+    // SAFETY: `pt_mem` is the `MAX_PAGES * 4096`-byte, 4096-aligned, zeroed
+    // allocation above, and a `Plan` never names more pages than that.
+    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, &plan) };
     println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
 
     // Said before it is asserted: `assert!` panics through uefi-services, whose handler prints to the console alone.
@@ -591,11 +571,20 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     );
     assert!(kernel_fits, "the kernel image does not fit the boot map");
 
-    report_reach("Scanout", gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
-    report_reach(
-        "Parameter buffer",
-        (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64)),
-    );
+    // A line and not a refusal: a parameter the kernel cannot read before
+    // `mm::init` costs it the parameter, never the boot. An empty cmdline's
+    // pointer names nothing and is not reported as reachable.
+    let parameters = (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64));
+    match parameters {
+        None => println!("Parameter buffer: none"),
+        Some((at, len)) if at.checked_add(len).is_some_and(|end| end <= BOOT_MAP_BYTES) => {
+            println!("Parameter buffer: {at:#x}+{len:#x} is inside the {BOOT_MAP_BYTES:#x}-byte boot map")
+        }
+        Some((at, len)) => println!(
+            "Parameter buffer: {at:#x}+{len:#x} is outside the {BOOT_MAP_BYTES:#x}-byte boot map, \
+             so the kernel cannot reach it before mm::init"
+        ),
+    }
 
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.
