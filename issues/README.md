@@ -21,7 +21,7 @@ rg -c '' issues/audio/              # how much audio owes
 
 ## Frontmatter
 
-Four fields, all required, no defaults.
+Four fields, three required, no defaults.
 
 | field | values | means |
 |---|---|---|
@@ -70,10 +70,10 @@ has a bounded life: whoever next reviews it either promotes it to a `defect`
 instrument) or moves its one durable line to the module header or doc comment
 at the site that owns the subject and deletes the file by the closing
 procedure below. A fold moves the invariant, never the investigation: one
-clause, no dates, no story — the deletion commit carries those, and
-`src/prosegate.rs`'s ledger refuses the fold that arrives as a paragraph. "May never be worth fixing" is a reason to fold it to the
-site, never a reason to keep the file; when unsure, promote — a wrong
-promotion costs a later demotion, a wrong fold loses tracked truth.
+clause, no dates, no story — the deletion commit carries those. "May never be
+worth fixing" is a reason to fold it to the site, never a reason to keep the
+file; when unsure, promote — a wrong promotion costs a later demotion, a wrong
+fold loses tracked truth.
 
 **`kind: question` is not work either** — not yours. It is owed by the owner,
 and an agent that "fixes" one has decided something that was his to decide. But
@@ -97,7 +97,8 @@ That list is closed. An area is a
 directory because it makes every cross-reference a path that resolves. Moving
 an issue between areas is a `git mv`; the **slug** is its identity — unique
 across every area — so `rg <slug>` finds every pointer at it wherever it has
-been put.
+been put. A slug is a claim like any sentence here: one the tree has refuted is
+renamed in the commit that corrects the body, with every citation moved.
 
 ## Pointing at one
 
@@ -121,11 +122,8 @@ reason this is a directory and not a document.
 **Delete the file.** Git keeps the story, and the commit message is where
 evidence, measurements and what-the-code-used-to-do belong.
 
-**Verify a close with `cargo test --lib`, not the workspace run** — the
-tracker's own gates (`issuegate`, `redlist`, `sourcegate`, the durations gates)
-live in the root package, which `cargo test --workspace --exclude toyos-build`
-excludes, so that command is green on a branch whose frontmatter or citation is
-broken and proves nothing about it.
+**A close is verified by the review** (`.claude/agents/reviewer.md`), which
+reads this file's rules against the branch.
 
 Before you delete it, ask what durable rule it carries — an invariant a future
 agent could violate again, independent of the bug that revealed it. One line of
