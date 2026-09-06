@@ -3,10 +3,7 @@
 //! Between the loader's `mov cr3` and the kernel's `mm::init` there is one
 //! mapping in the machine, and everything the kernel touches in that window has
 //! to be in it — its own image, the boot parameter, and the panel it reports a
-//! wedge on. What goes where is arithmetic over three numbers, and the machine
-//! that gets it wrong is the one that cannot say so: the panel is the thing
-//! that went missing. So the arithmetic lives here, where a host test can ask
-//! it about a framebuffer at 256 GiB without owning a laptop that has one.
+//! wedge on.
 //!
 //! Pure: three numbers in, a [`Plan`] out. The loader allocates the pages and
 //! writes the entries.
@@ -24,6 +21,14 @@ const GIB: u64 = 1 << 30;
 /// One PDPT reaches 512 GiB, and the map has two: the identity view at PML4[0]
 /// and the high-half view at PML4[256].
 const GIB_PER_PDPT: u64 = 512;
+
+/// PML4[0]: physical memory at its own address, which the `mov cr3` itself
+/// runs from.
+pub const PML4_IDENTITY: usize = 0;
+
+/// PML4[256]: the same memory at `PHYS_OFFSET`, whose bits 39..48 are 256 and
+/// which is where the kernel's entry point is called.
+pub const PML4_HIGH_HALF: usize = 256;
 
 /// How much physical memory the map covers, at identity and at `PHYS_OFFSET`
 /// alike. Everything the entry jump needs, not everything `KernelArgs` names.
@@ -87,6 +92,21 @@ pub enum Cache {
     Uncacheable,
 }
 
+impl Cache {
+    /// The bits a 2 MiB entry carries for this type, beside its address and the
+    /// present, writable and page-size bits every entry has.
+    pub const fn bits(self) -> u64 {
+        /// Page-level cache disable, bit 4.
+        const PCD: u64 = 1 << 4;
+        /// Page-level write-through, bit 3.
+        const PWT: u64 = 1 << 3;
+        match self {
+            Self::DeferToMtrr => 0,
+            Self::Uncacheable => PCD | PWT,
+        }
+    }
+}
+
 /// One 2 MiB entry the map holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Entry {
@@ -114,23 +134,32 @@ impl Plan {
     /// end anywhere else and what the last one covers past the framebuffer is
     /// the same aperture firmware put it in.
     pub fn new(scanout: Option<(u64, u64)>) -> Result<Self, Refusal> {
-        let mut plan =
-            Self { gibs: [0; MAX_DIRECTORIES], directories: 0, scanout: None };
+        let mut plan = Self { gibs: [0; MAX_DIRECTORIES], directories: 0, scanout: None };
         for gib in 0..BOOT_MAP_BYTES / GIB {
-            plan.claim(gib)?;
+            plan.claim(gib);
         }
         let Some((base, len)) = scanout else { return Ok(plan) };
         if base % PAGE_2M != 0 {
             return Err(Refusal::Unaligned(base));
         }
         let end = base.checked_add(len).ok_or(Refusal::Extent { base, len })?;
-        let covered = end
-            .checked_next_multiple_of(PAGE_2M)
-            .ok_or(Refusal::Extent { base, len })?
-            - base;
+        let covered =
+            end.checked_next_multiple_of(PAGE_2M).ok_or(Refusal::Extent { base, len })? - base;
+        let last = (base + covered - PAGE_2M) / GIB;
+        if last >= GIB_PER_PDPT {
+            return Err(Refusal::PastPdpt(last));
+        }
+        // Counted whole before one is claimed, so a machine needing fourteen is
+        // told fourteen rather than that one more than the budget was wanted.
+        let low = LOW_DIRECTORIES as u64;
+        let fresh = if last < low { 0 } else { last - (base / GIB).max(low) + 1 };
+        let required = LOW_DIRECTORIES + fresh as usize;
+        if required > MAX_DIRECTORIES {
+            return Err(Refusal::Directories(required));
+        }
         let mut phys = base;
         while phys < base + covered {
-            plan.claim(phys / GIB)?;
+            plan.claim(phys / GIB);
             phys += PAGE_2M;
         }
         plan.scanout = Some((base, covered));
@@ -140,11 +169,6 @@ impl Plan {
     /// The GiB each directory covers, in the order a builder allocates them.
     pub fn directories(&self) -> &[u64] {
         &self.gibs[..self.directories]
-    }
-
-    /// How many pool pages a builder needs for this plan.
-    pub fn pages(&self) -> usize {
-        3 + self.directories
     }
 
     /// The scanout as this map covers it: firmware's base, rounded up to whole
@@ -191,19 +215,13 @@ impl Plan {
         }
     }
 
-    /// Name the directory for `gib`, unless it is already named.
-    fn claim(&mut self, gib: u64) -> Result<(), Refusal> {
-        if gib >= GIB_PER_PDPT {
-            return Err(Refusal::PastPdpt(gib));
-        }
+    /// Name the directory for `gib`, unless it is already named. Infallible:
+    /// `new` counts and refuses before it claims anything.
+    fn claim(&mut self, gib: u64) {
         if self.gibs[..self.directories].contains(&gib) {
-            return Ok(());
-        }
-        if self.directories == MAX_DIRECTORIES {
-            return Err(Refusal::Directories(self.directories + 1));
+            return;
         }
         self.gibs[self.directories] = gib;
         self.directories += 1;
-        Ok(())
     }
 }

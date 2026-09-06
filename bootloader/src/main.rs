@@ -19,7 +19,7 @@ use uefi::{
     table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID},
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
-use toyos_bootmap::{Cache, Plan, BOOT_MAP_BYTES, MAX_PAGES};
+use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
 
 /// Every line this loader prints: the firmware's console, and the file on the
 /// stick once [`loaderlog::open`] has one.
@@ -494,10 +494,6 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
     const PAGE_PRESENT: u64 = 1 << 0;
     const PAGE_WRITE: u64 = 1 << 1;
     const PAGE_SIZE_BIT: u64 = 1 << 7;
-    /// PCD and PWT with the PAT bit clear: PAT entry 3, which is uncacheable
-    /// under every MTRR type and under an unprogrammed PAT — and nothing has
-    /// programmed `IA32_PAT` until the kernel's `pat::init`.
-    const PAGE_UNCACHEABLE: u64 = (1 << 4) | (1 << 3);
 
     let mut next_page = 0usize;
     let mut alloc_page = || -> *mut u64 {
@@ -518,17 +514,12 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
     }
 
     for entry in plan.entries() {
-        let cache = match entry.cache {
-            Cache::DeferToMtrr => 0,
-            Cache::Uncacheable => PAGE_UNCACHEABLE,
-        };
         *directories[entry.directory].add(entry.index) =
-            entry.phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT | cache;
+            entry.phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT | entry.cache.bits();
     }
 
-    // PML4[0] = identity, PML4[256] = high-half (PHYS_OFFSET >> 39 = 256)
-    *pml4.add(0) = identity_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
-    *pml4.add(256) = high_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
+    *pml4.add(PML4_IDENTITY) = identity_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
+    *pml4.add(PML4_HIGH_HALF) = high_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
 
     pml4 as u64
 }
@@ -548,9 +539,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 
     // Before the exit: `_print` unwraps a system table uefi-services nulls in its exit callback, so `println!` past it panics.
     //
-    // Said before it is applied, for `kernel_fits`'s reason: a machine this
-    // refuses leaves the refusal in `loader.log`, which is the artifact a
-    // machine with no console has.
+    // Said before it is applied: a machine this refuses leaves the refusal in
+    // `loader.log`, which is the artifact a machine with no console has.
     let planned = Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
     match &planned {
         Ok(plan) => match plan.scanout() {
