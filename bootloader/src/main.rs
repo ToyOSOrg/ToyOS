@@ -30,6 +30,7 @@ macro_rules! println {
     }};
 }
 
+mod blackbox;
 mod loaderlog;
 mod watchdog;
 
@@ -687,6 +688,10 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let log_guid = log_partition_guid(handle, &system_table);
     loaderlog::open(&system_table, &log_guid);
     println!("{}", loaderlog::BEGINS_AT);
+    // Early, and after the log is open: the page has to be claimed before this
+    // loader's own allocations can land on it, and what it recovers belongs on
+    // the stick rather than only on a console the owner's machine has none of.
+    blackbox::harvest(&system_table);
     match firmware_watchdog {
         Ok(()) => println!(
             "Firmware watchdog: {FIRMWARE_WATCHDOG_SECS} s, until ExitBootServices disables it"

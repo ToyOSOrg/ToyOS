@@ -563,7 +563,11 @@ pub fn render() -> bool {
     if PAINTING.swap(true, Ordering::SeqCst) {
         return false;
     }
-    paint(Fill::Fatal, fatal_text(), Page::Last, Watch::No);
+    let text = fatal_text();
+    // Before the paint, from the same view the panel gets: a fault inside the
+    // painter then costs the screen and not the copy the next boot reads.
+    crate::blackbox::record(text.text);
+    paint(Fill::Fatal, text, Page::Last, Watch::No);
     true
 }
 

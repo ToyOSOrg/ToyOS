@@ -15,6 +15,9 @@ toyos-acpi = { path = "../toyos-acpi" }
 # from the pointers that write it and host-tested against machines this one is
 # not.
 toyos-bootmap = { path = "../toyos-bootmap" }
+# The page a panicked kernel leaves for this loader to find, and the checksum
+# that decides whether the reset really left DRAM alone.
+toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-tco = { path = "../toyos-tco" }
 uefi = { version = "0.26.0", default-features = false }

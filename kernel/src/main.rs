@@ -27,6 +27,7 @@ mod drivers;
 mod log;
 mod actuator;
 mod params;
+mod blackbox;
 mod mm;
 mod panic;
 mod panic_reboot;
@@ -250,6 +251,8 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
+    // Beside it and for the same reason: both are what a crash before `mm::init` has left.
+    blackbox::arm(maps);
 
     serial::init();
 
