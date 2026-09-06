@@ -3,7 +3,7 @@
 //! every one it is handed; a name here is claimed before that table sees it,
 //! and is the only way an image the owner flashes asks for anything.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Each parameter beside the flag it sets, so a name cannot be claimed and then handled by nothing.
 pub const PARAMS: &[(&str, &AtomicBool)] =
@@ -13,22 +13,10 @@ static WATCHDOG_NAMED: AtomicBool = AtomicBool::new(false);
 static EARLY_PANEL_NAMED: AtomicBool = AtomicBool::new(false);
 static PARSED: AtomicBool = AtomicBool::new(false);
 
-/// The black-box page's address, or 0 for a boot whose loader claimed none.
-///
-/// **The one parameter that carries a value**, and the reason it does: the page
-/// is the loader's allocation, so whether there is one is a fact only the loader
-/// has. It used to be read out of the memory map, off a UEFI memory type of this
-/// project's own — until the owner's firmware stopped returning from
-/// `ExitBootServices` with one of those in the map it was handed.
-static BLACKBOX_PAGE: AtomicU64 = AtomicU64::new(0);
-
 pub fn init(cmdline: &str) {
     for token in toyos_abi::boot::actuators(cmdline) {
         if let Some((_, named)) = PARAMS.iter().find(|(name, _)| *name == token) {
             named.store(true, Ordering::Relaxed);
-        }
-        if let Some(at) = toyos_blackbox::address_of(token) {
-            BLACKBOX_PAGE.store(at, Ordering::Relaxed);
         }
     }
     PARSED.store(true, Ordering::Relaxed);
@@ -36,15 +24,14 @@ pub fn init(cmdline: &str) {
 
 /// Whether this kernel handles `token` itself, which is what stops
 /// `actuator::init` refusing it as a name it does not know.
+///
+/// **The one parameter that carries a value is not in [`PARAMS`] and is not
+/// read here**: the black-box page's address is read out of the raw buffer in
+/// `kernel_main`'s first statements (`crate::blackbox::arm`), because a panic
+/// before this function runs still has to be able to seal. All this does is stop
+/// the actuator table refusing a word it does not know.
 pub fn claims(token: &str) -> bool {
     PARAMS.iter().any(|(name, _)| *name == token) || token.starts_with(toyos_blackbox::PARAM)
-}
-
-/// Where the loader put the black-box page, or `None` where it claimed none.
-/// Read before `mm::init`, which is what keeps the page out of the allocator.
-pub fn blackbox_page() -> Option<u64> {
-    let at = BLACKBOX_PAGE.load(Ordering::Relaxed);
-    (at != 0).then_some(at)
 }
 
 pub fn watchdog() -> bool {

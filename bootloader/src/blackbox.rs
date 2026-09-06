@@ -34,7 +34,11 @@ pub const HEAD: &str = "Black box:";
 pub struct Page(u64);
 
 /// Claim the page for this boot, or say by name why this machine has none.
-pub fn claim(system_table: &SystemTable<Boot>) -> Option<Page> {
+/// **Runs before the log is open**, because whether this pass appends to the
+/// last one's file or replaces it is what the page decides — so a refusal is
+/// returned as a line for the caller to write rather than printed here, where a
+/// machine with no console would lose it.
+pub fn claim(system_table: &SystemTable<Boot>) -> (Option<Page>, Option<String>) {
     match system_table.boot_services().allocate_pages(
         AllocateType::Address(PHYS),
         MemoryType::LOADER_DATA,
@@ -44,15 +48,15 @@ pub fn claim(system_table: &SystemTable<Boot>) -> Option<Page> {
             // `AllocateType::Address` allocates that address or fails; firmware
             // answering with another one has not done what was asked of it.
             assert_eq!(at, PHYS, "AllocatePages(AllocateAddress) answered {at:#x} for {PHYS:#x}");
-            Some(Page(at))
+            (Some(Page(at)), None)
         }
-        Err(e) => {
-            println!(
+        Err(e) => (
+            None,
+            Some(alloc::format!(
                 "{HEAD} firmware would not give {PHYS:#x} ({e}), so this boot leaves nothing \
                  behind and the next one has nothing to read"
-            );
-            None
-        }
+            )),
+        ),
     }
 }
 

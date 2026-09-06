@@ -647,6 +647,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
     // Its own boot, and every verdict is a line: no host clock in any of it.
     ("blackbox_unclaimed_page", Sched::Parallel, Tier::Fast),
+    // The seal read off the page's own bytes by QEMU, after a panic earlier than
+    // anything the kernel used to learn the page's address from. Its own boot,
+    // and no clock in the verdict.
+    ("blackbox_early_panic_sealed", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
@@ -9002,6 +9006,9 @@ fn run_machine_test(
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
         "blackbox_unclaimed_page" => {
             power::blackbox_unclaimed_page(test_config, c_bins, rust_bins)
+        }
+        "blackbox_early_panic_sealed" => {
+            power::blackbox_early_panic_sealed(test_config, c_bins, rust_bins)
         }
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),

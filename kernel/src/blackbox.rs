@@ -30,29 +30,43 @@ use crate::mm::{DirectMap, Region};
 /// the whole of the ordering the panic path needs.
 static PAGE: AtomicU64 = AtomicU64::new(0);
 
+/// The page's physical address, kept apart from [`PAGE`] because `mm::init`
+/// wants the physical one and the writers want the mapped one.
+static PHYS: AtomicU64 = AtomicU64::new(0);
+
 /// The physical page `mm::init` must keep out of the allocator, or an empty
 /// region where there is none.
 ///
 /// Its result goes into the same array as the AP trampoline's page: both are
 /// addresses this kernel was given rather than ones it allocated.
 pub fn reserved_region() -> Region {
-    match crate::params::blackbox_page() {
-        Some(at) => Region { start: at, end: at.saturating_add(BYTES as u64) },
-        // Empty, and `overlaps_reserved` reads it as covering nothing.
-        None => Region { start: 0, end: 0 },
+    match PHYS.load(Relaxed) {
+        0 => Region { start: 0, end: 0 },
+        at => Region { start: at, end: at.saturating_add(BYTES as u64) },
     }
 }
 
-/// Take the page the loader named, after `mm::init` has kept it out of the
-/// allocator. A boot with no page says so and writes nowhere.
-pub fn arm() {
-    let Some(at) = crate::params::blackbox_page() else {
+/// Take the page the loader named, out of the raw parameter buffer.
+///
+/// **Called in `kernel_main`'s first statements, beside `panic_console::arm`
+/// and before anything that can fail.** The panics this page exists for are the
+/// early ones — the owner's laptop rendered a panel and then reset itself with
+/// the page still reading the loader's own `ARMED`, because this ran after the
+/// console, the parameter line's UTF-8 check and `params::init`, and the panic
+/// was before all three. Bytes, not `&str`, for the same reason: nothing has
+/// decided the buffer is UTF-8 yet, and that decision panics.
+///
+/// A boot whose loader claimed no page says so on the panel here, which is the
+/// only place it can be said — the seal itself runs where nothing may log.
+pub fn arm(cmdline: &[u8]) {
+    let Some(at) = toyos_blackbox::address_in(cmdline) else {
         log!(
-            "black box: this boot's loader claimed no page, so a panic reaches the panel and \
-             nowhere else"
+            "black box: this boot's parameter line names no page, so a panic reaches the panel \
+             and nowhere else"
         );
         return;
     };
+    PHYS.store(at, Relaxed);
     PAGE.store(DirectMap::from_phys(at).as_mut_ptr::<u8>() as u64, Relaxed);
     log!("black box: {at:#x} is this boot's, {TEXT_BYTES} bytes for the next boot's loader");
 }
@@ -78,6 +92,10 @@ pub fn record_done() {
 fn seal(state: State, text: &[u8]) {
     let at = PAGE.load(Relaxed);
     if at == 0 {
+        // **Refused, and silently, because this is the one site that cannot
+        // speak**: `record_panic` runs inside `panic_console::render`, which may
+        // take no lock and re-enter nothing. What a boot with no page loses is
+        // said at `arm`, on the panel, while there is still a machine to say it on.
         return;
     }
     // SAFETY: `at` is non-zero only where `arm` found the address on this

@@ -59,7 +59,14 @@ static SINK: Sink = Sink(UnsafeCell::new(None));
 
 /// Open `loader.log` on the partition `guid` names, discarding what an earlier
 /// boot left there.
-pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16]) {
+/// What a pass that appends writes before its own first line, so the boot being
+/// reported on and the pass reporting on it are never read as one.
+pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
+
+/// `truncate` replaces what the last boot left; a pass that appends is one that
+/// has a *report about* that boot, and the boot's own account has to stay
+/// readable under it. One file for now: per-pass names are their own change.
+pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
     let bs = system_table.boot_services();
     let Ok(handles) = bs.locate_handle_buffer(SearchType::from_proto::<SimpleFileSystem>()) else {
         return refused(format_args!("this machine publishes no filesystem at all"));
@@ -89,14 +96,16 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16]) {
     // Deleted and not rewound: `CreateReadWrite` opens what is already there at
     // offset zero without truncating it, so a shorter boot than the last would
     // end in the last one's tail.
-    match root.open(NAME, FileMode::ReadWrite, FileAttribute::empty()) {
-        Ok(stale) => {
-            if let Err(e) = stale.delete() {
-                return refused(format_args!("the last boot's {NAME} would not delete ({e})"));
+    if truncate {
+        match root.open(NAME, FileMode::ReadWrite, FileAttribute::empty()) {
+            Ok(stale) => {
+                if let Err(e) = stale.delete() {
+                    return refused(format_args!("the last boot's {NAME} would not delete ({e})"));
+                }
             }
+            Err(e) if e.status() == Status::NOT_FOUND => {}
+            Err(e) => return refused(format_args!("the last boot's {NAME} would not open ({e})")),
         }
-        Err(e) if e.status() == Status::NOT_FOUND => {}
-        Err(e) => return refused(format_args!("the last boot's {NAME} would not open ({e})")),
     }
     let file = match root.open(NAME, FileMode::CreateReadWrite, FileAttribute::empty()) {
         Ok(file) => file,
@@ -109,8 +118,19 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16]) {
     // written to until [`close`], and the loader never gives the machine back
     // before then.
     core::mem::forget(fs);
+    let mut file = file;
+    if !truncate {
+        // `EFI_FILE_POSITION_END_OF_FILE` (UEFI 2.10 §13.5.13): the one seek
+        // that does not need the length read first.
+        if let Err(e) = file.set_position(u64::MAX) {
+            return refused(format_args!("{NAME} would not seek to its end ({e})"));
+        }
+    }
     // SAFETY: [`Sink`]'s contract.
     unsafe { *SINK.0.get() = Some(file) };
+    if !truncate {
+        println!("{SEPARATOR}");
+    }
 }
 
 pub fn line(args: fmt::Arguments) {

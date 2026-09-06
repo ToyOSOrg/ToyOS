@@ -597,6 +597,21 @@ const HANDS_OFF: &str = "Loader log: the kernel handoff begins, so this file end
 /// and not merely a page that checksummed.
 const BLACKBOX_WITNESS: &str = "test-late-panic: on-screen console check";
 
+/// The earliest panic this tree can stage, inside `percpu::init_bsp` one
+/// statement after the IDT is loaded — which is before `params::init`, and so
+/// before everything the kernel used to learn the page's address from.
+///
+/// **It cannot drive the chain and that is not a choice**: the reboot bound is
+/// carried in TSC cycles, and before `clock::init` those come off CPUID leaves
+/// this guest's CPU answers with zeros, so the panic path holds the panel rather
+/// than resetting (`issues/panic-path/the-panic-bounds-cpuid-clock-runs-on-no-guest-this-tree-boots.md`).
+/// The seal is read off the page itself instead, which needs no reset at all.
+const EARLY_WITNESS: &str = "test-panic-after-idt: the IDT is loaded and nothing else is up";
+
+/// The first record `serial::init` writes, which is the first thing the kernel
+/// does after taking the page.
+const SERIAL_IS_UP: &str = "serial: 16550 loopback read";
+
 /// The page armed and its address handed to the kernel, as the two sides say it.
 fn armed_line() -> String {
     format!("{BLACKBOX_HEAD} {PHYS:#x} armed")
@@ -622,11 +637,35 @@ fn done_line() -> String {
 fn chained(params: &'static [&'static str]) -> BootOptions {
     BootOptions {
         profile: qemu::Profile::Metal,
+        qmp: true,
         kernel_params: params,
         takes_the_reset: true,
         ready_marker: HANDS_OFF,
         ..Default::default()
     }
+}
+
+/// Resets a chain leaves behind: the kernel's own, and the pass that read the
+/// page ending itself rather than returning to the boot manager.
+const CHAIN_RESETS: usize = 2;
+
+/// Both chain judges' second half: the pass after the reset said its piece and
+/// then reset the machine itself.
+///
+/// **The reset is not decoration.** A UEFI application that returns leaves its
+/// `SIGNAL_EXIT_BOOT_SERVICES` callback registered and is then unloaded, and the
+/// next operating system's own `ExitBootServices` calls into that freed image —
+/// measured on the owner's T14 as Ubuntu freezing in its EFI stub. Asked of QEMU
+/// and not of the guest, because a guest that says it is about to reset is not a
+/// guest that did.
+fn ended_in_a_reset(resets: &mut qemu::QmpResets) -> Result<(), String> {
+    let seen = resets.seen(CHAIN_RESETS);
+    if seen < CHAIN_RESETS {
+        return Err(format!(
+            "QEMU reported {seen} guest reset(s) and this chain is {CHAIN_RESETS}: the pass that              read the page returned to the boot manager instead of resetting, which leaves this              image's exit-boot-services callback registered for the next operating system to              call into"
+        ));
+    }
+    Ok(())
 }
 
 /// Every line the guest said after its first boot handed off, up to the second
@@ -666,6 +705,8 @@ pub fn blackbox_panic_chain(
     // the loader's own account; that the *kernel* took the page is
     // `blackbox_unclaimed_page`'s to say and is not restated here.
     let first = serial::Serial::boot(&qemu);
+    // Opened before either reset: events queue on the socket from here.
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
     // Nothing was harvested on a machine whose RAM QEMU zeroed, so the pass
     // below is reading this boot's page and not a claim about every boot.
@@ -691,9 +732,13 @@ pub fn blackbox_panic_chain(
     // The chain ends rather than going round: a pass that booted a kernel would
     // have said so, and this one must not have.
     second.must_not_say(HANDS_OFF)?;
+    ended_in_a_reset(&mut resets)?;
     drop(qemu);
 
-    eprintln!("  [power] the panic crossed the reset and the loader ended the chain on it");
+    eprintln!(
+        "  [power] the panic crossed the reset, and the pass that read it ended in a reset of \
+         its own"
+    );
     Ok(())
 }
 
@@ -710,6 +755,7 @@ pub fn blackbox_done_chain(
     let case = config.parent().expect("system.toml has a directory");
     let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(&[]));
     let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
 
     let second = after_the_reset(&mut qemu, ENDS_THE_CHAIN);
@@ -719,9 +765,10 @@ pub fn blackbox_done_chain(
     second.must_not_say(&armed_and_nothing_else())?;
     second.must_not_say(BLACKBOX_WITNESS)?;
     second.must_not_say(HANDS_OFF)?;
+    ended_in_a_reset(&mut resets)?;
     drop(qemu);
 
-    eprintln!("  [power] a deliberate reboot sealed DONE and the loader ended the chain on it");
+    eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
     Ok(())
 }
 
@@ -751,8 +798,85 @@ pub fn blackbox_unclaimed_page(
     let claimed = boot.must_say(&armed_line())?.to_string();
     boot.must_say(&kernel_took_it())?;
     boot.must_say(&format!("blackbox={PHYS:#x}"))?;
+    // **Before `serial::init`, and that ordering is the assertion.** The page
+    // used to be taken after the console, the parameter line's UTF-8 check and
+    // `params::init`, and the owner's laptop panicked before all three: it
+    // rendered a panel and reset itself with the page still holding the loader's
+    // `ARMED`. No staged panic can land in that window — arming one needs the
+    // line parsed first — so what is judged is where the kernel says it took
+    // the page, which moves the moment the reading moves.
+    boot.must_say_after(&kernel_took_it(), SERIAL_IS_UP)?;
     drop(qemu);
 
     eprintln!("  [power] the loader named the page and the kernel took it: {}", claimed.trim());
+    Ok(())
+}
+
+/// A panic earlier than everything the kernel used to learn the page's address
+/// from seals it anyway — read out of the page's own bytes, by QEMU.
+///
+/// **What it judges is the seal, not the ordering.** No staged panic can land
+/// before `params::init` — arming one requires that line to have been parsed —
+/// so the earliest this tree can produce is inside `percpu::init_bsp`, which is
+/// after it, and a kernel that took the page late would still seal here. That
+/// the page is taken *before* `serial::init` is `blackbox_unclaimed_page`'s to
+/// say, off the order of two records.
+///
+/// The oracle is `pmemsave`, which is QEMU reading its own guest's physical
+/// memory — not the guest reporting on itself, and not a reset the guest cannot
+/// perform here anyway. The bytes are then handed to the same `recover` the next
+/// boot's loader would call, so what is judged is a page that loader would read.
+pub fn blackbox_early_panic_sealed(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::Metal,
+            qmp: true,
+            kernel_params: &["test-panic-after-idt"],
+            ready_marker: EARLY_WITNESS,
+            ..Default::default()
+        },
+    );
+    let boot = serial::Serial::boot(&qemu);
+    // The kernel took the page before it panicked, which is the whole claim;
+    // without this line the seal below could only have come from the loader.
+    boot.must_say(&kernel_took_it())?;
+
+    let page = qemu.guest_page(PHYS)?;
+    let page: &[u8; toyos_blackbox::BYTES] =
+        page.as_slice().try_into().map_err(|_| "pmemsave returned the wrong length".to_string())?;
+    let Some((state, text)) = toyos_blackbox::recover(page) else {
+        return Err(format!(
+            "the page at {PHYS:#x} carries nothing the next boot's loader would read, after a \
+             panic this kernel rendered: {:02x?}",
+            &page[..32]
+        ));
+    };
+    if state != State::Panic {
+        return Err(format!(
+            "the page reads {} after a panic, so the panic path did not reach it and the next \
+             boot would report a kernel that vanished",
+            state.named()
+        ));
+    }
+    let text = String::from_utf8_lossy(text);
+    if !text.contains(EARLY_WITNESS) {
+        return Err(format!(
+            "the page is sealed PANIC and does not carry {EARLY_WITNESS:?}, so what crossed is \
+             not this crash\n{text}"
+        ));
+    }
+    drop(qemu);
+
+    eprintln!(
+        "  [power] a panic before `params::init` sealed {} bytes, read off the page by QEMU",
+        text.len()
+    );
     Ok(())
 }

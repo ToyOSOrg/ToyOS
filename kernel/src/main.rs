@@ -295,6 +295,20 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
+    // Beside it, and out of the raw buffer: a panic between here and
+    // `params::init` — inside `serial::init`, or on the parameter line's own
+    // UTF-8 check — is one this machine renders and then resets on, and the page
+    // is what carries it past the reset. The owner's laptop did exactly that
+    // with the page still reading the loader's `ARMED`, because this used to run
+    // after all three.
+    blackbox::arm(if kernel_args.cmdline_len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(
+            DirectMap::from_phys(kernel_args.cmdline_addr).as_ptr::<u8>(),
+            kernel_args.cmdline_len as usize,
+        )
+    });
 
     serial::init();
 
@@ -312,11 +326,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // Both readings of it here: the parameter is in no reserved region, so
     // `mm::init` may hand that memory out and neither may hold a borrow.
     params::init(cmdline);
-    // Straight after the line it reads the address off, and before `mm::init`
-    // rather than after: the panics this page exists for are the early ones,
-    // and nothing can be handed the page yet because the allocator does not
-    // exist — `reserved` below is what keeps it out once it does.
-    blackbox::arm();
     actuator::init(cmdline);
     rootfs::init(cmdline);
 

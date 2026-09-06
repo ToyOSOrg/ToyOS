@@ -199,6 +199,19 @@ pub fn address_of(token: &str) -> Option<u64> {
     Some(value)
 }
 
+/// The address the `blackbox=` word of a raw parameter buffer names.
+///
+/// **Bytes and not `&str`, because this is read before anything has decided the
+/// buffer is UTF-8.** The kernel reads it out of the loader's buffer in its
+/// first statements, so that a panic anywhere after the jump has somewhere to go;
+/// the UTF-8 check that the rest of the line stands or falls on happens later
+/// and panics where a panel already exists.
+pub fn address_in(cmdline: &[u8]) -> Option<u64> {
+    cmdline.split(|byte| *byte == b',').find_map(|token| {
+        core::str::from_utf8(token).ok().and_then(address_of)
+    })
+}
+
 const _: () = {
     // UEFI deals in pages, and `AllocatePages` can only be given an address it deals in.
     assert!(PHYS.is_multiple_of(BYTES as u64));
@@ -333,6 +346,21 @@ mod tests {
         }
         // Wider than an address, so the shift cannot silently drop the head.
         assert_eq!(address_of("blackbox=0x10000000000000000"), None);
+    }
+
+    /// The raw-buffer reading finds the word wherever on the line it sits, and
+    /// reads a buffer that is not UTF-8 without deciding anything about it.
+    #[test]
+    fn the_address_is_found_in_a_raw_parameter_buffer() {
+        let line = format!("root=deadbeef,watchdog,{PARAM}{PHYS:#x},early-panel");
+        assert_eq!(address_in(line.as_bytes()), Some(PHYS));
+        assert_eq!(address_in(format!("{PARAM}{PHYS:#x}").as_bytes()), Some(PHYS));
+        assert_eq!(address_in(b"root=deadbeef,watchdog"), None);
+        assert_eq!(address_in(b""), None);
+        // One token is not UTF-8 and the word is still found beside it.
+        let mut mixed = vec![0xffu8, 0xfe, b','];
+        mixed.extend_from_slice(format!("{PARAM}{PHYS:#x}").as_bytes());
+        assert_eq!(address_in(&mixed), Some(PHYS));
     }
 
     /// Three states, three words, none of them each other's.

@@ -16,7 +16,8 @@ use uefi::{
     proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID},
+    table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
+    Event,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
@@ -761,9 +762,45 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     entry(&kernel_args);
 }
 
+/// End a pass that read the black box and boots no kernel, by resetting the
+/// machine rather than returning to the boot manager.
+///
+/// **A UEFI application that returns leaves whatever it registered behind, and
+/// the boot manager then unloads its image.** `uefi_services::init` registers a
+/// `SIGNAL_EXIT_BOOT_SERVICES` callback that lives in this image; the next
+/// operating system signals that group from inside its own `ExitBootServices`,
+/// and firmware calls into memory that is no longer ours. Measured on the
+/// owner's T14: after a pass of this kind returned, Ubuntu froze in its EFI stub
+/// at `Measured initrd data into PCR 9` and the machine never came back — the
+/// same signature this loader itself had when its map was refused, and absent on
+/// the run where no pass ever returned.
+///
+/// So the event is closed *and* the pass resets. Closing it is the invariant —
+/// a pass that does not hand off leaves nothing registered in the firmware — and
+/// the reset is what makes that invariant not have to be complete: the next
+/// operating system comes up on firmware this image has never run on, at the
+/// cost of one reboot. `BootNext` was consumed by this pass and this pass sets
+/// none, so the firmware's own order is what takes the machine, and the page was
+/// cleared as it was read, so a boot that does come back here boots normally.
+fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
+    println!("{}", loaderlog::ENDS_AT_CHAIN);
+    loaderlog::close_without_a_kernel();
+    if let Some(event) = exit_event {
+        // After the last line is written: closing it is what stops `println!`
+        // being disabled by a callback, not what enables it, but the ordering
+        // is the one a reader should not have to check.
+        let _ = system_table.boot_services().close_event(event);
+    }
+    system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS, None)
+}
+
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
-    uefi_services::init(&mut system_table).unwrap();
+    // The event is kept, not discarded: it is a callback *inside this image*
+    // that firmware holds until it is closed, and a pass that returns to the
+    // boot manager is a pass whose image the boot manager then unloads. See
+    // `end_this_pass`.
+    let exit_event = uefi_services::init(&mut system_table).unwrap();
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
     // the image neither exits boot services nor disables it, and a minute is
@@ -774,24 +811,24 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // The same sixteen bytes the kernel is handed below, read once, and read
     // before the first line so that no line is only on the screen.
     let log_guid = log_partition_guid(handle, &system_table);
-    loaderlog::open(&system_table, &log_guid);
+    // Before the log is opened, and before this loader's own allocations can
+    // land on the page: whether this pass replaces the last boot's file or
+    // appends a report under it is what the page decides, and the boot being
+    // reported on has to stay readable.
+    let (page, claim_refused) = blackbox::claim(&system_table);
+    let finding = blackbox::harvest(page);
+    loaderlog::open(&system_table, &log_guid, finding.is_none());
     println!("{}", loaderlog::BEGINS_AT);
-    // Early, and after the log is open: the page has to be claimed before this
-    // loader's own allocations can land on it, and what it holds belongs on the
-    // stick rather than only on a console the owner's machine has none of.
-    let page = blackbox::claim(&system_table);
-    if let Some(finding) = blackbox::harvest(page) {
+    if let Some(line) = claim_refused {
+        println!("{line}");
+    }
+    if let Some(finding) = finding {
         for line in &finding.lines {
             println!("{line}");
         }
         if finding.ends_the_chain {
-            // Back to the firmware's boot manager without a kernel: the last
-            // boot has been accounted for, and booting again would start the
-            // same loop over. Whatever the firmware's own order names next
-            // takes the machine.
-            println!("{}", loaderlog::ENDS_AT_CHAIN);
-            loaderlog::close_without_a_kernel();
-            return Status::SUCCESS;
+            // The last boot is accounted for, so this pass boots no kernel.
+            end_this_pass(&system_table, exit_event);
         }
     }
     match firmware_watchdog {
