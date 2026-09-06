@@ -422,10 +422,9 @@ mod tests {
     /// Integration branches (`metal` today) develop locally and fast; CI
     /// starts only once the work reaches the pull request to `main`. A
     /// `pull_request:` trigger with no `branches:` filter runs its whole job
-    /// list on a pull request whatever its base — a draft PR into `metal` ran
-    /// the full CI before this rule existed. The `seen` count is the teeth:
-    /// a workflow that gains or drops the trigger without updating it is the
-    /// silent drift this exists to catch.
+    /// list on a pull request whatever its base. The `seen` count is the
+    /// teeth: a workflow that gains or drops the trigger without updating it
+    /// is the silent drift this exists to catch.
     #[test]
     fn every_pull_request_trigger_runs_only_against_main() {
         let dir = repo_root().join(".github/workflows");
