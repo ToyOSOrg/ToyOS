@@ -13,6 +13,7 @@ use common::qemu::{
 };
 use common::{audio, compile, faults, hostload, pkg, power, screen, serial, stats, storage, usb};
 use toyos_build::day::Day;
+use toyos_build::metal::boot_millis;
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
 
@@ -13639,15 +13640,6 @@ fn image_extent(path: &Path) -> (u64, u64) {
     (meta.len(), meta.blocks() * 512)
 }
 
-/// The guest's own boot duration, out of `Boot: complete (123ms)`.
-fn boot_millis(log: &str) -> Option<u64> {
-    log.lines()
-        .find_map(|l| l.split("Boot: complete (").nth(1))?
-        .split("ms)")
-        .next()?
-        .parse()
-        .ok()
-}
 
 #[derive(Debug)]
 struct XhciBind {
