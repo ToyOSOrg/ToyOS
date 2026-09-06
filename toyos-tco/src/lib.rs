@@ -33,7 +33,9 @@ pub const TCO1_CNT_HALT: u16 = TCO_TMR_HLT;
 pub const TMR_MASK: u16 = 0x3ff;
 const TMR_MAX: u64 = TMR_MASK as u64;
 const TMR_MIN: u64 = 2;
-const TICK_MS: u64 = 600;
+/// Public because a reader watching this timer count has to wait one of these
+/// to see it move: a shorter wait proves nothing about a halted timer.
+pub const TICK_MS: u64 = 600;
 const EXPIRIES: u64 = 2;
 
 /// The `TCO_TMR` whose expiries reach `bound_ms`, rounded down so the reset lands at or before the bound.

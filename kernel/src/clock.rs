@@ -36,7 +36,34 @@ pub fn init(hpet_base: u64) {
     let hpet_start = hpet.read_u64(HPET_COUNTER);
     let tsc_start = cpu::rdtsc();
     let hpet_target = hpet_start + calibration_hpet_ticks;
-    while hpet.read_u64(HPET_COUNTER) < hpet_target {}
+    log!(
+        "clock: HPET at {:#x} enabled, period={}fs, counter reads {}, calibrating over {} ticks",
+        hpet_base,
+        hpet_period_fs,
+        hpet_start,
+        calibration_hpet_ticks,
+    );
+
+    // A main counter that does not advance would spin here forever, and this is
+    // the boot's last wait before it has a clock: the only unit available to
+    // bound it is the TSC's own, so the budget is the calibration converted at
+    // a frequency no x86-64 part reaches, which makes it an over-estimate of
+    // the cycles the calibration can legitimately take on any machine.
+    const TSC_CEILING_HZ: u64 = 10_000_000_000;
+    // Times two, so a machine merely slower than the ceiling is not refused for it.
+    let stall_budget_cycles = 2 * calibration_ns * (TSC_CEILING_HZ / 1_000_000_000);
+    while hpet.read_u64(HPET_COUNTER) < hpet_target {
+        assert!(
+            cpu::rdtsc().wrapping_sub(tsc_start) <= stall_budget_cycles,
+            "clock: the HPET main counter at {:#x} did not reach {} in {} TSC cycles (it started \
+             at {} and reads {}), so this machine offers no clock to calibrate against",
+            hpet_base,
+            hpet_target,
+            stall_budget_cycles,
+            hpet_start,
+            hpet.read_u64(HPET_COUNTER),
+        );
+    }
     let tsc_end = cpu::rdtsc();
     let hpet_end = hpet.read_u64(HPET_COUNTER);
 

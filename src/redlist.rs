@@ -2783,6 +2783,33 @@ pub const KNOWN_RED: &[Red] = &[
         source: "src/redlist.rs",
         measured: "2026-08-19",
     },
+    // A second, unrelated way this name goes red, measured against the base it
+    // appeared on rather than against the branch that saw it first.
+    Red {
+        test: "sched_stress",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::fires(1, 4),
+        standing: Standing::Stands,
+        what: "`log-gate: FAILED: cpu5 seq 517 is stamped 650224011 ns, behind the 651750439 ns \
+               of the record before it — within a shard the sequence order is the timestamp \
+               order, and `emit` stamps inside the same bracket it reserves in` — the log gate, \
+               not a scheduler assert and not a kernel death, so it is **not** the \
+               `navigate.rs:161` row above. The inversion is emitted by the boot whatever the \
+               run's verdict: it appeared in all four full tiers and failed the test in one, \
+               which is the whole of the rate. It is always an AP's shard, never cpu0's, and it \
+               is always **one fixed position** in that shard: `seq 517` in the three runs \
+               before this branch added a boot record ahead of it and `seq 518` in the one \
+               after, so what selects the record is its index and not its number",
+        evidence: "four `cargo test` fast tiers on this host, 2026-09-06, one of them on \
+                   `origin/metal` `b3c314cf` with an empty working tree — cpu6, 742053639 ns \
+                   behind 743716169 ns, 325/325 green. Three on `t14-run4`: cpu5 (324/325, this \
+                   row's red), cpu6 736451308 behind 739564366 ns, and after the added record \
+                   cpu6 `seq 518`, 736406061 behind 737807237 ns, both 325/325 green. \
+                   **Firing on the untouched base is what makes this not the author's diff**, \
+                   and `ALONE sched_stress: PASS (1s)`",
+        source: "issues/diagnostics/a-shards-timestamps-run-backwards-at-seq-517.md",
+        measured: "2026-09-06",
+    },
     // ---------------------------------------------------------------------
     // The same session's last two runs, after the branch merged `origin/main`
     // at `bf54143`. Both red, both `ALONE … GREEN`, neither about the diff.

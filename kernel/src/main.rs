@@ -349,6 +349,11 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     idt::init();
     ioapic::init(&madt);
     idt::enable_interrupts();
+    // Read back, because `sti` is the first instruction at which this machine's
+    // own devices can reach the kernel: a CPU not holding `IF` here took
+    // something that cleared it again before this record was stamped.
+    let flags = cpu::rflags();
+    log!("interrupts: cpu0 rflags={:#x} if={}", flags, u8::from(flags & cpu::RFLAGS_IF != 0));
     syscall::init();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     if !kernel_elf.is_empty() {

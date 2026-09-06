@@ -4,8 +4,10 @@
 //! at the same [`toyos_tco::TIMER`] — but only once it is up, and this covers
 //! the span before that.
 //!
-//! `TCO2_STS` is neither read nor written: whether the last boot ended in a TCO
-//! reset is latched there and the kernel is the one place that reports it.
+//! `TCO2_STS` is read and never written: whether the last boot ended in a TCO
+//! reset is latched there and the kernel is the one place that clears it, but a
+//! boot whose kernel never reaches its own arm still owes the value, and this
+//! file is the only channel such a boot has.
 //!
 //! Every machine this cannot arm is refused by name on the console and boots
 //! anyway.
@@ -14,7 +16,7 @@ use core::mem::{align_of, size_of};
 use core::ptr::read_volatile;
 
 use toyos_acpi::Phys;
-use toyos_tco::{Chipset, TCO1_CNT, TCO1_CNT_RUN, TCO_RLD, TCO_TMR, TCO_TMR_HLT};
+use toyos_tco::{Chipset, TCO1_CNT, TCO1_CNT_RUN, TCO2_STS, TCO_RLD, TCO_TMR, TCO_TMR_HLT};
 use uefi::prelude::*;
 use uefi::table::boot::{MemoryDescriptor, PAGE_SIZE};
 
@@ -95,7 +97,45 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
         toyos_tco::TIMER,
         toyos_tco::bound_of(toyos_tco::TIMER)
     );
+    report(system_table, port, cnt);
 }
+
+/// What the block holds once it is armed, as whole words.
+///
+/// The second read of `TCO_RLD` is the question no single read answers — whether
+/// this timer counts at all — so the wait between them is one
+/// [`toyos_tco::TICK_MS`] plus a margin, the shortest wait a moving counter is
+/// guaranteed to be seen across. It is spent inside the bound it measures, and
+/// what remains of this loader is the page tables and the jump.
+fn report(system_table: &SystemTable<Boot>, port: u16, cnt: u16) {
+    let rld = inw(port + TCO_RLD);
+    let tmr = inw(port + TCO_TMR);
+    let sts2 = inw(port + TCO2_STS);
+    println!(
+        "watchdog: read back TCO_RLD={rld:#06x} TCO_TMR={tmr:#06x} TCO1_CNT={cnt:#06x} \
+         TCO2_STS={sts2:#06x}"
+    );
+
+    system_table.boot_services().stall(TICK_STALL_MICROS);
+    let moved = inw(port + TCO_RLD);
+    if moved == rld {
+        println!(
+            "watchdog: TCO_RLD still reads {moved:#06x} after {TICK_STALL_MS}ms, so this timer is \
+             not counting and no bound it was armed with can expire"
+        );
+    } else {
+        // One clause, because the argument for it is one issue and not this file.
+        println!(
+            "watchdog: TCO_RLD went {rld:#06x} -> {moved:#06x} over {TICK_STALL_MS}ms, so the \
+             timer counts and what a machine that stays up owes is the reset gate, which is not in \
+             this block"
+        );
+    }
+}
+
+/// One tick plus a margin, so a counting timer is seen to have moved.
+const TICK_STALL_MS: u64 = toyos_tco::TICK_MS + toyos_tco::TICK_MS / 6;
+const TICK_STALL_MICROS: usize = (TICK_STALL_MS * 1_000) as usize;
 
 /// The first function on bus 0 a row names, with the two config words that row
 /// reads. Bus 0, because the LPC bridge and the SMBus function both live there

@@ -14,9 +14,13 @@ PCH's are write-one-to-clear, and what the same word does to the rest of that
 register there, is unread. The symptom is a T14 that keeps reporting a reset it
 already reported.
 
-The other four things this row assumed are answered: the metal loop's third run
-read `8086:a0a3 TCO at 0x400` off the log partition, armed without a refusal,
-and came back to Ubuntu on its own, which is `toyos-tco`'s Tiger Lake row.
+The other things this row assumed are answered in part: the metal loop's third
+run read `8086:a0a3 TCO at 0x400` off the log partition and armed without a
+refusal, which is `toyos-tco`'s Tiger Lake row. **It did not come back on its
+own** — the owner power-cycled it by hand (owner ruling, 2026-09-06). No run
+has yet seen this PCH reset itself, which is
+`issues/hardware/an-armed-tco-has-never-reset-the-t14.md`; until that is
+answered this register's clearing cannot be exercised on the machine at all.
 
 **Exit condition**: the kernel's own `watchdog:` line, off the log partition, on
 the boot *after* a reset — so it needs a metal run whose boot reaches `logd`,

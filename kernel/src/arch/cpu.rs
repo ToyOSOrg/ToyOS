@@ -86,15 +86,24 @@ pub fn read_rsp() -> u64 {
     rsp
 }
 
-/// The direction flag; must stay clear in Ring 0, and this is the instrument that catches a stray writer.
-#[cfg(feature = "df-witness")]
-pub fn direction_flag_set() -> bool {
+/// This CPU's `RFLAGS` as the CPU holds them, which is not the same claim as
+/// what it was asked to hold — a step that sets a flag reads it back through here.
+pub fn rflags() -> u64 {
     let rflags: u64;
     // SAFETY: balanced push/pop leaves rsp unchanged; the pair uses the stack, so no nomem.
     unsafe {
         asm!("pushfq", "pop {}", out(reg) rflags, options(nomem));
     }
-    rflags & 0x400 != 0
+    rflags
+}
+
+/// `RFLAGS.IF`: whether this CPU takes maskable interrupts at all.
+pub const RFLAGS_IF: u64 = 1 << 9;
+
+/// The direction flag; must stay clear in Ring 0, and this is the instrument that catches a stray writer.
+#[cfg(feature = "df-witness")]
+pub fn direction_flag_set() -> bool {
+    rflags() & 0x400 != 0
 }
 
 /// Clears DF before reporting: `core::fmt`'s backward copy would corrupt the report it's printing.

@@ -584,6 +584,11 @@ pub fn init_bsp(lapic_id: u32) {
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(0);
     super::fpu::init();
+    // Between `fpu::init` and the `wrmsr`, not after this function's own line:
+    // this is the gap with no record of its own, and these are the facts
+    // `fpu::init` just established on a CPU whose extended state QEMU and a
+    // Tiger Lake do not agree about.
+    super::fpu::log_state(0);
 
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };
@@ -592,7 +597,6 @@ pub fn init_bsp(lapic_id: u32) {
     crate::log::PERCPU_READY.store(true, core::sync::atomic::Ordering::Release);
 
     log!("percpu: BSP cpu_id=0 lapic_id={lapic_id}");
-    super::fpu::log_state();
 }
 
 /// Allocate percpu for an AP; the trampoline writes the pointer into IA32_GS_BASE.
@@ -614,7 +618,7 @@ pub fn init_ap(percpu_ptr: *mut PerCpu) {
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(percpu.cpu_id);
     super::fpu::init();
-    super::fpu::log_state();
+    super::fpu::log_state(percpu.cpu_id);
 }
 
 /// Update `kernel_rsp` and `tss.rsp0` for a context switch to a new process.
