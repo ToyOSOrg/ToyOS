@@ -173,6 +173,37 @@ impl Ppm {
         None
     }
 
+    /// How many rows of text are on the panel, counted without decoding a
+    /// glyph — which is the only way to count rows a *firmware* font drew,
+    /// since [`Ppm::text`] reads the kernel's font and nothing else.
+    ///
+    /// A row is a band of scanlines carrying lit pixels. The row pitch is the
+    /// closest two band tops come, which is the console's own; a band taller
+    /// than that is a logo or a progress block and not a row of text.
+    pub fn text_row_bands(&self) -> usize {
+        let mut bands: Vec<(usize, usize)> = Vec::new();
+        let mut top = None;
+        for y in 0..self.height {
+            let lit = (0..self.width)
+                .any(|x| self.pixels[y * self.width + x].iter().any(|c| *c >= FG_THRESHOLD));
+            match (lit, top) {
+                (true, None) => top = Some(y),
+                (false, Some(from)) => {
+                    bands.push((from, y));
+                    top = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(from) = top {
+            bands.push((from, self.height));
+        }
+        let Some(pitch) = bands.windows(2).map(|pair| pair[1].0 - pair[0].0).min() else {
+            return 0;
+        };
+        bands.iter().filter(|(from, to)| to - from <= pitch).count()
+    }
+
     /// The fill colour, read from the bottom-right pixel. The renderer paints
     /// at most `MAX_ROWS` rows and never the last column of a glyph cell, so
     /// this corner carries the fill and nothing else.

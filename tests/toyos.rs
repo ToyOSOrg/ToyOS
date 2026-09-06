@@ -419,6 +419,10 @@ const AUDIO_SMP: &[u32] = &[1, 8];
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_decoder", Sched::Parallel, Tier::Fast),
+    // Its own boot, ended at a loader line rather than at the kernel's ready
+    // marker. Every verdict is a count of rows against a count of lines off
+    // the same boot's console; no clock is in either.
+    ("screen_loader_lines", Sched::Parallel, Tier::Fast),
     ("screen_gop_firmware_mode", Sched::Parallel, Tier::Nightly),
     // `thread::sleep(5 s)` is the measurement, not a ceiling: the assertion is
     // literally that the log is still on the panel five seconds after the boot
@@ -3294,6 +3298,61 @@ fn run_screen_test(
     match name {
         "screen_decoder" => {
             screen::self_test();
+            Ok(())
+        }
+        "screen_loader_lines" => {
+            // Every line the loader prints reaches the panel. An EXCLUSIVE
+            // open of `GraphicsOutput` calls `Stop` on the firmware's graphics
+            // console, so with one the panel stops at the GOP query and the
+            // lines after it exist only on a serial port.
+            //
+            // The guest is stopped at the loader's own last line: the kernel
+            // repaints the panel over the firmware's text as soon as it is up.
+            let options = BootOptions {
+                profile: qemu::Profile::Metal,
+                qmp: true,
+                ready_marker: toyos_build::bootlog::LOADER_HANDOFF_LINE,
+                ..Default::default()
+            };
+            metal_sim_argv_check(&qemu::profile_argv(&options))?;
+            let mut qemu =
+                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            let console = qemu.boot_log().to_string();
+            let lines: Vec<&str> = console.lines().collect();
+            let at = |line: &str| {
+                lines
+                    .iter()
+                    .position(|seen| seen.contains(line))
+                    .ok_or_else(|| format!("this loader never printed {line:?}\n{console}"))
+            };
+            let printed = at(toyos_build::bootlog::LOADER_HANDOFF_LINE)? + 1
+                - at(toyos_build::bootlog::LOADER_FIRST_LINE)?;
+
+            let dump = qemu.screendump();
+            let decoded = dump.text();
+            // A panel the kernel painted decodes wholly in the kernel's own
+            // font. Refused rather than counted: its rows would be the
+            // kernel's, and every count below would pass on them.
+            if !decoded.contains(common::screen::UNKNOWN) {
+                return Err(format!(
+                    "the panel decodes wholly in the kernel's font, so the kernel repainted it \
+                     before this dump and the loader's rows are gone\ndecoded screen:\n{decoded}"
+                ));
+            }
+            let bands = dump.text_row_bands();
+            // The firmware's own lines are above the loader's and can only add
+            // rows, so a panel with fewer rows than the loader printed lines is
+            // one that stopped drawing partway through it.
+            if bands < printed {
+                return Err(format!(
+                    "the loader put {printed} lines on the console and the panel carries \
+                     {bands} rows: the firmware's graphics console stopped drawing before the \
+                     handoff\n{console}"
+                ));
+            }
+            eprintln!(
+                "  [screen] the panel carries {bands} rows for the loader's {printed} lines"
+            );
             Ok(())
         }
         "screen_gop_firmware_mode" => {

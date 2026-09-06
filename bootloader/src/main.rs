@@ -16,7 +16,7 @@ use uefi::{
     proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID},
+    table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID},
 };
 use uefi_services::println;
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
@@ -413,7 +413,21 @@ struct GopInfo {
 fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let bs = system_table.boot_services();
     let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().ok()?;
-    let mut gop = bs.open_protocol_exclusive::<GraphicsOutput>(gop_handle).ok()?;
+    // Never `open_protocol_exclusive` here: EXCLUSIVE calls `Stop` on every
+    // driver holding this protocol BY_DRIVER, and the firmware's graphics
+    // console is one — so the panel dies at this line and no loader line after
+    // it is ever seen on a machine whose only channel is its screen.
+    //
+    // SAFETY: `GetProtocol` only hands back the interface pointer. This image
+    // is the sole agent running under boot services and installs, uninstalls
+    // and reinstalls nothing, so the interface stays live for the reads below.
+    let mut gop = unsafe {
+        bs.open_protocol::<GraphicsOutput>(
+            OpenProtocolParams { handle: gop_handle, agent: bs.image_handle(), controller: None },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
 
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();

@@ -14,6 +14,12 @@ use std::fmt;
 /// in `kernel/src/arch/syscall/machine.rs`'s `quiesce`.
 pub const REBOOTING: &str = "Rebooting.";
 
+/// The bootloader's first line and its last before the handoff. The GOP query
+/// sits between them, so a panel carrying the first and not the second is one
+/// the firmware's graphics console was disconnected from at that query.
+pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
+pub const LOADER_HANDOFF_LINE: &str = "Starting kernel...";
+
 /// The kernel's boot-phase record for the end of boot, in
 /// `kernel/src/log/mod.rs`'s `boot_phase!`.
 const COMPLETE: &str = "Boot: complete (";
@@ -80,6 +86,47 @@ mod tests {
         assert!(matches!(verdict(&carried_on), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&format!("[logd 0.9 cpu1] {REBOOTING}\n")), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
+    }
+
+    /// Whether `source` writes `line` as one whole Rust string literal: both
+    /// quotes, on one line. That is the only spelling this closes — a literal
+    /// split across lines, or built by concatenation, reds.
+    fn spells(source: &str, line: &str) -> bool {
+        let quoted = format!("\"{line}\"");
+        source.lines().any(|text| text.contains(&quoted))
+    }
+
+    #[test]
+    fn a_line_is_spelled_whole_or_it_is_not_spelled() {
+        assert!(spells("    println!(\"Starting kernel...\");", "Starting kernel..."));
+        // A longer literal that merely carries the words is not this line.
+        assert!(!spells("    println!(\"Starting kernel... now\");", "Starting kernel..."));
+        assert!(!spells("    println!(\"Not Starting kernel...\");", "Starting kernel..."));
+        // Concatenated, and so unfindable — which is the refusal, not a pass.
+        assert!(!spells("    println!(\"Starting \" \"kernel...\");", "Starting kernel..."));
+        assert!(!spells("Starting kernel...", "Starting kernel..."));
+    }
+
+    /// Nothing links the two crates: the loader is `no_std` and this is the
+    /// build system, so the two lines above are held to the loader's by
+    /// reading its source.
+    #[test]
+    fn the_loader_prints_the_lines_the_panel_is_read_for() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src");
+        let sources: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the loader's source directory")
+            .map(|entry| entry.expect("a directory entry").path())
+            .filter(|path| path.extension().is_some_and(|e| e == "rs"))
+            .map(|path| std::fs::read_to_string(&path).expect("a loader source file"))
+            .collect();
+        assert!(!sources.is_empty(), "{} holds no Rust source", dir.display());
+        for line in [LOADER_FIRST_LINE, LOADER_HANDOFF_LINE] {
+            assert!(
+                sources.iter().any(|text| spells(text, line)),
+                "no file under {} spells {line:?} whole",
+                dir.display()
+            );
+        }
     }
 
     #[test]
