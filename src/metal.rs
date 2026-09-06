@@ -585,6 +585,11 @@ fn entries_labelled(listing: &str, label: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Every boot entry id a listing carries under `label`.
+fn ids(listing: &str, label: &str) -> Vec<String> {
+    entries_labelled(listing, label).into_iter().map(|(id, _)| id).collect()
+}
+
 /// The id a create left behind, or the refusal it earned: the order it must not
 /// have moved, and the entry it must have made.
 fn entry_after_create(
@@ -760,13 +765,19 @@ impl Driver {
             // A dry run created nothing, so `0000` stands for the id the
             // firmware would have given it — the only value in the run that is
             // not the real run's.
-            Err(_) if self.dry_run => Ok("0000".to_string()),
+            Err(Refusal::BootEntry(_)) if self.dry_run => Ok("0000".to_string()),
             Err(refusal) => {
-                // Whichever way the create went, what it made does not stay: a
-                // refusal that left an entry behind is one the next run inherits.
-                for (id, _) in ours(&after).0 {
+                // Every entry this create added under the loop's own label,
+                // whatever partition it names: one left behind is one the next
+                // run inherits. A failure to clear it does not replace the
+                // refusal being answered.
+                let had: Vec<String> = ids(&before, &self.target.label);
+                for id in ids(&after, &self.target.label) {
+                    if had.contains(&id) {
+                        continue;
+                    }
                     let what = "deleting the entry this create made";
-                    self.as_root(what, Job::Delete, Some(&id), None)?;
+                    let _ = self.as_root(what, Job::Delete, Some(&id), None);
                 }
                 Err(refusal)
             }
@@ -1241,8 +1252,6 @@ mod tests {
             })
         );
 
-        // A create that made nothing, and one that made an entry for another
-        // partition, are both a boot this loop cannot name.
         assert!(matches!(
             entry_after_create(before, before, "ToyOS", guid),
             Err(Refusal::BootEntry(_))
