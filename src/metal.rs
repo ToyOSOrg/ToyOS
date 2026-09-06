@@ -43,11 +43,6 @@ const WIPEFS: &str = "/usr/sbin/wipefs";
 /// What the firmware loads off the stick's ESP.
 const LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
 
-/// [`LOADER`] as the installed rule spells it, pinned here so the four
-/// backslashes a match needs are a constant and not a count in a test.
-#[cfg(test)]
-const LOADER_RULE: &str = r"\\\\EFI\\\\BOOT\\\\BOOTX64.EFI";
-
 /// The three logind keys that keep a closed-lid machine awake.
 const LID_KEYS: &[&str] =
     &["HandleLidSwitch", "HandleLidSwitchExternalPower", "HandleLidSwitchDocked"];
@@ -77,6 +72,8 @@ pub enum Refusal {
     Landed { what: String, want: u64, got: u64 },
     /// `efibootmgr` named no four-hex-digit boot entry.
     BootEntry(String),
+    /// Creating the entry moved the firmware's boot order.
+    BootOrder { before: String, now: String },
     Sudo(String),
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
@@ -134,6 +131,11 @@ impl fmt::Display for Refusal {
             Self::BootEntry(saw) => {
                 write!(f, "efibootmgr named no four-hex-digit boot entry: {saw:?}")
             }
+            Self::BootOrder { before, now } => write!(
+                f,
+                "creating the boot entry moved BootOrder from {before:?} to {now:?}: this loop \
+                 buys one boot with --bootnext and leaves the order alone"
+            ),
             Self::Sudo(saw) => {
                 write!(f, "`sudo -n` on the machine did not answer: {saw}. Install the rule first")
             }
@@ -288,12 +290,10 @@ impl Word {
         Ok(Self::Is(text.to_string()))
     }
 
-    /// The word as `sudoers(5)` reads it. `,`, `:` and `=` carry meaning to the
-    /// sudoers lexer and a leading `^` makes the argument a regex, so each is
-    /// escaped once — but **a backslash is escaped twice, into four**, because
-    /// two readers consume it: the lexer takes one layer, and sudo then matches
-    /// an argument containing a backslash with `fnmatch(3)`, where `\x` is a
-    /// literal `x`.
+    /// The word as `sudoers(5)` reads it: `,`, `:`, `=` and a `^` escaped once,
+    /// and a backslash four times — the page's "you must escape the backslash
+    /// twice", for the two levels of escaping it names, the sudoers parser's
+    /// and `fnmatch(3)`'s.
     fn sudoers(&self) -> String {
         match self {
             Self::Is(text) => {
@@ -315,11 +315,14 @@ impl Word {
     }
 }
 
-/// The account name as the rule's *user* field, stricter than a command word:
-/// `,` and `:` separate a user list and a `Runas` there and `%` and `+` make
-/// the name a group and a netgroup, where an argument only escapes all four.
+/// The account name as the rule's *user* field, which [`Word::sudoers`] cannot
+/// render: a word there escapes a backslash once where an argument escapes it
+/// four times, and `(` and `)` are escaped there and not here. Every character
+/// the two would disagree about is refused, so the disagreement cannot arise —
+/// along with `,` and `:`, which separate a user list and a `Runas`, and `%`
+/// and `+`, which make the name a group and a netgroup.
 fn user_word(user: &str) -> Result<Word, Refusal> {
-    if user.contains([',', ':', '%', '+']) {
+    if user.contains([',', ':', '%', '+', '\\', '(', ')']) {
         return Err(Refusal::Word(user.to_string()));
     }
     Word::literal(user)
@@ -382,9 +385,13 @@ impl Target {
         match job {
             Job::Wipe => literal(&[WIPEFS, "--all", &node]),
             Job::Flash => literal(&[DD, &of, "bs=4M", "conv=fsync"]),
+            // `--create-only`, never `--create`: the latter "add[s] to
+            // bootorder" (efibootmgr(8)) at the top, so the boot after the one
+            // `--bootnext` bought picks ToyOS again, and a job list whose one
+            // job is a reboot then loops.
             Job::Create => literal(&[
                 EFIBOOTMGR,
-                "--create",
+                "--create-only",
                 "--disk",
                 &node,
                 "--part",
@@ -581,6 +588,18 @@ fn entries_labelled(listing: &str, label: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The firmware's boot order, out of `efibootmgr`'s `BootOrder:` line. Empty
+/// where there is none, which is a machine whose order this loop did not move
+/// either.
+fn boot_order(listing: &str) -> String {
+    listing
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("BootOrder:"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// systemd's *effective* logind policy, out of `systemd-analyze cat-config`:
 /// the last assignment of a key wins, and `Key = value` is legal spacing.
 fn lid_policy(text: &str) -> Result<(), Refusal> {
@@ -712,11 +731,18 @@ impl Driver {
             self.as_root("deleting a stale boot entry", Job::Delete, Some(&id), None)?;
         }
         self.as_root("creating the boot entry", Job::Create, None, None)?;
-        // Read back rather than parsed out of `--create`'s own output: the
+        // Read back rather than parsed out of the create's own output: the
         // firmware's list is what the next command names, and one parser reads
         // it. A dry run created nothing, so `0000` stands for the id it would
         // have been given — the only value here that is not the real run's.
         let after = self.ssh("listing boot entries", EFIBOOTMGR)?;
+        // **The entry this loop adds is one boot's, never an order's.** A
+        // create that reached BootOrder would outlive `--bootnext` and every
+        // later boot would pick ToyOS.
+        let (before, now) = (boot_order(&listing), boot_order(&after));
+        if before != now {
+            return Err(Refusal::BootOrder { before, now });
+        }
         match (ours(&after).0.first(), self.dry_run) {
             (Some((id, _)), _) => Ok(id.clone()),
             (None, true) => Ok("0000".to_string()),
@@ -1052,8 +1078,8 @@ mod tests {
                 "# toyos-metal: the whole of what the metal loop runs as root.\n\
                  t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
                  t14 ALL=(root) NOPASSWD: /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
-                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create --disk /dev/sda \
-                 --part 1 --label ToyOS --loader {LOADER_RULE}\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create-only --disk /dev/sda \
+                 --part 1 --label ToyOS --loader \\\\\\\\EFI\\\\\\\\BOOT\\\\\\\\BOOTX64.EFI\n\
                  t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --delete-bootnum --bootnum {hex}\n\
                  t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --bootnext {hex}\n\
                  t14 ALL=(root) NOPASSWD: /usr/bin/mount -o ro /dev/sda3 /home/t14/toyos-log\n\
@@ -1108,6 +1134,11 @@ mod tests {
             "t*",
             "t14 ALL=(root) NOPASSWD",
             "t14\t",
+            // The three a word escapes differently from an argument, so the
+            // argument rendering can never reach the user field.
+            r"t14\root",
+            "t14(x",
+            "t14)x",
         ] {
             let mut t = target();
             t.user = user.to_string();
@@ -1128,11 +1159,7 @@ mod tests {
         assert_eq!(escaped("a:b"), r"a\:b");
         assert_eq!(escaped("^a"), r"\^a");
         assert_eq!(Word::Hex4.sudoers(), "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]");
-        // Four per backslash, because the sudoers lexer eats one layer and
-        // `fnmatch(3)` the other; at two, sudo matched `EFIBOOTBOOTX64.EFI`
-        // and refused the argument every boot entry actually carries.
-        assert_eq!(escaped(LOADER), LOADER_RULE);
-        assert_eq!(LOADER_RULE.matches('\\').count(), 4 * LOADER.matches('\\').count());
+        assert_eq!(escaped(LOADER), r"\\\\EFI\\\\BOOT\\\\BOOTX64.EFI");
     }
 
     #[test]
@@ -1164,9 +1191,25 @@ mod tests {
         );
         assert_eq!(
             t.remote(Job::Create, None).unwrap(),
-            "sudo -n '/usr/bin/efibootmgr' '--create' '--disk' '/dev/sda' '--part' '1' \
+            "sudo -n '/usr/bin/efibootmgr' '--create-only' '--disk' '/dev/sda' '--part' '1' \
              '--label' 'ToyOS' '--loader' '\\EFI\\BOOT\\BOOTX64.EFI'"
         );
+    }
+
+    /// The order the entry must not reach: `--create` would have put ToyOS at
+    /// its head, and every boot after the one `--bootnext` bought would take it.
+    #[test]
+    fn the_boot_order_is_read_and_compared_whole() {
+        let before = "BootCurrent: 0001\nBootOrder: 0001,001D,0000\nBoot0001* Ubuntu\tHD(1)\n";
+        assert_eq!(boot_order(before), "0001,001D,0000");
+        // What `--create` does, and what the refusal is against.
+        let after = before.replace("BootOrder: 0001", "BootOrder: 0002,0001");
+        assert_ne!(boot_order(&after), boot_order(before));
+        // A machine with no order at all moved no order either.
+        assert_eq!(boot_order("BootCurrent: 0001\n"), "");
+        assert_eq!(boot_order(""), "");
+        assert!(!Refusal::BootOrder { before: String::new(), now: "0002".to_string() }
+            .about_the_boot());
     }
 
     #[test]
