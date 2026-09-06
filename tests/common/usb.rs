@@ -1386,14 +1386,9 @@ pub fn xhci_slow_connect(
     // `i8042_absent`'s arrangement, and the obligation is re-runnable by
     // anybody. It decides nothing: what is asserted is that the boot finished,
     // which is the `else` below.
-    let Some(boot_ms) = log
-        .split("Boot: complete (")
-        .nth(1)
-        .and_then(|rest| rest.split("ms)").next())
-    else {
+    let Some(boot_ms) = toyos_build::bootlog::boot_millis(&log) else {
         return Err(format!("the boot did not finish\n{log}"));
     };
-    let boot_ms = boot_ms.to_string();
     serial::Serial::named("boot console", log.as_str()).must_be_clean()?;
     let _ = std::fs::remove_file(&image);
 

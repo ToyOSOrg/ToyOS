@@ -1,5 +1,6 @@
 //! `toyos-metal` — the loop that flashes ToyOS to the T14's stick, boots it
-//! once, and reads the boot record back off the log partition.
+//! once, and answers with [`crate::bootlog`]'s verdict on what that boot wrote
+//! to the log partition.
 //!
 //! It runs on the development host and reaches the machine over `ssh`.
 //! [`Target::words`] is the one place a root command line is written — the
@@ -17,6 +18,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use crate::bootlog;
 use crate::image::LBA;
 
 const CONNECT_SECS: u64 = 10;
@@ -76,7 +78,8 @@ pub enum Refusal {
     Remote { what: String, status: String, stderr: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
-    NoBootRecord,
+    /// The log the boot left is not a passing boot's.
+    Log(bootlog::Unfit),
     Usage(String),
 }
 
@@ -84,7 +87,7 @@ impl Refusal {
     /// Whether the machine failed rather than the loop: the boot is the subject
     /// only once the stick is written and the reboot asked for.
     pub fn about_the_boot(&self) -> bool {
-        matches!(self, Self::Silent { .. } | Self::NoBootRecord)
+        matches!(self, Self::Silent { .. } | Self::Log(_))
     }
 }
 
@@ -142,9 +145,7 @@ impl fmt::Display for Refusal {
                 "the machine did not {what} within {secs} s; it may be sitting in ToyOS with its \
                  one boot already spent, which needs a hand on the power button"
             ),
-            Self::NoBootRecord => {
-                write!(f, "the log partition carries no `Boot: complete` record for this boot")
-            }
+            Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
             Self::Usage(why) => write!(f, "{why}"),
         }
     }
@@ -535,13 +536,6 @@ fn one_partition(
         sectors: out[0].lba_count(),
         guid: out[0].unique_guid,
     })
-}
-
-/// The kernel's own boot record, out of `Boot: complete (123ms)`. The QEMU
-/// harness judges the same line, so it reads it through here.
-pub fn boot_millis(log: &str) -> Option<u64> {
-    let tail = log.lines().find_map(|line| line.split("Boot: complete (").nth(1))?;
-    tail.split("ms)").next()?.parse().ok()
 }
 
 /// How many bytes `dd` says it copied, out of its own last line.
@@ -986,7 +980,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     println!("the machine answered ssh again after {back} s");
     let log = driver.read_log()?;
     print!("{log}");
-    boot_millis(&log).map(Some).ok_or(Refusal::NoBootRecord)
+    bootlog::verdict(&log).map(Some).map_err(Refusal::Log)
 }
 
 #[cfg(test)]
@@ -1182,20 +1176,13 @@ mod tests {
 
     #[test]
     fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
-        assert!(Refusal::NoBootRecord.about_the_boot());
+        assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
+        assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
         assert!(Refusal::Silent { what: "come back", secs: RETURN_SECS }.about_the_boot());
         assert!(!Refusal::Node("/dev/nvme0n1".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
         assert!(!Refusal::NoHome.about_the_boot());
-    }
-
-    #[test]
-    fn the_boot_record_is_the_kernels_own_line() {
-        assert_eq!(boot_millis("[kernel 1.151 cpu0] Boot: complete (1151ms)\n"), Some(1151));
-        assert_eq!(boot_millis("[kernel 0.084 cpu0] Boot: storage ready (84ms)\n"), None);
-        assert_eq!(boot_millis("Boot: complete (later)\n"), None);
-        assert_eq!(boot_millis(""), None);
     }
 
     #[test]

@@ -2514,14 +2514,8 @@ fn build_boot_image_with(
     );
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    toyos_build::build::build_test_image(
-        &compile::repo_root(),
-        &config_path,
-        kernel_features,
-        kernel_params,
-        quiet,
-        &extra_files,
-    )
+    let plan = toyos_build::build::Plan::new(&config_path, kernel_features, kernel_params);
+    toyos_build::build::build_test_image(&compile::repo_root(), &plan, quiet, &extra_files)
 }
 
 /// Build all binaries in a test crate.

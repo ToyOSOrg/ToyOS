@@ -2,6 +2,7 @@
 #[cfg(test)]
 pub mod actuatorstate;
 pub mod assets;
+pub mod bootlog;
 pub mod build;
 pub mod buildlock;
 pub mod ci;
