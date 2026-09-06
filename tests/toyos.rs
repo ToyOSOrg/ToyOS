@@ -607,6 +607,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("machine_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
+    ("loader_watchdog_arms", Sched::Parallel, Tier::Fast),
     // Its own boot, and the verdict is QEMU's stop reason inside the bound.
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
@@ -8800,6 +8801,7 @@ fn run_machine_test(
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
+        "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),
         "usb_storage_shapes" => usb::usb_storage_shapes(test_config, c_bins, rust_bins),

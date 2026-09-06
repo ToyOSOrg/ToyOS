@@ -226,6 +226,67 @@ pub fn watchdog_fed(
     Ok(())
 }
 
+/// The kernel's read-back above its own arm, in
+/// `kernel/src/drivers/watchdog.rs`: whole clauses, one per branch.
+const ARMED_ON_ARRIVAL: &str = "so the bootloader had already armed the timer";
+/// Unreachable from this suite: every guest that reaches the kernel's arm
+/// passed the parameter, and the loader read the same one first.
+const UNARMED_ON_ARRIVAL: &str = "so nothing had armed the timer";
+
+/// The tail of the loader's own arm line, which names the shipped bound and so
+/// tells it from the kernel's, whatever the port and the PCI ids turn out to be.
+fn loader_armed() -> String {
+    format!(
+        "armed for {}ms, and the kernel takes it over",
+        toyos_tco::bound_of(toyos_tco::TIMER)
+    )
+}
+
+/// The register value the loader wrote, as the kernel reports finding it.
+fn armed_on_arrival() -> String {
+    format!("TCO_TMR={} on arrival, {ARMED_ON_ARRIVAL}", toyos_tco::TIMER)
+}
+
+/// The loader arms the chipset's watchdog before it jumps, so the handoff is
+/// inside the bound.
+///
+/// What the kernel's read-back must report is the register value the loader
+/// wrote, never merely a running timer: `TCO_TMR_HLT` is clear out of reset on
+/// q35.
+pub fn loader_watchdog_arms(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let armed = BootOptions {
+        profile: qemu::Profile::Metal,
+        kernel_params: &[toyos_tco::PARAM],
+        ..Default::default()
+    };
+    let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, armed);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let line = boot.must_say(&loader_armed())?.to_string();
+    boot.must_say(&armed_on_arrival())?;
+    drop(qemu);
+
+    let idle = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::Metal, ..Default::default() },
+    );
+    let quiet = serial::Serial::boot(&idle);
+    quiet.must_be_clean()?;
+    quiet.must_not_say(&loader_armed())?;
+    quiet.must_not_say(ARMED_ON_ARRIVAL)?;
+    quiet.must_not_say(UNARMED_ON_ARRIVAL)?;
+    drop(idle);
+
+    eprintln!("  [power] the loader armed it and the kernel found it running: {}", line.trim());
+    Ok(())
+}
+
 fn starved() -> BootOptions {
     BootOptions {
         profile: qemu::Profile::Metal,
@@ -236,6 +297,12 @@ fn starved() -> BootOptions {
 }
 
 /// The line `arm` logs on q35 at the fast bound; both tests demand it first.
-const ARMED: &str = "watchdog: 8086:2918 TCO at 0x660 TCO_TMR=2";
+///
+/// The tail is what makes it the kernel's: the loader prints the same port and
+/// a `TCO_TMR=` of its own on every guest that passes the parameter, and
+/// `TCO_TMR=2` is a prefix of its `TCO_TMR=250`.
+const ARMED: &str =
+    "watchdog: 8086:2918 TCO at 0x660 TCO_TMR=2 — this machine resets if no scheduler pass runs \
+     for 2400ms";
 
 const FED_FOR: Duration = Duration::from_secs(20);

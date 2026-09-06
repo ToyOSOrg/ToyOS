@@ -999,11 +999,47 @@ pub fn declared_params(root: &Path) -> Vec<String> {
     names
 }
 
-/// Every string literal in `PARAMS`: anchored on the name and closed on `];`, so a reflow still reads and an unfound declaration is empty rather than guessed.
+/// Every name in `PARAMS`: anchored on the name and closed on `];`, so a reflow still reads and an unfound declaration is empty rather than guessed.
+///
+/// A name is a string literal there or `toyos_tco::PARAM`, the one constant the
+/// bootloader reads the same parameter out of. A row spelled any other way
+/// resolves to nothing, which the count below refuses rather than passing on
+/// the names it did resolve.
 fn params_of(text: &str) -> Vec<String> {
     let Some((_, body)) = text.split_once("pub const PARAMS") else { return Vec::new() };
     let Some((body, _)) = body.split_once("];") else { return Vec::new() };
-    body.split('"').skip(1).step_by(2).map(str::to_string).collect()
+    let mut names: Vec<String> = body.split('"').skip(1).step_by(2).map(str::to_string).collect();
+    names.extend(body.matches("toyos_tco::PARAM").map(|_| toyos_tco::PARAM.to_string()));
+    assert!(
+        names.len() == rows_of(body),
+        "`PARAMS` lists {} row(s) and this reads {} name(s) out of them: {names:?}",
+        rows_of(body),
+        names.len()
+    );
+    names
+}
+
+/// How many `(name, flag)` rows the list holds: an opening paren at the slice's
+/// own depth, so a paren inside a row is part of that row and not another.
+///
+/// The value's `&[`, not the type's, which is the last one before the rows.
+fn rows_of(body: &str) -> usize {
+    let Some((_, rows)) = body.rsplit_once("&[") else { return 0 };
+    let mut depth = 0usize;
+    let mut count = 0;
+    for c in rows.chars() {
+        match c {
+            '(' => {
+                if depth == 0 {
+                    count += 1;
+                }
+                depth += 1;
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    count
 }
 
 #[derive(Deserialize)]
@@ -1924,6 +1960,27 @@ mod tests {
             "and the same declaration reflowed",
         );
         assert!(params_of("static PARAMS: u8 = 0;").is_empty(), "a declaration it cannot read");
+        // The one path it resolves, and a path it does not.
+        assert_eq!(
+            params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[(toyos_tco::PARAM, &W)];"),
+            vec![toyos_tco::PARAM.to_string()]
+        );
+        // A paren inside a row is that row's, not another row's.
+        assert_eq!(
+            params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[(\"a (one)\", &A)];"),
+            vec!["a (one)".to_string()]
+        );
+        // A row it cannot read is refused rather than dropped, which the count
+        // is for: without it the two-row table below would read as one name.
+        for unreadable in [
+            "pub const PARAMS: &[(&str, &AtomicBool)] = &[(other::NAME, &W)];",
+            "pub const PARAMS: &[(&str, &AtomicBool)] = &[(\"a\", &A), (other::NAME, &W)];",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| params_of(unreadable)).is_err(),
+                "a row this cannot read passed: {unreadable}"
+            );
+        }
     }
 
     /// **An actuator is a boot parameter and never a kernel build.**

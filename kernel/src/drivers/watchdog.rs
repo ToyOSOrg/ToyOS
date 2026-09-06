@@ -8,26 +8,31 @@ use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use toyos_tco::{
     Chipset, TCO1_CNT, TCO1_CNT_HALT, TCO1_CNT_RUN, TCO2_STS, TCO_BOOT_STS, TCO_RLD,
-    TCO_SECOND_TO_STS, TCO_TMR, TCO_TMR_HLT,
+    TCO_SECOND_TO_STS, TCO_TMR, TCO_TMR_HLT, TIMER,
 };
 
 use crate::drivers::pci::PciDevice;
 use crate::log;
 use crate::time::Duration;
 
-const BOUND: Duration = Duration::from_secs(300);
 const FAST_BOUND: Duration = Duration::from_secs(3);
 const FEEDS_PER_BOUND: u64 = 4;
 
-/// Neither bound is a value this kernel can fail to have.
-const TIMER: u16 = match toyos_tco::timer_for(BOUND.millis()) {
-    Some(timer) => timer,
-    None => panic!("the shipped bound reaches no TCO timer"),
-};
+/// The fast bound is not a value this kernel can fail to have either.
 const FAST_TIMER: u16 = match toyos_tco::timer_for(FAST_BOUND.millis()) {
     Some(timer) => timer,
     None => panic!("the fast bound reaches no TCO timer"),
 };
+
+/// What the read-back above the arm says. Whole clauses, because a machine
+/// owner and a test read the same line and neither may have to parse a
+/// register.
+///
+/// **`TCO_TMR_HLT` alone answers nothing**: q35 leaves it clear out of reset,
+/// so a running timer is the state of a machine nothing has armed as well. The
+/// bootloader's arm is `TCO_TMR` holding the bound this tree arms at.
+const ARMED_ON_ARRIVAL: &str = "the bootloader had already armed the timer";
+const UNARMED_ON_ARRIVAL: &str = "nothing had armed the timer";
 
 /// When `tco-starve` starts starving: boot is long done by here, so a judge measures a reset after starvation and never a race with it.
 const STARVE_AFTER: Duration = Duration::from_secs(5);
@@ -70,6 +75,17 @@ pub fn init(devices: &[PciDevice]) {
 }
 
 fn arm(row: &Chipset, port: u16, timer: u16) {
+    // Read before anything here is written: the bootloader arms the same timer
+    // on the same port and hands over a machine already inside the bound, and
+    // this is the only place that can say whether it did.
+    let cnt = crate::arch::cpu::inw(port + TCO1_CNT);
+    let tmr = crate::arch::cpu::inw(port + TCO_TMR) & toyos_tco::TMR_MASK;
+    let already = cnt & TCO_TMR_HLT == 0 && tmr == TIMER;
+    log!(
+        "watchdog: TCO1_CNT={cnt:#06x} TCO_TMR={tmr} on arrival, so {}",
+        if already { ARMED_ON_ARRIVAL } else { UNARMED_ON_ARRIVAL }
+    );
+
     let stale = crate::arch::cpu::inw(port + TCO2_STS);
     if stale & (TCO_SECOND_TO_STS | TCO_BOOT_STS) != 0 {
         log!("watchdog: the last boot ended in a TCO reset (TCO2_STS={stale:#06x})");
