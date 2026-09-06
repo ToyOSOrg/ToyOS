@@ -513,11 +513,12 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
 /// switch and `mm::init`, when the boot map is the only mapping there is.
 ///
 /// A line, not a refusal: the kernel goes on booting either way, and what it
-/// loses is the panel or a parameter rather than the boot. This is the last
-/// place the answer can be said at all.
+/// loses is the panel or a parameter rather than the boot.
 fn report_reach(what: &str, extent: Option<(u64, u64)>) {
+    // `None` is an empty extent — no framebuffer, or no boot parameter — whose
+    // pointer names nothing and must not be reported as reachable.
     let Some((at, len)) = extent else {
-        println!("{what}: this machine has none");
+        println!("{what}: none");
         return;
     };
     match at.checked_add(len) {
@@ -546,11 +547,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
-    // Built here rather than after the exit, because this is the last place a
-    // refusal can be read: past `exit_boot_services` `println!` panics —
-    // uefi-services nulls the system table in its exit callback and `_print`
-    // unwraps it — and the panic handler's own `println!` panics again, so a
-    // refusal there is a silent hang on any machine.
+    // Before the exit: `_print` unwraps a system table uefi-services nulls in its exit callback, so `println!` past it panics.
     // SAFETY: `pt_mem` is the `PT_PAGES * 4096`-byte, 4096-aligned, zeroed
     // allocation above, and `PT_PAGES` (12) covers what `BOOT_MAP_BYTES` (4
     // GiB) needs: 1 PML4 + 2 PDPTs + up to 8 PDs, one PD per GiB — `size`
@@ -559,19 +556,22 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pml4_phys = unsafe { build_boot_page_tables(pt_mem, BOOT_MAP_BYTES) };
     println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
 
+    // Said before it is asserted: `assert!` panics through uefi-services, whose handler prints to the console alone.
     let kernel_phys = kernel.memory.as_ptr() as u64;
-    assert!(
-        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES),
-        "kernel image at {kernel_phys:#x}..+{:#x} does not fit the {BOOT_MAP_BYTES:#x}-byte boot map",
-        kernel.memory.len()
+    let kernel_fits =
+        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES);
+    println!(
+        "Kernel image: {kernel_phys:#x}+{:#x} {} the {BOOT_MAP_BYTES:#x}-byte boot map",
+        kernel.memory.len(),
+        if kernel_fits { "is inside" } else { "DOES NOT FIT" },
     );
+    assert!(kernel_fits, "the kernel image does not fit the boot map");
 
-    // The two pointers the kernel dereferences before it has page tables of its
-    // own, said while saying it still works. Tiger Lake puts a framebuffer
-    // above four gigabytes, and nothing constrains a firmware pool allocation
-    // to stay below it either.
     report_reach("Scanout", gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
-    report_reach("Boot parameter", Some((cmdline.as_ptr() as u64, cmdline.len() as u64)));
+    report_reach(
+        "Boot parameter",
+        (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64)),
+    );
 
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.

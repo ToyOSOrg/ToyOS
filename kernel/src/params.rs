@@ -11,6 +11,7 @@ pub const PARAMS: &[(&str, &AtomicBool)] =
 
 static WATCHDOG_NAMED: AtomicBool = AtomicBool::new(false);
 static EARLY_PANEL_NAMED: AtomicBool = AtomicBool::new(false);
+static PARSED: AtomicBool = AtomicBool::new(false);
 
 pub fn init(cmdline: &str) {
     for token in toyos_abi::boot::actuators(cmdline) {
@@ -18,6 +19,7 @@ pub fn init(cmdline: &str) {
             named.store(true, Ordering::Relaxed);
         }
     }
+    PARSED.store(true, Ordering::Relaxed);
 }
 
 pub fn claims(token: &str) -> bool {
@@ -28,8 +30,9 @@ pub fn watchdog() -> bool {
     WATCHDOG_NAMED.load(Ordering::Relaxed)
 }
 
-/// Repaint the panel after every record until the first boot phase. False
-/// until [`init`] runs, which is what keeps the records before it free.
+/// Every record before this ran repaints the panel: the boot parameter it reads
+/// is dereferenced through a mapping nothing has checked, and a fault there
+/// leaves no channel at all. After it, only a boot that named `early-panel`.
 pub fn early_panel() -> bool {
-    EARLY_PANEL_NAMED.load(Ordering::Relaxed)
+    !PARSED.load(Ordering::Relaxed) || EARLY_PANEL_NAMED.load(Ordering::Relaxed)
 }

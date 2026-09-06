@@ -216,10 +216,7 @@ static FB: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 /// over a fatal report; [`boot_checkpoint`] does release it.
 static PAINTING: AtomicBool = AtomicBool::new(false);
 
-/// Set from the moment a framebuffer is reachable until the first boot phase.
-/// In that window nothing else paints and a machine with no serial port has no
-/// other channel, so every record repaints rather than waiting for a
-/// checkpoint that a boot which stops there never reaches.
+/// Set from the moment a framebuffer is reachable until the first boot phase — the window in which nothing else paints.
 static EARLY: AtomicBool = AtomicBool::new(false);
 
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
@@ -651,12 +648,6 @@ pub fn boot_checkpoint() {
 }
 
 /// Repaint after a record, while the first boot phase is still ahead.
-///
-/// On the boot parameter because a repaint is a full-panel paint: 27 of them
-/// cost 34 ms of a 272 ms boot under QEMU, and the two metal figures the
-/// tracker carries for the same painter are 383 ms and 461 ms each. A boot
-/// that is not being diagnosed pays for neither — `params::early_panel` is
-/// false until `params::init`, so the records before it are free as well.
 pub fn early_checkpoint() {
     if EARLY.load(Ordering::Relaxed) && crate::params::early_panel() {
         repaint();

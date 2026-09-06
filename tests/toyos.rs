@@ -3574,14 +3574,13 @@ fn run_screen_test(
             Ok(())
         }
         "screen_early_panel" => {
-            // The window between `panic_console::arm` and the first
-            // `boot_phase!`: nothing else paints in it, so on a machine with no
-            // serial port a boot that stops there says nothing anywhere.
-            //
-            // `test-early-halt` and not `test-early-panic`: the panic path
-            // renders the panel itself, so a test that let it run would pass on
-            // a kernel whose early records never reached the glass.
-            const HALTED: &str = "test-early-halt: halted before the first boot phase";
+            // The guest halts here logging nothing, so the last record on the
+            // wire is `PAT:` and whatever is on the panel was painted at a
+            // record earlier than the one the boot waited for.
+            const LAST: &str = "PAT: IA32_PAT";
+            // What `arm`, `serial::init`, `actuator::init` and `pat::init` log,
+            // in order, and the whole of what a boot can have said by then.
+            const EARLY_RECORDS: usize = 4;
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -3590,15 +3589,13 @@ fn run_screen_test(
                     profile: qemu::Profile::Metal,
                     qmp: true,
                     kernel_params: &["test-early-halt", "early-panel"],
-                    ready_marker: HALTED,
+                    ready_marker: LAST,
                     ..Default::default()
                 },
             );
-            // Polled, not read once: `emit` drains the record to the console
-            // before it repaints, so the marker this boot waited on is on the
-            // wire a moment before the panel has it. The guest is halted, so
-            // the poll ends on the paint and never on a later one.
-            let dump = qemu.screendump_until(HALTED, Duration::from_secs(30));
+            // Polled, not read once: `emit` drains a record to the console
+            // before it repaints, so the marker is on the wire first.
+            let dump = qemu.screendump_until(LAST, Duration::from_secs(30));
             // The machine's panel, not the kernel's account of it: a geometry
             // read off the guest's own `GOP:` line would agree with a guest
             // that painted nothing.
@@ -3611,19 +3608,22 @@ fn run_screen_test(
             }
             let text = dump.text();
             print_screen(name, &text);
-            for want in ["panic console: armed", "PAT: IA32_PAT", HALTED] {
-                if !text.contains(want) {
-                    return Err(format!(
-                        "{want:?} is not on the panel of a guest halted before the first boot \
-                         phase, so nothing put the kernel's early records there\n\
-                         decoded screen:\n{text}"
-                    ));
-                }
+            // The count, not just the presence: one repaint of the whole tail
+            // and a repaint per record put the same lines up, and only the
+            // number says the window was painted as far back as its first
+            // record. `panic console: armed` carries the framebuffer address,
+            // which is the line this whole window exists to deliver.
+            let records = text.lines().filter(|line| line.contains("cpu0")).count();
+            if records != EARLY_RECORDS || !text.contains("panic console: armed") {
+                return Err(format!(
+                    "the panel holds {records} kernel records and wanted {EARLY_RECORDS}, \
+                     ending at {LAST:?} and beginning at `panic console: armed`\n\
+                     decoded screen:\n{text}"
+                ));
             }
             // What rules the other two painters out. `boot_checkpoint` would
             // have put its own `Boot:` record up with the rest, and the panic
-            // renderer would have put a panic up: neither ran, so the repaint
-            // under test is what painted this.
+            // renderer would have put a panic up: neither ran.
             for painter in ["Boot: ", "EARLY PANIC:"] {
                 if text.contains(painter) {
                     return Err(format!(
@@ -3632,10 +3632,7 @@ fn run_screen_test(
                     ));
                 }
             }
-            eprintln!(
-                "  [panel] {} of the kernel's early records on the {panel:?} panel, no boot phase",
-                text.lines().filter(|l| l.contains("cpu0")).count()
-            );
+            eprintln!("  [panel] {records} kernel records on the {panel:?} panel, no boot phase");
             Ok(())
         }
         "screen_log_absent" => {

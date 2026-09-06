@@ -51,11 +51,7 @@ built on the first.
    loop's admission check: no image is flashed that has not passed it.
 4. **The first milestone is one unattended boot with a log back** — flashed,
    booted, verdict read, machine returned to Linux, nobody in the room.
-   The 2026-09-06 attempt stopped with the loader's `Applied 4275 relocations`
-   still the last thing on the panel and TOYOS-LOG empty, so what is built next
-   is the `early-panel` boot parameter — every kernel record repaints the panel
-   until the first `boot_phase!` — and a loader that builds its page tables
-   before `ExitBootServices`, where a refusal can still print.
+   The 2026-09-06 attempt stopped before the kernel logged anything anywhere.
 
 `src/bootlog.rs` holds the reset word the verdict looks for, and the kernel
 spells it a second time at `kernel/src/arch/syscall/machine.rs`'s `quiesce`:

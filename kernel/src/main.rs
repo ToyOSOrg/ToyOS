@@ -273,10 +273,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         panic!("test-early-panic: on-screen console check");
     }
 
-    // Halts rather than panicking: the panic path paints the panel itself, so a
-    // boot that ends there says nothing about what put the log up before it.
     if actuator::test_early_halt() {
-        log!("test-early-halt: halted before the first boot phase");
         cpu::halt();
     }
 
