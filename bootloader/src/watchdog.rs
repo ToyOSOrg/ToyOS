@@ -4,8 +4,10 @@
 //! at the same [`toyos_tco::TIMER`] — but only once it is up, and this covers
 //! the span before that.
 //!
-//! `TCO2_STS` is neither read nor written: whether the last boot ended in a TCO
-//! reset is latched there and the kernel is the one place that reports it.
+//! `TCO2_STS` is read and never written: whether the last boot ended in a TCO
+//! reset is latched there and the kernel is the one place that clears it, but a
+//! boot whose kernel never reaches its own arm still owes the value, and this
+//! file is the only channel such a boot has.
 //!
 //! Every machine this cannot arm is refused by name on the console and boots
 //! anyway.
@@ -14,7 +16,9 @@ use core::mem::{align_of, size_of};
 use core::ptr::read_volatile;
 
 use toyos_acpi::Phys;
-use toyos_tco::{Chipset, TCO1_CNT, TCO1_CNT_RUN, TCO_RLD, TCO_TMR, TCO_TMR_HLT};
+use toyos_tco::{
+    Chipset, TCO1_CNT, TCO1_CNT_RUN, TCO1_STS, TCO2_STS, TCO_RLD, TCO_TMR, TCO_TMR_HLT,
+};
 use uefi::prelude::*;
 use uefi::table::boot::{MemoryDescriptor, PAGE_SIZE};
 
@@ -95,7 +99,51 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
         toyos_tco::TIMER,
         toyos_tco::bound_of(toyos_tco::TIMER)
     );
+    report(system_table, port, cnt);
 }
+
+/// What the block holds once it is armed, as whole words.
+///
+/// Whole words and not decoded bits: `TCO_TMR_HLT` is the only bit in here this
+/// tree has a citation for, and a machine that stays up under an armed timer is
+/// answered by whatever gates the reset — so the loader prints the registers
+/// and leaves the decoding to a reader with the datasheet, rather than testing a
+/// guessed bit position and reporting a guess as a finding.
+///
+/// The second read of `TCO_RLD` is the whole question "does this timer count at
+/// all", which no single read answers: one tick is 600 ms, so the stall is one
+/// tick plus a margin. It is spent inside the bound it is measuring, and the
+/// loader's remaining work is the page tables and the jump.
+fn report(system_table: &SystemTable<Boot>, port: u16, cnt: u16) {
+    let rld = inw(port + TCO_RLD);
+    let tmr = inw(port + TCO_TMR);
+    let sts1 = inw(port + TCO1_STS);
+    let sts2 = inw(port + TCO2_STS);
+    println!(
+        "watchdog: read back TCO_RLD={rld:#06x} TCO_TMR={tmr:#06x} TCO1_CNT={cnt:#06x} \
+         TCO1_STS={sts1:#06x} TCO2_STS={sts2:#06x}"
+    );
+
+    system_table.boot_services().stall(TICK_STALL_MICROS);
+    let moved = inw(port + TCO_RLD);
+    if moved == rld {
+        println!(
+            "watchdog: TCO_RLD still reads {moved:#06x} after {}ms, so this timer is not counting \
+             and no bound it was armed with can expire",
+            TICK_STALL_MICROS / 1_000
+        );
+    } else {
+        println!(
+            "watchdog: TCO_RLD went {rld:#06x} -> {moved:#06x} over {}ms, so the timer counts and \
+             what a machine that stays up owes is the reset gate: {}",
+            TICK_STALL_MICROS / 1_000,
+            toyos_tco::RESET_GATE_IS_OUTSIDE_THIS_BLOCK,
+        );
+    }
+}
+
+/// One 600 ms tick plus a margin, so a counting timer is seen to have moved.
+const TICK_STALL_MICROS: usize = 700_000;
 
 /// The first function on bus 0 a row names, with the two config words that row
 /// reads. Bus 0, because the LPC bridge and the SMBus function both live there

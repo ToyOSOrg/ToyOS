@@ -306,6 +306,14 @@ pub fn loader_watchdog_arms(
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let line = boot.must_say(&loader_armed())?.to_string();
+    // The read-back is what a machine with no serial port answers with, so the
+    // guest that has one is where it is proven to print at all.
+    boot.must_say("watchdog: read back TCO_RLD=")?;
+    // q35 is the positive control for the one question a single read cannot
+    // answer: a timer that is armed and running has moved by one tick. A T14
+    // that prints the other branch is a chipset that never counts, not a
+    // loader that never armed.
+    let counts = boot.must_say("so the timer counts")?.to_string();
     boot.must_say(&armed_on_arrival())?;
     drop(qemu);
 
@@ -323,6 +331,7 @@ pub fn loader_watchdog_arms(
     drop(idle);
 
     eprintln!("  [power] the loader armed it and the kernel found it running: {}", line.trim());
+    eprintln!("  [power] {}", counts.trim());
     Ok(())
 }
 

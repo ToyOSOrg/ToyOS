@@ -33,10 +33,35 @@ pub fn init(hpet_base: u64) {
     let calibration_ns = CALIBRATION.nanos();
     let calibration_hpet_ticks = calibration_ns * 1_000_000 / hpet_period_fs;
 
+    log!(
+        "clock: HPET at {:#x} enabled (period={}fs), calibrating the TSC over {}ms",
+        hpet_base,
+        hpet_period_fs,
+        calibration_ns / 1_000_000,
+    );
+
     let hpet_start = hpet.read_u64(HPET_COUNTER);
     let tsc_start = cpu::rdtsc();
     let hpet_target = hpet_start + calibration_hpet_ticks;
-    while hpet.read_u64(HPET_COUNTER) < hpet_target {}
+    // A main counter that does not advance is a wedge with no channel: this is
+    // the boot's last wait before it has a clock, so the bound is counted in
+    // TSC cycles and the refusal names the register that stood still. The
+    // budget converts to seconds only against a TSC frequency this does not
+    // know yet, so it is stated as its own unit: far past the calibration on
+    // every machine that keeps time, finite on every machine that does not.
+    const STALL_BUDGET_CYCLES: u64 = 1 << 34;
+    while hpet.read_u64(HPET_COUNTER) < hpet_target {
+        assert!(
+            cpu::rdtsc().wrapping_sub(tsc_start) <= STALL_BUDGET_CYCLES,
+            "clock: the HPET main counter at {:#x} did not advance past {} in {} TSC cycles \
+             (it reads {}, the target is {}), so this machine offers no clock to calibrate against",
+            hpet_base,
+            hpet_start,
+            STALL_BUDGET_CYCLES,
+            hpet.read_u64(HPET_COUNTER),
+            hpet_target,
+        );
+    }
     let tsc_end = cpu::rdtsc();
     let hpet_end = hpet.read_u64(HPET_COUNTER);
 

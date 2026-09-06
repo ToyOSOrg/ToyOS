@@ -583,7 +583,13 @@ pub fn init_bsp(lapic_id: u32) {
     // SAFETY: `load_gdt`'s once-per-CPU contract — this is the BSP's call; `init_ap` is every AP's.
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(0);
+    // A step with no record of its own is invisible on a machine whose only
+    // channel is the panel: the last record painted is the whole of what a stop
+    // says, so each step between `control_regs`' line and this function's own
+    // gets one before it is taken.
+    log!("percpu: cpu0 gdt loaded and control registers applied; the FPU's initial state is next");
     super::fpu::init();
+    log!("percpu: cpu0 FPU initial state accepted; gs base and the per-CPU log path are next");
 
     // SAFETY: the write that makes `gs:` valid on the BSP; `ptr`'s `&mut` ended at `load_gdt` above, so this hands the CPU its only reference.
     unsafe { cpu::wrmsr(MSR_GS_BASE, ptr as u64) };

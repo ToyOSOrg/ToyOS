@@ -12,9 +12,26 @@
 
 /// Offsets from the block's base port.
 pub const TCO_RLD: u16 = 0x00;
+/// The first expiry's own latch, the pair of [`TCO2_STS`]; read, never written
+/// here, because what gates the reset is read as whole words rather than tested
+/// a bit at a time (see [`RESET_GATE_IS_OUTSIDE_THIS_BLOCK`]).
+pub const TCO1_STS: u16 = 0x04;
 pub const TCO2_STS: u16 = 0x06;
 pub const TCO1_CNT: u16 = 0x08;
 pub const TCO_TMR: u16 = 0x12;
+
+/// Why an armed timer whose `TCO_TMR_HLT` reads back clear can still never
+/// reset the machine, and why nothing in this tree writes the bit that would.
+///
+/// The second expiry reboots only while the PCH's `NO_REBOOT` is clear, and
+/// that bit is not in this block: it lives in the power-management controller's
+/// own space, at an address no source in this tree cites. Writing a guessed
+/// offset there is an arbitrary MMIO write on somebody's laptop, so this tree
+/// reads what it can name and says what it cannot. The T14 is the standing
+/// case: armed at `TCO_TMR=8` with the halt bit clear, and never reset.
+pub const RESET_GATE_IS_OUTSIDE_THIS_BLOCK: &str =
+    "NO_REBOOT is in the PMC, not this block, and no datasheet text here names its address, so \
+     it is unread and unwritten";
 
 /// `TCO2_STS`'s two bits are how a chipset that reset the machine last time
 /// says it was this timer that did it.
