@@ -65,10 +65,6 @@ pub const FIRMWARE_BOUND_MS: u64 = 60_000;
 /// while a job never finishes is no wedge to it and nothing else ends the boot.
 pub const JOB_BOUND_MS: u64 = 60_000;
 
-/// What the runner says when [`JOB_BOUND_MS`] expires with a job still running.
-/// Declared here because the writer is a guest program and the reader is the
-/// harness, and a hand-copied line is two spellings of one fact.
-pub const JOB_DEADLINE_SAID: &str = "test-runner: the job list did not finish within";
 
 /// [`BOUND_MS`]'s timer, which is neither a value this tree can fail to have
 /// nor one the hardware would ignore.

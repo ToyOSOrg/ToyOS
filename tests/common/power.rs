@@ -109,7 +109,7 @@ pub fn metal_job_reboot(
     drain.must_say("===TEST_START reboot===")?;
     // The control for `job_deadline_reboots`: a list that finishes inside the
     // bound is ended by its own last job and never by the deadline.
-    drain.must_not_say(toyos_tco::JOB_DEADLINE_SAID)?;
+    drain.must_not_say(bootlog::JOB_DEADLINE_SAID)?;
     drain.must_say(REBOOTING)?;
     returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
     drop(qemu);
@@ -158,9 +158,6 @@ pub fn metal_job_reboot(
 /// A job list that never finishes ends the boot anyway, on the runner's own
 /// deadline: the kernel is alive and its scheduler passes keep feeding the
 /// chipset, so no watchdog is what fires here.
-///
-/// `metal_job_reboot` is the control — the same shape whose job *does* finish,
-/// and which reboots without the line this one waits for.
 pub fn job_deadline_reboots(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -183,12 +180,11 @@ pub fn job_deadline_reboots(
 
     let drain = serial::Serial::named("deadline drain", tail.as_str());
     drain.must_be_clean()?;
-    drain.must_say("===TEST_START park===")?;
-    // The writer's own constant, and the job it names: a deadline that fired
-    // without saying which job was running answers nothing on a machine whose
-    // only channel is this log.
-    drain.must_say(toyos_tco::JOB_DEADLINE_SAID)?;
-    drain.must_say("park was running")?;
+    drain.must_say("===TEST_START spin===")?;
+    // A deadline that fired without naming the job it was inside answers
+    // nothing to whoever reads the console afterwards.
+    drain.must_say(bootlog::JOB_DEADLINE_SAID)?;
+    drain.must_say("spin was running")?;
     drain.must_say(REBOOTING)?;
     returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
 

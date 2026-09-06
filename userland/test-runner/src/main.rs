@@ -28,15 +28,7 @@ const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
     ("log-gate", log_gate::run),
     ("log-close", log_close::run),
     ("kbd-close", kbd_close::run),
-    ("park", park),
 ];
-
-/// A job that never finishes, which is the case the deadline below exists for.
-fn park(_cap: Option<&SysCap>) -> i32 {
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
-}
 
 /// The job the runner is inside, and whether the list got through: written by
 /// the loop, read by the deadline watching it.
@@ -69,6 +61,9 @@ fn main() {
         jobs.remove(0);
     }
     if !jobs.is_empty() {
+        // Named before the watcher exists, so a boot slower than its own bound
+        // still has a job to name when the deadline fires.
+        *RUNNING.lock().expect("nothing has locked this yet") = jobs[0].clone();
         deadline(bound_ms, cap.as_ref());
         for job in &jobs {
             // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
@@ -92,16 +87,13 @@ fn main() {
     }
 }
 
-/// Watch the job list for `bound_ms` **from boot**, and hand the machine back to
-/// the firmware if it has not got through.
+/// Watch the job list for `bound_ms` measured from boot, which is the only
+/// bound over a kernel that is alive while a job never finishes.
 ///
-/// A boot whose job never finishes is not a wedge to the chipset — the kernel is
-/// alive and its scheduler passes keep feeding the TCO — so this is the only
-/// bound over that case, and it is a thread because the loop it watches is
-/// blocked inside a job.
-///
-/// `toyos_abi::syscall::clock_nanos` is nanoseconds since boot, so the deadline
-/// covers the boot before this program as well as the jobs after it.
+/// **The line below is console output and reaches no log record**: a userland
+/// `println!` is a write to a `ConsoleObject` and `logd` never sees it, so on a
+/// machine with no serial port the evidence that this fired is the kernel's own
+/// reboot line and the boot's elapsed time, not this.
 fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
     let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) else {
         // A boot list with no way back to the firmware would sit here forever
@@ -118,13 +110,15 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
             return;
         }
         let job = RUNNING.lock().map(|job| job.clone()).unwrap_or_default();
-        println!("{} {bound_ms} ms; {job} was running", toyos_tco::JOB_DEADLINE_SAID);
+        println!("test-runner: the job list did not finish within {bound_ms} ms; {job} was running");
         let _ = io::stdout().flush();
-        power.reboot();
+        fatal(&format!("the reboot was refused: {:?}", power.reboot()));
     });
 }
 
-/// Say why and end the boot, for the job path where no host is listening.
+/// Say why, on a console that may have nobody on it, and end this process —
+/// which on the job path ends the boot, because the runner is what init waits
+/// on.
 fn fatal(why: &str) -> ! {
     println!("test-runner: {why}");
     let _ = io::stdout().flush();

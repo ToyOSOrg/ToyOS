@@ -1,11 +1,9 @@
-# The job list that never finishes. `park` runs forever, so nothing but the
-# runner's own deadline ends this boot — the kernel stays alive and its
-# scheduler passes keep feeding the chipset's timer, which is the case no
-# watchdog covers.
+# The job list that never finishes: `spin` is the toybox applet whose whole body
+# is `loop {}`, so nothing but the runner's own deadline ends this boot.
 #
-# `--bound-ms` is the one argument that is not a job. The T14 leaves the bound
-# at `toyos_tco::JOB_BOUND_MS`; this shortens it because the fast tier's ceiling
-# is ten seconds, the way `tco-fast` shortens the chipset's.
+# `--bound-ms` is the one argument that is not a job. The T14 leaves the bound at
+# `toyos_tco::JOB_BOUND_MS`; this shortens it for the suite's ceiling, the way
+# `tco-fast` shortens the chipset's.
 [boot]
 start = ["logd", "test-runner"]
 
@@ -13,10 +11,11 @@ start = ["logd", "test-runner"]
 syscap = ["logread"]
 
 [programs.test-runner]
-args = ["--bound-ms=3000", "park"]
+args = ["--bound-ms=3000", "spin"]
 syscap = ["dup", "power"]
 
 [programs.toybox]
 
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"
+"bin/spin" = "/system/bin/toybox"
