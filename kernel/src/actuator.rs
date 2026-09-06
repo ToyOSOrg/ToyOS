@@ -333,13 +333,10 @@ actuators! {
     /// Write through a page cache over a view that does not start at block 0, and say where on the device the bytes landed.
     page_cache_partition_offset = "pc-partition-offset";
 
-    /// Arm the chipset's TCO watchdog; `watchdog_fed` is the control it needs.
-    watchdog = "tco-arm";
-
-    /// Arm it at seconds rather than minutes, so a guest run reaches the reset.
+    /// Arm the watchdog at seconds rather than minutes, so a guest reaches the reset.
     watchdog_fast = "tco-fast";
 
-    /// Stop feeding it once the machine is up, which is what a wedge looks like to the chipset.
+    /// Stop feeding it once boot is done, which is what a wedge looks like to the chipset.
     watchdog_starve = "tco-starve";
 }
 
@@ -362,7 +359,7 @@ static ARMED: [AtomicU64; ARM_WORDS] = [const { AtomicU64::new(0) }; ARM_WORDS];
 #[cfg(feature = "boot-actuators")]
 pub fn init(cmdline: &str) {
     let mut armed = [0u64; ARM_WORDS];
-    for token in toyos_abi::boot::actuators(cmdline) {
+    for token in toyos_abi::boot::actuators(cmdline).filter(|t| !crate::params::claims(t)) {
         arm(&mut armed, token);
     }
     for (name, implied) in IMPLIES {
@@ -401,7 +398,7 @@ const fn at(index: usize) -> (usize, u64) {
 /// Refuses any actuator: a kernel with none must not boot looking like one that was given none.
 #[cfg(not(feature = "boot-actuators"))]
 pub fn init(cmdline: &str) {
-    let mut named = toyos_abi::boot::actuators(cmdline);
+    let mut named = toyos_abi::boot::actuators(cmdline).filter(|t| !crate::params::claims(t));
     assert!(
         named.next().is_none(),
         "this kernel carries no actuators and was handed the boot parameter {cmdline:?}"

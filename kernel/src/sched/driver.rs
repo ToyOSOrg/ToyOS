@@ -502,8 +502,6 @@ pub fn pass(dispose: Dispose) {
     // posts is in the run queue by the time the pass chooses.
     crate::object::drain_zero_handles();
     let now = HW.now();
-    // Reaching here is the whole of what the chipset watchdog is told about this
-    // machine's health, so it is fed from the pass and from nowhere else.
     crate::drivers::watchdog::feed(now.0);
     #[cfg(feature = "heap-sweep")]
     maybe_sweep(now);

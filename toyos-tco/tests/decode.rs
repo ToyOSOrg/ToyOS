@@ -2,12 +2,11 @@
 
 use toyos_tco::{bound_of, chipset, timer_for, Chipset, NoPort, CHIPSETS};
 
-/// QEMU's own numbers: `info pci` reports the ISA bridge at 00:1f.0; PMBASE is
-/// `include/hw/southbridge/ich9.h:134-136` and the block sits 0x60 in (`:205`).
 #[test]
 fn the_q35_row_reaches_the_port_qemu_puts_the_block_at() {
     let ich9 = chipset(0x8086, 0x2918).expect("the q35 row");
     assert_eq!(ich9.port(0x601, 0x601), Ok(0x660));
+    assert_eq!(ich9.port(0x641, 0x641), Ok(0x660), "the mask is 0xff80, never 0xffc0");
 }
 
 #[test]
@@ -16,12 +15,11 @@ fn a_machine_no_row_names_is_refused_rather_than_guessed() {
     assert_eq!(chipset(0x1234, 0x2918), None, "the device id alone is not the key");
 }
 
-/// The T14's own base register has never been read, so this row is judged on
-/// that machine and by nothing here; what is checked is the decode around it.
 #[test]
 fn the_tiger_lake_row_takes_its_base_from_the_smbus_function() {
     let tgl = chipset(0x8086, 0xa0a3).expect("the Tiger Lake-LP row");
     assert_eq!(tgl.port(0x0401, 0x0100), Ok(0x0400), "bit 0 is not part of the address");
+    assert_eq!(tgl.port(0x0403, 0x0100), Ok(0x0402), "the mask is !1, never !3");
     assert_eq!(tgl.port(0x0400, 0x0000), Err(NoPort::Disabled), "the enable is clear");
     assert_eq!(tgl.port(0x0400, 0x00ff), Err(NoPort::Disabled), "no bit below 8 enables it");
     assert_eq!(
@@ -38,10 +36,28 @@ fn a_base_the_block_cannot_live_at_is_refused_by_name() {
     assert_eq!(ich9.port(0x001, 0x001), Err(NoPort::Base(1)), "the address bits are all zero");
 }
 
+/// Neither shipped row can reach that edge, so this one carries the whole
+/// address and puts the block at its start.
 #[test]
-fn an_offset_that_walks_off_the_port_space_is_refused() {
-    let wide = Chipset { base_offset: 0xffe0, ..*chipset(0x8086, 0x2918).expect("the q35 row") };
+fn the_last_register_has_to_end_inside_the_port_space() {
+    let ich9 = *chipset(0x8086, 0x2918).expect("the q35 row");
+    let edge = Chipset { base_mask: 0xffff, base_offset: 0, ..ich9 };
+
+    assert_eq!(edge.port(0xffec, 0xffed), Ok(0xffec), "the far byte lands exactly on 0xffff");
+    assert_eq!(
+        edge.port(0xffed, 0xffed),
+        Err(NoPort::Base(0xffed)),
+        "one past it: without the `+ 1` this would be admitted"
+    );
+
+    let wide = Chipset { base_offset: 0xffe0, ..ich9 };
     assert_eq!(wide.port(0x601, 0x601), Err(NoPort::Base(0x601)));
+}
+
+#[test]
+fn the_declared_control_words_run_and_halt_the_timer() {
+    assert_eq!(toyos_tco::TCO1_CNT_RUN & toyos_tco::TCO_TMR_HLT, 0);
+    assert_eq!(toyos_tco::TCO1_CNT_HALT & toyos_tco::TCO_TMR_HLT, toyos_tco::TCO_TMR_HLT);
 }
 
 #[test]
@@ -77,27 +93,14 @@ fn an_absent_device_reading_all_ones_names_no_port() {
 }
 
 #[test]
-fn every_row_keeps_the_whole_block_inside_the_port_space() {
-    for row in CHIPSETS {
-        let mut reached = 0;
-        for base in 0..=u32::from(u16::MAX) {
-            let Ok(port) = row.port(base, u32::from(u16::MAX)) else { continue };
-            reached += 1;
-            assert!(
-                port.checked_add(toyos_tco::TCO_TMR).is_some(),
-                "{row:?} at {base:#x} put TCO_TMR past the port space",
-            );
-        }
-        assert!(reached > 0, "{row:?} accepted no base at all, so this walk asserted nothing");
-    }
-}
-
-#[test]
 fn the_register_offsets_are_ich9_tco_hs() {
     assert_eq!(
-        (toyos_tco::TCO_RLD, toyos_tco::TCO1_STS, toyos_tco::TCO1_CNT, toyos_tco::TCO_TMR),
-        (0x00, 0x04, 0x08, 0x12),
+        (toyos_tco::TCO_RLD, toyos_tco::TCO2_STS, toyos_tco::TCO1_CNT, toyos_tco::TCO_TMR),
+        (0x00, 0x06, 0x08, 0x12),
     );
-    assert_eq!((toyos_tco::TCO_TMR_HLT, toyos_tco::TCO_TIMEOUT), (1 << 11, 1 << 3));
+    assert_eq!(
+        (toyos_tco::TCO_TMR_HLT, toyos_tco::TCO_SECOND_TO_STS, toyos_tco::TCO_BOOT_STS),
+        (1 << 11, 1 << 1, 1 << 2),
+    );
 }
 

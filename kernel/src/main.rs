@@ -26,6 +26,7 @@ mod drivers;
 #[macro_use]
 mod log;
 mod actuator;
+mod params;
 mod mm;
 mod panic;
 
@@ -255,6 +256,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     };
     // Both readings of it here: the parameter is in no reserved region, so
     // `mm::init` may hand that memory out and neither may hold a borrow.
+    params::init(cmdline);
     actuator::init(cmdline);
     rootfs::init(cmdline);
 

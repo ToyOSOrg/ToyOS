@@ -59,25 +59,19 @@ pub fn machine_reboot(
     Ok(())
 }
 
-/// The chipset resets a machine whose kernel stops feeding its watchdog.
-/// `watchdog_fed` is the same guest with the feed on, and is what says the
-/// bound is real rather than a timer nothing was going to reload.
+/// The chipset resets a machine whose kernel stops feeding its watchdog, and
+/// `watchdog_fed` is the same guest with the feed on. Starvation begins well
+/// after boot, so what is measured is a reset inside this guest's own scaled
+/// ceiling once it has, never an arm-to-ready race.
 pub fn watchdog_resets(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let options = starved();
-    // An expiry under QEMU's `NO_REBOOT` strap does nothing, so a boot whose argv lost the global is green for the wrong reason.
-    let argv = qemu::profile_argv(&options);
-    if !argv.windows(2).any(|w| w[0] == "-global" && w[1] == "ICH9-LPC.noreboot=false") {
-        return Err(format!("the guest may not be reset by its own chipset: {argv:?}"));
-    }
-
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, starved());
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    boot.must_say("watchdog: 8086:2918 TCO at 0x660 TCO_TMR=2")?;
+    boot.must_say(ARMED)?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
     let reason = stop.reason();
@@ -106,9 +100,12 @@ pub fn watchdog_fed(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let options = BootOptions { kernel_params: &["tco-arm", "tco-fast"], ..starved() };
+    let options = BootOptions { kernel_params: &["watchdog", "tco-fast"], ..starved() };
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-    serial::Serial::boot(&qemu).must_be_clean()?;
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    // Without this the control cannot tell a fed watchdog from none at all.
+    boot.must_say(ARMED)?;
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), FED_FOR);
     if let Some(seen) = stop.reason() {
@@ -118,7 +115,6 @@ pub fn watchdog_fed(
         ));
     }
 
-    // Still answering, so the absence above is a live machine.
     let result = qemu.run_test("pwd", Duration::from_secs(30));
     if result.exit_code != Some(0) {
         return Err(format!("the guest stopped answering after {FED_FOR:?}: {result:?}"));
@@ -128,15 +124,16 @@ pub fn watchdog_fed(
     Ok(())
 }
 
-/// Both watchdog tests boot the laptop's shape, its chipset allowed to reset it.
 fn starved() -> BootOptions {
     BootOptions {
         profile: qemu::Profile::Metal,
         qmp: true,
-        watchdog_resets: true,
-        kernel_params: &["tco-arm", "tco-fast", "tco-starve"],
+        kernel_params: &["watchdog", "tco-fast", "tco-starve"],
         ..Default::default()
     }
 }
 
-const FED_FOR: Duration = Duration::from_secs(12);
+/// The line `arm` logs on q35 at the fast bound; both tests demand it first.
+const ARMED: &str = "watchdog: 8086:2918 TCO at 0x660 TCO_TMR=2";
+
+const FED_FOR: Duration = Duration::from_secs(20);

@@ -603,7 +603,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // Its own boot, and the verdict is QEMU's stop reason.
     ("watchdog_resets", Sched::Parallel, Tier::Fast),
     // Serial: its verdict is that nothing happened for a span of host clock.
-    // Fast only to buy its one measured run; the re-tier to Nightly carries its relegation row.
     ("watchdog_fed", Sched::Serial, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is

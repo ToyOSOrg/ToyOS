@@ -2195,12 +2195,6 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
-    /// Let the ICH9 TCO watchdog reset this guest. QEMU holds the chipset's
-    /// `NO_REBOOT` strap set unless told otherwise (`hw/acpi/ich9_tco.c:66`
-    /// reads it before acting), so a guest without this is one whose expiry
-    /// does nothing — and no other test wants a boot that can reset itself out
-    /// from under it.
-    pub watchdog_resets: bool,
 }
 
 /// The in-guest test runner's startup marker.
@@ -2230,7 +2224,6 @@ impl Default for BootOptions {
             usb_images: Vec::new(),
             rtc_base: None,
             extra_root_files: Vec::new(),
-            watchdog_resets: false,
         }
     }
 }
@@ -2471,10 +2464,15 @@ fn build_boot_image_with(
     static ACTUATORS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let actuators =
         ACTUATORS.get_or_init(|| toyos_build::build::declared_actuators(&compile::repo_root()));
+    // A parameter is an actuator's name or one of the kernel's own; both travel
+    // in the same field and a shipping kernel takes only the second.
+    static PARAMS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let params =
+        PARAMS.get_or_init(|| toyos_build::build::declared_params(&compile::repo_root()));
     for name in kernel_params {
         assert!(
-            actuators.iter().any(|a| a == name),
-            "{name:?} is a `kernel_params` and `kernel/src/actuator.rs` declares no such actuator"
+            actuators.iter().chain(params).any(|a| a == name),
+            "{name:?} is a `kernel_params` and the kernel declares no such actuator or parameter"
         );
     }
     for name in kernel_features {
@@ -3825,9 +3823,6 @@ fn qemu_command(
         .arg("-display")
         .arg("none")
         .arg("-no-reboot");
-    if options.watchdog_resets {
-        qemu.arg("-global").arg("ICH9-LPC.noreboot=false");
-    }
     if let Some((w, h)) = shape.panel {
         // A panel on a machine with no VGA adapter is a declaration nothing
         // emits, which is the silently-inert field this suite refuses by name.

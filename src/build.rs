@@ -804,10 +804,10 @@ fn kernel_features(
     if debug {
         features.push(DEBUG_KERNEL_BUILD);
     }
-    // A parameter names an actuator, and only a kernel compiled with them can
-    // be told to arm one. This is the whole of what `--kernel-param` decides
-    // about the build — which actuator is a boot's business, not a build's.
-    if !params.is_empty() {
+    // A parameter names an actuator or one of the kernel's own boot parameters,
+    // and only the first needs a kernel compiled with them.
+    let own = declared_params(root);
+    if params.iter().any(|p| !own.contains(p)) {
         features.push("boot-actuators");
     }
     if !requested.is_empty() {
@@ -839,15 +839,39 @@ fn actuator_params(root: &Path, params: &[String]) -> String {
         return String::new();
     }
     let declared = declared_actuators(root);
+    let own = declared_params(root);
     for name in params {
         assert!(
-            declared.contains(name),
-            "--kernel-param {name}: the kernel declares no such actuator.\n\
-             Actuators it declares: {}.",
-            declared.join(", ")
+            declared.contains(name) || own.contains(name),
+            "--kernel-param {name}: the kernel declares no such actuator or boot parameter.\n\
+             Actuators it declares: {}.\n\
+             Boot parameters it declares: {}.",
+            declared.join(", "),
+            own.join(", "),
         );
     }
     params.join(",")
+}
+
+/// The boot parameters the kernel itself answers to, off `kernel/src/params.rs`.
+pub fn declared_params(root: &Path) -> Vec<String> {
+    let path = root.join("kernel/src/params.rs");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+    let body = text
+        .split_once("pub const PARAMS: &[&str] = &[")
+        .expect("kernel/src/params.rs has no `PARAMS` list")
+        .1;
+    let body = body.split_once("];").expect("the `PARAMS` list does not end").0;
+    let names: Vec<String> = body
+        .split(',')
+        .filter_map(|token| {
+            let token = token.trim();
+            token.strip_prefix('"')?.strip_suffix('"').map(str::to_string)
+        })
+        .collect();
+    assert!(!names.is_empty(), "{} declares no boot parameters", path.display());
+    names
 }
 
 #[derive(Deserialize)]
@@ -1324,8 +1348,10 @@ pub fn build_test_image(
     // parameter picks which actuator the one test kernel arms, so 45 builds
     // became two; keying the image on it is what keeps two boots asking for
     // different actuators from sharing one disk.
+    let own = declared_params(root);
     assert!(
-        kernel_params.is_empty() || kernel_features == TEST_KERNEL,
+        kernel_params.iter().all(|p| own.contains(&p.to_string()))
+            || kernel_features == TEST_KERNEL,
         "a boot asking for {kernel_params:?} must boot the test kernel, not {kernel_features:?}"
     );
     let params = kernel_params.join(",");
