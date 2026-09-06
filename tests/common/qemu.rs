@@ -2213,9 +2213,6 @@ pub struct BootOptions {
 /// program's startup — a test asking about a daemon's line waits on the guest
 /// for that line ([`await_guest`]), never on a span of host wall clock after
 /// this one.
-/// What `guest_page` dumps, which is the page every allocator here deals in.
-pub const PAGE_BYTES: usize = 4096;
-
 pub const DEFAULT_READY: &str = "===READY===";
 
 impl Default for BootOptions {
@@ -2729,33 +2726,33 @@ impl QemuInstance {
     /// After a halt the guest is stopped, so the dump is stable. QEMU writes
     /// the file itself, so the only synchronization needed is the command's
     /// own reply.
-    /// One page of the guest's *physical* memory, as QEMU reads it.
+    /// A span of the guest's *physical* memory, as QEMU reads it.
     ///
     /// **The oracle for anything a guest leaves in DRAM for a later boot.** The
     /// guest cannot be asked — the claim is precisely about what survives it —
     /// and a screendump says nothing about bytes. `pmemsave` is the monitor
     /// command that answers, so what a test judges is memory QEMU dumped and not
     /// a report the guest wrote about itself.
-    pub fn guest_page(&mut self, phys: u64) -> Result<Vec<u8>, String> {
+    pub fn guest_memory(&mut self, phys: u64, bytes: usize) -> Result<Vec<u8>, String> {
         let socket = self.qmp_socket.clone().expect("guest_page needs BootOptions { qmp: true }");
         // Beside the screendump, which is this instance's own scratch path.
-        let out = self.screendump.with_extension(format!("page-{phys:#x}"));
+        let out = self.screendump.with_extension(format!("mem-{phys:#x}"));
         let _ = fs::remove_file(&out);
         // Quoted for the monitor, whose unquoted filename is read as an
         // expression and stops on the first letter of the path; the backslashes
         // are the JSON `human-monitor-command` carries it in.
-        let command = format!("pmemsave {phys:#x} {PAGE_BYTES} \\\"{}\\\"", out.display());
+        let command = format!("pmemsave {phys:#x} {bytes} \\\"{}\\\"", out.display());
         let said = QmpMonitor::open(&socket).human(&command);
-        let bytes = fs::read(&out).map_err(|e| {
+        let read = fs::read(&out).map_err(|e| {
             format!("{command:?} wrote no file ({e}); the monitor said {said:?}")
         })?;
-        if bytes.len() != PAGE_BYTES {
+        if read.len() != bytes {
             return Err(format!(
-                "pmemsave {phys:#x} wrote {} bytes and not {PAGE_BYTES}; the monitor said {said:?}",
-                bytes.len()
+                "pmemsave {phys:#x} wrote {} bytes and not {bytes}; the monitor said {said:?}",
+                read.len()
             ));
         }
-        Ok(bytes)
+        Ok(read)
     }
 
     pub fn screendump(&mut self) -> super::screen::Ppm {

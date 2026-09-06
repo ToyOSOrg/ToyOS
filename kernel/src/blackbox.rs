@@ -89,8 +89,16 @@ pub fn record_fault(fault: &Fault) {
 /// Called from `panic_console::render`, inside the region that may take no
 /// lock, allocate nothing and panic nowhere: one bounded copy into a page
 /// nothing else in this machine names.
-pub fn record_panic(text: &[u8]) {
-    seal(State::Panic, text);
+pub fn record_panic(records: &[u8]) {
+    with_page(|page, stamp| {
+        let mut report = toyos_blackbox::Report::new(page);
+        // The crash first, then as much of the tail as is left. A report cut to
+        // its tail alone is a report with the crash missing: the panel's newest
+        // lines are the ones written after it.
+        crate::panic::first_words(&mut report);
+        report.tail(records, toyos_blackbox::RECORD_OPENS_WITH);
+        report.seal(State::Panic, stamp);
+    });
 }
 
 /// Seal that this kernel handed the machine back on purpose, so the next
@@ -103,25 +111,35 @@ pub fn record_done() {
 }
 
 fn seal(state: State, text: &[u8]) {
+    with_page(|page, stamp| {
+        toyos_blackbox::seal(page, state, stamp, text);
+    });
+}
+
+/// Hand `write` the box and the date it carries, then write it back out of the
+/// caches. Every writer in this kernel goes through here.
+///
+/// **Refused silently where there is no page, because this is the one site that
+/// cannot speak**: two of the three callers run inside `panic_console::render`
+/// or an exception entry, which may take no lock and re-enter nothing. What a
+/// boot with no page loses is said at [`arm`], on the panel, while there is
+/// still a machine to say it on.
+fn with_page(write: impl FnOnce(&mut [u8; BYTES], u64)) {
     let at = PAGE.load(Relaxed);
     if at == 0 {
-        // **Refused, and silently, because this is the one site that cannot
-        // speak**: `record_panic` runs inside `panic_console::render`, which may
-        // take no lock and re-enter nothing. What a boot with no page loses is
-        // said at `arm`, on the panel, while there is still a machine to say it on.
         return;
     }
     // SAFETY: `at` is non-zero only where `arm` found the address on this
-    // boot's parameter line, which is the page the loader allocated and which
+    // boot's parameter line, which is the box the loader allocated and which
     // `mm::init` was told to keep out of the allocator. The panic path holds
     // `PAINTING` and the quiesce path has stopped every other CPU, so the one
     // CPU still running is the only writer.
     let page = unsafe { &mut *(at as *mut [u8; BYTES]) };
     // Carried forward and not verified: this runs where nothing may be checked,
-    // and the checksum written below is what covers it. A page nothing armed
-    // hands back a zero, which is what an unknown date is.
+    // and the checksum the write puts down is what covers it. A box nothing
+    // armed hands back a zero, which is what an unknown date is.
     let stamp = toyos_blackbox::stamp_of(page);
-    toyos_blackbox::seal(page, state, stamp, text);
+    write(page, stamp);
     flush(at);
 }
 
