@@ -1,8 +1,7 @@
 //! The loader's own log, written to the stick as it runs.
 //!
 //! Every line [`crate::println`] puts on the firmware's console is appended
-//! here too, written and flushed before the loader goes on, so the last line in
-//! the file is the last thing the loader did.
+//! here too, written and flushed before the loader goes on.
 //!
 //! The file is `loader.log` at the root of the partition
 //! `KernelArgs::log_partition_guid` names, truncated at each boot. One file
@@ -23,6 +22,10 @@ use uefi::{prelude::*, CStr16, Handle};
 
 /// The loader's first line, which is also the file's: [`open`] runs before it.
 pub const BEGINS_AT: &str = "ToyOS Bootloader 1.0";
+
+/// What `query_gop` prints once it has opened the protocol, and the word that
+/// tells this line from the kernel's own `GOP:` line on a console with both.
+pub const GOP_AT: &str = "GOP: mode";
 
 /// The file's last line: [`close`] runs before the memory map is sized, and a
 /// write after that could grow the map the kernel is about to be handed.
@@ -117,7 +120,6 @@ pub fn line(args: fmt::Arguments) {
     }
 }
 
-/// The last line, and then the file.
 pub fn close() {
     println!("{ENDS_AT}");
     // SAFETY: [`Sink`]'s contract. Dropping the handle closes it.
@@ -130,9 +132,11 @@ fn unique_guid(bs: &BootServices, handle: Handle) -> Option<[u8; 16]> {
     // `GetProtocol`, never `Exclusive`: this runs over every filesystem on the
     // machine, and EXCLUSIVE would call `Stop` on whatever driver holds each.
     //
-    // SAFETY: `GetProtocol` only hands back the interface pointer. This image
-    // is the sole agent running under boot services and installs, uninstalls
-    // and reinstalls nothing, so the interface stays live for the read below.
+    // SAFETY: `open_protocol`'s obligation is that this handle and its protocol
+    // stay installed until the `ScopedProtocol` drops. Nothing between the two
+    // can uninstall either: the loader is the one image running, it registers
+    // no event callback, and it calls no boot service that connects or
+    // disconnects a controller.
     let info = unsafe {
         bs.open_protocol::<PartitionInfo>(
             OpenProtocolParams { handle, agent: bs.image_handle(), controller: None },
@@ -141,7 +145,7 @@ fn unique_guid(bs: &BootServices, handle: Handle) -> Option<[u8; 16]> {
     }
     .ok()?;
     let entry = info.gpt_partition_entry()?;
-    // Copied out of a `repr(packed)` entry, where a reference would be unaligned.
+    // A `repr(packed)` entry, where a reference into it would be unaligned.
     Some({ entry.unique_partition_guid }.to_bytes())
 }
 

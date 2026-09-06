@@ -16,7 +16,7 @@ use uefi::{
     proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID},
+    table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID},
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
@@ -423,7 +423,22 @@ struct GopInfo {
 fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let bs = system_table.boot_services();
     let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().ok()?;
-    let mut gop = bs.open_protocol_exclusive::<GraphicsOutput>(gop_handle).ok()?;
+    // Never `open_protocol_exclusive` here: EXCLUSIVE calls `Stop` on every
+    // driver holding this protocol BY_DRIVER, and the firmware's graphics
+    // console is one.
+    //
+    // SAFETY: `open_protocol`'s obligation is that this handle and its protocol
+    // stay installed until the `ScopedProtocol` drops. Nothing between the two
+    // can uninstall either: the loader is the one image running, it registers
+    // no event callback, and it calls no boot service that connects or
+    // disconnects a controller.
+    let mut gop = unsafe {
+        bs.open_protocol::<GraphicsOutput>(
+            OpenProtocolParams { handle: gop_handle, agent: bs.image_handle(), controller: None },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
 
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();
@@ -448,8 +463,8 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let framebuffer = fb.as_mut_ptr() as u64;
     let framebuffer_size = fb.size() as u64;
 
-    println!("GOP: {}x{} stride={} format={} fb={:#x} size={}",
-        width, height, stride, pixel_format, framebuffer, framebuffer_size);
+    println!("{} {}x{} stride={} format={} fb={:#x} size={}",
+        loaderlog::GOP_AT, width, height, stride, pixel_format, framebuffer, framebuffer_size);
 
     Some(GopInfo {
         framebuffer,
