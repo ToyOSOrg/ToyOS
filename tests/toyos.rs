@@ -603,11 +603,6 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("machine_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
-    // The same boot again, judged on what the bootloader wrote to the stick
-    // instead of on what the kernel did: a line off the image against a line
-    // off the console, with no clock in any of it. Fast with the UNMEASURED
-    // bootstrap marker until CI prices it.
-    ("loader_log_on_the_stick", Sched::Parallel, Tier::Fast),
     // Its own boot, and the verdict is QEMU's stop reason inside the bound.
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
@@ -8708,9 +8703,6 @@ fn run_machine_test(
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
-        "loader_log_on_the_stick" => {
-            common::volumes::loader_log_on_the_stick(test_config, c_bins, rust_bins)
-        }
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.

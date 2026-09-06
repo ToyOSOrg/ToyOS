@@ -172,17 +172,17 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
     let mut nodes = path.node_iter().filter(is_hard_drive);
     let node = nodes.next()?;
     if nodes.next().is_some() {
-        println!("Boot partition: the device path has more than one HARDDRIVE node — ignoring it");
+        println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
         return None;
     }
 
     let hd: &uefi::proto::device_path::media::HardDrive = node.try_into().ok()?;
     if hd.partition_format() != PartitionFormat::GPT {
-        println!("Boot partition: firmware says this is not a GPT partition — ignoring it");
+        println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
         return None;
     }
     let PartitionSignature::Guid(guid) = hd.partition_signature() else {
-        println!("Boot partition: firmware named it with no GUID signature — ignoring it");
+        println!("Boot partition: firmware named it with no GUID signature, so it is ignored");
         return None;
     };
     Some(BootPartition {
@@ -248,19 +248,19 @@ fn rtc_utc_offset(system_table: &SystemTable<Boot>) -> Option<i32> {
     let time = match system_table.runtime_services().get_time() {
         Ok(time) => time,
         Err(e) => {
-            println!("RTC zone: firmware's GetTime failed ({e:?}) — the kernel will assume UTC");
+            println!("RTC zone: firmware's GetTime failed ({e:?}), so the kernel assumes UTC");
             return None;
         }
     };
     let Some(zone) = time.time_zone() else {
-        println!("RTC zone: firmware names none ({time:?}) — the kernel will assume UTC");
+        println!("RTC zone: firmware names none ({time:?}), so the kernel assumes UTC");
         return None;
     };
     let zone = zone as i32;
     if !(-MAX_OFFSET_MINUTES..=MAX_OFFSET_MINUTES).contains(&zone) {
         println!(
-            "RTC zone: firmware names {zone} minutes, outside +/-{MAX_OFFSET_MINUTES} — ignoring \
-             it, the kernel will assume UTC"
+            "RTC zone: firmware names {zone} minutes, outside +/-{MAX_OFFSET_MINUTES}, so it is \
+             ignored and the kernel assumes UTC"
         );
         return None;
     }
@@ -510,6 +510,9 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
+    // Before the map is sized: a console write, a FAT write and a handle drop
+    // can each add a descriptor, and the margin below is fixed.
+    loaderlog::close();
     let mms = system_table.boot_services().memory_map_size();
     let memory_map_entry_count = mms.map_size / mms.entry_size + 8;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
@@ -525,7 +528,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
-    loaderlog::close();
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
 
     uefi_memory_map.entries().for_each(|entry| {

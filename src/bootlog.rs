@@ -14,22 +14,40 @@ use std::fmt;
 /// in `kernel/src/arch/syscall/machine.rs`'s `quiesce`.
 pub const REBOOTING: &str = "Rebooting.";
 
-/// The bootloader's own file on the log partition, which `logd` never writes
-/// and no reader of `logd`'s files may pick up: it is not one of them, and the
-/// verdict above is about what the kernel wrote.
+/// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
-/// That file's first line and its last, which are also the loader's first line
-/// and the last it can write: the log is opened before the first, and
-/// `ExitBootServices` takes the firmware's filesystem away after the last.
+/// That file's first line and its last.
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
-pub const LOADER_LAST_LINE: &str = "Loader log: ExitBootServices, so this file ends here";
+pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so this file ends here";
 
-/// Whether `name` on the log volume is one of `logd`'s files. Every reader of
-/// that volume asks this rather than the suffix: the loader's own file ends in
-/// `.log` too, and it sorts after every dated stem.
+/// Whether `name` on the log volume is one of `logd`'s files, which is
+/// `logd`'s own allow-list and not a suffix: the loader's file ends in `.log`
+/// too, and a `toybox` run can leave anything there.
 pub fn is_logd_file(name: &str) -> bool {
-    name.ends_with(".log") && name != LOADER_LOG
+    toyos_wallclock::classify(name).is_some()
+}
+
+/// The names on a mounted log volume, split into the loader's file and
+/// `logd`'s in the order theirs sort.
+///
+/// The loader's is matched without case, because a FAT driver that does not
+/// read the lowercase flags in a directory entry yields `LOADER.LOG`; `logd`'s
+/// are matched as its own writer spells them, which no such driver preserves
+/// either — a volume read through one has no `logd` file this can name, and
+/// says so by finding none.
+pub fn split_listing(listing: &str) -> (Option<&str>, Vec<&str>) {
+    let mut loader = None;
+    let mut logd = Vec::new();
+    for name in listing.lines().map(str::trim).filter(|name| !name.is_empty()) {
+        if name.eq_ignore_ascii_case(LOADER_LOG) {
+            loader = Some(name);
+        } else if is_logd_file(name) {
+            logd.push(name);
+        }
+    }
+    logd.sort_unstable();
+    (loader, logd)
 }
 
 /// The kernel's boot-phase record for the end of boot, in
@@ -100,27 +118,65 @@ mod tests {
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
     }
 
-    /// Nothing links the two crates — the loader is `no_std` and this is the
-    /// build system — so the three names above are held to the loader's by
-    /// reading its source. The scan closes exactly one spelling of each: a
-    /// quoted literal on one line. A name assembled from pieces reds here.
+    /// Whether `source` declares a constant whose value is exactly `rhs`.
+    ///
+    /// Anchored to the declaration, so a name that appears in a message or in
+    /// a longer literal is not one: the line must end `= <rhs>;`.
+    fn declares(source: &str, rhs: &str) -> bool {
+        let tail = format!("= {rhs};");
+        source.lines().any(|line| line.trim_end().ends_with(&tail))
+    }
+
+    #[test]
+    fn only_a_declaration_of_the_whole_value_counts() {
+        assert!(declares("const A: &str = \"x\";", "\"x\""));
+        assert!(declares("    const A: &CStr16 = cstr16!(\"x\");   ", "cstr16!(\"x\")"));
+        // A longer literal that carries the value, and a mention in a message.
+        assert!(!declares("const A: &str = \"xy\";", "\"x\""));
+        assert!(!declares("    say(\"x\");", "\"x\""));
+        // The value under another spelling, and concatenated.
+        assert!(!declares("const A: &CStr16 = cstr16!(\"x\");", "\"x\""));
+        assert!(!declares("const A: &str = \"x\" \"y\";", "\"xy\""));
+    }
+
+    /// Nothing links the two crates: the loader is `no_std` and this is the
+    /// build system, so the three names above are held to the loader's own
+    /// declarations by reading its source.
     #[test]
     fn the_loader_writes_the_file_the_host_reads() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src/loaderlog.rs");
         let source = std::fs::read_to_string(&path).expect("the loader's log module");
-        assert!(
-            source.contains(&format!("cstr16!(\"{LOADER_LOG}\")")),
-            "{} does not open {LOADER_LOG:?}",
-            path.display()
-        );
-        for line in [LOADER_FIRST_LINE, LOADER_LAST_LINE] {
+        let wanted = [
+            format!("cstr16!(\"{LOADER_LOG}\")"),
+            format!("\"{LOADER_FIRST_LINE}\""),
+            format!("\"{LOADER_LAST_LINE}\""),
+        ];
+        for rhs in wanted {
             assert!(
-                source.lines().any(|source_line| source_line.contains(&format!("\"{line}\""))),
-                "{} does not declare {line:?}",
+                declares(&source, &rhs),
+                "{} declares no constant equal to {rhs}",
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn the_loaders_file_is_told_from_logds_however_a_driver_spelled_it() {
+        let listing = "2026-09-06-084003.log\nloader.log\nunknown-00.log\nnotes.txt\n";
+        assert_eq!(
+            split_listing(listing),
+            (Some("loader.log"), vec!["2026-09-06-084003.log", "unknown-00.log"])
+        );
+        // A FAT driver that drops the lowercase flags yields 8.3 in upper case.
+        assert_eq!(split_listing("LOADER.LOG\n").0, Some("LOADER.LOG"));
+        // And it is never one of logd's, under either spelling.
+        assert!(split_listing("LOADER.LOG\nloader.log\n").1.is_empty());
+        // Blank rows and stray whitespace are a listing's, not a name's.
+        assert_eq!(split_listing("\n  loader.log  \n\n").0, Some("loader.log"));
+        assert_eq!(split_listing(""), (None, Vec::new()));
+        // Somebody else's file, which nothing here may name or delete.
+        assert_eq!(split_listing("boot.log\n"), (None, Vec::new()));
     }
 
     #[test]

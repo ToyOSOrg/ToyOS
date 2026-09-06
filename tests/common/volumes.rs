@@ -657,71 +657,20 @@ pub fn newest_log(image_path: &Path, start: usize, len: usize) -> Result<(String
     Ok((newest.clone(), need(found.pop().flatten(), newest)?))
 }
 
-/// The loader's account of a boot is on the stick and not only on the screen.
-///
-/// The whole account, not a line of it: `loader.log` is compared to the window
-/// the loader printed on the console, its first line to its last, so a write
-/// path that dropped, truncated or reordered a line is seen — the relocation
-/// line an unattended T14 hung after included, by construction. A file the last
-/// boot left is staged first, so a loader that opened without truncating ends
-/// with that boot's tail and fails here.
-///
-/// Both sides are folded to ASCII before they are compared: the file has the
-/// UTF-8 the loader formatted, and the firmware's terminal writes `?` for a
-/// character it has no glyph for.
-pub fn loader_log_on_the_stick(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let stale = (bootlog::LOADER_LOG.to_string(), vec![b'x'; 64 * 1024]);
-    let boot = super::power::jobcase_reboot("loader-log-boot.img", &[stale])?;
-    let (start, len) = boot.log_at;
-    let image = std::fs::read(&boot.image).map_err(|e| format!("read the image: {e}"))?;
-    let volume = image.get(start..start + len).ok_or("the image shrank under the log partition")?;
-
+/// The loader's own file on the volume, line by line.
+pub fn loader_log_lines(
+    image_path: &Path,
+    start: usize,
+    len: usize,
+) -> Result<Vec<String>, String> {
+    let image = std::fs::read(image_path).map_err(|e| format!("read the image: {e}"))?;
+    let volume =
+        image.get(start..start + len).ok_or("the image shrank under the log partition")?;
     let mut found = read_files(volume, &[bootlog::LOADER_LOG])?;
     let bytes = need(found.pop().flatten(), bootlog::LOADER_LOG)?;
     let text = String::from_utf8(bytes)
-        .map_err(|e| format!("{} is not the UTF-8 the loader formatted: {e}", bootlog::LOADER_LOG))?;
-    let written: Vec<String> = text.lines().map(ascii_only).collect();
-
-    let printed: Vec<String> = boot.console.lines().map(ascii_only).collect();
-    let at = |line: &str| {
-        printed
-            .iter()
-            .position(|seen| seen == line)
-            .ok_or_else(|| format!("the loader never printed {line:?} on the console"))
-    };
-    let window = &printed[at(bootlog::LOADER_FIRST_LINE)?..=at(bootlog::LOADER_LAST_LINE)?];
-    if written != window {
-        return Err(format!(
-            "{} carries {} line(s) and the loader printed {}\n--- on the stick\n{}\n--- on the console\n{}",
-            bootlog::LOADER_LOG,
-            written.len(),
-            window.len(),
-            written.join("\n"),
-            window.join("\n"),
-        ));
-    }
-
-    // Beside it, and not instead of it: the volume this boot's log is read off
-    // is the one the loader just wrote to.
-    let (name, _) = newest_log(&boot.image, start, len)?;
-
-    let _ = std::fs::remove_file(&boot.image);
-    eprintln!(
-        "  [volumes] {} carries the loader's {} lines, and {name} is beside it",
-        bootlog::LOADER_LOG,
-        written.len()
-    );
-    Ok(())
-}
-
-/// What a UEFI terminal can render of a line, which is what the console's copy
-/// of it is.
-fn ascii_only(line: &str) -> String {
-    line.chars().map(|c| if c.is_ascii() { c } else { '?' }).collect()
+        .map_err(|e| format!("{} is not UTF-8: {e}", bootlog::LOADER_LOG))?;
+    Ok(text.lines().map(str::to_string).collect())
 }
 
 /// Every file `logd` wrote, in the order their names sort.

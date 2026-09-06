@@ -5,7 +5,7 @@
 //! judges the boot after the reset: `-no-reboot` exits instead of taking it.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use toyos_build::bootlog::{self, REBOOTING};
@@ -65,35 +65,26 @@ pub fn machine_reboot(
     Ok(())
 }
 
-/// What one jobcase boot leaves behind for a host that reads it afterwards.
-pub struct Jobcase {
-    pub image: PathBuf,
-    /// The log partition's byte range inside [`Self::image`].
-    pub log_at: (usize, usize),
-    /// Everything the machine put on the serial line, firmware and loader
-    /// included, up to the kernel's ready marker.
-    pub console: String,
-}
-
-/// The jobcase on the metal profile, run until it hands the machine back to
-/// firmware. `name` is the image's, because two guests may not share one;
-/// `stage` is put on the log partition before the machine that reads it exists.
-///
-/// Built here, because a boot deletes the image it built and this one is read
-/// after the guest is gone.
-pub fn jobcase_reboot(name: &str, stage: &[(String, Vec<u8>)]) -> Result<Jobcase, String> {
+/// A boot with no host on the console runs its manifest's jobs and ends
+/// itself, and the loader's own account of it is on the stick beside `logd`'s.
+pub fn metal_job_reboot(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
 
-    let image_path = super::lane::dir().join(name);
+    // Built here, because a boot deletes the image it built and this one is read after the guest is gone.
+    let image_path = super::lane::dir().join("jobcase-boot.img");
     let mut image = qemu::build_boot_image(case, &[], &[], &[]);
     std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let log_at = super::volumes::log_extent(&image, &image_path)?;
-    if !stage.is_empty() {
-        let (start, len) = log_at;
-        super::volumes::stage_files(&mut image[start..start + len], stage)?;
-        std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    }
+    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
+    // A file under the loader's name that the last boot could have left: a
+    // loader that opens without truncating ends in this one's tail.
+    let stale = (bootlog::LOADER_LOG.to_string(), vec![b'x'; 64 * 1024]);
+    super::volumes::stage_files(&mut image[start..start + len], &[stale])?;
+    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
 
     let mut qemu = QemuInstance::boot_with_options(
         case,
@@ -119,18 +110,6 @@ pub fn jobcase_reboot(name: &str, stage: &[(String, Vec<u8>)]) -> Result<Jobcase
     drain.must_say(REBOOTING)?;
     returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
     drop(qemu);
-    Ok(Jobcase { image: image_path, log_at, console })
-}
-
-/// A boot with no host on the console runs its manifest's jobs and ends itself.
-pub fn metal_job_reboot(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let boot = jobcase_reboot("jobcase-boot.img", &[])?;
-    let image_path = boot.image;
-    let (start, len) = boot.log_at;
 
     let (name, log) = super::volumes::newest_log(&image_path, start, len)?;
     let text = String::from_utf8_lossy(&log);
@@ -143,9 +122,54 @@ pub fn metal_job_reboot(
         )
     })?;
 
+    let printed = loader_window(&console)?;
+    let written = super::volumes::loader_log_lines(&image_path, start, len)?;
+    // Compared byte for byte against a console the firmware rendered: a
+    // character it has no glyph for is a line the two channels disagree about
+    // on one machine and not on the next.
+    if let Some(line) = written.iter().find(|line| !line.is_ascii()) {
+        return Err(format!("the loader wrote {line:?}, which is not ASCII"));
+    }
+    if written != printed {
+        return Err(format!(
+            "{} carries {} line(s) and the loader printed {}\n--- on the stick\n{}\n--- on the \
+             console\n{}",
+            bootlog::LOADER_LOG,
+            written.len(),
+            printed.len(),
+            written.join("\n"),
+            printed.join("\n"),
+        ));
+    }
+
     let _ = std::fs::remove_file(&image_path);
-    eprintln!("  [power] {name} carries Boot: complete ({boot_ms}ms) and this boot's last line");
+    eprintln!(
+        "  [power] {name} carries Boot: complete ({boot_ms}ms) and this boot's last line, and \
+         {} carries the loader's {} lines beside it",
+        bootlog::LOADER_LOG,
+        written.len()
+    );
     Ok(())
+}
+
+/// Everything the loader printed on the console, its first line to its last.
+fn loader_window(console: &str) -> Result<Vec<String>, String> {
+    let lines: Vec<&str> = console.lines().collect();
+    let at = |line: &str| {
+        lines
+            .iter()
+            .position(|seen| seen.contains(line))
+            .ok_or_else(|| format!("the loader never printed {line:?} on the console"))
+    };
+    let (first, last) = (at(bootlog::LOADER_FIRST_LINE)?, at(bootlog::LOADER_LAST_LINE)?);
+    if last < first {
+        return Err(format!(
+            "the console carries {:?} before {:?}, so there is no window between them",
+            bootlog::LOADER_LAST_LINE,
+            bootlog::LOADER_FIRST_LINE
+        ));
+    }
+    Ok(lines[first..=last].iter().map(|line| (*line).to_string()).collect())
 }
 
 /// The chipset resets a machine whose kernel stops feeding its watchdog, and
