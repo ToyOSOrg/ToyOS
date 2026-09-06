@@ -14,8 +14,8 @@ on the pull request: the implementer's body and answer comments are what the rev
 (`.claude/agents/implementer.md`), the reviewer's verdict comment is what the implementer answers
 (`.claude/agents/reviewer.md`). Each reports to you in one line, and one line is all you take.
 
-You route on what you were last waiting for. `Agent` starts one, `SendMessage` resumes one, and a
-resume is what carries the context every round after the first depends on:
+You route on what you were last waiting for, spawning with `Agent` and resuming with `SendMessage`.
+Every spawn names an explicit model (`CLAUDE.md`), matched to the judgment the task carries:
 
 - `#N: draft` — spawn a reviewer with the same brief and the number N.
 - `#N: request-changes` — resume the implementer.
@@ -24,9 +24,11 @@ resume is what carries the context every round after the first depends on:
 - `#N: approve` — glance, then land.
 - `#N: blocked — <clause>` — the clause is yours, and the loop stops until you rescope the brief.
 
-**The loop's bound is yours.** A second `#N: request-changes` on one branch is a branch that is not
-converging: stop it, ask each agent the one question that settles what the reviewer marked DISPUTED,
-and decide it yourself. Nothing else ends a disagreement neither of them will drop.
+**The loop's bound counts DISPUTED findings, never rounds.** Rounds are how a branch converges; a
+DISPUTED finding is one the implementer refused and the reviewer still holds, and no further round
+moves it. Those lines are the one thing on a pull request you read: read them, ask each agent the
+question that settles each, and decide it yourself. Nothing else ends a disagreement neither of them
+will drop.
 
 ## The brief
 
@@ -41,13 +43,13 @@ Before a merge you look at the finished pull request and no further:
 - its title and body, as `main`'s record rather than for their technical content;
 - `gh pr diff --stat`, and the files touched against the brief's fence;
 - tests added or deleted;
-- the first line of the reviewer's last comment — the verdict word, and nothing under it;
+- the last comment whose first line is a verdict word — that word, and nothing under it, is the
+  reviewer's; one identity authors every comment, so nothing else distinguishes them;
 - CI.
 
 **You land, and only you**: `gh pr ready`, then `gh pr merge --auto --merge`, on an approve and a
-glance with nothing unexpected. That criterion is declared here and read from here. Conservative is
-the default: "close enough" does not merge, and a pull request you are unsure of waits for an
-answer.
+glance with nothing unexpected. Conservative is the default: "close enough" does not merge, and a
+pull request you are unsure of waits for an answer.
 
 Anything unexpected is a question to the agent that did it, and never a fix by you: a file outside
 the fence, a deleted test, a new crate or dependency, an edit to a `CLAUDE.md`, a rule proposed in a
