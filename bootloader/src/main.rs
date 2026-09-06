@@ -269,6 +269,16 @@ fn rtc_utc_offset(system_table: &SystemTable<Boot>) -> Option<i32> {
     Some(zone)
 }
 
+/// How long firmware watches this loader, in seconds: a minute, which is this
+/// project's bound for every watchdog. It covers the span before the TCO arm
+/// near the handoff, and `ExitBootServices` disables it.
+const FIRMWARE_WATCHDOG_SECS: usize = 60;
+
+/// What firmware logs if that countdown expires. Codes to `0xffff` are reserved
+/// for firmware's own use and this is the first one an application may take;
+/// `uefi`'s `set_watchdog_timer` refuses a reserved one outright.
+const WATCHDOG_CODE: u64 = 0x0001_0000;
+
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
@@ -678,11 +688,27 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut system_table).unwrap();
+    // First, because it covers everything below it: firmware starts a
+    // five-minute countdown when it loads an image and resets the machine if
+    // the image neither exits boot services nor disables it, and a minute is
+    // this project's bound for every watchdog. Reported after the log is open,
+    // so the answer is on the stick and not only on the screen.
+    let firmware_watchdog =
+        system_table.boot_services().set_watchdog_timer(FIRMWARE_WATCHDOG_SECS, WATCHDOG_CODE, None);
     // The same sixteen bytes the kernel is handed below, read once, and read
     // before the first line so that no line is only on the screen.
     let log_guid = log_partition_guid(handle, &system_table);
     loaderlog::open(&system_table, &log_guid);
     println!("{}", loaderlog::BEGINS_AT);
+    match firmware_watchdog {
+        Ok(()) => println!(
+            "Firmware watchdog: {FIRMWARE_WATCHDOG_SECS} s, until ExitBootServices disables it"
+        ),
+        Err(e) => println!(
+            "Firmware watchdog: firmware refused {FIRMWARE_WATCHDOG_SECS} s ({e}), so a hang in \
+             this loader needs a hand on the button"
+        ),
+    }
 
     // Find ACPI 2.0 RSDP from UEFI configuration table
     let rsdp_addr = system_table
