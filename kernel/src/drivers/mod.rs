@@ -20,6 +20,7 @@ pub mod virtio_sound;
 pub mod gop;
 pub mod hda;
 pub mod panic_console;
+pub mod watchdog;
 
 /// The pool every driver here allocates its DMA out of.
 pub use crate::mm::DmaPool;

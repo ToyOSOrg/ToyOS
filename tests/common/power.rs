@@ -15,17 +15,21 @@ const WAIT: Duration = Duration::from_secs(20);
 
 pub const REBOOTING: &str = "Rebooting.";
 
-/// QEMU calls a reset-register write `guest-reset` and ACPI S5 `guest-shutdown`, which the console cannot tell apart.
-fn returned_to_firmware(reason: Option<String>, tail: &str) -> Result<(), String> {
+/// What a guest that never stopped means where something asked it to.
+const ASKED_AND_STAYED_UP: &str =
+    "QEMU never reported stopping: the guest asked for a reboot and stayed up";
+
+/// QEMU calls a reset-register write `guest-reset` and ACPI S5 `guest-shutdown`,
+/// which the console cannot tell apart. `never` is what a guest that did not
+/// stop at all means to the caller, which is not the same thing twice.
+fn returned_to_firmware(reason: Option<String>, never: &str, tail: &str) -> Result<(), String> {
     match reason.as_deref() {
         Some("guest-reset") => Ok(()),
         Some(seen) => Err(format!(
             "QEMU stopped this guest for {seen:?}, not a guest reset: the machine was not \
              returned to firmware\n{tail}"
         )),
-        None => Err(format!(
-            "QEMU never reported stopping: the guest asked for a reboot and stayed up\n{tail}"
-        )),
+        None => Err(format!("{never}\n{tail}")),
     }
 }
 
@@ -55,7 +59,7 @@ pub fn machine_reboot(
     let drain = serial::Serial::named("reboot drain", tail.as_str());
     drain.must_be_clean()?;
     drain.must_say(REBOOTING)?;
-    returned_to_firmware(reason, &tail)?;
+    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
 
     eprintln!("  [power] QEMU stopped the guest for guest-reset");
     Ok(())
@@ -93,11 +97,12 @@ pub fn metal_job_reboot(
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
     let reason = stop.reason();
     let tail = qemu.drain_serial(WAIT);
+
     let drain = serial::Serial::named("job drain", tail.as_str());
     drain.must_be_clean()?;
     drain.must_say("===TEST_START reboot===")?;
     drain.must_say(REBOOTING)?;
-    returned_to_firmware(reason, &tail)?;
+    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
     drop(qemu);
 
     let (name, log) = super::volumes::newest_log(&image_path, start, len)?;
@@ -116,3 +121,71 @@ pub fn metal_job_reboot(
     eprintln!("  [power] {name} carries this boot's last line, written before the reset");
     Ok(())
 }
+
+/// The chipset resets a machine whose kernel stops feeding its watchdog, and
+/// `watchdog_fed` is the same guest with the feed on. Starvation begins well
+/// after boot, so what is measured is a reset inside this guest's own scaled
+/// ceiling once it has, never an arm-to-ready race.
+pub fn watchdog_resets(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, starved());
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    boot.must_say(ARMED)?;
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let reason = stop.reason();
+    let tail = qemu.drain_serial(WAIT);
+
+    returned_to_firmware(reason, "the chipset never reset a guest that stopped feeding it", &tail)?;
+
+    eprintln!("  [power] the chipset reset a guest that stopped feeding it");
+    Ok(())
+}
+
+/// The control: the same guest, feeding, runs past the bound and is still there.
+pub fn watchdog_fed(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions { kernel_params: &["watchdog", "tco-fast"], ..starved() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    // Without this the control cannot tell a fed watchdog from none at all.
+    boot.must_say(ARMED)?;
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), FED_FOR);
+    if let Some(seen) = stop.reason() {
+        let tail = qemu.drain_serial(WAIT);
+        return Err(format!(
+            "QEMU stopped a guest that was feeding its watchdog, for {seen:?}\n{tail}"
+        ));
+    }
+
+    let result = qemu.run_test("pwd", Duration::from_secs(30));
+    if result.exit_code != Some(0) {
+        return Err(format!("the guest stopped answering after {FED_FOR:?}: {result:?}"));
+    }
+
+    eprintln!("  [power] a fed guest ran {FED_FOR:?}, several bounds, and still answers");
+    Ok(())
+}
+
+fn starved() -> BootOptions {
+    BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        kernel_params: &["watchdog", "tco-fast", "tco-starve"],
+        ..Default::default()
+    }
+}
+
+/// The line `arm` logs on q35 at the fast bound; both tests demand it first.
+const ARMED: &str = "watchdog: 8086:2918 TCO at 0x660 TCO_TMR=2";
+
+const FED_FOR: Duration = Duration::from_secs(20);

@@ -45,6 +45,8 @@ pub(super) fn sys_log_read(
 }
 
 fn quiesce(last: &str) {
+    // First: what follows outlasts a feed cadence, and no pass runs to feed again.
+    crate::drivers::watchdog::disarm();
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
     crate::writeback::drain_all();

@@ -203,6 +203,24 @@ pub struct Relegated {
 /// Every test the fast tier does not run.
 pub const RELEGATED: &[Relegated] = &[
     Relegated {
+        test: "watchdog_resets",
+        ci_ms: 9_393,
+        why: Why::TimerAnchored,
+        guards: "The chipset resets a machine whose kernel stops feeding its TCO watchdog: the \
+                 verdict is QEMU's `guest-reset` arriving inside the bound the arm line names, \
+                 which a 2x slower machine moves. Nothing else asks whether a wedged kernel \
+                 gets the T14 back to firmware without a hand on the button.",
+    },
+    Relegated {
+        test: "watchdog_fed",
+        ci_ms: 23_405,
+        why: Why::TimerAnchored,
+        guards: "The control on the name above: the same guest with the feed left on must run \
+                 several bounds and still answer, so its verdict is that nothing happened for a \
+                 fixed span of real time. Without it a green `watchdog_resets` says only that a \
+                 chipset can reset a guest, never that the feed is what stops it.",
+    },
+    Relegated {
         test: "dump_nmi_probe",
         ci_ms: 8_098,
         why: Why::Cost,

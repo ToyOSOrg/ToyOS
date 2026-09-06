@@ -2464,10 +2464,15 @@ fn build_boot_image_with(
     static ACTUATORS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let actuators =
         ACTUATORS.get_or_init(|| toyos_build::build::declared_actuators(&compile::repo_root()));
+    // A parameter is an actuator's name or one of the kernel's own; both travel
+    // in the same field and a shipping kernel takes only the second.
+    static PARAMS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let params =
+        PARAMS.get_or_init(|| toyos_build::build::declared_params(&compile::repo_root()));
     for name in kernel_params {
         assert!(
-            actuators.iter().any(|a| a == name),
-            "{name:?} is a `kernel_params` and `kernel/src/actuator.rs` declares no such actuator"
+            actuators.iter().chain(params).any(|a| a == name),
+            "{name:?} is a `kernel_params` and the kernel declares no such actuator or parameter"
         );
     }
     for name in kernel_features {

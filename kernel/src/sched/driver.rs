@@ -502,6 +502,7 @@ pub fn pass(dispose: Dispose) {
     // posts is in the run queue by the time the pass chooses.
     crate::object::drain_zero_handles();
     let now = HW.now();
+    crate::drivers::watchdog::feed(now.0);
     #[cfg(feature = "heap-sweep")]
     maybe_sweep(now);
     #[cfg(feature = "pass-spin")]

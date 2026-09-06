@@ -324,6 +324,16 @@ pub unsafe fn outw(port: u16, value: u16) {
     asm!("out dx, ax", in("dx") port, in("ax") value);
 }
 
+#[inline]
+pub fn inw(port: u16) -> u16 {
+    let value: u16;
+    // SAFETY: as `inb` — one instruction into the declared output, no memory operand.
+    unsafe {
+        asm!("in ax, dx", out("ax") value, in("dx") port);
+    }
+    value
+}
+
 /// One I/O bus cycle of delay, for a device that needs one between two commands.
 #[inline]
 pub fn io_wait() {

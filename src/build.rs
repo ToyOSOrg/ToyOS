@@ -804,10 +804,10 @@ fn kernel_features(
     if debug {
         features.push(DEBUG_KERNEL_BUILD);
     }
-    // A parameter names an actuator, and only a kernel compiled with them can
-    // be told to arm one. This is the whole of what `--kernel-param` decides
-    // about the build — which actuator is a boot's business, not a build's.
-    if !params.is_empty() {
+    // A parameter names an actuator or one of the kernel's own boot parameters,
+    // and only the first needs a kernel compiled with them.
+    let own = declared_params(root);
+    if params.iter().any(|p| !own.contains(p)) {
         features.push("boot-actuators");
     }
     if !requested.is_empty() {
@@ -839,15 +839,35 @@ fn actuator_params(root: &Path, params: &[String]) -> String {
         return String::new();
     }
     let declared = declared_actuators(root);
+    let own = declared_params(root);
     for name in params {
         assert!(
-            declared.contains(name),
-            "--kernel-param {name}: the kernel declares no such actuator.\n\
-             Actuators it declares: {}.",
-            declared.join(", ")
+            declared.contains(name) || own.contains(name),
+            "--kernel-param {name}: the kernel declares no such actuator or boot parameter.\n\
+             Actuators it declares: {}.\n\
+             Boot parameters it declares: {}.",
+            declared.join(", "),
+            own.join(", "),
         );
     }
     params.join(",")
+}
+
+/// The boot parameters the kernel itself answers to, off `kernel/src/params.rs`.
+pub fn declared_params(root: &Path) -> Vec<String> {
+    let path = root.join("kernel/src/params.rs");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+    let names = params_of(&text);
+    assert!(!names.is_empty(), "{} declares no boot parameters", path.display());
+    names
+}
+
+/// Every string literal in `PARAMS`: anchored on the name and closed on `];`, so a reflow still reads and an unfound declaration is empty rather than guessed.
+fn params_of(text: &str) -> Vec<String> {
+    let Some((_, body)) = text.split_once("pub const PARAMS") else { return Vec::new() };
+    let Some((body, _)) = body.split_once("];") else { return Vec::new() };
+    body.split('"').skip(1).step_by(2).map(str::to_string).collect()
 }
 
 #[derive(Deserialize)]
@@ -1324,8 +1344,10 @@ pub fn build_test_image(
     // parameter picks which actuator the one test kernel arms, so 45 builds
     // became two; keying the image on it is what keeps two boots asking for
     // different actuators from sharing one disk.
+    let own = declared_params(root);
     assert!(
-        kernel_params.is_empty() || kernel_features == TEST_KERNEL,
+        kernel_params.iter().all(|p| own.contains(&p.to_string()))
+            || kernel_features == TEST_KERNEL,
         "a boot asking for {kernel_params:?} must boot the test kernel, not {kernel_features:?}"
     );
     let params = kernel_params.join(",");
@@ -1734,6 +1756,32 @@ mod tests {
             assert!(harness_kernel_build_is_declared(suite_build, false));
             assert!(!harness_kernel_build_is_declared(suite_build, true));
         }
+    }
+
+    #[test]
+    fn params_read_the_kernels_own_list() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let params = declared_params(root);
+        assert!(params.contains(&"watchdog".to_string()), "{params:?}");
+        assert!(
+            params.iter().all(|p| p.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')),
+            "a parameter name is ASCII `[a-z-]`, and these are not: {params:?}"
+        );
+        let actuators = declared_actuators(root);
+        let both: Vec<&String> = params.iter().filter(|p| actuators.contains(p)).collect();
+        assert!(both.is_empty(), "declared as both a parameter and an actuator: {both:?}");
+
+        assert_eq!(
+            params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[\n    (\"a\", &A),\n];"),
+            ["a"],
+            "the scan reads the declaration this kernel has",
+        );
+        assert_eq!(
+            params_of("pub const PARAMS:\n    &[(&str, &AtomicBool)] =\n    &[(\"a\", &A), (\"b\", &B)];"),
+            ["a", "b"],
+            "and the same declaration reflowed",
+        );
+        assert!(params_of("static PARAMS: u8 = 0;").is_empty(), "a declaration it cannot read");
     }
 
     /// **An actuator is a boot parameter and never a kernel build.**

@@ -26,6 +26,7 @@ mod drivers;
 #[macro_use]
 mod log;
 mod actuator;
+mod params;
 mod mm;
 mod panic;
 
@@ -255,6 +256,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     };
     // Both readings of it here: the parameter is in no reserved region, so
     // `mm::init` may hand that memory out and neither may hold a borrow.
+    params::init(cmdline);
     actuator::init(cmdline);
     rootfs::init(cmdline);
 
@@ -378,6 +380,9 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.
     iommu::init(kernel_args.rsdp_addr, &pci_devices);
+    // Before storage and everything under it: what it covers is the rest of this
+    // boot, and a wedge down there is the reason to have one.
+    drivers::watchdog::init(&pci_devices);
     file_cache::init();
     gpt::init(kernel_args);
 
