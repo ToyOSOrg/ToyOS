@@ -31,10 +31,15 @@ pub const GOP_AT: &str = "GOP: mode";
 /// write after that could grow the map the kernel is about to be handed.
 const ENDS_AT: &str = "Loader log: the kernel handoff begins, so this file ends here";
 
-/// The last line of a pass that reads the black box and hands the machine back
-/// to the firmware instead of booting a kernel.
+/// The last line of a pass that reads the black box and boots no kernel.
+///
+/// It says the reset and not a return, because the reset is what it does:
+/// returning is what leaves this image's exit-boot-services callback registered
+/// for the next operating system to call into, and `end_this_pass` exists to
+/// not do it. A line describing the shape this code was written to avoid is a
+/// line that will be read as evidence one day.
 pub const ENDS_AT_CHAIN: &str =
-    "Loader log: the last boot is accounted for, so this pass returns to the firmware";
+    "Loader log: the last boot is accounted for, so this pass resets the machine";
 
 /// Close the file on a pass that boots no kernel. Separate from [`close`]
 /// because that one's last line is about a handoff this pass does not make.

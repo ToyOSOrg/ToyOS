@@ -582,11 +582,10 @@ const PANEL_HELD_FOR: Duration = Duration::from_secs(PANIC_FAST_SECS * 4);
 const BLACKBOX_HEAD: &str = "Black box:";
 const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 
-/// The loader's last line on a pass that reads the page and hands the machine
-/// back to the firmware instead of booting a kernel
-/// (`bootloader/src/loaderlog.rs`).
+/// The loader's last line on a pass that reads the page and boots no kernel
+/// (`bootloader/src/loaderlog.rs`), which is also this test's drain predicate.
 const ENDS_THE_CHAIN: &str =
-    "Loader log: the last boot is accounted for, so this pass returns to the firmware";
+    "Loader log: the last boot is accounted for, so this pass resets the machine";
 
 /// The loader's last line on a pass that *does* boot one, which is what tells
 /// a chain that ended from one that went round again.

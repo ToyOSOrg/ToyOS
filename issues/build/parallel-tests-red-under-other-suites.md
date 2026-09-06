@@ -328,6 +328,19 @@ changes.
   of the two runs failed only on `console_locale_detect`, already known-red on
   this instrument, at 733 s against the same suite's 196 s. Not investigated.
 
+- **`screen_loader_lines`**, second sighting — 2026-09-07 on `chain-line`, a
+  branch whose whole diff is two string constants. `the panel carried 26 rows at
+  the GOP query and 26 at the loader's last line, a growth of 0, where the loader
+  printed 9 lines between them` — a *different* message from the sighting above,
+  and the same shape: **zero** growth, so the panel had not been repainted when
+  it was decoded rather than carrying the wrong thing. `ALONE … GREEN`.
+  Adjudicated by a same-session A/B rather than by that classification: the base
+  (`f5267fe2`) ran two full fast tiers green, 334/334 each, and the arm ran red
+  once and green once. The mechanism agrees — the constant this branch changes is
+  printed only by a loader pass that reads a black-box page and boots no kernel,
+  and both of this test's guests are ordinary handoff passes on RAM QEMU zeroed,
+  so the string it changes is on no line either of them prints.
+
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
 twelve guests across every worktree. It recurred on 2026-08-07: **eight
