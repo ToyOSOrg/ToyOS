@@ -1758,13 +1758,6 @@ mod tests {
         }
     }
 
-    /// **An actuator is a boot parameter and never a kernel build.**
-    ///
-    /// A name that reappears in `kernel/Cargo.toml` is a 46th kernel, and the
-    /// suite would build it without anything saying so — which is the state
-    /// collapsing seven per-actuator features into `test-actuators` got out of.
-    /// The two lists are read from the two files that declare them, so neither
-    /// can be satisfied by editing this test.
     #[test]
     fn params_read_the_kernels_own_list() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1791,6 +1784,13 @@ mod tests {
         assert!(params_of("static PARAMS: u8 = 0;").is_empty(), "a declaration it cannot read");
     }
 
+    /// **An actuator is a boot parameter and never a kernel build.**
+    ///
+    /// A name that reappears in `kernel/Cargo.toml` is a 46th kernel, and the
+    /// suite would build it without anything saying so — which is the state
+    /// collapsing seven per-actuator features into `test-actuators` got out of.
+    /// The two lists are read from the two files that declare them, so neither
+    /// can be satisfied by editing this test.
     #[test]
     fn no_actuator_is_also_a_cargo_feature() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
