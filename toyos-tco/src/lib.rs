@@ -44,16 +44,27 @@ pub const fn timer_for(bound_ms: u64) -> Option<u16> {
     Some(ticks as u16)
 }
 
-/// The bound the kernel and its loader both arm at, in milliseconds.
-///
-/// Five minutes: past every boot phase and every disk wait this tree has, and
-/// inside the time an unattended machine may be left face down.
-pub const BOUND_MS: u64 = 300_000;
+/// The smallest `TCO_TMR` a PCH honours, whatever [`timer_for`]'s own floor
+/// admits: the two differ, and a bound derived for hardware answers to this one.
+pub const TMR_MIN_HARDWARE: u16 = 0x04;
 
-/// [`BOUND_MS`]'s timer. Neither is a value this tree can fail to have.
+/// The bound the **bootloader** arms at, in milliseconds.
+///
+/// What it covers is the handoff window alone — the loader's jump to the
+/// kernel's own arm — so it is seconds and not minutes; everything after that
+/// window is the kernel's bound, which this is not. The largest the tick and
+/// the double expiry make exact at or under ten seconds: eight ticks of 600 ms,
+/// twice.
+pub const BOUND_MS: u64 = 9_600;
+
+/// [`BOUND_MS`]'s timer, which is neither a value this tree can fail to have
+/// nor one the hardware would ignore.
 pub const TIMER: u16 = match timer_for(BOUND_MS) {
-    Some(timer) => timer,
-    None => panic!("the shipped bound reaches no TCO timer"),
+    Some(timer) => {
+        assert!(timer >= TMR_MIN_HARDWARE, "the loader's bound derives a TCO_TMR the PCH ignores");
+        timer
+    }
+    None => panic!("the loader's bound reaches no TCO timer"),
 };
 
 /// The boot parameter that arms it: the bootloader reads it off

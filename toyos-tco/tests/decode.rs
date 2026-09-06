@@ -74,6 +74,18 @@ fn a_bound_becomes_the_timer_whose_expiries_do_not_outrun_it() {
     assert!(bound_of(2) <= 3_000);
 }
 
+/// The bootloader's bound covers the handoff window and nothing after it.
+#[test]
+fn the_loaders_bound_is_exact_under_ten_seconds_and_reaches_the_hardware() {
+    assert_eq!(timer_for(toyos_tco::BOUND_MS), Some(toyos_tco::TIMER));
+    assert_eq!(bound_of(toyos_tco::TIMER), toyos_tco::BOUND_MS, "the bound is not a whole tick");
+    // Refused where the constants are, not where a run would reach them.
+    const { assert!(toyos_tco::BOUND_MS <= 10_000, "the handoff window is seconds, not minutes") };
+    const { assert!(toyos_tco::TIMER >= toyos_tco::TMR_MIN_HARDWARE) };
+    // The largest such bound: one tick more is over ten seconds.
+    assert!(bound_of(toyos_tco::TIMER + 1) > 10_000);
+}
+
 #[test]
 fn no_two_rows_name_one_device() {
     for (i, a) in CHIPSETS.iter().enumerate() {

@@ -298,9 +298,9 @@ fn starved() -> BootOptions {
 
 /// The line `arm` logs on q35 at the fast bound; both tests demand it first.
 ///
-/// The tail is what makes it the kernel's: the loader prints the same port and
-/// a `TCO_TMR=` of its own on every guest that passes the parameter, and
-/// `TCO_TMR=2` is a prefix of its `TCO_TMR=250`.
+/// The tail is what makes it the kernel's: on every guest that passes the
+/// parameter the loader prints the same port and a `TCO_TMR=` of its own, which
+/// the head of this line cannot be told from.
 const ARMED: &str =
     "watchdog: 8086:2918 TCO at 0x660 TCO_TMR=2 — this machine resets if no scheduler pass runs \
      for 2400ms";
