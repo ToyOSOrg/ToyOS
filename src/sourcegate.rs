@@ -529,6 +529,14 @@ const HOST_SPAWNS: &[Spawn] = &[
               declared by nothing else: no build, boot or gate reaches it",
     },
     Spawn {
+        arg: "\"ssh\"",
+        sites: &[],
+        why: "OpenSSH's client, which is how `src/metal.rs` reaches the T14 and the only way it \
+              can: the machine runs Ubuntu and no ToyOS code. Outside the bar and declared by \
+              nothing else — no build, boot or gate reaches it, and the metal loop runs only \
+              when it is asked for",
+    },
+    Spawn {
         arg: "\"/sbin/newfs_msdos\"",
         sites: &[],
         why: "a macOS binary, and one of the standing failures CLAUDE.md declares. It \

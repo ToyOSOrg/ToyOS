@@ -83,6 +83,9 @@ name = "toyos-build"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+# `src/bin/toyos-metal.rs` is a second binary of this package, so a bare
+# `cargo run` would otherwise be ambiguous — and that command is the dev loop.
+default-run = "toyos-build"
 
 [dependencies]
 fatfs = "0.3.6"

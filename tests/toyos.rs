@@ -13,6 +13,7 @@ use common::qemu::{
 };
 use common::{audio, compile, faults, hostload, pkg, power, screen, serial, stats, storage, usb};
 use toyos_build::day::Day;
+use toyos_build::metal::boot_millis;
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
 
@@ -600,6 +601,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel, Tier::Fast),
+    // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
+    ("metal_job_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot, and the verdict is QEMU's stop reason inside the bound.
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
@@ -8699,6 +8702,7 @@ fn run_machine_test(
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
+        "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
@@ -13645,15 +13649,6 @@ fn image_extent(path: &Path) -> (u64, u64) {
     (meta.len(), meta.blocks() * 512)
 }
 
-/// The guest's own boot duration, out of `Boot: complete (123ms)`.
-fn boot_millis(log: &str) -> Option<u64> {
-    log.lines()
-        .find_map(|l| l.split("Boot: complete (").nth(1))?
-        .split("ms)")
-        .next()?
-        .parse()
-        .ok()
-}
 
 #[derive(Debug)]
 struct XhciBind {
