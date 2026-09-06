@@ -6,6 +6,8 @@
 //! partition, and they must not be able to reach different answers about one
 //! log. Pure: text in, a verdict out.
 
+#![forbid(unsafe_code)]
+
 use std::fmt;
 
 /// The word the kernel writes as it hands the machine back to the firmware,
@@ -43,12 +45,9 @@ pub fn boot_millis(log: &str) -> Option<u64> {
     tail.split("ms)").next()?.parse().ok()
 }
 
-/// A boot's duration if its log is a passing boot's, which takes both records.
-///
-/// **Either alone is a boot that told half a story**: a log ending anywhere but
-/// the reset is a machine that did not come back on its own, whether or not it
-/// got as far as the boot record — so the reset word is looked for as the last
-/// line and not anywhere in the text.
+/// A boot's duration if its log is a passing boot's, which takes both records:
+/// a log ending anywhere but the reset is a machine that did not come back on
+/// its own, so the word is looked for as the last line and not in the text.
 pub fn verdict(log: &str) -> Result<u64, Unfit> {
     let boot_ms = boot_millis(log).ok_or(Unfit::NoBootRecord)?;
     let last = log.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
@@ -64,12 +63,13 @@ mod tests {
 
     /// The half-told boot: the kernel got all the way up and the log stops
     /// there, so the machine either never asked for the reset or the reset
-    /// outran `logd`. Either way it is not a pass.
+    /// outran `logd`.
     #[test]
     fn a_boot_record_without_the_reset_word_is_not_a_pass() {
         let booted = "[kernel 1.151 cpu0] Boot: complete (1151ms)\n";
         let ended = format!("{booted}[logd 1.203 cpu1] {REBOOTING}\n");
         assert_eq!(verdict(&ended), Ok(1151));
+        // Trailing blank lines are not the last line.
         assert_eq!(verdict(&format!("{ended}\n  \n")), Ok(1151));
 
         assert_eq!(

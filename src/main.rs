@@ -165,8 +165,7 @@ fn main() {
     let smp = parse_smp(&args);
     let profile = parse_profile(&args);
     let mute = args.iter().any(|a| a == "--mute");
-    let kernel_feature = parse_repeated(&args, "--kernel-feature");
-    let kernel_param = parse_repeated(&args, "--kernel-param");
+    let kernel_param = toyos_build::build::repeated(&args, "--kernel-param");
     // A machine with no serial port has the framebuffer and nothing else, and
     // the kernel stops painting it the moment userland claims it. `--diag-boot`
     // builds the image that never does; `--console-boot` builds the one that
@@ -175,11 +174,11 @@ fn main() {
     let diag = args.iter().any(|a| a == "--diag-boot");
     let console = args.iter().any(|a| a == "--console-boot");
     assert!(!(diag && console), "--diag-boot and --console-boot are two images; build one");
-    // `--boot-config <dir>` builds the `system.toml` in that directory — the
-    // metal loop's case, and any other. **A flashed image carries no actuator**,
-    // so only the kernel's own boot parameters are admitted beside it, and every
-    // flag it cannot combine with is refused by name rather than dropped.
-    let boot_config = parse_valued(&args, "--boot-config");
+    // `--boot-config <dir>` builds the `system.toml` in that directory.
+    // **A flashed image carries no actuator**, so only the kernel's own boot
+    // parameters are admitted beside it, and every flag it cannot combine with
+    // is refused by name.
+    let boot_config = toyos_build::build::valued(&args, "--boot-config");
     if let Some(asked) = &boot_config {
         for (other, flag) in [
             (diag, "--diag-boot"),
@@ -248,56 +247,14 @@ fn main() {
 
     // Toolchain included: `build` holds the build lock across both, so no other
     // agent's clean or bootstrap can land between the two.
-    let image = toyos_build::build::build(
-        &root,
-        debug,
-        boot,
-        rebuild_toolchain,
-        claim_sysroot,
-        &kernel_feature,
-        &kernel_param,
-    );
+    let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
+    let image = toyos_build::build::build(&root, boot, rebuild_toolchain, claim_sysroot, &plan);
     println!("Build finished.");
     println!("Boot image: {}", image.display());
 
     if !build_only {
         qemu::launch(&qemu::Options { debug, dump_audio, profile, smp, mute, image });
     }
-}
-
-/// `--kernel-param <name>`, repeatable: one actuator this *boot* arms, and the
-/// ordinary way to ask for one. `--kernel-feature <name>`, repeatable: one
-/// cargo feature this *build* carries, which is `fpu-save-nothing` and
-/// `sched-check` and nothing else. Unknown names are refused by name in
-/// [`build::build`], before any lock.
-///
-/// **Both are orthogonal to the boot mode on purpose.** Attaching a list to
-/// `Boot::Diag` was the other way to reach the same image, and it would have
-/// made the diagnostic kernel permanently a different build from the shipping
-/// one — which is the exact guarantee that mode's own documentation makes, that
-/// what the owner flashes is the kernel everything else is tested against. Here
-/// the difference is one word he typed on one command line, and a parameter is
-/// not even that: `--diag-boot --kernel-param heartbeat` and
-/// `--diag-boot --kernel-param control-regs-bench` are one kernel binary.
-fn parse_repeated(args: &[String], flag: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        if arg == flag {
-            let name = rest
-                .next()
-                .unwrap_or_else(|| panic!("{flag} needs a name: {flag} <name>"));
-            values.push(name.clone());
-        }
-    }
-    values
-}
-
-/// The same flag taken once: a second use is refused rather than resolved.
-fn parse_valued(args: &[String], flag: &str) -> Option<String> {
-    let mut found = parse_repeated(args, flag);
-    assert!(found.len() < 2, "{flag} takes one value; this asks for {found:?}");
-    found.pop()
 }
 
 /// `--gop` swaps virtio-gpu for a firmware framebuffer; `--metal-sim` goes
