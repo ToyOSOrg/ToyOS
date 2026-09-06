@@ -19,8 +19,7 @@ pub const TCO_TMR: u16 = 0x12;
 pub const TCO_TMR_HLT: u16 = 1 << 11;
 pub const TCO_TIMEOUT: u16 = 1 << 3;
 
-/// `TCO1_CNT` declared whole, never a bit set into what was there: it also
-/// selects an interrupt this kernel wants none of.
+/// `TCO1_CNT` declared whole, never a bit set into what was there: it also selects an interrupt this kernel wants none of.
 pub const TCO1_CNT_RUN: u16 = 0;
 pub const TCO1_CNT_HALT: u16 = TCO_TMR_HLT;
 
@@ -31,8 +30,7 @@ const TMR_MIN: u64 = 2;
 const TICK_MS: u64 = 600;
 const EXPIRIES: u64 = 2;
 
-/// The `TCO_TMR` whose expiries reach `bound_ms`, or `None`. Rounded down, so
-/// the reset lands at or before the bound rather than after it.
+/// The `TCO_TMR` whose expiries reach `bound_ms`, rounded down so the reset lands at or before the bound.
 pub fn timer_for(bound_ms: u64) -> Option<u16> {
     let ticks = bound_ms / (TICK_MS * EXPIRIES);
     (TMR_MIN..=TMR_MAX).contains(&ticks).then_some(ticks as u16)

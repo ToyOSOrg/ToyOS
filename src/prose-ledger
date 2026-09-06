@@ -614,7 +614,7 @@ toyos-sched/src/timer.rs 38 0
 toyos-sched/src/waitq.rs 162 0
 toyos-symbols/src/lib.rs 65 0
 toyos-symbols/tests/real.rs 30 0
-toyos-tco/src/lib.rs 28 0
+toyos-tco/src/lib.rs 26 0
 toyos-tco/tests/decode.rs 3 0
 toyos-untrusted/src/lib.rs 151 0
 toyos-userbound/src/fault.rs 111 1
