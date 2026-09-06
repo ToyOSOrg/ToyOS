@@ -19,6 +19,7 @@ use uefi::{
     table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID},
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_bootmap::{Cache, Plan, BOOT_MAP_BYTES, MAX_PAGES};
 
 /// Every line this loader prints: the firmware's console, and the file on the
 /// stick once [`loaderlog::open`] has one.
@@ -282,14 +283,6 @@ const WATCHDOG_CODE: u64 = 0x0001_0000;
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
-/// How much physical memory the boot page tables cover, identity and high-half alike.
-const BOOT_MAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-
-/// The page-table pages [`build_boot_page_tables`] draws from: one PML4, two
-/// PDPTs, one PD per GiB of [`BOOT_MAP_BYTES`], and one per GiB the scanout
-/// adds above it.
-const PT_PAGES: usize = 12;
-
 /// `SHT_REL`, the relocation form whose addend lives in the destination word.
 ///
 /// Named here rather than taken from `toyos-elf`, which names only the section
@@ -495,93 +488,44 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     })
 }
 
-/// One 4 KiB page out of the fixed pool.
+/// Write `plan` into `pt_mem` and return the PML4's physical address.
 ///
 /// # Safety
-/// `pt_mem` is the [`PT_PAGES`]-page zeroed allocation and `next` its cursor.
-unsafe fn page_table(pt_mem: *mut u8, next: &mut usize) -> *mut u64 {
-    assert!(*next < PT_PAGES, "the boot map needs more than its {PT_PAGES} page tables");
-    let page = pt_mem.add(*next * 4096) as *mut u64;
-    *next += 1;
-    page
-}
-
-/// Build minimal boot page tables for kernel transition to high half, and
-/// return the physical address of the PML4.
-///
-/// Maps the first `size` bytes of physical memory, and `scanout` wherever
-/// firmware put it, at both identity (PML4[0]) and high-half (PML4[256] =
-/// PHYS_OFFSET), in 2 MiB pages.
-///
-/// # Safety
-/// `pt_mem` is [`PT_PAGES`] pages of zeroed memory, 4096-aligned.
-unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64, scanout: Option<(u64, u64)>) -> u64 {
+/// `pt_mem` is [`toyos_bootmap::MAX_PAGES`] pages of zeroed memory, 4096-aligned.
+unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
     const PAGE_PRESENT: u64 = 1 << 0;
     const PAGE_WRITE: u64 = 1 << 1;
     const PAGE_SIZE_BIT: u64 = 1 << 7;
-    /// Bit 12 of a 2 MiB entry, which with PCD and PWT clear selects PAT entry
-    /// 4 — `kernel/src/arch/pat.rs`'s `WC_ENTRY` and `mm/paging.rs`'s
-    /// `CachePolicy::WriteCombining`, the entry the kernel installs over these
-    /// same frames at `mm::init`. One physical page may not hold two memory
-    /// types (SDM Vol. 3A §11.12.4), so the two mappings select the same one.
-    const PAGE_PAT_2M: u64 = 1 << 12;
-    const PAGE_2M: u64 = 2 * 1024 * 1024;
-    const GB: u64 = 1 << 30;
-    /// A PDPT holds 512 GiB, and this builds two of them.
-    const GB_PER_PDPT: u64 = 512;
+    /// PCD and PWT with the PAT bit clear: PAT entry 3, which is uncacheable
+    /// under every MTRR type and under an unprogrammed PAT — and nothing has
+    /// programmed `IA32_PAT` until the kernel's `pat::init`.
+    const PAGE_UNCACHEABLE: u64 = (1 << 4) | (1 << 3);
 
     let mut next_page = 0usize;
-    let pml4 = page_table(pt_mem, &mut next_page);
-    let identity_pdpt = page_table(pt_mem, &mut next_page);
-    let high_pdpt = page_table(pt_mem, &mut next_page);
+    let mut alloc_page = || -> *mut u64 {
+        let page = pt_mem.add(next_page * 4096) as *mut u64;
+        next_page += 1;
+        page
+    };
 
-    // Every PD by its GiB, so the scanout's pages land in the one the low map
-    // already made where the two overlap.
-    let mut pds: [(u64, *mut u64); PT_PAGES] = [(0, core::ptr::null_mut()); PT_PAGES];
-    let mut pd_count = 0usize;
-    // A macro and not a closure: it writes `pds`, and the scanout loop below
-    // reads it in the same expression that calls this.
-    macro_rules! attach {
-        ($gi:expr) => {{
-            let gi: u64 = $gi;
-            let pd = page_table(pt_mem, &mut next_page);
-            *identity_pdpt.add(gi as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
-            *high_pdpt.add(gi as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
-            pds[pd_count] = (gi, pd);
-            pd_count += 1;
-            pd
-        }};
+    let pml4 = alloc_page();
+    let identity_pdpt = alloc_page();
+    let high_pdpt = alloc_page();
+    let mut directories = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_DIRECTORIES];
+    for (slot, gib) in plan.directories().iter().enumerate() {
+        let pd = alloc_page();
+        directories[slot] = pd;
+        *identity_pdpt.add(*gib as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
+        *high_pdpt.add(*gib as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
     }
 
-    let num_gb = size.div_ceil(GB);
-    for gi in 0..num_gb {
-        let pd = attach!(gi);
-        for pdi in 0..512u64 {
-            let phys = gi * GB + pdi * PAGE_2M;
-            if phys < size {
-                *pd.add(pdi as usize) = phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT;
-            }
-        }
-    }
-
-    // The scanout, wherever firmware put it: the kernel paints the panel from
-    // its first record, through these tables, and on an AP that has not yet
-    // loaded its own (`kernel/src/arch/smp.rs`'s `ap_entry`).
-    if let Some((at, len)) = scanout {
-        let end = at.checked_add(len).expect("the scanout's extent overflows an address");
-        let mut phys = at & !(PAGE_2M - 1);
-        while phys < end {
-            let gi = phys >> 30;
-            assert!(gi < GB_PER_PDPT, "the scanout at {at:#x} is past the boot map's two PDPTs");
-            let known = pds[..pd_count].iter().find(|(each, _)| *each == gi).map(|(_, pd)| *pd);
-            let pd = match known {
-                Some(pd) => pd,
-                None => attach!(gi),
-            };
-            *pd.add(((phys >> 21) & 0x1ff) as usize) =
-                phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT | PAGE_PAT_2M;
-            phys += PAGE_2M;
-        }
+    for entry in plan.entries() {
+        let cache = match entry.cache {
+            Cache::DeferToMtrr => 0,
+            Cache::Uncacheable => PAGE_UNCACHEABLE,
+        };
+        *directories[entry.directory].add(entry.index) =
+            entry.phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT | cache;
     }
 
     // PML4[0] = identity, PML4[256] = high-half (PHYS_OFFSET >> 39 = 256)
@@ -595,29 +539,38 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64, scanout: Option<(u6
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
-    // Pre-allocate page table pages before exiting boot services.
-    // We need: 1 PML4 + 2 PDPTs + up to 8 PDs (for 8GB) = ~11 pages max.
-    // Allocate as a flat array and split into 512-entry pages.
-    let pt_layout = Layout::from_size_align(PT_PAGES * 4096, 4096).unwrap();
-    // SAFETY: `layout` has non-zero size (`PT_PAGES` is a fixed 12) and its
-    // 4096 alignment is what every page-table page below needs — the low 12
-    // bits of an entry are flags, not address bits.
+    // Pre-allocated before exiting boot services, and flat: `alloc_page` splits
+    // it into 512-entry pages.
+    let pt_layout = Layout::from_size_align(MAX_PAGES * 4096, 4096).unwrap();
+    // SAFETY: `layout` has non-zero size and its 4096 alignment is what every
+    // page-table page below needs — the low 12 bits of an entry are flags, not
+    // address bits.
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
     // Before the exit: `_print` unwraps a system table uefi-services nulls in its exit callback, so `println!` past it panics.
-    let scanout = gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size));
-    // SAFETY: `pt_mem` is the `PT_PAGES * 4096`-byte, 4096-aligned, zeroed
-    // allocation above; the pool's own bound is asserted inside.
-    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, BOOT_MAP_BYTES, scanout) };
-    println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
-    match scanout {
-        Some((at, len)) => println!(
-            "Scanout: {at:#x}+{len:#x} mapped in 2 MiB pages at PAT entry 4, at identity and at \
-             PHYS_OFFSET"
-        ),
-        None => println!("Scanout: none"),
+    //
+    // Said before it is applied, for `kernel_fits`'s reason: a machine this
+    // refuses leaves the refusal in `loader.log`, which is the artifact a
+    // machine with no console has.
+    let planned = Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
+    match &planned {
+        Ok(plan) => match plan.scanout() {
+            Some((at, len)) => println!(
+                "Scanout: {at:#x}+{len:#x} mapped uncacheable in 2 MiB pages at identity and at \
+                 PHYS_OFFSET, in {} page directories",
+                plan.directories().len()
+            ),
+            None => println!("Scanout: this machine has none"),
+        },
+        Err(why) => println!("Scanout: NO BOOT MAP HOLDS IT, {why}"),
     }
+    let plan = planned.unwrap_or_else(|why| panic!("the boot map cannot hold the scanout: {why}"));
+
+    // SAFETY: `pt_mem` is the `MAX_PAGES * 4096`-byte, 4096-aligned, zeroed
+    // allocation above, and a `Plan` never names more pages than that.
+    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, &plan) };
+    println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
 
     // Said before it is asserted: `assert!` panics through uefi-services, whose handler prints to the console alone.
     let kernel_phys = kernel.memory.as_ptr() as u64;

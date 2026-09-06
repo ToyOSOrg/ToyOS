@@ -399,9 +399,8 @@ const _: () = {
 /// Arm the console from `KernelArgs`, before `serial::init`; covers everything
 /// up to `mm::init`.
 ///
-/// Where the scanout is is the bootloader's to answer, and it asserts at the
-/// handoff that its own map reaches it — so nothing here holds a second,
-/// weaker belief about how far that map goes.
+/// The bootloader refuses to hand over a machine whose boot map does not hold
+/// the scanout, so nothing here holds a second belief about where it is.
 pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     if args.gop_framebuffer == 0 {
         return;
