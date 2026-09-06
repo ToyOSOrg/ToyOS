@@ -419,9 +419,9 @@ const AUDIO_SMP: &[u32] = &[1, 8];
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_decoder", Sched::Parallel, Tier::Fast),
-    // Its own boot, ended at a loader line rather than at the kernel's ready
-    // marker. Every verdict is a count of rows against a count of lines off
-    // the same boot's console; no clock is in either.
+    // Two boots, each ended at a loader line rather than at the kernel's ready
+    // marker. Every verdict is a count of rows against a count of lines off the
+    // same boot's console; no clock is in either.
     ("screen_loader_lines", Sched::Parallel, Tier::Fast),
     ("screen_gop_firmware_mode", Sched::Parallel, Tier::Nightly),
     // `thread::sleep(5 s)` is the measurement, not a ceiling: the assertion is
@@ -479,6 +479,11 @@ const CONSOLE_PROMPT: &str = "/home/root>";
 /// read them. This one is written hundreds of lines into a boot, which is what
 /// makes its *absence* two different things — see `screen_console_shell`.
 const CONSOLE_SEED_WITNESS: &str = "i8042:";
+
+/// The line `query_gop` prints right after it opens the protocol. `fb=` is the
+/// bootloader's spelling of a GOP line and `at 0x` is the kernel's, so this
+/// picks the loader's wherever both are on one console.
+const GOP_QUERY_LINE: &str = "fb=0x";
 
 /// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
 /// the brightest channel and a colour a glyph could contain would let a
@@ -3301,57 +3306,80 @@ fn run_screen_test(
             Ok(())
         }
         "screen_loader_lines" => {
-            // Every line the loader prints reaches the panel. An EXCLUSIVE
-            // open of `GraphicsOutput` calls `Stop` on the firmware's graphics
-            // console, so with one the panel stops at the GOP query and the
-            // lines after it exist only on a serial port.
+            // An EXCLUSIVE open of `GraphicsOutput` calls `Stop` on the
+            // firmware's graphics console, so with one the panel stops at the
+            // GOP query and every later loader line is on serial alone.
             //
-            // The guest is stopped at the loader's own last line: the kernel
-            // repaints the panel over the firmware's text as soon as it is up.
-            let options = BootOptions {
-                profile: qemu::Profile::Metal,
-                qmp: true,
-                ready_marker: toyos_build::bootlog::LOADER_HANDOFF_LINE,
-                ..Default::default()
+            // Differential across that query, because a single count would be
+            // the firmware's own preamble as well; and rows are counted rather
+            // than read, because the kernel's font is the only one `screen.rs`
+            // has and every row here was drawn by the firmware's.
+            let dump_at = |marker: &'static str| -> Result<(usize, String), String> {
+                let options = BootOptions {
+                    profile: qemu::Profile::Metal,
+                    qmp: true,
+                    ready_marker: marker,
+                    ..Default::default()
+                };
+                metal_sim_argv_check(&qemu::profile_argv(&options))?;
+                let mut qemu =
+                    QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+                let console = qemu.boot_log().to_string();
+                let dump = qemu.screendump();
+                // A row that decodes in the kernel's font is a row the kernel
+                // drew. Refused rather than counted: its rows are not the
+                // loader's and would only push the growth below green.
+                if dump
+                    .rows()
+                    .iter()
+                    .any(|row| !row.trim().is_empty() && !row.contains(screen::UNKNOWN))
+                {
+                    return Err(format!(
+                        "the kernel had already repainted the panel at {marker:?}, so these are \
+                         its rows and not the loader's\ndecoded screen:\n{}",
+                        dump.text()
+                    ));
+                }
+                Ok((dump.text_row_bands(), console))
             };
-            metal_sim_argv_check(&qemu::profile_argv(&options))?;
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let console = qemu.boot_log().to_string();
+
+            let (before, _) = dump_at(GOP_QUERY_LINE)?;
+            let (after, console) = dump_at(toyos_build::bootlog::LOADER_LAST_LINE)?;
+
+            // What the loader printed after the query, off its own console.
             let lines: Vec<&str> = console.lines().collect();
             let at = |line: &str| {
                 lines
                     .iter()
                     .position(|seen| seen.contains(line))
-                    .ok_or_else(|| format!("this loader never printed {line:?}\n{console}"))
+                    .ok_or_else(|| format!("the loader never printed {line:?}\n{console}"))
             };
-            let printed = at(toyos_build::bootlog::LOADER_HANDOFF_LINE)? + 1
-                - at(toyos_build::bootlog::LOADER_FIRST_LINE)?;
-
-            let dump = qemu.screendump();
-            let decoded = dump.text();
-            // A panel the kernel painted decodes wholly in the kernel's own
-            // font. Refused rather than counted: its rows would be the
-            // kernel's, and every count below would pass on them.
-            if !decoded.contains(common::screen::UNKNOWN) {
+            let (query, last) = (at(GOP_QUERY_LINE)?, at(toyos_build::bootlog::LOADER_LAST_LINE)?);
+            if last <= query {
                 return Err(format!(
-                    "the panel decodes wholly in the kernel's font, so the kernel repainted it \
-                     before this dump and the loader's rows are gone\ndecoded screen:\n{decoded}"
+                    "the console carries {:?} at line {last} and {GOP_QUERY_LINE:?} at {query}, \
+                     so there is nothing between them",
+                    toyos_build::bootlog::LOADER_LAST_LINE
                 ));
             }
-            let bands = dump.text_row_bands();
-            // The firmware's own lines are above the loader's and can only add
-            // rows, so a panel with fewer rows than the loader printed lines is
-            // one that stopped drawing partway through it.
-            if bands < printed {
+            let printed = last - query;
+
+            // A range and not an equality: each panel is dumped after its
+            // marker reached the console, so a line drawn in between is on the
+            // panel and not in the count. Both ends are the claim — the console
+            // kept drawing past the query, and drew no more than the loader
+            // printed — and the defect this exists for makes the growth zero.
+            let grew = after as i64 - before as i64;
+            if !(1..=printed as i64).contains(&grew) {
                 return Err(format!(
-                    "the loader put {printed} lines on the console and the panel carries \
-                     {bands} rows: the firmware's graphics console stopped drawing before the \
-                     handoff\n{console}"
+                    "the panel carried {before} rows at the GOP query and {after} at the loader's \
+                     last line, a growth of {grew}, where the loader printed {printed} lines \
+                     between them\n{console}"
                 ));
             }
             eprintln!(
-                "  [screen] the panel carries {bands} rows for the loader's {printed} lines"
+                "  [screen] the panel grew {grew} row(s) across the GOP query, {before} to \
+                 {after}, for {printed} line(s) printed"
             );
             Ok(())
         }

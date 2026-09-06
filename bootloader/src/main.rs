@@ -18,8 +18,18 @@ use uefi::{
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
     table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID},
 };
-use uefi_services::println;
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+
+/// Every line this loader prints: the firmware's console, and the file on the
+/// stick once [`loaderlog::open`] has one.
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        uefi_services::println!($($arg)*);
+        $crate::loaderlog::line(core::format_args!($($arg)*));
+    }};
+}
+
+mod loaderlog;
 
 /// The largest file the bootloader will read off the ESP.
 ///
@@ -162,17 +172,17 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
     let mut nodes = path.node_iter().filter(is_hard_drive);
     let node = nodes.next()?;
     if nodes.next().is_some() {
-        println!("Boot partition: the device path has more than one HARDDRIVE node — ignoring it");
+        println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
         return None;
     }
 
     let hd: &uefi::proto::device_path::media::HardDrive = node.try_into().ok()?;
     if hd.partition_format() != PartitionFormat::GPT {
-        println!("Boot partition: firmware says this is not a GPT partition — ignoring it");
+        println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
         return None;
     }
     let PartitionSignature::Guid(guid) = hd.partition_signature() else {
-        println!("Boot partition: firmware named it with no GUID signature — ignoring it");
+        println!("Boot partition: firmware named it with no GUID signature, so it is ignored");
         return None;
     };
     Some(BootPartition {
@@ -238,19 +248,19 @@ fn rtc_utc_offset(system_table: &SystemTable<Boot>) -> Option<i32> {
     let time = match system_table.runtime_services().get_time() {
         Ok(time) => time,
         Err(e) => {
-            println!("RTC zone: firmware's GetTime failed ({e:?}) — the kernel will assume UTC");
+            println!("RTC zone: firmware's GetTime failed ({e:?}), so the kernel assumes UTC");
             return None;
         }
     };
     let Some(zone) = time.time_zone() else {
-        println!("RTC zone: firmware names none ({time:?}) — the kernel will assume UTC");
+        println!("RTC zone: firmware names none ({time:?}), so the kernel assumes UTC");
         return None;
     };
     let zone = zone as i32;
     if !(-MAX_OFFSET_MINUTES..=MAX_OFFSET_MINUTES).contains(&zone) {
         println!(
-            "RTC zone: firmware names {zone} minutes, outside +/-{MAX_OFFSET_MINUTES} — ignoring \
-             it, the kernel will assume UTC"
+            "RTC zone: firmware names {zone} minutes, outside +/-{MAX_OFFSET_MINUTES}, so it is \
+             ignored and the kernel assumes UTC"
         );
         return None;
     }
@@ -415,12 +425,13 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().ok()?;
     // Never `open_protocol_exclusive` here: EXCLUSIVE calls `Stop` on every
     // driver holding this protocol BY_DRIVER, and the firmware's graphics
-    // console is one — so the panel dies at this line and no loader line after
-    // it is ever seen on a machine whose only channel is its screen.
+    // console is one.
     //
-    // SAFETY: `GetProtocol` only hands back the interface pointer. This image
-    // is the sole agent running under boot services and installs, uninstalls
-    // and reinstalls nothing, so the interface stays live for the reads below.
+    // SAFETY: `open_protocol`'s obligation is that this handle and its protocol
+    // stay installed until the `ScopedProtocol` drops. Nothing between the two
+    // can uninstall either: the loader is the one image running, it registers
+    // no event callback, and it calls no boot service that connects or
+    // disconnects a controller.
     let mut gop = unsafe {
         bs.open_protocol::<GraphicsOutput>(
             OpenProtocolParams { handle: gop_handle, agent: bs.image_handle(), controller: None },
@@ -514,6 +525,9 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
+    // Before the map is sized: a console write, a FAT write and a handle drop
+    // can each add a descriptor, and the margin below is fixed.
+    loaderlog::close();
     let mms = system_table.boot_services().memory_map_size();
     let memory_map_entry_count = mms.map_size / mms.entry_size + 8;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
@@ -628,7 +642,11 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut system_table).unwrap();
-    println!("ToyOS Bootloader 1.0");
+    // The same sixteen bytes the kernel is handed below, read once, and read
+    // before the first line so that no line is only on the screen.
+    let log_guid = log_partition_guid(handle, &system_table);
+    loaderlog::open(&system_table, &log_guid);
+    println!("{}", loaderlog::BEGINS_AT);
 
     // Find ACPI 2.0 RSDP from UEFI configuration table
     let rsdp_addr = system_table
@@ -652,7 +670,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let kernel_bytes = load_file_bytes(handle, &system_table, cstr16!("\\toyos\\kernel.elf"));
     println!("Kernel: {} bytes", kernel_bytes.len());
 
-    let log_guid = log_partition_guid(handle, &system_table);
     println!("Log partition: signature {:02x?}", log_guid);
 
     let cmdline = cmdline(handle, &system_table);
@@ -668,6 +685,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // answers die with Boot Services.
     let rtc_offset = rtc_utc_offset(&system_table);
 
-    println!("Starting kernel...");
+    println!("{}", loaderlog::HANDS_OFF_AT);
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);
 }

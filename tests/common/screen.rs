@@ -174,12 +174,13 @@ impl Ppm {
     }
 
     /// How many rows of text are on the panel, counted without decoding a
-    /// glyph — which is the only way to count rows a *firmware* font drew,
-    /// since [`Ppm::text`] reads the kernel's font and nothing else.
+    /// glyph: no firmware font is committed here, so a row one drew is
+    /// invisible to [`Ppm::text`] and countable only as lit scanlines.
     ///
-    /// A row is a band of scanlines carrying lit pixels. The row pitch is the
-    /// closest two band tops come, which is the console's own; a band taller
-    /// than that is a logo or a progress block and not a row of text.
+    /// The pitch is the median distance between band tops — a stray scanline
+    /// would set a minimum of one, and a mean would follow the same outlier.
+    /// A band taller than the pitch is a logo or two rows that touch, and
+    /// neither is one row of text.
     pub fn text_row_bands(&self) -> usize {
         let mut bands: Vec<(usize, usize)> = Vec::new();
         let mut top = None;
@@ -198,9 +199,12 @@ impl Ppm {
         if let Some(from) = top {
             bands.push((from, self.height));
         }
-        let Some(pitch) = bands.windows(2).map(|pair| pair[1].0 - pair[0].0).min() else {
+        let mut gaps: Vec<usize> = bands.windows(2).map(|pair| pair[1].0 - pair[0].0).collect();
+        if gaps.is_empty() {
             return 0;
-        };
+        }
+        gaps.sort_unstable();
+        let pitch = gaps[gaps.len() / 2];
         bands.iter().filter(|(from, to)| to - from <= pitch).count()
     }
 
