@@ -29,6 +29,8 @@ pub mod passcost;
 #[allow(dead_code)]
 pub mod pkg;
 #[allow(dead_code)]
+pub mod power;
+#[allow(dead_code)]
 pub mod qemu;
 #[allow(dead_code)]
 pub mod screen;

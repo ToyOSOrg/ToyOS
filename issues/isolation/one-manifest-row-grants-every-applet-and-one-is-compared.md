@@ -4,20 +4,20 @@ kind: track
 opened: 2026-09-01
 ---
 
-# One manifest row grants nineteen applets, and exactly one of them is compared against it
+# One manifest row grants every applet, and exactly one of them is compared against it
 
-`system.toml:99` is `[programs.toybox]`, and 19 rows below it link an applet name
+`system.toml:112` is `[programs.toybox]`, and every `[symlinks]` row below it links an applet name
 to `/system/bin/toybox`. Init resolves a symlink to its binary row
 (`userland/init/src/main.rs:422-441`), so every applet runs with the union of
 authority that one row grants —
-`issues/isolation/toybox-is-one-row-for-nineteen-applets.md`.
+`issues/isolation/toybox-is-one-row-for-every-applet.md`.
 
 **One applet is already checked, and the shape it uses is the right one.**
 `tests/toyos-rust-tests/src/bin/endowment_denied.rs:39-43` runs `/system/bin/ps` twice,
 endowed a duplicate with `Rights::ROSTER` and a duplicate without it, and its own
 comment says what that buys: "the manifest's name, the kernel's demand and the
 program are one line rather than three that agree by luck". That is one allowed
-and one forbidden operation for one authority class on one of the nineteen. The
+and one forbidden operation for one authority class on one of them. The
 effective-authority side is a shipped syscall too — `SYS_ENDOWMENTS`
 (`toyos-abi/src/syscall.rs:173`, wrapper at `:849`) lets a process read its own
 endowment table back.
@@ -34,19 +34,20 @@ applets that have no use for it is not the list this test declares
   left: ["cat: receive soundd", "cp: receive soundd", "echo: receive soundd",
          "free: receive soundd", "grep: receive soundd", "hexdump: receive soundd",
          "ls: receive soundd", "mkdir: receive soundd", "mv: receive soundd",
-         "ps: receive soundd", "pwd: receive soundd", "rm: receive soundd",
+         "ps: receive soundd", "pwd: receive soundd", "reboot: receive soundd",
+         "rm: receive soundd",
          "shutdown: receive soundd"]
  right: []
 ```
 
-Thirteen of the fourteen applets in the test image hold a connector to soundd
+Every applet but `tone` in the test image holds a connector to soundd
 because `tone` needs one. That list is now `DECLARED_OVER_GRANTS`, so the size
 of the defect cannot grow without a red naming what grew.
 
 **What is still missing is the shipped image.** A guest test boots
 `tests/testcases/system.toml`, whose `toybox` row is `receives = ["soundd"]` and
-carries no `syscap` at all. The row this record opened on — `system.toml:99`,
-`syscap = ["power", "roster"]` across nineteen links — is measured by nothing:
+carries no `syscap` at all. The row this record opened on — `system.toml:112`,
+`syscap = ["power", "roster"]` across every link — is measured by nothing:
 the differential that would see `/system/bin/echo` holding `Rights::POWER` has to read
 `system.toml` and ROOT's link list on the host, in `cargo test --lib`,
 because no boot carries that manifest.

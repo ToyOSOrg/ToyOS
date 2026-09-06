@@ -1,8 +1,9 @@
-//! What a process may learn about the machine, and the one thing it may do to it.
+//! What a process may learn about the machine, and the two things it may do to it.
 //!
-//! [`sys_log_read`], the roster half of [`sys_sysinfo`], and [`sys_shutdown`]
-//! each require a `SysCap` bit from `/system/bin/init`'s `system.toml`; `SYS_SYSINFO`'s
-//! header is ambient, and [`sys_sched_info`] demands nothing.
+//! [`sys_log_read`], the roster half of [`sys_sysinfo`], and both of
+//! [`sys_shutdown`] and [`sys_reboot`] each require a `SysCap` bit from
+//! `/system/bin/init`'s `system.toml`; `SYS_SYSINFO`'s header is ambient, and
+//! [`sys_sched_info`] demands nothing.
 
 use alloc::vec::Vec;
 
@@ -43,22 +44,40 @@ pub(super) fn sys_log_read(
     }
 }
 
-/// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Does not return.
-pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
-    if let Err(e) = demand_syscap(syscap, Rights::POWER) {
-        return e.refuse();
-    }
+fn quiesce(last: &str) {
     log!("Syncing filesystems...");
     // drain_all before sync_all: a closed-but-undrained file's dirty pages are only in the cache, which sync_all would miss.
     crate::writeback::drain_all();
     crate::vfs::lock().sync_all();
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
-    log!("Shutting down.");
-    // Order is load-bearing: wait_for_durable, then drain_inline, then the non-returning acpi::shutdown.
+    log!("{last}");
+    // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
     crate::log::wait_for_durable();
     crate::log::console::drain_inline();
+}
+
+/// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Does not return.
+pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::POWER) {
+        return e.refuse();
+    }
+    quiesce("Shutting down.");
     acpi::shutdown();
+}
+
+/// Returns the machine to firmware; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
+// The register is demanded before anything is torn down: a machine whose FADT names none is left running, not synced, stopped and still on.
+pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::POWER) {
+        return e.refuse();
+    }
+    if !acpi::can_reboot() {
+        log!("reboot: this machine's FADT names no reset register — refused");
+        return SyscallError::NotSupported.to_u64();
+    }
+    quiesce("Rebooting.");
+    acpi::reboot();
 }
 
 /// The most live threads `SYS_SYSINFO` will describe; kept under `mm::MAX_HEAP_ALLOC` so an unbounded thread count cannot trip the allocator's fail-fast assert.
