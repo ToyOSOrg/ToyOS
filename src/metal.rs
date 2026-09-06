@@ -43,6 +43,11 @@ const WIPEFS: &str = "/usr/sbin/wipefs";
 /// What the firmware loads off the stick's ESP.
 const LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
 
+/// [`LOADER`] as the installed rule spells it, pinned here so the four
+/// backslashes a match needs are a constant and not a count in a test.
+#[cfg(test)]
+const LOADER_RULE: &str = r"\\\\EFI\\\\BOOT\\\\BOOTX64.EFI";
+
 /// The three logind keys that keep a closed-lid machine awake.
 const LID_KEYS: &[&str] =
     &["HandleLidSwitch", "HandleLidSwitchExternalPower", "HandleLidSwitchDocked"];
@@ -283,17 +288,25 @@ impl Word {
         Ok(Self::Is(text.to_string()))
     }
 
-    /// The word as `sudoers(5)` reads it: `,`, `:`, `=` and `\` carry meaning
-    /// in a command argument, and a leading `^` makes the argument a regex.
+    /// The word as `sudoers(5)` reads it. `,`, `:` and `=` carry meaning to the
+    /// sudoers lexer and a leading `^` makes the argument a regex, so each is
+    /// escaped once — but **a backslash is escaped twice, into four**, because
+    /// two readers consume it: the lexer takes one layer, and sudo then matches
+    /// an argument containing a backslash with `fnmatch(3)`, where `\x` is a
+    /// literal `x`.
     fn sudoers(&self) -> String {
         match self {
             Self::Is(text) => {
                 let mut out = String::new();
                 for c in text.chars() {
-                    if matches!(c, ',' | ':' | '=' | '\\' | '^') {
-                        out.push('\\');
+                    match c {
+                        '\\' => out.push_str(r"\\\\"),
+                        ',' | ':' | '=' | '^' => {
+                            out.push('\\');
+                            out.push(c);
+                        }
+                        _ => out.push(c),
                     }
-                    out.push(c);
                 }
                 out
             }
@@ -1032,21 +1045,22 @@ mod tests {
 
     #[test]
     fn the_rule_is_the_command_table_rendered() {
+        let hex = "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]";
         assert_eq!(
             target().sudoers().unwrap(),
-            "# toyos-metal: the whole of what the metal loop runs as root.\n\
-             t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create --disk /dev/sda --part 1 \
-             --label ToyOS --loader \\\\EFI\\\\BOOT\\\\BOOTX64.EFI\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --delete-bootnum --bootnum \
-             [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --bootnext \
-             [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/mount -o ro /dev/sda3 /home/t14/toyos-log\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/umount /home/t14/toyos-log\n\
-             t14 ALL=(root) NOPASSWD: /usr/sbin/reboot \"\"\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/true \"\"\n"
+            format!(
+                "# toyos-metal: the whole of what the metal loop runs as root.\n\
+                 t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create --disk /dev/sda \
+                 --part 1 --label ToyOS --loader {LOADER_RULE}\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --delete-bootnum --bootnum {hex}\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --bootnext {hex}\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/mount -o ro /dev/sda3 /home/t14/toyos-log\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/umount /home/t14/toyos-log\n\
+                 t14 ALL=(root) NOPASSWD: /usr/sbin/reboot \"\"\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/true \"\"\n"
+            )
         );
     }
 
@@ -1109,12 +1123,16 @@ mod tests {
     #[test]
     fn a_sudoers_word_escapes_what_sudoers_reads() {
         let escaped = |text: &str| Word::Is(text.to_string()).sudoers();
-        assert_eq!(escaped("of=/dev/sda"), "of\\=/dev/sda");
-        assert_eq!(escaped(LOADER), "\\\\EFI\\\\BOOT\\\\BOOTX64.EFI");
-        assert_eq!(escaped("a,b"), "a\\,b");
-        assert_eq!(escaped("a:b"), "a\\:b");
-        assert_eq!(escaped("^a"), "\\^a");
+        assert_eq!(escaped("of=/dev/sda"), r"of\=/dev/sda");
+        assert_eq!(escaped("a,b"), r"a\,b");
+        assert_eq!(escaped("a:b"), r"a\:b");
+        assert_eq!(escaped("^a"), r"\^a");
         assert_eq!(Word::Hex4.sudoers(), "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]");
+        // Four per backslash, because the sudoers lexer eats one layer and
+        // `fnmatch(3)` the other; at two, sudo matched `EFIBOOTBOOTX64.EFI`
+        // and refused the argument every boot entry actually carries.
+        assert_eq!(escaped(LOADER), LOADER_RULE);
+        assert_eq!(LOADER_RULE.matches('\\').count(), 4 * LOADER.matches('\\').count());
     }
 
     #[test]
