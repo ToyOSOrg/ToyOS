@@ -195,6 +195,11 @@ pub fn emit(level: Level, args: core::fmt::Arguments) {
             }
         }
     }
+
+    // After the commit, so the record this call made is on the panel: until the
+    // first `boot_phase!` nothing else paints, and the panel is the whole
+    // channel on a machine with no serial port.
+    crate::drivers::panic_console::early_checkpoint();
 }
 
 /// A line of ordinary kernel log.

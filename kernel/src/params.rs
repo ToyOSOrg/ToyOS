@@ -6,25 +6,11 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Each parameter beside the flag it sets, so a name cannot be claimed and then handled by nothing.
-///
-/// Literals, because `src/build.rs`'s `params_of` reads this array as text to
-/// refuse a `--kernel-param` the kernel does not declare.
 pub const PARAMS: &[(&str, &AtomicBool)] =
-    &[("watchdog", &WATCHDOG_NAMED), ("early-breadcrumbs", &BREADCRUMBS_NAMED)];
-
-/// The literal above and the word both binaries paint crumbs for are one word.
-const _: () = {
-    let (here, shared) = (PARAMS[1].0.as_bytes(), toyos_crumbs::PARAM.as_bytes());
-    assert!(here.len() == shared.len());
-    let mut i = 0;
-    while i < here.len() {
-        assert!(here[i] == shared[i]);
-        i += 1;
-    }
-};
+    &[("watchdog", &WATCHDOG_NAMED), ("early-panel", &EARLY_PANEL_NAMED)];
 
 static WATCHDOG_NAMED: AtomicBool = AtomicBool::new(false);
-static BREADCRUMBS_NAMED: AtomicBool = AtomicBool::new(false);
+static EARLY_PANEL_NAMED: AtomicBool = AtomicBool::new(false);
 
 pub fn init(cmdline: &str) {
     for token in toyos_abi::boot::actuators(cmdline) {
@@ -42,6 +28,8 @@ pub fn watchdog() -> bool {
     WATCHDOG_NAMED.load(Ordering::Relaxed)
 }
 
-pub fn breadcrumbs() -> bool {
-    BREADCRUMBS_NAMED.load(Ordering::Relaxed)
+/// Repaint the panel after every record until the first boot phase. False
+/// until [`init`] runs, which is what keeps the records before it free.
+pub fn early_panel() -> bool {
+    EARLY_PANEL_NAMED.load(Ordering::Relaxed)
 }

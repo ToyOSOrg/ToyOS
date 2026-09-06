@@ -19,7 +19,6 @@ name = "bootloader"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
- "toyos-crumbs",
  "toyos-elf",
  "uefi",
  "uefi-services",
@@ -100,13 +99,6 @@ dependencies = [
 [[package]]
 name = "toyos-abi"
 version = "0.3.0"
-
-[[package]]
-name = "toyos-crumbs"
-version = "0.1.0"
-dependencies = [
- "toyos-abi",
-]
 
 [[package]]
 name = "toyos-elf"

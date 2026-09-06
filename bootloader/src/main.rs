@@ -7,7 +7,6 @@ use core::mem;
 
 use alloc::vec;
 use alloc::alloc::Layout;
-use toyos_crumbs::{crumb, Pen, Step};
 use toyos_elf::section::{SectionTable, SHT_RELA};
 use toyos_elf::{RelaTable, RelocKind};
 use uefi::{
@@ -500,44 +499,33 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
     pml4 as u64
 }
 
-/// The pen for the crumbs painted while firmware's page tables are still live,
-/// and the pen for the ones painted after the CR3 switch.
-///
-/// Two, because the boot map covers [`BOOT_MAP_BYTES`] and a framebuffer above
-/// that is reachable through firmware's mapping and through nothing this loader
-/// builds. One pen would make the diagnostic fault where the boot it is
-/// watching would not have.
-fn pens(cmdline: &[u8], gop: Option<&GopInfo>) -> (Option<Pen>, Option<Pen>) {
-    let Some(gop) = gop else { return (None, None) };
-    // A boot parameter that is not text arms nothing; the kernel's own decode of it still refuses it by name.
-    if !core::str::from_utf8(cmdline).is_ok_and(toyos_crumbs::armed) {
-        return (None, None);
-    }
-    // SAFETY: `framebuffer` and `framebuffer_size` are the extent firmware
-    // published for the mode it set, and firmware maps it until the CR3 switch.
-    let pen = unsafe {
-        Pen::new(
-            gop.framebuffer as *mut u32,
-            gop.framebuffer_size,
-            gop.stride,
-            gop.width,
-            gop.height,
-            gop.pixel_format,
-        )
+/// Whether the kernel will be able to paint between the CR3 switch and
+/// `mm::init`, said here because this is the last place it can be said at all:
+/// the boot map covers [`BOOT_MAP_BYTES`], and a framebuffer above that is
+/// reachable through firmware's page tables and through nothing this loader
+/// builds. Tiger Lake puts one there.
+fn report_scanout_reach(gop: Option<&GopInfo>) {
+    let Some(gop) = gop else {
+        println!("Scanout: this machine publishes no framebuffer");
+        return;
     };
-    let reachable = gop
-        .framebuffer
-        .checked_add(gop.framebuffer_size)
-        .is_some_and(|end| end <= BOOT_MAP_BYTES);
-    (Some(pen), reachable.then_some(pen))
+    match gop.framebuffer.checked_add(gop.framebuffer_size) {
+        Some(end) if end <= BOOT_MAP_BYTES => println!(
+            "Scanout: {:#x}+{:#x} is inside the {BOOT_MAP_BYTES:#x}-byte boot map",
+            gop.framebuffer, gop.framebuffer_size
+        ),
+        _ => println!(
+            "Scanout: {:#x}+{:#x} is outside the {BOOT_MAP_BYTES:#x}-byte boot map, so the \
+             kernel paints nothing between the handoff and mm::init",
+            gop.framebuffer, gop.framebuffer_size
+        ),
+    }
 }
 
 // Nine arguments because this is the handoff and they are what firmware leaves:
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
-    let (firmware_pen, boot_map_pen) = pens(&cmdline, gop.as_ref());
-
     let mms = system_table.boot_services().memory_map_size();
     let memory_map_entry_count = mms.map_size / mms.entry_size + 8;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
@@ -553,8 +541,29 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
+    // Everything that can be done before the exit is done before it. After
+    // `exit_boot_services` `println!` panics — uefi-services nulls the system
+    // table in its exit callback and `_print` unwraps it — and the panic
+    // handler's own `println!` panics again, so a refusal past this point is a
+    // silent hang. What is left after it is the map copy, CR3 and the jump.
+    // SAFETY: `pt_mem` is the `PT_PAGES * 4096`-byte, 4096-aligned, zeroed
+    // allocation above, and `PT_PAGES` (12) covers what `BOOT_MAP_BYTES` (4
+    // GiB) needs: 1 PML4 + 2 PDPTs + up to 8 PDs, one PD per GiB — `size`
+    // here is `BOOT_MAP_BYTES` exactly, so `num_gb` inside is 4, well under
+    // the 8 the allocation has room for.
+    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, BOOT_MAP_BYTES) };
+    println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
+
+    let kernel_phys = kernel.memory.as_ptr() as u64;
+    assert!(
+        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES),
+        "kernel image at {kernel_phys:#x}..+{:#x} does not fit the {BOOT_MAP_BYTES:#x}-byte boot map",
+        kernel.memory.len()
+    );
+
+    report_scanout_reach(gop.as_ref());
+
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
-    crumb(&firmware_pen, Step::Exited);
 
     uefi_memory_map.entries().for_each(|entry| {
         memory_map.push(MemoryMapEntry {
@@ -563,7 +572,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             end: entry.phys_start + entry.page_count * PAGE_SIZE as u64,
         });
     });
-    crumb(&firmware_pen, Step::Mapped);
 
     let (gop_framebuffer, gop_framebuffer_size, gop_width, gop_height, gop_stride, gop_pixel_format) =
         match &gop {
@@ -607,34 +615,15 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         cmdline_len: cmdline.len() as u64,
     };
 
-    // Build boot page tables: identity map + high-half map for first 4GB.
-    // SAFETY: `pt_mem` is the `PT_PAGES * 4096`-byte, 4096-aligned, zeroed
-    // allocation above, and `PT_PAGES` (12) covers what `BOOT_MAP_BYTES` (4
-    // GiB) needs: 1 PML4 + 2 PDPTs + up to 8 PDs, one PD per GiB — `size`
-    // here is `BOOT_MAP_BYTES` exactly, so `num_gb` inside is 4, well under
-    // the 8 the allocation has room for.
-    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, BOOT_MAP_BYTES) };
     kernel_args.boot_pml4_addr = pml4_phys;
-    crumb(&firmware_pen, Step::Paged);
 
-    // Switch to new page tables. SAFETY: `pml4_phys` is the table just built,
+    // Switch to new page tables. SAFETY: `pml4_phys` is the table built above,
     // identity-mapping low memory (so the code and stack this instruction
     // itself runs from stay mapped across the switch) and high-half-mapping
-    // the same range at `PHYS_OFFSET` for the jump below.
+    // the same range at `PHYS_OFFSET` for the jump below. The assert before the
+    // exit proved the whole kernel image is inside that range.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack)) };
-    crumb(&boot_map_pen, Step::Cr3);
 
-    // The boot map above covers only `BOOT_MAP_BYTES` — everything the entry
-    // jump below needs mapped, not everything `KernelArgs` names. The kernel
-    // reaches the rest (the cmdline, its own stack) through the page tables it
-    // builds for itself once it is running; only the entry point has to be
-    // live under *these* transient ones.
-    assert!(
-        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES),
-        "kernel image at {kernel_phys:#x}..+{:#x} does not fit the {BOOT_MAP_BYTES:#x}-byte boot map",
-        kernel.memory.len()
-    );
-    crumb(&boot_map_pen, Step::Jumping);
     let entry_virt = PHYS_OFFSET + kernel_phys + kernel.entry_offset as u64;
 
     mem::forget(memory_map);

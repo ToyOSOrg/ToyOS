@@ -425,9 +425,9 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // finished, so a 2x slower machine changes nothing about the wait but the
     // wait is the verdict either way — timer-anchored.
     ("screen_diag_boot", Sched::Parallel, Tier::Nightly),
-    // Two boots of one image, the boot parameter apart: the armed one has to
-    // leave every block on the glass, the other has to leave the strip clean.
-    ("screen_early_breadcrumbs", Sched::Parallel, Tier::Fast),
+    // Two boots halted in the same window, the parameter apart: the panel
+    // carries the kernel's early records or it carries none of them.
+    ("screen_early_panel", Sched::Parallel, Tier::Fast),
     ("screen_log_absent", Sched::Parallel, Tier::Fast),
     ("screen_console_shell", Sched::Parallel, Tier::Fast),
     ("screen_console_clear", Sched::Parallel, Tier::Fast),
@@ -3573,73 +3573,68 @@ fn run_screen_test(
             );
             Ok(())
         }
-        "screen_early_breadcrumbs" => {
-            // A crumb is painted where the log has no channel, so the panel is
-            // the only place one can be read back from. The diag config for
-            // `screen_diag_boot`'s reason — nothing in this image claims the
-            // framebuffer, so what the boot painted is still there at the end
-            // of it — and `Profile::Metal`, whose panel is the T14's 1920x1080
-            // and therefore the one whose strip below the last cell row is
-            // where the blocks go.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("diag");
-            let boot = |params: &'static [&'static str]| {
-                let options = BootOptions {
+        "screen_early_panel" => {
+            // The window between `panic_console::arm` and the first
+            // `boot_phase!`: nothing else paints in it, so on a machine with no
+            // serial port a boot that stops there says nothing anywhere.
+            //
+            // `test-early-halt` and not `test-early-panic`: the panic path
+            // renders the panel itself, so a test that let it run would pass on
+            // a kernel whose early records never reached the glass.
+            const HALTED: &str = "test-early-halt: halted before the first boot phase";
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
                     profile: qemu::Profile::Metal,
                     qmp: true,
-                    kernel_params: params,
-                    ready_marker: "Boot: complete",
+                    kernel_params: &["test-early-halt", "early-panel"],
+                    ready_marker: HALTED,
                     ..Default::default()
-                };
-                let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-                qemu.screendump_until("Boot: complete", Duration::from_secs(30));
-                qemu.screendump()
-            };
-            // The centre of `step`'s block, in the strip, as the dump reports it.
-            let read = |dump: &screen::Ppm, step: toyos_crumbs::Step| -> Result<[u8; 3], String> {
-                let width = dump.width as u32;
-                let height = dump.height as u32;
-                let (top, bottom) = toyos_crumbs::strip(height)
-                    .ok_or_else(|| format!("a {width}x{height} panel holds no strip"))?;
-                let (left, right) = toyos_crumbs::block(step, width)
-                    .ok_or_else(|| format!("a {width}x{height} panel holds no {step:?} block"))?;
-                let (x, y) = (left.midpoint(right), top.midpoint(bottom));
-                Ok(dump.pixels[y as usize * dump.width + x as usize])
-            };
-
-            let armed = boot(&[toyos_crumbs::PARAM]);
-            let mut on = Vec::new();
-            for step in toyos_crumbs::STEPS {
-                let (r, g, b) = toyos_crumbs::rgb(step);
-                let got = read(&armed, step)?;
-                on.push(format!("{step:?}={got:?}"));
-                if got != [r, g, b] {
+                },
+            );
+            // Polled, not read once: `emit` drains the record to the console
+            // before it repaints, so the marker this boot waited on is on the
+            // wire a moment before the panel has it. The guest is halted, so
+            // the poll ends on the paint and never on a later one.
+            let dump = qemu.screendump_until(HALTED, Duration::from_secs(30));
+            // The machine's panel, not the kernel's account of it: a geometry
+            // read off the guest's own `GOP:` line would agree with a guest
+            // that painted nothing.
+            let panel = qemu::Profile::Metal.panel().expect("metal-sim advertises a panel");
+            if (dump.width as u32, dump.height as u32) != panel {
+                return Err(format!(
+                    "the machine advertises {panel:?} and the screendump is {}x{}",
+                    dump.width, dump.height
+                ));
+            }
+            let text = dump.text();
+            print_screen(name, &text);
+            for want in ["panic console: armed", "PAT: IA32_PAT", HALTED] {
+                if !text.contains(want) {
                     return Err(format!(
-                        "the boot reached `Boot: complete`, so every step ran, but {step:?}'s \
-                         block reads {got:?} and not the {:?} it paints; blocks read: {}",
-                        [r, g, b],
-                        on.join(" ")
+                        "{want:?} is not on the panel of a guest halted before the first boot \
+                         phase, so nothing put the kernel's early records there\n\
+                         decoded screen:\n{text}"
                     ));
                 }
             }
-            eprintln!("  [crumbs] armed: {}", on.join(" "));
-
-            // The control, which is the same image booted without the
-            // parameter: without it a green arm would be satisfied by a panel
-            // that is those colours for some other reason.
-            let bare = boot(&[]);
-            for step in toyos_crumbs::STEPS {
-                let (r, g, b) = toyos_crumbs::rgb(step);
-                let got = read(&bare, step)?;
-                if got == [r, g, b] {
+            // What rules the other two painters out. `boot_checkpoint` would
+            // have put its own `Boot:` record up with the rest, and the panic
+            // renderer would have put a panic up: neither ran, so the repaint
+            // under test is what painted this.
+            for painter in ["Boot: ", "EARLY PANIC:"] {
+                if text.contains(painter) {
                     return Err(format!(
-                        "{step:?}'s block is its crumb colour {got:?} on a boot that did not \
-                         ask for crumbs, so the armed arm above proves nothing"
+                        "{painter:?} is on the panel, so something other than the early repaint \
+                         painted it\ndecoded screen:\n{text}"
                     ));
                 }
             }
             eprintln!(
-                "  [crumbs] control: no block on a boot without {:?}",
-                toyos_crumbs::PARAM
+                "  [panel] {} of the kernel's early records on the {panel:?} panel, no boot phase",
+                text.lines().filter(|l| l.contains("cpu0")).count()
             );
             Ok(())
         }

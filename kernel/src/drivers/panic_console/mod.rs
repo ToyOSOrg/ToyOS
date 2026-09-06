@@ -58,7 +58,7 @@ const REPORT_CHECK: Cadence = Cadence::every(
 );
 
 /// Framebuffers below this are reachable before [`remap`] runs; above it, only after.
-pub(crate) const LOW_MAP_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+const LOW_MAP_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct Fb {
@@ -215,6 +215,12 @@ static FB: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 /// [`render`] never releases it, so a later boot checkpoint cannot paint
 /// over a fatal report; [`boot_checkpoint`] does release it.
 static PAINTING: AtomicBool = AtomicBool::new(false);
+
+/// Set from the moment a framebuffer is reachable until the first boot phase.
+/// In that window nothing else paints and a machine with no serial port has no
+/// other channel, so every record repaints rather than waiting for a
+/// checkpoint that a boot which stops there never reaches.
+static EARLY: AtomicBool = AtomicBool::new(false);
 
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
 static CAPTURE_ACCESS: access::CaptureAccess = access::CaptureAccess::new();
@@ -438,6 +444,7 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     match args.gop_framebuffer.checked_add(args.gop_framebuffer_size) {
         Some(end) if end <= LOW_MAP_LIMIT => {
             publish(fb);
+            EARLY.store(true, Ordering::Relaxed);
             log!(
                 "panic console: armed {}x{} stride={} format={} at {:#x}",
                 fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
@@ -460,6 +467,9 @@ pub fn remap() {
     let size = RAW_SIZE.load(Ordering::Relaxed);
     mm::paging::map_mmio(phys, align_2m(size as usize) as u64, MmioPolicy::WriteCombining);
     rearm();
+    // Not in `rearm`, which a `set_resolution` window also calls: this runs
+    // once, and it is where a framebuffer above the boot map first has a panel.
+    EARLY.store(true, Ordering::Relaxed);
 }
 
 /// Render the newest records into the console's static scratch, before
@@ -636,6 +646,24 @@ fn hold(nanos: Option<u64>, keys: &mut KeyDecoder) -> Option<PageKey> {
 
 /// Repaint at a boot phase boundary, so a machine that wedges later still shows how far it got.
 pub fn boot_checkpoint() {
+    EARLY.store(false, Ordering::Relaxed);
+    repaint();
+}
+
+/// Repaint after a record, while the first boot phase is still ahead.
+///
+/// On the boot parameter because a repaint is a full-panel paint: 27 of them
+/// cost 34 ms of a 272 ms boot under QEMU, and the two metal figures the
+/// tracker carries for the same painter are 383 ms and 461 ms each. A boot
+/// that is not being diagnosed pays for neither — `params::early_panel` is
+/// false until `params::init`, so the records before it are free as well.
+pub fn early_checkpoint() {
+    if EARLY.load(Ordering::Relaxed) && crate::params::early_panel() {
+        repaint();
+    }
+}
+
+fn repaint() {
     if SCREEN_OWNED_BY_USERLAND.load(Ordering::Relaxed) {
         return;
     }
@@ -1058,17 +1086,9 @@ pub fn graffiti() {
 /// ambiguous about which boot it came from. Proves the clamp once per row,
 /// not once per pixel: a boot checkpoint repaints several times over a
 /// multi-megapixel panel.
-///
-/// Stops above the crumb strip on a boot that armed one: the crumbs are the
-/// only account there is of the window before this console existed, and a boot
-/// that got far enough to paint a log has to leave a panel carrying both.
 fn fill_screen(fb: &Fb, color: u32) {
     let width = fb.width as usize;
-    let last = match toyos_crumbs::strip(fb.height).filter(|_| crate::params::breadcrumbs()) {
-        Some((top, _)) => top as usize,
-        None => fb.height as usize,
-    };
-    for y in 0..last {
+    for y in 0..fb.height as usize {
         let Some(row) = row_base(fb, y, width) else { return };
         for x in 0..width {
             // SAFETY: `row_base` returns a pointer, not a slice, so this

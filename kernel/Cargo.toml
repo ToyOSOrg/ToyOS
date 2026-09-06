@@ -376,7 +376,6 @@ overflow-checks = true
 bcachefs = { path = "../bcachefs", default-features = false }
 toyos-abi = { path = "../toyos-abi" }
 toyos-acpi = { path = "../toyos-acpi" }
-toyos-crumbs = { path = "../toyos-crumbs" }
 toyos-dma = { path = "../toyos-dma" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
