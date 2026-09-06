@@ -216,6 +216,9 @@ static FB: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 /// over a fatal report; [`boot_checkpoint`] does release it.
 static PAINTING: AtomicBool = AtomicBool::new(false);
 
+/// Set from the moment a framebuffer is reachable until the first boot phase — the window in which nothing else paints.
+static EARLY: AtomicBool = AtomicBool::new(false);
+
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
 static CAPTURE_ACCESS: access::CaptureAccess = access::CaptureAccess::new();
 
@@ -438,6 +441,7 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     match args.gop_framebuffer.checked_add(args.gop_framebuffer_size) {
         Some(end) if end <= LOW_MAP_LIMIT => {
             publish(fb);
+            EARLY.store(true, Ordering::Relaxed);
             log!(
                 "panic console: armed {}x{} stride={} format={} at {:#x}",
                 fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
@@ -460,6 +464,9 @@ pub fn remap() {
     let size = RAW_SIZE.load(Ordering::Relaxed);
     mm::paging::map_mmio(phys, align_2m(size as usize) as u64, MmioPolicy::WriteCombining);
     rearm();
+    // Not in `rearm`, which a `set_resolution` window also calls: this runs
+    // once, and it is where a framebuffer above the boot map first has a panel.
+    EARLY.store(true, Ordering::Relaxed);
 }
 
 /// Render the newest records into the console's static scratch, before
@@ -636,6 +643,18 @@ fn hold(nanos: Option<u64>, keys: &mut KeyDecoder) -> Option<PageKey> {
 
 /// Repaint at a boot phase boundary, so a machine that wedges later still shows how far it got.
 pub fn boot_checkpoint() {
+    EARLY.store(false, Ordering::Relaxed);
+    repaint();
+}
+
+/// Repaint after a record, while the first boot phase is still ahead.
+pub fn early_checkpoint() {
+    if EARLY.load(Ordering::Relaxed) && crate::params::early_panel() {
+        repaint();
+    }
+}
+
+fn repaint() {
     if SCREEN_OWNED_BY_USERLAND.load(Ordering::Relaxed) {
         return;
     }

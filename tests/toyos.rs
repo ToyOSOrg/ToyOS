@@ -429,6 +429,9 @@ const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     // finished, so a 2x slower machine changes nothing about the wait but the
     // wait is the verdict either way — timer-anchored.
     ("screen_diag_boot", Sched::Parallel, Tier::Nightly),
+    // A guest halted in the window, so the panel is read where only the repaint
+    // under test can have painted it.
+    ("screen_early_panel", Sched::Parallel, Tier::Fast),
     ("screen_log_absent", Sched::Parallel, Tier::Fast),
     ("screen_console_shell", Sched::Parallel, Tier::Fast),
     ("screen_console_clear", Sched::Parallel, Tier::Fast),
@@ -3664,6 +3667,87 @@ fn run_screen_test(
                     None => "whole log on one screen, no footer".to_string(),
                 }
             );
+            Ok(())
+        }
+        "screen_early_panel" => {
+            // `test-early-halt` stops the boot between `PAT:`'s commit and its
+            // repaint, so `PAT:` is on the console and the panel holds only what
+            // an earlier record's own repaint put there. That is what tells a
+            // repaint per record from one repaint at the end, which would have
+            // painted the same tail.
+            const LAST: &str = "PAT: IA32_PAT";
+            // In order: `arm`, `serial::init`, then `actuator::init` — the first
+            // two before `params::init` and the third after it.
+            const BEFORE_PARAMS: [&str; 2] =
+                ["panic console: armed", "serial: 16550 loopback read"];
+            const AFTER_PARAMS: &str = "actuators:";
+
+            let panel = qemu::Profile::Metal.panel().expect("metal-sim advertises a panel");
+            let halted_panel = |params: &'static [&'static str]| -> Result<String, String> {
+                let mut qemu = QemuInstance::boot_with_options(
+                    test_config,
+                    c_bins,
+                    rust_bins,
+                    BootOptions {
+                        profile: qemu::Profile::Metal,
+                        qmp: true,
+                        kernel_params: params,
+                        ready_marker: LAST,
+                        ..Default::default()
+                    },
+                );
+                // The marker is the record whose repaint never runs, so every
+                // paint this boot makes is already on the glass when it lands.
+                let dump = qemu.screendump();
+                // The machine's panel, not the kernel's account of it: a
+                // geometry read off the guest's own `GOP:` line would agree
+                // with a guest that painted nothing.
+                if (dump.width as u32, dump.height as u32) != panel {
+                    return Err(format!(
+                        "the machine advertises {panel:?} and the screendump is {}x{}",
+                        dump.width, dump.height
+                    ));
+                }
+                let text = dump.text();
+                print_screen(name, &text);
+                Ok(text)
+            };
+            let holds = |text: &str, want: &[&str], unwanted: &[&str]| -> Result<(), String> {
+                for line in want {
+                    if !text.contains(line) {
+                        return Err(format!("{line:?} is not on the panel\n{text}"));
+                    }
+                }
+                for line in unwanted {
+                    if text.contains(line) {
+                        return Err(format!("{line:?} is on the panel\n{text}"));
+                    }
+                }
+                Ok(())
+            };
+
+            // Armed: every record up to the halt repaints, so the panel carries
+            // the three records before `PAT:` and not `PAT:` itself. `Boot: `
+            // and `EARLY PANIC:` are the two other painters, and neither ran.
+            let armed = halted_panel(&["test-early-halt", "early-panel"])?;
+            holds(
+                &armed,
+                &[BEFORE_PARAMS[0], BEFORE_PARAMS[1], AFTER_PARAMS],
+                &[LAST, "Boot: ", "EARLY PANIC:"],
+            )?;
+
+            // The shipping configuration, which names no parameter: the two
+            // records before `params::init` repaint because they have no other
+            // channel, and nothing after it does.
+            let bare = halted_panel(&["test-early-halt"])?;
+            holds(
+                &bare,
+                &BEFORE_PARAMS,
+                &[AFTER_PARAMS, LAST, "Boot: ", "EARLY PANIC:"],
+            )?;
+
+            eprintln!("  [panel] armed: three records up to the halt, and not {LAST:?}");
+            eprintln!("  [panel] no parameter: the two before params::init, and not {AFTER_PARAMS:?}");
             Ok(())
         }
         "screen_log_absent" => {

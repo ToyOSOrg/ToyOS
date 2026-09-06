@@ -272,6 +272,9 @@ fn rtc_utc_offset(system_table: &SystemTable<Boot>) -> Option<i32> {
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
 
+/// How much physical memory the boot page tables cover, identity and high-half alike.
+const BOOT_MAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// `SHT_REL`, the relocation form whose addend lives in the destination word.
 ///
 /// Named here rather than taken from `toyos-elf`, which names only the section
@@ -522,17 +525,33 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
     pml4 as u64
 }
 
+/// Whether `[at, at + len)` is somewhere the kernel can read between the CR3
+/// switch and `mm::init`, when the boot map is the only mapping there is.
+///
+/// A line, not a refusal: the kernel goes on booting either way, and what it
+/// loses is the panel or a parameter rather than the boot.
+fn report_reach(what: &str, extent: Option<(u64, u64)>) {
+    // `None` is an empty extent — no framebuffer, or no boot parameter — whose
+    // pointer names nothing and must not be reported as reachable.
+    let Some((at, len)) = extent else {
+        println!("{what}: none");
+        return;
+    };
+    match at.checked_add(len) {
+        Some(end) if end <= BOOT_MAP_BYTES => {
+            println!("{what}: {at:#x}+{len:#x} is inside the {BOOT_MAP_BYTES:#x}-byte boot map")
+        }
+        _ => println!(
+            "{what}: {at:#x}+{len:#x} is outside the {BOOT_MAP_BYTES:#x}-byte boot map, so the \
+             kernel cannot reach it before mm::init"
+        ),
+    }
+}
+
 // Nine arguments because this is the handoff and they are what firmware leaves:
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
-    // Before the map is sized: a console write, a FAT write and a handle drop
-    // can each add a descriptor, and the margin below is fixed.
-    loaderlog::close();
-    let mms = system_table.boot_services().memory_map_size();
-    let memory_map_entry_count = mms.map_size / mms.entry_size + 8;
-    let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
-
     // Pre-allocate page table pages before exiting boot services.
     // We need: 1 PML4 + 2 PDPTs + up to 8 PDs (for 8GB) = ~11 pages max.
     // Allocate as a flat array and split into 512-entry pages.
@@ -543,6 +562,39 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // bits of an entry are flags, not address bits.
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
+
+    // Before the exit: `_print` unwraps a system table uefi-services nulls in its exit callback, so `println!` past it panics.
+    // SAFETY: `pt_mem` is the `PT_PAGES * 4096`-byte, 4096-aligned, zeroed
+    // allocation above, and `PT_PAGES` (12) covers what `BOOT_MAP_BYTES` (4
+    // GiB) needs: 1 PML4 + 2 PDPTs + up to 8 PDs, one PD per GiB — `size`
+    // here is `BOOT_MAP_BYTES` exactly, so `num_gb` inside is 4, well under
+    // the 8 the allocation has room for.
+    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, BOOT_MAP_BYTES) };
+    println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
+
+    // Said before it is asserted: `assert!` panics through uefi-services, whose handler prints to the console alone.
+    let kernel_phys = kernel.memory.as_ptr() as u64;
+    let kernel_fits =
+        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES);
+    println!(
+        "Kernel image: {kernel_phys:#x}+{:#x} {} the {BOOT_MAP_BYTES:#x}-byte boot map",
+        kernel.memory.len(),
+        if kernel_fits { "is inside" } else { "DOES NOT FIT" },
+    );
+    assert!(kernel_fits, "the kernel image does not fit the boot map");
+
+    report_reach("Scanout", gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
+    report_reach(
+        "Parameter buffer",
+        (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64)),
+    );
+
+    // Last, and after every line above: a console write, a FAT write and a
+    // handle drop can each add a descriptor, and the margin below is fixed.
+    loaderlog::close();
+    let mms = system_table.boot_services().memory_map_size();
+    let memory_map_entry_count = mms.map_size / mms.entry_size + 8;
+    let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
 
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
 
@@ -596,32 +648,15 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         cmdline_len: cmdline.len() as u64,
     };
 
-    // Build boot page tables: identity map + high-half map for first 4GB.
-    const BOOT_MAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-    // SAFETY: `pt_mem` is the `PT_PAGES * 4096`-byte, 4096-aligned, zeroed
-    // allocation above, and `PT_PAGES` (12) covers what `BOOT_MAP_BYTES` (4
-    // GiB) needs: 1 PML4 + 2 PDPTs + up to 8 PDs, one PD per GiB — `size`
-    // here is `BOOT_MAP_BYTES` exactly, so `num_gb` inside is 4, well under
-    // the 8 the allocation has room for.
-    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, BOOT_MAP_BYTES) };
     kernel_args.boot_pml4_addr = pml4_phys;
 
-    // Switch to new page tables. SAFETY: `pml4_phys` is the table just built,
+    // Switch to new page tables. SAFETY: `pml4_phys` is the table built above,
     // identity-mapping low memory (so the code and stack this instruction
     // itself runs from stay mapped across the switch) and high-half-mapping
-    // the same range at `PHYS_OFFSET` for the jump below.
+    // the same range at `PHYS_OFFSET` for the jump below. The assert before the
+    // exit proved the whole kernel image is inside that range.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack)) };
 
-    // The boot map above covers only `BOOT_MAP_BYTES` — everything the entry
-    // jump below needs mapped, not everything `KernelArgs` names. The kernel
-    // reaches the rest (the cmdline, its own stack) through the page tables it
-    // builds for itself once it is running; only the entry point has to be
-    // live under *these* transient ones.
-    assert!(
-        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES),
-        "kernel image at {kernel_phys:#x}..+{:#x} does not fit the {BOOT_MAP_BYTES:#x}-byte boot map",
-        kernel.memory.len()
-    );
     let entry_virt = PHYS_OFFSET + kernel_phys + kernel.entry_offset as u64;
 
     mem::forget(memory_map);

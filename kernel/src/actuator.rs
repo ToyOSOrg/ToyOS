@@ -37,6 +37,10 @@ actuators! {
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
+    /// Halt between a record's commit and its repaint, so the panel holds the
+    /// record before it and `screen_early_panel` reads a paint it can attribute.
+    test_early_halt = "test-early-halt";
+
     /// Have `iod` null SS, force a switch, and report whether it reloaded — the
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";

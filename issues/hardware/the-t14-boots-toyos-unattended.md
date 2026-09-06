@@ -51,6 +51,7 @@ built on the first.
    loop's admission check: no image is flashed that has not passed it.
 4. **The first milestone is one unattended boot with a log back** — flashed,
    booted, verdict read, machine returned to Linux, nobody in the room.
+   The 2026-09-06 attempt stopped before the kernel logged anything anywhere.
 
 `src/bootlog.rs` holds the reset word the verdict looks for, and the kernel
 spells it a second time at `kernel/src/arch/syscall/machine.rs`'s `quiesce`:
