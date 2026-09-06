@@ -73,6 +73,11 @@ pub enum State {
     /// The kernel handed the machine back on purpose, so the chain ends here
     /// and the firmware's own boot order takes the machine next.
     Done = 3,
+    /// An exception entry sealed its registers before it did anything else. The
+    /// text is a [`Fault`], not a report: whatever it was going to say, it had
+    /// not said it yet, and a handler that dies before its own report is the
+    /// case this state exists for.
+    Fault = 4,
 }
 
 impl State {
@@ -85,6 +90,7 @@ impl State {
             1 => Some(Self::Armed),
             2 => Some(Self::Panic),
             3 => Some(Self::Done),
+            4 => Some(Self::Fault),
             // Not a state this tree writes: the page holds something else, or
             // something else holds the page.
             _ => None,
@@ -98,6 +104,7 @@ impl State {
             Self::Armed => "ARMED",
             Self::Panic => "PANIC",
             Self::Done => "DONE",
+            Self::Fault => "FAULT",
         }
     }
 }
@@ -177,6 +184,90 @@ fn checksum(state: State, text: &[u8]) -> u32 {
     hash
 }
 
+/// The general registers a [`Fault`] carries, in the order `TrapFrame` holds
+/// them. One declaration, so the kernel that writes them and the loader that
+/// prints them cannot disagree about which word is which.
+pub const REGISTERS: [&str; 15] = [
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15",
+];
+
+/// What an exception entry seals before it does anything else.
+///
+/// **A fixed layout of `u64`s and nothing else.** It is written from a context
+/// that may take no lock, allocate nothing and call no formatter — the machine
+/// is already faulting and the next fault is a triple one — so the encoding is
+/// eight-byte words in a declared order, and the decoding is the same words
+/// read back by a loader that has all the time in the world.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Fault {
+    pub vector: u64,
+    pub error_code: u64,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub cr2: u64,
+    pub cr3: u64,
+    /// The CPU this happened on, or [`Fault::NO_CPU`] where `gs` could not be
+    /// trusted to say — which is itself worth knowing.
+    pub cpu: u64,
+    /// [`REGISTERS`], in that order.
+    pub registers: [u64; REGISTERS.len()],
+}
+
+impl Fault {
+    /// What [`Fault::cpu`] holds where the per-CPU block could not be read.
+    pub const NO_CPU: u64 = u64::MAX;
+
+    /// The named words, then the general ones.
+    const WORDS: usize = 8 + REGISTERS.len();
+
+    /// The record's width on the page.
+    pub const BYTES: usize = Self::WORDS * 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        let named =
+            [self.vector, self.error_code, self.rip, self.rsp, self.rflags, self.cr2, self.cr3, self.cpu];
+        for (i, word) in named.iter().chain(&self.registers).enumerate() {
+            let at = i * 8;
+            if let Some(slot) = out.get_mut(at..at + 8) {
+                slot.copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// The record `bytes` holds, or `None` where they are not one.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::BYTES {
+            return None;
+        }
+        let word = |i: usize| -> u64 {
+            let mut out = [0u8; 8];
+            if let Some(slot) = bytes.get(i * 8..i * 8 + 8) {
+                out.copy_from_slice(slot);
+            }
+            u64::from_le_bytes(out)
+        };
+        let mut registers = [0u64; REGISTERS.len()];
+        for (i, slot) in registers.iter_mut().enumerate() {
+            *slot = word(8 + i);
+        }
+        Some(Self {
+            vector: word(0),
+            error_code: word(1),
+            rip: word(2),
+            rsp: word(3),
+            rflags: word(4),
+            cr2: word(5),
+            cr3: word(6),
+            cpu: word(7),
+            registers,
+        })
+    }
+}
+
 /// The address a [`PARAM`] token names, or `None` for a token that is not one.
 ///
 /// The loader writes it with `{:#x}` and the kernel reads it back here: one
@@ -213,6 +304,8 @@ pub fn address_in(cmdline: &[u8]) -> Option<u64> {
 }
 
 const _: () = {
+    // The record fits the page with room for the report that overwrites it.
+    assert!(Fault::BYTES < TEXT_BYTES);
     // UEFI deals in pages, and `AllocatePages` can only be given an address it deals in.
     assert!(PHYS.is_multiple_of(BYTES as u64));
     assert!(HEADER.is_multiple_of(4));
@@ -225,7 +318,7 @@ mod tests {
 
     use super::*;
 
-    const STATES: [State; 3] = [State::Armed, State::Panic, State::Done];
+    const STATES: [State; 4] = [State::Armed, State::Panic, State::Done, State::Fault];
 
     fn blank() -> [u8; BYTES] {
         [0u8; BYTES]
@@ -374,6 +467,62 @@ mod tests {
             assert_eq!(State::of(state.code()), Some(*state));
         }
         assert_eq!(State::of(0), None);
-        assert_eq!(State::of(4), None);
+        assert_eq!(State::of(5), None);
     }
+}
+
+#[cfg(test)]
+mod fault_tests {
+    extern crate std;
+    use super::*;
+
+    fn sample() -> Fault {
+        let mut registers = [0u64; REGISTERS.len()];
+        for (i, slot) in registers.iter_mut().enumerate() {
+            *slot = 0x1000 + i as u64;
+        }
+        Fault {
+            vector: 14,
+            error_code: 0x2,
+            rip: 0xffff_8000_7ce4_1ba0,
+            rsp: 0xffff_8000_0041_a000,
+            rflags: 0x246,
+            cr2: 0xdead_beef,
+            cr3: 0x7e06_c000,
+            cpu: 1,
+            registers,
+        }
+    }
+
+    /// Every word comes back where it went, which is the whole of the contract
+    /// between an entry that may not format and a loader that prints.
+    #[test]
+    fn a_fault_round_trips_word_for_word() {
+        let fault = sample();
+        assert_eq!(Fault::from_bytes(&fault.to_bytes()), Some(fault));
+    }
+
+    /// Sealed as a state's text and recovered as one, so what the next boot
+    /// reads is what the entry wrote.
+    #[test]
+    fn a_fault_survives_the_page_it_is_sealed_into() {
+        let fault = sample();
+        let mut page = [0u8; BYTES];
+        assert_eq!(seal(&mut page, State::Fault, &fault.to_bytes()), Fault::BYTES);
+        let (state, text) = recover(&page).expect("a sealed fault");
+        assert_eq!(state, State::Fault);
+        assert_eq!(Fault::from_bytes(text), Some(fault));
+    }
+
+    /// A record of the wrong width is not one: a loader handed a PANIC's text
+    /// must not print it as registers.
+    #[test]
+    fn only_a_record_of_the_declared_width_decodes() {
+        assert_eq!(Fault::from_bytes(&[]), None);
+        assert_eq!(Fault::from_bytes(&[0u8; Fault::BYTES - 1]), None);
+        assert_eq!(Fault::from_bytes(&[0u8; Fault::BYTES + 1]), None);
+        assert_eq!(Fault::from_bytes(b"PANIC: a report and not a record"), None);
+    }
+
+
 }

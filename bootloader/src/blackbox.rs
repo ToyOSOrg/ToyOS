@@ -92,18 +92,68 @@ pub fn harvest(page: Option<Page>) -> Option<Finding> {
              chain ends here",
             state.named()
         )),
-        // The one finding an absence makes: the loader armed it, and neither of
-        // the kernel's two writers reached the page.
+        // The one finding an absence makes: the loader armed it, and nothing in
+        // that kernel — not even its exception entry — reached the page.
         State::Armed => lines.push(alloc::format!(
             "{PREVIOUS_PANIC} the page still reads {}, so that kernel died without reaching \
              either its panic path or its shutdown",
             state.named()
         )),
+        // Registers and no report: an exception entry sealed what it could and
+        // whatever it was going to say, it never said.
+        State::Fault => match toyos_blackbox::Fault::from_bytes(text) {
+            Some(fault) => lines.extend(fault_lines(&fault)),
+            None => lines.push(alloc::format!(
+                "{PREVIOUS_PANIC} the page reads {} and its {} bytes are not a record, so that \
+                 boot's registers are not readable",
+                state.named(),
+                text.len()
+            )),
+        },
     }
     // Cleared once it has been read, so the boot after this one does not report
     // a death two boots old as its predecessor's.
     toyos_blackbox::clear(page);
     Some(Finding { lines, ends_the_chain: true })
+}
+
+/// A sealed [`toyos_blackbox::Fault`] as lines for the log.
+///
+/// **Decoded here and nowhere on the machine that wrote it**: the entry that
+/// sealed these words was one fault away from a triple fault and could not
+/// format a digit, and this pass has firmware, a filesystem and all the time
+/// there is.
+fn fault_lines(fault: &toyos_blackbox::Fault) -> Vec<String> {
+    let cpu = if fault.cpu == toyos_blackbox::Fault::NO_CPU {
+        String::from("cpu unknown")
+    } else {
+        alloc::format!("cpu{}", fault.cpu)
+    };
+    let mut lines = alloc::vec![
+        alloc::format!(
+            "{PREVIOUS_PANIC} its exception entry sealed registers and never got to a report"
+        ),
+        alloc::format!(
+            "| vector {} err={:#x} on {cpu}",
+            fault.vector, fault.error_code
+        ),
+        alloc::format!(
+            "| rip={:#018x} rsp={:#018x} rflags={:#x}",
+            fault.rip, fault.rsp, fault.rflags
+        ),
+        alloc::format!("| cr2={:#018x} cr3={:#018x}", fault.cr2, fault.cr3),
+    ];
+    // Three to a line, so a photograph of the panel carries them all.
+    for row in toyos_blackbox::REGISTERS.chunks(3).enumerate() {
+        let (r, names) = row;
+        let mut line = String::from("|");
+        for (c, name) in names.iter().enumerate() {
+            let value = fault.registers.get(r * 3 + c).copied().unwrap_or(0);
+            line.push_str(&alloc::format!(" {name}={value:#018x}"));
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 /// Seal `ARMED` into the page, which is what makes the next boot's silence a finding.

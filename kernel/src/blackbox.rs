@@ -21,7 +21,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use toyos_blackbox::{BYTES, State, TEXT_BYTES};
+use toyos_blackbox::{BYTES, Fault, State, TEXT_BYTES};
 
 use crate::mm::{DirectMap, Region};
 
@@ -71,6 +71,19 @@ pub fn arm(cmdline: &[u8]) {
     log!("black box: {at:#x} is this boot's, {TEXT_BYTES} bytes for the next boot's loader");
 }
 
+/// Seal an exception's registers before anything else in the handler runs.
+///
+/// **First, and before any lock, allocation, panel write, symbol lookup or
+/// format.** The owner's laptop reset itself with the page still holding the
+/// loader's `ARMED` after a panic it had rendered on screen — a handler that
+/// faults again becomes a double and then a triple fault, and a triple fault is
+/// a reset with nothing written. What the entry can say without risking a second
+/// fault is its own registers, so it says those first and the report overwrites
+/// them if it ever gets that far.
+pub fn record_fault(fault: &Fault) {
+    seal(State::Fault, &fault.to_bytes());
+}
+
 /// Seal what the panel rendered, for the next boot to report.
 ///
 /// Called from `panic_console::render`, inside the region that may take no
@@ -105,4 +118,38 @@ fn seal(state: State, text: &[u8]) {
     // CPU still running is the only writer.
     let page = unsafe { &mut *(at as *mut [u8; BYTES]) };
     toyos_blackbox::seal(page, state, text);
+    flush(at);
+}
+
+/// One cache line per `CLFLUSH`, which is what the page has to be written back in.
+const CACHE_LINE: u64 = 64;
+
+/// Write the page out of this CPU's caches, and every other CPU's.
+///
+/// **A reset does not write dirty lines back.** INIT and RESET invalidate the
+/// caches without flushing them (SDM Vol. 3A §11.5.3 on cache invalidation
+/// across a reset), so a page sealed into write-back memory and then reset over
+/// is a page whose bytes never reached DRAM — which is the one failure this
+/// whole mechanism cannot survive, and it looks exactly like a seal that never
+/// happened. `CLFLUSH` is coherent across every CPU in the machine, so one
+/// caller's flush is the whole machine's.
+fn flush(at: u64) {
+    let mut line = 0u64;
+    while line < BYTES as u64 {
+        // SAFETY: `CLFLUSH` writes back and invalidates the line containing the
+        // address and touches nothing else; the address is inside the page
+        // `arm` took, and the instruction faults on nothing a canonical address
+        // can be. Not privileged, and present on every x86-64 part.
+        unsafe {
+            core::arch::asm!(
+                "clflush [{addr}]",
+                addr = in(reg) (at + line) as *const u8,
+                options(nostack, preserves_flags),
+            );
+        }
+        line += CACHE_LINE;
+    }
+    // SAFETY: `SFENCE` orders those writebacks ahead of whatever ends this
+    // machine; it touches no memory or register.
+    unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
 }

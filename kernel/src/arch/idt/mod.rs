@@ -374,6 +374,14 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     crate::arch::cpu::df_witness("trap_dispatch");
     // SAFETY: `frame` is `rsp` from common_entry's pushes on this CPU's kernel stack, held nowhere else.
     let frame = unsafe { &mut *frame };
+    // **First, and before every handler below it.** A handler that faults again
+    // is a double and then a triple fault, and a triple fault is a reset that
+    // wrote nothing; the registers are what this entry can say without risking
+    // that, and the report overwrites them if the machine gets that far. Every
+    // vector, the page fault included: a diagnostic that skips the commonest
+    // fault class is one that misses the answer, and a returning fault's record
+    // is simply overwritten by the next.
+    crate::blackbox::record_fault(&fault_of(frame));
     match Vector::from_raw(frame.vector) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),
@@ -383,6 +391,32 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
             cpu::disable_interrupts();
         }
         _ => exceptions::exception_handler(frame),
+    }
+}
+
+/// This CPU's state as the black box records it, read out of the frame the stub
+/// pushed and the three control registers the frame does not carry.
+///
+/// `gs` is not trusted for the CPU id: this runs on a machine that has already
+/// faulted once, and a per-CPU block that is what faulted would fault again here.
+fn fault_of(frame: &TrapFrame) -> toyos_blackbox::Fault {
+    toyos_blackbox::Fault {
+        vector: frame.vector,
+        error_code: frame.error_code,
+        rip: frame.rip,
+        rsp: frame.rsp,
+        rflags: frame.rflags,
+        cr2: cpu::read_cr2(),
+        cr3: cpu::read_cr3(),
+        cpu: if crate::log::PERCPU_READY.load(core::sync::atomic::Ordering::Relaxed) {
+            u64::from(percpu::cpu_id())
+        } else {
+            toyos_blackbox::Fault::NO_CPU
+        },
+        registers: [
+            frame.rax, frame.rbx, frame.rcx, frame.rdx, frame.rsi, frame.rdi, frame.rbp,
+            frame.r8, frame.r9, frame.r10, frame.r11, frame.r12, frame.r13, frame.r14, frame.r15,
+        ],
     }
 }
 
