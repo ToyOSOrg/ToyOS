@@ -30,7 +30,6 @@ macro_rules! println {
     }};
 }
 
-mod blackbox;
 mod loaderlog;
 mod watchdog;
 
@@ -672,11 +671,13 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // dead-loops. The machine then holds the loader's last line on the panel
     // forever and says nothing — which is the failure this loop is written to
     // be incapable of, not merely unlikely to reach.
-    let mut dropped = 0usize;
     uefi_memory_map.entries().for_each(|entry| {
         if memory_map.len() == memory_map.capacity() {
-            // A `push` here would grow the vector, and growing it is the death above.
-            dropped += 1;
+            // A `push` here would grow the vector, and growing it is the death
+            // above. What was dropped is not reported: the page that carried
+            // that refusal off this boot is gone with the claim, and
+            // `issues/panic-path/the-loaders-truncated-map-refusal-is-executed-by-nothing.md`
+            // holds what is owed.
             return;
         }
         memory_map.push(MemoryMapEntry {
@@ -688,10 +689,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             end: entry.phys_start.saturating_add(entry.page_count.saturating_mul(PAGE_SIZE as u64)),
         });
     });
-    if dropped > 0 {
-        // The one channel still open: the page the next boot's loader reads.
-        blackbox::seal_loader_refusal(dropped, memory_map.len());
-    }
 
     let (gop_framebuffer, gop_framebuffer_size, gop_width, gop_height, gop_stride, gop_pixel_format) =
         match &gop {
@@ -777,10 +774,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let log_guid = log_partition_guid(handle, &system_table);
     loaderlog::open(&system_table, &log_guid);
     println!("{}", loaderlog::BEGINS_AT);
-    // Early, and after the log is open: the page has to be claimed before this
-    // loader's own allocations can land on it, and what it recovers belongs on
-    // the stick rather than only on a console the owner's machine has none of.
-    blackbox::harvest(&system_table);
     match firmware_watchdog {
         Ok(()) => println!(
             "Firmware watchdog: {FIRMWARE_WATCHDOG_SECS} s, until ExitBootServices disables it"

@@ -2,16 +2,12 @@
 //! a reset, a power-off and a triple fault all end a `-no-reboot` QEMU with
 //! status 0, so what is asserted is the cause its `SHUTDOWN` event names, and a
 //! reboot implemented as a power-off reds on `guest-shutdown`.
-//!
-//! One name here judges the boot *after* the reset instead, and pays for it:
-//! `panic_blackbox_survives` sets `BootOptions::takes_the_reset`, which gives up
-//! the stop reason every other test in this file judges by, because a page
-//! crossing a reset cannot be observed from a QEMU that exits on one.
 
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+use toyos_blackbox::{MEMORY_TYPE, PHYS};
 use toyos_build::bootlog::{self, REBOOTING};
 
 use super::qemu::{self, BootOptions, QemuInstance};
@@ -575,120 +571,22 @@ const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
 /// Several bounds, so the control is not a race the guest won once.
 const PANEL_HELD_FOR: Duration = Duration::from_secs(PANIC_FAST_SECS * 4);
 
-/// The two lines the loader writes about the black-box page
-/// (`bootloader/src/blackbox.rs`), which are also the two this pair judges.
-const PREVIOUS_PANIC: &str = "Previous boot's panic:";
-const BLACKBOX_RESERVED: &str = "Black box: reserved";
-
-/// A line of the first boot's own report, which has to come back out of DRAM
-/// on the boot after it. The panic's message, so what is recovered is the
-/// crash and not merely a page that checksummed.
-const BLACKBOX_WITNESS: &str = "test-late-panic: on-screen console check";
-
-/// The guest that panics, resets, and comes back: the same arming as
-/// [`panic_reboots`], because it is that reset this rides on.
-const BLACKBOX_PARAMS: &[&str] = &["test-late-panic", "panic-reboot-fast"];
-
-/// What the second boot has to arrive inside: the bound the first boot counts
-/// down, plus firmware and a loader. Scaled at the call site — it is a liveness
-/// ceiling on a guest, and the predicate is what ends the drain.
-const REBOOT_WAIT: Duration = Duration::from_secs(PANIC_FAST_SECS + 60);
-
-/// A panic survives the reset and reaches the stick: the kernel seals what the
-/// panel rendered into a page of DRAM, the machine returns itself to firmware,
-/// and the next boot's loader finds it there and writes it into `loader.log`.
-///
-/// The A/B is this guest's own two boots. QEMU starts a machine with its RAM
-/// zeroed, so the first boot must find no page — which is what stops a green
-/// run meaning "the loader says that about every boot".
-pub fn panic_blackbox_survives(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    // Its own image, because the verdict is read off the stick once the guest
-    // is gone, and the shared one is a lane's to reuse.
-    let image_path = super::lane::dir().join("blackbox-boot.img");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, BLACKBOX_PARAMS);
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            boot_image: Some(image_path.clone()),
-            kernel_params: BLACKBOX_PARAMS,
-            // The one test in the tree that lets a guest take its own reset:
-            // nothing about a page crossing one can be judged from a QEMU that
-            // exits on it.
-            takes_the_reset: true,
-            ready_marker: PANIC_ARMED_HEAD,
-            ..Default::default()
-        },
-    );
-
-    let first = serial::Serial::boot(&qemu);
-    first.must_say(BLACKBOX_RESERVED)?;
-    // Not `must_not_say`: that one demands a live capture first, and this one
-    // is a boot that panicked on purpose. The claim is only about this line.
-    if let Some(line) = first.text().lines().find(|l| l.contains(PREVIOUS_PANIC)) {
-        return Err(format!(
-            "the first boot of a machine whose RAM QEMU zeroed reported a previous panic \
-             ({line:?}), so the second boot's report would say nothing\n{}",
-            first.text()
-        ));
-    }
-    first.must_say(&panic_armed())?;
-
-    // Ends on the *kernel* line of the boot after the reset, not on the loader
-    // line this test is about. `println!` reaches the console before it reaches
-    // the file, and the loader closes `loader.log` at the handoff — so a drain
-    // that stopped at its own needle would kill the guest inside the window
-    // between the two writes, and did: `loader.log` came back holding the
-    // loader's first line and nothing else.
-    let armed = blackbox_armed();
-    let tail = qemu.drain_until(REBOOT_WAIT, |line| line.contains(&armed));
-    let second = serial::Serial::named("boot after the reset", tail.as_str());
-    second.must_say(PREVIOUS_PANIC)?;
-    second.must_say(&armed)?;
-    // Killed once that boot's loader has closed the file, and the stick read after.
-    drop(qemu);
-
-    let lines = super::volumes::loader_log_lines(&image_path, start, len)?;
-    let log = lines.join("\n");
-    for want in [PREVIOUS_PANIC, BLACKBOX_WITNESS] {
-        if !log.contains(want) {
-            return Err(format!(
-                "{} on the stick does not carry {want:?}, so the machine with no console has \
-                 no account of the boot that died\n{log}",
-                toyos_build::bootlog::LOADER_LOG
-            ));
-        }
-    }
-    // The loader renders the recovered bytes in the panel's own alphabet, and
-    // this file is compared byte for byte against a console elsewhere.
-    if let Some(line) = lines.iter().find(|line| !line.is_ascii()) {
-        return Err(format!("the recovered report put {line:?} in the log, which is not ASCII"));
-    }
-
-    let _ = std::fs::remove_file(&image_path);
-    eprintln!(
-        "  [power] the panic crossed the reset: {} carries {} lines of it",
-        toyos_build::bootlog::LOADER_LOG,
-        lines.iter().filter(|l| l.starts_with("| ")).count()
-    );
-    Ok(())
+/// The kernel's line about the black-box page when no loader claimed it, which
+/// is every boot: `bootloader/src/blackbox.rs` and its `AllocatePages` of a
+/// custom UEFI memory type are gone, because the T14's firmware stopped
+/// returning from `ExitBootServices` with one of those in its map.
+fn blackbox_unclaimed() -> String {
+    format!("black box: no {:#x} page at {:#x} in the memory map", MEMORY_TYPE, PHYS)
 }
 
-/// The control: an ordinary boot claims the page and reports it empty.
+/// The kernel side of the black box with nothing under it: the page is not this
+/// boot's, the kernel says so by name, and a panic reaches the panel and
+/// nowhere else.
 ///
-/// Without it a green judge says only that the loader can print a report it
-/// found, never that a boot which crashed nowhere prints none — and a loader
-/// that reported one unconditionally would satisfy the judge and be a lie on
-/// every machine that never crashed.
+/// **It is a control on the loader's absence, not on the feature.** Until the
+/// page comes back under an ordinary memory type this is the only state the
+/// kernel can be in, and a kernel that armed anyway would be writing a page
+/// nothing reserved.
 pub fn panic_blackbox_clean_boot(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -702,21 +600,13 @@ pub fn panic_blackbox_clean_boot(
     );
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    let line = boot.must_say(BLACKBOX_RESERVED)?.to_string();
-    boot.must_not_say(PREVIOUS_PANIC)?;
-    // The other half of the claim, and the one the kernel makes: a page the
-    // loader claimed is a page the kernel will write, said in the kernel's own
-    // line rather than inferred from the loader's.
-    boot.must_say(&blackbox_armed())?;
+    let line = boot.must_say(&blackbox_unclaimed())?.to_string();
+    // The loader is silent about the page in both directions, which is what
+    // says the claim is gone rather than merely failing.
+    boot.must_not_say("Black box:")?;
+    boot.must_not_say("Previous boot's panic:")?;
     drop(qemu);
 
-    eprintln!("  [power] a boot that crashed nowhere reports no previous panic: {}", line.trim());
+    eprintln!("  [power] no loader claims the page and the kernel says so: {}", line.trim());
     Ok(())
-}
-
-/// The kernel's own line about the page (`kernel/src/blackbox.rs`), which says
-/// the memory map carried the loader's claim into this boot. Derived from the
-/// one constant all three binaries name, so a moved address reds here.
-fn blackbox_armed() -> String {
-    format!("black box: {:#x} is this boot's", toyos_blackbox::PHYS)
 }

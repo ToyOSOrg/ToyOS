@@ -2145,15 +2145,6 @@ pub struct BootOptions {
     /// to wait for and no `run_test` to drive, so it is observed with
     /// [`QemuInstance::screendump_while`] and nothing else.
     pub mute: bool,
-    /// Let this machine take a guest reset instead of exiting on one.
-    ///
-    /// **`-no-reboot` is the default and stays it**: it is what turns a triple
-    /// fault, a reset-register write and a power-off alike into a QEMU exit
-    /// whose `SHUTDOWN` reason a test can read, and every power test judges by
-    /// that reason. This is for the one claim that cannot be made that way —
-    /// that something the *first* boot left in DRAM reaches the boot after it —
-    /// and a guest with it set runs until the harness kills it.
-    pub takes_the_reset: bool,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
     /// expected outcome rather than a boot failure -- the early-panic screen
@@ -2227,7 +2218,6 @@ impl Default for BootOptions {
             kernel_params: &[],
             i8042: true,
             mute: false,
-            takes_the_reset: false,
             ready_marker: DEFAULT_READY,
             nvme_image: None,
             boot_image: None,
@@ -3822,10 +3812,7 @@ fn qemu_command(
         );
         qemu.arg("-device").arg(format!("{gpu}{platform}"));
     }
-    qemu.arg("-vga").arg(shape.vga).arg("-display").arg("none");
-    if !options.takes_the_reset {
-        qemu.arg("-no-reboot");
-    }
+    qemu.arg("-vga").arg(shape.vga).arg("-display").arg("none").arg("-no-reboot");
     if let Some((w, h)) = shape.panel {
         // A panel on a machine with no VGA adapter is a declaration nothing
         // emits, which is the silently-inert field this suite refuses by name.

@@ -639,12 +639,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Fast),
     // Serial like `watchdog_fed`: its verdict is that nothing happened for a span of host clock.
     ("panic_key_holds", Sched::Serial, Tier::Fast),
-    // The black box across that reset: its own boot, its own image, and the
-    // only guest in the tree that takes its own reset rather than exiting on
-    // it. Timer-anchored through the bound the first boot counts down, so it is
-    // destined for Nightly once its one CI price is measured.
-    ("panic_blackbox_survives", Sched::Parallel, Tier::Fast),
-    // Its control, and an ordinary boot: no host clock is in any of it.
+    // What the kernel says about a black-box page no loader claims, which is
+    // every boot until the page comes back under an ordinary memory type. An
+    // ordinary boot: no host clock is in any of it.
     ("panic_blackbox_clean_boot", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
@@ -8997,7 +8994,6 @@ fn run_machine_test(
             power::panic_before_peripherals_reboots(test_config, c_bins, rust_bins)
         }
         "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
-        "panic_blackbox_survives" => power::panic_blackbox_survives(test_config, c_bins, rust_bins),
         "panic_blackbox_clean_boot" => {
             power::panic_blackbox_clean_boot(test_config, c_bins, rust_bins)
         }

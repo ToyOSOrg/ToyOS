@@ -293,7 +293,6 @@ operation_nesting 5075 shards=12
 page_cache_partition_offset 6984 shards=12
 panic_before_peripherals_reboots 18446744073709551615 shards=none
 panic_blackbox_clean_boot 18446744073709551615 shards=none
-panic_blackbox_survives 18446744073709551615 shards=none
 panic_key_holds 18446744073709551615 shards=none
 panic_reboots 18446744073709551615 shards=none
 panic_recovery 130 shards=12

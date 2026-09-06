@@ -4,25 +4,27 @@ kind: tooling
 opened: 2026-09-06
 ---
 
-# The loader's truncated-map refusal is executed by nothing
+# The loader's truncated-map refusal is executed by nothing, and now says nothing
 
-`start_kernel`'s copy of the UEFI memory map now refuses to grow its vector
-after `ExitBootServices` — growing it takes a null pointer from an allocator
-that is gone, and the panic that follows has no channel — and seals what it
-dropped into the black-box page for the next boot to report
-(`bootloader/src/blackbox.rs`'s `seal_loader_refusal`).
+`start_kernel`'s copy of the UEFI memory map refuses to grow its vector after
+`ExitBootServices` — growing it takes a null pointer from an allocator that is
+gone, and the panic that follows has no channel. The refusal is correct and it
+is the only thing standing between a firmware whose map does not fit and a
+machine that freezes holding the loader's last line.
 
-Neither the refusal nor that channel is executed by any test. QEMU's map fits
-with room to spare: measured 2026-09-06 on the dev host, 108 descriptors at the
-sizing and 101 in the map handed over, against a margin of 64. So the branch
-that matters on the T14 — the only machine whose map has ever been suspected of
-not fitting — runs nowhere.
+Two things are owed on it.
 
-What is owed is a loader boot parameter that sets `MAP_MARGIN` to zero, and a
-two-boot judge in the shape of `panic_blackbox_survives`: the first boot drops a
-few descriptors and seals the refusal, the second reports it. The loader already
-parses its own parameters (`toyos_tco::PARAM` is one), so the arming has a home.
+**It reaches no test.** QEMU's map fits with room to spare: measured 2026-09-06
+on the dev host, 108 descriptors at the sizing and 101 in the map handed over,
+against a margin of 64. So the branch that matters on the T14 — the only machine
+whose map has ever been suspected of not fitting — runs nowhere. What would
+execute it is a loader boot parameter setting `MAP_MARGIN` to zero; the loader
+already parses its own parameters (`toyos_tco::PARAM` is one), so the arming has
+a home.
 
-Filed rather than built because `bootloader/src/blackbox.rs` is about to be
-rewritten around a loader-owned boot chain, and a judge written against the
-current shape would be rewritten with it.
+**It also reports nothing.** It briefly sealed what it dropped into the
+black-box page, and that page is gone: the loader's claim was removed whole
+after the T14's firmware stopped returning from `ExitBootServices` with a
+custom UEFI memory type in its map. A truncated map is now memory the kernel
+silently never sees. The channel comes back when the page does, under an
+ordinary memory type with its address on the kernel parameter line.

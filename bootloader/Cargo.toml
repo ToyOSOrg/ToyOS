@@ -15,9 +15,6 @@ toyos-acpi = { path = "../toyos-acpi" }
 # from the pointers that write it and host-tested against machines this one is
 # not.
 toyos-bootmap = { path = "../toyos-bootmap" }
-# The page a panicked kernel leaves for this loader to find, and the checksum
-# that decides whether the reset really left DRAM alone.
-toyos-blackbox = { path = "../toyos-blackbox" }
 # The bands either side of `ExitBootServices`, declared where the kernel's entry
 # stub and the harness read the same three rows and colours.
 toyos-bootband = { path = "../toyos-bootband" }
