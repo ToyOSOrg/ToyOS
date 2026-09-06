@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use toyos_build::metal::REBOOTING;
+use toyos_build::bootlog::{self, REBOOTING};
 
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
@@ -66,7 +66,6 @@ pub fn machine_reboot(
 }
 
 /// A boot with no host on the console runs its manifest's jobs and ends itself.
-/// `Rebooting.` reaching the log partition is the assertion the T14 rests on.
 pub fn metal_job_reboot(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -108,11 +107,11 @@ pub fn metal_job_reboot(
     let (name, log) = super::volumes::newest_log(&image_path, start, len)?;
     let text = String::from_utf8_lossy(&log);
     // The volume is born clean in an image built moments ago, so every record in it is this boot's.
-    // Judged by the metal loop's own verdict, because a T14 run reads this same volume.
-    let boot_ms = toyos_build::metal::boot_verdict(&text).map_err(|refusal| {
+    // Judged by `bootlog`, because a T14 run judges the same volume by it.
+    let boot_ms = bootlog::verdict(&text).map_err(|unfit| {
         format!(
-            "{name} on the log partition: {refusal}. A machine with no console would have no \
-             account of this boot\n{text}"
+            "{name}: {unfit}. A machine with no console would have no account of this \
+             boot\n{text}"
         )
     })?;
 

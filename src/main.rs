@@ -175,26 +175,29 @@ fn main() {
     let diag = args.iter().any(|a| a == "--diag-boot");
     let console = args.iter().any(|a| a == "--console-boot");
     assert!(!(diag && console), "--diag-boot and --console-boot are two images; build one");
-    // `--boot-config <path>` builds a named `system.toml` — the metal loop's
-    // case, and any other. It names the config itself, so the two modes that
-    // name their own are refused beside it rather than silently outranked, and
-    // it is a build and not a boot: `qemu::launch` has no case to run.
+    // `--boot-config <dir>` builds the `system.toml` in that directory — the
+    // metal loop's case, and any other. **A flashed image carries no actuator**,
+    // so only the kernel's own boot parameters are admitted beside it, and every
+    // flag it cannot combine with is refused by name rather than dropped.
     let boot_config = parse_valued(&args, "--boot-config");
     if let Some(asked) = &boot_config {
-        assert!(
-            !(diag || console),
-            "--boot-config {asked} and --diag-boot/--console-boot each name a config; pass one"
-        );
+        for (other, flag) in [
+            (diag, "--diag-boot"),
+            (console, "--console-boot"),
+            (rebuild_toolchain, "--rebuild-toolchain"),
+        ] {
+            assert!(!other, "--boot-config {asked} cannot be combined with {flag}");
+        }
         assert!(build_only, "--boot-config {asked} builds an image; pass --build-only");
+        toyos_build::build::flashable_params(&root, &kernel_param)
+            .unwrap_or_else(|refusal| panic!("{refusal}"));
     }
     let boot = match (&boot_config, diag, console) {
-        (Some(asked), _, _) => toyos_build::build::Boot::Config(
-            toyos_build::build::boot_config(&root, asked)
-                .unwrap_or_else(|refusal| panic!("{refusal}")),
-        ),
-        (None, true, _) => toyos_build::build::Boot::Diag,
-        (None, _, true) => toyos_build::build::Boot::Console,
-        _ => toyos_build::build::Boot::Normal,
+        (Some(asked), _, _) => toyos_build::build::Boot::case(&root, asked)
+            .unwrap_or_else(|refusal| panic!("{refusal}")),
+        (None, true, _) => toyos_build::build::Boot::diag(&root),
+        (None, _, true) => toyos_build::build::Boot::console(&root),
+        _ => toyos_build::build::Boot::shipped(&root),
     };
     assert!(
         !(dump_audio && profile == qemu::Profile::Metal),
@@ -276,14 +279,6 @@ fn main() {
 /// the difference is one word he typed on one command line, and a parameter is
 /// not even that: `--diag-boot --kernel-param heartbeat` and
 /// `--diag-boot --kernel-param control-regs-bench` are one kernel binary.
-/// `<flag> <value>`, once. A second use is refused rather than resolved: two
-/// answers to "which config" is a command line whose author meant one of them.
-fn parse_valued(args: &[String], flag: &str) -> Option<String> {
-    let mut found = parse_repeated(args, flag);
-    assert!(found.len() < 2, "{flag} takes one value; this asks for {found:?}");
-    found.pop()
-}
-
 fn parse_repeated(args: &[String], flag: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut rest = args.iter();
@@ -296,6 +291,13 @@ fn parse_repeated(args: &[String], flag: &str) -> Vec<String> {
         }
     }
     values
+}
+
+/// The same flag taken once: a second use is refused rather than resolved.
+fn parse_valued(args: &[String], flag: &str) -> Option<String> {
+    let mut found = parse_repeated(args, flag);
+    assert!(found.len() < 2, "{flag} takes one value; this asks for {found:?}");
+    found.pop()
 }
 
 /// `--gop` swaps virtio-gpu for a firmware framebuffer; `--metal-sim` goes

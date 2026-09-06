@@ -13,7 +13,7 @@ use common::qemu::{
 };
 use common::{audio, compile, faults, hostload, pkg, power, screen, serial, stats, storage, usb};
 use toyos_build::day::Day;
-use toyos_build::metal::boot_millis;
+use toyos_build::bootlog::boot_millis;
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
 
