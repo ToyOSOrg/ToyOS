@@ -174,6 +174,124 @@ pub fn watchdog_fed(
     Ok(())
 }
 
+/// The kernel's read-back above its own arm, in
+/// `kernel/src/drivers/watchdog.rs`: whole clauses, one per branch.
+const ARMED_ON_ARRIVAL: &str = "so the bootloader had already armed the timer";
+const UNARMED_ON_ARRIVAL: &str = "so nothing had armed the timer";
+
+/// The tail of the loader's own arm line, which names the shipped bound and so
+/// tells it from the kernel's, whatever the port and the PCI ids turn out to be.
+fn loader_armed() -> String {
+    format!("armed for {}ms, and the kernel takes it over", toyos_tco::BOUND_MS)
+}
+
+/// The loader arms the chipset's watchdog before it jumps, so the handoff and
+/// everything up to the kernel's own arm is inside the bound.
+///
+/// The kernel's read-back is the witness: it reads `TCO1_CNT` before it writes
+/// anything, and on a boot the loader armed it finds the timer already running.
+/// The other way is the same guest without the parameter, where neither half
+/// arms and the kernel says nothing about a timer at all — without which the
+/// line above would be satisfied by a kernel that always printed it.
+pub fn loader_watchdog_arms(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let armed = BootOptions {
+        profile: qemu::Profile::Metal,
+        kernel_params: &[toyos_tco::PARAM],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, armed);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let line = boot.must_say(&loader_armed())?.to_string();
+    boot.must_say(ARMED_ON_ARRIVAL)?;
+    drop(qemu);
+
+    let mut idle = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::Metal, ..Default::default() },
+    );
+    let quiet = serial::Serial::boot(&idle);
+    quiet.must_be_clean()?;
+    quiet.must_not_say(&loader_armed())?;
+    quiet.must_not_say(ARMED_ON_ARRIVAL)?;
+    quiet.must_not_say(UNARMED_ON_ARRIVAL)?;
+    drop(idle);
+
+    eprintln!("  [power] the loader armed it and the kernel found it running: {}", line.trim());
+    Ok(())
+}
+
+/// A machine that stops before the kernel arms anything is reset by the timer
+/// the loader left running.
+///
+/// `test-early-panic` halts the kernel long before `drivers::watchdog::init`,
+/// so nothing in this guest arms or feeds a timer: a reset here is the loader's
+/// and no other code's. The control is the same panic without the parameter,
+/// which sits for the same span.
+pub fn loader_watchdog_resets(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let bound = Duration::from_millis(toyos_tco::BOUND_MS);
+    // The panic is the marker: this guest never reaches a ready line, and
+    // `boot_with_options` refuses a boot that dies before one.
+    let panicked = |params: &'static [&'static str]| BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        kernel_params: params,
+        ready_marker: EARLY_PANIC,
+        ..Default::default()
+    };
+
+    let mut qemu =
+        QemuInstance::boot_with_options(test_config, c_bins, rust_bins, panicked(&["test-early-panic"]));
+    // A span and not a budget: "nothing reset it" is a bound, and a slower host
+    // does not make the chipset's timer slower.
+    let mut sat = qemu::QmpShutdown::open(qemu.qmp_socket(), bound + MARGIN);
+    if let Some(seen) = sat.reason() {
+        let tail = qemu.drain_serial(WAIT);
+        return Err(format!(
+            "QEMU stopped an unarmed guest for {seen:?} inside {:?}, so a reset in the armed \
+             arm would say nothing about the loader\n{tail}",
+            bound + MARGIN
+        ));
+    }
+    drop(qemu);
+
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        panicked(&[toyos_tco::PARAM, "test-early-panic"]),
+    );
+    // A budget here, because "it did reset" is a liveness claim.
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(bound + MARGIN));
+    let reason = stop.reason();
+    let tail = qemu.drain_serial(WAIT);
+    returned_to_firmware(
+        reason,
+        "the loader armed the watchdog and a kernel that never fed it was never reset",
+        &tail,
+    )?;
+
+    eprintln!("  [power] a guest halted before the kernel's own arm was reset inside {bound:?}");
+    Ok(())
+}
+
+/// How long past the bound a reset may land and still be that bound's.
+const MARGIN: Duration = Duration::from_secs(30);
+
+/// What `test-early-panic` puts on the console, which is as far as either guest
+/// in [`loader_watchdog_resets`] ever gets.
+const EARLY_PANIC: &str = "EARLY PANIC:";
+
 fn starved() -> BootOptions {
     BootOptions {
         profile: qemu::Profile::Metal,

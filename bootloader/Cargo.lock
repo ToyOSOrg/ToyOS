@@ -19,7 +19,9 @@ name = "bootloader"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+ "toyos-acpi",
  "toyos-elf",
+ "toyos-tco",
  "uefi",
  "uefi-services",
 ]
@@ -101,7 +103,15 @@ name = "toyos-abi"
 version = "0.3.0"
 
 [[package]]
+name = "toyos-acpi"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-elf"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-tco"
 version = "0.1.0"
 
 [[package]]

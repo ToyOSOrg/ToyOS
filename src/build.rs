@@ -999,11 +999,19 @@ pub fn declared_params(root: &Path) -> Vec<String> {
     names
 }
 
-/// Every string literal in `PARAMS`: anchored on the name and closed on `];`, so a reflow still reads and an unfound declaration is empty rather than guessed.
+/// Every name in `PARAMS`: anchored on the name and closed on `];`, so a reflow still reads and an unfound declaration is empty rather than guessed.
+///
+/// A name is a string literal there or `toyos_tco::PARAM`, which is the one
+/// constant the bootloader reads the same parameter out of. Any other path
+/// resolves to nothing, and [`declared_params`] refuses an empty list.
 fn params_of(text: &str) -> Vec<String> {
     let Some((_, body)) = text.split_once("pub const PARAMS") else { return Vec::new() };
     let Some((body, _)) = body.split_once("];") else { return Vec::new() };
-    body.split('"').skip(1).step_by(2).map(str::to_string).collect()
+    let mut names: Vec<String> = body.split('"').skip(1).step_by(2).map(str::to_string).collect();
+    if body.contains("toyos_tco::PARAM") {
+        names.push(toyos_tco::PARAM.to_string());
+    }
+    names
 }
 
 #[derive(Deserialize)]
@@ -1924,6 +1932,15 @@ mod tests {
             "and the same declaration reflowed",
         );
         assert!(params_of("static PARAMS: u8 = 0;").is_empty(), "a declaration it cannot read");
+        // The one path it resolves, and a path it does not.
+        assert_eq!(
+            params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[(toyos_tco::PARAM, &W)];"),
+            vec![toyos_tco::PARAM.to_string()]
+        );
+        assert!(
+            params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[(other::NAME, &W)];").is_empty(),
+            "a path this cannot resolve was resolved anyway"
+        );
     }
 
     /// **An actuator is a boot parameter and never a kernel build.**

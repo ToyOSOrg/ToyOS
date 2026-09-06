@@ -6,7 +6,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Each parameter beside the flag it sets, so a name cannot be claimed and then handled by nothing.
-pub const PARAMS: &[(&str, &AtomicBool)] = &[("watchdog", &WATCHDOG_NAMED)];
+pub const PARAMS: &[(&str, &AtomicBool)] = &[(toyos_tco::PARAM, &WATCHDOG_NAMED)];
 
 static WATCHDOG_NAMED: AtomicBool = AtomicBool::new(false);
 

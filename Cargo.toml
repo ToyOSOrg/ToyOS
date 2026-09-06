@@ -108,6 +108,9 @@ toyos-fat32-check = { path = "toyos-fat32-check" }
 toyos-gpt = { path = "toyos-gpt" }
 toyos-keymap = { path = "toyos-keymap" }
 toyos-manifest = { path = "toyos-manifest" }
+# The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
+# the same constant the kernel and the bootloader do.
+toyos-tco = { path = "toyos-tco" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # The digest behind two readings that must not be able to agree by accident:
 # `NOTICE`'s record of every committed binary file (`src/sourcegate.rs`), and a

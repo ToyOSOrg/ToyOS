@@ -8,7 +8,11 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }
+# The ECAM window's address, and the TCO block the loader arms in it: the two
+# pure crates the kernel reads the same answers out of.
+toyos-acpi = { path = "../toyos-acpi" }
 toyos-elf = { path = "../toyos-elf" }
+toyos-tco = { path = "../toyos-tco" }
 uefi = { version = "0.26.0", default-features = false }
 uefi-services = { version = "0.23.0", features = ["panic_handler", "logger"] }
 

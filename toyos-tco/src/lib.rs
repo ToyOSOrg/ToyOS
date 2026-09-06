@@ -26,8 +26,11 @@ pub const TCO1_CNT_RUN: u16 = 0;
 pub const TCO1_CNT_HALT: u16 = TCO_TMR_HLT;
 
 /// `TCO_TMR` is ten bits, the chipset ignores 0 and 1, a tick is 600 ms, and
-/// the first expiry only latches a status bit — so a bound is two of them.
-const TMR_MAX: u64 = 0x3ff;
+/// the first expiry only latches a status bit — so a bound is two of them. The
+/// mask is public because reading the register back is how the kernel tells a
+/// timer the bootloader armed from one nothing has touched.
+pub const TMR_MASK: u16 = 0x3ff;
+const TMR_MAX: u64 = TMR_MASK as u64;
 const TMR_MIN: u64 = 2;
 const TICK_MS: u64 = 600;
 const EXPIRIES: u64 = 2;
@@ -40,6 +43,23 @@ pub const fn timer_for(bound_ms: u64) -> Option<u16> {
     }
     Some(ticks as u16)
 }
+
+/// The bound the kernel and its loader both arm at, in milliseconds.
+///
+/// Five minutes: past every boot phase and every disk wait this tree has, and
+/// inside the time an unattended machine may be left face down.
+pub const BOUND_MS: u64 = 300_000;
+
+/// [`BOUND_MS`]'s timer. Neither is a value this tree can fail to have.
+pub const TIMER: u16 = match timer_for(BOUND_MS) {
+    Some(timer) => timer,
+    None => panic!("the shipped bound reaches no TCO timer"),
+};
+
+/// The boot parameter that arms it: the bootloader reads it off
+/// `\toyos\cmdline` and the kernel off the same bytes in `KernelArgs`, so
+/// one machine cannot have one of the two armed and not the other.
+pub const PARAM: &str = "watchdog";
 
 pub fn bound_of(timer: u16) -> u64 {
     u64::from(timer) * TICK_MS * EXPIRIES

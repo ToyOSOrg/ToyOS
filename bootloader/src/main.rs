@@ -21,6 +21,8 @@ use uefi::{
 use uefi_services::println;
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
+mod watchdog;
+
 /// The largest file the bootloader will read off the ESP.
 ///
 /// Nothing here has a caller to return an error to and nothing has run that
@@ -653,6 +655,10 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Last of the firmware questions and for the same reason as the GOP: both
     // answers die with Boot Services.
     let rtc_offset = rtc_utc_offset(&system_table);
+
+    // Last, so the smallest possible span of this loader is inside the bound
+    // and a hang between here and the kernel's own arm resets the machine.
+    watchdog::arm(rsdp_addr, &cmdline);
 
     println!("Starting kernel...");
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);

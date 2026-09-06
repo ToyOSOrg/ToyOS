@@ -1124,6 +1124,7 @@ dependencies = [
  "toyos-ld",
  "toyos-manifest",
  "toyos-sched",
+ "toyos-tco",
  "uuid",
 ]
 
