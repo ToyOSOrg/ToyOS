@@ -45,11 +45,10 @@ pull request that identity opened, so there is no review state and no per-line t
 the reviewer's comments are the ones whose first line is a verdict word and yours never begin with
 one. The orchestrator relays nothing.
 
-The verdict says what you owe. On **LAND AFTER NAMED CODE CHANGES** the findings are the whole list
-and the branch lands once each is answered, so answer them and stop. On **SEND BACK** they are not:
-rework the branch, and expect the next review to be of the whole branch rather than of your answers.
-
-Either way every finding is answered, in one comment, one line each, keyed by the reviewer's number:
+On **LAND AFTER NAMED CODE CHANGES** the findings are the whole list and the branch lands once each
+is answered. On **SEND BACK** they are not: rework the branch, and the next review is of the whole
+branch rather than of your answers. Either way every finding is answered, in one comment, one line
+each, keyed by the reviewer's number:
 
 - accepted — one commit fixing exactly that finding, and the line names the commit;
 - refused — the line names the rule or the measurement that makes the finding wrong. "I disagree" is

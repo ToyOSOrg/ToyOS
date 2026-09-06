@@ -24,11 +24,10 @@ Every spawn names an explicit model (`CLAUDE.md`), matched to the judgment the t
 - `#N: approve` — glance, then land.
 - `#N: blocked — <clause>` — the clause is yours, and the loop stops until you rescope the brief.
 
-**The loop's bound counts DISPUTED findings, never rounds.** Rounds are how a branch converges; a
-DISPUTED finding is one the implementer refused and the reviewer still holds, and no further round
-moves it. Those lines are the one thing on a pull request you read: read them, ask each agent the
-question that settles each, and decide it yourself. Nothing else ends a disagreement neither of them
-will drop.
+**The loop's bound counts DISPUTED findings, never rounds.** A DISPUTED finding is one the
+implementer refused and the reviewer still holds, and no round moves it. Those lines are the one
+thing on a pull request you read: read them, ask each agent the question that settles each, and
+decide it yourself.
 
 ## The brief
 
@@ -43,8 +42,8 @@ Before a merge you look at the finished pull request and no further:
 - its title and body, as `main`'s record rather than for their technical content;
 - `gh pr diff --stat`, and the files touched against the brief's fence;
 - tests added or deleted;
-- the last comment whose first line is a verdict word — that word, and nothing under it, is the
-  reviewer's; one identity authors every comment, so nothing else distinguishes them;
+- the last comment whose first line is a verdict word — that word alone is the reviewer's, and one
+  identity authors every comment, so nothing else tells you which are;
 - CI.
 
 **You land, and only you**: `gh pr ready`, then `gh pr merge --auto --merge`, on an approve and a
@@ -53,9 +52,6 @@ pull request you are unsure of waits for an answer.
 
 Anything unexpected is a question to the agent that did it, and never a fix by you: a file outside
 the fence, a deleted test, a new crate or dependency, an edit to a `CLAUDE.md`, a rule proposed in a
-final report. A proposed rule you place or decline; you never let one land unplaced.
-
-## What you never do
-
-You hand-work nothing — no red adjudicated, no price looked up, no machine run, no edit of your own
-to a branch under review. Each of those is a task, with a brief and a model.
+final report. A proposed rule you place or decline; you never let one land unplaced. And you
+hand-work nothing else either — no red adjudicated, no price looked up, no machine run, no edit of
+your own to a branch under review. Each of those is a task, with a brief and a model.
