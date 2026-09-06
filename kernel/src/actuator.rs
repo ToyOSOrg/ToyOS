@@ -332,6 +332,15 @@ actuators! {
 
     /// Write through a page cache over a view that does not start at block 0, and say where on the device the bytes landed.
     page_cache_partition_offset = "pc-partition-offset";
+
+    /// Arm the chipset's TCO watchdog; `watchdog_fed` is the control it needs.
+    watchdog = "tco-arm";
+
+    /// Arm it at seconds rather than minutes, so a guest run reaches the reset.
+    watchdog_fast = "tco-fast";
+
+    /// Stop feeding it once the machine is up, which is what a wedge looks like to the chipset.
+    watchdog_starve = "tco-starve";
 }
 
 #[cfg(feature = "boot-actuators")]

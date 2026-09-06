@@ -40,6 +40,7 @@ members = [
     "toyos-sched/loom",
     "toyos-sched/sim",
     "toyos-symbols",
+    "toyos-tco",
     "toyos-untrusted",
     "toyos-userbound",
     "toyos-userpin",

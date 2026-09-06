@@ -2195,6 +2195,12 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
+    /// Let the ICH9 TCO watchdog reset this guest. QEMU holds the chipset's
+    /// `NO_REBOOT` strap set unless told otherwise (`hw/acpi/ich9_tco.c:66`
+    /// reads it before acting), so a guest without this is one whose expiry
+    /// does nothing — and no other test wants a boot that can reset itself out
+    /// from under it.
+    pub watchdog_resets: bool,
 }
 
 /// The in-guest test runner's startup marker.
@@ -2224,6 +2230,7 @@ impl Default for BootOptions {
             usb_images: Vec::new(),
             rtc_base: None,
             extra_root_files: Vec::new(),
+            watchdog_resets: false,
         }
     }
 }
@@ -3818,6 +3825,9 @@ fn qemu_command(
         .arg("-display")
         .arg("none")
         .arg("-no-reboot");
+    if options.watchdog_resets {
+        qemu.arg("-global").arg("ICH9-LPC.noreboot=false");
+    }
     if let Some((w, h)) = shape.panel {
         // A panel on a machine with no VGA adapter is a declaration nothing
         // emits, which is the silently-inert field this suite refuses by name.
