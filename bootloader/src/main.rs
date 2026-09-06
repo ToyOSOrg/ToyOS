@@ -269,10 +269,8 @@ fn rtc_utc_offset(system_table: &SystemTable<Boot>) -> Option<i32> {
     Some(zone)
 }
 
-/// How long firmware watches this loader, in seconds: a minute, which is this
-/// project's bound for every watchdog. It covers the span before the TCO arm
-/// near the handoff, and `ExitBootServices` disables it.
-const FIRMWARE_WATCHDOG_SECS: usize = 60;
+/// [`toyos_tco::FIRMWARE_BOUND_MS`] in the seconds `set_watchdog_timer` takes.
+const FIRMWARE_WATCHDOG_SECS: usize = (toyos_tco::FIRMWARE_BOUND_MS / 1_000) as usize;
 
 /// What firmware logs if that countdown expires. Codes to `0xffff` are reserved
 /// for firmware's own use and this is the first one an application may take;

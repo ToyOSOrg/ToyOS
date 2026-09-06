@@ -23,10 +23,28 @@ use crate::image::LBA;
 
 const CONNECT_SECS: u64 = 10;
 
-/// How long the machine has to go quiet after `reboot`, and how long it then
-/// has to answer again.
+/// How long the machine has to go quiet after `reboot`.
 const GOING_DOWN_SECS: u64 = 120;
-const RETURN_SECS: u64 = 420;
+
+/// What the machine spends between the reset that ends a ToyOS boot and `sshd`
+/// answering again: the firmware's pass and Ubuntu's own boot.
+const RETURN_ALLOWANCE_SECS: u64 = 300;
+
+/// Every watchdog a metal boot runs under, by the constant that arms it: the
+/// firmware's over the span before the handoff, and the TCO the loader arms
+/// there and the kernel keeps feeding.
+const WATCHDOG_BOUNDS_MS: &[u64] = &[toyos_tco::FIRMWARE_BOUND_MS, toyos_tco::BOUND_MS];
+
+/// How long the machine has to answer `ssh` again after `reboot`.
+///
+/// **Derived, because a literal is wrong the day any of it moves.** A boot is
+/// only certainly over once the longest of [`WATCHDOG_BOUNDS_MS`] could have
+/// fired; the machine then spends [`RETURN_ALLOWANCE_SECS`] coming back.
+fn return_secs() -> u64 {
+    let longest =
+        WATCHDOG_BOUNDS_MS.iter().copied().max().expect("a metal boot runs under a watchdog");
+    longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
+}
 
 const POLL_SECS: u64 = 5;
 
@@ -149,8 +167,9 @@ impl fmt::Display for Refusal {
             }
             Self::Silent { what, secs } => write!(
                 f,
-                "the machine did not {what} within {secs} s; it may be sitting in ToyOS with its \
-                 one boot already spent, which needs a hand on the power button"
+                "the machine did not {what} within {secs} s, which is longer than every watchdog \
+                 a boot runs under; what is left is a wedge before the firmware armed its own, \
+                 and that needs a hand on the power button"
             ),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
             Self::Usage(why) => write!(f, "{why}"),
@@ -889,7 +908,7 @@ impl Args {
             target: Target::t14()?,
             dry_run: false,
             install_sudoers: None,
-            wait_secs: RETURN_SECS,
+            wait_secs: return_secs(),
         };
         let mut at = 0;
         while at < args.len() {
@@ -1302,11 +1321,24 @@ mod tests {
         assert_eq!(entries_labelled(listing, "Setup"), [("0010".to_string(), String::new())]);
     }
 
+    /// The wait is the *longest* watchdog plus the allowance, computed here by
+    /// hand from the constants rather than from the expression under test — so
+    /// a `max` that became a `min` reds instead of agreeing with itself.
+    #[test]
+    fn the_wait_outlasts_every_watchdog_a_boot_runs_under() {
+        assert_eq!(toyos_tco::FIRMWARE_BOUND_MS, 60_000);
+        assert_eq!(toyos_tco::BOUND_MS, 9_600);
+        assert_eq!(RETURN_ALLOWANCE_SECS, 300);
+        assert_eq!(return_secs(), 360);
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::FIRMWARE_BOUND_MS));
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
+    }
+
     #[test]
     fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
-        assert!(Refusal::Silent { what: "come back", secs: RETURN_SECS }.about_the_boot());
+        assert!(Refusal::Silent { what: "come back", secs: return_secs() }.about_the_boot());
         assert!(!Refusal::Node("/dev/nvme0n1".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
@@ -1352,7 +1384,7 @@ mod tests {
         let args = Args::parse(&[]).unwrap();
         assert_eq!(args.target.user, "t14");
         assert_eq!(args.target.node.whole(), "/dev/sda");
-        assert_eq!(args.wait_secs, RETURN_SECS);
+        assert_eq!(args.wait_secs, return_secs());
         assert!(!args.dry_run);
 
         let words: Vec<String> = ["--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]
