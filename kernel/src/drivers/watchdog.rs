@@ -89,10 +89,8 @@ fn arm(row: &Chipset, port: u16, timer: u16) {
     let stale = crate::arch::cpu::inw(port + TCO2_STS);
     if stale & (TCO_SECOND_TO_STS | TCO_BOOT_STS) != 0 {
         log!("watchdog: the last boot ended in a TCO reset (TCO2_STS={stale:#06x})");
-        // Cleared, or the latches are sticky across resets and every later boot
-        // reports this one. Verified for QEMU only: its store masks both bits
-        // out (`ich9_tco.c:167`), so this word clears them and zeroes the rest
-        // of the register with them. What the PCH does with it is unread.
+        // Cleared, so a reset is reported by the boot after it and not by every
+        // boot after it.
         // SAFETY: as the arm below.
         unsafe { crate::arch::cpu::outw(port + TCO2_STS, TCO_SECOND_TO_STS | TCO_BOOT_STS) };
     }

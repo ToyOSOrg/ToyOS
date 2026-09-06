@@ -1,4 +1,5 @@
-//! Intel's TCO watchdog: its register block, and where a chipset keeps it.
+//! Every bound a boot arms and the metal loop waits on, and Intel's TCO
+//! watchdog: its register block, and where a chipset keeps it.
 //!
 //! The block's layout is one thing across the generations this kernel targets;
 //! **where its base comes from is not**, so that is a table keyed by PCI id
@@ -48,14 +49,16 @@ pub const fn timer_for(bound_ms: u64) -> Option<u16> {
 /// admits: the two differ, and a bound derived for hardware answers to this one.
 pub const TMR_MIN_HARDWARE: u16 = 0x04;
 
-/// The bound the **bootloader** arms at, in milliseconds.
-///
-/// What it covers is the handoff window alone — the loader's jump to the
-/// kernel's own arm — so it is seconds and not minutes; everything after that
-/// window is the kernel's bound, which this is not. The largest the tick and
-/// the double expiry make exact at or under ten seconds: eight ticks of 600 ms,
-/// twice.
+/// The TCO bound, in milliseconds: the bootloader arms it before it jumps and
+/// the kernel keeps feeding that same timer, so it is the bound from the
+/// handoff onward. The largest the tick and the double expiry make exact at or
+/// under ten seconds: eight ticks of 600 ms, twice.
 pub const BOUND_MS: u64 = 9_600;
+
+/// The bound the firmware's own watchdog is set to, in milliseconds. It covers
+/// the span before the TCO arm, and `ExitBootServices` disables it; a minute is
+/// this project's bound for every watchdog.
+pub const FIRMWARE_BOUND_MS: u64 = 60_000;
 
 /// [`BOUND_MS`]'s timer, which is neither a value this tree can fail to have
 /// nor one the hardware would ignore.
@@ -105,7 +108,8 @@ pub const CHIPSETS: &[Chipset] = &[
         enable: Enable { reg: 0x40, bit: 1 },
     },
     // Tiger Lake-LP's SMBus function: a 32-byte I/O base of its own, the block
-    // at its start, and bit 0 of the register not part of the address.
+    // at its start, and bit 0 of the register not part of the address. The
+    // double expiry `timer_for` derives is the count this PCH keeps.
     Chipset {
         vendor: 0x8086,
         device: 0xa0a3,
