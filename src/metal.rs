@@ -26,8 +26,10 @@ const CONNECT_SECS: u64 = 10;
 /// How long the machine has to go quiet after `reboot`.
 const GOING_DOWN_SECS: u64 = 120;
 
-/// What the machine spends between the reset that ends a ToyOS boot and `sshd`
-/// answering again: the firmware's pass and Ubuntu's own boot.
+/// What the machine spends getting back to `sshd` once a ToyOS boot is over:
+/// the firmware's pass and Ubuntu's own boot. Measured from a power-on, which
+/// is the only way this machine has ever left a ToyOS boot; no run has yet
+/// timed it from a reset.
 const RETURN_ALLOWANCE_SECS: u64 = 300;
 
 /// Every bound a metal boot runs under, by the constant that arms it: the
@@ -41,7 +43,7 @@ const WATCHDOG_BOUNDS_MS: &[u64] =
 ///
 /// **Derived, because a literal is wrong the day any of it moves.** A boot is
 /// only certainly over once the longest of [`WATCHDOG_BOUNDS_MS`] could have
-/// fired; the machine then spends [`RETURN_ALLOWANCE_SECS`] coming back.
+/// fired; [`RETURN_ALLOWANCE_SECS`] is what coming back costs after that.
 fn return_secs() -> u64 {
     let longest =
         WATCHDOG_BOUNDS_MS.iter().copied().max().expect("a metal boot runs under a watchdog");
@@ -170,8 +172,8 @@ impl fmt::Display for Refusal {
             Self::Silent { what, secs } => write!(
                 f,
                 "the machine did not {what} within {secs} s, which is longer than every watchdog \
-                 a boot runs under; what is left is a wedge before the firmware armed its own, \
-                 and that needs a hand on the power button"
+                 a boot runs under plus the time coming back costs; why it did not is what the \
+                 panel and the log partition say, and neither is readable from here"
             ),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
             Self::Usage(why) => write!(f, "{why}"),

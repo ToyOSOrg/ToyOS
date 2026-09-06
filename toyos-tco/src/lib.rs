@@ -115,8 +115,7 @@ pub const CHIPSETS: &[Chipset] = &[
         enable: Enable { reg: 0x40, bit: 1 },
     },
     // Tiger Lake-LP's SMBus function: a 32-byte I/O base of its own, the block
-    // at its start, and bit 0 of the register not part of the address. The
-    // double expiry `timer_for` derives is the count this PCH keeps.
+    // at its start, and bit 0 of the register not part of the address.
     Chipset {
         vendor: 0x8086,
         device: 0xa0a3,
