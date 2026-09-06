@@ -21,7 +21,7 @@ Exit condition: one host test that reds when `ls .claude/agents/*.md`,
 `.gitignore`'s negations under that directory, and `CLAUDE.md`'s table rows are
 not the same set.
 
-Weigh it against `issues/build/the-tooling-is-a-review-prompt-and-three-workflows.md`
-first, which moves rules out of gates and into the prompt: this asks for a gate
-in the direction that track is emptying. What the track does not answer is who
-notices a prompt file that was never committed.
+`issues/build/the-tooling-is-a-review-prompt-and-three-workflows.md` is moving
+rules out of gates and into the prompt, and this asks for a gate in the
+direction that track is emptying. What that track does not answer is who
+notices a prompt file nobody committed.
