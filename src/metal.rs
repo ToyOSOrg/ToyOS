@@ -803,10 +803,14 @@ impl Driver {
         Err(Refusal::Silent { what, secs })
     }
 
-    /// Everything the stick's log partition carries, in name order: a freshly
-    /// flashed volume holds one boot's files, and its newest file alone would
-    /// miss the continuations `logd` rotates into.
-    fn read_log(&self) -> Result<String, Refusal> {
+    /// The loader's own file, and then everything `logd` wrote, in name order:
+    /// a freshly flashed volume holds one boot's files, and its newest file
+    /// alone would miss the continuations `logd` rotates into.
+    ///
+    /// Two strings and not one, because only the second is the boot's log: a
+    /// verdict over the loader's lines would read a partition GUID as a boot
+    /// record.
+    fn read_log(&self) -> Result<(String, String), Refusal> {
         self.ssh("making the mount point", &format!("mkdir -p {}", shell_word(&self.target.mount)))?;
         self.as_root("mounting the log partition", Job::Mount, None, None)?;
         let read = self.read_mounted();
@@ -815,7 +819,7 @@ impl Driver {
         // because the read's failure is the one worth answering with.
         let unmounted = self.as_root("unmounting the log partition", Job::Umount, None, None);
         match (read, unmounted) {
-            (Ok(text), Ok(_)) => Ok(text),
+            (Ok(both), Ok(_)) => Ok(both),
             (Ok(_), Err(umount)) => Err(umount),
             (Err(read), Ok(_)) => Err(read),
             (Err(read), Err(umount)) => Err(Refusal::Remote {
@@ -826,18 +830,30 @@ impl Driver {
         }
     }
 
-    fn read_mounted(&self) -> Result<String, Refusal> {
+    fn read_mounted(&self) -> Result<(String, String), Refusal> {
         let at = shell_word(&self.target.mount);
         let listing = self.ssh("listing the log", &format!("ls -1 {at}"))?;
+        let present: Vec<&str> = listing.lines().map(str::trim).collect();
+        // Absence is an answer and not a failure: the loader says on the
+        // machine's screen why it wrote none, and the boot is judged either way.
+        let loader = if present.contains(&bootlog::LOADER_LOG) {
+            self.cat(bootlog::LOADER_LOG)?
+        } else {
+            format!("{}: the loader wrote none\n", bootlog::LOADER_LOG)
+        };
         let mut names: Vec<&str> =
-            listing.lines().map(str::trim).filter(|n| n.ends_with(".log")).collect();
+            present.into_iter().filter(|n| bootlog::is_logd_file(n)).collect();
         names.sort_unstable();
         let mut text = String::new();
         for name in names {
-            let file = shell_word(&format!("{}/{name}", self.target.mount));
-            text.push_str(&self.ssh("reading a log file", &format!("cat {file}"))?);
+            text.push_str(&self.cat(name)?);
         }
-        Ok(text)
+        Ok((loader, text))
+    }
+
+    fn cat(&self, name: &str) -> Result<String, Refusal> {
+        let file = shell_word(&format!("{}/{name}", self.target.mount));
+        self.ssh("reading a log file", &format!("cat {file}"))
     }
 }
 
@@ -1051,8 +1067,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
 
     let back = driver.ride_the_reboot(args.wait_secs)?;
     println!("the machine answered ssh again after {back} s");
-    let log = driver.read_log()?;
-    print!("{log}");
+    let (loader, log) = driver.read_log()?;
+    // The loader's first, because a boot that stopped before the kernel leaves
+    // nothing else, and the refusal below is then all this report would carry.
+    print!("{loader}{log}");
     bootlog::verdict(&log).map(Some).map_err(Refusal::Log)
 }
 

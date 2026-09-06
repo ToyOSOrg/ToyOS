@@ -18,8 +18,18 @@ use uefi::{
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
     table::{boot::{MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID},
 };
-use uefi_services::println;
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+
+/// Every line this loader prints: the firmware's console, and the file on the
+/// stick once [`loaderlog::open`] has one.
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        uefi_services::println!($($arg)*);
+        $crate::loaderlog::line(core::format_args!($($arg)*));
+    }};
+}
+
+mod loaderlog;
 
 /// The largest file the bootloader will read off the ESP.
 ///
@@ -515,6 +525,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
+    loaderlog::close();
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
 
     uefi_memory_map.entries().for_each(|entry| {
@@ -614,7 +625,11 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut system_table).unwrap();
-    println!("ToyOS Bootloader 1.0");
+    // The same sixteen bytes the kernel is handed below, read once, and read
+    // before the first line so that no line is only on the screen.
+    let log_guid = log_partition_guid(handle, &system_table);
+    loaderlog::open(&system_table, &log_guid);
+    println!("{}", loaderlog::BEGINS_AT);
 
     // Find ACPI 2.0 RSDP from UEFI configuration table
     let rsdp_addr = system_table
@@ -638,7 +653,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let kernel_bytes = load_file_bytes(handle, &system_table, cstr16!("\\toyos\\kernel.elf"));
     println!("Kernel: {} bytes", kernel_bytes.len());
 
-    let log_guid = log_partition_guid(handle, &system_table);
     println!("Log partition: signature {:02x?}", log_guid);
 
     let cmdline = cmdline(handle, &system_table);

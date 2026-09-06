@@ -244,6 +244,7 @@ lapic_spurious_vector 6829 shards=12
 late_storage_connect 6455 shards=12
 launcher_refusals 2106 shards=12
 leak_rollback_selftest 5423 shards=12
+loader_log_on_the_stick 18446744073709551615 shards=none
 locale_detect 9959 shards=12
 locale_detect_unrecognized 160 shards=12
 log_backing_read_error 4887 shards=12

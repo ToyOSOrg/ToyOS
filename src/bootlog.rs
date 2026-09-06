@@ -4,7 +4,7 @@
 //! Neither the T14 driver's nor the QEMU harness's — `src/metal.rs` reads a log
 //! off a flashed stick and `tests/common/power.rs` reads one off a guest's log
 //! partition, and they must not be able to reach different answers about one
-//! log. Pure: text in, a verdict out.
+//! log. Pure: text in, a verdict out; its one gate reads the loader's source.
 
 #![forbid(unsafe_code)]
 
@@ -13,6 +13,24 @@ use std::fmt;
 /// The word the kernel writes as it hands the machine back to the firmware,
 /// in `kernel/src/arch/syscall/machine.rs`'s `quiesce`.
 pub const REBOOTING: &str = "Rebooting.";
+
+/// The bootloader's own file on the log partition, which `logd` never writes
+/// and no reader of `logd`'s files may pick up: it is not one of them, and the
+/// verdict above is about what the kernel wrote.
+pub const LOADER_LOG: &str = "loader.log";
+
+/// That file's first line and its last, which are also the loader's first line
+/// and the last it can write: the log is opened before the first, and
+/// `ExitBootServices` takes the firmware's filesystem away after the last.
+pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
+pub const LOADER_LAST_LINE: &str = "Loader log: ExitBootServices, so this file ends here";
+
+/// Whether `name` on the log volume is one of `logd`'s files. Every reader of
+/// that volume asks this rather than the suffix: the loader's own file ends in
+/// `.log` too, and it sorts after every dated stem.
+pub fn is_logd_file(name: &str) -> bool {
+    name.ends_with(".log") && name != LOADER_LOG
+}
 
 /// The kernel's boot-phase record for the end of boot, in
 /// `kernel/src/log/mod.rs`'s `boot_phase!`.
@@ -80,6 +98,29 @@ mod tests {
         assert!(matches!(verdict(&carried_on), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&format!("[logd 0.9 cpu1] {REBOOTING}\n")), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
+    }
+
+    /// Nothing links the two crates — the loader is `no_std` and this is the
+    /// build system — so the three names above are held to the loader's by
+    /// reading its source. The scan closes exactly one spelling of each: a
+    /// quoted literal on one line. A name assembled from pieces reds here.
+    #[test]
+    fn the_loader_writes_the_file_the_host_reads() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src/loaderlog.rs");
+        let source = std::fs::read_to_string(&path).expect("the loader's log module");
+        assert!(
+            source.contains(&format!("cstr16!(\"{LOADER_LOG}\")")),
+            "{} does not open {LOADER_LOG:?}",
+            path.display()
+        );
+        for line in [LOADER_FIRST_LINE, LOADER_LAST_LINE] {
+            assert!(
+                source.lines().any(|source_line| source_line.contains(&format!("\"{line}\""))),
+                "{} does not declare {line:?}",
+                path.display()
+            );
+        }
     }
 
     #[test]

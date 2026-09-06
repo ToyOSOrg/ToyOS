@@ -5,7 +5,7 @@
 //! judges the boot after the reset: `-no-reboot` exits instead of taking it.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use toyos_build::bootlog::{self, REBOOTING};
@@ -65,20 +65,35 @@ pub fn machine_reboot(
     Ok(())
 }
 
-/// A boot with no host on the console runs its manifest's jobs and ends itself.
-pub fn metal_job_reboot(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
+/// What one jobcase boot leaves behind for a host that reads it afterwards.
+pub struct Jobcase {
+    pub image: PathBuf,
+    /// The log partition's byte range inside [`Self::image`].
+    pub log_at: (usize, usize),
+    /// Everything the machine put on the serial line, firmware and loader
+    /// included, up to the kernel's ready marker.
+    pub console: String,
+}
+
+/// The jobcase on the metal profile, run until it hands the machine back to
+/// firmware. `name` is the image's, because two guests may not share one;
+/// `stage` is put on the log partition before the machine that reads it exists.
+///
+/// Built here, because a boot deletes the image it built and this one is read
+/// after the guest is gone.
+pub fn jobcase_reboot(name: &str, stage: &[(String, Vec<u8>)]) -> Result<Jobcase, String> {
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
 
-    // Built here, because a boot deletes the image it built and this one is read after the guest is gone.
-    let image_path = super::lane::dir().join("jobcase-boot.img");
-    let image = qemu::build_boot_image(case, &[], &[], &[]);
+    let image_path = super::lane::dir().join(name);
+    let mut image = qemu::build_boot_image(case, &[], &[], &[]);
     std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = super::volumes::log_extent(&image, &image_path)?;
+    let log_at = super::volumes::log_extent(&image, &image_path)?;
+    if !stage.is_empty() {
+        let (start, len) = log_at;
+        super::volumes::stage_files(&mut image[start..start + len], stage)?;
+        std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    }
 
     let mut qemu = QemuInstance::boot_with_options(
         case,
@@ -92,6 +107,7 @@ pub fn metal_job_reboot(
         },
     );
     serial::Serial::boot(&qemu).must_be_clean()?;
+    let console = qemu.boot_log().to_string();
 
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
     let reason = stop.reason();
@@ -103,6 +119,18 @@ pub fn metal_job_reboot(
     drain.must_say(REBOOTING)?;
     returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
     drop(qemu);
+    Ok(Jobcase { image: image_path, log_at, console })
+}
+
+/// A boot with no host on the console runs its manifest's jobs and ends itself.
+pub fn metal_job_reboot(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let boot = jobcase_reboot("jobcase-boot.img", &[])?;
+    let image_path = boot.image;
+    let (start, len) = boot.log_at;
 
     let (name, log) = super::volumes::newest_log(&image_path, start, len)?;
     let text = String::from_utf8_lossy(&log);
