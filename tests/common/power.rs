@@ -2,12 +2,18 @@
 //! a reset, a power-off and a triple fault all end a `-no-reboot` QEMU with
 //! status 0, so what is asserted is the cause its `SHUTDOWN` event names, and a
 //! reboot implemented as a power-off reds on `guest-shutdown`.
+//!
+//! Two names here judge the boot *after* a reset instead, and pay for it:
+//! `blackbox_panic_chain` and `blackbox_done_chain` set
+//! `BootOptions::takes_the_reset`, which gives up the stop reason every other
+//! test in this file judges by, because a page crossing a reset cannot be
+//! observed from a QEMU that exits on one.
 
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use toyos_blackbox::{MEMORY_TYPE, PHYS};
+use toyos_blackbox::{PHYS, State};
 use toyos_build::bootlog::{self, REBOOTING};
 
 use super::qemu::{self, BootOptions, QemuInstance};
@@ -571,23 +577,162 @@ const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
 /// Several bounds, so the control is not a race the guest won once.
 const PANEL_HELD_FOR: Duration = Duration::from_secs(PANIC_FAST_SECS * 4);
 
-/// The kernel's line about the black-box page when no loader claimed it, which
-/// is every boot: `bootloader/src/blackbox.rs` and its `AllocatePages` of a
-/// custom UEFI memory type are gone, because the T14's firmware stopped
-/// returning from `ExitBootServices` with one of those in its map.
-fn blackbox_unclaimed() -> String {
-    format!("black box: no {:#x} page at {:#x} in the memory map", MEMORY_TYPE, PHYS)
+/// The head the loader writes every line about the page under
+/// (`bootloader/src/blackbox.rs`), and the line a harvested report goes under.
+const BLACKBOX_HEAD: &str = "Black box:";
+const PREVIOUS_PANIC: &str = "Previous boot's panic:";
+
+/// The loader's last line on a pass that reads the page and hands the machine
+/// back to the firmware instead of booting a kernel
+/// (`bootloader/src/loaderlog.rs`).
+const ENDS_THE_CHAIN: &str =
+    "Loader log: the last boot is accounted for, so this pass returns to the firmware";
+
+/// The loader's last line on a pass that *does* boot one, which is what tells
+/// a chain that ended from one that went round again.
+const HANDS_OFF: &str = "Loader log: the kernel handoff begins, so this file ends here";
+
+/// A line of the first boot's own report, which has to come back out of DRAM on
+/// the boot after it: the panic's message, so what is recovered is the crash
+/// and not merely a page that checksummed.
+const BLACKBOX_WITNESS: &str = "test-late-panic: on-screen console check";
+
+/// The page armed and its address handed to the kernel, as the two sides say it.
+fn armed_line() -> String {
+    format!("{BLACKBOX_HEAD} {PHYS:#x} armed")
 }
 
-/// The kernel side of the black box with nothing under it: the page is not this
-/// boot's, the kernel says so by name, and a panic reaches the panel and
-/// nowhere else.
+fn kernel_took_it() -> String {
+    format!("black box: {PHYS:#x} is this boot's")
+}
+
+/// What the loader writes about a page that still read ARMED, which is a kernel
+/// that reached neither of the two paths that write one.
+fn armed_and_nothing_else() -> String {
+    format!("{PREVIOUS_PANIC} the page still reads {}", State::Armed.named())
+}
+
+/// What it writes about a kernel that handed the machine back on purpose.
+fn done_line() -> String {
+    format!("the last boot read {}", State::Done.named())
+}
+
+/// The two-boot shape both chain judges use: a guest that takes its own reset,
+/// so the loader pass after it is observable.
+fn chained(params: &'static [&'static str]) -> BootOptions {
+    BootOptions {
+        profile: qemu::Profile::Metal,
+        kernel_params: params,
+        takes_the_reset: true,
+        ready_marker: HANDS_OFF,
+        ..Default::default()
+    }
+}
+
+/// Every line the guest said after its first boot handed off, up to the second
+/// pass's own last line.
+fn after_the_reset(qemu: &mut QemuInstance, until: &str) -> serial::Serial {
+    let until = until.to_string();
+    let tail = qemu.drain_until(CHAIN_WAIT, move |line| line.contains(&until));
+    serial::Serial::named("boot after the reset", tail.as_str())
+}
+
+/// What the boot after a reset has to arrive inside: the bound the first boot
+/// counts down, plus firmware and a loader. Scaled by `drain_until`, and the
+/// predicate is what ends the drain.
+const CHAIN_WAIT: Duration = Duration::from_secs(PANIC_FAST_SECS + 60);
+
+/// The chain closes on a panic: the kernel seals what the panel rendered, the
+/// machine resets itself, and the boot after it is this loader again — which
+/// reads the page, writes the report, and hands the machine back to firmware
+/// rather than starting the same loop over.
 ///
-/// **It is a control on the loader's absence, not on the feature.** Until the
-/// page comes back under an ordinary memory type this is the only state the
-/// kernel can be in, and a kernel that armed anyway would be writing a page
-/// nothing reserved.
-pub fn panic_blackbox_clean_boot(
+/// The A/B is this guest's own two passes. QEMU zeroes a machine's RAM, so the
+/// first pass must find no page at all, which is what stops a green run meaning
+/// "the loader says that about every boot".
+pub fn blackbox_panic_chain(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let params: &[&str] = &["test-late-panic", "panic-reboot-fast"];
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        chained(params),
+    );
+    // The capture ends at the loader's handoff line, so what it can carry is
+    // the loader's own account; that the *kernel* took the page is
+    // `blackbox_unclaimed_page`'s to say and is not restated here.
+    let first = serial::Serial::boot(&qemu);
+    first.must_say(&armed_line())?;
+    // Nothing was harvested on a machine whose RAM QEMU zeroed, so the pass
+    // below is reading this boot's page and not a claim about every boot.
+    if let Some(line) = first.text().lines().find(|l| l.contains(PREVIOUS_PANIC)) {
+        return Err(format!(
+            "the first pass of a machine with zeroed RAM reported a previous boot ({line:?}), so              the pass after the reset would say nothing\n{}",
+            first.text()
+        ));
+    }
+
+    let second = after_the_reset(&mut qemu, ENDS_THE_CHAIN);
+    second.must_say(PREVIOUS_PANIC)?;
+    // **After the harvest line, and that is the whole of the assertion.** This
+    // capture begins at the first boot's handoff, so it carries that boot's own
+    // panic on the console too — and a whole-capture scan for the witness was
+    // satisfied by it, which let a kernel that sealed nothing pass. Only the
+    // loader's `| ` lines come after the harvest line.
+    second.must_say_after(PREVIOUS_PANIC, BLACKBOX_WITNESS)?;
+    // The page read PANIC and not the state the loader itself put there, which
+    // is what tells a report that crossed the reset from a kernel that vanished.
+    second.must_not_say(&armed_and_nothing_else())?;
+    second.must_say(ENDS_THE_CHAIN)?;
+    // The chain ends rather than going round: a pass that booted a kernel would
+    // have said so, and this one must not have.
+    second.must_not_say(HANDS_OFF)?;
+    drop(qemu);
+
+    eprintln!("  [power] the panic crossed the reset and the loader ended the chain on it");
+    Ok(())
+}
+
+/// The other way a kernel ends, and the control on the name above: a boot that
+/// hands the machine back on purpose seals DONE, and the loader pass after it
+/// reports a deliberate stop rather than a death — then ends the chain too, so
+/// the machine goes back to the firmware's own boot order.
+pub fn blackbox_done_chain(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(&[]));
+    let first = serial::Serial::boot(&qemu);
+    first.must_say(&armed_line())?;
+
+    let second = after_the_reset(&mut qemu, ENDS_THE_CHAIN);
+    second.must_say(&done_line())?;
+    // The distinction the whole state machine exists for: a deliberate stop is
+    // not a panic and not a kernel that vanished.
+    second.must_not_say(&armed_and_nothing_else())?;
+    second.must_not_say(BLACKBOX_WITNESS)?;
+    second.must_not_say(HANDS_OFF)?;
+    drop(qemu);
+
+    eprintln!("  [power] a deliberate reboot sealed DONE and the loader ended the chain on it");
+    Ok(())
+}
+
+/// The kernel side with no page under it: a boot whose loader claimed none says
+/// so by name and writes nowhere.
+///
+/// **A control on the loader's claim, not on the feature.** Without it a green
+/// chain says only that a claimed page works, never that a kernel handed no page
+/// declines to write one — and a kernel that wrote anyway would be writing into
+/// memory nothing reserved.
+pub fn blackbox_unclaimed_page(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -600,13 +745,14 @@ pub fn panic_blackbox_clean_boot(
     );
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    let line = boot.must_say(&blackbox_unclaimed())?.to_string();
-    // The loader is silent about the page in both directions, which is what
-    // says the claim is gone rather than merely failing.
-    boot.must_not_say("Black box:")?;
-    boot.must_not_say("Previous boot's panic:")?;
+    // The loader claimed one on this guest, so what is judged here is the
+    // *kernel's* reading of its own parameter line: the address it was given is
+    // the address the loader printed, and nothing else in the line is a page.
+    let claimed = boot.must_say(&armed_line())?.to_string();
+    boot.must_say(&kernel_took_it())?;
+    boot.must_say(&format!("blackbox={PHYS:#x}"))?;
     drop(qemu);
 
-    eprintln!("  [power] no loader claims the page and the kernel says so: {}", line.trim());
+    eprintln!("  [power] the loader named the page and the kernel took it: {}", claimed.trim());
     Ok(())
 }

@@ -639,10 +639,14 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Fast),
     // Serial like `watchdog_fed`: its verdict is that nothing happened for a span of host clock.
     ("panic_key_holds", Sched::Serial, Tier::Fast),
-    // What the kernel says about a black-box page no loader claims, which is
-    // every boot until the page comes back under an ordinary memory type. An
-    // ordinary boot: no host clock is in any of it.
-    ("panic_blackbox_clean_boot", Sched::Parallel, Tier::Fast),
+    // The boot chain's three answers. The two chain names each watch a guest
+    // take its own reset and read the pass after it, so both are anchored to
+    // the bound the first boot counts down and are destined for
+    // `Why::TimerAnchored` once their one CI price is measured.
+    ("blackbox_panic_chain", Sched::Parallel, Tier::Fast),
+    ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
+    // Its own boot, and every verdict is a line: no host clock in any of it.
+    ("blackbox_unclaimed_page", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
@@ -8994,8 +8998,10 @@ fn run_machine_test(
             power::panic_before_peripherals_reboots(test_config, c_bins, rust_bins)
         }
         "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
-        "panic_blackbox_clean_boot" => {
-            power::panic_blackbox_clean_boot(test_config, c_bins, rust_bins)
+        "blackbox_panic_chain" => power::blackbox_panic_chain(test_config, c_bins, rust_bins),
+        "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
+        "blackbox_unclaimed_page" => {
+            power::blackbox_unclaimed_page(test_config, c_bins, rust_bins)
         }
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),

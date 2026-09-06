@@ -295,8 +295,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
-    // Beside it and for the same reason: both are what a crash before `mm::init` has left.
-    blackbox::arm(maps);
 
     serial::init();
 
@@ -314,6 +312,11 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // Both readings of it here: the parameter is in no reserved region, so
     // `mm::init` may hand that memory out and neither may hold a borrow.
     params::init(cmdline);
+    // Straight after the line it reads the address off, and before `mm::init`
+    // rather than after: the panics this page exists for are the early ones,
+    // and nothing can be handed the page yet because the allocator does not
+    // exist — `reserved` below is what keeps it out once it does.
+    blackbox::arm();
     actuator::init(cmdline);
     rootfs::init(cmdline);
 
@@ -385,6 +388,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
         mm::Region { start: kernel_args.kernel_stack_addr, end: kernel_args.kernel_stack_addr + kernel_args.kernel_stack_size },
         mm::Region { start: 0x8000, end: 0x9000 }, // AP trampoline page
+        // The loader's black-box page, which is ordinary `LoaderData` and so
+        // memory the allocator would otherwise hand out. Empty on a boot whose
+        // parameter line names none.
+        blackbox::reserved_region(),
     ];
 
     // The last point before the first hash container (`mm::init`'s address

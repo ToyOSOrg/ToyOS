@@ -57,6 +57,11 @@ fn quiesce(last: &str) {
     // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
     crate::log::wait_for_durable();
     crate::log::console::drain_inline();
+    // Last, and after the log is durable: the next boot's loader reads this
+    // page to learn how the last one ended, and a machine that was asked to
+    // stop is the one answer that is not a death. Without it the loader would
+    // find the loader's own `ARMED` and report a kernel that vanished.
+    crate::blackbox::record_done();
 }
 
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Does not return.

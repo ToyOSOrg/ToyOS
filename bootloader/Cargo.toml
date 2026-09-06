@@ -18,9 +18,14 @@ toyos-bootmap = { path = "../toyos-bootmap" }
 # The bands either side of `ExitBootServices`, declared where the kernel's entry
 # stub and the harness read the same three rows and colours.
 toyos-bootband = { path = "../toyos-bootband" }
+# The page this loader claims for the next boot to read, and the three states it
+# can hold; the kernel writes two of them and this loader writes the third.
+toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-tco = { path = "../toyos-tco" }
-uefi = { version = "0.26.0", default-features = false }
+# `alloc`: `variable_keys` and `get_variable_boxed`, which are how the boot
+# entry pointing at this image is found among the firmware's own variables.
+uefi = { version = "0.26.0", default-features = false, features = ["alloc"] }
 uefi-services = { version = "0.23.0", features = ["panic_handler", "logger"] }
 
 # The one profile every guest binary is built with. Optimised, because an

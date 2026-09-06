@@ -586,7 +586,7 @@ pub fn render() -> bool {
     let text = fatal_text();
     // Before the paint, from the same view the panel gets: a fault inside the
     // painter then costs the screen and not the copy the next boot reads.
-    crate::blackbox::record(text.text);
+    crate::blackbox::record_panic(text.text);
     paint(Fill::Fatal, text, Page::Last, Watch::No);
     true
 }

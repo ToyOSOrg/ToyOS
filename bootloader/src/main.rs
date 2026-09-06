@@ -30,6 +30,8 @@ macro_rules! println {
     }};
 }
 
+mod blackbox;
+mod bootnext;
 mod loaderlog;
 mod watchdog;
 
@@ -774,6 +776,24 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let log_guid = log_partition_guid(handle, &system_table);
     loaderlog::open(&system_table, &log_guid);
     println!("{}", loaderlog::BEGINS_AT);
+    // Early, and after the log is open: the page has to be claimed before this
+    // loader's own allocations can land on it, and what it holds belongs on the
+    // stick rather than only on a console the owner's machine has none of.
+    let page = blackbox::claim(&system_table);
+    if let Some(finding) = blackbox::harvest(page) {
+        for line in &finding.lines {
+            println!("{line}");
+        }
+        if finding.ends_the_chain {
+            // Back to the firmware's boot manager without a kernel: the last
+            // boot has been accounted for, and booting again would start the
+            // same loop over. Whatever the firmware's own order names next
+            // takes the machine.
+            println!("{}", loaderlog::ENDS_AT_CHAIN);
+            loaderlog::close_without_a_kernel();
+            return Status::SUCCESS;
+        }
+    }
     match firmware_watchdog {
         Ok(()) => println!(
             "Firmware watchdog: {FIRMWARE_WATCHDOG_SECS} s, until ExitBootServices disables it"
@@ -808,7 +828,16 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
     println!("Log partition: signature {:02x?}", log_guid);
 
-    let cmdline = cmdline(handle, &system_table);
+    // The word naming the page is appended to what the ESP carried, because
+    // whether there is a page is a fact only this loader has: the kernel is
+    // handed one line and reads its own parameters out of it.
+    let mut cmdline = cmdline(handle, &system_table);
+    if let Some(word) = blackbox::param(page) {
+        if !cmdline.is_empty() {
+            cmdline.push(b',');
+        }
+        cmdline.extend_from_slice(word.as_bytes());
+    }
     let params = core::str::from_utf8(&cmdline)
         .unwrap_or_else(|e| panic!("\\toyos\\cmdline is not UTF-8: {e}"));
     println!("Boot parameter: {params:?}");
@@ -826,6 +855,12 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Last, so the smallest possible span of this loader is inside the bound
     // and a hang between here and the kernel's own arm resets the machine.
     watchdog::arm(&system_table, rsdp_addr, params);
+
+    // Last before the handoff, and both before anything the exit path touches:
+    // the page says a kernel is running, and `BootNext` says this loader gets
+    // the machine again however that kernel ends.
+    blackbox::arm(page);
+    bootnext::point_at_us(handle, &system_table);
 
     println!("Starting kernel...");
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);
