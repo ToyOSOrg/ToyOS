@@ -597,6 +597,13 @@ pub fn init_bsp(lapic_id: u32) {
     // below would stop the machine with the panel holding the record before it.
     super::idt::init();
 
+    // The first instruction at which a panic is reportable at all, which is why
+    // it is where this fires: what it judges is that the reset register was
+    // already decoded, so a panic here can end the machine and not just describe it.
+    if crate::actuator::test_panic_after_idt() {
+        panic!("test-panic-after-idt: the IDT is loaded and nothing else is up");
+    }
+
     super::control_regs::init(0);
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`

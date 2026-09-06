@@ -623,6 +623,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // against a bound the guest printed, so both are destined for
     // `Why::TimerAnchored` and Nightly once their one CI price is measured.
     ("panic_reboots", Sched::Parallel, Tier::Fast),
+    // The same verdict from inside `percpu::init_bsp`: the earliest point a
+    // panic is reportable, and the window the owner's T14 stops in.
+    ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Fast),
     // Serial like `watchdog_fed`: its verdict is that nothing happened for a span of host clock.
     ("panic_key_holds", Sched::Serial, Tier::Fast),
     // The black box across that reset: its own boot, its own image, and the
@@ -8915,6 +8918,9 @@ fn run_machine_test(
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
         "panic_reboots" => power::panic_reboots(test_config, c_bins, rust_bins),
+        "panic_before_peripherals_reboots" => {
+            power::panic_before_peripherals_reboots(test_config, c_bins, rust_bins)
+        }
         "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
         "panic_blackbox_survives" => power::panic_blackbox_survives(test_config, c_bins, rust_bins),
         "panic_blackbox_clean_boot" => {

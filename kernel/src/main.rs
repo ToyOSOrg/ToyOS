@@ -359,6 +359,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // allows: a fault in any later phase then diagnoses instead of stopping in
     // a handler the firmware left behind.
     let madt = acpi::parse_madt(kernel_args.rsdp_addr).expect("ACPI: MADT not found");
+    // Off the same tables as the MADT, and before the IDT below makes a panic
+    // reportable: a panic that can be reported but not ended leaves the machine
+    // holding its panel for a hand that may not be in the room.
+    acpi::init_reset(kernel_args.rsdp_addr);
     apic::init();
     percpu::init_bsp(apic::id());
     ioapic::init(&madt);

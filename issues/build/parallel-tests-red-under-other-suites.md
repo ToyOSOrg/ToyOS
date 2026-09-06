@@ -316,6 +316,18 @@ changes.
   there reaches a userland filesystem cleanup returning `WouldBlock`. Not
   investigated further; filed so a fourth sighting is not re-derived.
 
+- **`screen_loader_lines`** — added 2026-09-06 on `t14-reset-early`, one of two
+  full `cargo test` runs, `ALONE … GREEN`, and `cargo run -- --known-red
+  screen_loader_lines` answered `NOT ON THE LIST`, so this is its first recorded
+  sighting. `the panel carries 0 band(s) of lit scanlines, too few to take a row
+  pitch from` — **zero** bands rather than a wrong count, so the panel was blank
+  when it was decoded and not carrying the wrong thing, which is this file's
+  liveness shape and not a content one. Worth stating because that branch does
+  move a boot record (`ACPI: reset register`) earlier, and a moved record is the
+  kind of change that shifts a panel's content: it cannot empty one. The other
+  of the two runs failed only on `console_locale_detect`, already known-red on
+  this instrument, at 733 s against the same suite's 196 s. Not investigated.
+
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
 twelve guests across every worktree. It recurred on 2026-08-07: **eight

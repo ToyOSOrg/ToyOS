@@ -37,6 +37,11 @@ actuators! {
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
+    /// Panic inside `percpu::init_bsp`, one statement after it loads the IDT:
+    /// the earliest point a panic is reportable at all, and the window the T14
+    /// stops in. What it judges is that the reset register is decoded by then.
+    test_panic_after_idt = "test-panic-after-idt";
+
     /// Halt between a record's commit and its repaint, so the panel holds the
     /// record before it and `screen_early_panel` reads a paint it can attribute.
     test_early_halt = "test-early-halt";

@@ -458,6 +458,60 @@ pub fn panic_reboots(
     Ok(())
 }
 
+/// A panic inside `percpu::init_bsp`, one statement after it loads the IDT,
+/// finds a reset register already decoded.
+///
+/// That is the window the owner's T14 stops in and the earliest point a panic is
+/// reportable at all. The FADT's reset register used to be decoded at
+/// `acpi::init_power`, hundreds of statements later, so a panic here said it had
+/// "decoded no reset register to hand the machine back to firmware with" and
+/// held the panel for a hand.
+///
+/// **The reset itself is not asserted here, and cannot be on this guest**: the
+/// bound is carried in TSC cycles, and before `clock::init` those come from
+/// CPUID leaves 15H/16H, which QEMU's model answers with zeros. So this guest
+/// reaches the *other* held branch — no clock — and the machine the bound was
+/// written for is the judge of the reset. What is asserted is the half QEMU can
+/// see, which is the half that was broken: the register is decoded before the
+/// panic, and the panic does not name it as missing.
+/// `panic_reboots` covers the reset once the calibrated clock exists.
+pub fn panic_before_peripherals_reboots(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions {
+        kernel_params: &["test-panic-after-idt", "panic-reboot-fast"],
+        ready_marker: PANIC_HELD_HEAD,
+        ..panicked()
+    };
+    let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    let boot = serial::Serial::boot(&qemu);
+
+    // Ordering is the whole assertion: this line is what `init_power` used to
+    // print long after the panic below.
+    let decoded = boot.must_say("ACPI: reset register SystemIO")?.to_string();
+    boot.must_say("EARLY PANIC: panicked at")?;
+    let held = boot.must_say(PANIC_HELD_HEAD)?.to_string();
+    // The one thing this branch removed. A guest reaching the other held branch
+    // for the other reason must not be read as this one passing.
+    boot.must_not_say("decoded no reset register")?;
+    if !held.contains("states no TSC frequency") {
+        return Err(format!(
+            "the panel held for a reason this guest was not expected to reach\n{held}"
+        ));
+    }
+
+    eprintln!("  [power] a panic inside init_bsp found {}", decoded.trim());
+    Ok(())
+}
+
+/// The head of [`panic_reboot::arm`]'s other line — the machine holds. Kept
+/// apart from [`PANIC_ARMED_HEAD`] there and here for the same reason.
+///
+/// [`panic_reboot::arm`]: kernel/src/panic_reboot.rs
+const PANIC_HELD_HEAD: &str = "panic: holding this panel";
+
 /// What the reset itself is allowed to cost on top of the bound: the flush the
 /// reset path makes before it writes the register, and the host seeing QEMU's
 /// event. Scaled by [`QemuInstance::budget`] at the call site.
