@@ -7,10 +7,11 @@ start = ["logd", "test-runner"]
 [programs.logd]
 syscap = ["logread"]
 
-# `dup` because the applet is spawned holding a duplicate, and `power` because
-# the one job ends the machine. Nothing else: this estate spawns no test binary.
+# One binary name per job, never a command line: the stdin path's `run <name>`
+# has the only parser. `dup` because the applet is spawned holding a duplicate,
+# and `power` because the one job ends the machine.
 [programs.test-runner]
-args = ["run reboot"]
+args = ["reboot"]
 syscap = ["dup", "power"]
 
 [programs.toybox]

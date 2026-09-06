@@ -2020,26 +2020,26 @@ mod tests {
         }
     }
 
-    /// **Every config with a `[boot] start` runs `/system/bin/logd`, and `logread` is
-    /// held by exactly the programs that read a cursor.**
+    /// **Every config with a `[boot] start` runs `/system/bin/logd`, `logd` always holds
+    /// `logread`, and nothing outside the cursor readers ever does.**
     ///
     /// The kernel writes no file — `/system/bin/logd` owns `/log` and reads records off
     /// a cursor — so a boot config that does not start `logd` is an image whose
     /// log partition stays empty for the whole of that boot — and on
     /// the machine this subsystem exists for, a T14 with no serial port, that is
-    /// the boot with no record of itself anywhere. A thirteenth config added
-    /// later fails the first clause **by default**, which is the direction this
-    /// bound has to fail in.
+    /// the boot with no record of itself anywhere. A config added later fails
+    /// the first clause **by default**, which is the direction this bound has to
+    /// fail in.
     ///
-    /// The second clause is the capability half: `logread` is
+    /// The rest is the capability half: `logread` is
     /// `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, which is authority
     /// over every record every CPU wrote, and a right with no caller is a
     /// capability handed out for a plan. Two programs read a cursor —
     /// `/system/bin/logd`, which writes the file, and `test-runner`, which runs the
-    /// conservation gates inside itself — and nothing else may, while an estate
-    /// running no such gate holds none. `/system/bin/console` is the near miss: it *could* show this boot's
-    /// records live off a cursor instead of seeding from the previous boot's
-    /// files, and it does not hold the right until something in it reads one.
+    /// conservation gates inside itself. `logd` always does, since that is its
+    /// whole job; `test-runner` does where an estate runs such a gate and not
+    /// where it runs none. `/system/bin/console` is the near miss: it *could* show this boot's
+    /// records live off a cursor, and holds the right only once something reads one.
     ///
     /// It reads the **parsed** `ProgramConfig` and never the file text: a grep
     /// over the TOML would pass on a row that is commented out and on a key
@@ -2062,6 +2062,10 @@ mod tests {
             );
             for (name, program) in &parsed.programs {
                 let holds = program.syscap.iter().any(|s| s == "logread");
+                if name == "logd" {
+                    assert!(holds, "{config}: `logd` writes the file and must read the cursor");
+                    continue;
+                }
                 assert!(
                     !holds || READERS.contains(&name.as_str()),
                     "{config}: `{name}` holds `logread`, and the only programs that read a \
@@ -2129,7 +2133,7 @@ mod tests {
             .join("\n")
     }
 
-    /// The twelve `system.toml` files this repository builds an image from.
+    /// Every `system.toml` this repository builds an image from.
     /// `every_shipped_boot_config_is_covered` asserts this equals what a walk of
     /// the tree finds, so a config added without a gate row reds rather than
     /// slipping through uncovered.

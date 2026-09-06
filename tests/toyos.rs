@@ -600,7 +600,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel, Tier::Fast),
-    // Its own boot and its own case: no host speaks to it, and it ends itself.
+    // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is

@@ -41,15 +41,20 @@ fn main() {
     println!("===READY===");
     let _ = io::stdout().flush();
 
-    // **A machine with no host on the other end runs its jobs from its own
-    // manifest.** Each argument is one of the lines stdin carries, in the row's
-    // own order, and the runner exits after the last.
+    // **A machine with no host on the other end runs the jobs its manifest
+    // names**, one binary name per argument through the stdin path's own [`run_one`].
     let jobs: Vec<String> = std::env::args().skip(1).collect();
     if !jobs.is_empty() {
         for job in &jobs {
-            command(job, cap.as_ref());
+            // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
+            if job.split_whitespace().count() != 1 {
+                fatal(&format!("job {job:?} is not one binary name"));
+            }
+            if !run_one(job, &[], cap.as_ref()) {
+                fatal(&format!("job {job:?} did not run"));
+            }
         }
-        return;
+        std::process::exit(0);
     }
 
     let stdin = io::stdin();
@@ -59,9 +64,16 @@ fn main() {
     }
 }
 
-/// One command line, whichever channel it arrived on.
+/// Say why and end the boot, for the job path where no host is listening.
+fn fatal(why: &str) -> ! {
+    println!("test-runner: {why}");
+    let _ = io::stdout().flush();
+    std::process::exit(1);
+}
+
+/// One command line off stdin. The only parser in this program.
 fn command(line: &str, cap: Option<&SysCap>) {
-    let cmd = line.trim().to_string();
+    let cmd = line.trim();
     if cmd.is_empty() {
         return;
     }
@@ -79,6 +91,11 @@ fn command(line: &str, cap: Option<&SysCap>) {
     let mut words = name.split_whitespace();
     let Some(name) = words.next() else { return };
     let args: Vec<&str> = words.collect();
+    run_one(name, &args, cap);
+}
+
+/// Run `/system/bin/<name>` or that name's builtin, between the host's markers; `false` is a job that never started.
+fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> bool {
     let path = format!("/system/bin/{name}");
 
     println!("===TEST_START {name}===");
@@ -88,13 +105,12 @@ fn command(line: &str, cap: Option<&SysCap>) {
         let code = builtin(cap);
         println!("===TEST_END {name} exit={code}===");
         let _ = io::stdout().flush();
-        return;
+        return true;
     }
 
-    // Spawn with piped stdin (so child doesn't consume serial commands)
-    // but inherited stdout/stderr (output goes directly to serial).
+    // Piped stdin so the child does not consume the serial commands.
     let mut command = Command::new(&path);
-    command.args(&args).stdin(Stdio::piped());
+    command.args(args).stdin(Stdio::piped());
     // **A refused dup is an answer and not a failure — but only one
     // refusal is.** `duplicate` needs `DUP` on the capability, which a
     // manifest grants by name, so `PermissionDenied` says this cap is one
@@ -117,22 +133,29 @@ fn command(line: &str, cap: Option<&SysCap>) {
         Some(Err(e)) => {
             println!("===TEST_END {name} error=the capability would not duplicate: {e:?}===");
             let _ = io::stdout().flush();
-            return;
+            return false;
         }
     }
-    match command.spawn() {
+    let ran = match command.spawn() {
         Ok(mut child) => {
-            // Drop stdin pipe so child gets EOF if it tries to read
             drop(child.stdin.take());
             match child.wait() {
                 Ok(status) => {
                     let code = status.code().unwrap_or(-1);
                     println!("===TEST_END {name} exit={code}===");
+                    true
                 }
-                Err(e) => println!("===TEST_END {name} error={e}==="),
+                Err(e) => {
+                    println!("===TEST_END {name} error={e}===");
+                    false
+                }
             }
         }
-        Err(e) => println!("===TEST_END {name} error={e}==="),
-    }
+        Err(e) => {
+            println!("===TEST_END {name} error={e}===");
+            false
+        }
+    };
     let _ = io::stdout().flush();
+    ran
 }
