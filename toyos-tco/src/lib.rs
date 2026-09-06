@@ -54,18 +54,30 @@ pub struct Chipset {
     pub enable: (u16, u32),
 }
 
-/// Every chipset this kernel will write a TCO register on. **QEMU's q35 is the
-/// only row, and the only one a harness can judge**; a Tiger Lake-LP row belongs
-/// here and this tree has no number for its base, which
-/// `issues/hardware/the-tco-row-for-tiger-lake-is-unmeasured.md` closes.
-pub const CHIPSETS: &[Chipset] = &[Chipset {
-    vendor: 0x8086,
-    device: 0x2918,
-    base_reg: 0x40,
-    base_mask: 0xff80,
-    base_offset: 0x60,
-    enable: (0x40, 1),
-}];
+/// Every chipset this kernel will write a TCO register on. **Only the q35 row
+/// is judged anywhere**: QEMU models no SMBus TCO base, so the second row is
+/// reachable on its own machine and nowhere in this harness.
+pub const CHIPSETS: &[Chipset] = &[
+    // q35's LPC bridge: the TCO block sits inside the ACPI PM I/O window.
+    Chipset {
+        vendor: 0x8086,
+        device: 0x2918,
+        base_reg: 0x40,
+        base_mask: 0xff80,
+        base_offset: 0x60,
+        enable: (0x40, 1),
+    },
+    // Tiger Lake-LP's SMBus function: a 32-byte I/O base of its own, the block
+    // at its start, and bit 0 of the register not part of the address.
+    Chipset {
+        vendor: 0x8086,
+        device: 0xa0a3,
+        base_reg: 0x50,
+        base_mask: !1,
+        base_offset: 0x00,
+        enable: (0x54, 1 << 8),
+    },
+];
 
 /// The row for a device, or `None` for a machine no row names.
 pub fn chipset(vendor: u16, device: u16) -> Option<&'static Chipset> {

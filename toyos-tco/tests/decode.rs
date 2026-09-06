@@ -12,9 +12,23 @@ fn the_q35_row_reaches_the_port_qemu_puts_the_block_at() {
 
 #[test]
 fn a_machine_no_row_names_is_refused_rather_than_guessed() {
-    assert_eq!(chipset(0x8086, 0xa0a3), None, "Tiger Lake-LP SMBus has no row yet");
     assert_eq!(chipset(0x8086, 0x2930), None, "q35's own SMBus function is not the LPC bridge");
     assert_eq!(chipset(0x1234, 0x2918), None, "the device id alone is not the key");
+}
+
+/// The T14's own base register has never been read, so this row is judged on
+/// that machine and by nothing here; what is checked is the decode around it.
+#[test]
+fn the_tiger_lake_row_takes_its_base_from_the_smbus_function() {
+    let tgl = chipset(0x8086, 0xa0a3).expect("the Tiger Lake-LP row");
+    assert_eq!(tgl.port(0x0401, 0x0100), Ok(0x0400), "bit 0 is not part of the address");
+    assert_eq!(tgl.port(0x0400, 0x0000), Err(NoPort::Disabled), "the enable is clear");
+    assert_eq!(tgl.port(0x0400, 0x00ff), Err(NoPort::Disabled), "no bit below 8 enables it");
+    assert_eq!(
+        tgl.port(0x0001_0400, 0x0100),
+        Err(NoPort::Base(0x0001_0400)),
+        "a base past the port space is not one `outw` reaches"
+    );
 }
 
 #[test]
