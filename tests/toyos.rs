@@ -603,10 +603,8 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("machine_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
-    // Its own boot, and the verdict is QEMU's stop reason inside the bound.
-    // Two boots of its own; every verdict is a console line and no clock is in
-    // either. Fast with the UNMEASURED bootstrap marker until CI prices it.
     ("loader_watchdog_arms", Sched::Parallel, Tier::Fast),
+    // Its own boot, and the verdict is QEMU's stop reason inside the bound.
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
     ("watchdog_fed", Sched::Serial, Tier::Nightly),

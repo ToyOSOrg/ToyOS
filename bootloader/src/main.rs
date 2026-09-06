@@ -659,7 +659,9 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     println!("Log partition: signature {:02x?}", log_guid);
 
     let cmdline = cmdline(handle, &system_table);
-    println!("Boot parameter: {:?}", core::str::from_utf8(&cmdline));
+    let params = core::str::from_utf8(&cmdline)
+        .unwrap_or_else(|e| panic!("\\toyos\\cmdline is not UTF-8: {e}"));
+    println!("Boot parameter: {params:?}");
 
     println!("Loading kernel elf...");
     let loaded_kernel = load_kernel_elf(&kernel_bytes);
@@ -673,7 +675,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
     // Last, so the smallest possible span of this loader is inside the bound
     // and a hang between here and the kernel's own arm resets the machine.
-    watchdog::arm(rsdp_addr, &cmdline);
+    watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);

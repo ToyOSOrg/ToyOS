@@ -234,17 +234,25 @@ const UNARMED_ON_ARRIVAL: &str = "so nothing had armed the timer";
 /// The tail of the loader's own arm line, which names the shipped bound and so
 /// tells it from the kernel's, whatever the port and the PCI ids turn out to be.
 fn loader_armed() -> String {
-    format!("armed for {}ms, and the kernel takes it over", toyos_tco::BOUND_MS)
+    format!(
+        "armed for {}ms, and the kernel takes it over",
+        toyos_tco::bound_of(toyos_tco::TIMER)
+    )
 }
 
-/// The loader arms the chipset's watchdog before it jumps, so the handoff and
-/// everything up to the kernel's own arm is inside the bound.
+/// The register value the loader wrote, as the kernel reports finding it.
+fn armed_on_arrival() -> String {
+    format!("TCO_TMR={} on arrival, {ARMED_ON_ARRIVAL}", toyos_tco::TIMER)
+}
+
+/// The loader arms the chipset's watchdog before it jumps, so the handoff is
+/// inside the bound.
 ///
-/// The kernel's read-back is the witness: it reads `TCO1_CNT` before it writes
-/// anything, and on a boot the loader armed it finds the timer already running.
-/// The other way is the same guest without the parameter, where neither half
-/// arms and the kernel says nothing about a timer at all — without which the
-/// line above would be satisfied by a kernel that always printed it.
+/// What the kernel's read-back must report is the register value the loader
+/// wrote, not merely a running timer: `TCO_TMR_HLT` is clear out of reset on
+/// q35, and with the loader's arm silenced this line reads `TCO_TMR=4`. The
+/// other way is the same guest without the parameter, where neither half arms
+/// and the kernel says nothing about a timer at all.
 pub fn loader_watchdog_arms(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -259,7 +267,7 @@ pub fn loader_watchdog_arms(
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let line = boot.must_say(&loader_armed())?.to_string();
-    boot.must_say(ARMED_ON_ARRIVAL)?;
+    boot.must_say(&armed_on_arrival())?;
     drop(qemu);
 
     let idle = QemuInstance::boot_with_options(

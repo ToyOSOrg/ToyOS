@@ -1001,16 +1001,22 @@ pub fn declared_params(root: &Path) -> Vec<String> {
 
 /// Every name in `PARAMS`: anchored on the name and closed on `];`, so a reflow still reads and an unfound declaration is empty rather than guessed.
 ///
-/// A name is a string literal there or `toyos_tco::PARAM`, which is the one
-/// constant the bootloader reads the same parameter out of. Any other path
-/// resolves to nothing, and [`declared_params`] refuses an empty list.
+/// A name is a string literal there or `toyos_tco::PARAM`, the one constant the
+/// bootloader reads the same parameter out of. A row spelled any other way
+/// resolves to nothing, which the count below refuses rather than passing on
+/// the names it did resolve.
 fn params_of(text: &str) -> Vec<String> {
     let Some((_, body)) = text.split_once("pub const PARAMS") else { return Vec::new() };
     let Some((body, _)) = body.split_once("];") else { return Vec::new() };
     let mut names: Vec<String> = body.split('"').skip(1).step_by(2).map(str::to_string).collect();
-    if body.contains("toyos_tco::PARAM") {
-        names.push(toyos_tco::PARAM.to_string());
-    }
+    names.extend(body.matches("toyos_tco::PARAM").map(|_| toyos_tco::PARAM.to_string()));
+    // The value's `&[`, not the type's: the rows are what follows the last one.
+    let rows = body.rsplit_once("&[").map_or(0, |(_, rows)| rows.matches('(').count());
+    assert!(
+        names.len() == rows,
+        "`PARAMS` lists {rows} row(s) and this reads {} name(s) out of them: {names:?}",
+        names.len()
+    );
     names
 }
 
@@ -1937,10 +1943,17 @@ mod tests {
             params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[(toyos_tco::PARAM, &W)];"),
             vec![toyos_tco::PARAM.to_string()]
         );
-        assert!(
-            params_of("pub const PARAMS: &[(&str, &AtomicBool)] = &[(other::NAME, &W)];").is_empty(),
-            "a path this cannot resolve was resolved anyway"
-        );
+        // A row it cannot read is refused rather than dropped, which the count
+        // is for: without it the two-row table below would read as one name.
+        for unreadable in [
+            "pub const PARAMS: &[(&str, &AtomicBool)] = &[(other::NAME, &W)];",
+            "pub const PARAMS: &[(&str, &AtomicBool)] = &[(\"a\", &A), (other::NAME, &W)];",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| params_of(unreadable)).is_err(),
+                "a row this cannot read passed: {unreadable}"
+            );
+        }
     }
 
     /// **An actuator is a boot parameter and never a kernel build.**

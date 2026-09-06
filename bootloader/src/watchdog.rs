@@ -1,29 +1,33 @@
 //! The chipset's TCO watchdog, armed here so the handoff is inside the bound.
 //!
-//! The kernel arms and feeds the same timer, but only once it is up: a machine
-//! that stops between this jump and `drivers::watchdog::init` has nothing
-//! watching it and stays down until somebody walks to it. This arms the same
-//! block, on the same [`toyos_tco::PARAM`], at the same [`toyos_tco::TIMER`],
-//! and leaves the kernel to take it over.
+//! The kernel arms and feeds the same block, on the same [`toyos_tco::PARAM`],
+//! at the same [`toyos_tco::TIMER`] — but only once it is up, and this covers
+//! the span before that.
 //!
-//! `TCO2_STS` is not touched. Whether the last boot ended in a TCO reset is
-//! latched there and the kernel reports it; a read-modify-write here would take
-//! that evidence away from the one place that reads it.
+//! `TCO2_STS` is neither read nor written: whether the last boot ended in a TCO
+//! reset is latched there and the kernel is the one place that reports it.
 //!
-//! A machine no row in [`toyos_tco::CHIPSETS`] names is refused by name on the
-//! console and the boot continues.
+//! Every machine this cannot arm is refused by name on the console and boots
+//! anyway.
 
+use core::mem::{align_of, size_of};
 use core::ptr::read_volatile;
 
 use toyos_acpi::Phys;
 use toyos_tco::{Chipset, TCO1_CNT, TCO1_CNT_RUN, TCO_RLD, TCO_TMR, TCO_TMR_HLT};
+use uefi::prelude::*;
+use uefi::table::boot::{MemoryDescriptor, PAGE_SIZE};
 
 /// x86-64's 52-bit physical-address ceiling, as `kernel/src/drivers/acpi.rs`
 /// bounds the same reads.
 const MAX_PHYS: u64 = 1 << 52;
 
-/// Firmware's tables, read where firmware left them: boot services identity-map
-/// physical memory, so a physical address is the address this loader reads.
+/// What of the ECAM window this reads: bus 0's thirty-two devices, eight
+/// functions each, one 4 KiB configuration space apiece.
+const BUS_ZERO_BYTES: u64 = 32 * 8 * 4096;
+
+/// Boot services identity-map physical memory, so a physical address is the
+/// address this loader reads.
 #[derive(Clone, Copy)]
 struct Identity;
 
@@ -41,8 +45,7 @@ impl Phys for Identity {
 
 /// Arm the watchdog when `cmdline` names it, and say on the console what was
 /// armed or why nothing was.
-pub fn arm(rsdp_addr: u64, cmdline: &[u8]) {
-    let Ok(cmdline) = core::str::from_utf8(cmdline) else { return };
+pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
     if !toyos_abi::boot::actuators(cmdline).any(|token| token == toyos_tco::PARAM) {
         return;
     }
@@ -50,6 +53,13 @@ pub fn arm(rsdp_addr: u64, cmdline: &[u8]) {
         Ok((_, base)) => base,
         Err(e) => return refused(format_args!("this machine's tables name no ECAM ({e:?})")),
     };
+    // The MCFG's word for where configuration space is, checked against
+    // firmware's own map before anything dereferences it.
+    if !described(system_table, ecam, BUS_ZERO_BYTES) {
+        return refused(format_args!(
+            "firmware's memory map describes no {BUS_ZERO_BYTES:#x} bytes at the MCFG's {ecam:#x}"
+        ));
+    }
     let Some((row, base_reg, enable_reg)) = chipset(ecam) else {
         return refused(format_args!("no function on bus 0 carries a TCO block this loader knows"));
     };
@@ -72,8 +82,8 @@ pub fn arm(rsdp_addr: u64, cmdline: &[u8]) {
         outw(port + TCO_RLD, 1);
     }
     // Read back: firmware may have set `TCO_LOCK`, which makes `TCO_TMR_HLT`
-    // unclearable. SAFETY: as the writes above.
-    let cnt = unsafe { inw(port + TCO1_CNT) };
+    // unclearable.
+    let cnt = inw(port + TCO1_CNT);
     if cnt & TCO_TMR_HLT != 0 {
         return refused(format_args!("{port:#x} kept the timer halted (TCO1_CNT={cnt:#06x})"));
     }
@@ -108,32 +118,59 @@ fn chipset(ecam: u64) -> Option<(&'static Chipset, u32, u32)> {
     None
 }
 
+/// Whether firmware's own map describes `[at, at + len)` inside one region.
+fn described(system_table: &SystemTable<Boot>, at: u64, len: u64) -> bool {
+    let bs = system_table.boot_services();
+    let size = bs.memory_map_size();
+    // Eight descriptors of slack: the map can grow between the two calls, and
+    // this one allocates in between.
+    let bytes = size.map_size + 8 * size.entry_size;
+    let mut words: alloc::vec::Vec<u64> = alloc::vec![0; bytes.div_ceil(size_of::<u64>())];
+    const _: () = assert!(align_of::<MemoryDescriptor>() <= align_of::<u64>());
+    // SAFETY: `words` is a live allocation of exactly this many bytes, aligned
+    // for `u64` and so for `MemoryDescriptor`, and nothing else names it while
+    // the slice is alive.
+    let buffer = unsafe {
+        core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 8)
+    };
+    let Ok(map) = bs.memory_map(buffer) else { return false };
+    let Some(end) = at.checked_add(len) else { return false };
+    map.entries().any(|region| {
+        let region_end = region.phys_start + region.page_count * PAGE_SIZE as u64;
+        region.phys_start <= at && end <= region_end
+    })
+}
+
 /// One configuration dword of a function on bus 0, through the ECAM window.
-///
-/// `device`, `function` and `offset` are this file's own and inside their
-/// fields; an absent function reads all ones, which every caller refuses.
 fn config_u32(ecam: u64, device: u8, function: u8, offset: u16) -> u32 {
+    // Masked here and not asserted: every field is this file's own, and the
+    // address the SAFETY clause below bounds is the one this expression makes.
     let at = ecam
-        + (u64::from(device) << 15)
-        + (u64::from(function) << 12)
-        + u64::from(offset & !3);
-    // SAFETY: the ECAM window is 256 MiB from `base` and firmware identity-maps
-    // it under boot services; `device`, `function` and `offset` are bounded by
-    // their callers to bits 15..20, 12..15 and 0..12 of one function's 4 KiB.
+        + (u64::from(device & 0x1f) << 15)
+        + (u64::from(function & 7) << 12)
+        + u64::from(offset & 0xffc);
+    // SAFETY: the three fields above put `at` inside `[ecam, ecam +
+    // BUS_ZERO_BYTES)`, which `arm` refused to enter unless firmware's own
+    // memory map describes it as one region.
     unsafe { read_volatile(at as *const u32) }
 }
 
 /// # Safety
-/// The caller must name a port it is entitled to write.
+/// No fault in Ring 0; the caller owns which device answers at `port` and what
+/// the word commands it to do. `kernel/src/arch/cpu.rs` states the same
+/// contract for the same instruction.
 unsafe fn outw(port: u16, value: u16) {
     core::arch::asm!("out dx, ax", in("dx") port, in("ax") value, options(nomem, nostack, preserves_flags));
 }
 
-/// # Safety
-/// The caller must name a port it is entitled to read.
-unsafe fn inw(port: u16) -> u16 {
+/// One word from an I/O port; safe because a read has no value a caller can get
+/// wrong, as `kernel/src/arch/cpu.rs`'s `inw` is.
+fn inw(port: u16) -> u16 {
     let value: u16;
-    core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    // SAFETY: one instruction into the declared output, no memory operand.
+    unsafe {
+        core::arch::asm!("in ax, dx", out("ax") value, in("dx") port, options(nomem, nostack, preserves_flags));
+    }
     value
 }
 
