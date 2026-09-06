@@ -1989,6 +1989,20 @@ pub const KNOWN_RED: &[Red] = &[
         measured: "2026-09-05",
     },
     Red {
+        test: "short_sleep_livelock",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`STALLED: 63s of guard expired, and the guest had said nothing for the last 63s of \
+               it` after four of five `test_rs_abuse_short_sleep` threads exited on cpu1 and the \
+               fifth never returned from its 100000 ns sleep; `ALONE short_sleep_livelock: GREEN, \
+               and it was alone both times`",
+        evidence: "merge-queue `ci` run 33999755256 (#424 on main e9731380), job 101396692597 \
+                   `guest (3)`",
+        source: "issues/kernel/short-sleep-livelock-stalls-on-ci-with-one-sleeper-never-returning.md",
+        measured: "2026-09-06",
+    },
+    Red {
         test: "double_fault_stack",
         instrument: Instrument::DevHostLoaded,
         finding: Finding::Seen,
