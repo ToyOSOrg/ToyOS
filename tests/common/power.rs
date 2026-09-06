@@ -255,14 +255,14 @@ pub fn loader_watchdog_arms(
         kernel_params: &[toyos_tco::PARAM],
         ..Default::default()
     };
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, armed);
+    let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, armed);
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let line = boot.must_say(&loader_armed())?.to_string();
     boot.must_say(ARMED_ON_ARRIVAL)?;
     drop(qemu);
 
-    let mut idle = QemuInstance::boot_with_options(
+    let idle = QemuInstance::boot_with_options(
         test_config,
         c_bins,
         rust_bins,
