@@ -600,10 +600,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel, Tier::Fast),
-    // Its own boot, and the verdict is QEMU's stop reason.
-    ("watchdog_resets", Sched::Parallel, Tier::Fast),
+    // Its own boot, and the verdict is QEMU's stop reason inside the bound.
+    ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
-    ("watchdog_fed", Sched::Serial, Tier::Fast),
+    ("watchdog_fed", Sched::Serial, Tier::Nightly),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
