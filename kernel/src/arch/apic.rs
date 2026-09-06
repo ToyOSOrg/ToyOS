@@ -166,6 +166,15 @@ fn wait_for_log_file() {
     if crate::drivers::serial::has_console() {
         return;
     }
+    // INVARIANT: nothing below runs before both facts this wait rests on hold.
+    // The deadline is read off the calibrated clock, so an uncalibrated one
+    // makes it unreachable; and what the wait is owed by is `logd`, which only
+    // a released machine can run. On a boot that crashes before either — the
+    // one this whole path exists for on a machine with no serial port — waiting
+    // costs the seal and buys nothing, so it is skipped and not shortened.
+    if !crate::clock::calibrated() || !crate::arch::smp::is_ready() {
+        return;
+    }
     // Sampled once — a sibling still logging on its way down must not be able to push this deadline out indefinitely.
     let want = crate::log::read::newest_committed_at_ns();
     if !owed(want) {
@@ -200,7 +209,10 @@ fn wait_for_log_file() {
 // panic_flush bypasses the log-ring and serial locks — after the halt IPI a wedged holder never releases them, so taking them normally could deadlock.
 pub fn halt_all_cpus() -> ! {
     wait_for_log_file();
-    if X2APIC_ENABLED.load(Ordering::Relaxed) {
+    // Under the same condition as the wait above: before the machine is
+    // released no sibling has been sent its `SIPI`, so this addresses CPUs that
+    // are still waiting for one rather than CPUs that need halting.
+    if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::arch::smp::is_ready() {
         Reg::Icr.write(0x000C_0000 | 0xFD);
     }
     let bound = crate::panic_reboot::arm(true);
