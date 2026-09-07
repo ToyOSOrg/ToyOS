@@ -93,6 +93,41 @@ unit = "s"
 ceiling = 360
 ceiling_from = "toyos_build::metal::return_secs"
 
+[[number]]
+name = "boot.latencycase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.latencycase.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+# --- what this machine's scheduler costs a waiter, and what one machine-wide
+# --- TLB shootdown costs its initiator
+# Both ceilings come from a constant in this repository, because neither number
+# has been taken on the machine yet. Each is the widest true bound there is
+# before a first reading, and each is narrowed against `measured` once one is.
+
+[[number]]
+name = "latency.p99_us"
+unit = "us"
+ceiling = 4095
+ceiling_from = "cyclictest's histogram is 4096 buckets of 1 us, so a p99 in its last bucket is a floor and not a measurement"
+
+[[number]]
+name = "tlb.latencycase.p50_ns"
+unit = "ns"
+ceiling = 5000000000
+ceiling_from = "kernel arch::tlb::ACK_TIMEOUT — a shootdown waiting longer than that panics the machine, so nothing under it is a wait this kernel tolerates"
+
+[[number]]
+name = "tlb.latencycase.p99_ns"
+unit = "ns"
+ceiling = 5000000000
+ceiling_from = "kernel arch::tlb::ACK_TIMEOUT — as tlb.latencycase.p50_ns"
 # --- the device boot, and every span `userland/metalprobe` measures on it ---
 # Each job exits with its span in microseconds and the kernel's `exit:` record
 # carries it; `src/metaldevices.rs` names the negative codes that are refusals

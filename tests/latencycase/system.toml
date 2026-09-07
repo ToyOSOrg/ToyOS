@@ -1,0 +1,26 @@
+# The boot that measures what this machine's scheduler costs a waiter, and ends
+# itself.
+#
+# **Its own config rather than a row added to `tests/testcases`.** The
+# instrument needs the real-time band, which is `Rights::RT` on a `SysCap`, and
+# it needs it *in a child* — so the runner would have to hold `rt` and `dup`
+# together, and the runner passes a duplicate of whatever it holds to every
+# binary it spawns. Putting the two on `tests/testcases` would hand the RT band
+# to every test in the estate; here the estate is two jobs long and both want it.
+#
+# `power` because the job list is what ends the boot: there is no host on the
+# other end of the console on the machine this config exists for.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+syscap = ["logread"]
+
+[programs.test-runner]
+args = ["test_rs_cyclictest", "test_rs_sched_stress", "reboot"]
+syscap = ["rt", "dup", "power"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"

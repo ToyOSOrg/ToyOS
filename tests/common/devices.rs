@@ -71,7 +71,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
 
 /// One job's exit code as the number it is, or why it is not one.
 fn measurement(job: &str, code: i32) -> Result<u64, String> {
-    if let Some(refused) = metaldevices::Refused::of(code) {
+    if let Some(refused) = metaldevices::Refused::of(i64::from(code)) {
         return Err(format!("{job}: the job refused — {refused}"));
     }
     u64::try_from(code)

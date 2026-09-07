@@ -124,7 +124,8 @@ mod tests {
     /// Every committed config the metal profile derives from, read from the
     /// tree so the transform is exercised on the real text rather than on a
     /// fixture that agrees with it today.
-    const CONFIGS: &[&str] = &["tests/testcases", "tests/jobcase", "tests/metalcase"];
+    const CONFIGS: &[&str] =
+        &["tests/testcases", "tests/jobcase", "tests/metalcase", "tests/latencycase"];
 
     fn derived(dir: &str, jobs: &[&str]) -> String {
         let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join("system.toml");

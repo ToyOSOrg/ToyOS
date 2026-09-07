@@ -215,6 +215,10 @@ actuators! {
     /// Time the same read loop on every CPU, either side of the `mov cr0` that enables caching.
     control_regs_bench = "control-regs-bench";
 
+    /// Issue a fixed count of machine-wide TLB shootdowns against every CPU the
+    /// machine brought up, with nothing else running, and report the distribution.
+    tlb_shootdown_bench = "tlb-shootdown-bench";
+
     /// Shrink both disk caches to 64 entries each.
     test_small_caches = "test-small-caches";
 

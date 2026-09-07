@@ -213,7 +213,12 @@ pub(super) fn init(entries: &[MemoryMapEntry], reserved: &[Region]) {
     bm.page_count = ((hi - lo) / PAGE_2M) as usize;
     assert!(bm.page_count <= MAX_PAGES, "pmm: physical memory exceeds {} GB", MAX_PAGES * 2 / 1024);
 
+    let mut usable_entries = 0u64;
+    let mut firmware_bytes = 0u64;
+    let mut withheld = 0u64;
     for entry in entries.iter().filter(|e| is_usable(e)) {
+        usable_entries += 1;
+        firmware_bytes += entry.end - entry.start;
         let start = (entry.start + PAGE_2M - 1) & !(PAGE_2M - 1);
         let end = entry.end & !(PAGE_2M - 1);
         let mut addr = start;
@@ -223,10 +228,31 @@ pub(super) fn init(entries: &[MemoryMapEntry], reserved: &[Region]) {
                 bm.set_free(idx);
                 bm.free_count += 1;
                 bm.total_usable += 1;
+            } else {
+                withheld += 1;
             }
             addr += PAGE_2M;
         }
     }
+
+    // **Exact, and it has to be**: every byte the firmware called usable is
+    // either a whole 2 MiB frame this bitmap manages, a frame withheld because
+    // a reserved region touches it, or a fragment lost to the alignment of an
+    // entry that does not begin and end on a 2 MiB boundary. Nothing else can
+    // become of one, so the three sum to the first, and a reader who cannot
+    // reproduce that sum is reading a defect.
+    let managed = bm.total_usable as u64 * PAGE_2M;
+    let withheld_bytes = withheld * PAGE_2M;
+    let (frames, base, span) = (bm.total_usable, bm.base, bm.page_count);
+    // The record is written with the lock released: `log!`'s own path may reach
+    // the allocator, and the allocator's page comes from this bitmap.
+    drop(bm);
+    crate::log!(
+        "pmm: the firmware map calls {firmware_bytes} bytes usable in {usable_entries} entries; \
+         managed={managed} withheld={withheld_bytes} unaligned={}, and the three sum to it; \
+         frames={frames} reserved_frames={withheld} base={base:#x} span={span}",
+        firmware_bytes - managed - withheld_bytes,
+    );
 }
 
 /// Allocate one 2MB physical page. Does not heap-allocate (safe to call from the allocator).

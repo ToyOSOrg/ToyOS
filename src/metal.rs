@@ -555,6 +555,11 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // and `build::flashable_params` already lets the owner flash them.
     ("watchdog", Flash::Ok),
     ("early-panel", Flash::Ok),
+    // It issues machine-wide TLB shootdowns from the BSP after the roster is
+    // released and before the idle loop, and reports how long each took. It
+    // reaches no device, writes no register outside `CR3`, and leaves nothing
+    // behind: the boot goes on to userland and ends the way an unarmed one does.
+    ("tlb-shootdown-bench", Flash::Ok),
 ];
 
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
