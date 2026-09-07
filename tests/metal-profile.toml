@@ -329,3 +329,44 @@ name = "boot.foreignrecord.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
+
+# --- the boot that stops itself on purpose ---
+# `deadlinewedge` is the only boot here whose verdict is not `Rebooting.`: every
+# CPU stops taking scheduler passes at the shutdown syscall and the kernel's own
+# `boot-deadline` is what ends it. Its three ordinary numbers are priced against
+# that bound rather than against the runner's, because the runner never reaches
+# its own.
+
+[[number]]
+name = "boot.deadlinewedge.complete_ms"
+unit = "ms"
+ceiling = 120000
+ceiling_from = "toyos_tco::WEDGE_BOUND_MS — on this boot the kernel's own deadline is what runs from boot, so a later `Boot: complete` is a boot the deadline already reset"
+measured = 1198
+
+[[number]]
+name = "boot.deadlinewedge.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs — which now derives from WEDGE_BOUND_MS, the longest watchdog a boot runs under, plus what coming back costs"
+measured = 231
+
+[[number]]
+name = "boot.deadlinewedge.stick_secs"
+unit = "s"
+ceiling = 5
+ceiling_from = "as boot.jobcase.stick_secs. It is the number this boot owes most: the deadline resets a machine whose USB was stopped by registers alone, and a stick the next host cannot enumerate is what `xhci::stop::before_reset` exists to prevent"
+measured = 0
+
+# --- and the one number only this boot measures ---
+# How far past its bound the deadline actually fired. The bound is a parameter;
+# the expiry is what the poll reached on a machine where every CPU was spinning
+# with preemption disabled, so the difference is what that poll costs in the
+# state it exists for.
+
+[[number]]
+name = "boot.deadlinewedge.deadline_lateness_ms"
+unit = "ms"
+ceiling = 10000
+ceiling_from = "the poll's own cadence: the deadline is read on every timer interrupt and an idle CPU re-arms its LAPIC one-shot per fire, so the lateness is one timer period. That period has not been measured on this machine, and ten seconds — a twelfth of the bound — is the widest true bound before it has been. 153 ms is what it read"
+measured = 153

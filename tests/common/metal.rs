@@ -166,6 +166,14 @@ impl Readback {
         Serial::named(&format!("{}'s loader.log", self.label), self.loader.as_str())
     }
 
+    /// How far past its bound this boot's deadline fired, or `None` on a boot
+    /// whose deadline did not — which is every boot but the one armed to stop
+    /// itself. Read out of the record the pass after the reset printed, because
+    /// that is the only channel a wedged boot has.
+    pub fn deadline_lateness_ms(&self) -> Option<u64> {
+        toyos_build::metal::deadline_lateness_ms(&self.loader)
+    }
+
     /// The loader pass **after** the kernel's reset, which is where a chain
     /// report is. `None` where the chain did not go round — which for a boot
     /// that ended itself is a finding, not an absence.
@@ -737,11 +745,19 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
+                // The fourth is `None` on every boot but the one armed to stop
+                // itself, and a `None` field is not recorded rather than
+                // recorded as a zero: an unpriced name is refused, and a boot
+                // that measured nothing may not answer for one that did.
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),
                     ("stick_secs", Some(back.stick_secs)),
+                    ("deadline_lateness_ms", back.deadline_lateness_ms()),
                 ] {
+                    if field == "deadline_lateness_ms" && value.is_none() {
+                        continue;
+                    }
                     let Some(value) = value else {
                         eprintln!("    FAIL boot.{label}.complete_ms: this boot recorded none");
                         red = true;

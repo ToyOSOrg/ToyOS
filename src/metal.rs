@@ -152,6 +152,11 @@ pub enum Refusal {
     /// machine back rather than starting the same hang again. What is owed is a
     /// look at why that kernel stopped, and the boot before this one is where.
     HungWithoutARecord,
+    /// **An image armed to stop itself did not, or was not ended by its own
+    /// bound.** Said only of an image carrying [`WEDGE_ARM`], for which
+    /// `Rebooting.` is the failure and a sealed `WEDGED` record is the pass —
+    /// the one boot in this loop whose verdict is not `bootlog::verdict`'s.
+    Wedge { why: &'static str },
     Usage(String),
 }
 
@@ -167,6 +172,7 @@ impl Refusal {
                 | Self::Fat32(_)
                 | Self::ReportedAndBootedNothing { .. }
                 | Self::HungWithoutARecord
+                | Self::Wedge { .. }
         )
     }
 }
@@ -265,6 +271,11 @@ impl fmt::Display for Refusal {
                  error -71` on the machine's own journal"
             ),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
+            Self::Wedge { why } => write!(
+                f,
+                "this image is armed to stop itself, so it is judged by the record its own \
+                 deadline sealed and not by the word a shutdown writes — and {why}"
+            ),
             Self::HungWithoutARecord => write!(
                 f,
                 "the last boot of this image was handed the machine and never reported: no panic, \
@@ -1536,9 +1547,62 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         if let Some(said) = reported_and_booted_nothing(&loader, &log) {
             return Err(Refusal::ReportedAndBootedNothing { said });
         }
+        // **An image armed to stop itself is judged by the record its deadline
+        // sealed, not by the word a shutdown writes.** Read off what the image
+        // is armed with rather than off its label or its readback directory: the
+        // arm comes out of the artifact, so no boot can be judged as something
+        // it was not flashed as.
+        if armed.iter().any(|name| name == WEDGE_ARM) {
+            last = Some(wedged_boot(&loader, &log)?);
+            continue;
+        }
         last = Some(bootlog::verdict(&log).map_err(Refusal::Log)?);
     }
     Ok(last)
+}
+
+/// What an image armed with [`WEDGE_ARM`] owes instead of `Rebooting.`, and the
+/// `Boot: complete` it still owes as well.
+///
+/// **Both halves, because either alone passes for the wrong reason.** A boot
+/// that reached `Rebooting.` was never wedged, and a boot with no sealed record
+/// is one somebody's hand ended — which is the whole thing this arm exists to
+/// prove cannot happen any more.
+fn wedged_boot(loader: &str, log: &str) -> Result<u64, Refusal> {
+    if log.contains(bootlog::REBOOTING) {
+        return Err(Refusal::Wedge {
+            why: "it reached the shutdown's own last word, so nothing about it was wedged",
+        });
+    }
+    if !loader.contains(bootlog::DEADLINE_EXPIRED) {
+        return Err(Refusal::Wedge {
+            why: "the pass after the reset reports no deadline, so what ended this boot was not \
+                  the kernel's own bound",
+        });
+    }
+    let ms = bootlog::boot_millis(log).ok_or(Refusal::Wedge {
+        why: "the kernel wrote no `Boot: complete`, so this boot stopped before the phase the \
+              deadline is armed for",
+    })?;
+    if let Some(said) = loader.lines().find(|l| l.contains(bootlog::DEADLINE_EXPIRED)) {
+        println!("{}", said.trim_start_matches("| ").trim());
+    }
+    Ok(ms)
+}
+
+/// The lateness of a deadline that expired, in milliseconds past the bound it
+/// was armed with, out of the line the pass after the reset printed.
+///
+/// **The one number this arm measures.** The bound is a parameter and the
+/// expiry is what the poll actually reached, so the difference is what the
+/// timer entry costs a wedged machine — and it is the number a slower poll
+/// would move.
+pub fn deadline_lateness_ms(loader: &str) -> Option<u64> {
+    let said = loader.lines().find(|l| l.contains(bootlog::DEADLINE_EXPIRED))?;
+    let (_, rest) = said.split_once("a bound of ")?;
+    let (bound, rest) = rest.split_once(" ms, reached at ")?;
+    let (reached, _) = rest.split_once(" ms,")?;
+    reached.parse::<u64>().ok()?.checked_sub(bound.parse::<u64>().ok()?)
 }
 
 /// What the two files and this boot's own facts are called under `--readback`.
@@ -2100,6 +2164,7 @@ mod tests {
 
     #[test]
     fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
+        assert!(Refusal::Wedge { why: "x" }.about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
         assert!(Refusal::Silent { what: "come back", secs: return_secs() }.about_the_boot());
@@ -2261,4 +2326,43 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
+    /// The lateness comes off the line the kernel writes, and a boot that wrote
+    /// none measures nothing rather than zero.
+    #[test]
+    fn the_deadlines_lateness_is_read_off_the_record_the_loader_printed() {
+        let said = format!(
+            "| {}: a bound of 120000 ms, reached at 120153 ms, with this machine in `complete`. \
+             The tail of the log ring follows.\n",
+            bootlog::DEADLINE_EXPIRED
+        );
+        assert_eq!(deadline_lateness_ms(&said), Some(153));
+        assert_eq!(deadline_lateness_ms("Previous boot's panic: nothing of the kind\n"), None);
+        // A bound the expiry did not reach is not a negative lateness.
+        let early = said.replace("reached at 120153", "reached at 119000");
+        assert_eq!(deadline_lateness_ms(&early), None);
+    }
+
+    /// The one boot judged by its sealed record and not by the shutdown's word:
+    /// both halves refuse, and the pass needs both.
+    #[test]
+    fn an_image_armed_to_stop_itself_owes_a_record_and_no_reboot() {
+        let sealed = format!(
+            "Previous boot's panic: the last boot read WEDGED\n| {}: a bound of 120000 ms, \
+             reached at 120153 ms, with this machine in `complete`.\n",
+            bootlog::DEADLINE_EXPIRED
+        );
+        let booted = "[kernel 1.198 cpu0] Boot: complete (1198ms)\n";
+        assert_eq!(wedged_boot(&sealed, booted), Ok(1198));
+
+        let rebooted = format!("{booted}[kernel 1.3 cpu0] {}\n", bootlog::REBOOTING);
+        let why = wedged_boot(&sealed, &rebooted).unwrap_err().to_string();
+        assert!(why.contains("nothing about it was wedged"), "{why}");
+
+        let why = wedged_boot("no record here\n", booted).unwrap_err().to_string();
+        assert!(why.contains("the pass after the reset reports no deadline"), "{why}");
+
+        let why = wedged_boot(&sealed, "nothing at all\n").unwrap_err().to_string();
+        assert!(why.contains("no `Boot: complete`"), "{why}");
+    }
+
 }
