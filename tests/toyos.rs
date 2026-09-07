@@ -1505,12 +1505,12 @@ fn shared_metal(rust_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
 /// with it costs the machine nothing and saves a whole minute. The bench runs
 /// on the BSP between the roster's release and the idle loop, before either job
 /// starts, so what it spends is boot time and not latency.
-const LATENCYCASE: &[metal::Arm] = &[metal::Arm {
-    boot: "latencycase",
-    config: "tests/latencycase",
-    params: &["tlb-shootdown-bench"],
-    jobs: &["test_rs_cyclictest", "test_rs_sched_stress"],
-}];
+const LATENCYCASE: &[metal::Arm] = &[metal::once(
+    "latencycase",
+    "tests/latencycase",
+    &["tlb-shootdown-bench"],
+    &["test_rs_cyclictest", "test_rs_sched_stress"],
+)];
 
 /// The job `log-close` runs after, and so the anchor its evidence is read from.
 const LOG_CLOSE_MARKER: &str = "test_rs_null_sink_client_exits";
