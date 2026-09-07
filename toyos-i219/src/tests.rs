@@ -138,7 +138,7 @@ fn a_part_with_no_station_address_is_refused() {
 fn a_window_or_grant_too_small_is_refused() {
     struct Narrow(usize);
     impl Registers for Narrow {
-        fn len(&self) -> usize {
+        fn bytes(&self) -> usize {
             self.0
         }
         fn read(&self, _: usize) -> u32 {
@@ -156,7 +156,7 @@ fn a_window_or_grant_too_small_is_refused() {
     }
     struct Small(usize);
     impl DmaBuffers for Small {
-        fn len(&self) -> usize {
+        fn bytes(&self) -> usize {
             self.0
         }
         fn device_addr(&self, _: usize) -> u64 {
@@ -210,7 +210,7 @@ fn a_window_or_grant_too_small_is_refused() {
 fn a_window_that_reads_ones_is_refused() {
     struct Dead;
     impl Registers for Dead {
-        fn len(&self) -> usize {
+        fn bytes(&self) -> usize {
             regs::REGISTER_BYTES
         }
         fn read(&self, _: usize) -> u32 {

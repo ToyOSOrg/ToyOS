@@ -221,7 +221,7 @@ impl Model {
     /// datasheet gives each register.
     fn read(&mut self, reg: usize) -> u32 {
         assert!(
-            reg % 4 == 0 && reg + 4 <= regs::REGISTER_BYTES,
+            reg.is_multiple_of(4) && reg + 4 <= regs::REGISTER_BYTES,
             "seed {}: a {reg:#x} register read is outside the file",
             self.seed
         );
@@ -264,7 +264,7 @@ impl Model {
 
     fn write(&mut self, reg: usize, value: u32) {
         assert!(
-            reg % 4 == 0 && reg + 4 <= regs::REGISTER_BYTES,
+            reg.is_multiple_of(4) && reg + 4 <= regs::REGISTER_BYTES,
             "seed {}: a {reg:#x} register write is outside the file",
             self.seed
         );
@@ -418,7 +418,7 @@ impl Model {
         self.transmit();
         self.flush_rx();
         self.flush_tx();
-        if self.permits.spurious_interrupts && next(&mut self.rng) % 32 == 0 {
+        if self.permits.spurious_interrupts && next(&mut self.rng).is_multiple_of(32) {
             // §7.4.5: a message whose cause is already gone. Nothing is set in
             // `ICR`, which is exactly what makes it spurious.
             self.messages = self.messages.saturating_add(1);
@@ -725,7 +725,7 @@ impl Nic {
 pub struct Bar(Rc<RefCell<Model>>);
 
 impl Registers for Bar {
-    fn len(&self) -> usize {
+    fn bytes(&self) -> usize {
         regs::REGISTER_BYTES
     }
 
@@ -751,7 +751,7 @@ impl Clock for Ticker {
 pub struct Grant(Rc<RefCell<Model>>);
 
 impl DmaBuffers for Grant {
-    fn len(&self) -> usize {
+    fn bytes(&self) -> usize {
         self.0.borrow().memory.len()
     }
 

@@ -80,7 +80,7 @@ use regs::{cause, ctrl, ivar, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl}
 /// volatile access with no bound of its own.
 pub trait Registers {
     /// Bytes the window covers. A field read.
-    fn len(&self) -> usize;
+    fn bytes(&self) -> usize;
     /// One volatile 32-bit load. Volatile because the device writes the same
     /// bytes, and a plain load of a status register can be hoisted out of the
     /// loop that waits on it.
@@ -107,7 +107,7 @@ pub trait Clock {
 /// implementation and nowhere above it.
 pub trait DmaBuffers {
     /// Bytes in the grant. A field read.
-    fn len(&self) -> usize;
+    fn bytes(&self) -> usize;
     /// Where the device reaches byte `at`. Never a physical address once a
     /// unit translates for this function.
     fn device_addr(&self, at: usize) -> u64;
@@ -152,10 +152,11 @@ pub const RX_BUF_BYTES: usize = 2048;
 /// nothing on this link is longer than 1522 bytes.
 pub const TX_BUF_BYTES: usize = 2048;
 
+/// §7.1.8 and §7.2.4: both ring lengths are programmed in bytes and "must be
+/// a multiple of 128", so both counts are a multiple of eight.
 const _: () = {
-    assert!(RX_RING * rx_desc::BYTES % 128 == 0);
-    assert!(TX_RING * tx_desc::BYTES % 128 == 0);
-    assert!(RX_RING <= u16::MAX as usize && TX_RING <= u16::MAX as usize);
+    assert!((RX_RING * rx_desc::BYTES).is_multiple_of(128));
+    assert!((TX_RING * tx_desc::BYTES).is_multiple_of(128));
 };
 
 /// The grant's layout. One grant, because every byte of it is this process's
@@ -173,7 +174,7 @@ const _: () = {
     // §7.1.8 and §7.2.4: the ring base "is aligned on a 16-byte boundary" and
     // "hardware ignores the lower 4 bits", so a ring at an unaligned offset
     // would be programmed somewhere else entirely.
-    assert!(OFF_RX_RING % 16 == 0 && OFF_TX_RING % 16 == 0);
+    assert!(OFF_RX_RING.is_multiple_of(16) && OFF_TX_RING.is_multiple_of(16));
 };
 
 /// Frames this driver hands up in one pass before it says there are no more.
@@ -394,11 +395,11 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// both rings, then the transmitter, then the receiver, then the interrupt
     /// mask.
     pub fn open(regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
-        if regs.len() < regs::REGISTER_BYTES {
-            return Err(Refusal::Window { given: regs.len(), needed: regs::REGISTER_BYTES });
+        if regs.bytes() < regs::REGISTER_BYTES {
+            return Err(Refusal::Window { given: regs.bytes(), needed: regs::REGISTER_BYTES });
         }
-        if (dma.len() as u64) < GRANT_BYTES {
-            return Err(Refusal::Grant { given: dma.len(), needed: GRANT_BYTES as usize });
+        if (dma.bytes() as u64) < GRANT_BYTES {
+            return Err(Refusal::Grant { given: dma.bytes(), needed: GRANT_BYTES as usize });
         }
         // A window nothing decodes answers ones on every access, and a driver
         // that went on would read a MAC address of `ff:ff:ff:ff:ff:ff` out of

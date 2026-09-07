@@ -41,12 +41,12 @@ pub struct Bar {
 }
 
 impl Registers for Bar {
-    fn len(&self) -> usize {
+    fn bytes(&self) -> usize {
         self.len
     }
 
     fn read(&self, reg: usize) -> u32 {
-        debug_assert!(reg % 4 == 0 && reg + 4 <= self.len);
+        debug_assert!(reg.is_multiple_of(4) && reg + 4 <= self.len);
         // SAFETY: `reg + 4` is inside the `len` bytes the mapping covers, which
         // `I219::open` refused anything shorter than; the address is 4-byte
         // aligned because every offset the driver names is. Volatile because
@@ -55,7 +55,7 @@ impl Registers for Bar {
     }
 
     fn write(&self, reg: usize, value: u32) {
-        debug_assert!(reg % 4 == 0 && reg + 4 <= self.len);
+        debug_assert!(reg.is_multiple_of(4) && reg + 4 <= self.len);
         // SAFETY: as in `read`.
         unsafe { self.mapped.as_ptr().add(reg).cast::<u32>().write_volatile(value) }
     }
@@ -78,7 +78,7 @@ pub struct Grant {
 }
 
 impl DmaBuffers for Grant {
-    fn len(&self) -> usize {
+    fn bytes(&self) -> usize {
         self.len
     }
 
@@ -87,7 +87,7 @@ impl DmaBuffers for Grant {
     }
 
     fn read(&self, at: usize) -> u64 {
-        debug_assert!(at % 8 == 0 && at + 8 <= self.len);
+        debug_assert!(at.is_multiple_of(8) && at + 8 <= self.len);
         // SAFETY: `at + 8` is inside the grant, whose length `I219::open`
         // refused anything shorter than, and every descriptor word the driver
         // names is 8-byte aligned. Volatile because the device writes the same
@@ -96,7 +96,7 @@ impl DmaBuffers for Grant {
     }
 
     fn write(&self, at: usize, word: u64) {
-        debug_assert!(at % 8 == 0 && at + 8 <= self.len);
+        debug_assert!(at.is_multiple_of(8) && at + 8 <= self.len);
         // SAFETY: as in `read`.
         unsafe { self.region.memory.as_ptr().add(at).cast::<u64>().write_volatile(word) }
     }
