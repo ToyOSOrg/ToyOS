@@ -32,13 +32,27 @@ pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
 /// a boot merely slower than its bound, which is what makes that control one.
 pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
 
+/// What the CPU that *stages* that wedge says about the state it arrived in,
+/// also in `kernel/src/deadline.rs`.
+///
+/// **The one line that measures that control's own claim.** It arrives through
+/// the shutdown syscall, and `arch::syscall::gate` masks `IF` for the whole of a
+/// syscall — so a wedge that inherited its state left exactly one CPU per boot
+/// taking no interrupt at all, which is not a wedge but a hard lockup. On the
+/// T14, run 24, that is what ended the boot: [`LOCKED_UP`] on the staging CPU,
+/// half a bound before the deadline. A boot on which no CPU says this is a boot
+/// whose wedge never reached the CPU that asked for it.
+pub const WEDGE_ARRIVED_DEAF: &str =
+    "arrived with interrupts off, through the syscall gate, and takes them again here";
+
 /// What one CPU's own NMI writes into the black box when that CPU has taken no
 /// interrupt for its bound, in `kernel/src/hardlockup/mod.rs`.
 ///
 /// The *other* record a machine that stopped can leave, and which of the two it
-/// left is most of the verdict: [`DEADLINE_EXPIRED`] is a machine that still
-/// took interrupts somewhere and stopped making progress, this one names the
-/// cpu that stopped taking them and where it was standing when it did.
+/// left is most of the verdict: [`DEADLINE_EXPIRED`] is a machine that stopped
+/// making progress while some CPU still took interrupts, and this one names a
+/// single cpu that stopped taking them and where it was standing when it did —
+/// whatever the rest of the machine was doing.
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 
 /// What the `hard-lockup-probe` actuator says before its cpu stops answering,
@@ -308,6 +322,7 @@ mod tests {
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
+            ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
             (
                 "kernel/src/hardlockup/probe.rs",

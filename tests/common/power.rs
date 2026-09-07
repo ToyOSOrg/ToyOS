@@ -899,6 +899,15 @@ pub fn boot_deadline_ends_a_wedge(
     // that fired on a boot merely slower than its bound would satisfy the first
     // and not the second, and `Rebooting.` is quiesce's own last word.
     second.must_say(bootlog::WEDGE_STAGED)?;
+    // **The state the T14 was actually in, staged and judged here.** The CPU
+    // that asks for this wedge is inside the shutdown syscall, where `IF` is
+    // masked for the whole call, so it arrives deaf — and on run 24 that CPU was
+    // ended by the lockup detector at half the deadline's bound, on a machine
+    // whose other seven cores were taking interrupts throughout. This line is
+    // that CPU saying it took them again, which is what makes everything below
+    // an assertion about a wedge rather than about a lockup this guest has no
+    // counter to notice.
+    second.must_say(bootlog::WEDGE_ARRIVED_DEAF)?;
     second.must_not_say(bootlog::REBOOTING)?;
     second.must_say(bootlog::PREVIOUS_PANIC)?;
     // **After the harvest line.** This capture also carries the first boot's own
@@ -1201,6 +1210,11 @@ pub fn deadline_wedge_chain(
     // The control: the machine reached the staged wedge, and then never reached
     // the reset it was one statement away from.
     kernel.must_say(bootlog::WEDGE_STAGED)?;
+    // And the CPU that asked for it took interrupts again: it comes through the
+    // syscall gate with `IF` masked, and run 24 was ended by the lockup detector
+    // on exactly that CPU while seven others were healthy. On this machine the
+    // assertion has a counter behind it, which is what the guest's has not.
+    kernel.must_say(bootlog::WEDGE_ARRIVED_DEAF)?;
     says_nothing_of(kernel, bootlog::REBOOTING)?;
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;

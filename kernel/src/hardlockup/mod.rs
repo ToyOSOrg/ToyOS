@@ -13,6 +13,13 @@
 //! there are any). An NMI is delivered whatever `IF` holds, so the sample
 //! reaches the one CPU nothing else can.
 //!
+//! **Its subject is one CPU and not the machine**, which is the whole
+//! difference: it ends a machine whose other cores are healthy and taking
+//! interrupts, because a core that has taken none for its bound will never run
+//! a thread again and nothing else here would say so. Run 24 on the T14 is the
+//! measurement — seven cores taking interrupts, one deaf inside the shutdown
+//! syscall, and this is what ended it, half a bound before the machine's own.
+//!
 //! **What a sample compares is progress, not liveness.**
 //! `crate::irq_census::taken_here` is every interrupt this CPU has taken except
 //! the NMI, in both rings — the exclusion is load-bearing, since the sample
