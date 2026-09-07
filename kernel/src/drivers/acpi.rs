@@ -60,6 +60,11 @@ impl Table {
         self.0.len()
     }
 
+    /// Where firmware put it, for an inventory a machine owner compares boots by.
+    pub fn base(&self) -> u64 {
+        self.0.base()
+    }
+
     /// A copy of the `T` at `offset`, or `None` when the table is not that long.
     // A copy, not a reference: `&T` would assert all of `T` is valid memory — exactly the claim being checked for a struct whose tail may run past the declared length.
     pub fn field<T: Copy>(&self, offset: usize) -> Option<T> {
@@ -76,6 +81,47 @@ impl Table {
 /// The first table in the XSDT with this signature, validated for `needed` bytes.
 pub fn find_table(rsdp_addr: u64, signature: &[u8; 4], needed: usize) -> Result<Table, TableError> {
     toyos_acpi::find_table(DirectPhys, rsdp_addr, signature, needed).map(Table)
+}
+
+/// ACPI 6.5 §5.2.6, Table 5.4: OEM ID is six bytes at offset 10 of every table header.
+const SDT_OEM_ID: usize = 10;
+
+/// Every table this kernel goes on to read, named once with what its own header
+/// declares.
+///
+/// **Presence is not the claim, validation is.** [`find_table`] reaches a table
+/// only through an RSDP whose 1.0 and extended checksums both hold and an XSDT
+/// whose own does, and hands one back only when its declared bytes sum to zero
+/// — so a row here is a table that checksummed, and the line that closes the
+/// list is the machine's answer to how many of them it has.
+pub fn inventory(rsdp_addr: u64) {
+    /// The five this kernel decodes: the MADT for its CPUs and IO APICs, the
+    /// FADT for reset, soft-off and the century register, the HPET for the
+    /// clock, the MCFG for ECAM and the DMAR for the IOMMU.
+    const READ: &[&[u8; 4]] = &[b"APIC", b"FACP", b"HPET", b"MCFG", b"DMAR"];
+
+    let mut validated = 0usize;
+    for signature in READ {
+        let name = core::str::from_utf8(*signature).unwrap_or("????");
+        match find_table(rsdp_addr, signature, SDT_HEADER_LEN) {
+            Ok(table) => {
+                validated += 1;
+                let oem: [u8; 6] = table.field(SDT_OEM_ID).unwrap_or_default();
+                let revision: u8 = table.field(SDT_REVISION).unwrap_or_default();
+                log!(
+                    "ACPI: {name} at {:#x} len={} rev={revision} oem={:?} checksummed",
+                    table.base(),
+                    table.len(),
+                    core::str::from_utf8(&oem).unwrap_or("<not ascii>").trim_end(),
+                );
+            }
+            Err(e) => log!("ACPI: {name} not read: {e:?}"),
+        }
+    }
+    log!(
+        "ACPI: {validated} of {} tables checksummed under the RSDP at {rsdp_addr:#x}",
+        READ.len()
+    );
 }
 
 const SLP_EN: u16 = 1 << 13;

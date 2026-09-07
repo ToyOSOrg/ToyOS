@@ -214,6 +214,26 @@ impl Readback {
             })
     }
 
+    /// One number this boot measured, against the ceiling
+    /// `tests/metal-profile.toml` holds for it.
+    ///
+    /// **The gate fails closed on a name with no row**, which is the profile's
+    /// own rule: a measurement nobody has priced must not pass by having no
+    /// ceiling. The file is read once and kept, because every judge that asks
+    /// asks inside one process and [`run`] has already read it to judge the
+    /// boots.
+    pub fn number(&self, name: &str, value: u64) -> Result<(), String> {
+        static PROFILE: std::sync::OnceLock<Result<Profile, String>> = std::sync::OnceLock::new();
+        PROFILE
+            .get_or_init(|| {
+                Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())
+            })
+            .as_ref()
+            .map_err(Clone::clone)?
+            .judge(name, value)
+            .map_err(|why| why.to_string())
+    }
+
     /// The job ran and the kernel recorded it exiting cleanly.
     pub fn job_passed(&self, binary: &str) -> Result<(), String> {
         match self.exit_code(binary)? {

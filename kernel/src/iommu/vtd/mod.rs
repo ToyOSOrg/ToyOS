@@ -141,6 +141,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
 
     let mut units = 0usize;
     let mut regions = 0usize;
+    let mut held_regions = 0usize;
+    // Read once, before the walk, so every region is judged against the same
+    // bound the domains below are built over.
+    let identity_top = crate::mm::pmm::top();
     // Described and planned before any unit is armed: whether sources may move
     // to the remappable format is one decision, taken before the first `IRE`.
     let mut ready: Vec<(Unit, Plan)> = Vec::new();
@@ -163,15 +167,36 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
             // Kernel devices get RMRR regions for free and userspace handoff of
             // one is refused elsewhere; QEMU publishes none, so this arm is
             // untested by the harness.
+            //
+            // **"For free" is a claim about one address range, and it is
+            // checked here.** The identity domain is built over `[0, top)`
+            // exactly (`table::identity_domain`), so a region whose limit falls
+            // at or above `top` is one firmware requires stay mapped and this
+            // kernel does not map — a device in its scope would fault on the
+            // access firmware reserved the range for. The other half, that it
+            // is mapped *nowhere else*, is structural: a driver domain's window
+            // begins above `top` or `Domain::new` refuses it.
             Ok(Structure::Rmrr(rmrr)) => {
-                log!(
-                    "iommu: rmrr{regions} seg={} {:#018x}..{:#018x}",
-                    rmrr.segment(),
-                    rmrr.base(),
-                    rmrr.limit()
-                );
+                let held = rmrr.limit() < identity_top;
+                // Spelled whole in each arm rather than with the verdict as a
+                // field: the host profile holds the refusing word against this
+                // file's source, and a literal assembled at run time is one no
+                // reader of the source can find.
+                let (seg, base, limit) = (rmrr.segment(), rmrr.base(), rmrr.limit());
+                if held {
+                    log!(
+                        "iommu: rmrr{regions} seg={seg} {base:#018x}..{limit:#018x} inside the \
+                         identity domain 0x0..{identity_top:#x}"
+                    );
+                } else {
+                    log!(
+                        "iommu: rmrr{regions} seg={seg} {base:#018x}..{limit:#018x} OUTSIDE the \
+                         identity domain 0x0..{identity_top:#x}"
+                    );
+                }
                 describe_scopes("rmrr", regions, rmrr.scopes());
                 regions += 1;
+                held_regions += usize::from(held);
             }
             Ok(Structure::Skipped { kind, at, len }) => {
                 log!(
@@ -192,6 +217,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     if units == 0 {
         log!("iommu: DMAR describes no remapping unit");
     }
+    log!(
+        "iommu: DMAR describes {units} units and {regions} reserved regions, {held_regions} of \
+         them inside the identity domain"
+    );
 
     let remap = remappable(&ready, units);
     // One identity-domain table set per address width: units may disagree on

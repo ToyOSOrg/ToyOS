@@ -82,6 +82,11 @@ pub const EFER: u64 = efer::SCE | efer::LME | efer::NXE;
 /// The declaration as the BSP computed it. Zero means not yet declared — also [`pcid_active`]'s correct answer before then.
 static DECLARED_CR4: AtomicU64 = AtomicU64::new(0);
 
+/// CPUs that have run [`self_check`] against the declaration and survived it.
+/// Counted rather than inferred from the roster, so [`report`]'s line is
+/// evidence of the check having run and not a restatement of the CPU count.
+static CHECKED: AtomicU64 = AtomicU64::new(0);
+
 /// Puts this CPU's `CR0` into [`CR0`]. Must run before
 /// [`pat::init`](super::pat::init), whose no-fill window depends on `CD` being live.
 pub fn init_cr0(cpu_id: u32) {
@@ -267,6 +272,25 @@ fn self_check(cpu_id: u32, declared_cr4: u64) {
         live_efer & !efer::LMA == EFER && live_efer & efer::LMA != 0,
         "control_regs: cpu{cpu_id} holds efer={live_efer:#06x}, the declaration is \
          {EFER:#06x} plus the CPU's own LMA",
+    );
+    CHECKED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many CPUs hold the declaration, said once after the last of them has
+/// been checked. A divergent CPU panics inside [`self_check`], so what this
+/// line adds is the *count*: a CPU that never reached [`init`] at all is
+/// invisible to a per-CPU assert and shows here as a number below the roster's.
+///
+/// Reported and not asserted: an AP that echoed past `boot_aps`' budget was
+/// checked without being committed, and the machine is declared to boot with
+/// the CPUs it got rather than to crash on that one.
+pub fn report(cpus: u32) {
+    log!(
+        "control_regs: {} of {cpus} cpus hold cr0={:#010x} cr4={:#010x} efer={:#06x}",
+        CHECKED.load(Ordering::Relaxed),
+        CR0,
+        DECLARED_CR4.load(Ordering::Acquire),
+        EFER,
     );
 }
 

@@ -23,6 +23,7 @@ pub mod mergehealth;
 pub mod metal;
 pub mod metaldevices;
 pub mod metalimage;
+pub mod metalkernel;
 pub mod metalprofile;
 pub mod pr;
 pub mod redlist;

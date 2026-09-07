@@ -17,7 +17,9 @@ static SHOOTDOWN: Shootdown = Shootdown::new();
 
 /// Which path issued a shootdown, so the census names who pays: `Dlopen` (a
 /// `Shared` window or rollback unmap), `Pcid` (pool reclaim), `Mmio`, `Unmap`
-/// (`Unmapped::drop`), `Pipe`, `Staged` (the ack-delay actuator).
+/// (`Unmapped::drop`), `Pipe`, `Staged` (the ack-delay actuator), `Bench`
+/// ([`bench`]'s own, so a measured shootdown is never counted as one a path in
+/// this kernel needed).
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub enum Origin {
@@ -28,12 +30,15 @@ pub enum Origin {
     Pipe,
     #[cfg_attr(not(feature = "test-actuators"), allow(dead_code))]
     Staged,
+    #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
+    Bench,
 }
 
 impl Origin {
-    const COUNT: usize = 6;
+    const COUNT: usize = 7;
     /// Order matches the variants; `tests/toyos.rs`'s `irq_census_conservation` reads the line back.
-    const NAMES: [&'static str; Self::COUNT] = ["dlopen", "pcid", "mmio", "unmap", "pipe", "staged"];
+    const NAMES: [&'static str; Self::COUNT] =
+        ["dlopen", "pcid", "mmio", "unmap", "pipe", "staged", "bench"];
 }
 
 /// Issuer-side census; `irq_census`'s `tlb` column is the receiver side, and a
@@ -108,6 +113,41 @@ pub fn shootdown(origin: Origin) {
     let took = crate::clock::nanos_since_boot().saturating_sub(began);
     WAIT_NS.fetch_add(took, Ordering::Relaxed);
     MAX_NS.fetch_max(took, Ordering::Relaxed);
+}
+
+/// What one machine-wide shootdown costs its initiator, as a distribution.
+///
+/// **The census above cannot answer this.** `wait`/`max` are a sum and a
+/// maximum over whatever the boot happened to unmap, so the average moves with
+/// the workload and the tail is one sample. This issues a fixed count against
+/// the CPUs the machine actually brought up, with nothing else running, and
+/// sorts what it measured — so two boots of one machine are comparable and a
+/// boot that widened the tail is visible as one.
+///
+/// Runs on the BSP after `smp::set_ready` and before the idle loop: the targets
+/// are halted in `ap_idle` with interrupts on, which is the state a shootdown
+/// finds them in. `boot_phase!("complete")` is already out, so what this spends
+/// is not in any boot-time number.
+#[cfg(feature = "boot-actuators")]
+pub fn bench() {
+    const ROUNDS: usize = 256;
+    let cpus = smp::cpu_count();
+    let mut took = [0u64; ROUNDS];
+    for sample in took.iter_mut() {
+        let began = crate::clock::nanos_since_boot();
+        shootdown(Origin::Bench);
+        *sample = crate::clock::nanos_since_boot().saturating_sub(began);
+    }
+    took.sort_unstable();
+    crate::log!(
+        "tlb: bench {ROUNDS} shootdowns across {cpus} cpus min={}ns p50={}ns p90={}ns p99={}ns \
+         max={}ns",
+        took[0],
+        took[ROUNDS / 2],
+        took[ROUNDS * 9 / 10],
+        took[ROUNDS * 99 / 100],
+        took[ROUNDS - 1],
+    );
 }
 
 /// Never logs: `drivers::serial`'s lock under `save_and_cli` would deadlock a

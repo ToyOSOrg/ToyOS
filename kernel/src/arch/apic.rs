@@ -263,7 +263,12 @@ pub fn init_timer() {
     TIMER_TICKS.store(ticks_10ms, Ordering::Release);
     // Fallback for any Ring 0 fire before the scheduler arms its first quantum.
     percpu::set_last_armed_ticks(OneShot::ticks(ticks_10ms as u64).0);
-    log!("LAPIC timer: {} ticks/10ms", ticks_10ms);
+    // The implied hertz is the machine's third timebase, and it is *not* a
+    // check on the TSC: this count was measured against the TSC-derived clock,
+    // so agreement between them is arithmetic. What it is is a number of the
+    // part's own — the bus clock the LAPIC counts — stable across boots of one
+    // machine, so a profile can hold a ceiling against a boot that moved it.
+    log!("LAPIC timer: {} ticks/10ms, so {}Hz", ticks_10ms, ticks_10ms as u64 * 100);
 }
 
 // Floor on every arm: a count that expires before the interrupt it schedules retires cannot outlast itself and livelocks the CPU forever.
