@@ -1312,6 +1312,68 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // ---- the boot facts, riding the same tests/testcases image ----
+    //
+    // **Six names and no extra minute of the machine.** Every needle below is a
+    // record the *shipping* kernel writes on any boot it takes, so each rides
+    // whatever image is already going on the stick; the two rows after them are
+    // the two things this suite measures rather than reads, and those cost a
+    // boot.
+    (
+        "smp_roster_and_tsc_trail",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| smp_roster_and_tsc_trail(b[0].kernel().text(), b[0].cpus()?),
+        },
+    ),
+    (
+        "pmm_accounting",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| pmm_accounting(b[0].kernel().text()) },
+    ),
+    (
+        "acpi_table_inventory",
+        metal::Metal::Runs {
+            arms: TESTCASES,
+            judge: |b| acpi_table_inventory(b[0].kernel().text()),
+        },
+    ),
+    (
+        "timer_calibration",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| timer_calibration(b[0].kernel().text()) },
+    ),
+    (
+        "pci_inventory",
+        metal::Metal::Runs { arms: TESTCASES, judge: |b| pci_inventory(b[0].kernel().text()) },
+    ),
+    // ---- one image: tests/latencycase armed with the shootdown bench ----
+    (
+        "tlb_shootdown_cost",
+        metal::Metal::Runs {
+            arms: LATENCYCASE,
+            // The machine's own CPU count, off the bring-up records rather than
+            // off a number the harness staged: the QEMU registration says eight
+            // because it asked for eight, and here the laptop says how many it
+            // has.
+            judge: |b| {
+                let (p50, p99) = tlb_shootdown_cost(b[0].kernel().text(), b[0].cpus()?)?;
+                b[0].number("tlb.latencycase.p50_ns", p50)?;
+                b[0].number("tlb.latencycase.p99_ns", p99)
+            },
+        },
+    ),
+    (
+        // The console half of the QEMU registration does not exist here, so
+        // what is judged is the half that does: the exit record carries the
+        // p99, and the stress suite beside it carries a verdict.
+        "latency_wake",
+        metal::Metal::Runs {
+            arms: LATENCYCASE,
+            judge: |b| {
+                b[0].job_passed("test_rs_sched_stress")?;
+                wake_latency_recorded(b[0])
+            },
+        },
+    ),
     // ---- one image: tests/jobcase ----
     (
         // Already precisely this boot: `args = ["reboot"]`. On the T14 the
@@ -1393,6 +1455,19 @@ const JOBCASE: &[metal::Arm] =
 
 const METALCASE: &[metal::Arm] =
     &[metal::Arm { boot: "metalcase", config: "tests/metalcase", params: &[], jobs: &[] }];
+
+/// **One boot for both measurements this suite takes rather than reads.**
+/// `tests/latencycase` is the only config that endows the real-time band, and
+/// the TLB bench is a boot parameter rather than a job — so arming this image
+/// with it costs the machine nothing and saves a whole minute. The bench runs
+/// on the BSP between the roster's release and the idle loop, before either job
+/// starts, so what it spends is boot time and not latency.
+const LATENCYCASE: &[metal::Arm] = &[metal::Arm {
+    boot: "latencycase",
+    config: "tests/latencycase",
+    params: &["tlb-shootdown-bench"],
+    jobs: &["test_rs_cyclictest", "test_rs_sched_stress"],
+}];
 
 /// The job `log-close` runs after, and so the anchor its evidence is read from.
 const LOG_CLOSE_MARKER: &str = "test_rs_null_sink_client_exits";
@@ -11833,7 +11908,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            tlb_shootdown_cost(qemu.boot_log(), CPUS)
+            tlb_shootdown_cost(qemu.boot_log(), CPUS).map(|_| ())
         }
         "latency_wake" => latency_wake(rust_bins),
         "smp_failed_ap_leaves_no_hole" => {
@@ -14607,7 +14682,7 @@ fn pci_inventory(log: &str) -> Result<(), String> {
 /// guests are TCG, which prices an IPI and an uncontended atomic unlike
 /// hardware, so what is asserted here is the shape — sorted, non-zero, and the
 /// CPUs it was measured across.
-fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(), String> {
+fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(u64, u64), String> {
     // Scoped to the bench's own line: the `tlb:` census carries a `max=` too,
     // in microseconds, and a reader over the whole log would take whichever
     // came first.
@@ -14637,7 +14712,8 @@ fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(), String> {
         "  [tlb] {rounds} shootdowns across {across} CPUs: min={min}ns p50={p50}ns p90={p90}ns \
          p99={p99}ns max={max}ns"
     );
-    Ok(())
+    // The two the metal profile prices; the rest are the shape's own evidence.
+    Ok((p50, p99))
 }
 
 /// What a waiter in the real-time band pays to be woken, and — the half this
@@ -14739,6 +14815,24 @@ fn latency_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     eprintln!("  [latency] {}", distribution.trim());
     eprintln!("  [latency] p99 {printed}us, off the stick's own `exit: cyclictest` record too");
     Ok(())
+}
+
+/// [`latency_wake`]'s half that exists on a machine with no console: the p99,
+/// off the kernel's own exit record, against the ceiling the metal profile
+/// holds.
+///
+/// A negative code is `cyclictest`'s refusal and not a fast machine — the sign
+/// is the whole of what separates the two, and that contract is in the binary's
+/// own module header.
+fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
+    let code = boot.exit_code("test_rs_cyclictest")?;
+    if code < 0 {
+        return Err(format!(
+            "cyclictest exited {code}, which is a refusal and not a measurement: -1 is no \
+             capability endowed, -2 is the real-time band refused"
+        ));
+    }
+    boot.number("latency.p99_us", u64::try_from(code).expect("a non-negative code"))
 }
 
 /// [`control_regs`] against machines this host cannot boot, with no guest.
