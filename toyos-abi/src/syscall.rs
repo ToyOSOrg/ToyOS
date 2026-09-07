@@ -279,6 +279,17 @@ pub const SYS_LOG_READ: u64 = 114;
 /// Return the machine to firmware, on the same `Rights::POWER` that powers it off. See [`reboot`].
 pub const SYS_REBOOT: u64 = 116;
 
+/// One memory BAR of a claimed PCI function, as an object to map. See
+/// [`device_bar_map`].
+pub const SYS_DEVICE_BAR_MAP: u64 = 117;
+
+/// Memory a claimed PCI function may reach, and nothing else may. See
+/// [`device_dma_alloc`].
+pub const SYS_DEVICE_DMA_ALLOC: u64 = 118;
+
+/// Mask or unmask a claimed function's interrupt. See [`device_irq_mask`].
+pub const SYS_DEVICE_IRQ_MASK: u64 = 119;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -291,7 +302,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_REBOOT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_IRQ_MASK < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -383,6 +394,7 @@ pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
 pub const MAX_LABELS_LEN: usize = 4096;
 
 use crate::handle::Rights;
+use crate::pci::DmaGrant;
 use crate::{Pid, RawHandle, HANDLE_INVALID};
 
 /// Syscall error with a specific code. Values occupy the top of the u64 range:
@@ -1169,6 +1181,61 @@ device_classes! {
     VirtioSound = 6 => "virtio-sound",
 }
 
+/// A PCI function named by what identifies the *card*, not the slot firmware
+/// happened to put it in.
+///
+/// Bus/device/function would name a position: the same card is `00:03.0` on one
+/// machine and `00:1f.6` on another, and a config that named a position would
+/// hand a program whatever the firmware put there. A vendor/device pair names
+/// what the driver is a driver for. The cost is that a machine with two of one
+/// card has an ambiguous name, and the kernel refuses that by name rather than
+/// picking the first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PciId {
+    pub vendor: u16,
+    pub device: u16,
+}
+
+impl PciId {
+    /// `"<vendor>:<device>"`, four lowercase hex digits each.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (vendor, device) = text.split_once(':')?;
+        Some(Self { vendor: hex16(vendor)?, device: hex16(device)? })
+    }
+
+    /// The selector word [`device_claim`] carries.
+    pub const fn wire(self) -> u64 {
+        ((self.vendor as u64) << 16) | self.device as u64
+    }
+
+    /// The selector word decoded; `None` for anything with bits above 32.
+    pub const fn from_wire(raw: u64) -> Option<Self> {
+        if raw > u32::MAX as u64 {
+            return None;
+        }
+        Some(Self { vendor: (raw >> 16) as u16, device: raw as u16 })
+    }
+}
+
+/// Exactly four hex digits, lowercase or upper, and nothing else: a shorter
+/// field would make `1af4:41` and `1af4:0041` two spellings of one card.
+fn hex16(text: &str) -> Option<u16> {
+    if text.len() != 4 {
+        return None;
+    }
+    let mut value = 0u16;
+    for byte in text.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        value = (value << 4) | digit as u16;
+    }
+    Some(value)
+}
+
 /// Mint a device claim for `class`, presenting a `SysCap` handle that carries
 /// [`Rights::DEVICE`]. `NotFound` for a class no driver registered — init
 /// endows what exists and logs what it did not.
@@ -1731,6 +1798,54 @@ pub fn nic_tx(claim: RawHandle, total_len: u64) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_NIC_TX, claim.0 as u64, total_len, 0, 0))
 }
 
+/// Map one memory BAR of a claimed PCI function, as a shared-memory object.
+///
+/// The answer is a handle `SYS_SHM_MAP` maps read/write and uncacheable, over
+/// the BAR the kernel enumerated for this function and nothing else. The kernel
+/// refuses an index that names no memory BAR, and refuses the BAR that holds
+/// this function's MSI-X table or PBA: masking is [`device_irq_mask`]'s, and a
+/// process that could write the table could aim the device's interrupt at any
+/// address the LAPIC decodes.
+///
+/// Mapping is idempotent per BAR — a second call answers the same object, so a
+/// caller that maps twice does not hold two handles to one window.
+pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_DEVICE_BAR_MAP, claim.0 as u64, bar as u64, 0, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// A DMA buffer for a claimed PCI function: memory mapped into this process and
+/// into that function's own address space at the unit, and into no other.
+///
+/// Both addresses come back because they are two different things — where the
+/// bytes are in this process, and what a descriptor must carry for the device
+/// to reach them. Nothing else in this ABI turns one into the other, and an
+/// address the caller invents instead is one the device's domain does not map:
+/// the unit refuses the access and records it.
+///
+/// `bytes` is rounded up to whole 2 MiB pages, which is this kernel's only
+/// translation granularity at both the CPU and the unit.
+///
+/// # Safety
+/// `out` must be a writable `DmaGrant` this thread owns for the call.
+pub unsafe fn device_dma_alloc(
+    claim: RawHandle,
+    bytes: u64,
+    out: *mut DmaGrant,
+) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_ALLOC, claim.0 as u64, bytes, out as u64, 0))
+}
+
+/// Mask or unmask the claimed function's interrupt.
+///
+/// Through the claim rather than through the register window, because the
+/// window a claimant maps deliberately excludes the MSI-X table: the vector in
+/// it is the kernel's, and a driver that could rewrite it could point the
+/// device's message anywhere.
+pub fn device_irq_mask(claim: RawHandle, masked: bool) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_IRQ_MASK, claim.0 as u64, masked as u64, 0, 0))
+}
+
 /// Allocate a TLS block for a dlopen'd module on the current thread.
 ///
 /// The block's *virtual* address, which is what the kernel writes into the DTV.
@@ -1947,5 +2062,32 @@ mod tests {
         assert_eq!(u64::from_ne_bytes(b[24..32].try_into().unwrap()), info.eh_frame_hdr_size);
         assert_eq!(u32::from_ne_bytes(b[32..36].try_into().unwrap()), info.path_offset);
         assert_eq!(u32::from_ne_bytes(b[36..40].try_into().unwrap()), info.path_len);
+    }
+
+    /// Four hex digits each and nothing else: a shorter field would make
+    /// `1af4:41` and `1af4:0041` two spellings of one card, and two spellings
+    /// are two claims on one function.
+    #[test]
+    fn a_pci_id_is_four_hex_digits_each_and_nothing_else() {
+        let want = PciId { vendor: 0x1af4, device: 0x1041 };
+        assert_eq!(PciId::parse("1af4:1041"), Some(want));
+        assert_eq!(PciId::parse("1AF4:1041"), Some(want));
+        for bad in ["1af4:41", "1af4", "1af4:1041:", "", ":", "zzzz:1041", "1af4:104g"] {
+            assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
+        }
+    }
+
+    /// The selector is one word on the wire and the kernel decodes it back;
+    /// a vendor lost to a shift would claim a different card.
+    #[test]
+    fn the_selector_survives_the_wire() {
+        for id in [
+            PciId { vendor: 0x1af4, device: 0x1041 },
+            PciId { vendor: 0x8086, device: 0x15fc },
+            PciId { vendor: 0xffff, device: 0xffff },
+        ] {
+            assert_eq!(PciId::from_wire(id.wire()), Some(id));
+        }
+        assert_eq!(PciId::from_wire(1 << 32), None);
     }
 }
