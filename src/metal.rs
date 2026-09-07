@@ -95,6 +95,11 @@ pub enum Refusal {
     /// The image is armed with a parameter [`FLASHABLE`] does not clear for
     /// this machine, or does not clear at all.
     Armed { name: String, why: &'static str },
+    /// **The outside judge's verdict on the volume the boot left.** What
+    /// `toyos-fat32-check` said about the log partition read straight off the
+    /// stick — the bytes, not a driver's opinion of them, and not the FAT32
+    /// implementation that wrote them.
+    Fat32(String),
     /// The image puts a partition somewhere the installed rule does not name.
     PartitionIndex { what: &'static str, want: u32, got: u32 },
     /// What landed on the disk is not what the image says.
@@ -118,7 +123,7 @@ impl Refusal {
     /// Whether the machine failed rather than the loop: the boot is the subject
     /// only once the stick is written and the reboot asked for.
     pub fn about_the_boot(&self) -> bool {
-        matches!(self, Self::Silent { .. } | Self::Log(_))
+        matches!(self, Self::Silent { .. } | Self::Log(_) | Self::Fat32(_))
     }
 }
 
@@ -150,6 +155,12 @@ impl fmt::Display for Refusal {
             Self::Partitions { what, matched } => {
                 write!(f, "the image carries {matched} {what} partitions and this loop needs one")
             }
+            Self::Fat32(said) => write!(
+                f,
+                "the log partition the boot left does not check out: {said}. This is \
+                 `toyos-fat32-check` reading the volume off the stick, so what it names is \
+                 what the kernel wrote and not what a driver read back"
+            ),
             Self::Armed { name, why } => write!(
                 f,
                 "the image is armed with {name:?}, and {why}. Every parameter a flashed image \
@@ -301,7 +312,7 @@ macro_rules! jobs {
     };
 }
 
-jobs!(Wipe, Flash, Create, Delete, BootNext, Mount, Umount, Reboot, Probe);
+jobs!(Wipe, Flash, ReadLog, Create, Delete, BootNext, Mount, Umount, Reboot, Probe);
 
 /// One word of a root command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,6 +417,7 @@ impl Target {
     fn words(&self, job: Job) -> Result<Vec<Word>, Refusal> {
         let node = self.node.whole();
         let of = format!("of={node}");
+        let read_log = format!("if={}", self.node.partition(self.log_part));
         let log = self.node.partition(self.log_part);
         let esp = self.esp_part.to_string();
         let literal =
@@ -418,6 +430,13 @@ impl Target {
         match job {
             Job::Wipe => literal(&[WIPEFS, "--all", &node]),
             Job::Flash => literal(&[DD, &of, "bs=4M", "conv=fsync"]),
+            // The log partition read whole, as bytes rather than as files: what
+            // `toyos-fat32-check` judges is the volume `logd` wrote, and a
+            // `mount` has already had a driver's opinion about it. Read-only, and
+            // the partition is the only node named — `/dev/sd<letter>` plus an
+            // index is all `Node` can spell, so the internal NVMe is unnameable
+            // here as everywhere.
+            Job::ReadLog => literal(&[DD, &read_log, "bs=4M"]),
             // `--create-only`, never `--create`: the latter "add[s] to
             // bootorder" (efibootmgr(8)) at the top, so the boot after the one
             // `--bootnext` bought picks ToyOS again, and a job list whose one
@@ -942,6 +961,33 @@ impl Driver {
         Ok((loader, text))
     }
 
+    /// The log partition read whole, as bytes.
+    ///
+    /// **The outside judge needs the volume and not a listing of it.** `read_log`
+    /// mounts read-only and `cat`s, so everything it can say has already been
+    /// filtered through a FAT driver — the same family of code that wrote the
+    /// volume. This reads the sectors.
+    fn raw_log(&self, sectors: u64) -> Result<Vec<u8>, Refusal> {
+        let line = self.target.remote(Job::ReadLog, None)?;
+        println!("  run: {line}  ({sectors} sectors)");
+        let out = Command::new("ssh")
+            .args(self.target.ssh_argv(&line))
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| unstarted("reading the log partition", &e))?;
+        let out = answer("reading the log partition", out)?;
+        let want = sectors * u64::from(LBA);
+        let got = out.stdout.len() as u64;
+        if got != want {
+            return Err(Refusal::Landed {
+                what: "the log partition read back off the stick".to_string(),
+                want,
+                got,
+            });
+        }
+        Ok(out.stdout)
+    }
+
     fn cat(&self, name: &str) -> Result<String, Refusal> {
         let file = shell_word(&format!("{}/{name}", self.target.mount));
         self.ssh("reading a log file", &format!("cat {file}"))
@@ -980,6 +1026,14 @@ pub struct Args {
     /// judge that is not this process. Absent leaves the run's only account its
     /// standard output, which no per-test predicate can be held to.
     readback: Option<PathBuf>,
+    /// Read the log partition whole off the stick and hand it to
+    /// `toyos-fat32-check`. The outside judge, and the only reader of that
+    /// volume in this tree that is not the family of code that wrote it.
+    fat32_check: bool,
+    /// **How many kernel boots this one flash buys**, each closed by the
+    /// loader's own reporting pass. See [`run`] for what the shape is and is
+    /// not.
+    boots: u32,
 }
 
 impl Args {
@@ -991,6 +1045,8 @@ impl Args {
             install_sudoers: None,
             wait_secs: return_secs(),
             readback: None,
+            fat32_check: false,
+            boots: 1,
         };
         let mut at = 0;
         while at < args.len() {
@@ -1033,6 +1089,19 @@ impl Args {
                 }
                 "--readback" => {
                     out.readback = Some(PathBuf::from(value()?));
+                    2
+                }
+                "--fat32-check" => {
+                    out.fat32_check = true;
+                    1
+                }
+                "--boots" => {
+                    let n = value()?;
+                    out.boots = n
+                        .parse()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .ok_or_else(|| Refusal::Usage(format!("--boots: {n:?} is not a count")))?;
                     2
                 }
                 "--wait-secs" => {
@@ -1119,8 +1188,21 @@ fn stage_and_install(
     Ok(String::new())
 }
 
-/// The whole loop, answering the boot's own millisecond count. `None` is a dry
-/// run, which reaches no boot record because it wrote nothing.
+/// The whole loop, answering the last boot's own millisecond count. `None` is a
+/// dry run, which reaches no boot record because it wrote nothing.
+///
+/// **`--boots N` is N kernel boots of one flash, each closed by the loader's own
+/// reporting pass** — and that is the only multi-boot shape there is. The pass
+/// after a reset always ends the chain (`bootloader/src/blackbox.rs` sets
+/// `ends_the_chain` unconditionally), which is what stops a machine that panics
+/// on every boot from looping on the owner's desk for ever; nothing here may
+/// disable it, and a declaration asking for N boots *without* it is asking for a
+/// loader policy change and not for a driver flag. What N buys is the shape a
+/// write-sync-readback needs: boot 1 writes and syncs, the machine goes all the
+/// way back to firmware, boot 2 reads what survived. Each boot costs another
+/// `--bootnext` and another `return_secs`, and the readback is the *last*
+/// boot's — the earlier ones are printed and not kept, because nothing yet
+/// judges them apart.
 pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     if let Some(password) = &args.install_sudoers {
         install_sudoers(&args.target, password)?;
@@ -1160,24 +1242,57 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
 
     driver.flash(&image)?;
     let entry = driver.boot_entry(&image.esp)?;
-    driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
-    driver.as_root("rebooting", Job::Reboot, None, None)?;
-    if driver.dry_run {
-        driver.as_root("mounting the log partition", Job::Mount, None, None)?;
-        driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
-        println!("dry run: nothing was written and the machine was not rebooted");
-        return Ok(None);
-    }
 
-    let back = driver.ride_the_reboot(args.wait_secs)?;
-    println!("the machine answered ssh again after {back} s");
-    let (loader, log) = driver.read_log()?;
-    print!("{loader}{log}");
-    if let Some(dir) = &args.readback {
-        write_readback(dir, &loader, &log, back)?;
-        println!("readback written to {}", dir.display());
+    // **One flash, `args.boots` boots.** The stick is written once; each round
+    // below buys one more kernel boot off it, and the last one's readback is
+    // what the judge gets.
+    let mut last = None;
+    for boot in 1..=args.boots {
+        if args.boots > 1 {
+            println!("boot {boot} of {}", args.boots);
+        }
+        driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
+        driver.as_root("rebooting", Job::Reboot, None, None)?;
+        if driver.dry_run {
+            driver.as_root("mounting the log partition", Job::Mount, None, None)?;
+            driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
+            println!("dry run: nothing was written and the machine was not rebooted");
+            return Ok(None);
+        }
+
+        let back = driver.ride_the_reboot(args.wait_secs)?;
+        println!("the machine answered ssh again after {back} s");
+        let (loader, log) = driver.read_log()?;
+        print!("{loader}{log}");
+        // The outside judge, and it runs before the verdict: a volume this
+        // cannot read is a finding about what the boot wrote, and the reason to
+        // read the sectors rather than the mount is that a mount has already
+        // had a FAT driver's opinion about them.
+        if args.fat32_check {
+            let bytes = driver.raw_log(image.log.sectors)?;
+            if let Some(dir) = &args.readback {
+                let at = dir.join(READBACK_VOLUME);
+                std::fs::write(&at, &bytes).map_err(|e| Refusal::File {
+                    path: at.display().to_string(),
+                    why: e.to_string(),
+                })?;
+            }
+            let complaints = toyos_fat32_check::check(&bytes);
+            if !complaints.is_empty() {
+                return Err(Refusal::Fat32(toyos_fat32_check::describe(&complaints)));
+            }
+            println!(
+                "toyos-fat32-check: the log partition's {} bytes check out",
+                bytes.len()
+            );
+        }
+        if let Some(dir) = &args.readback {
+            write_readback(dir, &loader, &log, back)?;
+            println!("readback written to {}", dir.display());
+        }
+        last = Some(bootlog::verdict(&log).map_err(Refusal::Log)?);
     }
-    bootlog::verdict(&log).map(Some).map_err(Refusal::Log)
+    Ok(last)
 }
 
 /// What the two files and this boot's own facts are called under `--readback`.
@@ -1189,6 +1304,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
 pub const READBACK_LOADER: &str = "loader.log";
 pub const READBACK_KERNEL: &str = "kernel.log";
 pub const READBACK_BOOT: &str = "boot.txt";
+
+/// The log partition's own bytes, kept beside them under `--fat32-check`: what
+/// the outside judge read, so a complaint can be looked at rather than retold.
+pub const READBACK_VOLUME: &str = "log-partition.img";
 
 /// The two keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
 pub const BACK_SECS: &str = "back_secs";
@@ -1314,6 +1433,7 @@ mod tests {
                 "# toyos-metal: the whole of what the metal loop runs as root.\n\
                  t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
                  t14 ALL=(root) NOPASSWD: /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/dd if\\=/dev/sda3 bs\\=4M\n\
                  t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create-only --disk /dev/sda \
                  --part 1 --label ToyOS --loader \\\\\\\\EFI\\\\\\\\BOOT\\\\\\\\BOOTX64.EFI\n\
                  t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --delete-bootnum --bootnum {hex}\n\
@@ -1341,7 +1461,28 @@ mod tests {
         );
         assert!(rule.contains("/usr/sbin/wipefs --all /dev/sdb"), "{rule}");
         assert_eq!(moved.argv(Job::Wipe, None).unwrap(), ["/usr/sbin/wipefs", "--all", "/dev/sdb"]);
+        // The outside judge's read moves with the same field the mount does,
+        // and it is a *partition* — the one thing on this machine that can
+        // never be spelled `/dev/nvme0n1`.
+        assert!(rule.contains("/usr/bin/dd if\\=/dev/sdb2 bs\\=4M"), "{rule}");
+        assert_eq!(
+            moved.argv(Job::ReadLog, None).unwrap(),
+            ["/usr/bin/dd", "if=/dev/sdb2", "bs=4M"]
+        );
         assert!(!rule.contains("/dev/sda"), "{rule}");
+    }
+
+    /// The read the outside judge needs is a read, and the rule says so: it
+    /// carries no `of=` and no `conv=`, so nothing that matches this line can
+    /// write to the disk it names.
+    #[test]
+    fn the_outside_judges_read_can_write_nothing() {
+        let argv = target().argv(Job::ReadLog, None).unwrap();
+        assert!(argv.iter().any(|w| w.starts_with("if=")), "{argv:?}");
+        assert!(!argv.iter().any(|w| w.starts_with("of=") || w.starts_with("conv=")), "{argv:?}");
+        // And it names a partition rather than the whole disk, so it cannot be
+        // the flash line with one word changed.
+        assert_eq!(argv[1], "if=/dev/sda3");
     }
 
     #[test]

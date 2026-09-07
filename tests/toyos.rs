@@ -1256,20 +1256,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         "loader_watchdog_arms",
         metal::Metal::Runs {
             arms: &[
-                metal::Arm {
-                    boot: "testcases-watchdog",
-                    config: "tests/testcases",
-                    params: &["watchdog"],
-                    jobs: &[],
-                },
-                metal::Arm {
-                    boot: "testcases",
-                    config: "tests/testcases",
-                    params: &[],
-                    // The batch's job list is the union of its riders'; this
-                    // arm needs none of its own.
-                    jobs: &[],
-                },
+                metal::once("testcases-watchdog", "tests/testcases", &["watchdog"], &[]),
+                // The batch's job list is the union of its riders'; this arm
+                // needs none of its own.
+                metal::once("testcases", "tests/testcases", &[], &[]),
             ],
             judge: |b| {
                 power::watchdog_armed(&b[0].loader(), &b[0].kernel())?;
@@ -1323,41 +1313,94 @@ const METAL: &[(&str, metal::Metal)] = &[
 /// reaches no kernel record, so the runner ends the boot on a non-zero one and
 /// every later job's record would then be missing for the wrong reason. The
 /// last job before it is [`LOG_CLOSE_MARKER`]'s subject.
-const TESTCASES: &[metal::Arm] = &[metal::Arm {
-    boot: "testcases",
-    config: "tests/testcases",
-    params: &[],
-    jobs: &[
-        "test_rs_abuse_short_sleep",
-        "test_rs_null_sink_client_exits",
-        "log-close",
-    ],
-}];
+const TESTCASES: &[metal::Arm] = &[metal::once(
+    "testcases",
+    "tests/testcases",
+    &[],
+    &["test_rs_abuse_short_sleep", "test_rs_null_sink_client_exits", "log-close"],
+)];
 
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
 /// and `readdir_bound`'s own `create_dir("/tmp/empty")` is then refused with
 /// `OutOfMemory` and it panics — measured on the first staged image, and the
 /// reason each has a boot of its own in QEMU too.
-const TESTCASES_MKDIR: &[metal::Arm] = &[metal::Arm {
-    boot: "testcases-mkdir",
-    config: "tests/testcases",
-    params: &[],
-    jobs: &["test_rs_mkdir_cap"],
-}];
+const TESTCASES_MKDIR: &[metal::Arm] =
+    &[metal::once("testcases-mkdir", "tests/testcases", &[], &["test_rs_mkdir_cap"])];
 
-const TESTCASES_READDIR: &[metal::Arm] = &[metal::Arm {
-    boot: "testcases-readdir",
-    config: "tests/testcases",
-    params: &[],
-    jobs: &["test_rs_readdir_bound"],
-}];
+const TESTCASES_READDIR: &[metal::Arm] =
+    &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
 
-const JOBCASE: &[metal::Arm] =
-    &[metal::Arm { boot: "jobcase", config: "tests/jobcase", params: &[], jobs: &[] }];
+const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
 
-const METALCASE: &[metal::Arm] =
-    &[metal::Arm { boot: "metalcase", config: "tests/metalcase", params: &[], jobs: &[] }];
+const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
+
+/// The shared block's Rust binaries that do **not** go on the T14, and what
+/// each one's boot said when it was tried there.
+///
+/// Every row is a measurement, not an inheritance: the whole discovered set was
+/// staged onto one metal-shaped image and booted, and these are the names whose
+/// exit record was not `code=0`. A name here with a reason that has stopped
+/// being true is a name that should come off — the boot is the judge, and it is
+/// cheap to re-run.
+///
+/// The eight `SYS_DEBUG` binaries are not here: they ride
+/// [`SHARED_METAL_DEBUG`], which is the same boot on the kernel that carries
+/// the syscall they call. The track's ruling is that the metal profile flashes
+/// test images, so that kernel may go on the stick.
+const METAL_SKIP: &[(&str, &str)] = &[(
+    // The binary refuses the machine itself, which is the strongest form a row
+    // here can take: its own `expect` message is the reason, and the day the T14
+    // grows a network device this kernel drives the row comes off because the
+    // boot stops saying it.
+    "nic_dma_isolation",
+    "it claims a `Nic` and says so: \"this boot's profile carries a virtio-net and no program \
+     on it claims one: NotFound\". The T14 has no network device this kernel drives",
+)];
+
+/// The boot the shared block's Rust binaries ride on the T14.
+///
+/// **`Profile::Headless`'s virtio machine is not what the T14 is**, so the
+/// audit's list of names "bound to the virtio machine" is a hypothesis about
+/// this boot rather than a fact about it. It is settled by booting them: what
+/// [`METAL_SKIP`] holds is what the machine refused, and nothing is excluded for
+/// a shape it was never tried on.
+fn shared_metal(rust_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
+    let skipped: BTreeSet<&str> = METAL_SKIP.iter().map(|(name, _)| *name).collect();
+    let discovered = discover_rust_tests(rust_bins);
+    for (name, _) in METAL_SKIP {
+        assert!(
+            discovered.iter().any(|d| d == name),
+            "METAL_SKIP names {name:?}, which the shared block does not discover; a row for a \
+             binary that is gone excludes nothing and hides that it is gone"
+        );
+    }
+    let (debug, shipping): (Vec<String>, Vec<String>) = discovered
+        .into_iter()
+        .filter(|name| !skipped.contains(name.as_str()))
+        .partition(|name| ACTUATOR_TESTS.contains(&name.as_str()));
+    vec![
+        metal::SharedBoot {
+            boot: "shared",
+            config: "tests/testcases",
+            params: &[],
+            features: &[],
+            jobs: shipping.iter().map(|n| format!("test_rs_{n}")).collect(),
+        },
+        // The same list's other half, on the kernel that carries `SYS_DEBUG`.
+        // A second boot rather than a second image for the whole set: what
+        // these need is a syscall number the rest must not have, and a boot
+        // where every binary could call it would stop being the shipping
+        // machine for the other seventy.
+        metal::SharedBoot {
+            boot: "shared-debug",
+            config: "tests/testcases",
+            params: &[],
+            features: toyos_build::build::TEST_KERNEL,
+            jobs: debug.iter().map(|n| format!("test_rs_{n}")).collect(),
+        },
+    ]
+}
 
 /// The job `log-close` runs after, and so the anchor its evidence is read from.
 const LOG_CLOSE_MARKER: &str = "test_rs_null_sink_client_exits";
@@ -17413,15 +17456,28 @@ fn main() {
             .filter(|(name, _)| filter.is_none_or(|f| name.contains(f)))
             .map(|(name, decl)| (*name, decl))
             .collect();
-        if selected.is_empty() {
-            eprintln!("[toyos] no metal registration matches filter {filter:?}");
-            std::process::exit(1);
+        // The shared boots carry names no registration holds, so an empty
+        // selection is only a dead filter when they are empty too — which
+        // `metal::run` says for itself.
+        if selected.is_empty() && filter.is_some() {
+            eprintln!(
+                "[toyos] no metal registration matches filter {filter:?}; the shared boots' \
+                 members are not filtered by name"
+            );
         }
         // Three statuses for the three things this can establish, as the
         // ordinary suite has: green, red, and "measured nothing" — a run that
         // staged images and never reached the machine has no claim to make.
         std::process::exit(
-            match metal::run(mode, &dir, &selected, &rust_bins, !nocapture && !debug_mode) {
+            match metal::run(
+                mode,
+                &dir,
+                &selected,
+                &shared_metal(&rust_bins),
+                &rust_bins,
+                RUST_SKIP,
+                !nocapture && !debug_mode,
+            ) {
                 metal::Verdict::Green => 0,
                 metal::Verdict::Red => 1,
                 metal::Verdict::Staged => 2,

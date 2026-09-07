@@ -64,21 +64,24 @@ fn main() {
         for job in &jobs {
             // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
             if job.split_whitespace().count() != 1 {
-                fatal(&format!("job {job:?} is not one binary name"));
+                give_the_machine_back(&format!("job {job:?} is not one binary name"), cap.as_ref());
             }
             *RUNNING.lock().expect("the deadline thread does not panic holding this") =
                 job.clone();
             match run_one(job, &[], cap.as_ref()) {
-                Ran::No => fatal(&format!("job {job:?} did not run")),
+                Ran::No => {
+                    give_the_machine_back(&format!("job {job:?} did not run"), cap.as_ref())
+                }
                 // **A builtin's exit code reaches no kernel record.** A spawned
                 // job's does — `process::exit_process` logs one — so a host
                 // reading a stick can judge it; a builtin runs inside this
                 // process and its code is console text, which on a machine with
                 // no serial port is nothing at all. So a failing builtin ends
                 // the boot: the missing `Rebooting.` is the only channel it has.
-                Ran::Builtin(code) if code != 0 => {
-                    fatal(&format!("the builtin {job:?} exited {code}"))
-                }
+                Ran::Builtin(code) if code != 0 => give_the_machine_back(
+                    &format!("the builtin {job:?} exited {code}"),
+                    cap.as_ref(),
+                ),
                 Ran::Builtin(_) | Ran::Spawned => {}
             }
         }
@@ -130,6 +133,31 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
         let _ = io::stdout().flush();
         fatal(&format!("the reboot was refused: {:?}", power.reboot()));
     });
+}
+
+/// End a job list that cannot go on, **by returning the machine to firmware**.
+///
+/// Exiting is not enough and that was a real defect: a boot whose list stopped
+/// early never reached its `reboot` job, and nothing else ended it — the
+/// deadline thread dies with this process, so the machine sat idle. Measured on
+/// a metal-shaped guest: `test_rs_std_tls` failed to spawn at 17 s and the guest
+/// was still up, saying nothing, at 291 s. On a machine with no console that is
+/// the loop waiting out `return_secs` and then refusing, with no line anywhere
+/// saying which job it was.
+///
+/// A reset the firmware sees is the one channel a job list has left. What went
+/// wrong is on the console for a QEMU run, and on the stick it is the *absence*
+/// of the boot's own last records — which is why the boot ends here rather than
+/// hanging: an absence at a known point is a verdict, and a hang is not.
+fn give_the_machine_back(why: &str, cap: Option<&SysCap>) -> ! {
+    println!("test-runner: {why}");
+    let _ = io::stdout().flush();
+    if let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) {
+        let refused = power.reboot();
+        println!("test-runner: the reboot was refused: {refused:?}");
+        let _ = io::stdout().flush();
+    }
+    std::process::exit(1);
 }
 
 /// Say why, on a console that may have nobody on it, and end this process —
