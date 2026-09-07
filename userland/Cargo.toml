@@ -12,6 +12,7 @@ members = [
     "init",
     "input-test",
     "logd",
+    "metalprobe",
     "netd",
     "paint",
     "pkg",

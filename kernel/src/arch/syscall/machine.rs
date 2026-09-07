@@ -53,6 +53,7 @@ fn quiesce(last: &str) {
     crate::vfs::lock().sync_all();
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
+    crate::drivers::nvme::log_census();
     log!("{last}");
     // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
     crate::log::wait_for_durable();

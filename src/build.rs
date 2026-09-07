@@ -2469,6 +2469,7 @@ mod tests {
         "tests/latencycase/system.toml",
         "tests/logrotatecase/system.toml",
         "tests/metalcase/system.toml",
+        "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
         "tests/pkgcase/system.toml",
         "tests/sshdcase/system.toml",

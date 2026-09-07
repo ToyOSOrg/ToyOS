@@ -199,7 +199,17 @@ fn read_protocols(
 }
 
 fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
-    log!("xHCI: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
+    // The silicon beside the slot: a machine with two controllers is two
+    // different parts as often as it is one twice, and the slot alone does not
+    // say which.
+    log!(
+        "xHCI: found at PCI {:02x}:{:02x}.{} {:04x}:{:04x}",
+        pci_dev.bus,
+        pci_dev.dev,
+        pci_dev.func,
+        pci_dev.vendor_id(),
+        pci_dev.device_id()
+    );
 
     // xHCI 1.2 §5.2.1 puts the capability registers in BAR 0; a controller
     // that doesn't is one this driver cannot address.
