@@ -333,7 +333,6 @@ pub fn arm_one_shot(nanos: u64) {
 
 /// Shorten this CPU's armed interval to at most `nanos`, arming it if stopped.
 // Traces nothing, unlike arm_one_shot: no scheduler deadline is being set here, and a TimerArm record would misreport one.
-#[cfg(feature = "boot-actuators")]
 pub fn arm_within(nanos: u64) {
     let want = OneShot::after(nanos);
     // Zero here means stop_timer, not an imminent expiry — a running count never reaches zero on its own.

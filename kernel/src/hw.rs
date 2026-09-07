@@ -8,6 +8,7 @@ use core::arch::asm;
 
 use toyos_sched::cpu::SleepToken;
 use toyos_sched::cpu::RunToken;
+use toyos_sched::fair::QUANTUM_NS;
 use toyos_sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
 use toyos_sched::task::{TaskAccounting, TaskKey};
 
@@ -108,6 +109,17 @@ impl Machine for KernelHw {
             apic::arm_within(DIAG_TICK_NS);
         }
         self.halt();
+        // **A CPU that is executing has a one-shot armed, and this is where
+        // that becomes true again.** `TimerPlan::Stop` left this one at zero
+        // before the halt above and only a pass reaching `apply_timer` arms
+        // another, so a CPU woken by an IPI or a device — never by its own
+        // timer, which is stopped — and then held in Ring 0 takes no timer
+        // interrupt at all. `crate::deadline`'s poll and
+        // `crate::hardlockup`'s sample both rest on some CPU taking one.
+        // Arming earlier than the scheduler planned is a spurious pass and
+        // never a missed deadline (`toyos_sched::timer::TimerPlan`), and the
+        // next pass replaces it either way.
+        apic::arm_within(QUANTUM_NS);
     }
 }
 

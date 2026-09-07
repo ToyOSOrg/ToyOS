@@ -894,6 +894,11 @@ pub fn boot_deadline_ends_a_wedge(
     // One capture from the first boot's handoff to the pass that reports it, so
     // the wedge's own line and the record read back off the page are both here.
     let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    if !second.text().contains(bootlog::CHAIN_ENDS_LINE) {
+        // One monitor per socket: the reset watcher goes before the question.
+        drop(resets);
+        return Err(silent_guest(&mut qemu, second.text()));
+    }
     // The control on the control, both halves: the machine reached the wedge,
     // and then it did *not* reach the reset it was on its way to. A deadline
     // that fired on a boot merely slower than its bound would satisfy the first
@@ -916,6 +921,30 @@ pub fn boot_deadline_ends_a_wedge(
 
     eprintln!("  [power] a wedge with every CPU stopped ended itself and said so off the page");
     Ok(())
+}
+
+/// Where every vCPU stood, asked of QEMU, for a guest that stopped speaking
+/// before its chain closed.
+///
+/// **The guest cannot be asked and the console cannot tell the two apart.** A
+/// machine spinning with `IF` clear and a machine halted with no one-shot armed
+/// are both silent, and only the first is a state `crate::hardlockup` covers;
+/// `info cpus` names the halted CPUs and `info registers -a` carries each
+/// vCPU's `RIP` and `RFLAGS`. Without this a hang here is a mute red that says
+/// nothing about which of the two it was.
+fn silent_guest(qemu: &QemuInstance, tail: &str) -> String {
+    let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
+    let cpus = monitor.human("info cpus");
+    let registers = monitor.human("info registers -a");
+    // Whether a CPU that is running could ever be interrupted by its own timer:
+    // `RFLAGS.IF` is only half of it, and a stopped one-shot reads as a zero
+    // initial count here.
+    let lapics: String = (0..2).map(|id| monitor.human(&format!("info lapic {id}"))).collect();
+    format!(
+        "the guest went silent and never reached {:?}\nQEMU's own account of its vCPUs:\n\
+         {cpus}\n{registers}\n{lapics}\n{tail}",
+        bootlog::CHAIN_ENDS_LINE,
+    )
 }
 
 /// The bound this test arms, as the parameter spells it.

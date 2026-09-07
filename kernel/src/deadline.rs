@@ -270,10 +270,18 @@ static STAGED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "boot-actuators")]
 fn this_cpu() -> ! {
-    // Preemption off and `IF` on: the shape a device operation on this machine
-    // already runs in, so what the deadline has to reach is the Ring 0 half of
-    // the timer entry and not the Rust half.
+    // Preemption off, `IF` on and a one-shot armed: the shape a device
+    // operation on this machine already runs in, so what the deadline has to
+    // reach is the Ring 0 half of the timer entry and not the Rust half.
+    //
+    // **All three are established here rather than inherited.** A CPU reaching
+    // a pass from `do_preempt` inside the timer entry arrives with `IF` clear,
+    // and one just woken out of the idle halt arrives with its one-shot
+    // stopped; a CPU wedged in either state is one this control has made deaf
+    // rather than wedged, and it is the deadline's own poll that never runs.
     crate::preempt::disable();
+    crate::arch::apic::arm_within(toyos_sched::fair::QUANTUM_NS);
+    crate::arch::cpu::enable_interrupts();
     // The hard-lockup control is this wedge and one CPU more, staged here —
     // where every CPU has already left the scheduler — because the idle loop it
     // would otherwise be staged from is one of the things this wedge stops. Two

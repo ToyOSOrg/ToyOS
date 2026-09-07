@@ -47,9 +47,11 @@
 //!   `issues/hardware/the-t14-boots-toyos-unattended.md` is what would reach
 //!   below it.
 //! - **A CPU with `IF` set that no timer ever interrupts.** Nothing resets it,
-//!   deliberately: `apic::stop_timer` is called from one site, the idle path's
-//!   `Machine::stop_timer` one statement before it halts, so a CPU running with
-//!   `IF` set has a one-shot armed and takes it.
+//!   deliberately, and what keeps that from being a hole is
+//!   `hw::KernelHw::idle_wait`: the `stop_timer` that pairs with the halt is
+//!   undone on the way *out* of it, so a CPU executing at all has a one-shot
+//!   armed and takes it — whether or not the wake that ended its halt was the
+//!   timer's.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
