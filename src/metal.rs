@@ -27,9 +27,7 @@ const CONNECT_SECS: u64 = 10;
 const GOING_DOWN_SECS: u64 = 120;
 
 /// What the machine spends getting back to `sshd` once a ToyOS boot is over:
-/// the firmware's pass and Ubuntu's own boot. Measured from a power-on, which
-/// is the only way this machine has ever left a ToyOS boot; no run has yet
-/// timed it from a reset.
+/// the firmware's pass and Ubuntu's own boot.
 const RETURN_ALLOWANCE_SECS: u64 = 300;
 
 /// Every bound a metal boot runs under, by the constant that arms it: the
