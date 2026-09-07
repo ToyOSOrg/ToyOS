@@ -34,10 +34,11 @@ What is left to build:
   the surviving file was 228 bytes and the boot's own watchdog read-back was
   gone. **Exit**: a chained run whose stick carries every pass, each named by
   the pass that wrote it.
-- **Fourteen instrument rows are UNMEASURED** and owe a price from the PR's own
-  CI, with anything over `FAST_COMMIT_MS` relegated Nightly under
-  `Why::TimerAnchored` in the commit after. **Exit**: no `UNMEASURED_MS` row
-  left in `src/redlist.rs`.
+- **Thirteen instrument rows carry `UNMEASURED_MS`** and owe a price from the
+  PR's own CI, with every name over `FAST_COMMIT_MS` moved to `Tier::Nightly`
+  under a `Why::TimerAnchored` row in the commit after —
+  `issues/build/the-metal-tracks-registrations-are-all-unmeasured.md`.
+  **Exit**: no `UNMEASURED_MS` row left in `tests/test-durations`.
 - **The measurements owed on hardware are this loop's jobs**, by record:
   `issues/kernel/the-split-window-tlb-cost-is-unpriced.md`,
   `issues/kernel/ap-control-registers-inherit-init.md`,
