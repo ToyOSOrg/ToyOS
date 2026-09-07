@@ -250,6 +250,7 @@ klogd_hosted 5674 shards=12
 klogd_panic_halts 16658 shards=12
 lapic_spurious_vector 6829 shards=12
 late_storage_connect 6455 shards=12
+latency_wake 18446744073709551615 shards=none
 launcher_refusals 2106 shards=12
 leak_rollback_selftest 5423 shards=12
 loader_watchdog_arms 10064 shards=12

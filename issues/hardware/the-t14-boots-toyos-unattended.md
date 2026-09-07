@@ -23,6 +23,44 @@ What is left to build:
   `issues/hardware/an-armed-tco-has-never-reset-the-t14.md` carries the
   registers and the datasheet. **Exit**: a T14 boot that resets itself on an
   armed TCO.
+
+  **The software answer was designed and is not built, and the first reason is
+  a number this loop does not have yet.** The design evaluated was a sentinel:
+  an AP started early becomes a CPU spinning on the TSC, the BSP publishes each
+  boot phase it reaches, and a phase missed within a bound seals a record into
+  the black box and writes the FADT reset register. Four findings, taken by
+  reading the code:
+
+  1. **The bound cannot be derived.** It has to be wider than the slowest
+     healthy phase on this machine and narrower than a wait for a hand, and
+     nothing in this tree has measured a T14 phase duration. A bound guessed
+     wrong resets a healthy laptop in a loop, which is worse than the present
+     state. This loop's boot-fact run is what publishes those numbers, so the
+     design is sequenced behind it rather than blocked on a ruling.
+  2. **A sentinel is a CPU outside the roster, and the roster is modelled.**
+     `Roster::begin_attempt`/`commit` hands out dense ids that `boot_aps` fills
+     in attempt order, `smp_failed_ap_leaves_no_hole` is the gate that exists
+     because a hole in them is a defect, and `kernel-loom/tests/smp_bringup.rs`
+     is what decides whether a second committer is sound. A CPU taking an id
+     before `boot_aps` runs is a change to that protocol and needs the model
+     extended first.
+  3. **It cannot start before the machine has a clock without a second
+     bring-up path.** `boot_aps`' SDM §8.4.4.1 delays and its 100 ms start
+     budget are spun on `clock::nanos_since_boot`, which answers zero until
+     `clock::init` — so an AP started before that never leaves the delay.
+     `clock::cpuid_tsc_hz` exists for the panic path's version of this problem
+     and would serve, at the cost of a second decider for how long an
+     INIT-SIPI wait is.
+  4. **The reset it would take is not lock-free.** `acpi::reboot` opens with
+     `serial::flush_final`, and a `BackendGuard` masks interrupts for its whole
+     life — so a BSP wedged inside one holds the lock a sentinel would spin on,
+     on exactly the boots the sentinel exists for. A `reset_now` that writes the
+     decoded port and nothing else is small and separable from the rest.
+
+  What no design of this shape can cover is the span before `apic::init`: no AP
+  can be started before the BSP's own LAPIC is enabled, and `acpi::init_reset`
+  — which decodes the register any of this would write — runs inside it. That
+  floor is inherent rather than an argument against the design.
 - **An AP loads its IDT before its control registers**, so a fault in that span
   triple-faults the machine —
   `issues/kernel/an-ap-loads-the-idt-before-its-control-registers.md`, whose

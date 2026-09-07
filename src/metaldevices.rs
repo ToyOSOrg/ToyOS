@@ -39,8 +39,33 @@ pub enum Bound {
     Unmeasured,
     /// A rate, which may not fall below this.
     AtLeast(i64),
+    /// A latency, a duration or a disagreement, which may not rise above this.
+    AtMost(i64),
     /// A value the machine has no freedom about, given its mode.
     Exactly(i64),
+}
+
+impl Bound {
+    /// One number against this bound. **The whole ceiling discipline lives
+    /// here**, so the device profile and the kernel profile cannot come to
+    /// different answers about what a bound means.
+    pub fn check(self, value: i64, unit: &'static str) -> Outcome {
+        match self {
+            Self::Unmeasured => Outcome::Measured { value, unit },
+            Self::AtLeast(floor) if value < floor => {
+                Outcome::Failed(format!("{value} {unit} is under this profile's floor of {floor}"))
+            }
+            Self::AtLeast(floor) => Outcome::Held(format!("{value} {unit} (floor {floor})")),
+            Self::AtMost(ceiling) if value > ceiling => {
+                Outcome::Failed(format!("{value} {unit} is over this profile's ceiling of {ceiling}"))
+            }
+            Self::AtMost(ceiling) => Outcome::Held(format!("{value} {unit} (ceiling {ceiling})")),
+            Self::Exactly(want) if value != want => {
+                Outcome::Failed(format!("{value} {unit} where this profile holds {want}"))
+            }
+            Self::Exactly(want) => Outcome::Held(format!("{want} {unit}")),
+        }
+    }
 }
 
 /// Why a `metalprobe` job has no number, mirroring `Refusal` in
@@ -320,20 +345,11 @@ fn judged(log: &str, job: &Job) -> Outcome {
     if exit.code < 0 {
         return Outcome::Failed(format!("the job exited {}, which names no refusal", exit.code));
     }
-    match job.bound {
-        Bound::Unmeasured => Outcome::Measured { value: exit.code, unit: job.unit },
-        Bound::AtLeast(floor) if exit.code < floor => Outcome::Failed(format!(
-            "{} {} is under this profile's floor of {floor} {}",
-            exit.code, job.unit, job.unit
-        )),
-        Bound::AtLeast(floor) => {
-            Outcome::Held(format!("{} {} (floor {floor}, cpu {}ms)", exit.code, job.unit, exit.cpu_ms))
-        }
-        Bound::Exactly(want) if exit.code != want => Outcome::Failed(format!(
-            "{} {} where this profile holds {want}",
-            exit.code, job.unit
-        )),
-        Bound::Exactly(want) => Outcome::Held(format!("{want} {}", job.unit)),
+    // The bound's own arithmetic, plus the one thing only a job's record has:
+    // what the measurement cost the CPU it ran on.
+    match job.bound.check(exit.code, job.unit) {
+        Outcome::Held(what) => Outcome::Held(format!("{what}, cpu {}ms", exit.cpu_ms)),
+        other => other,
     }
 }
 

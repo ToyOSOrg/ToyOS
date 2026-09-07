@@ -178,14 +178,22 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
             // begins above `top` or `Domain::new` refuses it.
             Ok(Structure::Rmrr(rmrr)) => {
                 let held = rmrr.limit() < identity_top;
-                log!(
-                    "iommu: rmrr{regions} seg={} {:#018x}..{:#018x} {} the identity domain \
-                     0x0..{identity_top:#x}",
-                    rmrr.segment(),
-                    rmrr.base(),
-                    rmrr.limit(),
-                    if held { "inside" } else { "OUTSIDE" },
-                );
+                // Spelled whole in each arm rather than with the verdict as a
+                // field: the host profile holds the refusing word against this
+                // file's source, and a literal assembled at run time is one no
+                // reader of the source can find.
+                let (seg, base, limit) = (rmrr.segment(), rmrr.base(), rmrr.limit());
+                if held {
+                    log!(
+                        "iommu: rmrr{regions} seg={seg} {base:#018x}..{limit:#018x} inside the \
+                         identity domain 0x0..{identity_top:#x}"
+                    );
+                } else {
+                    log!(
+                        "iommu: rmrr{regions} seg={seg} {base:#018x}..{limit:#018x} OUTSIDE the \
+                         identity domain 0x0..{identity_top:#x}"
+                    );
+                }
                 describe_scopes("rmrr", regions, rmrr.scopes());
                 regions += 1;
                 held_regions += usize::from(held);

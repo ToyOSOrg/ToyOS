@@ -19,12 +19,14 @@
 //! On the machine this instrument exists for there is no serial port, a
 //! userland `println!` reaches `Backend::None` and is dropped, and the only
 //! word a program gets onto the log partition is the kernel's own
-//! `exit: <name> pid=N code=N cpu=Nms` record. So the headline number leaves
-//! through the exit code: `0..=[REPORTED_CEILING_US]` is a measured p99 in
-//! microseconds, [`REPORTED_CEILING_US`] means "at or above that", and
-//! [`RUN_FAILED`] means the measurement did not happen and no number in this
-//! run means anything. Every percentile is on stdout as well, for the host that
-//! has a console to read it on.
+//! `exit: <name> pid=N code=N cpu=Nms` record, which carries the whole `i32`.
+//! So the headline number leaves through the exit code: a non-negative code is
+//! a measured p99 in microseconds, bounded above by [`BUCKETS`] because a p99
+//! at the histogram's last bucket is a floor rather than a measurement; a
+//! negative one is a [`Refusal`] and no number in that run means anything.
+//! `userland/metalprobe` spells the same contract for the device suite, and the
+//! sign is what separates the two halves of it there as here. Every percentile
+//! is on stdout as well, for the host that has a console to read it on.
 
 use std::process::exit;
 
@@ -44,16 +46,25 @@ const SAMPLES: usize = 10_000;
 /// property of starting rather than of waking.
 const WARMUP: usize = 100;
 
-/// The widest lateness the histogram has a bucket for; anything past it lands
-/// in the last one and is reported as "at or above".
+/// The widest lateness the histogram has a bucket for; a percentile that lands
+/// here is a floor rather than a measurement, and the caller is told so by the
+/// count of samples that had no bucket.
 const BUCKETS: usize = 4096;
 
-/// The largest p99 the exit code can carry, and the value it carries for
-/// anything wider.
-const REPORTED_CEILING_US: u64 = 254;
+/// Why this run measured nothing, as the exit code carries it. Negative,
+/// because a non-negative code is a microsecond figure and a run that failed
+/// must not be readable as a fast one.
+#[derive(Clone, Copy)]
+#[repr(i32)]
+enum Refusal {
+    NoCapability = -1,
+    BandRefused = -2,
+}
 
-/// The exit code that is not a measurement.
-const RUN_FAILED: i32 = 255;
+fn refuse(why: Refusal, said: &str) -> ! {
+    println!("cyclictest: {said}");
+    exit(why as i32);
+}
 
 fn main() {
     // **The band is the privilege and it is asked for by name.** A refusal is
@@ -62,12 +73,13 @@ fn main() {
     // would be compared against a ceiling taken on the other.
     let cap: Option<SysCap> = Endowments::get().take(SYSCAP_LABEL);
     let Some(cap) = cap else {
-        println!("cyclictest: no capability was endowed, so there is no real-time band to enter");
-        exit(RUN_FAILED);
+        refuse(
+            Refusal::NoCapability,
+            "no capability was endowed, so there is no real-time band to enter",
+        );
     };
     if let Err(e) = cap.enter_rt() {
-        println!("cyclictest: the real-time band was refused: {e:?}");
-        exit(RUN_FAILED);
+        refuse(Refusal::BandRefused, &format!("the real-time band was refused: {e:?}"));
     }
 
     let mut histogram = vec![0u32; BUCKETS];
@@ -120,5 +132,5 @@ fn main() {
         PERIOD_NS / 1_000,
     );
 
-    exit(p99.min(REPORTED_CEILING_US) as i32);
+    exit(p99 as i32);
 }

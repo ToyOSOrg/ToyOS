@@ -306,9 +306,20 @@ fn tsc_inside(cpu_id: u32, lo: u64, hi: u64) -> bool {
         log!("SMP: cpu{cpu_id} tsc={sample} inside the BSP's {lo}..{hi} ({span} cycles wide)");
         return true;
     }
-    let (word, by) =
-        if sample < lo { ("trails", lo - sample) } else { ("leads", sample - hi) };
-    log!("SMP: cpu{cpu_id} tsc={sample} {word} the BSP's {lo}..{hi} by {by} cycles");
+    // Spelled whole in each arm rather than with the verb as a field: the host
+    // profile holds these two words against this file's source, and a literal
+    // assembled at run time is one no reader of the source can find.
+    if sample < lo {
+        log!(
+            "SMP: cpu{cpu_id} tsc={sample} trails the BSP's {lo}..{hi} by {} cycles",
+            lo - sample
+        );
+    } else {
+        log!(
+            "SMP: cpu{cpu_id} tsc={sample} leads the BSP's {lo}..{hi} by {} cycles",
+            sample - hi
+        );
+    }
     false
 }
 
