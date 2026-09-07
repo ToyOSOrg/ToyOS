@@ -125,13 +125,18 @@ pub fn record_done() {
 /// a crash is worth more than the account of the reset that followed it.
 pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
     let mut appended = false;
-    with_page(|page, stamp, identity| {
+    // **The envelope is the one already on the page**, state, stamp and
+    // identity alike, and not what `with_page` would put there: this extends a
+    // report rather than writing one, and a boot that sealed its record under a
+    // staged identity must still read back under it.
+    with_page(|page, _stamp, _identity| {
         let opened = match toyos_blackbox::recover(page) {
-            Some((State::Panic, _, _, text)) => Some((State::Panic, text.len())),
-            Some((State::Done, _, _, text)) => Some((State::Done, text.len())),
-            Some((State::Armed | State::Fault, _, _, _)) | None => None,
+            Some((state @ (State::Panic | State::Done), stamp, identity, text)) => {
+                Some((state, stamp, identity, text.len()))
+            }
+            Some((State::Armed | State::Fault, ..)) | None => None,
         };
-        let Some((state, at)) = opened else { return };
+        let Some((state, stamp, identity, at)) = opened else { return };
         let mut report = toyos_blackbox::Report::reopened(page, at);
         account(&mut report);
         report.seal(state, stamp, identity);
