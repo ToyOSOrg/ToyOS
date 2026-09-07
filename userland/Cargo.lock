@@ -477,12 +477,12 @@ name = "compositor"
 version = "0.1.0"
 dependencies = [
  "sprite",
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-desktop",
  "toyos-font 0.1.0",
  "toyos-manifest",
- "toyos-window 0.4.0",
+ "toyos-window 0.5.0",
 ]
 
 [[package]]
@@ -499,10 +499,10 @@ name = "console"
 version = "0.1.0"
 dependencies = [
  "terminal",
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-font 0.1.0",
- "toyos-window 0.4.0",
+ "toyos-window 0.5.0",
 ]
 
 [[package]]
@@ -987,7 +987,7 @@ version = "0.1.0"
 dependencies = [
  "filepicker-api",
  "toyos-font 0.1.0",
- "toyos-window 0.4.0",
+ "toyos-window 0.5.0",
 ]
 
 [[package]]
@@ -1107,16 +1107,16 @@ name = "filepicker"
 version = "0.1.0"
 dependencies = [
  "filepicker-api",
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-font 0.1.0",
- "toyos-window 0.4.0",
+ "toyos-window 0.5.0",
 ]
 
 [[package]]
 name = "filepicker-api"
 version = "0.1.0"
 dependencies = [
- "toyos 0.4.0",
+ "toyos 0.5.0",
 ]
 
 [[package]]
@@ -1125,7 +1125,7 @@ version = "0.1.0"
 dependencies = [
  "sprite",
  "toyos-font 0.1.0",
- "toyos-window 0.4.0",
+ "toyos-window 0.5.0",
 ]
 
 [[package]]
@@ -1526,7 +1526,7 @@ dependencies = [
 name = "init"
 version = "0.1.0"
 dependencies = [
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-manifest",
 ]
@@ -1799,7 +1799,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 name = "logd"
 version = "0.1.0"
 dependencies = [
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-wallclock",
 ]
@@ -1909,7 +1909,7 @@ name = "netd"
 version = "0.0.0"
 dependencies = [
  "smoltcp",
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
 ]
 
@@ -2287,7 +2287,7 @@ version = "0.1.0"
 dependencies = [
  "filepicker-api",
  "toyos-font 0.1.0",
- "toyos-window 0.4.0",
+ "toyos-window 0.5.0",
 ]
 
 [[package]]
@@ -3253,7 +3253,7 @@ dependencies = [
 name = "shell"
 version = "0.1.0"
 dependencies = [
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-manifest",
 ]
 
@@ -3405,7 +3405,7 @@ name = "soundd"
 version = "0.0.0"
 dependencies = [
  "rubato",
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-hda",
  "toyos-mixer",
@@ -3545,16 +3545,16 @@ dependencies = [
 name = "terminal"
 version = "0.1.0"
 dependencies = [
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-font 0.1.0",
- "toyos-window 0.4.0",
+ "toyos-window 0.5.0",
 ]
 
 [[package]]
 name = "test-runner"
 version = "0.1.0"
 dependencies = [
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-tco",
 ]
@@ -3685,10 +3685,10 @@ name = "toybox"
 version = "0.1.0"
 dependencies = [
  "cpal",
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-keymap 0.1.0",
- "toyos-window 0.4.0",
+ "toyos-window 0.5.0",
 ]
 
 [[package]]
@@ -3711,7 +3711,7 @@ dependencies = [
 
 [[package]]
 name = "toyos"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "toyos-abi 0.4.0",
 ]
@@ -3796,9 +3796,9 @@ dependencies = [
 
 [[package]]
 name = "toyos-window"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-font 0.1.0",
  "toyos-keymap 0.1.0",
