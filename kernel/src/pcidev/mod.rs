@@ -33,12 +33,13 @@
 //!
 //! **What is read back, and what is not.** `Owned` is
 //! `pci_function_is_exclusive`, `NoMsix` is `virtio_net_no_msix`,
-//! `Untranslated` is `iommu_virtio_platform`'s no-unit arm, and the domain is
-//! `userdev_dma_fault`; `Ambiguous`, `KernelDriven`, `Exhausted`, every window
-//! refusal and every bound the three calls check are refused here and read by
-//! nothing, because a registration of them waits on a boot config whose own
-//! test binary holds a claimable function — netd holds this machine's only
-//! one, and netd is not a test binary.
+//! `Untranslated` is `iommu_virtio_platform`'s no-unit arm, the domain is
+//! `userdev_dma_fault`, and `SYS_DEVICE_REG_READ`'s bound is netd's own
+//! `config_space_is_bounded`. `Ambiguous`, `KernelDriven`, `Exhausted`, every
+//! window refusal, and every bound `SYS_DEVICE_BAR_MAP` and
+//! `SYS_DEVICE_DMA_ALLOC` check are refused here and read by nothing: a
+//! registration of them waits on a boot config whose own test binary holds a
+//! claimable function, and netd holds this machine's only one.
 //!
 //! Nothing here is specific to what a function *is*.
 
