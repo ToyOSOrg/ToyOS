@@ -114,6 +114,13 @@ pub struct SharedBoot {
     /// What the runner spawns, in order — the whole binary name, `test_rs_`
     /// prefix and all, because that is what the kernel records it under.
     pub jobs: Vec<String>,
+    /// Files this boot needs on ROOT beside the binaries: a corpus's committed
+    /// expectations, which the guest compares against because on this machine
+    /// no host can read what a case printed.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// Names in `bin/` that reach one binary, so the kernel records each run
+    /// under a name of its own. `(from, to)` as the manifest spells them.
+    pub links: Vec<(String, String)>,
 }
 
 /// Whether a registration runs on the T14, and how.
@@ -175,19 +182,22 @@ impl Readback {
     /// **The name is the file's, truncated the way the kernel truncates it.**
     /// `ProcessEntry`'s name is `THREAD_NAME_LEN` bytes and the loader fills it
     /// from the path's last component, so a binary whose name is longer than
-    /// that is recorded under a prefix — `test_rs_null_sink_client_exits` is
-    /// `test_rs_null_sink_client_ex` on the wire, and a predicate looking for
-    /// the whole name would find nothing on a perfectly good boot.
+    /// that is recorded under a prefix: the staged `null_sink_client_exits`
+    /// ends `…_client_ex` on the wire, and a predicate looking for the whole
+    /// name would find nothing on a perfectly good boot.
     ///
     /// **And the name alone does not identify one process.** A guest binary that
     /// cannot ask what a handle it does not hold does — the pattern
     /// `handle_kill_policy` is built on — re-executes *itself*, one child per
     /// fault, and every child is recorded under that same name with whatever
-    /// exit the fault gave it. Measured on a metal-shaped guest,
-    /// `test_rs_handle_kill_policy` left forty-two records reading `code=139`
-    /// and the job's own reading zero, and the last of them is a child. The
-    /// job's is the one with the **lowest pid**: the runner spawned it before it
-    /// spawned anything.
+    /// exit the fault gave it. Measured on a metal-shaped guest that binary left
+    /// forty-two records reading `code=139` and the job's own reading zero, and
+    /// the last of them is a child. The job's is the one with the **lowest
+    /// pid**: the runner spawned it before it spawned anything.
+    ///
+    /// A name is written here without the staged `test_rs_` prefix on purpose:
+    /// `suite_split` reads that spelling as a machine test *driving* the
+    /// binary, and this only says what the kernel recorded about one.
     pub fn exit_code(&self, binary: &str) -> Result<i32, String> {
         let name = bootlog::recorded_name(binary);
         let head = format!("{}{name} pid=", bootlog::EXIT);
@@ -289,6 +299,8 @@ struct Batch {
     params: Vec<&'static str>,
     features: &'static [&'static str],
     jobs: Vec<String>,
+    files: Vec<(String, Vec<u8>)>,
+    links: Vec<(String, String)>,
     boots: u32,
 }
 
@@ -331,6 +343,8 @@ fn batches<'a>(
                 params: boot.params.to_vec(),
                 features: boot.features,
                 jobs: boot.jobs.clone(),
+                files: boot.files.clone(),
+                links: boot.links.clone(),
                 boots: 1,
             },
         );
@@ -346,6 +360,8 @@ fn batches<'a>(
                 params: arm.params.to_vec(),
                 features: arm.features,
                 jobs: Vec::new(),
+                files: Vec::new(),
+                links: Vec::new(),
                 boots: arm.boots,
             });
             if batch.config != arm.config
@@ -390,7 +406,7 @@ fn build(
     let text = std::fs::read_to_string(&committed)
         .map_err(|e| format!("{}: {e}", committed.display()))?;
     let jobs: Vec<&str> = batch.jobs.iter().map(String::as_str).collect();
-    let derived = metalimage::derive(&text, &jobs)
+    let derived = metalimage::derive(&text, &jobs, &batch.links)
         .map_err(|why| format!("{}: {why}", committed.display()))?;
     // **The job list is in the file name, not only in the file.**
     // `build_test_image` memoizes ROOT on the config's *path*, so two runs whose
@@ -410,15 +426,17 @@ fn build(
             .ok_or_else(|| format!("the job {job:?} names no binary under tests/toyos-rust-tests"))?;
         extra.push((format!("bin/{job}"), data.clone()));
     }
+    extra.extend(batch.files.iter().cloned());
     // **What a job spawns comes with it, and it is not optional.** A binary
     // that cannot find its `.so` or its helper does not fail an assertion — it
-    // fails to *spawn*. Measured on a metal-shaped guest: `test_rs_std_tls` did
+    // fails to *spawn*. Measured on a metal-shaped guest: `std_tls` did
     // not run at all and took the rest of the job list with it, and
     // `disk_backtrace`, `fault_gates` and `panic_recovery` each panicked on
     // `entity not found` looking for a child that was never staged. Which job
     // needs which is the job's business and not this function's, so both sets
-    // go on whole the moment any job does.
-    if extra.iter().any(|(name, _)| name.starts_with("bin/test_rs_")) {
+    // go on whole the moment a boot has any job at all — including a job reached
+    // through a symlink, whose name says nothing about the binary behind it.
+    if !batch.jobs.is_empty() {
         for (name, data) in rust_bins {
             if name.ends_with(".so") {
                 extra.push((format!("lib/{name}"), data.clone()));

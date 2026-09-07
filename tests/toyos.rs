@@ -202,6 +202,9 @@ const RUST_SKIP: &[&str] = &[
     // its own can hold: in the shared boot every other binary's output is in the
     // same stream. `console_line_atomicity` runs it.
     "console_line_atomicity",
+    // The C corpus's comparator: a helper reached through one symlink per case,
+    // never a test of its own. `shared_metal` stages every name on this list.
+    "ccheck",
     "segfault_child",
     "disk_backtrace_child",
     "fault_gate_child",
@@ -1619,6 +1622,8 @@ fn shared_metal(
                 .filter(|n| keep(n))
                 .map(|n| format!("test_rs_{n}"))
                 .collect(),
+            files: Vec::new(),
+            links: Vec::new(),
         },
         // The same list's other half, on the kernel that carries `SYS_DEBUG`.
         // A second boot rather than a second image for the whole set: what
@@ -1631,6 +1636,8 @@ fn shared_metal(
             params: &[],
             features: toyos_build::build::TEST_KERNEL,
             jobs: debug.iter().filter(|n| keep(n)).map(|n| format!("test_rs_{n}")).collect(),
+            files: Vec::new(),
+            links: Vec::new(),
         },
     ]
 }
@@ -1648,6 +1655,114 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
     &["test_rs_cyclictest", "test_rs_sched_stress"],
 )];
 
+
+/// The C corpus on the T14: one boot, one job per case, each judged in the
+/// guest.
+///
+/// **Every case in the corpus `return 0`s unconditionally**, so a bare
+/// exit-code verdict would be vacuous — the comparison is the whole point. It
+/// happens in `ccheck`, which runs the case with its stdout on a pipe, compares
+/// the bytes with the committed `.expect` staged beside it, and exits with the
+/// verdict. What crosses is that exit code, as the kernel's own record.
+///
+/// **One binary, one symlink per case.** `ccheck` reads `argv[0]` to know which
+/// case it is, so the kernel records each run under the case's own name and a
+/// host reading the stick can say which of a hundred and nineteen failed. A
+/// job list of a hundred and nineteen `ccheck`s would leave one name and a
+/// hundred and nineteen records told apart only by position.
+///
+/// It is also a *stronger* comparison than the host's. `check_c_result` reads a
+/// console every process on the machine shares and has to take the other
+/// writers' lines out before comparing; this reads one pipe only the case can
+/// write to, so there is nothing to filter and no line that can be attributed
+/// to the wrong writer.
+
+/// The C cases that do **not** go on the T14, and what each one's boot said.
+///
+/// Measured, like `METAL_SKIP`: the whole corpus was staged onto one
+/// metal-shaped image and booted, and this is what the guest comparator could
+/// not answer for.
+const C_METAL_SKIP: &[(&str, &str)] = &[(
+    "90_stdio_buffering",
+    "its expectation carries a `stderr line`, and the guest comparator reads one pipe. The \
+     host compares a console both streams land on in real time; two pipes here would carry \
+     the same bytes in an order nothing preserves, so this case stays where the console is",
+)];
+
+/// **One comparison rule, in two places that cannot share code.**
+///
+/// The host's is `tests/common/console.rs`'s `verdict` and the guest's is
+/// `tests/toyos-rust-tests/src/bin/ccheck.rs`'s; a guest binary cannot link the
+/// harness, so the rule is written twice and held together here by reading both
+/// sources. It is `trim_end` on both sides today, and the day one of them stops
+/// being that this reds and names the other.
+fn the_two_comparisons_use_one_rule() -> Result<(), String> {
+    let root = compile::repo_root();
+    let pair = [
+        ("tests/common/console.rs", "mine.trim_end() != expected.trim_end()"),
+        ("tests/toyos-rust-tests/src/bin/ccheck.rs", "fn trim_end(bytes: &[u8]) -> &[u8] {"),
+    ];
+    for (file, rule) in pair {
+        let at = root.join(file);
+        let source = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        if !source.contains(rule) {
+            return Err(format!(
+                "{} no longer spells {rule:?}. The C corpus is compared on the host and again \
+                 in the guest, and the two rules have to be the same one or a case passes on \
+                 one machine and reds on the other",
+                at.display()
+            ));
+        }
+    }
+    Ok(())
+}
+fn c_corpus_metal(
+    c_bins: &[(String, Vec<u8>)],
+    keep: impl Fn(&str) -> bool,
+) -> metal::SharedBoot {
+    let dir = compile::testcases_dir();
+    let mut jobs = Vec::new();
+    let mut files = Vec::new();
+    let mut links = Vec::new();
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for (case, data) in c_bins {
+        if !keep(case) || C_METAL_SKIP.iter().any(|(name, _)| name == case) {
+            continue;
+        }
+        let expect = dir.join(format!("{case}.expect"));
+        // A case with no committed expectation is one nothing could judge, and
+        // shipping it would be a job that passes by comparing nothing.
+        let Ok(expected) = fs::read(&expect) else { continue };
+        // **The kernel truncates a process name**, so two cases whose names
+        // agree that far would land under one record. Refused rather than
+        // reported, because the second one's verdict would be read as the
+        // first's.
+        let recorded = bootlog::recorded_name(case);
+        if let Some(other) = seen.insert(recorded.clone(), case.clone()) {
+            panic!(
+                "the C cases {other:?} and {case:?} are both recorded as {recorded:?}, so one \
+                 boot's log cannot tell their verdicts apart"
+            );
+        }
+        files.push((format!("expect/{case}"), expected));
+        files.push((format!("bin/test_c_{case}"), data.clone()));
+        links.push((format!("bin/{case}"), format!("/system/bin/{CCHECK}")));
+        jobs.push(case.clone());
+    }
+    metal::SharedBoot {
+        boot: "ccorpus",
+        config: "tests/testcases",
+        params: &[],
+        features: &[],
+        jobs,
+        files,
+        links,
+    }
+}
+
+/// The comparator's own staged name. It is a `RUST_SKIP` helper, so discovery
+/// never makes a job of it and [`shared_metal`] stages it as one.
+const CCHECK: &str = "test_rs_ccheck";
 /// The job `log-close` runs after, and so the anchor its evidence is read from.
 const LOG_CLOSE_MARKER: &str = "test_rs_null_sink_client_exits";
 
@@ -17876,6 +17991,17 @@ fn assert_fast_profile_label(
 /// **A row for a name nothing registers is a metal test with no QEMU one**, and
 /// its verdict would be reported under a name no other tier can answer for.
 fn check_metal_registration() {
+    if let Err(why) = the_two_comparisons_use_one_rule() {
+        panic!("{why}");
+    }
+    for (case, _) in C_METAL_SKIP {
+        let at = compile::testcases_dir().join(format!("{case}.c"));
+        assert!(
+            at.is_file(),
+            "C_METAL_SKIP names {case:?}, which the corpus does not hold; a row for a case \
+             that is gone excludes nothing and hides that it is gone"
+        );
+    }
     devices::the_config_runs_exactly_these_jobs();
     let registered: BTreeSet<&str> = MACHINE_TESTS
         .iter()
@@ -18190,6 +18316,12 @@ fn main() {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
         eprintln!("[toyos] Building Rust tests...");
         let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
+        // The C corpus is compiled here rather than below, because the metal
+        // branch returns before the ordinary suite's own compile — and a boot
+        // that carries the corpus needs the binaries beside their expectations.
+        let c_names = discover_c_tests();
+        eprintln!("[toyos] Compiling {} C tests for the corpus boot...", c_names.len());
+        let c_bins = compile_c_tests(&c_names);
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
             .iter()
             .filter(|(name, _)| filter.is_none_or(|f| name.contains(f)))
@@ -18212,7 +18344,12 @@ fn main() {
                 mode,
                 &dir,
                 &selected,
-                &shared_metal(&rust_bins, |n| filter.is_none_or(|f| n.contains(f))),
+&{
+                    let keep = |n: &str| filter.is_none_or(|f| n.contains(f));
+                    let mut boots = shared_metal(&rust_bins, keep);
+                    boots.push(c_corpus_metal(&c_bins, keep));
+                    boots
+                },
                 &rust_bins,
                 RUST_SKIP,
                 !nocapture && !debug_mode,

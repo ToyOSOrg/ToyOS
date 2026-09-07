@@ -56,7 +56,11 @@ impl std::fmt::Display for Underived {
 /// `jobs` are the words the runner takes, in order; `reboot` is appended here
 /// rather than by every caller, because a list that did not end in one is a
 /// boot the loop waits 360 s for and then refuses.
-pub fn derive(config: &str, jobs: &[&str]) -> Result<String, Underived> {
+pub fn derive(
+    config: &str,
+    jobs: &[&str],
+    extra_links: &[(String, String)],
+) -> Result<String, Underived> {
     let mut root: Value = toml::from_str(config).map_err(|e| Underived::Toml(e.to_string()))?;
     let table = root.as_table_mut().ok_or_else(|| Underived::Toml("not a table".to_string()))?;
 
@@ -108,6 +112,12 @@ pub fn derive(config: &str, jobs: &[&str]) -> Result<String, Underived> {
         .as_table_mut()
         .ok_or_else(|| Underived::Toml("`symlinks` is not a table".to_string()))?;
     symlinks.insert(REBOOT_LINK.to_string(), Value::String(TOYBOX_PATH.to_string()));
+    // A boot whose jobs are reached through names of their own — the C corpus's
+    // one comparator, staged once and symlinked once per case, so the kernel
+    // records each run under the case's name and a stick says which one failed.
+    for (from, to) in extra_links {
+        symlinks.insert(from.clone(), Value::String(to.clone()));
+    }
 
     let mut out = String::from(
         "# Derived by `toyos_build::metalimage::derive` — not committed, not edited.\n\
@@ -130,7 +140,7 @@ mod tests {
     fn derived(dir: &str, jobs: &[&str]) -> String {
         let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir).join("system.toml");
         let text = std::fs::read_to_string(&at).expect("a committed boot config");
-        derive(&text, jobs).unwrap_or_else(|why| panic!("{}: {why}", at.display()))
+        derive(&text, jobs, &[]).unwrap_or_else(|why| panic!("{}: {why}", at.display()))
     }
 
     /// The whole point of the derivation, on every config it is asked of: the
@@ -187,13 +197,13 @@ mod tests {
     /// producing an image that parks the machine for 360 s.
     #[test]
     fn a_config_with_no_runner_is_refused_by_name() {
-        let refusal = derive("[boot]\nstart = [\"logd\"]\n", &[]).unwrap_err();
+        let refusal = derive("[boot]\nstart = [\"logd\"]\n", &[], &[]).unwrap_err();
         assert_eq!(refusal, Underived::NoRunner("does not start `test-runner`".to_string()));
         let said = refusal.to_string();
         assert!(said.contains("parks on a console nothing is on"), "{said}");
 
         let refusal =
-            derive("[boot]\nstart = [\"test-runner\"]\n[programs.logd]\n", &[]).unwrap_err();
+            derive("[boot]\nstart = [\"test-runner\"]\n[programs.logd]\n", &[], &[]).unwrap_err();
         assert!(matches!(refusal, Underived::NoRunner(_)), "{refusal:?}");
     }
 }
