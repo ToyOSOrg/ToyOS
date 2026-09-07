@@ -2,7 +2,7 @@
 //!
 //! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, turns translation on, remaps every interrupt source through a source-id-verified table entry, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
 //!
-//! The refusal is deliberately not yet built: landing it before any userspace driver exists would cost every machine and protect nothing.
+//! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`DeviceSpace::own`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory.
 //!
 //! `trait Iommu` is deliberately not added: with one backend it would have a single implementor.
 
@@ -153,7 +153,18 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One of a device's own, or the machine's own with the reason.
+    /// One of a device's own, or the reason there is none.
+    ///
+    /// The refusing form, for `pcidev`: a function a *process* drives must
+    /// never be handed a physical address, so a machine with no unit and a
+    /// machine out of domains are both answers its caller refuses the claim
+    /// with rather than degrading past.
+    pub fn own() -> Result<Self, IommuError> {
+        vtd::domain::create().map(Self::Own)
+    }
+
+    /// One of a device's own, or the machine's own with the reason. For a
+    /// driver **in this kernel**, whose addresses are the kernel's either way.
     pub fn create() -> Self {
         match vtd::domain::create() {
             Ok(id) => Self::Own(id),

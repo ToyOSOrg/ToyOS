@@ -475,7 +475,6 @@ impl<'pool> Virtqueue<'pool> {
     pub fn avail_addr(&self) -> u64 { self.avail.device_addr() }
     pub fn used_addr(&self) -> u64 { self.used.device_addr() }
 
-
     /// Where in the notification region this queue's doorbell sits; meaningless before `setup_queue` runs.
     pub fn notify_bytes(&self, multiplier: u32) -> u64 {
         self.notify_offset as u64 * multiplier as u64
@@ -618,7 +617,6 @@ impl<'pool> Virtqueue<'pool> {
         // Exact: `at_most` proved it is no more than `chain`, a `u32`.
         Ok((DescSlot(id), written as u32))
     }
-
 
     /// How many used-ring elements this queue has refused, for [`used_selftest`]
     /// alone: every case it stages would pass against a `poll_used` that

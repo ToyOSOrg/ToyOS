@@ -2022,7 +2022,7 @@ mod tests {
                 "debug-wait",
                 // Costs no kernel build, for `wake-fence-off`'s reason: only
                 // `kernel-loom` turns it on, and `device_irq` must red under it.
-                "device-irq-relaxed",
+                "device-irq-lossy",
                 // Does this kernel reach a pass, a trap or a syscall with the
                 // direction flag set. No gate clears `DF` and
                 // `compiler_builtins::mem::memmove` sets it across three `rep`

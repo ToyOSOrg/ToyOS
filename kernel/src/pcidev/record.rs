@@ -10,26 +10,56 @@
 //! scheduler pass that turns a message into a wake runs on the ISR's own CPU
 //! after it, so those two do not interleave.
 //!
-//! **The invariant is that a count carries a timestamp.** A record answering
-//! "two interrupts, at nanosecond zero" is a driver told its device spoke
-//! before the machine started, and the only thing between the two fields is one
-//! release edge — the count's — carrying the timestamp store before it.
+//! **The invariant is that every message is counted exactly once, and owes
+//! exactly one wake.** Both are read-modify-writes and neither is a load
+//! followed by a store: a reader that loaded a count and then cleared it drops
+//! every message the ISR recorded in between, and a driver that misses one
+//! waits for a device that has already spoken. No ordering carries anything
+//! across these words — each is the whole of what it says — so the orderings
+//! here are `Relaxed` and the model is about the interleaving.
 
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-// Kernel builds never enable `device-irq-relaxed`.
-#[cfg(not(feature = "device-irq-relaxed"))]
-const PUBLISH: Ordering = Ordering::Release;
-#[cfg(not(feature = "device-irq-relaxed"))]
-const OBSERVE: Ordering = Ordering::Acquire;
-#[cfg(feature = "device-irq-relaxed")]
-const PUBLISH: Ordering = Ordering::Relaxed;
-#[cfg(feature = "device-irq-relaxed")]
-const OBSERVE: Ordering = Ordering::Relaxed;
+/// Every word here is the whole of what it says and orders nothing else, so
+/// the only property is the interleaving — which `device-irq-lossy` is the
+/// control for and `kernel-loom` is the model of.
+const ORDER: Ordering = Ordering::Relaxed;
+
+/// The negative control: the two read-modify-writes become a load and a store,
+/// which is the whole of what this record's design is. Never on in a kernel
+/// build.
+#[cfg(feature = "device-irq-lossy")]
+macro_rules! take_word {
+    ($word:expr, $empty:expr) => {{
+        let held = $word.load(ORDER);
+        $word.store($empty, ORDER);
+        held
+    }};
+}
+#[cfg(not(feature = "device-irq-lossy"))]
+macro_rules! take_word {
+    ($word:expr, $empty:expr) => {
+        $word.swap($empty, ORDER)
+    };
+}
+
+#[cfg(feature = "device-irq-lossy")]
+macro_rules! bump {
+    ($word:expr) => {{
+        let held = $word.load(ORDER);
+        $word.store(held.wrapping_add(1), ORDER);
+    }};
+}
+#[cfg(not(feature = "device-irq-lossy"))]
+macro_rules! bump {
+    ($word:expr) => {
+        $word.fetch_add(1, ORDER)
+    };
+}
 
 /// What the ISR writes and the claim reads back.
 ///
@@ -37,13 +67,6 @@ const OBSERVE: Ordering = Ordering::Relaxed;
 pub struct Interrupt {
     /// Messages since the holder's last read.
     count: AtomicU32,
-    /// When the most recent of them was taken.
-    ///
-    /// **The most recent and not the first**: a field the ISR *overwrites* is
-    /// non-zero for every count a reader can observe, while one reserved for
-    /// the first of a set is cleared by the reader that took the set and leaves
-    /// the next count with nothing.
-    at_nanos: AtomicU64,
     /// Set by the ISR, cleared by the scheduler pass that turns it into a wake.
     /// Same CPU as the ISR and after it, so nothing here races.
     pending: AtomicBool,
@@ -59,7 +82,6 @@ impl Interrupt {
     pub const fn new() -> Self {
         Self {
             count: AtomicU32::new(0),
-            at_nanos: AtomicU64::new(0),
             pending: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
         }
@@ -71,7 +93,6 @@ impl Interrupt {
     pub fn new() -> Self {
         Self {
             count: AtomicU32::new(0),
-            at_nanos: AtomicU64::new(0),
             pending: AtomicBool::new(false),
             faulted: AtomicBool::new(false),
         }
@@ -80,53 +101,55 @@ impl Interrupt {
     /// Record one message. Called from the vector's ISR, so it takes no lock
     /// and allocates nothing.
     ///
-    /// The timestamp is stored **before** the count, whose store is the
-    /// release: a reader that sees the count has the timestamp that went with it.
-    pub fn took(&self, at_nanos: u64) {
-        self.at_nanos.store(at_nanos, Ordering::Relaxed);
-        self.count.fetch_add(1, PUBLISH);
-        self.pending.store(true, PUBLISH);
+    /// `fetch_add` and not a store: the reader may take the count between any
+    /// two of these, and what it took plus what is left has to be what arrived.
+    pub fn took(&self) {
+        bump!(self.count);
+        self.pending.store(true, ORDER);
     }
 
-    /// The messages since the last read and when the last of them landed, or
-    /// `None` for none.
-    pub fn take(&self) -> Option<(u32, u64)> {
-        let count = self.count.swap(0, OBSERVE);
-        if count == 0 {
-            return None;
+    /// The messages since the last read, or `None` for none.
+    ///
+    /// `swap` and not a load followed by a store: a message the ISR records
+    /// between the two would be cleared without ever having been counted.
+    pub fn take(&self) -> Option<u32> {
+        match take_word!(self.count, 0) {
+            0 => None,
+            count => Some(count),
         }
-        Some((count, self.at_nanos.load(Ordering::Relaxed)))
     }
 
     /// Whether a message is waiting, for a readiness check that consumes
     /// nothing.
     pub fn armed(&self) -> bool {
-        self.count.load(OBSERVE) != 0
+        self.count.load(ORDER) != 0
     }
 
     /// Whether a wake is owed, taken at most once per message. Answers `true`
     /// for the pass that owes it and `false` for every pass after.
+    ///
+    /// `swap` for the same reason as [`Self::take`]: two passes that both
+    /// loaded `true` would both wake one message's watchers.
     pub fn take_pending(&self) -> bool {
-        self.pending.swap(false, OBSERVE)
+        take_word!(self.pending, false)
     }
 
     /// The unit refused this function an access. Called from the fault handler,
     /// which takes no lock: one store, and every call the claim answers refuses
     /// from here on.
     pub fn fault(&self) {
-        self.faulted.store(true, PUBLISH);
+        self.faulted.store(true, ORDER);
     }
 
     pub fn faulted(&self) -> bool {
-        self.faulted.load(OBSERVE)
+        self.faulted.load(ORDER)
     }
 
     /// Back to the state a fresh slot is in, for a claim being minted or given
     /// up. The holder is not running at either point.
     pub fn clear(&self) {
-        self.count.store(0, Ordering::Relaxed);
-        self.at_nanos.store(0, Ordering::Relaxed);
-        self.pending.store(false, Ordering::Relaxed);
-        self.faulted.store(false, Ordering::Relaxed);
+        self.count.store(0, ORDER);
+        self.pending.store(false, ORDER);
+        self.faulted.store(false, ORDER);
     }
 }

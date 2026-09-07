@@ -290,7 +290,7 @@ actuators! {
     /// Give it a present context entry naming an empty second-level table, distinct from an absent context: passthrough would fault identically to the row above.
     iommu_empty_domain = "iommu-empty-domain";
 
-    /// Answer a claimed function's first DMA grant with the physical bytes NVMe's admin completion queue page ends with — an address in another driver's pool, which the claimed function's own domain does not map. Staged at the grant rather than in the driver, because the driver is a *process* now: what it does with an address it was handed is exactly what it does with a correct one, so this is a wrong descriptor without a wrong driver.
+    /// Answer a claimed function's first DMA grant with the physical bytes NVMe's admin completion queue page ends with — an address in another driver's pool, which the claimed function's own domain does not map.
     iommu_userdev_foreign_dma = "iommu-userdev-foreign-dma";
 
     /// Point a scanout backing at that same page, which the display's own domain does not map.

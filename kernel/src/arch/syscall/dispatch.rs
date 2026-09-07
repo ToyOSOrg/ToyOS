@@ -27,7 +27,7 @@ use super::HANDLE_LEN;
 use super::debug::{canary, debug_heap_alloc, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH, LOCK_ACROSS_SWITCH_ARMED};
 use super::device::{
     holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc,
-    sys_device_irq_mask, sys_device_reg, sys_gpu_reset_scanout,
+    sys_device_reg, sys_gpu_reset_scanout,
 };
 use super::fs::{
     sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink, sys_rename,
@@ -390,7 +390,6 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // allocation, so a bad address leaves no memory nobody was told of.
             sys_device_dma_alloc(&ctx, RawHandle(a1 as u32), a2, out)
         }
-        SYS_DEVICE_IRQ_MASK => sys_device_irq_mask(RawHandle(a1 as u32), a2),
         SYS_SYMLINK => {
             let target = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             let link = match ctx.user_str(UserAddr::new(a3), a4) { Ok(s) => s, Err(e) => return e.to_u64() };

@@ -10,14 +10,21 @@
 //! refused at the unit and recorded against that claim.
 //!
 //! **A window is 2 MiB because that is the only page this kernel maps.** A BAR
-//! a process may see is re-assigned onto a 2 MiB boundary above every address
-//! firmware handed out, where the rest of the page decodes to no function at
-//! all. [`place_bar`] is the mechanism and [`alone_in_its_page`] is the
-//! assertion that it worked — never the other way round.
+//! a process may see is re-assigned onto a 2 MiB boundary above everything
+//! firmware described; [`place_bar`] is the mechanism and [`alone_in_its_page`]
+//! is the assertion that it worked, never the other way round.
 //!
-//! **The BAR holding the MSI-X table or PBA is never mapped**: the vector in it
-//! is this kernel's, and a holder that could rewrite it could point the
-//! device's message at any address the LAPIC decodes.
+//! **The BAR holding the MSI-X table or PBA is never mapped**: a holder that
+//! could rewrite the table could point the device's message at any address the
+//! LAPIC decodes.
+//!
+//! **A function with no address space of its own is not handed over**, because
+//! every grant would answer with a physical address and a descriptor holding
+//! one is an arbitrary read and write over all of memory.
+//!
+//! **A function this kernel cannot reset is not handed over either**: what
+//! comes back from a process still holds the device addresses of a domain that
+//! no longer maps them.
 //!
 //! Nothing here is specific to what a function *is*.
 
@@ -29,14 +36,16 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use record::Interrupt;
+use toyos_abi::boot::MemoryMapEntry;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
-use toyos_pci::{bar, msix};
+use toyos_dma::Register;
+use toyos_pci::{bar, express, msix};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::PciDevice;
 use crate::inbox::InboxId;
-use crate::iommu::DeviceSpace;
+use crate::iommu::{DeviceSpace, IommuError};
 use crate::mm::paging::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
@@ -71,15 +80,26 @@ const PLATFORM_MMIO: u64 = 0xFEC0_0000;
 /// each.
 const WINDOW_SPAN: u64 = (MAX_FUNCTIONS * BARS) as u64 * PAGE_2M;
 
+/// A function's own configuration space, which is all a claim may read of it
+/// (PCIe base spec §7.2.2: 4 KiB per function under ECAM).
+const CONFIG_BYTES: u64 = 4096;
+
 static IRQ: [Interrupt; MAX_FUNCTIONS] = [const { Interrupt::new() }; MAX_FUNCTIONS];
+
+/// One address space per slot, made on that slot's first claim and kept.
+///
+/// Kept because a domain id is never given back (`iommu/vtd/domain.rs`), so a
+/// domain per claim would let a process spawn and die its way through every id
+/// the units report. [`release`] empties it, so the next holder attaches to one
+/// that maps nothing.
+static SPACE: [Lock<Option<DeviceSpace>>; MAX_FUNCTIONS] =
+    [const { Lock::new(None) }; MAX_FUNCTIONS];
 
 /// One granted buffer: the memory, and where the device reaches it.
 struct Grant {
-    /// **Why a dying driver cannot leave its device writing into memory
-    /// somebody else has been given.** The claim holds this `Arc` beside the
-    /// process's handle, so the pages outlive every handle the process had and
-    /// are freed by [`release`] — after bus mastering is off and after the
-    /// domain has given the address back.
+    /// Held so the pages outlive every handle the process had: they are freed
+    /// by [`release`], after bus mastering is off and the domain has given the
+    /// address back.
     #[expect(dead_code, reason = "the Arc is what keeps the pages alive past the process")]
     memory: Arc<SharedMemObject>,
     at: u64,
@@ -113,6 +133,13 @@ static WATCHERS: [Lock<Vec<InboxId>>; MAX_FUNCTIONS] =
 /// moved into.
 struct Machine {
     functions: Vec<PciDevice>,
+    /// Every memory BAR every function decodes, as `(requester, base, end)`.
+    ///
+    /// Recorded in [`publish`] and never re-derived: reading a BAR's *size*
+    /// means writing all-ones into it and reading back, with memory decode off
+    /// for the length of the probe — safe before any driver `init` and nothing
+    /// to do to a live function while a claim is being minted.
+    decoded: Vec<(u16, u64, u64)>,
     /// Requester ids the kernel's own drivers bound. A claim on one of them
     /// would be two drivers on one device.
     kernel_driven: Vec<u16>,
@@ -121,13 +148,19 @@ struct Machine {
     /// cannot hold an address a 64-bit one can.
     narrow: (u64, u64),
     wide: (u64, u64),
+    /// Functions this module has reset, and when each may be touched again
+    /// (PCIe §6.6.2). One entry per function ever released, so a re-claim
+    /// cannot start reading a register the reset has not finished with.
+    resetting: Vec<(u16, u64)>,
 }
 
 static MACHINE: Lock<Machine> = Lock::new(Machine {
     functions: Vec::new(),
+    decoded: Vec::new(),
     kernel_driven: Vec::new(),
     narrow: (0, 0),
     wide: (0, 0),
+    resetting: Vec::new(),
 });
 
 fn requester(pci: &PciDevice) -> u16 {
@@ -152,19 +185,39 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 ///
 /// **Before any driver `init`**, because the sizing probe below takes memory
 /// decode off the function it is probing for the length of the probe, and a
-/// driver mid-transfer must not meet that. Both floors are the highest address
-/// firmware assigned, rounded up: everything above is space no function decodes.
-pub fn publish(devices: &[PciDevice]) {
+/// driver mid-transfer must not meet that.
+///
+/// **Both floors are above everything firmware described**, which is every BAR
+/// it assigned *and* every entry of the memory map it handed the loader — RAM,
+/// its own runtime services, the ACPI regions and the fixed platform apertures
+/// alike. A floor derived from BARs alone would put a holder's 2 MiB window on
+/// whatever firmware had put there instead, and the only thing that would catch
+/// it is [`Refusal::Dead`], which cannot tell unrouted space from RAM.
+pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
     let mut narrow_end = 0u64;
     let mut wide_end = 0u64;
+    let mut decoded = Vec::new();
+    for entry in maps {
+        wide_end = wide_end.max(entry.end);
+        // Clamped rather than skipped: a region that starts below the platform's
+        // fixed MMIO and ends above it still covers every address a 32-bit
+        // window could take, and clamping is what makes that answer "no room".
+        if entry.start < PLATFORM_MMIO {
+            narrow_end = narrow_end.max(entry.end.min(PLATFORM_MMIO));
+        }
+    }
     for device in devices {
         let mut index = 0u8;
         while index <= bar::MAX_INDEX {
             let low = device.read_config_u32(bar::BASE + index as u64 * 4);
             let wide = matches!(bar::decode(index, low), Ok(bar::Width::Wide(_)));
             if let Ok(memory) = device.memory_bar(index) {
-                let size = device.bar_size(index).unwrap_or(0);
+                // At least one byte for a BAR that answers no size: a window
+                // may not start on top of an address something decodes, and
+                // an unknown length is not an empty one.
+                let size = device.bar_size(index).unwrap_or(0).max(1);
                 let end = memory.address().saturating_add(size);
+                decoded.push((requester(device), memory.address(), end));
                 if memory.address() < 1 << 32 {
                     narrow_end = narrow_end.max(end);
                 } else {
@@ -178,6 +231,7 @@ pub fn publish(devices: &[PciDevice]) {
     }
     let mut machine = MACHINE.lock();
     machine.functions = devices.to_vec();
+    machine.decoded = decoded;
     machine.narrow = window(narrow_end, PLATFORM_MMIO);
     machine.wide = window(wide_end, u64::MAX);
     log!(
@@ -211,6 +265,8 @@ fn window(assigned: u64, ceiling: u64) -> (u64, u64) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Refusal {
     NoMsix,
+    NoReset,
+    Untranslated(IommuError),
     NoWindow,
     BarUnsizable(u8),
     BarUnplaceable(u8),
@@ -224,6 +280,16 @@ impl core::fmt::Display for Refusal {
                 f,
                 "its MSI-X could not be armed, and a claim with no interrupt is a driver \
                  that would never be told anything"
+            ),
+            Self::NoReset => write!(
+                f,
+                "it advertises no function-level reset, so nothing could put it back into a \
+                 known state after the process driving it died"
+            ),
+            Self::Untranslated(why) => write!(
+                f,
+                "it would have no address space of its own — {why} — and a process driving \
+                 it would be given physical addresses to put in descriptors"
             ),
             Self::NoWindow => write!(
                 f,
@@ -286,12 +352,10 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
         Ok(bound) => {
             let info = PciFunctionInfo {
                 bar_bytes: bound.bar_bytes,
-                vendor: id.vendor,
-                device: id.device,
                 bus: pci.bus,
                 dev: pci.dev,
                 func: pci.func,
-                irq: 1,
+                _pad: [0; 5],
             };
             *BOUND[slot].lock() = Some(bound);
             IRQ[slot].clear();
@@ -327,6 +391,14 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
 /// bus before its domain existed would be reaching physical memory with
 /// whatever addresses its registers still held.
 fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
+    // **Before anything is spent on it**: a function this kernel cannot reset
+    // is one it cannot take back, so the last holder's queue addresses would
+    // still be programmed into it when the next holder attaches. `release`
+    // does the reset; this is the check that there will be one to do.
+    if !resettable(&pci) {
+        return Err(Refusal::NoReset);
+    }
+    settle_after_reset(&pci);
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.
     let table_bar = msix_bar(&pci);
@@ -362,8 +434,10 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     }
 
     // An address space holding this function's grants and nothing else,
-    // attached before it can issue a transaction of its own.
-    let space = DeviceSpace::create();
+    // attached before it can issue a transaction of its own — and a *refusal*
+    // where this machine has none to give, because the alternative is handing
+    // a process physical addresses to write into descriptors.
+    let space = slot_space(slot).map_err(Refusal::Untranslated)?;
     space.attach(pci.bus, pci.dev, pci.func);
     pci.start_bus_mastering();
 
@@ -377,6 +451,54 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
         bars: [const { None }; BARS],
         grants: Vec::new(),
     })
+}
+
+/// This slot's address space, made on its first claim.
+fn slot_space(slot: usize) -> Result<DeviceSpace, IommuError> {
+    let mut held = SPACE[slot].lock();
+    match *held {
+        Some(space) => Ok(space),
+        None => {
+            let space = DeviceSpace::own()?;
+            *held = Some(space);
+            Ok(space)
+        }
+    }
+}
+
+/// Whether this function implements the reset that puts it back into a known
+/// state (PCIe §7.5.3.3).
+fn resettable(pci: &PciDevice) -> bool {
+    let Some(cap) = pci.capabilities().find(|c| c.id() == express::CAP_ID) else {
+        return false;
+    };
+    express::resets(cap.read_u32(express::DEVICE_CAPABILITIES))
+}
+
+/// Start this function's own reset. Answers when the function may be touched
+/// again, which [`settle_after_reset`] spends rather than this.
+fn reset(pci: &PciDevice) -> Option<u64> {
+    let cap = pci.capabilities().find(|c| c.id() == express::CAP_ID)?;
+    let control = cap.read_u16(express::DEVICE_CONTROL);
+    cap.write_u16(express::DEVICE_CONTROL, express::initiate(control));
+    Some(crate::clock::nanos_since_boot() + express::SETTLE_NANOS)
+}
+
+/// Wait out whatever is left of a reset this kernel started on this function.
+///
+/// Spent here rather than in [`release`], where the process is already dying:
+/// a re-claim is the only thing that may touch the function again, and on every
+/// boot in reach the deadline is long past by the time one happens.
+fn settle_after_reset(pci: &PciDevice) {
+    let who = requester(pci);
+    let deadline = {
+        let machine = MACHINE.lock();
+        machine.resetting.iter().find(|(id, _)| *id == who).map(|(_, at)| *at)
+    };
+    let Some(deadline) = deadline else { return };
+    while crate::clock::nanos_since_boot() < deadline {
+        core::hint::spin_loop();
+    }
 }
 
 /// Which BAR holds this function's MSI-X table or PBA, if any.
@@ -463,23 +585,19 @@ fn take_window(wide: bool, span: u64) -> Option<u64> {
 /// module handing out an address it did not own.
 fn alone_in_its_page(claimed: &PciDevice, at: u64, span: u64) {
     let machine = MACHINE.lock();
-    for device in machine.functions.iter() {
-        if requester(device) == requester(claimed) {
+    let mine = requester(claimed);
+    for (who, address, end) in machine.decoded.iter() {
+        if *who == mine {
             continue;
         }
-        for index in 0..=bar::MAX_INDEX {
-            let Ok(memory) = device.memory_bar(index) else { continue };
-            let address = memory.address();
-            assert!(
-                address < at || address >= at + span,
-                "pcidev: the {span:#x}-byte window at {at:#x} holds PCI \
-                 {:02x}:{:02x}.{}'s BAR {index} at {address:#x} as well, and its holder \
-                 would be given that function's registers",
-                device.bus,
-                device.dev,
-                device.func,
-            );
-        }
+        // The whole extent, not the base: a BAR that starts below the window
+        // and reaches into it is the overlap this is for.
+        assert!(
+            *end <= at || *address >= at + span,
+            "pcidev: the {span:#x}-byte window at {at:#x} holds requester {who:#06x}'s \
+             {address:#x}..{end:#x} as well, and its holder would be given that \
+             function's registers",
+        );
     }
 }
 
@@ -497,6 +615,18 @@ pub fn release(slot: usize) {
     for grant in bound.grants.iter() {
         if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
             panic!("pcidev: slot {slot} could not take {:#x} back: {why}", grant.at);
+        }
+    }
+    // After the domain is empty and bus mastering is gone, so nothing the reset
+    // disturbs can reach memory: the function goes back to the state the next
+    // holder's `bring_up` expects, and the deadline is recorded rather than
+    // waited out here — this runs on a dying process's teardown.
+    if let Some(at) = reset(&bound.pci) {
+        let who = requester(&bound.pci);
+        let mut machine = MACHINE.lock();
+        match machine.resetting.iter_mut().find(|(id, _)| *id == who) {
+            Some(entry) => entry.1 = at,
+            None => machine.resetting.push((who, at)),
         }
     }
     IRQ[slot].clear();
@@ -576,6 +706,25 @@ pub fn dma_alloc(
     })
 }
 
+/// Take a grant back, for a caller that could not be given a handle to it.
+///
+/// **A partial success is not left behind.** Without this the grant would stay
+/// mapped in the function's domain and counted against [`MAX_GRANT_TOTAL`] with
+/// nothing naming it, so a caller that hit a full handle table once would be
+/// refused every later grant with no way back but dying.
+pub fn dma_undo(slot: usize) {
+    let _ = with_bound(slot, |bound| {
+        // The most recent, which is the one [`dma_alloc`] just pushed: the
+        // slot's lock is what makes "just" mean it, and the address the caller
+        // was *told* is not always the address the grant is at.
+        let Some(grant) = bound.grants.pop() else { return Ok(()) };
+        if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
+            panic!("pcidev: slot {slot} could not take {:#x} back: {why}", grant.at);
+        }
+        Ok(())
+    });
+}
+
 /// The address a grant answers with, or — for a claim's first grant, with the
 /// actuator armed — another driver's pool.
 ///
@@ -596,13 +745,10 @@ fn foreign_if_armed(first: bool, at: u64) -> u64 {
     at
 }
 
-/// Mask or unmask this function's message at the table the kernel keeps.
-pub fn set_irq_mask(slot: usize, masked: bool) -> Result<(), SyscallError> {
-    with_bound(slot, |bound| {
-        let control = if masked { msix::ENTRY_MASKED } else { msix::ENTRY_UNMASKED };
-        bound.entry.write_u32(msix::ENTRY_VECTOR_CONTROL, control);
-        Ok(())
-    })
+/// The window a claim's configuration reads are checked against, for the one
+/// caller that turns an offset from userland into a [`Register`].
+pub fn config_window(offset: u64, width: RegWidth) -> Result<Register, toyos_dma::RefusedRegister> {
+    toyos_dma::register(offset, width.bytes(), CONFIG_BYTES)
 }
 
 /// One dword, word or byte of this function's own config space.
@@ -611,28 +757,23 @@ pub fn set_irq_mask(slot: usize, masked: bool) -> Result<(), SyscallError> {
 /// registers without its capability chain, while every write config space takes
 /// — bus mastering, the BARs, the MSI-X control word — is a decision this module
 /// keeps.
-pub fn config_read(slot: usize, offset: u64, width: RegWidth) -> Result<u32, SyscallError> {
+///
+/// **Takes the witness and not an offset.** The number came from a caller, and
+/// [`Register`]'s only constructor is the check, so there is no way to reach
+/// the register file here with one nobody bounded.
+pub fn config_read(slot: usize, at: Register, width: RegWidth) -> Result<u32, SyscallError> {
     with_bound(slot, |bound| {
-        let bytes = width.bytes();
-        // A function's own header is 4 KiB and this reaches no further; an
-        // access that straddles the end, or is not aligned for its width, is a
-        // caller's bad argument rather than a wrap into the next function's.
-        if offset % bytes != 0 || offset + bytes > crate::mm::PAGE_SIZE {
-            return Err(SyscallError::InvalidArgument);
-        }
         Ok(match width {
-            RegWidth::U8 => bound.pci.read_config_u8(offset) as u32,
-            RegWidth::U16 => bound.pci.read_config_u16(offset) as u32,
-            RegWidth::U32 => bound.pci.read_config_u32(offset),
+            RegWidth::U8 => bound.pci.read_config_u8(at.offset()) as u32,
+            RegWidth::U16 => bound.pci.read_config_u16(at.offset()) as u32,
+            RegWidth::U32 => bound.pci.read_config_u32(at.offset()),
         })
     })
 }
 
 /// The interrupts since the last read, or `None` for none.
 pub fn take_record(slot: usize) -> Option<DeviceIrqRecord> {
-    IRQ[slot]
-        .take()
-        .map(|(count, at_nanos)| DeviceIrqRecord { count, _pad: 0, timestamp_nanos: at_nanos })
+    IRQ[slot].take().map(|count| DeviceIrqRecord { count })
 }
 
 pub fn has_irq(slot: usize) -> bool {
@@ -640,10 +781,10 @@ pub fn has_irq(slot: usize) -> bool {
 }
 
 /// Records one message. Called from the vector's ISR, so it takes no lock and
-/// allocates nothing; `record.rs` owns the ordering, and `kernel-loom` models
+/// allocates nothing; `record.rs` owns the counting, and `kernel-loom` models
 /// it against a concurrent reader.
-pub fn isr(slot: usize, timestamp_nanos: u64) {
-    IRQ[slot].took(timestamp_nanos);
+pub fn isr(slot: usize) {
+    IRQ[slot].took();
 }
 
 /// Turn every message taken since the last pass into a wake.
@@ -651,8 +792,8 @@ pub fn isr(slot: usize, timestamp_nanos: u64) {
 /// On the scheduler pass rather than in the ISR, like every other device in
 /// this kernel: a wake takes the inbox lock and an ISR may not.
 pub fn drain_pending() {
-    for slot in 0..MAX_FUNCTIONS {
-        if IRQ[slot].take_pending() {
+    for (slot, irq) in IRQ.iter().enumerate() {
+        if irq.take_pending() {
             crate::inbox::Source::PciFunction(slot as u8).wake();
         }
     }

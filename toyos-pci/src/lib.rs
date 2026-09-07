@@ -24,5 +24,6 @@
 
 pub mod bar;
 pub mod caps;
+pub mod express;
 pub mod msi;
 pub mod msix;

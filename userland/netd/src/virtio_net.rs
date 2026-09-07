@@ -87,7 +87,14 @@ const TX_QUEUE: u16 = 1;
 const RX_QUEUE_SIZE: u16 = 256;
 pub const RX_BUF_COUNT: usize = RX_QUEUE_SIZE as usize;
 pub const RX_BUF_SIZE: usize = 4096;
+/// One descriptor per transmit buffer, and the two counts are one number for
+/// the same reason the receive side's are: buffer `i` is published at head `i`
+/// and nowhere else, so a head this driver holds names a buffer nothing else
+/// is writing. Sixteen heads over one buffer would be sixteen aliases — smoltcp
+/// emits several frames per poll, and the device reads a descriptor whenever it
+/// likes.
 const TX_QUEUE_SIZE: u16 = 16;
+pub const TX_BUF_COUNT: usize = TX_QUEUE_SIZE as usize;
 pub const TX_BUF_SIZE: usize = 4096;
 /// The header virtio 1.0 puts in front of every frame, both directions: always
 /// twelve bytes with `VERSION_1`, `num_buffers` included (§5.1.6).
@@ -102,8 +109,8 @@ const OFF_RX_AVAIL: usize = 0x1000;
 const OFF_RX_USED: usize = 0x2000;
 const OFF_TX_RINGS: usize = 0x3000;
 const OFF_RX_BUFS: usize = 0x4000;
-const OFF_TX_BUF: usize = OFF_RX_BUFS + RX_BUF_COUNT * RX_BUF_SIZE;
-const GRANT_BYTES: u64 = (OFF_TX_BUF + TX_BUF_SIZE) as u64;
+const OFF_TX_BUFS: usize = OFF_RX_BUFS + RX_BUF_COUNT * RX_BUF_SIZE;
+const GRANT_BYTES: u64 = (OFF_TX_BUFS + TX_BUF_COUNT * TX_BUF_SIZE) as u64;
 
 const fn tx_avail_off() -> usize {
     (TX_QUEUE_SIZE as usize * DESC_BYTES + 1) & !1
@@ -120,6 +127,7 @@ const _: () = {
         USED_RING_OFF + RX_QUEUE_SIZE as usize * USED_ELEM_BYTES <= OFF_TX_RINGS - OFF_RX_USED
     );
     assert!(tx_used_off() + USED_RING_OFF + TX_QUEUE_SIZE as usize * USED_ELEM_BYTES <= 0x1000);
+    assert!(OFF_TX_RINGS + 0x1000 <= OFF_RX_BUFS);
     assert!(NET_HDR_SIZE < RX_BUF_SIZE && NET_HDR_SIZE < TX_BUF_SIZE);
 };
 
@@ -338,6 +346,8 @@ pub enum Refusal {
     /// The kernel refused a call this driver cannot work without, and the word
     /// is the kernel's own.
     Kernel(&'static str, SyscallError),
+    /// The claim answered a configuration read it had to refuse.
+    Unbounded(&'static str, u32),
 }
 
 impl std::fmt::Display for Refusal {
@@ -352,8 +362,45 @@ impl std::fmt::Display for Refusal {
             ),
             Self::NoVector(what) => write!(f, "it refused a vector for {what}"),
             Self::Kernel(call, why) => write!(f, "the kernel refused {call}: {why:?}"),
+            Self::Unbounded(what, at) => write!(
+                f,
+                "the claim answered a {what} at {at:#x}, so it is not a claim on one \
+                 function's own configuration space"
+            ),
         }
     }
+}
+
+/// The bound the capability walk rests on, asked once before the walk.
+///
+/// **The walk below indexes configuration space by numbers the *device* wrote**
+/// — the capability pointer and every `next` link in the chain — and it is safe
+/// only because a claim answers its own function's 4 KiB and nothing else. That
+/// is the kernel's contract, so this is where the driver that depends on it
+/// checks it: a read past the end, one that straddles the end, and one not
+/// aligned for its own width are all refused, and the first byte is not.
+///
+/// The offset that *wraps* its own width is not asked here because it cannot be
+/// expressed: `PciDev::config_read` takes a `u32`. It is answered where the
+/// arithmetic lives, in `toyos-dma`'s host tests.
+fn config_space_is_bounded(dev: &PciDev) -> Result<(), Refusal> {
+    const CONFIG_BYTES: u32 = 4096;
+    for (what, at, width) in [
+        ("read past its configuration space", CONFIG_BYTES, RegWidth::U8),
+        ("read straddling the end of it", CONFIG_BYTES - 2, RegWidth::U32),
+        ("misaligned read", 1, RegWidth::U16),
+    ] {
+        if dev.config_read(at, width).is_ok() {
+            return Err(Refusal::Unbounded(what, at));
+        }
+    }
+    // And the bound is a bound rather than a wall: the vendor id is still there.
+    dev.config_read(0, RegWidth::U16).map_err(|e| Refusal::Kernel("its vendor id", e))?;
+    crate::say!(
+        "netd: this claim answers {CONFIG_BYTES} bytes of configuration space and refuses \
+         every access outside them"
+    );
+    Ok(())
 }
 
 /// The virtio-net function, brought up and driving.
@@ -376,6 +423,10 @@ pub struct VirtioNet {
     /// Frames dropped for want of one. A count and not a wait: a server never
     /// blocks, and a dropped frame's recovery is the peer's retransmit.
     tx_dropped: Cell<u32>,
+    /// Where a dropped frame is written. Ordinary memory outside the grant, so
+    /// no device can reach it: smoltcp's token has to be given somewhere to put
+    /// its bytes even when there is no head to send them on.
+    dropped: RefCell<Vec<u8>>,
     /// What `report_refusals` last said, so it says it again only on a change.
     reported: Cell<(u32, u32)>,
     mac: [u8; 6],
@@ -388,6 +439,7 @@ impl VirtioNet {
     pub fn open(dev: PciDev) -> Result<Self, Refusal> {
         let info = dev.describe().map_err(|e| Refusal::Kernel("the claim's description", e))?;
 
+        config_space_is_bounded(&dev)?;
         let caps = Capabilities::walk(&dev);
         let common_cap = caps.find(CAP_COMMON_CFG).ok_or(Refusal::MissingCap("COMMON_CFG"))?;
         let notify_cap = caps.find(CAP_NOTIFY_CFG).ok_or(Refusal::MissingCap("NOTIFY_CFG"))?;
@@ -539,6 +591,7 @@ impl VirtioNet {
             tx: RefCell::new(tx),
             tx_free: RefCell::new((0..TX_QUEUE_SIZE).rev().collect()),
             tx_dropped: Cell::new(0),
+            dropped: RefCell::new(vec![0; TX_BUF_SIZE]),
             reported: Cell::new((0, 0)),
             mac,
         };
@@ -651,40 +704,44 @@ impl VirtioNet {
         unsafe { std::slice::from_raw_parts(window.base as *const u8, len) }
     }
 
-    /// The transmit buffer, past the virtio header, for a frame of `len` bytes.
-    pub fn tx_frame(&self, len: usize) -> &mut [u8] {
+    /// Fill a transmit buffer with a `len`-byte frame and hand it to the device.
+    ///
+    /// **The buffer is the head's own and the two are taken together**, so
+    /// nothing is written into a buffer the device is reading: a head leaves
+    /// `tx_free` only here and comes back only in [`Self::reclaim_tx`], which
+    /// the device's used ring is what drives.
+    ///
+    /// Non-blocking. A frame with no head free is written into the scratch
+    /// buffer and dropped — **a server never blocks**, smoltcp's token cannot
+    /// say no, and a dropped frame's recovery is the peer's retransmit;
+    /// spinning on the used ring here would park netd on a device.
+    pub fn tx<R>(&self, len: usize, fill: impl FnOnce(&mut [u8]) -> R) -> R {
         assert!(
             NET_HDR_SIZE + len <= TX_BUF_SIZE,
             "netd: a {len}-byte frame does not fit this NIC's transmit buffer"
         );
-        let window = self.dma.sub(OFF_TX_BUF + NET_HDR_SIZE, len);
-        // SAFETY: the window is inside the grant, which lives as long as
-        // `self`; the device is not reading it, because `tx` publishes the
-        // descriptor only after this borrow ends.
-        unsafe { std::slice::from_raw_parts_mut(window.base, len) }
-    }
-
-    /// Hand the transmit buffer's first `len` frame bytes to the device.
-    ///
-    /// Non-blocking, and `false` is a frame dropped for want of a head. **A
-    /// server never blocks**, and a dropped frame's recovery is the peer's
-    /// retransmit; spinning on the used ring here would park netd on a device.
-    pub fn tx(&self, len: usize) -> bool {
         self.reclaim_tx();
         let Some(head) = self.tx_free.borrow_mut().pop() else {
             self.tx_dropped.set(self.tx_dropped.get().saturating_add(1));
             self.report_refusals();
-            return false;
+            return fill(&mut self.dropped.borrow_mut()[..len]);
         };
-        self.dma.sub(OFF_TX_BUF, NET_HDR_SIZE).zero();
+        let at = OFF_TX_BUFS + head as usize * TX_BUF_SIZE;
+        // The header is this driver's and zeroed before the frame goes in.
+        self.dma.sub(at, NET_HDR_SIZE).zero();
+        let window = self.dma.sub(at + NET_HDR_SIZE, len);
+        // SAFETY: the window is inside the grant, which lives as long as
+        // `self`; the device is not reading it, because this head is out of
+        // `tx_free` and its descriptor is published only after `fill` returns.
+        let result = fill(unsafe { std::slice::from_raw_parts_mut(window.base, len) });
         self.tx.borrow_mut().submit(
             head,
-            self.dma_device_addr + OFF_TX_BUF as u64,
+            self.dma_device_addr + at as u64,
             (NET_HDR_SIZE + len) as u32,
             false,
             self.tx_doorbell,
         );
-        true
+        result
     }
 
     /// Take back every transmit head the device has finished with.
@@ -854,26 +911,5 @@ mod tests {
             queue.parse_used(3, u32::MAX),
             Err(UsedRefusal::Written { id: 3, len: u32::MAX, chain: 100 })
         );
-    }
-
-    /// The layout the const assertions above check, restated as arithmetic a
-    /// reader can follow: nothing overlaps, and everything is inside the grant.
-    #[test]
-    fn the_grant_holds_every_ring_and_buffer_without_overlap() {
-        assert!(OFF_RX_DESC + RX_QUEUE_SIZE as usize * DESC_BYTES <= OFF_RX_AVAIL);
-        assert!(OFF_RX_AVAIL + AVAIL_RING_OFF + RX_QUEUE_SIZE as usize * 2 <= OFF_RX_USED);
-        assert!(
-            OFF_RX_USED + USED_RING_OFF + RX_QUEUE_SIZE as usize * USED_ELEM_BYTES
-                <= OFF_TX_RINGS
-        );
-        assert!(
-            OFF_TX_RINGS
-                + tx_used_off()
-                + USED_RING_OFF
-                + TX_QUEUE_SIZE as usize * USED_ELEM_BYTES
-                <= OFF_RX_BUFS
-        );
-        assert_eq!(OFF_TX_BUF, OFF_RX_BUFS + RX_BUF_COUNT * RX_BUF_SIZE);
-        assert!(GRANT_BYTES as usize >= OFF_TX_BUF + TX_BUF_SIZE);
     }
 }

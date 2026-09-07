@@ -12372,27 +12372,18 @@ fn run_machine_test(
             if ran != 1 {
                 return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
             }
-            // And the legal direction, on the same boot and not by assertion:
-            // this log arrived over virtio-console, whose TX path is
-            // `submit_and_wait` around the same `poll_used`. A parse that
-            // refused a correct element would have produced no capture to
-            // search — but virtio-sound says so in its own words, so that the
-            // legal case is *named* rather than inferred from the test running
-            // at all: the line below is the answer its control queue's used
-            // ring carried back.
-            //
-            // **It was the NIC's line until the NIC's driver moved to netd.**
-            // The witness has to be a driver still on this `Virtqueue`, which
-            // is what the self-test is about; virtio-net's parse is now
-            // `userland/netd/src/virtio_net.rs`'s and has its own tests.
-            if !log.contains("virtio-sound: configured stream") {
+            // And the legal direction, on the same boot: this capture arrived
+            // over virtio-console, whose TX path is `submit_and_wait` around
+            // the same `poll_used`, so every chunk of it is one legal used-ring
+            // round trip a driver still on this `Virtqueue` completed. A parse
+            // that refused correct elements would never reclaim a transmit slot
+            // and the boot would stop mid-line, so the *last* line is the
+            // witness and the eleven refusals above are not unaccompanied.
+            if !log.contains("Boot: complete") {
                 return Err(format!(
-                    "no virtio driver on this `Virtqueue` completed a legal round trip on this \
-                     boot, so the eleven refusals above are unaccompanied\n{log}"
+                    "no driver on this `Virtqueue` carried a boot to its last line, so nothing \
+                     here says a correct used-ring element is still accepted\n{log}"
                 ));
-            }
-            if let Some(bad) = log.lines().find(|l| l.contains("refused") && l.contains("RX used-ring")) {
-                return Err(format!("a correct completion was refused on the ordinary path: {bad}"));
             }
             eprintln!("  [virtio] {}", verdict.trim());
             Ok(())

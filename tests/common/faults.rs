@@ -265,9 +265,9 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     // netd is spawned before the ready marker and speaks after it, so its line
     // is drained for rather than read out of the boot capture. **What is waited
     // for is the whole line and not a prefix naming the program**: init reports
-    // the claim it could not make as `init: netd: no nic on this machine
-    // (NotFound)`, and that is already in the boot capture before netd has run
-    // at all, so a `"netd: "` predicate is satisfied by the wrong speaker.
+    // the claim it could not make as `init: netd: ...`, and that is already in
+    // the boot capture before netd has run at all, so a `"netd: "` predicate is
+    // satisfied by the wrong speaker.
     const NETD_EXITS: &str = "netd: no NIC on this machine, exiting";
     let mut text = qemu.boot_log().to_string();
     let stalled =
@@ -291,9 +291,12 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     // can be given one.
     log.must_not_say("pcidev: PCI 00:03.0 BAR")?;
     // All the way out to userland, rather than a kernel that logged a refusal
-    // and handed netd a NIC anyway. init names what it could not mint, in the
-    // config's own spelling.
-    log.must_say("init: netd: no pci:1af4:1041 on this machine")?;
+    // and handed netd a NIC anyway. init names what it could not mint in the
+    // config's own spelling, and **with this refusal's own word**: the machine
+    // has the function, so "no such device on this machine" would be false.
+    log.must_say(
+        "init: netd: pci:1af4:1041 is on this machine and could not be handed over",
+    )?;
     if !log.text().contains(NETD_EXITS) {
         return Err(format!(
             "{}{NETD_EXITS:?} never reached the boot console:\n{}",

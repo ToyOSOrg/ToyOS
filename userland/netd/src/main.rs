@@ -118,11 +118,10 @@ impl phy::TxToken for DmaTxToken<'_> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let result = f(self.nic.tx_frame(len));
-        // A refused transmit is a frame dropped for want of a head, which is
-        // the peer's retransmit to recover — smoltcp's token cannot say no.
-        let _ = self.nic.tx(len);
-        result
+        // Filling and sending are one call, because the buffer belongs to the
+        // head the driver picks: a frame written before a head was taken would
+        // be written into a buffer the device may still be reading.
+        self.nic.tx(len, f)
     }
 }
 

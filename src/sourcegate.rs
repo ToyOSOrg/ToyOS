@@ -211,6 +211,10 @@ const BANS: &[Ban] = &[
             ("kernel/src/iommu/vtd/mod.rs", 1),
             // The export itself, and the one place the literal lives.
             ("kernel/src/mm/mod.rs", 1),
+            // A PCI function's own configuration space is 4 KiB by PCIe
+            // §7.2.2, not by this kernel's page size; the two agreeing here is
+            // a coincidence and a claim's bound may not move with the page.
+            ("kernel/src/pcidev/mod.rs", 1),
         ],
     },
     Ban {

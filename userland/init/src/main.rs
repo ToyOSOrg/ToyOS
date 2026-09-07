@@ -43,7 +43,8 @@ use toyos::port::{self, Acceptor, Connector};
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::syscall::{
-    DeviceRequest, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
+    DeviceRequest, SyscallError, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL,
+    SYSCAP_LABEL,
 };
 
 /// The service init answers on. Its own, so it has no `[programs]` row and the
@@ -516,6 +517,31 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
 /// a terminal's `surface`. They are added *to* the manifest's row rather than
 /// replacing it, and a caller could only transfer what it already held, so a
 /// launch confers the row and nothing beyond it.
+/// What init says about a device it could not mint a claim for.
+///
+/// One arm per refusal the kernel distinguishes (`kernel/src/device.rs`'s
+/// `ClaimError`, through the codes `sys_device_claim` answers with). The last
+/// arm is not a default: it is the answer for a code this call does not
+/// produce, and it prints the code rather than inventing a reason.
+fn refused(name: &str, why: SyscallError) -> String {
+    match why {
+        SyscallError::NotFound => format!("no {name} on this machine"),
+        SyscallError::AlreadyExists => format!("{name} is already claimed"),
+        SyscallError::InvalidArgument => {
+            format!("{name} names more than one function on this machine")
+        }
+        SyscallError::PermissionDenied => {
+            format!("{name} is driven by the kernel and cannot be claimed")
+        }
+        SyscallError::ResourceExhausted => format!("no claim slot is free for {name}"),
+        SyscallError::NotSupported => {
+            format!("{name} is on this machine and could not be handed over; the kernel's \
+                     `pcidev:` line says why")
+        }
+        other => format!("{name} was refused with {other:?}"),
+    }
+}
+
 fn start<'a>(
     mut command: Command,
     program: &Program,
@@ -597,7 +623,11 @@ fn start<'a>(
                 command.endow(&format!("{DEV_PREFIX}{name}"), raw.0);
                 held.0.push(raw);
             }
-            Err(e) => say!("init: {}: no {name} on this machine ({e:?})", program.name),
+            // Each refusal keeps the word the kernel gave it. "This machine
+            // has none" is a configuration and every other answer is a fault,
+            // and one sentence for all six sends whoever reads the line looking
+            // in the wrong place.
+            Err(e) => say!("init: {}: {}", program.name, refused(name, e)),
         }
     }
 

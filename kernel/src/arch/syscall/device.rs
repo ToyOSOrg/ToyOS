@@ -80,7 +80,14 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
             let read = match target {
                 RegTarget::Hda => crate::drivers::hda::reg_read(offset, width),
                 RegTarget::VirtioSound => crate::drivers::virtio_sound::reg_read(offset, width),
-                RegTarget::PciConfig(slot) => crate::pcidev::config_read(slot, offset, width),
+                // The one place a caller's offset becomes an access: the
+                // witness `pcidev::config_window` answers is the only thing
+                // the register read takes, so an unchecked number cannot
+                // reach the register file.
+                RegTarget::PciConfig(slot) => match crate::pcidev::config_window(offset, width) {
+                    Ok(at) => crate::pcidev::config_read(slot, at, width),
+                    Err(_) => Err(SyscallError::InvalidArgument),
+                },
             };
             match read {
                 Ok(v) => v as u64,
@@ -200,11 +207,13 @@ pub(super) fn sys_device_dma_alloc(
     });
     let shm = match installed {
         Ok(handle) => handle,
-        // The grant stays mapped in the function's domain and is released with
-        // the claim: a table too full to hold its handle is the caller's
-        // problem, and taking the mapping back here would need the slot lock a
-        // second time for nothing.
-        Err(e) => return e.to_u64(),
+        // The grant goes back rather than staying mapped with nothing naming
+        // it: a caller left holding neither the handle nor the quota would be
+        // refused every later grant with no way out but dying.
+        Err(e) => {
+            crate::pcidev::dma_undo(slot);
+            return e.to_u64();
+        }
     };
     window.write_at(
         0,
@@ -229,18 +238,6 @@ fn grant_bytes(grant: &toyos_abi::pci::DmaGrant) -> &[u8] {
             grant as *const _ as *const u8,
             core::mem::size_of::<toyos_abi::pci::DmaGrant>(),
         )
-    }
-}
-
-/// Mask or unmask a claimed function's interrupt at the table the kernel keeps.
-pub(super) fn sys_device_irq_mask(handle: RawHandle, masked: u64) -> u64 {
-    let slot = match pci_slot(handle) {
-        Ok(slot) => slot,
-        Err(e) => return e.refuse(),
-    };
-    match crate::pcidev::set_irq_mask(slot, masked != 0) {
-        Ok(()) => 0,
-        Err(e) => e.to_u64(),
     }
 }
 

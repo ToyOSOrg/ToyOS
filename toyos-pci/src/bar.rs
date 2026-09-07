@@ -127,7 +127,7 @@ pub fn placement(index: u8, low: u32, address: u64, size: u64) -> Result<Placeme
     if size == 0 || !size.is_power_of_two() {
         return Err(Unusable::Misaligned { address, size });
     }
-    if address % size != 0 {
+    if !address.is_multiple_of(size) {
         return Err(Unusable::Misaligned { address, size });
     }
     let flags = low & !MEMORY_ADDRESS;

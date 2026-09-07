@@ -1,8 +1,8 @@
 //! The vectors a PCI function a *process* drives delivers on.
 //!
 //! One per claim slot, because the slot is what the kernel needs to know: the
-//! count and the timestamp go to that slot's own record, and the wake it earns
-//! goes to that slot's watchers and nobody else's. A single shared vector would
+//! count goes to that slot's own record, and the wake it earns goes to that
+//! slot's watchers and nobody else's. A single shared vector would
 //! wake every user driver in the machine on any of their interrupts, which is
 //! one process learning when another's device is busy.
 //!
@@ -14,9 +14,8 @@ use crate::irq_ring::IrqSource;
 
 fn took(slot: usize) {
     crate::irq_census::irq_took!(UserDev);
-    let timestamp = crate::clock::nanos_since_boot();
-    crate::pcidev::isr(slot, timestamp);
-    crate::irq_ring::isr_publish(IrqSource::UserDev, timestamp);
+    crate::pcidev::isr(slot);
+    crate::irq_ring::isr_publish(IrqSource::UserDev, crate::clock::nanos_since_boot());
     // Force resched now, so `drain_irqs` turns the record into a wake before
     // the next quantum tick rather than after it.
     crate::preempt::set_need_resched();

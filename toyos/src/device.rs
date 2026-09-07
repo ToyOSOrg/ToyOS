@@ -158,10 +158,9 @@ impl PciDev {
 
     /// The interrupts since the last read, or `Err(WouldBlock)` for none.
     pub fn irq(&self) -> Result<toyos_abi::pci::DeviceIrqRecord, SyscallError> {
-        let mut record =
-            toyos_abi::pci::DeviceIrqRecord { count: 0, _pad: 0, timestamp_nanos: 0 };
+        let mut record = toyos_abi::pci::DeviceIrqRecord { count: 0 };
         // SAFETY: the slice covers exactly the record being filled, and every
-        // bit pattern of its three integer fields is a valid one.
+        // bit pattern of its one integer field is a valid one.
         let buf = unsafe {
             core::slice::from_raw_parts_mut(
                 &mut record as *mut _ as *mut u8,
@@ -175,12 +174,6 @@ impl PciDev {
             "partial device interrupt record ({n} bytes)"
         );
         Ok(record)
-    }
-
-    /// Mask or unmask this function's interrupt at the MSI-X table the kernel
-    /// keeps; the window this claim maps does not contain it.
-    pub fn mask_irq(&self, masked: bool) -> Result<(), SyscallError> {
-        syscall::device_irq_mask(self.0.as_handle(), masked)
     }
 }
 
