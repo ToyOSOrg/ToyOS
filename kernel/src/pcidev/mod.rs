@@ -22,9 +22,14 @@
 //! every grant would answer with a physical address and a descriptor holding
 //! one is an arbitrary read and write over all of memory.
 //!
-//! **A function this kernel cannot reset is not handed over either**: what
+//! **A function masters the bus only once it has memory it may reach.** What
 //! comes back from a process still holds the device addresses of a domain that
-//! no longer maps them.
+//! no longer maps them, so bus mastering is not started at hand-over: it starts
+//! on the claim's first grant, after that grant is in the function's domain.
+//! Between the two the function can issue no transaction at all, whatever its
+//! registers still say. `release` also asks the function for a reset where it
+//! advertises one (PCIe §6.6.2), which no device in reach does — so the order
+//! above is the mechanism and the reset is the belt.
 //!
 //! Nothing here is specific to what a function *is*.
 
@@ -121,6 +126,10 @@ struct Bound {
     /// object rather than a second handle to one window.
     bars: [Option<Arc<SharedMemObject>>; BARS],
     grants: Vec<Grant>,
+    /// Whether this function may issue a transaction yet. False until its first
+    /// grant is in its domain, so a function carrying a previous holder's queue
+    /// addresses can act on none of them.
+    mastering: bool,
 }
 
 static BOUND: [Lock<Option<Bound>>; MAX_FUNCTIONS] =
@@ -265,7 +274,6 @@ fn window(assigned: u64, ceiling: u64) -> (u64, u64) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Refusal {
     NoMsix,
-    NoReset,
     Untranslated(IommuError),
     NoWindow,
     BarUnsizable(u8),
@@ -280,11 +288,6 @@ impl core::fmt::Display for Refusal {
                 f,
                 "its MSI-X could not be armed, and a claim with no interrupt is a driver \
                  that would never be told anything"
-            ),
-            Self::NoReset => write!(
-                f,
-                "it advertises no function-level reset, so nothing could put it back into a \
-                 known state after the process driving it died"
             ),
             Self::Untranslated(why) => write!(
                 f,
@@ -391,13 +394,8 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
 /// bus before its domain existed would be reaching physical memory with
 /// whatever addresses its registers still held.
 fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
-    // **Before anything is spent on it**: a function this kernel cannot reset
-    // is one it cannot take back, so the last holder's queue addresses would
-    // still be programmed into it when the next holder attaches. `release`
-    // does the reset; this is the check that there will be one to do.
-    if !resettable(&pci) {
-        return Err(Refusal::NoReset);
-    }
+    // Whatever is left of a reset [`release`] started on this function, before
+    // a register of it is read (PCIe §6.6.2).
     settle_after_reset(&pci);
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.
@@ -439,8 +437,13 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // a process physical addresses to write into descriptors.
     let space = slot_space(slot).map_err(Refusal::Untranslated)?;
     space.attach(pci.bus, pci.dev, pci.func);
-    pci.start_bus_mastering();
 
+    // **Bus mastering is deliberately not started here.** A function this
+    // kernel handed out before may still hold the queue addresses its last
+    // holder programmed, and this machine's devices advertise no reset to
+    // clear them with; a function that cannot master the bus cannot act on
+    // them. It starts on the first grant, which is the first moment there is
+    // anything it may legally reach.
     Ok(Bound {
         pci,
         space,
@@ -450,6 +453,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
         bar_bytes,
         bars: [const { None }; BARS],
         grants: Vec::new(),
+        mastering: false,
     })
 }
 
@@ -466,19 +470,17 @@ fn slot_space(slot: usize) -> Result<DeviceSpace, IommuError> {
     }
 }
 
-/// Whether this function implements the reset that puts it back into a known
-/// state (PCIe §7.5.3.3).
-fn resettable(pci: &PciDevice) -> bool {
-    let Some(cap) = pci.capabilities().find(|c| c.id() == express::CAP_ID) else {
-        return false;
-    };
-    express::resets(cap.read_u32(express::DEVICE_CAPABILITIES))
-}
-
-/// Start this function's own reset. Answers when the function may be touched
-/// again, which [`settle_after_reset`] spends rather than this.
+/// Start this function's own reset, where it advertises one (PCIe §7.5.3.3),
+/// and answer when it may be touched again.
+///
+/// `None` for a function that advertises none — which every device this project
+/// has in reach does, so nothing rests on this: what makes a re-claim safe is
+/// that bus mastering starts on the first grant and not at hand-over.
 fn reset(pci: &PciDevice) -> Option<u64> {
     let cap = pci.capabilities().find(|c| c.id() == express::CAP_ID)?;
+    if !express::resets(cap.read_u32(express::DEVICE_CAPABILITIES)) {
+        return None;
+    }
     let control = cap.read_u16(express::DEVICE_CONTROL);
     cap.write_u16(express::DEVICE_CONTROL, express::initiate(control));
     Some(crate::clock::nanos_since_boot() + express::SETTLE_NANOS)
@@ -702,6 +704,12 @@ pub fn dma_alloc(
             .unwrap_or_else(|why| panic!("pcidev: slot {slot} could not map a grant: {why}"));
         let first = bound.grants.is_empty();
         bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span });
+        // After the mapping and never before: the first thing this function may
+        // reach has to exist before it may reach anything.
+        if !bound.mastering {
+            bound.pci.start_bus_mastering();
+            bound.mastering = true;
+        }
         Ok((memory, foreign_if_armed(first, at), span))
     })
 }

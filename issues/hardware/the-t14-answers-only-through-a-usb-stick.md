@@ -40,8 +40,12 @@ Constraints a reader would otherwise pay to re-derive:
 - The I219 has **32-bit BARs**, and `pcidev`'s window allocator has only ever
   placed a 64-bit one: `Refusal::NoWindow` on that machine means nothing was
   found above everything firmware described and below the platform's fixed MMIO.
-- A function that advertises no PCIe function-level reset is refused
-  (`Refusal::NoReset`), because nothing else can put it back into a known state
-  when the process driving it dies.
+- **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
+  function-level reset** — measured, not assumed: `pcidev`'s refusal on that
+  ground reddened every netd registration at once. So a re-claim is made safe by
+  ordering instead: bus mastering starts on the claim's **first grant**, never at
+  hand-over, so a function still holding its last holder's queue addresses can
+  act on none of them. `release` asks for a reset where the function advertises
+  one; the I219 does, so on the T14 both hold.
 - The metal loop is `toyos-metal` (`src/metal.rs`), and the T14 is run by the
   orchestrator alone.

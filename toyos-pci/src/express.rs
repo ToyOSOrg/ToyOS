@@ -6,9 +6,10 @@
 //! left it.** Its queues are still programmed with device addresses of a domain
 //! that no longer maps them, and its own status register still says a driver is
 //! attached. The only reset that means the same thing on every function is the
-//! one the function itself implements, and a function that does not implement
-//! it is one this kernel cannot promise anything about — so the answer here is
-//! a refusal rather than a best effort.
+//! one the function itself implements — and QEMU's virtio functions implement
+//! none, so `pcidev` does not rest on this: what makes a re-claim safe there is
+//! that bus mastering starts on the first grant. This is the belt, taken where
+//! a function offers it.
 
 /// This capability's id in a function's capability list.
 pub const CAP_ID: u8 = 0x10;
