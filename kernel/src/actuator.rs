@@ -157,6 +157,14 @@ actuators! {
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
+    /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
+    /// and never gives back: the negative control on `crate::hardlockup`, and a
+    /// machine nothing else in this tree ends. Where CPUID states no
+    /// performance counter it also has one CPU send the victim the NMI the
+    /// counter would have, which is the only way a TCG guest reaches that
+    /// decision; on hardware the counter does it and nothing is sent.
+    hard_lockup_probe = "hard-lockup-probe";
+
     /// Storm the CPU spinning on `syscall` from Ring 3 with NMIs.
     syscall_window_nmi = "syscall-window-nmi";
 
@@ -388,6 +396,11 @@ const IMPLIES: &[(&str, &[&str])] = &[
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
     ("syscall-window-nmi", &["diag-tick"]),
+    // The staged CPU has to still be deaf when its bound passes, and this boot
+    // would otherwise have handed the machine back at the end of its job list —
+    // so the control that ends a machine no other bound ends is staged over the
+    // one that stops this machine ending itself.
+    ("hard-lockup-probe", &["wedge-before-reset"]),
 ];
 
 #[cfg(feature = "boot-actuators")]

@@ -32,6 +32,20 @@ pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
 /// a boot merely slower than its bound, which is what makes that control one.
 pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
 
+/// What one CPU's own NMI writes into the black box when that CPU has taken no
+/// interrupt for its bound, in `kernel/src/hardlockup/mod.rs`.
+///
+/// The *other* record a machine that stopped can leave, and which of the two it
+/// left is most of the verdict: [`DEADLINE_EXPIRED`] is a machine that still
+/// took interrupts somewhere and stopped making progress, this one names the
+/// cpu that stopped taking them and where it was standing when it did.
+pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
+
+/// What the `hard-lockup-probe` actuator says before its cpu stops answering,
+/// in `kernel/src/hardlockup/probe.rs` — the witness in the sealed record's tail
+/// that this machine was ended by the control that was staged on it.
+pub const LOCKUP_STAGED: &str = "hard-lockup: staged, and only the lockup detector ends this cpu";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
@@ -294,6 +308,11 @@ mod tests {
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
+            ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
+            (
+                "kernel/src/hardlockup/probe.rs",
+                format!("PROBE_STAGED: &str = \"{LOCKUP_STAGED}\""),
+            ),
         ] {
             let at = root.join(file);
             let source = std::fs::read_to_string(&at).expect("a kernel module");

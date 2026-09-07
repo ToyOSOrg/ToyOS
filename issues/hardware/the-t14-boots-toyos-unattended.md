@@ -77,12 +77,26 @@ What is left to build:
   passes: measured on QEMU as `boot_deadline_ends_a_wedge`, 18 s with the arm
   against a machine that never came back without it, twice at 66 s.
 
-  Findings 2 and 3 are untouched and are exactly what is left: they are about a
-  CPU outside the roster, and the only thing that needs one is the span this
-  cannot reach — before `clock::init`, and a machine on which no CPU takes an
-  interrupt at all. `kernel/src/deadline.rs`'s header states both as the same
-  seam. Nothing here is a second mechanism beside the sentinel; it is the
-  sentinel's seal, bound and reset, waiting for its CPU.
+  **The second of the two seams that were left is closed, and not by a
+  sentinel.** A machine on which no CPU takes an interrupt is now
+  `kernel/src/hardlockup`: the local APIC's performance-counter LVT in NMI
+  delivery mode, armed on every CPU whose CPUID states an architectural PMU,
+  sampling that CPU's own interrupt count about once a second and sealing a
+  record — the CPU, its `rip` and `rsp` off the NMI frame, the lock it is
+  spinning on, a line for every CPU — from the stuck CPU's own NMI, then
+  `reset_now`. Its bound is half the deadline's and off the same parameter
+  (`toyos_tco::hard_lockup_bound_ms`), so the two compose rather than race. That
+  is the state run 22 sat in past 420 s with the deadline armed and unfired, and
+  it wanted a *sample* rather than a poll — no CPU outside the roster would have
+  helped, since a sentinel spinning on the TSC still has to be given a CPU that
+  runs, and the CPUs that were running were the deaf ones.
+
+  **What is left for a sentinel is finding 3's span alone**: before
+  `clock::init` there is no TSC period to convert either bound with, and before
+  `apic::init` there is no LVT to arm — so a kernel that dies in early bring-up
+  still needs a hand, and only a CPU started that early reaches it. Finding 2
+  (the roster is modelled and a CPU taking an id outside it is a protocol
+  change) stands unchanged and is what that would cost.
 - **An AP loads its IDT before its control registers**, so a fault in that span
   triple-faults the machine —
   `issues/kernel/an-ap-loads-the-idt-before-its-control-registers.md`, whose

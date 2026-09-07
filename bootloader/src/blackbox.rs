@@ -140,12 +140,15 @@ pub fn harvest(
                 }
             }
         }
-        // The kernel ended itself on its own bound: nothing failed an assertion,
-        // so the text is why and the tail of a log ring nobody was draining —
-        // which is the whole point of it, and is printed the same way a panel is.
+        // The kernel ended itself on a bound of its own: nothing failed an
+        // assertion, so the text is why and the tail of a log ring nobody was
+        // draining — which is the whole point of it, and is printed the same way
+        // a panel is. *Which* bound is the record's own first line to say: the
+        // boot's deadline and one CPU's hard-lockup detector both seal this
+        // state, and naming one of them here would misattribute the other.
         State::Wedged => {
             lines.push(alloc::format!(
-                "{PREVIOUS_PANIC} the last boot read {}, so its own deadline ended it and this \
+                "{PREVIOUS_PANIC} the last boot read {}, so a bound of its own ended it and this \
                  chain ends here",
                 state.named()
             ));

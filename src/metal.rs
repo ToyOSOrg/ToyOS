@@ -704,6 +704,15 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // [`arms_are_admissible`] refuses an image without: it reaches no device
     // register, writes no firmware state, and the boot after it is ordinary.
     (WEDGE_ARM, Flash::Ok),
+    // **The other arm that deliberately stops this machine, and it stops one
+    // CPU harder.** It takes a lock of its own, clears `IF` on the last CPU and
+    // never gives either back, which is the state this machine hung in for
+    // 420 s. Admissible for the same reason as the row above and one more:
+    // `kernel/src/hardlockup` ends it at half the bound the image carries, and
+    // the boot deadline is still armed behind that. It reaches no device
+    // register and writes no firmware state; the kernel implies `WEDGE_ARM`
+    // behind it, so the boot cannot end itself before its own bound.
+    ("hard-lockup-probe", Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(

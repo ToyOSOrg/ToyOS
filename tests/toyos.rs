@@ -694,6 +694,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // T14 hung in twice. Two boots and a 25 s bound counted down in the guest,
     // so it is priced rather than free, and no host clock is in the verdict.
     ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
+    // The other half of that same parameter, and the state its poll cannot
+    // reach: one CPU with interrupts off, which no running CPU can see. Two
+    // boots and a bound counted down in the guest, so it is timer-anchored and
+    // belongs beside the row above — **Fast here only as the bootstrap
+    // `src/tiers.rs` requires**, because a name carrying the UNMEASURED marker
+    // has to be one the fast tier executes before anything can price it.
+    ("hard_lockup_ends_a_deaf_cpu", Sched::Parallel, Tier::Fast),
     // Four chained boots, one per way this kernel reaches a reset, each
     // anchored to the bound its own first boot counts down.
     ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
@@ -1437,6 +1444,19 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs {
             arms: &[metal::once("deadlinewedge", "tests/jobcase", &["wedge-before-reset"], &[])],
             judge: |b| power::deadline_wedge_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
+        // Its own boot, and the one arm in this profile the machine itself is
+        // the instrument for: QEMU's TCG guest has no performance counter, so
+        // only here is the NMI that samples a deaf CPU the counter's own. It
+        // ends the machine at half the metal bound, with the whole second half
+        // of the deadline still to run, so which record the page carries says
+        // which of the two bounds ended it.
+        "hard_lockup_ends_a_deaf_cpu",
+        metal::Metal::Runs {
+            arms: &[metal::once("hardlockup", "tests/jobcase", &["hard-lockup-probe"], &[])],
+            judge: |b| power::hard_lockup_chain(&b[0].kernel(), &b[0].after_the_reset()?),
         },
     ),
     (
@@ -9665,6 +9685,9 @@ fn run_machine_test(
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
         "boot_deadline_ends_a_wedge" => {
             power::boot_deadline_ends_a_wedge(test_config, c_bins, rust_bins)
+        }
+        "hard_lockup_ends_a_deaf_cpu" => {
+            power::hard_lockup_ends_a_deaf_cpu(test_config, c_bins, rust_bins)
         }
         "usb_reset_hands_devices_back" => {
             power::usb_reset_hands_devices_back(test_config, c_bins, rust_bins)

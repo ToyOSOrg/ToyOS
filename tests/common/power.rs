@@ -928,6 +928,109 @@ pub fn boot_deadline_ends_a_wedge(
 /// [`bootlog::WEDGE_STAGED`] above is the assertion about.
 const WEDGE_DEADLINE: &str = "boot-deadline=15000";
 
+/// One CPU that has stopped taking interrupts ends the machine, from its own
+/// NMI, and the record names where it was standing.
+///
+/// **The state the boot deadline cannot reach, and the T14 sat in for 420 s.**
+/// Run 22's mkdir image hung with a 120 s deadline armed and the deadline did
+/// not fire: nothing polls it on a machine where no CPU takes an interrupt. The
+/// control stages exactly that — one CPU with `IF` clear, spinning on a ticket
+/// lock another CPU holds and never gives back — and no other bound in this tree
+/// ends it: the chipset's TCO is fed by any CPU, the runner's job bound needs a
+/// scheduler pass, nothing panicked, and the deadline's own poll is still being
+/// reached by the CPUs that are healthy, which is what keeps this machine
+/// looking alive.
+///
+/// **Two records, and which one the page carries is the verdict.** The deadline
+/// is armed on this boot too and would end the same machine
+/// [`toyos_tco::hard_lockup_bound_ms`] later; a page reading
+/// [`bootlog::DEADLINE_EXPIRED`] is this detector failing and the deadline
+/// covering for it, so that line is refused as hard as the right one is
+/// demanded. The mutation that fails if the implementation is wrong is the whole
+/// detector reverted: the same image then ends at the deadline, with a record
+/// naming a bound and no cpu.
+///
+/// **QEMU's TCG guest has no performance counter**, so the counter's NMI is one
+/// thing this cannot judge: the actuator has a second CPU send the victim the
+/// NMI the counter would have, and what is under test here is the handler, the
+/// decision, the record and the reset. `hardlockup_ends_a_deaf_cpu`'s metal arm
+/// is where the counter itself is the sample, and the line this asserts about
+/// CPUID is what tells the two runs apart.
+pub fn hard_lockup_ends_a_deaf_cpu(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    // Both numbers off the one parameter the image is armed with, so the
+    // kernel's derivation and this test's expectation cannot drift apart.
+    let deadline_ms = toyos_tco::deadline_in(LOCKUP_DEADLINE)
+        .and_then(Result::ok)
+        .ok_or_else(|| format!("{LOCKUP_DEADLINE:?} is not a bound the kernel would read"))?;
+    let bound_ms = toyos_tco::hard_lockup_bound_ms(deadline_ms);
+
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        chained(&["hard-lockup-probe", LOCKUP_DEADLINE]),
+    );
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line())?;
+
+    // One capture from the first boot's handoff to the pass that reports it, so
+    // the staged cpu's own line and the record read back off the page are both
+    // here.
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    // The arm, in the kernel's own words and with the kernel's own arithmetic.
+    second.must_say(&format!("hard lockup: {bound_ms} ms"))?;
+    // Which sample source this run proves, which is the whole difference
+    // between it and the metal arm: no counter here, so a sibling sends the NMI.
+    second.must_say("CPUID states no counter on cpu")?;
+    // The control on the control: the machine reached the staged lockup, and
+    // then did not reach a reset of its own accord.
+    second.must_say(bootlog::LOCKUP_STAGED)?;
+    second.must_not_say(bootlog::REBOOTING)?;
+
+    second.must_say(bootlog::PREVIOUS_PANIC)?;
+    // **After the harvest line**, so this is the page and not the wire.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?;
+    // The lock the staged cpu was inside, which is the field a machine with
+    // every CPU deaf has nothing else to say.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    // A line for every cpu, so the holder of what the stuck one wanted is in
+    // the record too. cpu0 is the one this boot is certain of.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, "cpu0 irqs=")?;
+    // And the tail of a ring nothing was draining crossed the reset with it.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKUP_STAGED)?;
+    // The discrimination: the deadline was armed and running on this boot, and
+    // it is not what ended the machine.
+    second.must_not_say(bootlog::DEADLINE_EXPIRED)?;
+    second.must_not_say(&armed_and_nothing_else())?;
+    second.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    second.must_not_say(bootlog::LOADER_LAST_LINE)?;
+    ended_in_a_reset(&mut resets)?;
+    drop(qemu);
+
+    eprintln!(
+        "  [power] one cpu with interrupts off ended the machine {bound_ms} ms in, and the page \
+         named where it was"
+    );
+    Ok(())
+}
+
+/// The bound this control arms, as the parameter spells it.
+///
+/// **Wider than [`WEDGE_DEADLINE`] and for the opposite reason.** The staged cpu
+/// goes deaf once the machine is up, so its bound starts running seconds after
+/// the deadline's does; half of 30 s leaves it reaching its own bound with the
+/// whole of the deadline's second half still ahead, which is what makes a page
+/// reading [`bootlog::LOCKED_UP`] rather than [`bootlog::DEADLINE_EXPIRED`] a
+/// fact about this detector and not a race between two of them.
+const LOCKUP_DEADLINE: &str = "boot-deadline=30000";
+
 /// A boot that hung is bounded by the stick, and the third boot is free again.
 ///
 /// **The defect trapped the machine in ToyOS.** `bootnext::point_at_us` aims
@@ -1104,6 +1207,52 @@ pub fn deadline_wedge_chain(
     // The tail crossed with it, which is what makes the record an instrument
     // and not just a verdict.
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
+    // **The two bounds composing, on the one machine that has both.** This
+    // wedge spins with `IF` set, so every CPU still takes its timer interrupt
+    // and every CPU's performance counter still samples it — and the
+    // hard-lockup detector, whose bound is the earlier of the two, must find
+    // nothing. A page reading it here would mean this machine resets a boot
+    // that was merely stopped, which on the T14 is a reset loop.
+    says_nothing_of(after, bootlog::LOCKED_UP)?;
+    says_nothing_of(after, &armed_and_nothing_else())?;
+    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
+    eprintln!("  [power] {}", said.trim());
+    Ok(())
+}
+
+/// The metal half of [`hard_lockup_ends_a_deaf_cpu`], and **the arm that proves
+/// the counter**: on this machine CPUID states an architectural PMU, so the
+/// staged CPU's own performance-counter NMI is what samples it and nothing is
+/// sent to it. QEMU's TCG guest can prove the handler and the record; only
+/// hardware can prove the thing that delivers them.
+///
+/// The state under it is the one measured on this machine and on no other: run
+/// 22's boot hung after its job list with a 120 s deadline armed, sat past
+/// 420 s, and left the stick with no kernel log at all — the deadline never
+/// fired, because nothing was taking the interrupt that polls it.
+pub fn hard_lockup_chain(
+    kernel: &serial::Serial,
+    after: &serial::Serial,
+) -> Result<(), String> {
+    // What this machine has that the guest does not, and the reason this arm
+    // exists: the sample comes off the counter, so nothing sends the NMI.
+    kernel.must_say("sampled every")?;
+    kernel.must_say(bootlog::LOCKUP_STAGED)?;
+    kernel.must_say("has a performance counter of its own")?;
+    says_nothing_of(kernel, "CPUID states no counter")?;
+    says_nothing_of(kernel, bootlog::REBOOTING)?;
+
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    // Every CPU's line, which is what a machine whose cores went quiet one at a
+    // time will be read by. This one is certain of cpu0's.
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "cpu0 irqs=")?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKUP_STAGED)?;
+    // The deadline was armed on this boot too, at twice this bound, and is not
+    // what ended the machine.
+    says_nothing_of(after, bootlog::DEADLINE_EXPIRED)?;
     says_nothing_of(after, &armed_and_nothing_else())?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;

@@ -366,6 +366,11 @@ extern "C" fn ap_entry() -> ! {
     // Must run before touching anything not self-mapped: the acquire on `released` makes the BSP's mappings visible, and this flush discards what the spin cached over them.
     crate::arch::tlb::join();
 
+    // Once this CPU is committed and about to run something: the counter and
+    // the LVT are per logical CPU, so a CPU nobody arms here is one the
+    // hard-lockup bound does not cover.
+    crate::hardlockup::arm_this_cpu();
+
     log!("CPU {me}: joining scheduler");
     process::ap_idle();
 }

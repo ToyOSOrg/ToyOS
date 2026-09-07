@@ -135,6 +135,42 @@ pub fn deliveries_total(cpu: u32) -> Option<u64> {
     read(cpu).map(|counts| counts[TOTAL])
 }
 
+/// **One CPU's progress: every interrupt it has taken except the NMI.**
+///
+/// What `crate::hardlockup` compares one sample to the next, and the exclusion
+/// is the whole of why this is not [`deliveries_total`]: that sample arrives
+/// *as* an NMI and has already counted itself by the time it reads this, so a
+/// total including it moves on every sample and no CPU is ever stuck.
+///
+/// One published pointer and two relaxed loads: no lock, so the CPU sealing a
+/// record about a sibling can read this about it.
+pub fn taken_by(cpu: u32) -> Option<u64> {
+    read(cpu).map(|counts| counts[TOTAL].saturating_sub(counts[1 + Source::Nmi as usize]))
+}
+
+/// [`taken_by`] for the CPU asking, read straight off `gs:` — the one form a CPU
+/// inside an NMI may use, since it needs neither the published pointer array nor
+/// a bounds check on a `cpu_id` it is standing on.
+pub fn taken_here() -> u64 {
+    let total: u64;
+    let nmis: u64;
+    // SAFETY: both slots are this CPU's own counter block per `arch::percpu`;
+    // `GS_BASE` points at the running CPU's `PerCpu` in every context this is
+    // read from.
+    unsafe {
+        core::arch::asm!(
+            "mov {total}, qword ptr gs:[{at}]",
+            "mov {nmis}, qword ptr gs:[{nmi_at}]",
+            total = out(reg) total,
+            nmis = out(reg) nmis,
+            at = const slot_offset(TOTAL),
+            nmi_at = const slot_offset(1 + Source::Nmi as usize),
+            options(nostack, readonly, preserves_flags),
+        );
+    }
+    total.saturating_sub(nmis)
+}
+
 /// Logs one `irq: cpuN total=… <source>=…` line per online CPU; counts are cumulative since boot.
 /// Allocates nothing, takes no lock, touches no device.
 pub fn log_census() {

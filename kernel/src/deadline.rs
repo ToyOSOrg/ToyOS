@@ -22,18 +22,24 @@
 //!   still a machine that needs a hand.
 //! - **A machine on which no CPU takes an interrupt at all** — every core
 //!   halted below the interrupt layer, or spinning with `IF` clear at once.
-//!   Nothing polled from a running CPU can cover that.
+//!   Nothing polled from a running CPU can cover that. **That half is
+//!   [`crate::hardlockup`]**, sampled by an NMI off a performance counter
+//!   rather than polled. The two are armed off this one parameter and compose:
+//!   this bound is a *machine* that has stopped making progress while some CPU
+//!   still takes interrupts, that one is a *CPU* that has stopped taking them,
+//!   and the CPU gets the earlier bound because its record can name where it
+//!   is standing. Whichever fires takes the machine's one seal through
+//!   [`claim_the_reset`].
+//! - **The span before `clock::init`,** which neither of them reaches: there is
+//!   no TSC period to convert a bound with and no counter armed. That seam has
+//!   a name — the sentinel CPU designed and postponed in
+//!   `issues/hardware/the-t14-boots-toyos-unattended.md`, a CPU outside the
+//!   roster spinning on the TSC — and it is now all that design is left owed.
 //! - **A panic racing the seal.** [`expire`] loses the `PAINTING` latch to a
 //!   CPU already inside the panel's fatal painter, and that CPU's own
 //!   `record_panic` then replaces this record. That is the right outcome and
 //!   not a gap: a panic report says more than a deadline does, and the panic
 //!   path has a bound of its own.
-//!
-//! Both are the *same* seam, and it has a name: the sentinel CPU designed and
-//! postponed in `issues/hardware/the-t14-boots-toyos-unattended.md`, a CPU
-//! outside the roster spinning on the TSC. This is that design's first half —
-//! the seal, the lock-free reset and the parameter are what it would have
-//! needed too — and not a second mechanism beside it.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 
@@ -68,6 +74,16 @@ static AT_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a CPU has taken the expiry. One machine, one seal, one reset.
 static FIRED: AtomicBool = AtomicBool::new(false);
+
+/// Take this machine's one seal-and-reset, or `false` where another CPU already
+/// holds it — in which case the caller must add nothing to the page and go no
+/// further, because the page is being written.
+///
+/// Shared with [`crate::hardlockup`]: the two bounds compose, and a machine that
+/// passes both may still only be sealed once.
+pub fn claim_the_reset() -> bool {
+    !FIRED.swap(true, Relaxed)
+}
 
 /// The last phase [`reached`] was told about, as an index into [`PHASES`].
 static PHASE: AtomicU8 = AtomicU8::new(0);
@@ -153,6 +169,11 @@ pub fn start() {
         "boot deadline: {ms} ms, after which this kernel seals a WEDGED record and writes the \
          reset register itself"
     );
+    // The other half of the same parameter: what one CPU gets to take no
+    // interrupt at all, which this poll cannot see because it is not running.
+    // Written from here because everything that module does is reached from an
+    // NMI, and none of it may say a word.
+    log!("{}", crate::hardlockup::start(ms));
 }
 
 /// Whether this machine's bound has passed; the timer interrupt entry's, in
@@ -178,7 +199,7 @@ pub extern "sysv64" fn poll() {
 /// in — and for the stronger reason: every lock in this kernel is a thing the
 /// wedge may be holding.
 fn expire() -> ! {
-    if FIRED.swap(true, Relaxed) {
+    if !claim_the_reset() {
         // Another CPU is already sealing and resetting. This one has nothing to
         // add and must not race it into the page.
         crate::arch::cpu::halt();
@@ -215,6 +236,17 @@ pub const EXPIRED: &str = "the boot deadline expired";
 pub fn stage_a_wedge() -> ! {
     log!("{WEDGE_STAGED}: every CPU stops taking scheduler passes from here");
     STAGED.store(true, Relaxed);
+    // Kicked, and not left to arrive on their own: a CPU already halted in the
+    // idle path has stopped its own timer, so nothing would bring it to the
+    // pass this wedge is taken at, and a core still asleep is not a core this
+    // control has wedged. The kick is this vector's own IPI, so the CPU it
+    // wakes runs one entry and reaches `wedge_if_staged` from it.
+    let me = crate::arch::percpu::cpu_id();
+    for cpu in 0..crate::arch::smp::cpu_count() {
+        if cpu != me {
+            crate::arch::apic::kick_cpu(cpu);
+        }
+    }
     this_cpu()
 }
 
@@ -242,6 +274,13 @@ fn this_cpu() -> ! {
     // already runs in, so what the deadline has to reach is the Ring 0 half of
     // the timer entry and not the Rust half.
     crate::preempt::disable();
+    // The hard-lockup control is this wedge and one CPU more, staged here —
+    // where every CPU has already left the scheduler — because the idle loop it
+    // would otherwise be staged from is one of the things this wedge stops. Two
+    // of these CPUs never come back from it.
+    if crate::actuator::hard_lockup_probe() {
+        crate::hardlockup::probe::stage();
+    }
     loop {
         core::hint::spin_loop();
     }

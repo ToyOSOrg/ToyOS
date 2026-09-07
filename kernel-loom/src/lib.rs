@@ -66,6 +66,14 @@ pub mod preempt {
     pub fn enable() {}
 }
 
+/// `Lock::lock`'s spin also records what this CPU is waiting for, so a record
+/// sealed from an NMI can name it. Empty here for the same reason as `tlb`: the
+/// models do not drive that spin, and there is no per-CPU state to write it to.
+pub mod hardlockup {
+    pub fn spinning_on(_lock: u64, _at: &'static core::panic::Location<'static>) {}
+    pub fn spinning_on_nothing() {}
+}
+
 /// `Lock::lock`'s spin serves TLB shootdowns for a CPU that is not taking
 /// interrupts. Empty here: the models do not drive that spin at all (see the
 /// scope note above), and the protocol it would call has its own models.

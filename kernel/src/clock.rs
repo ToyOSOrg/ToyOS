@@ -166,9 +166,19 @@ pub fn now() -> Instant {
 /// The [`cpu::rdtsc`] value `nanos` in the future, for a wait loop that must
 /// not call the nanosecond clock.
 pub fn tsc_deadline(nanos: u64) -> u64 {
+    cpu::rdtsc().saturating_add(tsc_ticks(nanos))
+}
+
+/// `nanos` as a count of TSC ticks: a span converted once and then compared
+/// against `rdtsc` differences, which is what a sampler that may not divide
+/// needs. Before [`init`] the period is unknown and this is zero, so a bound
+/// derived from it is one its arm has to refuse.
+pub fn tsc_ticks(nanos: u64) -> u64 {
     let period_fs = TSC_PERIOD_FS.load(Relaxed);
-    let ticks = (nanos as u128 * 1_000_000) / period_fs.max(1) as u128;
-    cpu::rdtsc().saturating_add(ticks as u64)
+    if period_fs == 0 {
+        return 0;
+    }
+    ((nanos as u128 * 1_000_000) / period_fs as u128) as u64
 }
 
 /// Polls `ready` until it holds or `nanos` pass; `false` is the deadline.

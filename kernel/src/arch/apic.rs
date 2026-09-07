@@ -18,6 +18,8 @@ enum Reg {
     Isr0 = 0x810,
     Icr = 0x830,
     LvtTimer = 0x832,
+    /// The performance-monitoring counters' LVT entry, xAPIC offset 0x340.
+    LvtPmc = 0x834,
     TimerInit = 0x838,
     TimerCurrent = 0x839,
     TimerDivide = 0x83E,
@@ -144,6 +146,22 @@ pub fn send_nmi(cpu_id: u32) {
     Reg::Icr.write(((apic_id as u64) << 32) | 0x4400);
 }
 
+/// Point this CPU's performance-counter LVT entry at NMI delivery, unmasked —
+/// the one interrupt a CPU that has cleared `IF` still takes, and so the only
+/// way `crate::hardlockup` can sample one.
+///
+/// **Written again after every delivery, not once at arm.** SDM Vol. 3A §12.5.1:
+/// the local APIC sets this entry's mask flag when it handles a
+/// performance-monitoring interrupt, and only software clears it, so a handler
+/// that does not write this gets exactly one NMI for the machine's life.
+///
+/// Declared whole: delivery mode 100b (NMI) in bits 10:8, mask clear, and a
+/// vector field the CPU ignores under that delivery mode.
+pub fn arm_perf_nmi() {
+    if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
+    Reg::LvtPmc.write(0b100 << 8);
+}
+
 // Time /system/bin/logd gets to durably write the panic report before halt; a Budget (not Bound) because expiry degrades gracefully instead of panicking.
 const LOG_FILE_DRAIN: Budget = Budget::of(
     Duration::from_millis(500),
@@ -208,6 +226,11 @@ fn wait_for_log_file() {
 /// to firmware.
 // panic_flush bypasses the log-ring and serial locks — after the halt IPI a wedged holder never releases them, so taking them normally could deadlock.
 pub fn halt_all_cpus() -> ! {
+    // Before the wait and the panel: from here this machine holds a report for
+    // whoever is in front of it, with `IF` clear and under a bound of its own —
+    // which to a hard-lockup sample is indistinguishable from a wedge, and is
+    // the opposite of one.
+    crate::hardlockup::stand_down();
     wait_for_log_file();
     // Under the same condition as the wait above: before the machine is
     // released no sibling has been sent its `SIPI`, so this addresses CPUs that

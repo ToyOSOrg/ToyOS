@@ -29,6 +29,7 @@ mod actuator;
 mod params;
 mod blackbox;
 mod deadline;
+mod hardlockup;
 mod mm;
 mod panic;
 mod panic_reboot;

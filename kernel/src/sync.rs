@@ -123,6 +123,15 @@ impl<T> Lock<T> {
         let mut spins = 0u64;
         let mut next_warn = 50_000_000u64;
         while self.now.load(ACQUIRED) != my_ticket {
+            // Inside the loop, so an uncontended acquisition writes nothing:
+            // what a CPU is waiting for is the one thing a record sealed from
+            // that CPU's own NMI cannot read off its registers.
+            if spins == 0 {
+                crate::hardlockup::spinning_on(
+                    self as *const Self as *const () as u64,
+                    core::panic::Location::caller(),
+                );
+            }
             core::hint::spin_loop();
             // Polls TLB shootdowns: this spin runs with `IF` clear, so skipping
             // it here can deadlock a shootdown initiator that holds a lock.
@@ -139,6 +148,9 @@ impl<T> Lock<T> {
                 panic!("DEADLOCK at {}: 500M spins, ticket={} now={}",
                     caller, my_ticket.raw(), self.now.load(Ordering::Relaxed).raw());
             }
+        }
+        if spins != 0 {
+            crate::hardlockup::spinning_on_nothing();
         }
         LockGuard { lock: self }
     }

@@ -205,6 +205,7 @@ handle_kill_policy 515 shards=12
 handle_lifetime 33 shards=12
 handle_transfer 66 shards=12
 hang_bounded_by_the_stick 18446744073709551615 shards=none
+hard_lockup_ends_a_deaf_cpu 18446744073709551615 shards=none
 hash_seed_precedes_every_map 4976 shards=12
 hda_client_stall 19047 shards=12
 hda_tone 13389 shards=12

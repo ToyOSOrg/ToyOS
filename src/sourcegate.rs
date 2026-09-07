@@ -404,6 +404,14 @@ fn kernel_lines() -> Vec<(String, usize, String)> {
 /// The three log macros and the function they all expand to.
 const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit("];
 
+/// Every file whose whole contents run inside an NMI, and so may write no log
+/// record: the handler, and the hard-lockup detector it samples through. The
+/// detector's own control is not here — it stages from ordinary context, in
+/// `kernel/src/hardlockup/probe.rs`, which is why it is a file of its own — and
+/// neither is the line the arm writes, which its caller writes for it.
+const NMI_SILENT: &[&str] =
+    &["kernel/src/arch/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
+
 /// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
 /// Arming DMA comes after a site's refusals — virtio parses its capability
 /// chain first and disarms on one it cannot use — and the three early-enabling
@@ -1451,22 +1459,24 @@ mod tests {
     #[test]
     fn nmi_does_not_log() {
         let lines = kernel_lines();
-        assert!(
-            lines.iter().any(|(file, _, _)| file == "kernel/src/arch/idt/nmi.rs"),
-            "the NMI handler moved: this gate is scanning a file that is not there"
-        );
+        for file in NMI_SILENT {
+            assert!(
+                lines.iter().any(|(at, _, _)| at == file),
+                "{file} moved: this gate is scanning a file that is not there"
+            );
+        }
 
         let silent: Vec<_> = lines
             .iter()
             .filter(|(file, _, line)| {
-                file == "kernel/src/arch/idt/nmi.rs"
+                NMI_SILENT.contains(&file.as_str())
                     && LOG_PRODUCERS.iter().any(|p| code_only(line).contains(p))
             })
             .map(|(file, n, line)| format!("{file}:{n}: {}", line.trim()))
             .collect();
         assert!(
             silent.is_empty(),
-            "the NMI handler logs, and it reenters its own CPU's shard to do it:\n{}",
+            "an NMI-reached file logs, and it reenters its own CPU's shard to do it:\n{}",
             silent.join("\n")
         );
 

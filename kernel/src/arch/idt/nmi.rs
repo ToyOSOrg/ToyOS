@@ -6,6 +6,13 @@
 //! Runs on IST2 for the `#DF` `arch::syscall`'s CPL-0/user-`rsp` window would
 //! otherwise take; `PerCpu::nmi_active` guards IST2's non-reentrancy by
 //! routing a second NMI to [`nested_nmi`] instead of corrupting the stack.
+//!
+//! It is also where `crate::hardlockup` samples the CPU it landed on, which is
+//! the one bound a CPU with `IF` clear is under: the frame's `rip`, `rsp` and
+//! `rflags` are what a machine whose every CPU stopped taking interrupts has
+//! left to say. That path may seal a record and reset from here and never
+//! return, and it obeys this file's discipline exactly — no lock, no
+//! allocation, nothing that logs.
 
 use core::arch::naked_asm;
 
@@ -16,6 +23,8 @@ const RIP_OFFSET: usize = 80;
 /// `cs` and `rsp` say whether the NMI landed in the CPL-0/user-`rsp` window the IST exists for.
 const CS_OFFSET: usize = RIP_OFFSET + 8;
 const RSP_OFFSET: usize = RIP_OFFSET + 24;
+/// `rflags` is between them, and its `IF` is what separates a cpu that has stopped taking interrupts from one that is merely slow.
+const RFLAGS_OFFSET: usize = RIP_OFFSET + 16;
 
 /// Before any push, the CPU's own five words start at `rsp`.
 const NESTED_RIP_OFFSET: usize = 0;
@@ -43,6 +52,7 @@ pub(super) extern "sysv64" fn nmi_entry() {
         "mov rdi, [rsp + {rip_offset}]",
         "mov rsi, [rsp + {cs_offset}]",
         "mov rdx, [rsp + {rsp_offset}]",
+        "mov rcx, [rsp + {rflags_offset}]",
         "mov rbp, rsp",
         "and rsp, -16",
         "call {note}",
@@ -72,6 +82,7 @@ pub(super) extern "sysv64" fn nmi_entry() {
         rip_offset = const RIP_OFFSET,
         cs_offset = const CS_OFFSET,
         rsp_offset = const RSP_OFFSET,
+        rflags_offset = const RFLAGS_OFFSET,
         nested_rip = const NESTED_RIP_OFFSET,
         nested_rsp = const NESTED_RSP_OFFSET,
         note = sym note,
@@ -79,14 +90,19 @@ pub(super) extern "sysv64" fn nmi_entry() {
     );
 }
 
-/// Loads all three words in both builds so the observer and shipping handler share one frame layout.
-extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64) {
+/// Loads all four words in both builds so the observer and shipping handler share one frame layout.
+extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64, rflags: u64) {
     crate::irq_census::irq_took!(Nmi);
     #[cfg(not(feature = "boot-actuators"))]
-    let _ = (cs, rsp);
+    let _ = cs;
     #[cfg(feature = "boot-actuators")]
     crate::nmi_gate::observe(rip, cs, rsp);
     crate::sched::dump::note_nmi(rip);
+    // After the probe's store and before the nested-NMI staging: a hard lockup
+    // ends the machine from here, so the sibling asking where this CPU is still
+    // gets its answer, and nothing stages a second NMI onto a frame that is
+    // sealing a record.
+    crate::hardlockup::sample(rip, rsp, rflags);
     #[cfg(feature = "boot-actuators")]
     crate::nmi_gate::stage_nested_if_armed();
 }
