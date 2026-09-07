@@ -5,6 +5,9 @@ mod log_gate;
 use std::io::{self, BufRead, Write};
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
@@ -28,6 +31,11 @@ const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
     ("kbd-close", kbd_close::run),
 ];
 
+/// The job the runner is inside, and whether the list got through: written by
+/// the loop, read by the deadline watching it.
+static RUNNING: Mutex<String> = Mutex::new(String::new());
+static FINISHED: AtomicBool = AtomicBool::new(false);
+
 fn main() {
     // **The test estate's authority, and the one place least authority is not
     // enforced.** The guest binaries are not `[programs]` keys, so no manifest
@@ -43,17 +51,28 @@ fn main() {
 
     // **A machine with no host on the other end runs the jobs its manifest
     // names**, one binary name per argument through the stdin path's own [`run_one`].
-    let jobs: Vec<String> = std::env::args().skip(1).collect();
+    let mut jobs: Vec<String> = std::env::args().skip(1).collect();
+    // The one argument that is not a job: what the whole list gets.
+    let mut bound_ms = toyos_tco::JOB_BOUND_MS;
+    if let Some(asked) = jobs.first().and_then(|a| a.strip_prefix("--bound-ms=")) {
+        let Ok(ms) = asked.parse() else { fatal(&format!("--bound-ms={asked}: not a number")) };
+        bound_ms = ms;
+        jobs.remove(0);
+    }
     if !jobs.is_empty() {
+        deadline(bound_ms, cap.as_ref());
         for job in &jobs {
             // Fatal by name: nobody is reading this console, so a job that did not run must end the boot.
             if job.split_whitespace().count() != 1 {
                 fatal(&format!("job {job:?} is not one binary name"));
             }
+            *RUNNING.lock().expect("the deadline thread does not panic holding this") =
+                job.clone();
             if !run_one(job, &[], cap.as_ref()) {
                 fatal(&format!("job {job:?} did not run"));
             }
         }
+        FINISHED.store(true, Ordering::Release);
         std::process::exit(0);
     }
 
@@ -64,7 +83,48 @@ fn main() {
     }
 }
 
-/// Say why and end the boot, for the job path where no host is listening.
+/// Watch the job list for `bound_ms` measured from boot, which is the only
+/// bound over a kernel that is alive while a job never finishes.
+///
+/// **The line below is console output and reaches no log record**: a userland
+/// `println!` is a write to a `ConsoleObject` and `logd` never sees it, so on a
+/// machine with no serial port the evidence that this fired is the kernel's own
+/// reboot line and the boot's elapsed time, not this.
+fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
+    let Some(power) = cap.and_then(|cap| cap.duplicate().ok()) else {
+        // A boot list with no way back to the firmware would sit here forever
+        // whatever this thread did, so it is refused where it is asked for.
+        fatal("no capability to reboot with, so the job list has no deadline");
+    };
+    std::thread::spawn(move || {
+        // A deadline that fired before the loop named a job would say the bound
+        // and nothing about what was inside it, so it waits for the name.
+        let job = loop {
+            if FINISHED.load(Ordering::Acquire) {
+                return;
+            }
+            let since_boot = toyos_abi::syscall::clock_nanos() / 1_000_000;
+            let named = RUNNING.lock().map(|job| job.clone()).unwrap_or_default();
+            match bound_ms.checked_sub(since_boot) {
+                Some(left) => std::thread::sleep(Duration::from_millis(left.max(1))),
+                None if !named.is_empty() => break named,
+                None => std::thread::sleep(Duration::from_millis(1)),
+            }
+        };
+        // Spelled here and read from `toyos_build::bootlog::JOB_DEADLINE_SAID`,
+        // the way the kernel spells `Rebooting.` for the same reader.
+        println!(
+            "test-runner: the job list ran past its bound, and the job it was inside is {job} \
+             ({bound_ms} ms)"
+        );
+        let _ = io::stdout().flush();
+        fatal(&format!("the reboot was refused: {:?}", power.reboot()));
+    });
+}
+
+/// Say why, on a console that may have nobody on it, and end this process —
+/// which on the job path ends the boot, because the runner is what init waits
+/// on.
 fn fatal(why: &str) -> ! {
     println!("test-runner: {why}");
     let _ = io::stdout().flush();

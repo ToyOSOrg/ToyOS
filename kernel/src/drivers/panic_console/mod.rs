@@ -6,6 +6,10 @@
 //! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. A
 //! recovered panic must call [`discard_capture`]. virtio-gpu is
 //! unsupported: its scanout needs the unbounded-poll wedge this module avoids.
+//!
+//! The two holds this module ends a panic in — [`page_forever`] and
+//! [`hold_the_panel`] — are also where `crate::panic_reboot`'s bound is
+//! watched, because the keyboard poll that retires it is here.
 
 mod access;
 mod latch;
@@ -17,6 +21,7 @@ use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_ps2::{KeyDecoder, KeyOutcome};
 
 use crate::log;
+use crate::panic_reboot::Bound;
 use crate::time::{Budget, Cadence, Duration};
 use crate::mm::paging::MmioPolicy;
 use crate::mm::{self, DirectMap, align_2m};
@@ -56,9 +61,6 @@ const REPORT_CHECK: Cadence = Cadence::every(
     Duration::from_millis(20),
     "PROBES uncached reads per check, on the CPU that took an interrupt anyway",
 );
-
-/// Framebuffers below this are reachable before [`remap`] runs; above it, only after.
-const LOW_MAP_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct Fb {
@@ -215,6 +217,9 @@ static FB: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 /// [`render`] never releases it, so a later boot checkpoint cannot paint
 /// over a fatal report; [`boot_checkpoint`] does release it.
 static PAINTING: AtomicBool = AtomicBool::new(false);
+
+/// Set from the moment a framebuffer is reachable until the first boot phase — the window in which nothing else paints.
+static EARLY: AtomicBool = AtomicBool::new(false);
 
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
 static CAPTURE_ACCESS: access::CaptureAccess = access::CaptureAccess::new();
@@ -396,21 +401,13 @@ const _: () = {
     assert!(framebuffer_is_reclaimed_ram(&SPLIT, 0xE000_0000, 0x0080_0000).is_none());
 };
 
-/// Arm the console from `KernelArgs`, before `serial::init`; covers
-/// everything up to `mm::init`, which the bootloader's identity+high map already reaches.
+/// Arm the console from `KernelArgs`, before `serial::init`; covers everything
+/// up to `mm::init`.
+///
+/// The bootloader refuses to hand over a machine whose boot map does not hold
+/// the scanout, so nothing here holds a second belief about where it is.
 pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     if args.gop_framebuffer == 0 {
-        return;
-    }
-
-    if let Some(uefi_type) =
-        framebuffer_is_reclaimed_ram(maps, args.gop_framebuffer, args.gop_framebuffer_size)
-    {
-        log!(
-            "panic console: disarmed, framebuffer at {:#x} is UEFI type {} (PMM-owned RAM)",
-            args.gop_framebuffer,
-            uefi_type
-        );
         return;
     }
 
@@ -435,23 +432,38 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
     RAW_PHYS.store(args.gop_framebuffer, Ordering::Relaxed);
     RAW_SIZE.store(args.gop_framebuffer_size, Ordering::Relaxed);
 
-    match args.gop_framebuffer.checked_add(args.gop_framebuffer_size) {
-        Some(end) if end <= LOW_MAP_LIMIT => {
-            publish(fb);
-            log!(
-                "panic console: armed {}x{} stride={} format={} at {:#x}",
-                fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
-            );
-        }
-        _ => log!(
-            "panic console: framebuffer at {:#x} is above the boot map, armed after mm::init",
-            args.gop_framebuffer
-        ),
+    publish(fb);
+    EARLY.store(true, Ordering::Relaxed);
+    // **The panel is taken before the memory map is read, and this record is
+    // what proves the kernel entered.** Every refusal below it, and every fault
+    // the walk itself can take, then reaches a panel that exists; when the walk
+    // came first a machine that died in it kept the loader's last line on the
+    // screen and said nothing about which of the two had happened. Painting
+    // twice into a scanout the check may yet call PMM-owned RAM costs nothing:
+    // the PMM does not exist until `mm::init`, hundreds of statements later.
+    log!(
+        "panic console: armed {}x{} stride={} format={} at {:#x}",
+        fb.width, fb.height, fb.stride_px, fb.format, args.gop_framebuffer
+    );
+
+    if let Some(uefi_type) =
+        framebuffer_is_reclaimed_ram(maps, args.gop_framebuffer, args.gop_framebuffer_size)
+    {
+        log!(
+            "panic console: disarmed, framebuffer at {:#x} is UEFI type {} (PMM-owned RAM)",
+            args.gop_framebuffer,
+            uefi_type
+        );
+        // Cleared too, so a later `rearm` cannot resurrect a scanout the PMM owns.
+        // SAFETY: sound as `disable`'s write — one writer, in the single-threaded boot sequence.
+        unsafe { *PENDING.0.get() = Fb::DETACHED };
+        RAW_PHYS.store(0, Ordering::Relaxed);
+        detach();
     }
 }
 
 /// Re-establish the mapping after `mm::init` replaces the bootloader's page
-/// tables, and arm a framebuffer above [`LOW_MAP_LIMIT`]'s reach.
+/// tables.
 pub fn remap() {
     let phys = RAW_PHYS.load(Ordering::Relaxed);
     if phys == 0 {
@@ -524,7 +536,9 @@ pub fn discard_capture() {
 
 /// Re-freeze the captured report so a line written *after* [`capture`] is
 /// painted; only refreshes a capture that already exists — [`live_tail`] already reads live otherwise.
-/// One caller: `apic::wait_for_log_file` logs this after `capture` already ran, on the machine with no serial fallback.
+/// Both callers are in `apic`, and both are the machine with no serial
+/// fallback: `wait_for_log_file` when its drain budget expires, and
+/// `halt_all_cpus` for the arm line, each after `capture` already ran.
 pub fn refresh_capture() {
     capture_into(true);
 }
@@ -562,24 +576,29 @@ pub fn render() -> bool {
     if PAINTING.swap(true, Ordering::SeqCst) {
         return false;
     }
-    paint(Fill::Fatal, fatal_text(), Page::Last, Watch::No);
+    let text = fatal_text();
+    // Before the paint, from the same view the panel gets: a fault inside the
+    // painter then costs the screen and not the copy the next boot reads.
+    crate::blackbox::record_panic(text.text);
+    paint(Fill::Fatal, text, Page::Last, Watch::No);
     true
 }
 
-/// Cycle the report across the screen until the machine is switched off.
-/// Reached only from `halt_all_cpus`, after `panic_flush`, on the CPU whose
-/// [`render`] took `PAINTING`; the handler's other two exits call
-/// [`render`] instead, since neither can safely loop in place.
-pub fn page_forever() {
+/// Cycle the report across the screen until the machine is switched off, or
+/// until `bound` returns it to firmware. Reached only from `halt_all_cpus`,
+/// after `panic_flush`, on the CPU whose [`render`] took `PAINTING`; the
+/// handler's other two exits reach [`hold_the_panel`] the same way, and every
+/// one of the three is the last call its CPU makes.
+pub fn page_forever(mut bound: Bound) -> ! {
     if !crate::clock::calibrated() {
-        return;
+        hold_the_panel(bound);
     }
     let text = fatal_text();
-    let Some(fb) = snapshot() else { return };
-    let Some((cols, grid_rows)) = geometry(&fb) else { return };
+    let Some(fb) = snapshot() else { hold_the_panel(bound) };
+    let Some((cols, grid_rows)) = geometry(&fb) else { hold_the_panel(bound) };
     let (_, pages, _) = pagination(text.text, cols, grid_rows);
     if pages < 2 {
-        return;
+        hold_the_panel(bound);
     }
     // `None` is the screenful [`render`] already painted, not a numbered page, so the first key reaches either end.
     let mut shown: Option<usize> = None;
@@ -588,7 +607,7 @@ pub fn page_forever() {
     let mut steered = false;
     // Spins rather than `hlt`: nothing would wake it, and re-arming the LAPIC timer would dispatch the scheduler mid-panic.
     loop {
-        let step = hold((!steered).then_some(PAGE_HOLD.nanos()), &mut keys);
+        let step = hold((!steered).then_some(PAGE_HOLD.nanos()), &mut keys, &mut bound);
         steered |= step.is_some();
         let next = match (shown, step.unwrap_or(PageKey::Down)) {
             (None, PageKey::Down) => 0,
@@ -599,6 +618,48 @@ pub fn page_forever() {
         paint(Fill::Fatal, text, Page::Nth(next), Watch::No);
         shown = Some(next);
     }
+}
+
+/// Keep the panel as it is until `bound` resets the machine, or for good once a
+/// key has retired it. The panic path's terminal hold wherever there is no
+/// second page to cycle — and the whole of it on a machine with no panel at all.
+///
+/// One poller: every caller is the CPU that took `PAINTING`, because two CPUs
+/// reading port 0x60 would each see half of every scancode.
+pub fn hold_the_panel(mut bound: Bound) -> ! {
+    let mut keys = KeyDecoder::new();
+    while bound.is_armed() {
+        read_key(&mut keys, &mut bound);
+        bound.check();
+        core::hint::spin_loop();
+    }
+    // Nothing left to wait for, so this CPU costs the machine no power.
+    crate::arch::cpu::halt()
+}
+
+/// One byte off the controller, folded into `keys`; a key **press** retires
+/// `bound`, since pressing one is how the person reading the panel says he is
+/// there. `None` is a poll that found nothing, which is not the decoder's
+/// `Pending`.
+///
+/// The pointer shares the port; its packet bytes look like scancodes to
+/// anything that does not skip them. [`i8042::poll_byte`] is an `inb` — no
+/// lock, no MMIO.
+///
+/// [`i8042::poll_byte`]: crate::drivers::i8042::poll_byte
+fn read_key(keys: &mut KeyDecoder, bound: &mut Bound) -> Option<KeyOutcome> {
+    let (byte, false) = crate::drivers::i8042::poll_byte()? else {
+        return None;
+    };
+    let outcome = keys.feed(byte);
+    // A make code and nothing else. A break code is the release of a key
+    // pressed before this panel existed, and a controller's own byte — an ACK,
+    // a self-test result — is the hardware answering itself; neither is a
+    // person saying he is here to read it.
+    if matches!(outcome, KeyOutcome::Key { pressed: true, .. }) {
+        bound.retire();
+    }
+    Some(outcome)
 }
 
 /// Which way the next paint moves.
@@ -613,22 +674,21 @@ const HID_PAGE_UP: u8 = 0x4B;
 const HID_PAGE_DOWN: u8 = 0x4E;
 
 /// Wait for a page key, giving up after `nanos`; `None` means the deadline
-/// expired. [`i8042::poll_byte`] is an `inb` — no lock, no MMIO.
-///
-/// [`i8042::poll_byte`]: crate::drivers::i8042::poll_byte
-fn hold(nanos: Option<u64>, keys: &mut KeyDecoder) -> Option<PageKey> {
+/// expired. `bound` is retired by any key and resets the machine at its own
+/// expiry, so an unattended panel pages until it is over and no longer.
+fn hold(nanos: Option<u64>, keys: &mut KeyDecoder, bound: &mut Bound) -> Option<PageKey> {
     let target = nanos.map(|n| crate::clock::nanos_since_boot().saturating_add(n));
     while target.is_none_or(|t| crate::clock::nanos_since_boot() < t) {
-        // The pointer shares the port; its packet bytes look like scancodes to anything that does not skip them.
-        if let Some((byte, false)) = crate::drivers::i8042::poll_byte() {
-            match keys.feed(byte) {
-                KeyOutcome::Key { usage: HID_PAGE_UP, pressed: true } => return Some(PageKey::Up),
-                KeyOutcome::Key { usage: HID_PAGE_DOWN, pressed: true } => {
-                    return Some(PageKey::Down);
-                }
-                _ => {}
+        match read_key(keys, bound) {
+            Some(KeyOutcome::Key { usage: HID_PAGE_UP, pressed: true }) => {
+                return Some(PageKey::Up);
             }
+            Some(KeyOutcome::Key { usage: HID_PAGE_DOWN, pressed: true }) => {
+                return Some(PageKey::Down);
+            }
+            _ => {}
         }
+        bound.check();
         core::hint::spin_loop();
     }
     None
@@ -636,6 +696,18 @@ fn hold(nanos: Option<u64>, keys: &mut KeyDecoder) -> Option<PageKey> {
 
 /// Repaint at a boot phase boundary, so a machine that wedges later still shows how far it got.
 pub fn boot_checkpoint() {
+    EARLY.store(false, Ordering::Relaxed);
+    repaint();
+}
+
+/// Repaint after a record, while the first boot phase is still ahead.
+pub fn early_checkpoint() {
+    if EARLY.load(Ordering::Relaxed) && crate::params::early_panel() {
+        repaint();
+    }
+}
+
+fn repaint() {
     if SCREEN_OWNED_BY_USERLAND.load(Ordering::Relaxed) {
         return;
     }

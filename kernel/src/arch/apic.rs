@@ -166,6 +166,15 @@ fn wait_for_log_file() {
     if crate::drivers::serial::has_console() {
         return;
     }
+    // INVARIANT: nothing below runs before both facts this wait rests on hold.
+    // The deadline is read off the calibrated clock, so an uncalibrated one
+    // makes it unreachable; and what the wait is owed by is `logd`, which only
+    // a released machine can run. On a boot that crashes before either — the
+    // one this whole path exists for on a machine with no serial port — waiting
+    // costs the seal and buys nothing, so it is skipped and not shortened.
+    if !crate::clock::calibrated() || !crate::arch::smp::is_ready() {
+        return;
+    }
     // Sampled once — a sibling still logging on its way down must not be able to push this deadline out indefinitely.
     let want = crate::log::read::newest_committed_at_ns();
     if !owed(want) {
@@ -194,12 +203,26 @@ fn wait_for_log_file() {
     }
 }
 
-/// Halt all CPUs: send the halt IPI, flush pending log output, then halt self.
+/// Halt all CPUs: send the halt IPI, flush pending log output, then hold this
+/// machine's panel until a key retires the reboot bound or the bound returns it
+/// to firmware.
 // panic_flush bypasses the log-ring and serial locks — after the halt IPI a wedged holder never releases them, so taking them normally could deadlock.
 pub fn halt_all_cpus() -> ! {
     wait_for_log_file();
-    if X2APIC_ENABLED.load(Ordering::Relaxed) {
+    // Under the same condition as the wait above: before the machine is
+    // released no sibling has been sent its `SIPI`, so this addresses CPUs that
+    // are still waiting for one rather than CPUs that need halting.
+    if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::arch::smp::is_ready() {
         Reg::Icr.write(0x000C_0000 | 0xFD);
+    }
+    let bound = crate::panic_reboot::arm(true);
+    // Folded into the still-unpainted capture only where the panel is this
+    // boot's only account of itself, exactly as `wait_for_log_file`'s own line
+    // is: a refresh re-freezes the ring, and `screen_late_panic` reads the
+    // panel for a record written *after* `capture()` to prove the paint comes
+    // from the frozen snapshot. A machine with a console gets the arm line on it.
+    if !crate::drivers::serial::has_console() {
+        crate::drivers::panic_console::refresh_capture();
     }
     // Render before the flush: it can't fail the proven serial channel, and a serial line then proves the paint already finished.
     let painted = crate::drivers::panic_console::render();
@@ -208,9 +231,9 @@ pub fn halt_all_cpus() -> ! {
     // Must follow the flush — it's the deepest stack this path reaches. No-op off IST1.
     percpu::ist1_report();
     // page_forever runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
-    // Only the CPU that painted enters the pager; the rest halt directly below.
+    // Only the CPU that painted watches the bound; the rest halt below, since two CPUs polling port 0x60 would split every scancode.
     if painted {
-        crate::drivers::panic_console::page_forever();
+        crate::drivers::panic_console::page_forever(bound);
     }
     super::cpu::halt();
 }

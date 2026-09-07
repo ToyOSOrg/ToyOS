@@ -146,6 +146,51 @@ pub fn is_stem(stem: &str) -> bool {
         })
 }
 
+/// The name a boot gets when the machine would not say what time it is — or
+/// would not say it unambiguously (`wall`).
+///
+/// A word and not a zero date: `0000-00-00-000000.log` sorts correctly and
+/// reads as a real timestamp that happens to be absurd, and the difference
+/// matters to whoever finds it on a stick six months from now.
+pub const UNDATED_STEM: &str = "unknown";
+
+/// Where a file sits in the order retention deletes in: lower goes first.
+///
+/// Undated boots go before dated ones because they cannot be ordered against
+/// them — there is no clock to compare — and of the two kinds, the one that can
+/// be placed in time is the one worth keeping. Within a kind the name is the
+/// order, which is what the timestamp format is for.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Class {
+    Undated,
+    Dated,
+}
+
+/// Whether `name` on the log volume is one of `logd`'s files, and which kind.
+///
+/// An allow-list, and the strictness is the safety property in both
+/// directions: `logd` deletes nothing this does not recognise, and a host
+/// reading the volume for a boot's log reads nothing else — the bootloader's
+/// own `loader.log` is not one of these.
+pub fn classify(name: &str) -> Option<Class> {
+    let stem = name.strip_suffix(".log")?;
+    let stem = match stem.split_once('_') {
+        Some((head, part)) => {
+            if part.len() != 4 || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            head
+        }
+        None => stem,
+    };
+
+    if let Some(index) = stem.strip_prefix(UNDATED_STEM).and_then(|s| s.strip_prefix('-')) {
+        let ours = index.len() == 2 && index.bytes().all(|b| b.is_ascii_digit());
+        return ours.then_some(Class::Undated);
+    }
+    is_stem(stem).then_some(Class::Dated)
+}
+
 /// What two readings of one instant can be made to say about the zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recovery {
@@ -269,6 +314,35 @@ mod tests {
         }
         for no in ["2026-08-15-12000", "2026-8-15-120000", "unknown-01", "2026-08-15-12000x"] {
             assert!(!is_stem(no), "`{no}` was accepted as a dated stem");
+        }
+    }
+
+    /// The allow-list, from both sides: `logd` deletes only what this names,
+    /// and a host reading the volume for a boot's log reads only what it names.
+    #[test]
+    fn only_logds_own_names_are_logds() {
+        assert_eq!(classify("2026-09-06-084003.log"), Some(Class::Dated));
+        assert_eq!(classify("2026-09-06-084003_0002.log"), Some(Class::Dated));
+        assert_eq!(classify("unknown-00.log"), Some(Class::Undated));
+        assert_eq!(classify("unknown-07_9999.log"), Some(Class::Undated));
+        // An undated boot goes before a dated one, which is the delete order.
+        assert!(Class::Undated < Class::Dated);
+
+        // The bootloader's own file, and anything else on a volume a person
+        // and `toybox` can both write to.
+        for no in ["loader.log", "LOADER.LOG", "boot.log", "notes.txt", ".log", "log"] {
+            assert_eq!(classify(no), None, "`{no}` was taken for one of logd's");
+        }
+        // A part number that is not four digits, and an index that is not two.
+        for no in [
+            "2026-09-06-084003_2.log",
+            "2026-09-06-084003_00002.log",
+            "2026-09-06-084003_abcd.log",
+            "unknown-0.log",
+            "unknown-000.log",
+            "unknown.log",
+        ] {
+            assert_eq!(classify(no), None, "`{no}` was taken for one of logd's");
         }
     }
 

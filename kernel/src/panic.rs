@@ -216,6 +216,42 @@ fn state_name(state: CpuFaultState) -> &'static str {
 /// this module refused to run a formatter to find out.
 const NOT_CAPTURED: &str = "<formatted at runtime; not captured>";
 
+/// This CPU's captured crash, as the one or two lines a black-box report opens
+/// with.
+///
+/// **The first thing in that report, before any tail of records.** The panel's
+/// newest lines are the ones written *after* the crash — the register dump, the
+/// page walk, the backtrace, the reboot bound's own line — so a report cut to
+/// its tail is a report with the crash missing, which is what run 14's stick
+/// carried. `out` is written into the page directly and drops what does not fit.
+pub fn first_words(out: &mut impl core::fmt::Write) {
+    let slot = evidence();
+    let mut file_bytes = [0u8; FILE_BYTES];
+    let mut msg_bytes = [0u8; MSG_BYTES];
+    let kind = Kind::of(slot.kind.load(Ordering::Relaxed));
+    let file = read(&slot.file, &slot.file_len, &mut file_bytes);
+    let message = read(&slot.msg, &slot.msg_len, &mut msg_bytes);
+    let cut = if slot.file_cut.load(Ordering::Relaxed) == 0 { "" } else { "..." };
+    let (line, column) = (slot.line.load(Ordering::Relaxed), slot.column.load(Ordering::Relaxed));
+    let apic = slot.apic.load(Ordering::Relaxed);
+    let _ = match kind {
+        Kind::Panic => core::writeln!(
+            out,
+            "PANIC (apic {apic}): panicked at {cut}{file}:{line}:{column}: {message}"
+        ),
+        Kind::Fault => core::writeln!(
+            out,
+            "FAULT (apic {apic}): {message} rip={:#018x} cr2={:#018x} err={:#018x}",
+            slot.rip.load(Ordering::Relaxed),
+            slot.cr2.load(Ordering::Relaxed),
+            slot.error_code.load(Ordering::Relaxed),
+        ),
+        // The panic path ran without `record_panic` having claimed a slot,
+        // which is a state worth saying rather than an empty first line.
+        Kind::None => core::writeln!(out, "PANIC (apic {apic}): nothing was captured on this cpu"),
+    };
+}
+
 /// Reports this CPU's captured crash and the panic (`second`) that just
 /// reentered it. `prev` is `None` where the caller has no fault state to
 /// give — the reentry guard runs before the state swap. `on_the_record` also

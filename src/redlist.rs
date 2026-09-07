@@ -2783,6 +2783,33 @@ pub const KNOWN_RED: &[Red] = &[
         source: "src/redlist.rs",
         measured: "2026-08-19",
     },
+    // A second, unrelated way this name goes red, measured against the base it
+    // appeared on rather than against the branch that saw it first.
+    Red {
+        test: "sched_stress",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::fires(1, 4),
+        standing: Standing::Stands,
+        what: "`log-gate: FAILED: cpu5 seq 517 is stamped 650224011 ns, behind the 651750439 ns \
+               of the record before it — within a shard the sequence order is the timestamp \
+               order, and `emit` stamps inside the same bracket it reserves in` — the log gate, \
+               not a scheduler assert and not a kernel death, so it is **not** the \
+               `navigate.rs:161` row above. The inversion is emitted by the boot whatever the \
+               run's verdict: it appeared in all four full tiers and failed the test in one, \
+               which is the whole of the rate. It is always an AP's shard, never cpu0's, and it \
+               is always **one fixed position** in that shard: `seq 517` in the three runs \
+               before this branch added a boot record ahead of it and `seq 518` in the one \
+               after, so what selects the record is its index and not its number",
+        evidence: "four `cargo test` fast tiers on this host, 2026-09-06, one of them on \
+                   `origin/metal` `b3c314cf` with an empty working tree — cpu6, 742053639 ns \
+                   behind 743716169 ns, 325/325 green. Three on `t14-run4`: cpu5 (324/325, this \
+                   row's red), cpu6 736451308 behind 739564366 ns, and after the added record \
+                   cpu6 `seq 518`, 736406061 behind 737807237 ns, both 325/325 green. \
+                   **Firing on the untouched base is what makes this not the author's diff**, \
+                   and `ALONE sched_stress: PASS (1s)`",
+        source: "issues/diagnostics/a-shards-timestamps-run-backwards-at-seq-517.md",
+        measured: "2026-09-06",
+    },
     // ---------------------------------------------------------------------
     // The same session's last two runs, after the branch merged `origin/main`
     // at `bf54143`. Both red, both `ALONE … GREEN`, neither about the diff.
@@ -3573,6 +3600,56 @@ pub const KNOWN_RED: &[Red] = &[
                    the alone re-run read `21160 samples of signal at peak 7969`",
         source: "issues/audio/doom-sound-flood-played-full-scale-once.md",
         measured: "2026-09-03",
+    },
+    // The metal track's own pre-pull-request gate on the merged shape. The
+    // name's three other rows are all retired, and this one contradicts the
+    // clause of the newest retirement: the revision it promises did not happen.
+    Red {
+        test: "i8042_undecoded_bytes",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`the verdict was said too early — \"[kernel 1.474 cpu0] i8042: 2 interrupts and 4 \
+               bytes, nothing decoded — first seen at 1474ms\" — and never revised: no later \
+               `nothing decoded` line names the sequence`, and `ALONE: GREEN — it fails only \
+               beside other guests, so its Sched::Parallel is wrong. The run stays red on the \
+               classification`. **It is the 2026-08-28 retirement's own clause that fails**: \
+               that row retired on the verdict revising itself once, the first mute line naming \
+               nothing and the second naming the sequence, staged on every run by \
+               `i8042-split-burst`. Here the first line named four of Pause\'s six bytes and no \
+               second line came, so the revision the retirement rests on did not happen under \
+               load. Four bytes and not zero, so this is the CI row\'s producer and not the two \
+               dev-host rows the single-word tally closed. **Not about the diff**: the branch\'s \
+               driver fold is two markdown files and one doc comment, and neither the test nor \
+               the i8042 path is in it",
+        evidence: "the metal branch\'s pre-pull-request fast tier on the merged tip 8d895a15, \
+                   2026-09-07: 333 passed, 1 failed, 334 total in 188.3 s, red at 5 s and the \
+                   harness\'s own isolated re-run PASS at 2 s in the same run",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
+        measured: "2026-09-07",
+    },
+    // Met on the metal branch's own `durations` job, and not this branch's to
+    // fix: the price is unenforced at this base and the nightly renders it.
+    Red {
+        test: "sysret_ss_reload",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "not the test — its **price**: `sysret_ss_reload measured 26927 ms in CI, over the \
+               10000 ms line, but sysret_ss_reload remains Fast`, against a committed 6,453 ms. \
+               Four times the committed value on a name this branch does not touch, and the \
+               same direction the 2026-09-03 nightly already measured at 23,838 ms. The \
+               mechanism is this name\'s own 2026-08-29 fix: the probe line is waited for on a \
+               10 s liveness ceiling instead of a fixed 500 ms drain, so a loaded shard now \
+               spends patience where it used to spend the verdict — the red became a price. \
+               **Left committed at 6,453**: replacing the whole measured profile would have \
+               re-tiered a name whose owner is not this branch, so only the thirteen \
+               `UNMEASURED` markers this change registered were replaced",
+        evidence: "pull request #431, `ci` run 34070261856\'s `durations` job 101589256298, \
+                   2026-09-07, printed as a `::warning::` and unenforced at base 67cb15be \
+                   because this change neither registered nor re-tiered the name",
+        source: "issues/build/the-committed-profile-disagrees-with-the-nightly-on-28-names.md",
+        measured: "2026-09-07",
     },
 ];
 

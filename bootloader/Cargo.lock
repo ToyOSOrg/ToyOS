@@ -19,7 +19,12 @@ name = "bootloader"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+ "toyos-acpi",
+ "toyos-blackbox",
+ "toyos-bootmap",
  "toyos-elf",
+ "toyos-tco",
+ "toyos-wallclock",
  "uefi",
  "uefi-services",
 ]
@@ -101,7 +106,27 @@ name = "toyos-abi"
 version = "0.3.0"
 
 [[package]]
+name = "toyos-acpi"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blackbox"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-bootmap"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-elf"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-tco"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-wallclock"
 version = "0.1.0"
 
 [[package]]

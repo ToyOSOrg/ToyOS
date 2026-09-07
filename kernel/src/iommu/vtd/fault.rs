@@ -211,6 +211,12 @@ pub fn service() {
     if faults > 0 {
         // capture() puts the fault on the panel before the halt takes the
         // machine down.
+        //
+        // The refusal is the whole response and there is no recovery missing
+        // from it: a faulting device reached an address this kernel never gave
+        // it, and nothing here can know what else it already did. **So this
+        // path halts and never panics** — a report of one carries the fault
+        // record and `panic_reboot`'s arm line, and no `panicked at` line.
         crate::drivers::panic_console::capture();
         crate::arch::apic::halt_all_cpus();
     }

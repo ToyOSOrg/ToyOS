@@ -299,6 +299,48 @@ changes.
   build on the host, which is what turns this into either a contention class the
   harness should schedule around or a defect in the storm's own pacing.
 
+- **`fs_transactional`, `fs_dirs_durable`, `wake_storm_cost`** — added
+  2026-09-06 on `t14-run5`, whose kernel delta is the boot-order change loading
+  the IDT inside `percpu::init_bsp`. Three names across two of three full
+  `cargo test` runs, all three `ALONE … GREEN`, none previously on this list.
+  `fs_transactional` died at `cleanup: Kind(WouldBlock)`, the other two in the
+  run after it.
+
+  **The A/B was run and did not convict the diff.** `origin/metal` `6a715b6f`
+  with the working tree stashed: 325/325 in 185.9 s. The branch again minutes
+  later: 325/325 in 186.7 s. The two red runs were 178.9 s (one name) and
+  242.4 s (two names), and every run's `[host-slots]` lines show **both** guest
+  slots held by other worktrees throughout — four other metal worktrees were
+  live on this host. Mechanism argues the same way as the A/B: the diff moves
+  `lidt` four statements earlier with interrupts still masked, and no path from
+  there reaches a userland filesystem cleanup returning `WouldBlock`. Not
+  investigated further; filed so a fourth sighting is not re-derived.
+
+- **`screen_loader_lines`** — added 2026-09-06 on `t14-reset-early`, one of two
+  full `cargo test` runs, `ALONE … GREEN`, and `cargo run -- --known-red
+  screen_loader_lines` answered `NOT ON THE LIST`, so this is its first recorded
+  sighting. `the panel carries 0 band(s) of lit scanlines, too few to take a row
+  pitch from` — **zero** bands rather than a wrong count, so the panel was blank
+  when it was decoded and not carrying the wrong thing, which is this file's
+  liveness shape and not a content one. Worth stating because that branch does
+  move a boot record (`ACPI: reset register`) earlier, and a moved record is the
+  kind of change that shifts a panel's content: it cannot empty one. The other
+  of the two runs failed only on `console_locale_detect`, already known-red on
+  this instrument, at 733 s against the same suite's 196 s. Not investigated.
+
+- **`screen_loader_lines`**, second sighting — 2026-09-07 on `chain-line`, a
+  branch whose whole diff is two string constants. `the panel carried 26 rows at
+  the GOP query and 26 at the loader's last line, a growth of 0, where the loader
+  printed 9 lines between them` — a *different* message from the sighting above,
+  and the same shape: **zero** growth, so the panel had not been repainted when
+  it was decoded rather than carrying the wrong thing. `ALONE … GREEN`.
+  Adjudicated by a same-session A/B rather than by that classification: the base
+  (`f5267fe2`) ran two full fast tiers green, 334/334 each, and the arm ran red
+  once and green once. The mechanism agrees — the constant this branch changes is
+  printed only by a loader pass that reads a black-box page and boots no kernel,
+  and both of this test's guests are ordinary handoff passes on RAM QEMU zeroed,
+  so the string it changes is on no line either of them prints.
+
 **The eight-landing regime, and what it does to the paragraph above.** That
 paragraph says the four-suite regime "cannot recur" now that `guest_slot` admits
 twelve guests across every worktree. It recurred on 2026-08-07: **eight
@@ -434,3 +476,34 @@ describes. `ALONE: GREEN` both times, and green again when re-run alone by hand
 is the ceiling this section corrects; what a contended host does to `/system/bin/init`'s
 handle accounting on a *refused* launch is not explained here, and nobody has a
 mechanism for it. `src/redlist.rs` carries the sighting.
+
+- **`i8042_undecoded_bytes`** — added 2026-09-07 on the metal branch's
+  pre-pull-request fast tier over the merged tip `8d895a15`, one sighting:
+  `the verdict was said too early — "[kernel 1.474 cpu0] i8042: 2 interrupts
+  and 4 bytes, nothing decoded — first seen at 1474ms" — and never revised: no
+  later ``nothing decoded`` line names the sequence`, red at 5 s in a run of
+  333/334, and the harness's own re-run `ALONE i8042_undecoded_bytes: GREEN —
+  it fails only beside other guests, so its Sched::Parallel is wrong. The run
+  stays red on the classification.` **This one is not the wall-clock-guard
+  shape the head of this file warns about**: nothing waits on a number of host
+  seconds. The test asserts an ordering of two lines, and the second line never
+  came.
+
+  **It contradicts a retirement rather than joining a class.** All three of the
+  name's earlier rows in `src/redlist.rs` are retired: the two dev-host
+  `ALONE: GREEN` rows by the single-word tally in
+  `kernel/src/drivers/i8042/tally.rs` (2026-08-17), which made `N interrupts
+  and 0 bytes` unprintable, and the CI row by "the verdict revises itself once"
+  (2026-08-28) — a mute line said while a decoder still holds the run is
+  `HEALTH_MUTE_BLIND`, the first blamed byte moves it to `HEALTH_MUTE_SAID`
+  with the line that names the bytes, and `i8042-split-burst` stages that
+  interleaving on every run. Four bytes and not zero puts this sighting on the
+  CI row's producer — the test's own Pause, reported after the first interrupt
+  delivered four of its six bytes — which is exactly what the 2026-08-28 clause
+  says is no longer waited for. Under a loaded host the second line did not
+  arrive, so the revision that retirement rests on is not unconditional.
+
+  Owner: the i8042 tally. **Exit condition**: the verdict revising itself in a
+  parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
+  first mute line names nothing and its second names the sequence, or the
+  retirement's clause narrowed to the conditions under which it holds.

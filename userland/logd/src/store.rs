@@ -1,36 +1,25 @@
 //! `/log` as this program's policy: one file per boot, continuations, and
 //! retention.
 //!
-//! Moved out of `kernel/src/log_file.rs` unchanged in behaviour — the constants
-//! keep their values and their reasons, the names keep their shape, and
-//! [`classify`] keeps being strict. What changed is who runs it: a userland
-//! process with an ordinary `File`, so every byte goes through `SYS_WRITE` and
-//! `SYS_FSYNC` exactly as any other program's would.
+//! Every byte goes through `SYS_WRITE` and `SYS_FSYNC` exactly as any other
+//! program's would.
 //!
-//! **[`classify`] is more necessary here than it was in the kernel, not less.**
-//! `/log` is userland-writable and `toybox` writes there; this program is
-//! userland too, and the only thing standing between somebody else's file and
-//! `delete_file` is that this function does not recognise it.
+//! **`toyos_wallclock::classify` is the whole of what this program may delete.**
+//! `/log` is userland-writable, `toybox` writes there and the bootloader writes
+//! its own file there, and the only thing standing between somebody else's file
+//! and `delete_file` is that the function does not recognise it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
-use toyos_wallclock::is_stem;
+use toyos_wallclock::{classify, Class, UNDATED_STEM};
 
 /// Where the logs go.
 ///
 /// The root of the log partition, so that plugging the stick into another
 /// machine puts them at the top of the window that opens.
 pub const DIR: &str = "/log";
-
-/// The name a boot gets when the machine would not say what time it is — or
-/// would not say it unambiguously (`wall`).
-///
-/// A word and not a zero date: `0000-00-00-000000.log` sorts correctly and
-/// reads as a real timestamp that happens to be absurd, and the difference
-/// matters to whoever finds it on a stick six months from now.
-pub const UNDATED_STEM: &str = "unknown";
 
 /// How many of this program's files the volume keeps, including the one this
 /// boot is writing.
@@ -66,42 +55,6 @@ pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 /// boot's own log crosses it many times over and drives both the continuation
 /// and the retention path.
 pub const ROTATE_FAST_BYTES: u64 = 256;
-
-/// Where a file sits in the order retention deletes in: lower goes first.
-///
-/// Undated boots go before dated ones because they cannot be ordered against
-/// them — there is no clock to compare — and of the two kinds, the one that can
-/// be placed in time is the one worth keeping. Within a kind the name is the
-/// order, which is what the timestamp format is for.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Class {
-    Undated,
-    Dated,
-}
-
-/// Whether `name` is one of this program's files, and which kind.
-///
-/// Strict on purpose, and the strictness is the safety property: anything this
-/// does not recognise exactly is somebody else's file and is never deleted to
-/// make room.
-pub fn classify(name: &str) -> Option<Class> {
-    let stem = name.strip_suffix(".log")?;
-    let stem = match stem.split_once('_') {
-        Some((head, part)) => {
-            if part.len() != 4 || !part.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            head
-        }
-        None => stem,
-    };
-
-    if let Some(index) = stem.strip_prefix(UNDATED_STEM).and_then(|s| s.strip_prefix('-')) {
-        let ours = index.len() == 2 && index.bytes().all(|b| b.is_ascii_digit());
-        return ours.then_some(Class::Undated);
-    }
-    is_stem(stem).then_some(Class::Dated)
-}
 
 /// The name of one file in this boot's sequence.
 ///

@@ -8,8 +8,20 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }
+# The ECAM window's address, and the TCO block the loader arms in it: the two
+# pure crates the kernel reads the same answers out of.
+toyos-acpi = { path = "../toyos-acpi" }
+# Where the transient page tables put memory and the scanout, decided apart
+# from the pointers that write it and host-tested against machines this one is
+# not.
+toyos-bootmap = { path = "../toyos-bootmap" }
+toyos-blackbox = { path = "../toyos-blackbox" }
+toyos-wallclock = { path = "../toyos-wallclock" }
 toyos-elf = { path = "../toyos-elf" }
-uefi = { version = "0.26.0", default-features = false }
+toyos-tco = { path = "../toyos-tco" }
+# `alloc`: `variable_keys` and `get_variable_boxed`, which are how the boot
+# entry pointing at this image is found among the firmware's own variables.
+uefi = { version = "0.26.0", default-features = false, features = ["alloc"] }
 uefi-services = { version = "0.23.0", features = ["panic_handler", "logger"] }
 
 # The one profile every guest binary is built with. Optimised, because an

@@ -35,6 +35,7 @@ pub fn init() {
         let df = if cfg!(feature = "entry-df-unclean") { 0 } else { DF };
         cpu::wrmsr(MSR_FMASK, TF | IF | AC | df);
     }
+
 }
 
 // GS permanently points to kernel per-CPU data here; no swapgs.

@@ -3556,6 +3556,7 @@ version = "0.1.0"
 dependencies = [
  "toyos 0.3.0",
  "toyos-abi 0.3.0",
+ "toyos-tco",
 ]
 
 [[package]]
@@ -3771,6 +3772,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-mixer"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-tco"
 version = "0.1.0"
 
 [[package]]

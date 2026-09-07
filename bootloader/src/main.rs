@@ -16,10 +16,25 @@ use uefi::{
     proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID},
+    table::{boot::{MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
+    Event,
 };
-use uefi_services::println;
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
+use toyos_bootmap::{Plan, BOOT_MAP_BYTES, MAX_PAGES, PML4_HIGH_HALF, PML4_IDENTITY};
+
+/// Every line this loader prints: the firmware's console, and the file on the
+/// stick once [`loaderlog::open`] has one.
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        uefi_services::println!($($arg)*);
+        $crate::loaderlog::line(core::format_args!($($arg)*));
+    }};
+}
+
+mod blackbox;
+mod bootnext;
+mod loaderlog;
+mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
 ///
@@ -33,6 +48,16 @@ use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 /// ESP, and this bound is orders of magnitude above it while still far below
 /// what a UEFI implementation would serve in one allocation.
 const MAX_ESP_FILE: u64 = 1024 * 1024 * 1024;
+
+/// Descriptors of room held above what the map measured, for the descriptors
+/// the two allocations between that measurement and `ExitBootServices` add: the
+/// vector below, and the buffer `exit_boot_services` takes the map into.
+///
+/// **The margin is not what makes the loop safe** — the loop refuses to grow
+/// the vector at all, and this only decides how much of a real map is kept.
+/// Each allocation splits at most one free region in two, so four would do;
+/// this is beyond any plausible firmware and costs 1.5 KiB.
+const MAP_MARGIN: usize = 64;
 
 fn alloc_kernel_memory(size: usize) -> vec::Vec<u8> {
     const KERNEL_ALIGN: usize = 2 * 1024 * 1024; // 2MB
@@ -162,17 +187,17 @@ fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<Bo
     let mut nodes = path.node_iter().filter(is_hard_drive);
     let node = nodes.next()?;
     if nodes.next().is_some() {
-        println!("Boot partition: the device path has more than one HARDDRIVE node — ignoring it");
+        println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
         return None;
     }
 
     let hd: &uefi::proto::device_path::media::HardDrive = node.try_into().ok()?;
     if hd.partition_format() != PartitionFormat::GPT {
-        println!("Boot partition: firmware says this is not a GPT partition — ignoring it");
+        println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
         return None;
     }
     let PartitionSignature::Guid(guid) = hd.partition_signature() else {
-        println!("Boot partition: firmware named it with no GUID signature — ignoring it");
+        println!("Boot partition: firmware named it with no GUID signature, so it is ignored");
         return None;
     };
     Some(BootPartition {
@@ -238,25 +263,33 @@ fn rtc_utc_offset(system_table: &SystemTable<Boot>) -> Option<i32> {
     let time = match system_table.runtime_services().get_time() {
         Ok(time) => time,
         Err(e) => {
-            println!("RTC zone: firmware's GetTime failed ({e:?}) — the kernel will assume UTC");
+            println!("RTC zone: firmware's GetTime failed ({e:?}), so the kernel assumes UTC");
             return None;
         }
     };
     let Some(zone) = time.time_zone() else {
-        println!("RTC zone: firmware names none ({time:?}) — the kernel will assume UTC");
+        println!("RTC zone: firmware names none ({time:?}), so the kernel assumes UTC");
         return None;
     };
     let zone = zone as i32;
     if !(-MAX_OFFSET_MINUTES..=MAX_OFFSET_MINUTES).contains(&zone) {
         println!(
-            "RTC zone: firmware names {zone} minutes, outside +/-{MAX_OFFSET_MINUTES} — ignoring \
-             it, the kernel will assume UTC"
+            "RTC zone: firmware names {zone} minutes, outside +/-{MAX_OFFSET_MINUTES}, so it is \
+             ignored and the kernel assumes UTC"
         );
         return None;
     }
     println!("RTC zone: {zone} minutes to add to the RTC for UTC ({time:?})");
     Some(zone)
 }
+
+/// [`toyos_tco::FIRMWARE_BOUND_MS`] in the seconds `set_watchdog_timer` takes.
+const FIRMWARE_WATCHDOG_SECS: usize = (toyos_tco::FIRMWARE_BOUND_MS / 1_000) as usize;
+
+/// What firmware logs if that countdown expires. Codes to `0xffff` are reserved
+/// for firmware's own use and this is the first one an application may take;
+/// `uefi`'s `set_watchdog_timer` refuses a reserved one outright.
+const WATCHDOG_CODE: u64 = 0x0001_0000;
 
 /// Kernel virtual base: all physical memory is mapped here in the kernel's address space.
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
@@ -413,7 +446,22 @@ struct GopInfo {
 fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let bs = system_table.boot_services();
     let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().ok()?;
-    let mut gop = bs.open_protocol_exclusive::<GraphicsOutput>(gop_handle).ok()?;
+    // Never `open_protocol_exclusive` here: EXCLUSIVE calls `Stop` on every
+    // driver holding this protocol BY_DRIVER, and the firmware's graphics
+    // console is one.
+    //
+    // SAFETY: `open_protocol`'s obligation is that this handle and its protocol
+    // stay installed until the `ScopedProtocol` drops. Nothing between the two
+    // can uninstall either: the loader is the one image running, it registers
+    // no event callback, and it calls no boot service that connects or
+    // disconnects a controller.
+    let mut gop = unsafe {
+        bs.open_protocol::<GraphicsOutput>(
+            OpenProtocolParams { handle: gop_handle, agent: bs.image_handle(), controller: None },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
 
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();
@@ -438,8 +486,8 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let framebuffer = fb.as_mut_ptr() as u64;
     let framebuffer_size = fb.size() as u64;
 
-    println!("GOP: {}x{} stride={} format={} fb={:#x} size={}",
-        width, height, stride, pixel_format, framebuffer, framebuffer_size);
+    println!("{} {}x{} stride={} format={} fb={:#x} size={}",
+        loaderlog::GOP_AT, width, height, stride, pixel_format, framebuffer, framebuffer_size);
 
     Some(GopInfo {
         framebuffer,
@@ -451,47 +499,40 @@ fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     })
 }
 
-/// Build minimal boot page tables for kernel transition to high half.
-/// `pt_mem` is a pointer to PT_PAGES * 4096 bytes of zeroed memory.
-/// Returns the physical address of the PML4.
+/// Write `plan` into `pt_mem` and return the PML4's physical address.
 ///
-/// Maps first `size` bytes of physical memory at both identity (PML4[0]) and
-/// high-half (PML4[256] = PHYS_OFFSET). Uses 2MB large pages.
-unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
+/// # Safety
+/// `pt_mem` is [`toyos_bootmap::MAX_PAGES`] pages of zeroed memory, 4096-aligned.
+unsafe fn build_boot_page_tables(pt_mem: *mut u8, plan: &Plan) -> u64 {
     const PAGE_PRESENT: u64 = 1 << 0;
     const PAGE_WRITE: u64 = 1 << 1;
     const PAGE_SIZE_BIT: u64 = 1 << 7;
-    const PAGE_2M: u64 = 2 * 1024 * 1024;
-    const GB: u64 = 1 << 30;
 
     let mut next_page = 0usize;
-    let mut alloc_page = |pt_mem: *mut u8| -> *mut u64 {
-        let p = pt_mem.add(next_page * 4096) as *mut u64;
+    let mut alloc_page = || -> *mut u64 {
+        let page = pt_mem.add(next_page * 4096) as *mut u64;
         next_page += 1;
-        p
+        page
     };
 
-    let pml4 = alloc_page(pt_mem);
-    let identity_pdpt = alloc_page(pt_mem);
-    let high_pdpt = alloc_page(pt_mem);
-
-    let num_gb = size.div_ceil(GB) as usize;
-    for gi in 0..num_gb {
-        let pd = alloc_page(pt_mem);
-        for pdi in 0..512u64 {
-            let phys = gi as u64 * GB + pdi * PAGE_2M;
-            if phys < size {
-                *pd.add(pdi as usize) = phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT;
-            }
-        }
-        let pd_phys = pd as u64;
-        *identity_pdpt.add(gi) = pd_phys | PAGE_PRESENT | PAGE_WRITE;
-        *high_pdpt.add(gi) = pd_phys | PAGE_PRESENT | PAGE_WRITE;
+    let pml4 = alloc_page();
+    let identity_pdpt = alloc_page();
+    let high_pdpt = alloc_page();
+    let mut directories = [core::ptr::null_mut::<u64>(); toyos_bootmap::MAX_DIRECTORIES];
+    for (slot, gib) in plan.directories().iter().enumerate() {
+        let pd = alloc_page();
+        directories[slot] = pd;
+        *identity_pdpt.add(*gib as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
+        *high_pdpt.add(*gib as usize) = pd as u64 | PAGE_PRESENT | PAGE_WRITE;
     }
 
-    // PML4[0] = identity, PML4[256] = high-half (PHYS_OFFSET >> 39 = 256)
-    *pml4.add(0) = identity_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
-    *pml4.add(256) = high_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
+    for entry in plan.entries() {
+        *directories[entry.directory].add(entry.index) =
+            entry.phys | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE_BIT | entry.cache.bits();
+    }
+
+    *pml4.add(PML4_IDENTITY) = identity_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
+    *pml4.add(PML4_HIGH_HALF) = high_pdpt as u64 | PAGE_PRESENT | PAGE_WRITE;
 
     pml4 as u64
 }
@@ -500,28 +541,102 @@ unsafe fn build_boot_page_tables(pt_mem: *mut u8, size: u64) -> u64 {
 // every one is moved into `KernelArgs` below and nothing else calls it.
 #[allow(clippy::too_many_arguments)]
 fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], rtc_utc_offset: Option<i32>, system_table: SystemTable<Boot>) -> ! {
-    let mms = system_table.boot_services().memory_map_size();
-    let memory_map_entry_count = mms.map_size / mms.entry_size + 8;
-    let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
-
-    // Pre-allocate page table pages before exiting boot services.
-    // We need: 1 PML4 + 2 PDPTs + up to 8 PDs (for 8GB) = ~11 pages max.
-    // Allocate as a flat array and split into 512-entry pages.
-    const PT_PAGES: usize = 12;
-    let pt_layout = Layout::from_size_align(PT_PAGES * 4096, 4096).unwrap();
-    // SAFETY: `layout` has non-zero size (`PT_PAGES` is a fixed 12) and its
-    // 4096 alignment is what every page-table page below needs — the low 12
-    // bits of an entry are flags, not address bits.
+    // Pre-allocated before exiting boot services, and flat: `alloc_page` splits
+    // it into 512-entry pages.
+    let pt_layout = Layout::from_size_align(MAX_PAGES * 4096, 4096).unwrap();
+    // SAFETY: `layout` has non-zero size and its 4096 alignment is what every
+    // page-table page below needs — the low 12 bits of an entry are flags, not
+    // address bits.
     let pt_mem = unsafe { alloc::alloc::alloc_zeroed(pt_layout) };
     assert!(!pt_mem.is_null(), "page table allocation failed");
 
+    // Before the exit: `_print` unwraps a system table uefi-services nulls in its exit callback, so `println!` past it panics.
+    //
+    // Said before it is applied: a machine this refuses leaves the refusal in
+    // `loader.log`, which is the artifact a machine with no console has.
+    let planned = Plan::new(gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)));
+    match &planned {
+        Ok(plan) => match plan.scanout() {
+            Some((at, len)) => println!(
+                "Scanout: {at:#x}+{len:#x} mapped uncacheable in 2 MiB pages at identity and at \
+                 PHYS_OFFSET, in {} page directories",
+                plan.directories().len()
+            ),
+            None => println!("Scanout: this machine has none"),
+        },
+        Err(why) => println!("Scanout: NO BOOT MAP HOLDS IT, {why}"),
+    }
+    let plan = planned.unwrap_or_else(|why| panic!("the boot map cannot hold the scanout: {why}"));
+
+    // SAFETY: `pt_mem` is the `MAX_PAGES * 4096`-byte, 4096-aligned, zeroed
+    // allocation above, and a `Plan` never names more pages than that.
+    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, &plan) };
+    println!("Boot map: PML4 {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
+
+    // Said before it is asserted: `assert!` panics through uefi-services, whose handler prints to the console alone.
+    let kernel_phys = kernel.memory.as_ptr() as u64;
+    let kernel_fits =
+        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES);
+    println!(
+        "Kernel image: {kernel_phys:#x}+{:#x} {} the {BOOT_MAP_BYTES:#x}-byte boot map",
+        kernel.memory.len(),
+        if kernel_fits { "is inside" } else { "DOES NOT FIT" },
+    );
+    assert!(kernel_fits, "the kernel image does not fit the boot map");
+
+    // A refusal, like the scanout's: a buffer the kernel cannot read before
+    // `mm::init` is not one parameter lost, it is every one of them — the
+    // watchdog, the black box's address, the root — with the boot going on as
+    // though none had been asked for. An empty cmdline's pointer names nothing
+    // and is not reported as reachable.
+    let parameters = (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64));
+    match parameters {
+        None => println!("Parameter buffer: none"),
+        Some((at, len)) => {
+            let inside = at.checked_add(len).is_some_and(|end| end <= BOOT_MAP_BYTES);
+            assert!(
+                inside,
+                "the boot map cannot hold the parameter buffer: {at:#x}+{len:#x} is outside its \
+                 {BOOT_MAP_BYTES:#x} bytes, so the kernel would read none of this boot's parameters"
+            );
+            println!(
+                "Parameter buffer: {at:#x}+{len:#x} is inside the {BOOT_MAP_BYTES:#x}-byte boot map"
+            );
+        }
+    }
+
+    // Last, and after every line above: a console write, a FAT write and a
+    // handle drop can each add a descriptor, and the margin below is fixed.
+    loaderlog::close();
+    let mms = system_table.boot_services().memory_map_size();
+    let memory_map_entry_count = mms.map_size / mms.entry_size + MAP_MARGIN;
+    let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
+
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
 
+    // **Nothing below this line may allocate or panic.** Boot services are gone,
+    // so the allocator answers null and `println!` dereferences a system table
+    // uefi-services has already nulled; either one ends in a panic inside a
+    // panic, and a fault with no IDT of our own vectors into firmware's, which
+    // dead-loops. The machine then holds the loader's last line on the panel
+    // forever and says nothing — which is the failure this loop is written to
+    // be incapable of, not merely unlikely to reach.
     uefi_memory_map.entries().for_each(|entry| {
+        if memory_map.len() == memory_map.capacity() {
+            // A `push` here would grow the vector, and growing it is the death
+            // above. What was dropped is not reported: the page that carried
+            // that refusal off this boot is gone with the claim, and
+            // `issues/panic-path/the-loaders-truncated-map-refusal-is-executed-by-nothing.md`
+            // holds what is owed.
+            return;
+        }
         memory_map.push(MemoryMapEntry {
             uefi_type: entry.ty.0,
+            // Saturating: `overflow-checks` is on in this profile, so a
+            // descriptor whose extent does not fit an address would panic here
+            // rather than in a caller that could report it.
             start: entry.phys_start,
-            end: entry.phys_start + entry.page_count * PAGE_SIZE as u64,
+            end: entry.phys_start.saturating_add(entry.page_count.saturating_mul(PAGE_SIZE as u64)),
         });
     });
 
@@ -567,32 +682,15 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         cmdline_len: cmdline.len() as u64,
     };
 
-    // Build boot page tables: identity map + high-half map for first 4GB.
-    const BOOT_MAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-    // SAFETY: `pt_mem` is the `PT_PAGES * 4096`-byte, 4096-aligned, zeroed
-    // allocation above, and `PT_PAGES` (12) covers what `BOOT_MAP_BYTES` (4
-    // GiB) needs: 1 PML4 + 2 PDPTs + up to 8 PDs, one PD per GiB — `size`
-    // here is `BOOT_MAP_BYTES` exactly, so `num_gb` inside is 4, well under
-    // the 8 the allocation has room for.
-    let pml4_phys = unsafe { build_boot_page_tables(pt_mem, BOOT_MAP_BYTES) };
     kernel_args.boot_pml4_addr = pml4_phys;
 
-    // Switch to new page tables. SAFETY: `pml4_phys` is the table just built,
+    // Switch to new page tables. SAFETY: `pml4_phys` is the table built above,
     // identity-mapping low memory (so the code and stack this instruction
     // itself runs from stay mapped across the switch) and high-half-mapping
-    // the same range at `PHYS_OFFSET` for the jump below.
+    // the same range at `PHYS_OFFSET` for the jump below. The assert before the
+    // exit proved the whole kernel image is inside that range.
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) pml4_phys, options(nostack)) };
 
-    // The boot map above covers only `BOOT_MAP_BYTES` — everything the entry
-    // jump below needs mapped, not everything `KernelArgs` names. The kernel
-    // reaches the rest (the cmdline, its own stack) through the page tables it
-    // builds for itself once it is running; only the entry point has to be
-    // live under *these* transient ones.
-    assert!(
-        kernel_phys.checked_add(kernel.memory.len() as u64).is_some_and(|end| end <= BOOT_MAP_BYTES),
-        "kernel image at {kernel_phys:#x}..+{:#x} does not fit the {BOOT_MAP_BYTES:#x}-byte boot map",
-        kernel.memory.len()
-    );
     let entry_virt = PHYS_OFFSET + kernel_phys + kernel.entry_offset as u64;
 
     mem::forget(memory_map);
@@ -611,10 +709,99 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     entry(&kernel_args);
 }
 
+/// When this pass armed the page, in Unix seconds, or 0 where firmware would
+/// not say.
+///
+/// The zone is not applied and does not need to be: what a reader of the stick
+/// asks of this number is whether the record beside it is *this* boot's
+/// predecessor's or one left over, and an hour either way answers that.
+fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
+    let Ok(t) = system_table.runtime_services().get_time() else { return 0 };
+    toyos_wallclock::Civil {
+        year: u64::from(t.year()),
+        month: u64::from(t.month()),
+        day: u64::from(t.day()),
+        hour: u64::from(t.hour()),
+        min: u64::from(t.minute()),
+        sec: u64::from(t.second()),
+    }
+    .to_unix_secs()
+}
+
+/// End a pass that read the black box and boots no kernel, by resetting the
+/// machine rather than returning to the boot manager.
+///
+/// **A UEFI application that returns leaves whatever it registered behind, and
+/// the boot manager then unloads its image.** `uefi_services::init` registers a
+/// `SIGNAL_EXIT_BOOT_SERVICES` callback that lives here; the next operating
+/// system signals that group from inside its own `ExitBootServices`, and
+/// firmware calls into memory that is no longer ours.
+///
+/// So the event is closed *and* the pass resets. Closing it is the invariant —
+/// a pass that does not hand off leaves nothing registered in the firmware — and
+/// the reset is what makes that invariant not have to be complete: the next
+/// operating system comes up on firmware this image has never run on, for one
+/// reboot. `BootNext` was consumed by this pass and this pass sets none, so the
+/// firmware's own order takes the machine, and the page was cleared as it was
+/// read, so a boot that does come back here boots normally.
+fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
+    println!("{}", loaderlog::ENDS_AT_CHAIN);
+    loaderlog::close_without_a_kernel();
+    if let Some(event) = exit_event {
+        // After the last line is written: closing it is what stops `println!`
+        // being disabled by a callback, not what enables it, but the ordering
+        // is the one a reader should not have to check.
+        let _ = system_table.boot_services().close_event(event);
+    }
+    system_table.runtime_services().reset(ResetType::WARM, Status::SUCCESS, None)
+}
+
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
-    uefi_services::init(&mut system_table).unwrap();
-    println!("ToyOS Bootloader 1.0");
+    // The event is kept, not discarded: it is a callback *inside this image*
+    // that firmware holds until it is closed, and a pass that returns to the
+    // boot manager is a pass whose image the boot manager then unloads. See
+    // `end_this_pass`.
+    let exit_event = uefi_services::init(&mut system_table).unwrap();
+    // First, because it covers everything below it: firmware starts a
+    // five-minute countdown when it loads an image and resets the machine if
+    // the image neither exits boot services nor disables it, and a minute is
+    // this project's bound for every watchdog. Reported after the log is open,
+    // so the answer is on the stick and not only on the screen.
+    let firmware_watchdog =
+        system_table.boot_services().set_watchdog_timer(FIRMWARE_WATCHDOG_SECS, WATCHDOG_CODE, None);
+    // The same sixteen bytes the kernel is handed below, read once, and read
+    // before the first line so that no line is only on the screen.
+    let log_guid = log_partition_guid(handle, &system_table);
+    // Before the log is opened, and before this loader's own allocations can
+    // land on the page: whether this pass replaces the last boot's file or
+    // appends a report under it is what the page decides, and the boot being
+    // reported on has to stay readable.
+    let (page, claim_refused) = blackbox::claim(&system_table);
+    let finding = blackbox::harvest(page);
+    loaderlog::open(&system_table, &log_guid, finding.is_none());
+    println!("{}", loaderlog::BEGINS_AT);
+    if let Some(line) = claim_refused {
+        println!("{line}");
+    }
+    if let Some(finding) = finding {
+        for line in &finding.lines {
+            println!("{line}");
+        }
+        if finding.ends_the_chain {
+            // The last boot is accounted for, so this pass boots no kernel.
+            end_this_pass(&system_table, exit_event);
+        }
+    }
+    match firmware_watchdog {
+        Ok(()) => println!(
+            "Firmware watchdog: {FIRMWARE_WATCHDOG_SECS} s, until ExitBootServices disables it"
+        ),
+        Err(e) => println!(
+            "Firmware watchdog: firmware refused {FIRMWARE_WATCHDOG_SECS} s ({e}), so a hang in \
+             this loader needs a hand on the button"
+        ),
+    }
 
     // Find ACPI 2.0 RSDP from UEFI configuration table
     let rsdp_addr = system_table
@@ -638,11 +825,21 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let kernel_bytes = load_file_bytes(handle, &system_table, cstr16!("\\toyos\\kernel.elf"));
     println!("Kernel: {} bytes", kernel_bytes.len());
 
-    let log_guid = log_partition_guid(handle, &system_table);
     println!("Log partition: signature {:02x?}", log_guid);
 
-    let cmdline = cmdline(handle, &system_table);
-    println!("Boot parameter: {:?}", core::str::from_utf8(&cmdline));
+    // The word naming the page is appended to what the ESP carried, because
+    // whether there is a page is a fact only this loader has: the kernel is
+    // handed one line and reads its own parameters out of it.
+    let mut cmdline = cmdline(handle, &system_table);
+    if let Some(word) = blackbox::param(page) {
+        if !cmdline.is_empty() {
+            cmdline.push(b',');
+        }
+        cmdline.extend_from_slice(word.as_bytes());
+    }
+    let params = core::str::from_utf8(&cmdline)
+        .unwrap_or_else(|e| panic!("\\toyos\\cmdline is not UTF-8: {e}"));
+    println!("Boot parameter: {params:?}");
 
     println!("Loading kernel elf...");
     let loaded_kernel = load_kernel_elf(&kernel_bytes);
@@ -653,6 +850,16 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // Last of the firmware questions and for the same reason as the GOP: both
     // answers die with Boot Services.
     let rtc_offset = rtc_utc_offset(&system_table);
+
+    // The page says a kernel is running, and `BootNext` says this loader gets the
+    // machine again however that kernel ends.
+    blackbox::arm(page, armed_at(&system_table));
+    bootnext::point_at_us(handle, &system_table);
+
+    // The last act before the jump, so the smallest possible span of this loader
+    // is inside the bound: everything above it can still be reported, and a hang
+    // between here and the kernel's own arm is what the bound is for.
+    watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);

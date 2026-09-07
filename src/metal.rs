@@ -23,10 +23,36 @@ use crate::image::LBA;
 
 const CONNECT_SECS: u64 = 10;
 
-/// How long the machine has to go quiet after `reboot`, and how long it then
-/// has to answer again.
+/// How long the machine has to go quiet after `reboot`.
 const GOING_DOWN_SECS: u64 = 120;
-const RETURN_SECS: u64 = 420;
+
+/// What the machine spends getting back to `sshd` once a ToyOS boot is over:
+/// the firmware's pass and Ubuntu's own boot.
+const RETURN_ALLOWANCE_SECS: u64 = 300;
+
+/// Every bound a metal boot runs under, by the constant that arms it: the
+/// firmware's over the span before the handoff, the TCO the loader arms there
+/// and the kernel keeps feeding, the runner's own over its job list — which no
+/// watchdog covers, because a kernel with an unfinished job is alive — and the
+/// panicked kernel's own over its panel, which is what ends a boot on a machine
+/// whose chipset watchdog does not count.
+const WATCHDOG_BOUNDS_MS: &[u64] = &[
+    toyos_tco::FIRMWARE_BOUND_MS,
+    toyos_tco::BOUND_MS,
+    toyos_tco::JOB_BOUND_MS,
+    toyos_tco::PANIC_BOUND_MS,
+];
+
+/// How long the machine has to answer `ssh` again after `reboot`.
+///
+/// **Derived, because a literal is wrong the day any of it moves.** A boot is
+/// only certainly over once the longest of [`WATCHDOG_BOUNDS_MS`] could have
+/// fired; [`RETURN_ALLOWANCE_SECS`] is what coming back costs after that.
+fn return_secs() -> u64 {
+    let longest =
+        WATCHDOG_BOUNDS_MS.iter().copied().max().expect("a metal boot runs under a watchdog");
+    longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
+}
 
 const POLL_SECS: u64 = 5;
 
@@ -72,6 +98,8 @@ pub enum Refusal {
     Landed { what: String, want: u64, got: u64 },
     /// `efibootmgr` named no four-hex-digit boot entry.
     BootEntry(String),
+    /// Creating the entry moved the firmware's boot order.
+    BootOrder { before: String, now: String },
     Sudo(String),
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
@@ -129,6 +157,11 @@ impl fmt::Display for Refusal {
             Self::BootEntry(saw) => {
                 write!(f, "efibootmgr named no four-hex-digit boot entry: {saw:?}")
             }
+            Self::BootOrder { before, now } => write!(
+                f,
+                "creating the boot entry moved BootOrder from {before:?} to {now:?}: this loop \
+                 buys one boot with --bootnext and leaves the order alone"
+            ),
             Self::Sudo(saw) => {
                 write!(f, "`sudo -n` on the machine did not answer: {saw}. Install the rule first")
             }
@@ -142,8 +175,9 @@ impl fmt::Display for Refusal {
             }
             Self::Silent { what, secs } => write!(
                 f,
-                "the machine did not {what} within {secs} s; it may be sitting in ToyOS with its \
-                 one boot already spent, which needs a hand on the power button"
+                "the machine did not {what} within {secs} s, which is longer than every watchdog \
+                 a boot runs under plus the time coming back costs; why it did not is what the \
+                 panel and the log partition say, and neither is readable from here"
             ),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
             Self::Usage(why) => write!(f, "{why}"),
@@ -283,17 +317,23 @@ impl Word {
         Ok(Self::Is(text.to_string()))
     }
 
-    /// The word as `sudoers(5)` reads it: `,`, `:`, `=` and `\` carry meaning
-    /// in a command argument, and a leading `^` makes the argument a regex.
+    /// The word as `sudoers(5)` reads it: `,`, `:`, `=` and a `^` escaped once,
+    /// and a backslash four times — the page's "you must escape the backslash
+    /// twice", for the two levels of escaping it names, the sudoers parser's
+    /// and `fnmatch(3)`'s.
     fn sudoers(&self) -> String {
         match self {
             Self::Is(text) => {
                 let mut out = String::new();
                 for c in text.chars() {
-                    if matches!(c, ',' | ':' | '=' | '\\' | '^') {
-                        out.push('\\');
+                    match c {
+                        '\\' => out.push_str(r"\\\\"),
+                        ',' | ':' | '=' | '^' => {
+                            out.push('\\');
+                            out.push(c);
+                        }
+                        _ => out.push(c),
                     }
-                    out.push(c);
                 }
                 out
             }
@@ -302,11 +342,11 @@ impl Word {
     }
 }
 
-/// The account name as the rule's *user* field, stricter than a command word:
-/// `,` and `:` separate a user list and a `Runas` there and `%` and `+` make
-/// the name a group and a netgroup, where an argument only escapes all four.
+/// The account name as the rule's *user* field, which [`Word::sudoers`] cannot
+/// render: every character the two escape differently is refused, along with
+/// the four that carry meaning in that field — `,`, `:`, `%` and `+`.
 fn user_word(user: &str) -> Result<Word, Refusal> {
-    if user.contains([',', ':', '%', '+']) {
+    if user.contains([',', ':', '%', '+', '\\', '(', ')']) {
         return Err(Refusal::Word(user.to_string()));
     }
     Word::literal(user)
@@ -369,9 +409,13 @@ impl Target {
         match job {
             Job::Wipe => literal(&[WIPEFS, "--all", &node]),
             Job::Flash => literal(&[DD, &of, "bs=4M", "conv=fsync"]),
+            // `--create-only`, never `--create`: the latter "add[s] to
+            // bootorder" (efibootmgr(8)) at the top, so the boot after the one
+            // `--bootnext` bought picks ToyOS again, and a job list whose one
+            // job is a reboot then loops.
             Job::Create => literal(&[
                 EFIBOOTMGR,
-                "--create",
+                "--create-only",
                 "--disk",
                 &node,
                 "--part",
@@ -568,6 +612,42 @@ fn entries_labelled(listing: &str, label: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Every boot entry id a listing carries under `label`.
+fn ids(listing: &str, label: &str) -> Vec<String> {
+    entries_labelled(listing, label).into_iter().map(|(id, _)| id).collect()
+}
+
+/// The id a create left behind, or the refusal it earned: the order it must not
+/// have moved, and the entry it must have made.
+fn entry_after_create(
+    before: &str,
+    after: &str,
+    label: &str,
+    guid: &str,
+) -> Result<String, Refusal> {
+    let (was, now) = (boot_order(before), boot_order(after));
+    if was != now {
+        return Err(Refusal::BootOrder { before: was, now });
+    }
+    entries_labelled(after, label)
+        .into_iter()
+        .find(|(_, made)| made == guid)
+        .map(|(id, _)| id)
+        .ok_or_else(|| Refusal::BootEntry(after.trim().to_string()))
+}
+
+/// The firmware's boot order, out of `efibootmgr`'s `BootOrder:` line. Empty
+/// where there is none, which is a machine whose order this loop did not move
+/// either.
+fn boot_order(listing: &str) -> String {
+    listing
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("BootOrder:"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// systemd's *effective* logind policy, out of `systemd-analyze cat-config`:
 /// the last assignment of a key wins, and `Key = value` is legal spacing.
 fn lid_policy(text: &str) -> Result<(), Refusal> {
@@ -698,16 +778,36 @@ impl Driver {
         for (id, _) in stale {
             self.as_root("deleting a stale boot entry", Job::Delete, Some(&id), None)?;
         }
+        // Read after those deletions, because a delete takes its entry out of
+        // the order too: what the create is judged against is the state the
+        // create acts on.
+        let before = self.ssh("listing boot entries", EFIBOOTMGR)?;
         self.as_root("creating the boot entry", Job::Create, None, None)?;
-        // Read back rather than parsed out of `--create`'s own output: the
+        // Read back rather than parsed out of the create's own output: the
         // firmware's list is what the next command names, and one parser reads
-        // it. A dry run created nothing, so `0000` stands for the id it would
-        // have been given — the only value here that is not the real run's.
+        // it.
         let after = self.ssh("listing boot entries", EFIBOOTMGR)?;
-        match (ours(&after).0.first(), self.dry_run) {
-            (Some((id, _)), _) => Ok(id.clone()),
-            (None, true) => Ok("0000".to_string()),
-            (None, false) => Err(Refusal::BootEntry(after.trim().to_string())),
+        match entry_after_create(&before, &after, &self.target.label, &want) {
+            Ok(id) => Ok(id),
+            // A dry run created nothing, so `0000` stands for the id the
+            // firmware would have given it — the only value in the run that is
+            // not the real run's.
+            Err(Refusal::BootEntry(_)) if self.dry_run => Ok("0000".to_string()),
+            Err(refusal) => {
+                // Every entry this create added under the loop's own label,
+                // whatever partition it names: one left behind is one the next
+                // run inherits. A failure to clear it does not replace the
+                // refusal being answered.
+                let had: Vec<String> = ids(&before, &self.target.label);
+                for id in ids(&after, &self.target.label) {
+                    if had.contains(&id) {
+                        continue;
+                    }
+                    let what = "deleting the entry this create made";
+                    let _ = self.as_root(what, Job::Delete, Some(&id), None);
+                }
+                Err(refusal)
+            }
         }
     }
 
@@ -730,10 +830,13 @@ impl Driver {
         Err(Refusal::Silent { what, secs })
     }
 
-    /// Everything the stick's log partition carries, in name order: a freshly
-    /// flashed volume holds one boot's files, and its newest file alone would
-    /// miss the continuations `logd` rotates into.
-    fn read_log(&self) -> Result<String, Refusal> {
+    /// The loader's own file, and then everything `logd` wrote, in name order:
+    /// a freshly flashed volume holds one boot's files, and its newest file
+    /// alone would miss the continuations `logd` rotates into.
+    ///
+    /// Two strings and not one, because only the second is the boot's log and
+    /// [`bootlog::verdict`] is about that.
+    fn read_log(&self) -> Result<(String, String), Refusal> {
         self.ssh("making the mount point", &format!("mkdir -p {}", shell_word(&self.target.mount)))?;
         self.as_root("mounting the log partition", Job::Mount, None, None)?;
         let read = self.read_mounted();
@@ -742,7 +845,7 @@ impl Driver {
         // because the read's failure is the one worth answering with.
         let unmounted = self.as_root("unmounting the log partition", Job::Umount, None, None);
         match (read, unmounted) {
-            (Ok(text), Ok(_)) => Ok(text),
+            (Ok(both), Ok(_)) => Ok(both),
             (Ok(_), Err(umount)) => Err(umount),
             (Err(read), Ok(_)) => Err(read),
             (Err(read), Err(umount)) => Err(Refusal::Remote {
@@ -753,18 +856,26 @@ impl Driver {
         }
     }
 
-    fn read_mounted(&self) -> Result<String, Refusal> {
+    fn read_mounted(&self) -> Result<(String, String), Refusal> {
         let at = shell_word(&self.target.mount);
         let listing = self.ssh("listing the log", &format!("ls -1 {at}"))?;
-        let mut names: Vec<&str> =
-            listing.lines().map(str::trim).filter(|n| n.ends_with(".log")).collect();
-        names.sort_unstable();
+        let (loader, logd) = bootlog::split_listing(&listing);
+        // Absence is an answer and not a failure: the boot is judged on what
+        // `logd` wrote either way.
+        let loader = match loader {
+            Some(name) => self.cat(name)?,
+            None => format!("{}: the loader wrote none\n", bootlog::LOADER_LOG),
+        };
         let mut text = String::new();
-        for name in names {
-            let file = shell_word(&format!("{}/{name}", self.target.mount));
-            text.push_str(&self.ssh("reading a log file", &format!("cat {file}"))?);
+        for name in logd {
+            text.push_str(&self.cat(name)?);
         }
-        Ok(text)
+        Ok((loader, text))
+    }
+
+    fn cat(&self, name: &str) -> Result<String, Refusal> {
+        let file = shell_word(&format!("{}/{name}", self.target.mount));
+        self.ssh("reading a log file", &format!("cat {file}"))
     }
 }
 
@@ -805,7 +916,7 @@ impl Args {
             target: Target::t14()?,
             dry_run: false,
             install_sudoers: None,
-            wait_secs: RETURN_SECS,
+            wait_secs: return_secs(),
         };
         let mut at = 0;
         while at < args.len() {
@@ -978,8 +1089,8 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
 
     let back = driver.ride_the_reboot(args.wait_secs)?;
     println!("the machine answered ssh again after {back} s");
-    let log = driver.read_log()?;
-    print!("{log}");
+    let (loader, log) = driver.read_log()?;
+    print!("{loader}{log}");
     bootlog::verdict(&log).map(Some).map_err(Refusal::Log)
 }
 
@@ -1032,21 +1143,22 @@ mod tests {
 
     #[test]
     fn the_rule_is_the_command_table_rendered() {
+        let hex = "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]";
         assert_eq!(
             target().sudoers().unwrap(),
-            "# toyos-metal: the whole of what the metal loop runs as root.\n\
-             t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create --disk /dev/sda --part 1 \
-             --label ToyOS --loader \\\\EFI\\\\BOOT\\\\BOOTX64.EFI\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --delete-bootnum --bootnum \
-             [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --bootnext \
-             [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/mount -o ro /dev/sda3 /home/t14/toyos-log\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/umount /home/t14/toyos-log\n\
-             t14 ALL=(root) NOPASSWD: /usr/sbin/reboot \"\"\n\
-             t14 ALL=(root) NOPASSWD: /usr/bin/true \"\"\n"
+            format!(
+                "# toyos-metal: the whole of what the metal loop runs as root.\n\
+                 t14 ALL=(root) NOPASSWD: /usr/sbin/wipefs --all /dev/sda\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --create-only --disk /dev/sda \
+                 --part 1 --label ToyOS --loader \\\\\\\\EFI\\\\\\\\BOOT\\\\\\\\BOOTX64.EFI\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --delete-bootnum --bootnum {hex}\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/efibootmgr --bootnext {hex}\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/mount -o ro /dev/sda3 /home/t14/toyos-log\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/umount /home/t14/toyos-log\n\
+                 t14 ALL=(root) NOPASSWD: /usr/sbin/reboot \"\"\n\
+                 t14 ALL=(root) NOPASSWD: /usr/bin/true \"\"\n"
+            )
         );
     }
 
@@ -1094,6 +1206,11 @@ mod tests {
             "t*",
             "t14 ALL=(root) NOPASSWD",
             "t14\t",
+            // The three a word escapes differently from an argument, so the
+            // argument rendering can never reach the user field.
+            r"t14\root",
+            "t14(x",
+            "t14)x",
         ] {
             let mut t = target();
             t.user = user.to_string();
@@ -1109,12 +1226,12 @@ mod tests {
     #[test]
     fn a_sudoers_word_escapes_what_sudoers_reads() {
         let escaped = |text: &str| Word::Is(text.to_string()).sudoers();
-        assert_eq!(escaped("of=/dev/sda"), "of\\=/dev/sda");
-        assert_eq!(escaped(LOADER), "\\\\EFI\\\\BOOT\\\\BOOTX64.EFI");
-        assert_eq!(escaped("a,b"), "a\\,b");
-        assert_eq!(escaped("a:b"), "a\\:b");
-        assert_eq!(escaped("^a"), "\\^a");
+        assert_eq!(escaped("of=/dev/sda"), r"of\=/dev/sda");
+        assert_eq!(escaped("a,b"), r"a\,b");
+        assert_eq!(escaped("a:b"), r"a\:b");
+        assert_eq!(escaped("^a"), r"\^a");
         assert_eq!(Word::Hex4.sudoers(), "[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]");
+        assert_eq!(escaped(LOADER), r"\\\\EFI\\\\BOOT\\\\BOOTX64.EFI");
     }
 
     #[test]
@@ -1146,9 +1263,47 @@ mod tests {
         );
         assert_eq!(
             t.remote(Job::Create, None).unwrap(),
-            "sudo -n '/usr/bin/efibootmgr' '--create' '--disk' '/dev/sda' '--part' '1' \
+            "sudo -n '/usr/bin/efibootmgr' '--create-only' '--disk' '/dev/sda' '--part' '1' \
              '--label' 'ToyOS' '--loader' '\\EFI\\BOOT\\BOOTX64.EFI'"
         );
+    }
+
+    #[test]
+    fn a_create_that_moved_the_boot_order_is_refused() {
+        let guid = "69ddc8f6-fab2-423f-9818-93bb0ba7349c";
+        let before = "BootCurrent: 0001\nBootOrder: 0001,001D\n\
+             Boot0001* Ubuntu\tHD(1,GPT,16c1f60f-0f7b-4c3d-ba3f-5d75df1fe7bf,0x800,0x1000)\
+             /File(\\EFI\\ubuntu\\shimx64.efi)\n";
+        let made = format!(
+            "Boot0002* ToyOS\tHD(1,GPT,{guid},0x800,0x11000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"
+        );
+
+        let created_only = format!("{before}{made}");
+        assert_eq!(entry_after_create(before, &created_only, "ToyOS", guid), Ok("0002".to_string()));
+
+        let ordered = created_only.replace("BootOrder: 0001,001D", "BootOrder: 0002,0001,001D");
+        assert_eq!(
+            entry_after_create(before, &ordered, "ToyOS", guid),
+            Err(Refusal::BootOrder {
+                before: "0001,001D".to_string(),
+                now: "0002,0001,001D".to_string(),
+            })
+        );
+
+        assert!(matches!(
+            entry_after_create(before, before, "ToyOS", guid),
+            Err(Refusal::BootEntry(_))
+        ));
+        let elsewhere = created_only.replace(guid, "11111111-1111-1111-1111-111111111111");
+        assert!(matches!(
+            entry_after_create(before, &elsewhere, "ToyOS", guid),
+            Err(Refusal::BootEntry(_))
+        ));
+
+        assert_eq!(boot_order("BootCurrent: 0001\n"), "");
+        assert_eq!(boot_order(""), "");
+        assert!(!Refusal::BootOrder { before: String::new(), now: "0002".to_string() }
+            .about_the_boot());
     }
 
     #[test]
@@ -1174,11 +1329,28 @@ mod tests {
         assert_eq!(entries_labelled(listing, "Setup"), [("0010".to_string(), String::new())]);
     }
 
+    /// The wait is the *longest* watchdog plus the allowance, computed here by
+    /// hand from the constants rather than from the expression under test — so
+    /// a `max` that became a `min` reds instead of agreeing with itself.
+    #[test]
+    fn the_wait_outlasts_every_watchdog_a_boot_runs_under() {
+        assert_eq!(toyos_tco::FIRMWARE_BOUND_MS, 60_000);
+        assert_eq!(toyos_tco::BOUND_MS, 9_600);
+        assert_eq!(toyos_tco::JOB_BOUND_MS, 60_000);
+        assert_eq!(toyos_tco::PANIC_BOUND_MS, 60_000);
+        assert_eq!(RETURN_ALLOWANCE_SECS, 300);
+        assert_eq!(return_secs(), 360);
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::FIRMWARE_BOUND_MS));
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::JOB_BOUND_MS));
+        assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::PANIC_BOUND_MS));
+    }
+
     #[test]
     fn a_failed_boot_and_a_loop_that_could_not_run_are_different_answers() {
         assert!(Refusal::Log(bootlog::Unfit::NoBootRecord).about_the_boot());
         assert!(Refusal::Log(bootlog::Unfit::Unfinished("x".to_string())).about_the_boot());
-        assert!(Refusal::Silent { what: "come back", secs: RETURN_SECS }.about_the_boot());
+        assert!(Refusal::Silent { what: "come back", secs: return_secs() }.about_the_boot());
         assert!(!Refusal::Node("/dev/nvme0n1".to_string()).about_the_boot());
         assert!(!Refusal::Sudo("a password is required".to_string()).about_the_boot());
         assert!(!Refusal::Landed { what: "dd".to_string(), want: 1, got: 2 }.about_the_boot());
@@ -1224,7 +1396,7 @@ mod tests {
         let args = Args::parse(&[]).unwrap();
         assert_eq!(args.target.user, "t14");
         assert_eq!(args.target.node.whole(), "/dev/sda");
-        assert_eq!(args.wait_secs, RETURN_SECS);
+        assert_eq!(args.wait_secs, return_secs());
         assert!(!args.dry_run);
 
         let words: Vec<String> = ["--dry-run", "--device", "/dev/sdb", "--host", "runner@box"]

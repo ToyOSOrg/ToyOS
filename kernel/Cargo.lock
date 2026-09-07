@@ -39,6 +39,7 @@ dependencies = [
  "rustc-demangle",
  "toyos-abi",
  "toyos-acpi",
+ "toyos-blackbox",
  "toyos-dma",
  "toyos-elf",
  "toyos-fat32",
@@ -75,6 +76,10 @@ version = "0.3.0"
 
 [[package]]
 name = "toyos-acpi"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-blackbox"
 version = "0.1.0"
 
 [[package]]

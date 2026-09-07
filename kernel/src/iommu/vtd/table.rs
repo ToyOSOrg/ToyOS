@@ -176,19 +176,50 @@ pub struct Domain {
     root: Table,
     id: u16,
     width: AddressWidth,
+    /// Bits of device address this domain may hand out, which is not
+    /// [`AddressWidth::bits`] — see [`Domain::translatable`].
+    translatable: u8,
     next: u64,
 }
 
 impl Domain {
-    /// A quarter of the way up what the width can express — far above any
-    /// physical address these machines have, so a descriptor still carrying one
-    /// names nothing this domain maps and faults rather than landing.
-    fn first_address(width: AddressWidth) -> u64 {
-        1 << (width.bits() - 2)
+    /// The bits of device address a unit will translate: the lesser of the page
+    /// tables' depth and what the hardware accepts at all.
+    ///
+    /// **`SAGAW` and `MGAW` are two different limits and the smaller binds.**
+    /// VT-d Rev. 4.0 D51397-015, 11.4.2 Capability Register: `SAGAW` 12:8 is the
+    /// set of page-table depths a unit supports, `MGAW` 21:16 (encoded one less
+    /// than it is) is the maximum DMA virtual addressability it has. A unit
+    /// reporting a 48-bit `SAGAW` and a 39-bit `MGAW` walks four levels and
+    /// still faults `address-beyond-mgaw` on anything from `1 << 39` up, so a
+    /// window placed by table depth alone is unreachable on it.
+    const fn translatable_bits(width: AddressWidth, mgaw: u8) -> u8 {
+        if mgaw < width.bits() { mgaw } else { width.bits() }
     }
 
-    pub fn new(tables: &mut Tables, id: u16, width: AddressWidth) -> Self {
-        Self { root: tables.alloc(), id, width, next: Self::first_address(width) }
+    /// A quarter of the way up what this domain can translate — above any
+    /// physical address these machines have, so a descriptor still carrying one
+    /// names nothing this domain maps and faults rather than landing.
+    const fn first_address(translatable: u8) -> u64 {
+        1 << (translatable - 2)
+    }
+
+    pub fn new(
+        tables: &mut Tables,
+        id: u16,
+        width: AddressWidth,
+        mgaw: u8,
+    ) -> Result<Self, IommuError> {
+        let translatable = Self::translatable_bits(width, mgaw);
+        let floor = Self::first_address(translatable);
+        // The property `first_address` is chosen for, asserted rather than
+        // assumed: a machine with enough memory to reach the window would have
+        // stale descriptors landing on real pages instead of faulting.
+        let top = crate::mm::pmm::top();
+        if floor <= top {
+            return Err(IommuError::WindowBelowMemory { translatable, floor, top });
+        }
+        Ok(Self { root: tables.alloc(), id, width, translatable, next: floor })
     }
 
     pub fn root(&self) -> Table {
@@ -199,12 +230,14 @@ impl Domain {
         self.id
     }
 
-    pub fn width(&self) -> AddressWidth {
-        self.width
+    pub fn floor(&self) -> u64 {
+        Self::first_address(self.translatable)
     }
 
-    pub fn floor(&self) -> u64 {
-        Self::first_address(self.width)
+    /// The bits of device address this domain hands out, for a refusal that
+    /// names what ran out rather than the depth of the tables.
+    pub fn translatable(&self) -> u8 {
+        self.translatable
     }
 
     /// Reserve room for `bytes`, rounded up to whole leaves. An address is
@@ -213,9 +246,9 @@ impl Domain {
     pub fn reserve(&mut self, bytes: u64) -> Option<Iova> {
         let span = bytes.next_multiple_of(PAGE_2M);
         let end = self.next.checked_add(span)?;
-        // The depth these tables were built to: an address past what the top
-        // level reaches has no entry to be written into.
-        if end > 1u64 << self.width.bits() {
+        // What this unit will translate, not what the tables can express: past
+        // `MGAW` the hardware faults before the walk it has entries for.
+        if end > 1u64 << self.translatable {
             return None;
         }
         let at = Iova::translated(self.next);
@@ -337,3 +370,22 @@ fn write_context(
     let hi = ((id as u64) << 8) | (levels(width) as u64 - 2);
     context.write_pair(stream.devfn() as usize, lo, hi);
 }
+
+/// A unit whose `MGAW` is narrower than its `SAGAW` gets its window under the
+/// smaller of the two.
+///
+/// Asserted here rather than in a guest because no guest holds the shape: QEMU's
+/// `intel-iommu` derives both fields from one `aw-bits` property, so its model
+/// cannot report a `SAGAW` wider than its `MGAW` at all.
+const _: () = {
+    assert!(Domain::translatable_bits(AddressWidth::Bits48, 39) == 39);
+    assert!(Domain::first_address(39) < 1 << 39);
+    // What a window placed by the table depth alone would be, against the
+    // ceiling such a unit reports.
+    assert!(Domain::first_address(48) >= 1 << 39);
+    // A unit whose two limits agree is unchanged by any of this.
+    assert!(Domain::translatable_bits(AddressWidth::Bits48, 48) == 48);
+    assert!(Domain::translatable_bits(AddressWidth::Bits39, 39) == 39);
+    // And tables shallower than `MGAW` bind it the other way round.
+    assert!(Domain::translatable_bits(AddressWidth::Bits39, 48) == 39);
+};

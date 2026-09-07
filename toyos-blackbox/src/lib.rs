@@ -1,0 +1,755 @@
+//! The page a boot leaves behind for the next boot to find, and the three
+//! things it can say.
+//!
+//! A ramoops-shaped black box. The loader claims one page, writes [`State::Armed`]
+//! into it and hands the machine to the kernel; whatever ends that kernel, the
+//! next boot is the loader again, and it reads the page to learn which of the
+//! three ways the last one went:
+//!
+//! - [`State::Panic`] — the kernel's panic path sealed what the panel rendered.
+//! - [`State::Done`] — the kernel handed the machine back on purpose.
+//! - [`State::Armed`] — neither, so it died before reaching either, and that
+//!   absence is itself the finding.
+//!
+//! **The invariant the whole thing stands on is that a reset leaves DRAM
+//! untouched on the machines this runs on.** Nothing here believes it: a magic
+//! and an FNV-1a checksum over the state and the recorded bytes decide, and a
+//! page that does not check out is a page with nothing in it — a cold power
+//! cycle, a first boot, or DRAM the reset did not preserve, all one answer.
+//!
+//! **The page carries an ordinary UEFI memory type and the kernel is told where
+//! it is on its parameter line.** Nothing in the memory map is ours: firmware
+//! this runs on does not return from `ExitBootServices` with a descriptor of a
+//! type out of the range UEFI 2.10 §7.2 reserves for OS loaders in the map it
+//! is handed.
+//!
+//! Pure: bytes in, bytes out. The loader owns the claim and the harvest, the
+//! kernel owns the two writes, and neither can be asked what it does with a
+//! corrupt page.
+
+#![no_std]
+#![forbid(unsafe_code)]
+
+/// Where the page is, chosen once and named by the loader that allocates it.
+///
+/// Fixed, because the loader has to find last boot's page before it has been
+/// told anything, and there is nowhere to have been told it from. The *kernel*
+/// is told, on its parameter line, so that a boot whose claim firmware refused
+/// is one the kernel knows about rather than one it has to infer. Page-aligned
+/// so `AllocatePages` can name it, and inside `toyos_bootmap::BOOT_MAP_BYTES` so
+/// a panic before `mm::init` still reaches it through the boot map.
+pub const PHYS: u64 = 0x0800_0000;
+
+/// Pages the box is, and the width of one.
+///
+/// **Four, because one is not a report.** A kernel that reaches PCI enumeration
+/// before it dies has thousands of records behind it, and one page holds 4,072
+/// bytes of their tail — less than the crash's own message plus context.
+pub const PAGES: usize = 4;
+pub const PAGE_BYTES: usize = 4096;
+
+/// The box, which is what every reader and writer of it deals in. Derived from
+/// [`PAGES`] and shared by all three binaries, so the size is on no wire and
+/// nobody can be handed a different one from the one they allocate.
+pub const BYTES: usize = PAGES * PAGE_BYTES;
+
+/// The parameter the loader appends to what it read off the ESP, with the
+/// page's address after it. The kernel claims the token (`kernel/src/params.rs`)
+/// and reserves the page it names before its allocator takes the memory map.
+pub const PARAM: &str = "blackbox=";
+
+/// `PANC`, big-endian ASCII, so a hexdump of the page reads.
+const MAGIC: u32 = 0x5041_4E43;
+
+/// Magic, state, length, checksum, and the stamp.
+const HEADER: usize = 24;
+
+/// The cache line every writer of this page writes it back in.
+///
+/// **A reset invalidates the caches without writing them back**, so a page
+/// written into write-back memory and then reset over is a page whose bytes
+/// never reached DRAM — which reads, from the next boot, exactly like a write
+/// that never happened. Every writer flushes; the instruction is each binary's,
+/// because this crate forbids unsafe code, and the size is here so that neither
+/// of them decides it.
+pub const CACHE_LINE: usize = 64;
+
+/// What one report may leave behind. Longer is truncated at its head, because
+/// the tail of a panel is the crash and the head is how the boot went.
+pub const TEXT_BYTES: usize = BYTES - HEADER;
+
+/// What the last boot got as far as saying.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum State {
+    /// The loader handed the machine to a kernel and nothing has said otherwise
+    /// since. On the next boot this means the kernel died without reaching
+    /// either of the two paths that write, which is a finding and not an absence.
+    Armed = 1,
+    /// The kernel's panic path sealed what the panel rendered, and the text is
+    /// that report.
+    Panic = 2,
+    /// The kernel handed the machine back on purpose, so the chain ends here
+    /// and the firmware's own boot order takes the machine next.
+    Done = 3,
+    /// An exception entry sealed its registers before it did anything else. The
+    /// text is a [`Fault`], not a report: whatever it was going to say, it had
+    /// not said it yet, and a handler that dies before its own report is the
+    /// case this state exists for.
+    Fault = 4,
+}
+
+impl State {
+    const fn code(self) -> u32 {
+        self as u32
+    }
+
+    const fn of(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::Armed),
+            2 => Some(Self::Panic),
+            3 => Some(Self::Done),
+            4 => Some(Self::Fault),
+            // Not a state this tree writes: the page holds something else, or
+            // something else holds the page.
+            _ => None,
+        }
+    }
+
+    /// One word for a log line, so the loader and a reader of the stick cannot
+    /// spell the same state two ways.
+    pub const fn named(self) -> &'static str {
+        match self {
+            Self::Armed => "ARMED",
+            Self::Panic => "PANIC",
+            Self::Done => "DONE",
+            Self::Fault => "FAULT",
+        }
+    }
+}
+
+/// Write `state` and `text` into `page` and seal it, returning the bytes recorded.
+///
+/// Truncation keeps the *tail*: the newest of what the panel rendered is the
+/// crash itself, and a report cut off before it is a report about nothing.
+///
+/// The kernel calls this from inside its panic path's no-lock, no-allocation,
+/// nothing-may-panic region, so nothing here indexes or unwraps: a bounds check
+/// that could panic would take the machine down inside the report about why it
+/// went down.
+pub fn seal(page: &mut [u8; BYTES], state: State, stamp: u64, text: &[u8]) -> usize {
+    let mut report = Report::new(page);
+    report.tail(text, RECORD_OPENS_WITH);
+    report.seal(state, stamp)
+}
+
+/// What the first line of one of this kernel's log records begins with, and so
+/// where a tail is cut. Declared beside the page because the kernel that cuts
+/// one and the loader that prints it read the same shape.
+pub const RECORD_OPENS_WITH: &[u8] = b"[";
+
+/// Close the envelope over `len` bytes already in the page's text area.
+fn seal_len(page: &mut [u8; BYTES], state: State, stamp: u64, len: usize) {
+    let text: [u8; 0] = [];
+    let kept = page.get(HEADER..HEADER.saturating_add(len)).unwrap_or(&text);
+    let sum = checksum(state, stamp, kept);
+    put(page, 0, MAGIC);
+    put(page, 4, state.code());
+    put(page, 8, len as u32);
+    put64(page, 16, stamp);
+    // Written last, so a machine that stopped mid-copy leaves a header the
+    // checksum then refuses, rather than a report with a hole in it.
+    put(page, 12, sum);
+}
+
+/// A report being composed straight into the page.
+///
+/// **The head goes in first and the tail fills what is left**, because a report
+/// cut to its tail alone is a report with the crash missing: the panel's newest
+/// records are the ones after the panic, not the panic. Written into the page
+/// rather than into a buffer that is then copied, because the one caller is a
+/// panic path with no allocator and a stack it is already deep in.
+pub struct Report<'a> {
+    page: &'a mut [u8; BYTES],
+    at: usize,
+}
+
+impl<'a> Report<'a> {
+    pub fn new(page: &'a mut [u8; BYTES]) -> Self {
+        Self { page, at: 0 }
+    }
+
+    /// Append, dropping whatever does not fit. Nothing here indexes or unwraps:
+    /// the caller may not panic.
+    pub fn write(&mut self, bytes: &[u8]) {
+        let room = TEXT_BYTES.saturating_sub(self.at);
+        let take = bytes.get(..room.min(bytes.len())).unwrap_or(&[]);
+        let from = HEADER.saturating_add(self.at);
+        if let Some(slot) = self.page.get_mut(from..from.saturating_add(take.len())) {
+            slot.copy_from_slice(take);
+            self.at += take.len();
+        }
+    }
+
+    /// Fill what is left with the tail of `records`, **cut at a record
+    /// boundary**: a report that begins part-way into one begins with half a
+    /// word, or with the second line of something whose first line is gone, and
+    /// a reader cannot tell which.
+    ///
+    /// `opens_a_record` is what a record's first line begins with — the caller's
+    /// knowledge, not this crate's, so nothing here holds a second opinion about
+    /// the log's shape. A record that renders as several lines is entered at its
+    /// first, because that is the only line that carries what it is.
+    pub fn tail(&mut self, records: &[u8], opens_a_record: &[u8]) {
+        let room = TEXT_BYTES.saturating_sub(self.at);
+        if records.len() <= room {
+            return self.write(records);
+        }
+        let mut at = records.len() - room;
+        // Forward to the first record that begins at or after the cut.
+        loop {
+            let Some(rest) = records.get(at..) else { return };
+            if rest.starts_with(opens_a_record)
+                && (at == 0 || records.get(at - 1) == Some(&b'\n'))
+            {
+                return self.write(rest);
+            }
+            match rest.iter().position(|byte| *byte == b'\n') {
+                Some(next) => at += next + 1,
+                // No boundary left in the window: what is there is not records,
+                // and the head is what this report is for.
+                None => return,
+            }
+        }
+    }
+
+    /// Close the envelope over what was written.
+    pub fn seal(self, state: State, stamp: u64) -> usize {
+        let at = self.at;
+        seal_len(self.page, state, stamp, at);
+        at
+    }
+}
+
+impl core::fmt::Write for Report<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// The stamp a page carries, read without checking anything.
+///
+/// **Carried forward and not trusted**: the kernel's seals happen where nothing
+/// may be verified — the panic path and the exception entry — so they read this
+/// word, write it back, and let the checksum they then write cover it. A page
+/// that was never armed hands them a zero, which is what an unknown stamp is.
+pub fn stamp_of(page: &[u8; BYTES]) -> u64 {
+    let mut out = [0u8; 8];
+    if let Some(slot) = page.get(16..24) {
+        out.copy_from_slice(slot);
+    }
+    u64::from_le_bytes(out)
+}
+
+fn put(page: &mut [u8; BYTES], at: usize, value: u32) {
+    if let Some(slot) = page.get_mut(at..at + 4) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn put64(page: &mut [u8; BYTES], at: usize, value: u64) {
+    if let Some(slot) = page.get_mut(at..at + 8) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// What a previous boot sealed into `page`, or `None` for a page that carries
+/// nothing this tree wrote — never written, cleared, reused, or corrupted.
+pub fn recover(page: &[u8; BYTES]) -> Option<(State, u64, &[u8])> {
+    if u32::from_le_bytes(head(page, 0)) != MAGIC {
+        return None;
+    }
+    let state = State::of(u32::from_le_bytes(head(page, 4)))?;
+    let len = u32::from_le_bytes(head(page, 8)) as usize;
+    let stamp = stamp_of(page);
+    let text = page.get(HEADER..HEADER.checked_add(len)?)?;
+    (checksum(state, stamp, text) == u32::from_le_bytes(head(page, 12)))
+        .then_some((state, stamp, text))
+}
+
+/// Take the magic off, so the same report is not harvested by a third boot.
+/// The header alone: the text stays where it is and answers to nothing without it.
+pub fn clear(page: &mut [u8; BYTES]) {
+    if let Some(header) = page.get_mut(..HEADER) {
+        header.fill(0);
+    }
+}
+
+fn head(page: &[u8; BYTES], at: usize) -> [u8; 4] {
+    let mut out = [0u8; 4];
+    if let Some(slot) = page.get(at..at + 4) {
+        out.copy_from_slice(slot);
+    }
+    out
+}
+
+/// FNV-1a, 32-bit, over the state, the length and then the bytes.
+///
+/// The state is folded in so one sealed page cannot be re-read as another
+/// state, the length so a report truncated to a prefix of itself does not keep
+/// checking out — a torn write is exactly that shape — and the stamp so a
+/// record carried forward from an older boot cannot be re-dated.
+fn checksum(state: State, stamp: u64, text: &[u8]) -> u32 {
+    const OFFSET_BASIS: u32 = 0x811c_9dc5;
+    const PRIME: u32 = 0x0100_0193;
+    let mut hash = OFFSET_BASIS;
+    let head = [state.code().to_le_bytes(), (text.len() as u32).to_le_bytes()];
+    for byte in head.iter().flatten().chain(&stamp.to_le_bytes()).chain(text) {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// The general registers a [`Fault`] carries, in the order `TrapFrame` holds
+/// them. One declaration, so the kernel that writes them and the loader that
+/// prints them cannot disagree about which word is which.
+pub const REGISTERS: [&str; 15] = [
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15",
+];
+
+/// What an exception entry seals before it does anything else.
+///
+/// **A fixed layout of `u64`s and nothing else.** It is written from a context
+/// that may take no lock, allocate nothing and call no formatter — the machine
+/// is already faulting and the next fault is a triple one — so the encoding is
+/// eight-byte words in a declared order, and the decoding is the same words
+/// read back by a loader that has all the time in the world.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Fault {
+    pub vector: u64,
+    pub error_code: u64,
+    pub rip: u64,
+    pub rsp: u64,
+    pub rflags: u64,
+    pub cr2: u64,
+    pub cr3: u64,
+    /// The CPU this happened on, or [`Fault::NO_CPU`] where `gs` could not be
+    /// trusted to say — which is itself worth knowing.
+    pub cpu: u64,
+    /// [`REGISTERS`], in that order.
+    pub registers: [u64; REGISTERS.len()],
+}
+
+impl Fault {
+    /// What [`Fault::cpu`] holds where the per-CPU block could not be read.
+    pub const NO_CPU: u64 = u64::MAX;
+
+    /// The named words, then the general ones.
+    const WORDS: usize = 8 + REGISTERS.len();
+
+    /// The record's width on the page.
+    pub const BYTES: usize = Self::WORDS * 8;
+
+    pub fn to_bytes(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        let named =
+            [self.vector, self.error_code, self.rip, self.rsp, self.rflags, self.cr2, self.cr3, self.cpu];
+        for (i, word) in named.iter().chain(&self.registers).enumerate() {
+            let at = i * 8;
+            if let Some(slot) = out.get_mut(at..at + 8) {
+                slot.copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// The record `bytes` holds, or `None` where they are not one.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::BYTES {
+            return None;
+        }
+        let word = |i: usize| -> u64 {
+            let mut out = [0u8; 8];
+            if let Some(slot) = bytes.get(i * 8..i * 8 + 8) {
+                out.copy_from_slice(slot);
+            }
+            u64::from_le_bytes(out)
+        };
+        let mut registers = [0u64; REGISTERS.len()];
+        for (i, slot) in registers.iter_mut().enumerate() {
+            *slot = word(8 + i);
+        }
+        Some(Self {
+            vector: word(0),
+            error_code: word(1),
+            rip: word(2),
+            rsp: word(3),
+            rflags: word(4),
+            cr2: word(5),
+            cr3: word(6),
+            cpu: word(7),
+            registers,
+        })
+    }
+}
+
+/// The address a [`PARAM`] token names, or `None` for a token that is not one.
+///
+/// The loader writes it with `{:#x}` and the kernel reads it back here: one
+/// spelling, so the two cannot drift into agreeing about different bytes.
+pub fn address_of(token: &str) -> Option<u64> {
+    let digits = token.strip_prefix(PARAM)?.strip_prefix("0x")?;
+    if digits.is_empty() || digits.len() > 16 {
+        return None;
+    }
+    let mut value: u64 = 0;
+    for byte in digits.bytes() {
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            // Upper case is refused rather than accepted: `{:#x}` renders lower.
+            _ => return None,
+        };
+        value = value << 4 | u64::from(nibble);
+    }
+    Some(value)
+}
+
+/// The address the `blackbox=` word of a raw parameter buffer names.
+///
+/// **Bytes and not `&str`, because this is read before anything has decided the
+/// buffer is UTF-8.** The kernel reads it out of the loader's buffer in its
+/// first statements, so that a panic anywhere after the jump has somewhere to go;
+/// the UTF-8 check that the rest of the line stands or falls on happens later
+/// and panics where a panel already exists.
+pub fn address_in(cmdline: &[u8]) -> Option<u64> {
+    cmdline.split(|byte| *byte == b',').find_map(|token| {
+        core::str::from_utf8(token).ok().and_then(address_of)
+    })
+}
+
+const _: () = {
+    // The record fits the page with room for the report that overwrites it.
+    assert!(Fault::BYTES < TEXT_BYTES);
+    // UEFI deals in pages, and `AllocatePages` can only be given an address it deals in.
+    assert!(PHYS.is_multiple_of(BYTES as u64));
+    assert!(HEADER.is_multiple_of(4));
+};
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use std::{format, vec};
+
+    use super::*;
+
+    /// A stamp the tests can tell from zero, which is what an unarmed page has.
+    const STAMP: u64 = 1_757_000_000;
+
+    const STATES: [State; 4] = [State::Armed, State::Panic, State::Done, State::Fault];
+
+    fn blank() -> [u8; BYTES] {
+        [0u8; BYTES]
+    }
+
+    #[test]
+    fn a_sealed_page_comes_back_as_what_went_in() {
+        for state in STATES {
+            let mut page = blank();
+            assert_eq!(seal(&mut page, state, STAMP, b"PANIC: nobody was there"), 23);
+            assert_eq!(recover(&page), Some((state, STAMP, &b"PANIC: nobody was there"[..])));
+        }
+    }
+
+    /// The state every first boot is in, and the one a false positive would
+    /// turn into a report about a crash that never happened.
+    #[test]
+    fn a_page_nobody_wrote_carries_nothing() {
+        assert_eq!(recover(&blank()), None);
+        assert_eq!(recover(&[0xffu8; BYTES]), None);
+        let mut noise = blank();
+        for (i, byte) in noise.iter_mut().enumerate() {
+            *byte = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        assert_eq!(recover(&noise), None);
+    }
+
+    #[test]
+    fn a_cleared_page_is_not_harvested_twice() {
+        let mut page = blank();
+        seal(&mut page, State::Panic, STAMP, b"the first boot's panic");
+        assert!(recover(&page).is_some());
+        clear(&mut page);
+        assert_eq!(recover(&page), None);
+    }
+
+    /// **The state is inside the checksum**, so one sealed page cannot be read
+    /// back as another: an ARMED page reported as a panic would invent a crash,
+    /// and a panicked one reported as ARMED would lose the report.
+    #[test]
+    fn no_state_can_be_read_as_another() {
+        for state in STATES {
+            let mut page = blank();
+            seal(&mut page, state, STAMP, b"whatever the last boot said");
+            for other in STATES.into_iter().filter(|s| *s != state) {
+                let mut forged = page;
+                forged[4..8].copy_from_slice(&other.code().to_le_bytes());
+                assert_eq!(recover(&forged), None, "{state:?} was readable as {other:?}");
+            }
+        }
+    }
+
+    /// Every single-byte corruption of a sealed page is refused: the text, the
+    /// header and the checksum itself. This is the whole of what stands between
+    /// a report and DRAM a reset did not preserve.
+    #[test]
+    fn one_flipped_bit_anywhere_refuses_the_whole_page() {
+        let text = b"PANIC: kernel/src/main.rs:1:1: this machine is on fire";
+        let mut sealed = blank();
+        seal(&mut sealed, State::Panic, STAMP, text);
+        for at in 0..HEADER + text.len() {
+            let mut page = sealed;
+            page[at] ^= 0x40;
+            assert_ne!(
+                recover(&page),
+                Some((State::Panic, STAMP, &text[..])),
+                "byte {at} was allowed to change"
+            );
+        }
+    }
+
+    /// A length past the page is a header, not a report: the read is refused
+    /// rather than reaching past what was recorded.
+    #[test]
+    fn a_length_past_the_page_is_refused() {
+        let mut page = blank();
+        put(&mut page, 0, MAGIC);
+        put(&mut page, 4, State::Panic.code());
+        put64(&mut page, 16, STAMP);
+        put(&mut page, 8, u32::MAX);
+        assert_eq!(recover(&page), None);
+        put(&mut page, 8, TEXT_BYTES as u32 + 1);
+        assert_eq!(recover(&page), None);
+    }
+
+    /// Records longer than the box keep their tail, **cut at a record
+    /// boundary**: a report that begins mid-line begins with half a word, and a
+    /// reader cannot tell which half.
+    #[test]
+    fn an_over_long_run_of_records_is_cut_at_a_boundary() {
+        let mut records = std::string::String::new();
+        let mut n = 0usize;
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str(&format!("[0.{n:04} cpu0] a record of some width or other\n"));
+            n += 1;
+        }
+        records.push_str("[9.9999 cpu0] the last one\n");
+        let mut page = blank();
+        seal(&mut page, State::Panic, STAMP, records.as_bytes());
+        let (_, _, back) = recover(&page).expect("a cut report is still sealed");
+        let back = std::str::from_utf8(back).expect("records are text");
+        assert!(back.len() <= TEXT_BYTES);
+        assert!(back.ends_with("[9.9999 cpu0] the last one\n"));
+        // The first line kept is a whole one, which is the assertion.
+        assert!(back.starts_with('['), "the report begins mid-record: {:?}", &back[..40]);
+        // Every kept line here is a whole record, so the cut is a record's edge.
+        assert!(back.lines().all(|l| l.starts_with('[')));
+        assert!(records.ends_with(back));
+    }
+
+    /// A head goes in before the tail and survives it: the crash's own message
+    /// is what a report is for, and the records after it are context.
+    #[test]
+    fn the_head_is_kept_and_the_tail_fills_what_is_left() {
+        const HEAD: &str = "PANIC: src/main.rs:1:1: this machine is on fire\n";
+        let mut records = std::string::String::new();
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str("[0.0000 cpu0] a record\n");
+        }
+        let mut page = blank();
+        let mut report = Report::new(&mut page);
+        report.write(HEAD.as_bytes());
+        report.tail(records.as_bytes(), RECORD_OPENS_WITH);
+        let len = report.seal(State::Panic, STAMP);
+        assert!(len <= TEXT_BYTES);
+        let (_, _, back) = recover(&page).expect("a composed report is sealed");
+        let back = std::str::from_utf8(back).expect("records are text");
+        assert!(back.starts_with(HEAD), "the head is not first: {:?}", &back[..60]);
+        assert!(back.ends_with("[0.0000 cpu0] a record\n"));
+    }
+
+    /// Records with no boundary in the window at all are not a run of records,
+    /// and the head is what the report is for: nothing of them is kept rather
+    /// than half of one line.
+    #[test]
+    fn a_window_with_no_boundary_keeps_none_of_it() {
+        let records = vec![b'.'; TEXT_BYTES + 100];
+        let mut page = blank();
+        assert_eq!(seal(&mut page, State::Panic, STAMP, &records), 0);
+        assert_eq!(recover(&page), Some((State::Panic, STAMP, &[][..])));
+    }
+
+    /// **A record that renders as several lines is entered at its first.** The
+    /// panel's panic record is exactly that shape, and a cut at the nearest
+    /// newline lands on its continuation — a sentence whose own first line is
+    /// gone, which reads as coming from nowhere.
+    #[test]
+    fn a_multi_line_record_is_never_entered_part_way() {
+        let mut records = std::string::String::new();
+        while records.len() < TEXT_BYTES * 2 {
+            records.push_str("[0.0000 cpu0] EARLY PANIC: panicked at src/main.rs:1:1:\n");
+            records.push_str("the message, on a line of its own\n");
+        }
+        let mut page = blank();
+        seal(&mut page, State::Panic, STAMP, records.as_bytes());
+        let (_, _, back) = recover(&page).expect("a cut report is still sealed");
+        let back = std::str::from_utf8(back).expect("records are text");
+        assert!(back.starts_with("[0.0000 cpu0] EARLY PANIC"), "{:?}", &back[..40]);
+        assert!(records.ends_with(back));
+    }
+
+
+    /// ARMED carries no text at all, and that is not the same as no page.
+    #[test]
+    fn an_armed_page_with_nothing_in_it_is_still_a_state() {
+        let mut page = blank();
+        assert_eq!(seal(&mut page, State::Armed, STAMP, b""), 0);
+        assert_eq!(recover(&page), Some((State::Armed, STAMP, &b""[..])));
+    }
+
+    /// The loader writes the address with `{:#x}` and the kernel reads it back
+    /// here; everything else is refused rather than guessed at.
+    #[test]
+    fn the_parameter_round_trips_the_address_it_names() {
+        assert_eq!(address_of(&format!("{PARAM}{PHYS:#x}")), Some(PHYS));
+        assert_eq!(address_of(&format!("{PARAM}{:#x}", u64::MAX)), Some(u64::MAX));
+        assert_eq!(address_of("blackbox=0x0"), Some(0));
+        for wrong in
+            ["blackbox=", "blackbox=0x", "blackbox=8000000", "blackbox=0X8000000", "watchdog"]
+        {
+            assert_eq!(address_of(wrong), None, "{wrong:?} was read as an address");
+        }
+        // Wider than an address, so the shift cannot silently drop the head.
+        assert_eq!(address_of("blackbox=0x10000000000000000"), None);
+    }
+
+    /// The raw-buffer reading finds the word wherever on the line it sits, and
+    /// reads a buffer that is not UTF-8 without deciding anything about it.
+    #[test]
+    fn the_address_is_found_in_a_raw_parameter_buffer() {
+        let line = format!("root=deadbeef,watchdog,{PARAM}{PHYS:#x},early-panel");
+        assert_eq!(address_in(line.as_bytes()), Some(PHYS));
+        assert_eq!(address_in(format!("{PARAM}{PHYS:#x}").as_bytes()), Some(PHYS));
+        assert_eq!(address_in(b"root=deadbeef,watchdog"), None);
+        assert_eq!(address_in(b""), None);
+        // One token is not UTF-8 and the word is still found beside it.
+        let mut mixed = vec![0xffu8, 0xfe, b','];
+        mixed.extend_from_slice(format!("{PARAM}{PHYS:#x}").as_bytes());
+        assert_eq!(address_in(&mixed), Some(PHYS));
+    }
+
+    /// Three states, three words, none of them each other's.
+    #[test]
+    fn every_state_has_a_word_of_its_own() {
+        for (i, state) in STATES.iter().enumerate() {
+            for other in &STATES[i + 1..] {
+                assert_ne!(state.named(), other.named());
+                assert_ne!(state.code(), other.code());
+            }
+            assert_eq!(State::of(state.code()), Some(*state));
+        }
+        assert_eq!(State::of(0), None);
+        assert_eq!(State::of(5), None);
+    }
+}
+
+#[cfg(test)]
+mod fault_tests {
+    extern crate std;
+    use super::*;
+
+    const STAMP: u64 = 1_757_000_001;
+
+    fn sample() -> Fault {
+        let mut registers = [0u64; REGISTERS.len()];
+        for (i, slot) in registers.iter_mut().enumerate() {
+            *slot = 0x1000 + i as u64;
+        }
+        Fault {
+            vector: 14,
+            error_code: 0x2,
+            rip: 0xffff_8000_7ce4_1ba0,
+            rsp: 0xffff_8000_0041_a000,
+            rflags: 0x246,
+            cr2: 0xdead_beef,
+            cr3: 0x7e06_c000,
+            cpu: 1,
+            registers,
+        }
+    }
+
+    /// Every word comes back where it went, which is the whole of the contract
+    /// between an entry that may not format and a loader that prints.
+    #[test]
+    fn a_fault_round_trips_word_for_word() {
+        let fault = sample();
+        assert_eq!(Fault::from_bytes(&fault.to_bytes()), Some(fault));
+    }
+
+    /// Sealed as a state's text and recovered as one, so what the next boot
+    /// reads is what the entry wrote.
+    #[test]
+    fn a_fault_survives_the_page_it_is_sealed_into() {
+        let fault = sample();
+        let mut page = [0u8; BYTES];
+        assert_eq!(seal(&mut page, State::Fault, STAMP, &fault.to_bytes()), Fault::BYTES);
+        let (state, _, text) = recover(&page).expect("a sealed fault");
+        assert_eq!(state, State::Fault);
+        assert_eq!(Fault::from_bytes(text), Some(fault));
+    }
+
+    /// A record of the wrong width is not one: a loader handed a PANIC's text
+    /// must not print it as registers.
+    #[test]
+    fn only_a_record_of_the_declared_width_decodes() {
+        assert_eq!(Fault::from_bytes(&[]), None);
+        assert_eq!(Fault::from_bytes(&[0u8; Fault::BYTES - 1]), None);
+        assert_eq!(Fault::from_bytes(&[0u8; Fault::BYTES + 1]), None);
+        assert_eq!(Fault::from_bytes(b"PANIC: a report and not a record"), None);
+    }
+
+
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    extern crate std;
+    use super::*;
+
+    /// **The stamp is inside the checksum**, so a record carried forward from an
+    /// older boot cannot be re-dated into this one's -- which is the whole of
+    /// what makes a stale report visible as stale rather than believed.
+    #[test]
+    fn a_records_date_cannot_be_changed_under_it() {
+        let mut page = [0u8; BYTES];
+        seal(&mut page, State::Panic, 1_757_000_000, b"a report from an older boot");
+        assert_eq!(stamp_of(&page), 1_757_000_000);
+        put64(&mut page, 16, 1_757_009_999);
+        assert_eq!(recover(&page), None);
+    }
+
+    /// A page nothing armed hands the kernel's seals a zero, which is what an
+    /// unknown date is; they carry it forward rather than inventing one.
+    #[test]
+    fn an_unstamped_page_reads_as_no_date() {
+        let page = [0u8; BYTES];
+        assert_eq!(stamp_of(&page), 0);
+        let mut page = page;
+        let stamp = stamp_of(&page);
+        seal(&mut page, State::Fault, stamp, &Fault::default().to_bytes());
+        assert_eq!(recover(&page).map(|(s, at, _)| (s, at)), Some((State::Fault, 0)));
+    }
+}

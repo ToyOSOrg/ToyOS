@@ -37,6 +37,15 @@ actuators! {
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
+    /// Panic inside `percpu::init_bsp`, one statement after it loads the IDT:
+    /// the earliest point a panic is reportable at all, and the window the T14
+    /// stops in. What it judges is that the reset register is decoded by then.
+    test_panic_after_idt = "test-panic-after-idt";
+
+    /// Halt between a record's commit and its repaint, so the panel holds the
+    /// record before it and `screen_early_panel` reads a paint it can attribute.
+    test_early_halt = "test-early-halt";
+
     /// Have `iod` null SS, force a switch, and report whether it reloaded — the
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";
@@ -338,6 +347,9 @@ actuators! {
 
     /// Stop feeding it once boot is done, which is what a wedge looks like to the chipset.
     watchdog_starve = "tco-starve";
+
+    /// Shorten the panicked kernel's own reboot bound from a minute to seconds, so a guest reaches the reset.
+    panic_reboot_fast = "panic-reboot-fast";
 }
 
 #[cfg(feature = "boot-actuators")]

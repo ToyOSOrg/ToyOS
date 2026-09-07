@@ -13,7 +13,7 @@ use common::qemu::{
 };
 use common::{audio, compile, faults, hostload, pkg, power, screen, serial, stats, storage, usb};
 use toyos_build::day::Day;
-use toyos_build::bootlog::boot_millis;
+use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::testargs::Shard;
 use toyos_build::tiers::{self, Tier};
 
@@ -419,12 +419,19 @@ const AUDIO_SMP: &[u32] = &[1, 8];
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
     ("screen_decoder", Sched::Parallel, Tier::Fast),
+    // Two boots, each ended at a loader line rather than at the kernel's ready
+    // marker. Every verdict is a count of rows against a count of lines off the
+    // same boot's console; no clock is in either.
+    ("screen_loader_lines", Sched::Parallel, Tier::Fast),
     ("screen_gop_firmware_mode", Sched::Parallel, Tier::Nightly),
     // `thread::sleep(5 s)` is the measurement, not a ceiling: the assertion is
     // literally that the log is still on the panel five seconds after the boot
     // finished, so a 2x slower machine changes nothing about the wait but the
     // wait is the verdict either way — timer-anchored.
     ("screen_diag_boot", Sched::Parallel, Tier::Nightly),
+    // A guest halted in the window, so the panel is read where only the repaint
+    // under test can have painted it.
+    ("screen_early_panel", Sched::Parallel, Tier::Fast),
     ("screen_log_absent", Sched::Parallel, Tier::Fast),
     ("screen_console_shell", Sched::Parallel, Tier::Fast),
     ("screen_console_clear", Sched::Parallel, Tier::Fast),
@@ -603,10 +610,40 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("machine_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
+    // Its verdict waits out a staged window.
+    ("job_deadline_reboots", Sched::Parallel, Tier::Fast),
+    // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
+    // changes the verdict; `RELEGATED` says what leaves the per-PR tier with it.
+    ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
     // Its own boot, and the verdict is QEMU's stop reason inside the bound.
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
     ("watchdog_fed", Sched::Serial, Tier::Nightly),
+    // The panicked kernel's own bound, which is what ends a boot on a machine
+    // whose chipset timer does not count. Both verdicts are QEMU's stop reason
+    // against a bound the guest printed, so a slower machine moves both.
+    ("panic_reboots", Sched::Parallel, Tier::Nightly),
+    // The same verdict from inside `percpu::init_bsp`: the earliest point a
+    // panic is reportable, and the window the owner's T14 stops in.
+    ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Fast),
+    // Serial like `watchdog_fed`: its verdict is that nothing happened for a span of host clock.
+    ("panic_key_holds", Sched::Serial, Tier::Nightly),
+    // The boot chain's three answers. The two chain names each watch a guest
+    // take its own reset and read the pass after it, so both are anchored to
+    // the bound the first boot counts down.
+    ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
+    ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
+    // Its own boot, and every verdict is a line: no host clock in any of it.
+    ("blackbox_unclaimed_page", Sched::Parallel, Tier::Fast),
+    // The seal read off the page's own bytes by QEMU, after a panic earlier than
+    // anything the kernel used to learn the page's address from. Its own boot,
+    // and no clock in the verdict.
+    ("blackbox_early_panic_sealed", Sched::Parallel, Tier::Fast),
+    // The same crash on the owner's machine's own shape — no serial port at all
+    // — where the panel and the page are the only two channels there are.
+    ("blackbox_early_panic_sealed_muted", Sched::Parallel, Tier::Fast),
+    // The exception entry's own seal, off the page's bytes on an ordinary boot.
+    ("blackbox_fault_sealed", Sched::Parallel, Tier::Fast),
     ("double_fault_stack", Sched::Parallel, Tier::Fast),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
@@ -3296,6 +3333,97 @@ fn run_screen_test(
             screen::self_test();
             Ok(())
         }
+        "screen_loader_lines" => {
+            // An EXCLUSIVE open of `GraphicsOutput` calls `Stop` on the
+            // firmware's graphics console, so with one the panel stops at the
+            // GOP query and every later loader line is on serial alone.
+            let dump_at = |marker: &'static str| -> Result<(usize, String), String> {
+                let options = BootOptions {
+                    profile: qemu::Profile::Metal,
+                    qmp: true,
+                    ready_marker: marker,
+                    ..Default::default()
+                };
+                metal_sim_argv_check(&qemu::profile_argv(&options))?;
+                let mut qemu =
+                    QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+                let console = qemu.boot_log().to_string();
+                let dump = qemu.screendump();
+                // A row that decodes in the kernel's font is a row the kernel
+                // drew. Refused rather than counted: its rows are not the
+                // loader's and would only push the growth below green.
+                if dump
+                    .rows()
+                    .iter()
+                    .any(|row| !row.trim().is_empty() && !row.contains(screen::UNKNOWN))
+                {
+                    return Err(format!(
+                        "the kernel had already repainted the panel at {marker:?}, so these are \
+                         its rows and not the loader's\ndecoded screen:\n{}",
+                        dump.text()
+                    ));
+                }
+                Ok((dump.text_row_bands()?, console))
+            };
+
+            let (before, at_query) = dump_at(bootlog::LOADER_GOP_LINE)?;
+            let (after, console) = dump_at(bootlog::LOADER_LAST_LINE)?;
+
+            // The growth below subtracts one boot's rows from the other's, and
+            // says nothing unless the two printed the same number of lines
+            // before the query. The lines themselves are not compared: each
+            // boot builds its own image, so two of them carry partition GUIDs
+            // drawn fresh.
+            let upto = |text: &str| {
+                text.lines().take_while(|line| !line.contains(bootlog::LOADER_GOP_LINE)).count()
+            };
+            if upto(&at_query) != upto(&console) {
+                return Err(format!(
+                    "one boot printed {} lines before the GOP query and the other {}, so their \
+                     row counts are not each other's baseline\n--- first\n{at_query}\n--- \
+                     second\n{console}",
+                    upto(&at_query),
+                    upto(&console)
+                ));
+            }
+
+            // What the loader printed after the query, off its own console.
+            let lines: Vec<&str> = console.lines().collect();
+            let at = |line: &str| {
+                lines
+                    .iter()
+                    .position(|seen| seen.contains(line))
+                    .ok_or_else(|| format!("the loader never printed {line:?}\n{console}"))
+            };
+            let (query, last) =
+                (at(bootlog::LOADER_GOP_LINE)?, at(bootlog::LOADER_LAST_LINE)?);
+            if last <= query {
+                return Err(format!(
+                    "the console carries {:?} at line {last} and {:?} at line {query}, so there \
+                     is nothing between them",
+                    bootlog::LOADER_LAST_LINE,
+                    bootlog::LOADER_GOP_LINE
+                ));
+            }
+            let printed = last - query;
+
+            // A range and not an equality: each panel is dumped after its marker
+            // reached the console, so a line drawn in between is on the panel
+            // and not in the count.
+            let grew = after as i64 - before as i64;
+            if !(1..=printed as i64).contains(&grew) {
+                return Err(format!(
+                    "the panel carried {before} rows at the GOP query and {after} at the loader's \
+                     last line, a growth of {grew}, where the loader printed {printed} lines \
+                     between them\n{console}"
+                ));
+            }
+            eprintln!(
+                "  [screen] the panel grew {grew} row(s) across the GOP query, {before} to \
+                 {after}, for {printed} line(s) printed"
+            );
+            Ok(())
+        }
         "screen_gop_firmware_mode" => {
             // Four of `GopInfo`'s six fields, on two machines advertising
             // different panels. QMP's `screendump` is the geometry QEMU scans
@@ -3568,6 +3696,87 @@ fn run_screen_test(
                     None => "whole log on one screen, no footer".to_string(),
                 }
             );
+            Ok(())
+        }
+        "screen_early_panel" => {
+            // `test-early-halt` stops the boot between `PAT:`'s commit and its
+            // repaint, so `PAT:` is on the console and the panel holds only what
+            // an earlier record's own repaint put there. That is what tells a
+            // repaint per record from one repaint at the end, which would have
+            // painted the same tail.
+            const LAST: &str = "PAT: IA32_PAT";
+            // In order: `arm`, `serial::init`, then `actuator::init` — the first
+            // two before `params::init` and the third after it.
+            const BEFORE_PARAMS: [&str; 2] =
+                ["panic console: armed", "serial: 16550 loopback read"];
+            const AFTER_PARAMS: &str = "actuators:";
+
+            let panel = qemu::Profile::Metal.panel().expect("metal-sim advertises a panel");
+            let halted_panel = |params: &'static [&'static str]| -> Result<String, String> {
+                let mut qemu = QemuInstance::boot_with_options(
+                    test_config,
+                    c_bins,
+                    rust_bins,
+                    BootOptions {
+                        profile: qemu::Profile::Metal,
+                        qmp: true,
+                        kernel_params: params,
+                        ready_marker: LAST,
+                        ..Default::default()
+                    },
+                );
+                // The marker is the record whose repaint never runs, so every
+                // paint this boot makes is already on the glass when it lands.
+                let dump = qemu.screendump();
+                // The machine's panel, not the kernel's account of it: a
+                // geometry read off the guest's own `GOP:` line would agree
+                // with a guest that painted nothing.
+                if (dump.width as u32, dump.height as u32) != panel {
+                    return Err(format!(
+                        "the machine advertises {panel:?} and the screendump is {}x{}",
+                        dump.width, dump.height
+                    ));
+                }
+                let text = dump.text();
+                print_screen(name, &text);
+                Ok(text)
+            };
+            let holds = |text: &str, want: &[&str], unwanted: &[&str]| -> Result<(), String> {
+                for line in want {
+                    if !text.contains(line) {
+                        return Err(format!("{line:?} is not on the panel\n{text}"));
+                    }
+                }
+                for line in unwanted {
+                    if text.contains(line) {
+                        return Err(format!("{line:?} is on the panel\n{text}"));
+                    }
+                }
+                Ok(())
+            };
+
+            // Armed: every record up to the halt repaints, so the panel carries
+            // the three records before `PAT:` and not `PAT:` itself. `Boot: `
+            // and `EARLY PANIC:` are the two other painters, and neither ran.
+            let armed = halted_panel(&["test-early-halt", "early-panel"])?;
+            holds(
+                &armed,
+                &[BEFORE_PARAMS[0], BEFORE_PARAMS[1], AFTER_PARAMS],
+                &[LAST, "Boot: ", "EARLY PANIC:"],
+            )?;
+
+            // The shipping configuration, which names no parameter: the two
+            // records before `params::init` repaint because they have no other
+            // channel, and nothing after it does.
+            let bare = halted_panel(&["test-early-halt"])?;
+            holds(
+                &bare,
+                &BEFORE_PARAMS,
+                &[AFTER_PARAMS, LAST, "Boot: ", "EARLY PANIC:"],
+            )?;
+
+            eprintln!("  [panel] armed: three records up to the halt, and not {LAST:?}");
+            eprintln!("  [panel] no parameter: the two before params::init, and not {AFTER_PARAMS:?}");
             Ok(())
         }
         "screen_log_absent" => {
@@ -4400,7 +4609,17 @@ fn run_screen_test(
             let dump = qemu.screendump_until("PANIC:", Duration::from_secs(30));
             let text = dump.text();
             print_screen(name, &text);
-            for want in ["PANIC:", "test-late-panic: on-screen console check"] {
+            // The arm line is here and nowhere else: this is the machine whose
+            // panel is its only account, so it is the only one whose capture
+            // `halt_all_cpus` refreshes to carry it. Newest record, so it sits
+            // at the foot of the same `Page::Last` the two lines above are on.
+            // The bound is derived: a panel promising a minute while the kernel
+            // counts something else is the failure this line exists to catch.
+            let armed = format!(
+                "panic: rebooting in {} s unless a key is pressed",
+                toyos_tco::PANIC_BOUND_MS / 1_000
+            );
+            for want in ["PANIC:", "test-late-panic: on-screen console check", &armed] {
                 if !text.contains(want) {
                     return Err(format!(
                         "{want:?} not on screen of a guest with no serial port at all\ndecoded screen:\n{text}"
@@ -8703,8 +8922,27 @@ fn run_machine_test(
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
+        "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
+        "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
+        "panic_reboots" => power::panic_reboots(test_config, c_bins, rust_bins),
+        "panic_before_peripherals_reboots" => {
+            power::panic_before_peripherals_reboots(test_config, c_bins, rust_bins)
+        }
+        "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
+        "blackbox_panic_chain" => power::blackbox_panic_chain(test_config, c_bins, rust_bins),
+        "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
+        "blackbox_unclaimed_page" => {
+            power::blackbox_unclaimed_page(test_config, c_bins, rust_bins)
+        }
+        "blackbox_early_panic_sealed" => {
+            power::blackbox_early_panic_sealed(test_config, c_bins, rust_bins)
+        }
+        "blackbox_early_panic_sealed_muted" => {
+            power::blackbox_early_panic_sealed_muted(test_config, c_bins, rust_bins)
+        }
+        "blackbox_fault_sealed" => power::blackbox_fault_sealed(test_config, c_bins, rust_bins),
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),
         "usb_storage_shapes" => usb::usb_storage_shapes(test_config, c_bins, rust_bins),

@@ -27,8 +27,10 @@ mod drivers;
 mod log;
 mod actuator;
 mod params;
+mod blackbox;
 mod mm;
 mod panic;
+mod panic_reboot;
 
 mod keyboard;
 mod mouse;
@@ -126,21 +128,30 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     if depth.fetch_add(1, core::sync::atomic::Ordering::SeqCst) > 0 {
         // UART only: percpu and the log path are what just panicked.
         panic::last_words("PANIC REENTRY: CPU halted", None, info, false);
+        // Off the record like the report above it: the log path is what just panicked here.
+        let bound = panic_reboot::arm(false);
         // No capture(): the outer panic's snapshot is the one worth showing.
         // render() is safe by construction here: a fault inside the renderer itself would find PAINTING already held, and return without touching a pixel.
-        drivers::panic_console::render();
+        // Only the CPU that took the panel watches the bound; a reentry inside the pager finds it held and halts.
+        if drivers::panic_console::render() {
+            drivers::panic_console::hold_the_panel(bound);
+        }
         cpu::halt();
     }
 
-    // Early boot: percpu not ready, just halt (single CPU at this point)
+    // Early boot: percpu not ready (single CPU at this point), and neither is the calibrated clock — the bound comes off CPUID there.
     if !log::PERCPU_READY.load(core::sync::atomic::Ordering::Relaxed) {
         alert!("EARLY PANIC: {}", info);
+        // Before the capture, so the arm line is the panel's last one.
+        let bound = panic_reboot::arm(true);
         // Halts directly instead of via halt_all_cpus: idt::init hasn't run yet, so a renderer fault would triple-fault.
         drivers::panic_console::capture();
         // SAFETY: no other writer can be mid-transmission — IF is clear here and every other CPU is about to halt.
         unsafe { drivers::serial::panic_flush(); }
         // Flush before render: the serial report survives even if render then faults.
-        drivers::panic_console::render();
+        if drivers::panic_console::render() {
+            drivers::panic_console::hold_the_panel(bound);
+        }
         cpu::halt();
     }
 
@@ -240,6 +251,18 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Before serial::init: the screen may be the only surviving channel if serial::init itself faults.
     drivers::panic_console::arm(&kernel_args, maps);
+    // Beside it, and out of the raw buffer: a panic between here and
+    // `params::init` — inside `serial::init`, or on the parameter line's own
+    // UTF-8 check — is one the page has to carry past the reset, and neither
+    // the console nor that line has been decided yet.
+    blackbox::arm(if kernel_args.cmdline_len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(
+            DirectMap::from_phys(kernel_args.cmdline_addr).as_ptr::<u8>(),
+            kernel_args.cmdline_len as usize,
+        )
+    });
 
     serial::init();
 
@@ -259,6 +282,12 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     actuator::init(cmdline);
     rootfs::init(cmdline);
+
+    // Armed here so the next record — `PAT:` — reaches the console and the panel keeps the one before it.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::test_early_halt() {
+        log::halt_before_the_next_repaint();
+    }
 
     // Before pat::init, which restores whatever CR0 it found — a firmware CD would ride straight through otherwise.
     arch::control_regs::init_cr0(0);
@@ -322,6 +351,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         mm::Region { start: kernel_args.kernel_elf_addr, end: kernel_args.kernel_elf_addr + kernel_args.kernel_elf_size },
         mm::Region { start: kernel_args.kernel_stack_addr, end: kernel_args.kernel_stack_addr + kernel_args.kernel_stack_size },
         mm::Region { start: 0x8000, end: 0x9000 }, // AP trampoline page
+        // The loader's black-box page, which is ordinary `LoaderData` and so
+        // memory the allocator would otherwise hand out. Empty on a boot whose
+        // parameter line names none.
+        blackbox::reserved_region(),
     ];
 
     // The last point before the first hash container (`mm::init`'s address
@@ -336,11 +369,16 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     mm::init(maps, &reserved);
     drivers::panic_console::remap();
 
-    // Exception handlers first: a bug in a later phase then diagnoses instead of triple-faulting.
+    // `init_bsp` loads the IDT partway through, as early as this CPU's `gs:`
+    // allows: a fault in any later phase then diagnoses instead of stopping in
+    // a handler the firmware left behind.
     let madt = acpi::parse_madt(kernel_args.rsdp_addr).expect("ACPI: MADT not found");
+    // Off the same tables as the MADT, and before the IDT below makes a panic
+    // reportable: a panic that can be reported but not ended leaves the machine
+    // holding its panel for a hand that may not be in the room.
+    acpi::init_reset(kernel_args.rsdp_addr);
     apic::init();
     percpu::init_bsp(apic::id());
-    idt::init();
     ioapic::init(&madt);
     idt::enable_interrupts();
     syscall::init();

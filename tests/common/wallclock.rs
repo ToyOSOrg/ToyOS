@@ -91,7 +91,7 @@ fn staged_logs() -> Vec<(String, Vec<u8>)> {
 
 /// The log files this module's kernel wrote or was given, oldest first.
 fn logs(entries: &[Entry]) -> Vec<&Entry> {
-    entries.iter().filter(|e| e.name.ends_with(".log")).collect()
+    entries.iter().filter(|e| toyos_build::bootlog::is_logd_file(&e.name)).collect()
 }
 
 fn names(entries: &[&Entry]) -> String {

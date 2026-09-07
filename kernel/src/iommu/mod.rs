@@ -110,6 +110,9 @@ pub enum IommuError {
     WidthsDisagree,
     DomainsExhausted(u32),
     AddressesExhausted(u8),
+    /// What this machine's units translate does not reach above its memory, so
+    /// a device window has nowhere to sit that a stale descriptor would miss.
+    WindowBelowMemory { translatable: u8, floor: u64, top: u64 },
     /// Not a whole number of the 2 MiB leaves this kernel writes.
     Unaligned(u64),
     NotMapped(Iova),
@@ -128,6 +131,11 @@ impl core::fmt::Display for IommuError {
             Self::AddressesExhausted(bits) => {
                 write!(f, "a domain's {bits} bits of device address are all handed out")
             }
+            Self::WindowBelowMemory { translatable, floor, top } => write!(
+                f,
+                "this machine's units translate {translatable} bits, whose device window would \
+                 start at {floor:#x}, at or below the {top:#x} its memory reaches"
+            ),
             Self::Unaligned(at) => write!(f, "{at:#x} is not a 2 MiB boundary"),
             Self::NotMapped(at) => write!(f, "{:#x} is not mapped in this domain", at.raw()),
         }

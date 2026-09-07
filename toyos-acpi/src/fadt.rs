@@ -13,6 +13,10 @@ const FADT_RESET_REG: usize = 116;
 const FADT_RESET_VALUE: usize = 128;
 pub const FADT_X_DSDT: usize = 140;
 
+/// The bytes [`reset_register`] reads to the end of, so a caller opening the
+/// table for that decode alone asks for what it needs and nothing after it.
+pub const FADT_FOR_RESET: usize = FADT_RESET_VALUE + size_of::<u8>();
+
 /// Fixed feature flags bit 10, `RESET_REG_SUP` (Table 5.10); then the address space IDs of Table 5.1.
 const RESET_REG_SUP: u32 = 1 << 10;
 const SPACE_SYSTEM_MEMORY: u8 = 0;

@@ -105,8 +105,10 @@ pub fn find_ecam_base(rsdp_addr: u64) -> Option<u64> {
     Some(base)
 }
 
-/// Parse FADT and DSDT to prepare for ACPI shutdown and for the reset back to firmware.
+/// Parse FADT and DSDT to prepare for ACPI shutdown.
 // A machine without them keeps booting without soft-off rather than panicking.
+// The reset register is not decoded here: it is `init_reset`, which runs before
+// the boot has anything a panic could report on.
 pub fn init_power(rsdp_addr: u64) {
     const FADT_FOR_POWER: usize = toyos_acpi::FADT_PM1A_CNT_BLK + size_of::<u32>();
     const FADT_FOR_X_DSDT: usize = toyos_acpi::FADT_X_DSDT + size_of::<u64>();
@@ -118,9 +120,6 @@ pub fn init_power(rsdp_addr: u64) {
             return;
         }
     };
-
-    // Ahead of the soft-off returns below: a machine with no `\_S5_` can still be handed back to its firmware.
-    init_reset(&fadt);
 
     let Some(pm1a) = fadt.field::<u32>(toyos_acpi::FADT_PM1A_CNT_BLK) else {
         log!("ACPI: FADT has no PM1a control block — no soft-off");
@@ -194,7 +193,21 @@ pub fn rtc_century_register(rsdp_addr: u64) -> Result<Option<u8>, TableError> {
 }
 
 /// Record the FADT's reset register, or say by name why this machine has none.
-fn init_reset(fadt: &Table) {
+///
+/// The one decode of it, and it runs before `percpu::init_bsp` rather than with
+/// the rest of the power tables: from the moment that function loads the IDT,
+/// every panic can be reported, and a panic that can be reported but not ended
+/// is a machine that still needs a hand. Walking these tables inside the panic
+/// handler instead is refused — a table walk on a machine that has already
+/// failed once is how a panic becomes a triple fault.
+pub fn init_reset(rsdp_addr: u64) {
+    let fadt = match find_table(rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_RESET) {
+        Ok(table) => table,
+        Err(e) => {
+            log!("ACPI: FADT unusable: {e:?} — no reboot, a panic will hold the panel");
+            return;
+        }
+    };
     match toyos_acpi::reset_register(&fadt.0) {
         Reset::Port { port, value } => {
             RESET_PORT.store(port, Ordering::Relaxed);

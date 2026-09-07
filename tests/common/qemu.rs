@@ -2145,6 +2145,15 @@ pub struct BootOptions {
     /// to wait for and no `run_test` to drive, so it is observed with
     /// [`QemuInstance::screendump_while`] and nothing else.
     pub mute: bool,
+    /// Let this machine take a guest reset instead of exiting on one.
+    ///
+    /// **`-no-reboot` is the default and stays it**: it is what turns a triple
+    /// fault, a reset-register write and a power-off alike into a QEMU exit
+    /// whose `SHUTDOWN` reason a test can read, and every power test judges by
+    /// that reason. This is for the one claim that cannot be made that way —
+    /// that the boot *after* a reset is this loader again, reading what the boot
+    /// before it left — and a guest with it set runs until the harness kills it.
+    pub takes_the_reset: bool,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
     /// expected outcome rather than a boot failure -- the early-panic screen
@@ -2218,6 +2227,7 @@ impl Default for BootOptions {
             kernel_params: &[],
             i8042: true,
             mute: false,
+            takes_the_reset: false,
             ready_marker: DEFAULT_READY,
             nvme_image: None,
             boot_image: None,
@@ -2709,6 +2719,35 @@ impl QemuInstance {
                 own_boot_image,
             },
         )
+    }
+
+    /// A span of the guest's *physical* memory, as QEMU reads it.
+    ///
+    /// **The oracle for anything a guest leaves in DRAM for a later boot.** The
+    /// guest cannot be asked — the claim is precisely about what survives it —
+    /// and a screendump says nothing about bytes. `pmemsave` is the monitor
+    /// command that answers, so what a test judges is memory QEMU dumped and not
+    /// a report the guest wrote about itself.
+    pub fn guest_memory(&mut self, phys: u64, bytes: usize) -> Result<Vec<u8>, String> {
+        let socket = self.qmp_socket.clone().expect("guest_memory needs BootOptions { qmp: true }");
+        // Beside the screendump, which is this instance's own scratch path.
+        let out = self.screendump.with_extension(format!("mem-{phys:#x}"));
+        let _ = fs::remove_file(&out);
+        // Quoted for the monitor, whose unquoted filename is read as an
+        // expression and stops on the first letter of the path; the backslashes
+        // are the JSON `human-monitor-command` carries it in.
+        let command = format!("pmemsave {phys:#x} {bytes} \\\"{}\\\"", out.display());
+        let said = QmpMonitor::open(&socket).human(&command);
+        let read = fs::read(&out).map_err(|e| {
+            format!("{command:?} wrote no file ({e}); the monitor said {said:?}")
+        })?;
+        if read.len() != bytes {
+            return Err(format!(
+                "pmemsave {phys:#x} wrote {} bytes and not {bytes}; the monitor said {said:?}",
+                read.len()
+            ));
+        }
+        Ok(read)
     }
 
     /// Capture the guest's scanout through QMP and return the decoded PPM.
@@ -3422,6 +3461,57 @@ impl QmpShutdown {
     }
 }
 
+/// Counts the guest resets QEMU reports, for a machine that takes its own
+/// rather than exiting on the first (`BootOptions::takes_the_reset`).
+///
+/// **`SHUTDOWN` is not available to such a guest.** `-no-reboot` is what turns a
+/// reset into one, and every other power test judges by its reason; a guest that
+/// keeps going emits `RESET` instead, and the *count* is what a chain is read
+/// by — one is a kernel that reset itself, two is a loader pass that ended the
+/// chain by resetting rather than returning to the boot manager.
+pub struct QmpResets(Qmp);
+
+impl QmpResets {
+    /// `budget` bounds every wait and is set here, while the peer is still there
+    /// to accept it — as [`QmpShutdown::open`], and for the same reason.
+    pub fn open(socket: &Path, budget: Duration) -> Self {
+        let qmp = Qmp::connect(socket);
+        qmp.stream.set_read_timeout(Some(budget)).expect("qmp: the reset-event budget");
+        Self(qmp)
+    }
+
+    /// How many guest resets have arrived, waiting for up to `want` of them.
+    ///
+    /// Events queue on the socket from the moment it is connected, so a caller
+    /// that opened this before the guest reset reads them here whenever it asks.
+    pub fn seen(&mut self, want: usize) -> usize {
+        use std::io::Read;
+        let qmp = &mut self.0;
+        loop {
+            let seen = guest_resets(&qmp.pending);
+            if seen >= want {
+                return seen;
+            }
+            let mut buf = [0u8; 4096];
+            match qmp.stream.read(&mut buf) {
+                // Budget spent, or the socket ended: what it had is in `pending`.
+                Ok(0) | Err(_) => return guest_resets(&qmp.pending),
+                Ok(n) => qmp.pending.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+}
+
+/// `RESET` events the *guest* caused, scanned rather than parsed like
+/// [`shutdown_reason`]. QEMU raises one for its own power-on reset too, which
+/// carries `"guest": false` and is not a claim about anything the guest did.
+fn guest_resets(bytes: &[u8]) -> usize {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| line.contains("\"RESET\"") && line.contains("\"guest\": true"))
+        .count()
+}
+
 /// The `reason` field of a `SHUTDOWN` event in `bytes`, scanned rather than parsed: [`Qmp`] carries no JSON dependency.
 fn shutdown_reason(bytes: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(bytes);
@@ -3812,11 +3902,10 @@ fn qemu_command(
         );
         qemu.arg("-device").arg(format!("{gpu}{platform}"));
     }
-    qemu.arg("-vga")
-        .arg(shape.vga)
-        .arg("-display")
-        .arg("none")
-        .arg("-no-reboot");
+    qemu.arg("-vga").arg(shape.vga).arg("-display").arg("none");
+    if !options.takes_the_reset {
+        qemu.arg("-no-reboot");
+    }
     if let Some((w, h)) = shape.panel {
         // A panel on a machine with no VGA adapter is a declaration nothing
         // emits, which is the silently-inert field this suite refuses by name.

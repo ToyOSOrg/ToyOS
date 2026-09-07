@@ -36,7 +36,34 @@ pub fn init(hpet_base: u64) {
     let hpet_start = hpet.read_u64(HPET_COUNTER);
     let tsc_start = cpu::rdtsc();
     let hpet_target = hpet_start + calibration_hpet_ticks;
-    while hpet.read_u64(HPET_COUNTER) < hpet_target {}
+    log!(
+        "clock: HPET at {:#x} enabled, period={}fs, counter reads {}, calibrating over {} ticks",
+        hpet_base,
+        hpet_period_fs,
+        hpet_start,
+        calibration_hpet_ticks,
+    );
+
+    // A main counter that does not advance would spin here forever, and this is
+    // the boot's last wait before it has a clock: the only unit available to
+    // bound it is the TSC's own, so the budget is the calibration converted at
+    // a frequency no x86-64 part reaches, which makes it an over-estimate of
+    // the cycles the calibration can legitimately take on any machine.
+    const TSC_CEILING_HZ: u64 = 10_000_000_000;
+    // Times two, so a machine merely slower than the ceiling is not refused for it.
+    let stall_budget_cycles = 2 * calibration_ns * (TSC_CEILING_HZ / 1_000_000_000);
+    while hpet.read_u64(HPET_COUNTER) < hpet_target {
+        assert!(
+            cpu::rdtsc().wrapping_sub(tsc_start) <= stall_budget_cycles,
+            "clock: the HPET main counter at {:#x} did not reach {} in {} TSC cycles (it started \
+             at {} and reads {}), so this machine offers no clock to calibrate against",
+            hpet_base,
+            hpet_target,
+            stall_budget_cycles,
+            hpet_start,
+            hpet.read_u64(HPET_COUNTER),
+        );
+    }
     let tsc_end = cpu::rdtsc();
     let hpet_end = hpet.read_u64(HPET_COUNTER);
 
@@ -55,6 +82,49 @@ pub fn init(hpet_base: u64) {
 pub fn calibrated() -> bool {
     TSC_PERIOD_FS.load(Relaxed) != 0
 }
+
+/// The TSC's frequency in hertz as CPUID *states* it, for the one caller that
+/// may run before [`init`] — the panic path, which has to bound a wait on a
+/// machine that never reached the HPET. Nothing calibrates against it and no
+/// third source is guessed at: a CPU that states neither leaf answers `None`
+/// and its caller says so rather than inventing a rate.
+pub fn cpuid_tsc_hz() -> Option<u64> {
+    let max_leaf = cpu::cpuid(0, 0).0;
+    tsc_hz_from(
+        (max_leaf >= 0x15).then(|| cpu::cpuid(0x15, 0)),
+        (max_leaf >= 0x16).then(|| cpu::cpuid(0x16, 0)),
+    )
+}
+
+/// SDM Vol. 2A, CPUID leaf 15H: EAX is the denominator and EBX the numerator of
+/// the core crystal's ratio to the TSC, ECX the crystal's hertz — any of the
+/// three reading zero means the leaf states nothing. Leaf 16H's EAX is the
+/// processor base frequency in MHz, which an invariant TSC counts at.
+const fn tsc_hz_from(
+    leaf15: Option<(u32, u32, u32, u32)>,
+    leaf16: Option<(u32, u32, u32, u32)>,
+) -> Option<u64> {
+    if let Some((denominator, numerator, crystal_hz, _)) = leaf15 {
+        if denominator != 0 && numerator != 0 && crystal_hz != 0 {
+            return Some(crystal_hz as u64 * numerator as u64 / denominator as u64);
+        }
+    }
+    if let Some((base_mhz, _, _, _)) = leaf16 {
+        if base_mhz != 0 {
+            return Some(base_mhz as u64 * 1_000_000);
+        }
+    }
+    None
+}
+
+const _: () = {
+    // The ratio, then the fall-through to the base frequency when the crystal
+    // is not enumerated, then the CPU that states neither.
+    assert!(matches!(tsc_hz_from(Some((2, 4, 25_000_000, 0)), None), Some(50_000_000)));
+    assert!(matches!(tsc_hz_from(Some((0, 0, 0, 0)), Some((2_400, 0, 0, 0))), Some(2_400_000_000)));
+    assert!(tsc_hz_from(None, Some((0, 0, 0, 0))).is_none());
+    assert!(tsc_hz_from(None, None).is_none());
+};
 
 /// Nanoseconds since boot; lock-free, no MMIO, and never panics — `log::emit`
 /// reads it from inside a bracket where panicking would reenter the log.
