@@ -19,13 +19,13 @@
 //! as the kernel's own `exit: <name> pid=N code=N cpu=Nms` record. Every
 //! predicate below reads records, never console text.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use toyos_build::bootlog;
 use toyos_build::metalimage;
-use toyos_build::metalprofile::Profile;
+use toyos_build::metalprofile::{job_ms_row, Profile, AROUND_THE_LIST_MS};
 
 use super::serial::Serial;
 
@@ -102,11 +102,19 @@ pub const fn once(
 /// exit record for it. So they are a boot with a list rather than a row each,
 /// and each member is still reported under its own name.
 ///
-/// The whole list rides one flash. A member that takes the machine down takes
-/// every member after it with it, and that is the honest price: on the T14 there
-/// is no `MAX_SHARED_REBOOTS` to answer a dead guest with a new one.
+/// The list is **sized to the bound before it is flashed** ([`sized`]): the
+/// runner's deadline runs from boot and ends the whole list, so a list longer
+/// than the bound is a boot whose tail members never run and are reported as
+/// missing records rather than as the boot being too long. A boot named here
+/// may therefore become several, `<boot>`, `<boot>-2`, …, and each is a row in
+/// `tests/metal-profile.toml` like any other.
+///
+/// A chunk rides one flash. A member that takes the machine down takes every
+/// member after it *in its chunk* with it, and that is the honest price: on the
+/// T14 there is no `MAX_SHARED_REBOOTS` to answer a dead guest with a new one.
+#[derive(Clone)]
 pub struct SharedBoot {
-    pub boot: &'static str,
+    pub boot: String,
     pub config: &'static str,
     pub params: &'static [&'static str],
     /// The kernel build, empty for the one an image ships.
@@ -121,6 +129,68 @@ pub struct SharedBoot {
     /// Names in `bin/` that reach one binary, so the kernel records each run
     /// under a name of its own. `(from, to)` as the manifest spells them.
     pub links: Vec<(String, String)>,
+}
+
+/// The name of one chunk of a boot that had to be cut in two.
+fn chunk_name(boot: &str, index: usize) -> String {
+    if index == 0 {
+        boot.to_string()
+    } else {
+        format!("{boot}-{}", index + 1)
+    }
+}
+
+/// Cut every shared boot's list to what the bound and the profile's allowance
+/// leave room for.
+///
+/// Measured on the T14 (run 24): `shared` spawned 25 of its 72 members in the
+/// 21.1 s before its log stopped and the runner's bound reset the machine at
+/// 60 s, so 47 members were reported as missing records; `ccorpus` finished 118
+/// members in 47.7 s, ten seconds inside the bound and with no margin for a
+/// slower stick. Both are the same defect — a list nothing sized — and this is
+/// where it is sized.
+///
+/// **A chunk carries only the files and links its own members name.** The C
+/// corpus stages a binary and an expectation per case; putting all of both on
+/// every chunk would double a flash that is already written over `ssh`.
+fn sized(shared: &[SharedBoot], profile: &Profile) -> Result<Vec<SharedBoot>, String> {
+    let mut out = Vec::new();
+    for boot in shared {
+        if boot.jobs.is_empty() {
+            continue;
+        }
+        let per = profile.members_per_boot(&boot.boot).map_err(|why| {
+            format!(
+                "the shared boot {:?} has {} member(s) and none of them is priced, so the list \
+                 cannot be cut to the runner's bound and would lose its tail: {why}",
+                boot.boot,
+                boot.jobs.len()
+            )
+        })?;
+        for (index, jobs) in boot.jobs.chunks(per).enumerate() {
+            let named: BTreeSet<&str> = jobs.iter().map(String::as_str).collect();
+            let mine = |path: &str| {
+                let last = path.rsplit('/').next().unwrap_or(path);
+                named.contains(last)
+                    || last.strip_prefix("test_c_").is_some_and(|c| named.contains(c))
+            };
+            out.push(SharedBoot {
+                boot: chunk_name(&boot.boot, index),
+                config: boot.config,
+                params: boot.params,
+                features: boot.features,
+                jobs: jobs.to_vec(),
+                files: boot
+                    .files
+                    .iter()
+                    .filter(|(path, _)| mine(path))
+                    .cloned()
+                    .collect(),
+                links: boot.links.iter().filter(|(from, _)| mine(from)).cloned().collect(),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Whether a registration runs on the T14, and how.
@@ -164,6 +234,48 @@ impl Readback {
     /// `loaderlog::SEPARATOR`, the one that read the black box afterwards.
     pub fn loader(&self) -> Serial {
         Serial::named(&format!("{}'s loader.log", self.label), self.loader.as_str())
+    }
+
+    /// When the last record this boot left was written, in milliseconds since
+    /// boot. `None` on a log with no record at all.
+    pub fn last_record_ms(&self) -> Option<u64> {
+        bootlog::last_record_millis(&self.kernel)
+    }
+
+    /// Whether every record this boot committed reached the stick, off the
+    /// kernel's own account of it.
+    ///
+    /// **Not a question the file can answer about itself.** A log that stops
+    /// early is a log that says nothing about stopping: `logd`'s give-up line
+    /// and the kernel's `shutdown: /log did not answer` record are both written
+    /// after the volume stopped taking bytes. So the account goes on the
+    /// black-box page under the boot's `DONE` seal and comes back in the next
+    /// loader pass, and this reads it there — for every boot, because the
+    /// suite's whole verdict is read out of that file.
+    pub fn log_reached_the_stick(&self) -> Result<(), String> {
+        let after = self.after_the_reset()?;
+        let text = after.text();
+        if text.contains(bootlog::LOG_COMPLETE) {
+            return Ok(());
+        }
+        let short: Vec<&str> =
+            text.lines().filter(|l| l.contains(bootlog::LOG_SHORT)).collect();
+        if short.is_empty() {
+            return Err(format!(
+                "{}'s loader pass after the reset carries neither {:?} nor {:?}: this boot's \
+                 kernel sealed no account of its log, so nothing says whether the file on the \
+                 stick is the whole of it",
+                self.label,
+                bootlog::LOG_COMPLETE,
+                bootlog::LOG_SHORT,
+            ));
+        }
+        Err(format!(
+            "{}'s log stopped before the boot did, and the kernel's own account says by how \
+             much:\n{}",
+            self.label,
+            short.join("\n")
+        ))
     }
 
     /// How far past its bound this boot's deadline fired, or `None` on a boot
@@ -349,6 +461,7 @@ fn at(dir: &Path, label: &str) -> PathBuf {
 fn batches(
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
+    profile: &Profile,
 ) -> Result<BTreeMap<String, Batch>, String> {
     let mut out: BTreeMap<String, Batch> = BTreeMap::new();
     // First, so a registration naming a shared boot rides it rather than
@@ -359,7 +472,7 @@ fn batches(
             continue;
         }
         let was = out.insert(
-            boot.boot.to_string(),
+            boot.boot.clone(),
             Batch {
                 config: boot.config,
                 params: boot.params.to_vec(),
@@ -406,6 +519,32 @@ fn batches(
             // question also answers every one-boot question on it.
             batch.boots = batch.boots.max(arm.boots);
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
+        }
+    }
+    // **Every boot, and the shared ones have already been cut to fit.** An
+    // authored arm is refused rather than cut: the order of an arm's jobs is
+    // the author's, and only the author knows where one may be broken in two —
+    // `Arm::boot`'s own doc is that argument.
+    for (label, batch) in &out {
+        let row = job_ms_row(label);
+        let Some(priced) = profile.row(&row) else {
+            return Err(format!(
+                "the boot {label:?} runs {} job(s) and {row} prices none of them; a list nobody \
+                 has priced cannot be sized to the runner's bound",
+                batch.jobs.len()
+            ));
+        };
+        let per = toyos_build::metalprofile::members_per_boot(priced.ceiling);
+        if batch.jobs.len() > per {
+            return Err(format!(
+                "the boot {label:?} carries {} job(s) and {row} leaves room for {per} of them \
+                 ({} ms each inside {} ms, less the {AROUND_THE_LIST_MS} ms the boot around the \
+                 list costs). The runner's bound ends the whole list, so the members past that \
+                 would never run — split this boot's arms across two named boots",
+                batch.jobs.len(),
+                priced.ceiling,
+                toyos_tco::JOB_BOUND_MS,
+            ));
         }
     }
     Ok(out)
@@ -622,7 +761,17 @@ pub fn run(
             return Verdict::Red;
         }
     };
-    let batches = match batches(tests, shared) {
+    // Before anything is batched: what rides one flash is what the runner's
+    // bound leaves room for, and a boot named once here can be several.
+    let shared = match sized(shared, &profile) {
+        Ok(shared) => shared,
+        Err(why) => {
+            eprintln!("[metal] {why}");
+            return Verdict::Red;
+        }
+    };
+    let shared = shared.as_slice();
+    let batches = match batches(tests, shared, &profile) {
         Ok(batches) => batches,
         Err(why) => {
             eprintln!("[metal] {why}");
@@ -778,6 +927,15 @@ pub fn run(
                         red = true;
                     }
                 }
+                // **Every boot, and before any verdict is read out of its
+                // log.** A test's judge reads the file the stick came back
+                // with, so a file that stops before the boot does turns a
+                // machine fact into a missing line — and the missing line is
+                // what a reader would have to guess about.
+                if let Err(why) = back.log_reached_the_stick() {
+                    eprintln!("    FAIL {why}");
+                    red = true;
+                }
             }
         }
     }
@@ -815,7 +973,8 @@ pub fn run(
             continue;
         }
         eprintln!("\n[metal] {}: {} member(s)", boot.boot, boot.jobs.len());
-        let back = readbacks.get(boot.boot).expect("every shared boot was batched");
+        let back = readbacks.get(&boot.boot).expect("every shared boot was batched");
+        let mut ran = 0usize;
         for job in &boot.jobs {
             members += 1;
             let verdict = match back {
@@ -823,11 +982,28 @@ pub fn run(
                 Ok(back) => back.job_passed(job),
             };
             match verdict {
-                Ok(()) => passed += 1,
+                Ok(()) => {
+                    passed += 1;
+                    ran += 1;
+                }
                 // One line per red and none per pass: two hundred `PASS` lines
                 // bury the four that matter.
                 Err(why) => {
                     eprintln!("  FAIL {job}: {}", why.lines().next().unwrap_or(&why));
+                    red = true;
+                }
+            }
+        }
+        // **What a member of this list actually cost, against the allowance the
+        // split was derived from.** Over the members that ran and not the
+        // members the list named: a boot the bound cut short would otherwise
+        // report a cost that looks smaller the more of its list it lost.
+        if let (Ok(back), true) = (back, ran > 0) {
+            if let (Some(complete), Some(last)) = (back.boot_ms, back.last_record_ms()) {
+                let each = last.saturating_sub(complete) / ran as u64;
+                eprintln!("  {} ms per member over the {ran} that ran", each);
+                if let Err(why) = profile.judge(&job_ms_row(&boot.boot), each) {
+                    eprintln!("    FAIL {why}");
                     red = true;
                 }
             }

@@ -411,3 +411,159 @@ unit = "ms"
 ceiling = 2000
 ceiling_from = "twice the sample period `kernel/src/hardlockup`'s SAMPLE_NS states, 1000 ms: a CPU is found stuck at the first sample after its bound, so one period is the lateness and a second is the widest a delayed one costs. 4 ms is what it read, which is a sample that landed almost on the bound"
 measured = 4
+
+# --- what one member of a job list may cost this machine ---
+# **The number the suite sizes its lists by, and judges them against.** The
+# runner's bound (`toyos_tco::JOB_BOUND_MS`) runs from boot and ends the whole
+# list, not the job it is inside, so a list longer than the bound is a boot
+# whose tail members never run — reported as missing records rather than as a
+# list nobody sized. `tests/common/metal.rs` derives how many members one boot
+# may carry from the ceiling here, and then holds the boot to the same number:
+# a list is cut to what its members are priced at, and members slower than their
+# price red by name.
+#
+# Every reading below is run 24's, taken from the interval between successive
+# `spawn: /system/bin/…` records on that boot's own log.
+
+[[number]]
+name = "list.shared.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "845 ms measured (25 members spawned between 1.943 s and 23.066 s on run 24's `shared`), and a ceiling above the widest single member on that boot — test_rs_abuse_elf_loader at 1,358 ms — so one heavy member cannot put the mean over it"
+measured = 845
+
+[[number]]
+name = "list.shared-2.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.shared.job_ms — the same list, cut in two"
+
+[[number]]
+name = "list.shared-debug.job_ms"
+unit = "ms"
+ceiling = 2900
+ceiling_from = "1,926 ms measured (8 members between 2.624 s and 18.032 s on run 24's `shared-debug`), and half again: these are the eight binaries that re-execute themselves once per fault, and handle_kill_policy alone spawned 42 children"
+measured = 1926
+
+[[number]]
+name = "list.ccorpus.job_ms"
+unit = "ms"
+ceiling = 600
+ceiling_from = "396 ms measured (118 cases between 2.625 s and the reboot job at 49.366 s on run 24's `ccorpus`), and half again. That boot was green at 49.5 s of a 60 s bound — 82 % of it, with no margin for a slower stick — which is why the same rule cuts a list that passed"
+measured = 396
+
+[[number]]
+name = "list.ccorpus-2.job_ms"
+unit = "ms"
+ceiling = 600
+ceiling_from = "as list.ccorpus.job_ms — the same corpus, cut in two"
+
+[[number]]
+name = "list.metaldevicecase.job_ms"
+unit = "ms"
+ceiling = 4800
+ceiling_from = "metalprobe's SHARE_PERCENT of toyos_tco::JOB_BOUND_MS, which is what every one of that boot's own span rows is priced at: the list is sized to what its jobs are allowed to cost, and a job that outruns its allowance reds on its own span row. Run 24's usbwrite spent 30.8 s of the bound and left the list unfinished, which is that row's red and not this one's"
+
+[[number]]
+name = "list.testcases.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.shared.job_ms: the same machine spawning the same kind of binary off the same stick"
+
+[[number]]
+name = "list.testcases-mkdir.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.testcases-readdir.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.testcases-watchdog.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.jobcase.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.metalcase.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.latencycase.job_ms"
+unit = "ms"
+ceiling = 30000
+ceiling_from = "both members of that list are benches that run for a stated span rather than binaries that exit as soon as they can, and two of them are the whole list; half the bound each is what the boot has to give"
+
+[[number]]
+name = "list.selftests.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.foreignrecord.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms"
+
+[[number]]
+name = "list.deadlinewedge.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.testcases.job_ms — the list is one job and a wedge, and what ends this boot is the kernel's own deadline rather than the runner's"
+
+[[number]]
+name = "list.hardlockup.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.deadlinewedge.job_ms"
+
+# --- the boots the split above adds ---
+
+[[number]]
+name = "boot.shared-2.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.shared-2.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.shared-2.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.ccorpus-2.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.ccorpus-2.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.ccorpus-2.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
