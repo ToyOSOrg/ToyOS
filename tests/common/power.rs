@@ -998,13 +998,14 @@ pub fn hard_lockup_ends_a_deaf_cpu(
     // **After the harvest line**, so this is the page and not the wire.
     second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?;
     // The lock the staged cpu was inside, which is the field a machine with
-    // every CPU deaf has nothing else to say.
+    // every CPU deaf has nothing else to say, and the site that took it — the
+    // control's own witness, carried by the mechanism rather than by a log line
+    // the sealed page may have no room for.
     second.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    second.must_say_after(bootlog::PREVIOUS_PANIC, "taken at src/hardlockup/probe.rs")?;
     // A line for every cpu, so the holder of what the stuck one wanted is in
     // the record too. cpu0 is the one this boot is certain of.
     second.must_say_after(bootlog::PREVIOUS_PANIC, "cpu0 irqs=")?;
-    // And the tail of a ring nothing was draining crossed the reset with it.
-    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKUP_STAGED)?;
     // The discrimination: the deadline was armed and running on this boot, and
     // it is not what ended the machine.
     second.must_not_say(bootlog::DEADLINE_EXPIRED)?;
@@ -1235,26 +1236,41 @@ pub fn hard_lockup_chain(
     kernel: &serial::Serial,
     after: &serial::Serial,
 ) -> Result<(), String> {
-    // What this machine has that the guest does not, and the reason this arm
-    // exists: the sample comes off the counter, so nothing sends the NMI.
-    kernel.must_say("sampled every")?;
-    kernel.must_say(bootlog::LOCKUP_STAGED)?;
-    kernel.must_say("has a performance counter of its own")?;
-    says_nothing_of(kernel, "CPUID states no counter")?;
+    // **Nothing this judge reads was written after the wedge.** `logd` stops
+    // where the scheduler does, so the stick's kernel log ends at the last
+    // spawn — and run 23's sealed page filled with that boot's *older* records
+    // before it reached the two lines the control writes about itself, so the
+    // tail did not carry them either
+    // (`issues/diagnostics/a-wedged-boots-record-outgrows-both-channels-that-carry-it.md`).
+    // What crosses is the arm line, written at 60 ms, and the record itself.
+    kernel.must_say("by each cpu's own performance counter")?;
+    says_nothing_of(kernel, "CPUID states no architectural performance counter")?;
     says_nothing_of(kernel, bootlog::REBOOTING)?;
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();
     after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
-    // Every CPU's line, which is what a machine whose cores went quiet one at a
-    // time will be read by. This one is certain of cpu0's.
+    // The staged control's own witness, carried by the mechanism rather than by
+    // a log line that may not survive: the lock the stuck cpu is inside was
+    // taken at the control's own source line, which no other boot can say.
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "taken at src/hardlockup/probe.rs")?;
+    // **cpu0's line is what proves the counter rather than a sender.** Nothing
+    // sends cpu0 an NMI on this boot — the control's sender is skipped where the
+    // cpus have counters — so a sample recorded against cpu0 came from cpu0's
+    // own overflow, and a sample against every cpu is the arm working on all of
+    // them.
     after.must_say_after(bootlog::PREVIOUS_PANIC, "cpu0 irqs=")?;
-    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKUP_STAGED)?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, "cpu7 irqs=")?;
     // The deadline was armed on this boot too, at twice this bound, and is not
     // what ended the machine.
     says_nothing_of(after, bootlog::DEADLINE_EXPIRED)?;
     says_nothing_of(after, &armed_and_nothing_else())?;
-    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    // **Not [`bootlog::CHAIN_ENDS_LINE`], which the deadline's arm demands.**
+    // That pass's own last line is written after the record, and on run 23
+    // `loader.log` stopped inside the record at 16,365 bytes — so demanding it
+    // here would judge the loader's file capacity and call it a lockup. The
+    // same issue file above carries it, and the pass having booted no kernel is
+    // what this asserts instead.
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
     eprintln!("  [power] {}", said.trim());
     Ok(())

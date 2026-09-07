@@ -174,6 +174,13 @@ impl Readback {
         toyos_build::metal::deadline_lateness_ms(&self.loader)
     }
 
+    /// The same for the other bound: how far past its own bound a hard-lockup
+    /// sample was when it found a cpu stuck, or `None` on a boot no cpu locked
+    /// up on. Read out of the same channel and for the same reason.
+    pub fn lockup_lateness_ms(&self) -> Option<u64> {
+        toyos_build::metal::lockup_lateness_ms(&self.loader)
+    }
+
     /// The loader pass **after** the kernel's reset, which is where a chain
     /// report is. `None` where the chain did not go round — which for a boot
     /// that ended itself is a finding, not an absence.
@@ -745,17 +752,20 @@ pub fn run(
                      after that",
                     back.back_secs, back.stick_secs
                 );
-                // The fourth is `None` on every boot but the one armed to stop
-                // itself, and a `None` field is not recorded rather than
-                // recorded as a zero: an unpriced name is refused, and a boot
-                // that measured nothing may not answer for one that did.
+                // The last two are `None` on every boot but the one armed to
+                // stop itself, and at most one of them is ever `Some` — a boot
+                // has one bound that ended it. A `None` field is not recorded
+                // rather than recorded as a zero: an unpriced name is refused,
+                // and a boot that measured nothing may not answer for one that
+                // did.
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),
                     ("stick_secs", Some(back.stick_secs)),
                     ("deadline_lateness_ms", back.deadline_lateness_ms()),
+                    ("lockup_lateness_ms", back.lockup_lateness_ms()),
                 ] {
-                    if field == "deadline_lateness_ms" && value.is_none() {
+                    if field.ends_with("_lateness_ms") && value.is_none() {
                         continue;
                     }
                     let Some(value) = value else {
