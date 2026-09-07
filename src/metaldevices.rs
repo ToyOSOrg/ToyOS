@@ -196,6 +196,10 @@ pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
 pub const LOADER_RECORDS: &[Record] = &[
     Record { about: "chain", needle: "the last boot read DONE", presence: Says },
     Record { about: "usb-quiesce", needle: QUIESCE_HEAD, presence: Says },
+    // What the stop did about transfers still outstanding when it ran. On this
+    // machine that is the difference between a stick the next boot reads and one
+    // somebody has to walk over and replug.
+    Record { about: "usb-inflight", needle: "bulk transfer", presence: Says },
     // A kernel that died on the way to the reset seals ARMED, not DONE.
     Record { about: "no-death", needle: "died without reaching", presence: NeverSays },
 ];
@@ -456,6 +460,7 @@ mod tests {
         "ToyOS Bootloader 1.0\n\
          Black box: the last boot read DONE, so it handed the machine back on purpose and this \
          chain ends here\n\
+         | usb-quiesce: no bulk transfer was outstanding, so this reset cuts none\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
          | usb-quiesce: 2/2 disk cache(s) flushed, 1 with no cache to flush, \
          5/5 connected port(s) reset, 2/2 controller(s) halted, 2 reset, \
@@ -548,7 +553,19 @@ mod tests {
             .filter(|l| !l.contains(QUIESCE_HEAD))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(about(unmet(&no_quiesce, &a_good_boot())), ["usb-quiesce", "usb-quiesce"]);
+        assert_eq!(
+            about(unmet(&no_quiesce, &a_good_boot())),
+            ["usb-quiesce", "usb-inflight", "usb-quiesce"]
+        );
+        // A stop that touched the registers without waiting out what it had
+        // rung: every other line of the account is unchanged, and this is the
+        // one that says whether a device was cut mid-command.
+        let cut = a_good_loader()
+            .lines()
+            .filter(|l| !l.contains("bulk transfer"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(about(unmet(&cut, &a_good_boot())), ["usb-inflight"]);
         let left = a_good_loader().replace("2/2 disk", "1/2 disk");
         assert_eq!(about(unmet(&left, &a_good_boot())), ["usb-quiesce"]);
         let died = a_good_loader().replace(

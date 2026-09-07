@@ -1667,6 +1667,14 @@ struct ResetPath {
     barrier: &'static str,
 }
 
+/// What every path's account has to say about the transfers this kernel had
+/// rung before it touched the first register.
+///
+/// **On every path and not on one**, since the device a cut costs is the same
+/// device whichever bound reached the reset. Reverting `settle_transfers` makes
+/// the sentence absent and fails all four arms by name.
+const SETTLED_TRANSFERS: &str = "bulk transfer";
+
 const TOOK_THE_LOCK: &str = "the controller lock was held from before the log volume's";
 const NO_BARRIER: &str = "no barrier was taken, so this reset is not the shutdown's";
 const LOCK_REFUSED: &str = "the controller lock was not free inside its bound";
@@ -1795,6 +1803,15 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
             "{path}: the account does not say {:?}, so the barrier this path owes was not the \
              one it took",
             arm.barrier
+        ));
+    }
+    // And the wait that has to happen before the first register on every path:
+    // a stop that cut a transfer without waiting it out is what leaves a device
+    // its next host cannot enumerate.
+    if !after.text().contains(SETTLED_TRANSFERS) {
+        return Err(format!(
+            "{path}: the account says nothing about a {SETTLED_TRANSFERS}, so this stop reached \
+             a controller's registers without waiting out what this kernel had rung"
         ));
     }
     nothing_after_the_last_word(after.text()).map_err(|why| format!("{path}: {why}"))?;

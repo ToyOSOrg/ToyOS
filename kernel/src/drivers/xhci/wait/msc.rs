@@ -799,6 +799,10 @@ impl XhciController {
         trb.control = TRB_NORMAL | (1 << 5) | (1 << 2);
         let at = ring.enqueue(trb);
         let slot = dev.slot_id;
+        // Before the doorbell, so no transfer is visible to the controller
+        // without a reset being able to see it; the guard must stay named, or a
+        // `let _` would end it here and the count would never be raised at all.
+        let _rung = crate::drivers::xhci::stop::InFlight::rung();
         self.ring_doorbell(slot, dci);
         #[cfg(feature = "boot-actuators")]
         if transport_break::take() {

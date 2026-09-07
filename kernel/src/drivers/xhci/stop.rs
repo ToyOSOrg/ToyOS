@@ -14,14 +14,23 @@
 //! panicked kernel can issue none of them, and a port reset clears strictly
 //! more than they do.
 //!
+//! **And a port reset is not free either.** One device on the owner's bench does
+//! not honour the obligation the class puts on it: cut in a command's data phase
+//! it enumerates and describes itself perfectly afterwards and answers no SCSI
+//! command again until it is physically unplugged, on a laptop whose port power
+//! control does not cut VBUS. So the first thing this path does is wait a
+//! transfer out — [`settle_transfers`], bounded, and it cuts when the bound
+//! passes, because a machine nobody can turn off is worse still.
+//!
 //! **Registers and nothing else, because the panic path calls this.** The
 //! controllers are published into [`POINTS`] at bring-up rather than read out of
-//! `XHCI`: a panicked CPU may take no lock and allocate nothing, and the CPU it
-//! panicked on may be the one holding that lock. The orderly path takes the
-//! lock first ([`super::seal_shut`]) so that no transfer is in flight when this
-//! runs; the panic path has `halt_all_cpus`'s NMI instead, which stops every
-//! other CPU where it stood — possibly mid-transfer, which is the device this
-//! path exists to rescue.
+//! `XHCI`, and what is outstanding is counted into [`IN_FLIGHT`] the same way: a
+//! panicked CPU may take no lock and allocate nothing, and the CPU it panicked
+//! on may be the one holding that lock. The orderly path takes the lock first
+//! ([`super::seal_shut`]) so that no transfer is in flight when this runs; the
+//! panic path has `halt_all_cpus`'s NMI instead, which stops every other CPU
+//! where it stood — possibly mid-transfer, which is the device this path exists
+//! to rescue.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -147,6 +156,97 @@ impl Barrier {
             1 => Self::Taken,
             2 => Self::Refused,
             _ => Self::NotTried,
+        }
+    }
+}
+
+/// Bulk-Only Transport transfers this kernel has rung a doorbell for and is
+/// still waiting on, machine-wide.
+///
+/// **The one thing [`before_reset`] must know and cannot ask.** Its reader takes
+/// no lock — the CPU holding `XHCI` may be the wedged one this reset is ending,
+/// which is the whole reason [`POINTS`] exists — so the count is published
+/// beside the driver rather than read out of it. One counter and not one per
+/// controller: what the stop below decides is whether to touch any register at
+/// all.
+static IN_FLIGHT: AtomicU32 = AtomicU32::new(0);
+
+/// Raised for exactly as long as this kernel is waiting on one bulk transfer.
+///
+/// **Its lifetime is the wait's and not the device's.** A wait that ends in
+/// [`super::Quiet::Elapsed`] leaves a TRB the controller never answered, and
+/// what takes the endpoint off that is the driver's own recovery; this says only
+/// that a transfer is one the kernel still expects an answer to, which is the
+/// question the stop below asks.
+#[must_use = "the transfer counts as outstanding for exactly as long as this lives"]
+pub(in crate::drivers::xhci) struct InFlight(());
+
+impl InFlight {
+    /// Called between the enqueue and the doorbell, so a transfer is never
+    /// visible to the controller without being counted here.
+    pub(in crate::drivers::xhci) fn rung() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+        Self(())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// How long the stop waits for a transfer it rang to be answered.
+///
+/// The driver's own transfer bound and not a number of this path's: past it the
+/// transfer is one the controller was never going to answer, and no further wait
+/// buys the device anything the reset below will not have to buy it anyway.
+const IN_FLIGHT_NS: u64 = USB_TIMEOUT_NS;
+
+/// Wait out every bulk transfer this kernel is still expecting an answer to, and
+/// say what was still outstanding when the registers below were touched.
+///
+/// **A port reset in a command's data phase is not free, whatever the class
+/// says.** USB Mass Storage Bulk-Only Transport §5.3.4 makes reset recovery the
+/// device's obligation and the port reset above clears strictly more than it
+/// asks for — and the SanDisk Ultra on the owner's bench does not honour it:
+/// after a cut in the data phase it enumerates at SuperSpeed, answers every
+/// descriptor and string, binds `usb-storage`, and then answers no SCSI command
+/// at all, resetting in a loop until it is physically unplugged. That laptop's
+/// port power control does not cut VBUS, so no software on it can clear one.
+///
+/// So the transfer is waited out first, and the wait is bounded and cuts anyway:
+/// a machine nobody can turn off is worse than a device somebody has to replug,
+/// and the account is what says which of the two this reset was.
+fn settle_transfers(said: &mut dyn fmt::Write) {
+    let outstanding = || IN_FLIGHT.load(Ordering::Acquire);
+    let began = outstanding();
+    if began == 0 {
+        let _ = writeln!(
+            said,
+            "usb-quiesce: no bulk transfer was outstanding, so this reset cuts none"
+        );
+        return;
+    }
+    crate::clock::settles(IN_FLIGHT_NS, || outstanding() == 0);
+    match outstanding() {
+        0 => {
+            let _ = writeln!(
+                said,
+                "usb-quiesce: {began} bulk transfer(s) were outstanding and all of them were \
+                 answered inside {} ms, so this reset cuts none",
+                IN_FLIGHT_NS / 1_000_000,
+            );
+        }
+        left => {
+            let _ = writeln!(
+                said,
+                "usb-quiesce: {began} bulk transfer(s) were outstanding and {left} still {} after \
+                 {} ms, so this reset cuts them — a device cut in its data phase may need a \
+                 physical replug before its next host can enumerate it",
+                if left == 1 { "is" } else { "are" },
+                IN_FLIGHT_NS / 1_000_000,
+            );
         }
     }
 }
@@ -335,6 +435,10 @@ fn stop_all(said: &mut dyn fmt::Write) {
     tally.flushed = FLUSHED.load(Ordering::Relaxed);
     tally.cacheless = CACHELESS.load(Ordering::Relaxed);
     let _ = writeln!(said, "{}", Barrier::of(BARRIER.load(Ordering::Relaxed)).said());
+    // Before the first register of the first controller: the count is
+    // machine-wide, and a transfer on one controller is not made safe by
+    // stopping another first.
+    settle_transfers(said);
     for point in POINTS.iter() {
         if let Some(live) = point.live() {
             live.stop(&mut tally, said);
