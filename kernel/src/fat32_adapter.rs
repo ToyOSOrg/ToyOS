@@ -558,6 +558,29 @@ fn as_syscall_error(e: Error) -> SyscallError {
 
 /// Log what the volume said and return its code; `NotFound` is skipped so
 /// opening a missing path doesn't write the log it lives on.
+/// Leave one handle's file consistent on the volume, or say why it could not
+/// be.
+///
+/// **The two writes a growing write makes are the chain and then the directory
+/// entry**, and everything between them is a volume holding clusters the entry
+/// does not reach — which is what `toyos-fat32-check` refuses and what the
+/// bench's own stick came back carrying: `DIR_FileSize` needing 345 clusters
+/// and a chain of 348, because the flush that would have recorded them refused.
+/// Nothing later repaired it, because nothing looked: a closed handle was
+/// dropped and a sync only flushed the device.
+///
+/// Logged and not returned. A close has no caller to answer, and a sync's
+/// answer is about the device; the repair either happened or the volume already
+/// held the inconsistency this is trying to remove.
+fn reconcile(role: Role, fs: &mut Fat32<FatVolume>, info: &mut OpenFile) {
+    if !info.file.needs_reconcile() {
+        return;
+    }
+    if let Err(e) = fs.reconcile(&mut info.file, now()) {
+        log!("{role}-volume: {} was left with a chain its entry does not reach: {e}", info.name);
+    }
+}
+
 fn refused(role: Role, op: &str, name: &str, e: Error) -> SyscallError {
     if e != Error::NotFound {
         log!("{role}-volume: {op} of {name}: {e}");
@@ -771,7 +794,8 @@ impl FileSystem for FatFs {
     }
 
     fn close_file(&mut self, file_id: FileId) {
-        if let Some(info) = self.open.remove(&file_id) {
+        if let Some(mut info) = self.open.remove(&file_id) {
+            reconcile(self.role, &mut self.fs, &mut info);
             self.by_name.remove(&info.name);
         }
     }
@@ -891,7 +915,15 @@ impl FileSystem for FatFs {
 
     /// Error returned, not logged via [`refused`]: a log write here would be
     /// more pending content for the next sync.
+    ///
+    /// Every open handle is brought level with its chain first: a sync is a
+    /// caller saying the volume may be left as it stands from here, and a
+    /// chain that outran its directory entry is not a volume that may be left.
     fn sync(&mut self) -> Result<(), SyscallError> {
+        let Self { role, fs, open, .. } = self;
+        for info in open.values_mut() {
+            reconcile(*role, fs, info);
+        }
         self.fs.sync().map_err(as_syscall_error)
     }
 

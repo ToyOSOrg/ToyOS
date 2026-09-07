@@ -76,7 +76,7 @@ fn quiesce(last: &str) {
         }
     }
     // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
-    crate::log::wait_for_durable();
+    let durability = crate::log::wait_for_durable();
     crate::log::console::drain_inline();
     // After the log is durable: the next boot's loader reads this page to learn
     // how the last one ended, and a machine that was asked to stop is the one
@@ -84,6 +84,12 @@ fn quiesce(last: &str) {
     // own `ARMED` and report a kernel that vanished. The reset's own account is
     // appended under it.
     crate::blackbox::record_done();
+    // Under that seal, because it extends it: how much of this boot's log the
+    // volume got, and the newest of what it did not. A file cannot report on
+    // its own tail, and on a machine with no serial port this is the only
+    // reader left for the lines written past the point `/log` stopped taking
+    // them.
+    crate::log::account_for_durability(durability);
     // **The barrier, and last of all.** Below the log volume's last durable
     // byte, because before it `logd` still has that volume to write and this
     // takes the controller away from it; and after everything else here,

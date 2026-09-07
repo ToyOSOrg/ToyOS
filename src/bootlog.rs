@@ -46,6 +46,25 @@ pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 /// that this machine was ended by the control that was staged on it.
 pub const LOCKUP_STAGED: &str = "hard-lockup: staged, and only the lockup detector ends this cpu";
 
+/// What the kernel seals under its own `DONE` record about the log volume, in
+/// `kernel/src/log/mod.rs`'s `account_for_durability`. The next loader pass
+/// prints it back under [`PREVIOUS_PANIC`].
+///
+/// **The one reader a boot's own tail has.** `logd` writes the file, so
+/// everything said after the volume stopped taking bytes — `logd`'s give-up
+/// line, the kernel's own `shutdown: /log did not answer` record, every later
+/// `exit:` — is written where no file can carry it, and on a machine with no
+/// serial port a console is nothing. Measured on the T14, run 24's `shared`:
+/// the file's last record was at 23.3 s of a boot that ran to 60 s, and no
+/// channel said so.
+pub const LOG_COMPLETE: &str = "log: /log holds every record this boot committed";
+/// The other half of [`LOG_COMPLETE`]: how far the volume got, and how many
+/// records committed after that reached it. The newest of them follow under
+/// [`LOG_TAIL`].
+pub const LOG_SHORT: &str = "log: /log holds this boot to";
+/// One record the volume never got, on the black-box page.
+pub const LOG_TAIL: &str = "log-tail: ";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
@@ -169,6 +188,26 @@ impl fmt::Display for Unfit {
             ),
         }
     }
+}
+
+/// The milliseconds since boot one record line carries.
+///
+/// **Found from the CPU it precedes rather than by position**: the field before
+/// it is the writer's tag, and the two writers disagree about it on purpose —
+/// `logd` puts a wall clock there and the panel puts nothing.
+pub fn record_millis(line: &str) -> Option<u64> {
+    let (before, _) = line.split_once(" cpu")?;
+    // The opening bracket, for the writer that puts no tag before the field.
+    let field = before.split_whitespace().next_back()?.trim_start_matches('[');
+    let (secs, millis) = field.split_once('.')?;
+    let secs: u64 = secs.parse().ok()?;
+    let millis: u64 = millis.parse().ok()?;
+    secs.checked_mul(1_000)?.checked_add(millis)
+}
+
+/// When the last record in `log` was written, in milliseconds since boot.
+pub fn last_record_millis(log: &str) -> Option<u64> {
+    log.lines().rev().find_map(record_millis)
 }
 
 /// The boot's own duration, out of `Boot: complete (123ms)`.
@@ -313,6 +352,9 @@ mod tests {
                 "kernel/src/hardlockup/probe.rs",
                 format!("PROBE_STAGED: &str = \"{LOCKUP_STAGED}\""),
             ),
+            ("kernel/src/log/mod.rs", format!("\"{LOG_COMPLETE}")),
+            ("kernel/src/log/mod.rs", format!("\"{LOG_SHORT}")),
+            ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
         ] {
             let at = root.join(file);
             let source = std::fs::read_to_string(&at).expect("a kernel module");
@@ -335,5 +377,37 @@ mod tests {
         assert_eq!(boot_millis("[kernel 0.084 cpu0] Boot: storage ready (84ms)\n"), None);
         assert_eq!(boot_millis("Boot: complete (later)\n"), None);
         assert_eq!(boot_millis(""), None);
+    }
+}
+
+#[cfg(test)]
+mod record_time_tests {
+    use super::*;
+
+    /// Both writers' shapes: `logd`'s file carries a wall-clock tag before the
+    /// elapsed field and the panel carries none, and the same reader answers
+    /// for both.
+    #[test]
+    fn a_records_elapsed_field_is_read_past_whatever_tag_precedes_it() {
+        assert_eq!(
+            record_millis("[2026-09-07 22:57:46 3.109 cpu1] exit: a pid=7 code=0 cpu=180ms"),
+            Some(3_109)
+        );
+        assert_eq!(record_millis("[3.109 cpu1] exit: a pid=7 code=0"), Some(3_109));
+        assert_eq!(
+            record_millis("[2026-09-07 22:58:03 20.071 cpu2 tid=1] exit: b tid=1 code=0"),
+            Some(20_071)
+        );
+        // The `cpu=180ms` field is a record's *content*: a reader keying on the
+        // first `cpu` would answer with a duration instead of a timestamp.
+        assert_eq!(record_millis("no timestamp here, cpu=1ms"), None);
+        assert_eq!(record_millis(""), None);
+    }
+
+    #[test]
+    fn the_last_record_is_the_last_line_that_carries_a_time() {
+        let log = "[1.000 cpu0] first\n[2.500 cpu1] second\nnot a record\n";
+        assert_eq!(last_record_millis(log), Some(2_500));
+        assert_eq!(last_record_millis("nothing\n"), None);
     }
 }
