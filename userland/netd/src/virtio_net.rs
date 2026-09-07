@@ -737,7 +737,7 @@ impl Cap {
     fn window(&self, bar: Window) -> Result<Window, Refusal> {
         let length = (self.length as usize).max(4);
         match (self.offset as usize).checked_add(length) {
-            Some(end) if end <= bar.len() => Ok(bar.sub(self.offset as usize, length)),
+            Some(end) if end <= bar.bytes() => Ok(bar.sub(self.offset as usize, length)),
             _ => Err(Refusal::MissingCap("a capability inside its own BAR")),
         }
     }

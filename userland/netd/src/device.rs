@@ -32,7 +32,7 @@ impl Window {
         Self { base, len }
     }
 
-    pub fn len(self) -> usize {
+    pub fn bytes(self) -> usize {
         self.len
     }
 

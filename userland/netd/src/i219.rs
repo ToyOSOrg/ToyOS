@@ -35,7 +35,7 @@ pub struct Bar {
 
 impl Registers for Bar {
     fn bytes(&self) -> usize {
-        self.window.len()
+        self.window.bytes()
     }
 
     fn read(&self, reg: usize) -> u32 {
@@ -67,7 +67,7 @@ pub struct Grant {
 
 impl DmaBuffers for Grant {
     fn bytes(&self) -> usize {
-        self.window.len()
+        self.window.bytes()
     }
 
     fn device_addr(&self, at: usize) -> u64 {
