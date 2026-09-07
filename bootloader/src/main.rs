@@ -431,47 +431,6 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
     }
 }
 
-/// What painting a band takes, kept apart from [`GopInfo`] because it is read
-/// after boot services are gone and `GopInfo` is moved into `KernelArgs`.
-#[derive(Clone, Copy)]
-struct Scanout {
-    at: u64,
-    bytes: u64,
-    stride: u32,
-    width: u32,
-    format: u32,
-}
-
-/// Paint one [`toyos_bootband::Band`] across the top of the scanout.
-///
-/// **Nothing in here is a service, an allocation or a formatter**: the two
-/// callers straddle `ExitBootServices`, and after it a `println!` dereferences a
-/// system table uefi-services has already nulled. Physical memory is still
-/// identity-mapped by firmware's own tables at both call sites — the loader
-/// switches `cr3` later — so the address the GOP published is the address to write.
-fn paint_band(scanout: Option<Scanout>, band: toyos_bootband::Band) {
-    let Some(fb) = scanout else { return };
-    if fb.at == 0 || fb.stride < fb.width || fb.width == 0 {
-        return;
-    }
-    let pixel = band.pixel(fb.format);
-    for row in band.first_row()..band.end_row() {
-        for x in 0..fb.width as u64 {
-            let at = (row as u64 * fb.stride as u64 + x) * 4;
-            // Every write is inside the byte count the GOP published, checked
-            // here and not argued: a band that does not fit is not painted.
-            if at.saturating_add(4) > fb.bytes {
-                return;
-            }
-            // SAFETY: `fb.at` is the framebuffer base `GraphicsOutput` published
-            // for this machine, identity-mapped at both call sites, and the
-            // offset is inside the size it published alongside it. A volatile
-            // store to a scanout has no safe spelling.
-            unsafe { core::ptr::write_volatile((fb.at + at) as *mut u32, pixel) };
-        }
-    }
-}
-
 struct GopInfo {
     framebuffer: u64,
     framebuffer_size: u64,
@@ -640,16 +599,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         ),
     }
 
-    // Everything the bands need, read off `gop` before it is moved into
-    // `KernelArgs`: after the exit there is no protocol left to ask.
-    let scanout = gop.as_ref().map(|g| Scanout {
-        at: g.framebuffer,
-        bytes: g.framebuffer_size,
-        stride: g.stride,
-        width: g.width,
-        format: g.pixel_format,
-    });
-
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.
     loaderlog::close();
@@ -657,15 +606,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let memory_map_entry_count = mms.map_size / mms.entry_size + MAP_MARGIN;
     let mut memory_map = vec::Vec::<MemoryMapEntry>::with_capacity(memory_map_entry_count);
 
-    // **The first band, and it is painted before the call rather than after a
-    // failure of it.** `SystemTable::exit_boot_services` does not hand an error
-    // back — it resets the machine — so the state this marks is the one that
-    // cannot be reported any other way: the call that never returned at all.
-    paint_band(scanout, toyos_bootband::EXITING);
     let (_system_table, uefi_memory_map) = system_table.exit_boot_services(MemoryType::LOADER_DATA);
-    // The second: boot services are gone, and from here to the kernel's own
-    // band this is the only thing that can be said.
-    paint_band(scanout, toyos_bootband::EXITED);
 
     // **Nothing below this line may allocate or panic.** Boot services are gone,
     // so the allocator answers null and `println!` dereferences a system table
@@ -786,21 +727,17 @@ fn armed_at(system_table: &SystemTable<Boot>) -> u64 {
 ///
 /// **A UEFI application that returns leaves whatever it registered behind, and
 /// the boot manager then unloads its image.** `uefi_services::init` registers a
-/// `SIGNAL_EXIT_BOOT_SERVICES` callback that lives in this image; the next
-/// operating system signals that group from inside its own `ExitBootServices`,
-/// and firmware calls into memory that is no longer ours. Measured on the
-/// owner's T14: after a pass of this kind returned, Ubuntu froze in its EFI stub
-/// at `Measured initrd data into PCR 9` and the machine never came back — the
-/// same signature this loader itself had when its map was refused, and absent on
-/// the run where no pass ever returned.
+/// `SIGNAL_EXIT_BOOT_SERVICES` callback that lives here; the next operating
+/// system signals that group from inside its own `ExitBootServices`, and
+/// firmware calls into memory that is no longer ours.
 ///
 /// So the event is closed *and* the pass resets. Closing it is the invariant —
 /// a pass that does not hand off leaves nothing registered in the firmware — and
 /// the reset is what makes that invariant not have to be complete: the next
-/// operating system comes up on firmware this image has never run on, at the
-/// cost of one reboot. `BootNext` was consumed by this pass and this pass sets
-/// none, so the firmware's own order is what takes the machine, and the page was
-/// cleared as it was read, so a boot that does come back here boots normally.
+/// operating system comes up on firmware this image has never run on, for one
+/// reboot. `BootNext` was consumed by this pass and this pass sets none, so the
+/// firmware's own order takes the machine, and the page was cleared as it was
+/// read, so a boot that does come back here boots normally.
 fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) -> ! {
     println!("{}", loaderlog::ENDS_AT_CHAIN);
     loaderlog::close_without_a_kernel();
@@ -908,15 +845,15 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // answers die with Boot Services.
     let rtc_offset = rtc_utc_offset(&system_table);
 
-    // Last, so the smallest possible span of this loader is inside the bound
-    // and a hang between here and the kernel's own arm resets the machine.
-    watchdog::arm(&system_table, rsdp_addr, params);
-
-    // Last before the handoff, and both before anything the exit path touches:
-    // the page says a kernel is running, and `BootNext` says this loader gets
-    // the machine again however that kernel ends.
+    // The page says a kernel is running, and `BootNext` says this loader gets the
+    // machine again however that kernel ends.
     blackbox::arm(page, armed_at(&system_table));
     bootnext::point_at_us(handle, &system_table);
+
+    // The last act before the jump, so the smallest possible span of this loader
+    // is inside the bound: everything above it can still be reported, and a hang
+    // between here and the kernel's own arm is what the bound is for.
+    watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
     start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, rtc_offset, system_table);

@@ -1,7 +1,3 @@
-# A member of the host workspace (root `Cargo.toml`), like toyos-bootmap and
-# toyos-tco: the bootloader and the kernel each hold one end of this page's
-# format, and neither of them can be asked what it does with a corrupt one.
-
 [package]
 name = "toyos-blackbox"
 version = "0.1.0"

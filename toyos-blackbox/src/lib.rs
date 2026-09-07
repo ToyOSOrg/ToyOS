@@ -18,11 +18,10 @@
 //! cycle, a first boot, or DRAM the reset did not preserve, all one answer.
 //!
 //! **The page carries an ordinary UEFI memory type and the kernel is told where
-//! it is on its parameter line.** It used to carry a type of its own out of the
-//! range UEFI 2.10 §7.2 reserves for OS loaders, which the kernel read back out
-//! of the memory map — an exact channel that cost nothing until the owner's
-//! firmware stopped returning from `ExitBootServices` with one of those
-//! descriptors in the map it was handed. Nothing in that map is ours any more.
+//! it is on its parameter line.** Nothing in the memory map is ours: firmware
+//! this runs on does not return from `ExitBootServices` with a descriptor of a
+//! type out of the range UEFI 2.10 §7.2 reserves for OS loaders in the map it
+//! is handed.
 //!
 //! Pure: bytes in, bytes out. The loader owns the claim and the harvest, the
 //! kernel owns the two writes, and neither can be asked what it does with a
@@ -44,10 +43,8 @@ pub const PHYS: u64 = 0x0800_0000;
 /// Pages the box is, and the width of one.
 ///
 /// **Four, because one is not a report.** A kernel that reaches PCI enumeration
-/// before it dies has thousands of records behind it, and a single page held
-/// 4,072 bytes of their tail — the crash's own message was already off the top
-/// of it. Four leaves room for the message, the registers, and a tail long
-/// enough to say what the machine was doing.
+/// before it dies has thousands of records behind it, and one page holds 4,072
+/// bytes of their tail — less than the crash's own message plus context.
 pub const PAGES: usize = 4;
 pub const PAGE_BYTES: usize = 4096;
 
@@ -71,12 +68,10 @@ const HEADER: usize = 24;
 ///
 /// **A reset invalidates the caches without writing them back**, so a page
 /// written into write-back memory and then reset over is a page whose bytes
-/// never reached DRAM — which looks, from the next boot, exactly like a write
-/// that never happened. It has been both failures already: a kernel's seal that
-/// read back as the loader's `ARMED`, and a loader's clear that read back as the
-/// report it had just made. Every writer flushes; the instruction is each
-/// binary's, because this crate forbids unsafe code, and the size is here so
-/// that neither of them decides it.
+/// never reached DRAM — which reads, from the next boot, exactly like a write
+/// that never happened. Every writer flushes; the instruction is each binary's,
+/// because this crate forbids unsafe code, and the size is here so that neither
+/// of them decides it.
 pub const CACHE_LINE: usize = 64;
 
 /// What one report may leave behind. Longer is truncated at its head, because
@@ -226,15 +221,6 @@ impl<'a> Report<'a> {
                 None => return,
             }
         }
-    }
-
-    /// Bytes of text written so far.
-    pub fn len(&self) -> usize {
-        self.at
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.at == 0
     }
 
     /// Close the envelope over what was written.
@@ -551,7 +537,7 @@ mod tests {
 
     /// Records longer than the box keep their tail, **cut at a record
     /// boundary**: a report that begins mid-line begins with half a word, and a
-    /// reader cannot tell which half. Run 14's stick began `| :1f.0 [0601]`.
+    /// reader cannot tell which half.
     #[test]
     fn an_over_long_run_of_records_is_cut_at_a_boundary() {
         let mut records = std::string::String::new();
@@ -569,8 +555,6 @@ mod tests {
         assert!(back.ends_with("[9.9999 cpu0] the last one\n"));
         // The first line kept is a whole one, which is the assertion.
         assert!(back.starts_with('['), "the report begins mid-record: {:?}", &back[..40]);
-        // Every kept line here is a whole record, so the cut is a record's edge.
-        assert!(back.lines().all(|l| l.starts_with('[')));
         // Every kept line here is a whole record, so the cut is a record's edge.
         assert!(back.lines().all(|l| l.starts_with('[')));
         assert!(records.ends_with(back));

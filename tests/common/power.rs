@@ -307,6 +307,14 @@ fn hex_field(line: &str, label: &str) -> Result<u64, String> {
     u64::from_str_radix(&digits[..end], 16).map_err(|e| format!("{label:?} in {line:?}: {e}"))
 }
 
+/// The decimal digit printed straight after `label`, for the decoded bits the
+/// read-back names one by one.
+fn decimal_field(line: &str, label: &str) -> Result<u64, String> {
+    let rest = line.split_once(label).ok_or_else(|| format!("no {label:?} in {line:?}"))?.1;
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..end].parse().map_err(|e| format!("{label:?} in {line:?}: {e}"))
+}
+
 /// The loader arms the chipset's watchdog before it jumps, so the handoff is
 /// inside the bound.
 ///
@@ -339,15 +347,15 @@ pub fn loader_watchdog_arms(
     }
     // The reset gate is inside this block on the generations the table names, so
     // a guest whose armed timer could not reset it is one the bound is a lie on.
-    boot.must_say("so a second expiry can reset this machine")?;
-    // q35 is the positive control for the question a single read cannot answer:
-    // an armed timer counts down. A T14 printing the other branch is a chipset
-    // that never counts, not a loader that never armed.
-    let counts = boot.must_say("so the timer counts")?.to_string();
-    let from = hex_field(&counts, "TCO_RLD went ")?;
-    let to = hex_field(&counts, "-> ")?;
-    if to >= from {
-        return Err(format!("an armed TCO went {from} -> {to} over one tick\n{counts}"));
+    let gates = boot.must_say("so a second expiry can reset this machine")?.to_string();
+    // The words of it, not the line: this is the register block's own account of
+    // whether an expiry reaches the machine, and a guest that has just armed the
+    // timer has not expired once.
+    for (field, want) in [("no_reboot=", 0), ("tco_lock=", 0), ("timeout=", 0)] {
+        let seen = decimal_field(&gates, field)?;
+        if seen != want {
+            return Err(format!("the loader read {field}{seen} back and this guest is {want}\n{gates}"));
+        }
     }
     boot.must_say(&armed_on_arrival())?;
     drop(qemu);
@@ -366,7 +374,7 @@ pub fn loader_watchdog_arms(
     drop(idle);
 
     eprintln!("  [power] the loader armed it and the kernel found it running: {}", line.trim());
-    eprintln!("  [power] {}", counts.trim());
+    eprintln!("  [power] {}", gates.trim());
     Ok(())
 }
 
@@ -577,20 +585,6 @@ const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
 /// Several bounds, so the control is not a race the guest won once.
 const PANEL_HELD_FOR: Duration = Duration::from_secs(PANIC_FAST_SECS * 4);
 
-/// The head the loader writes every line about the page under
-/// (`bootloader/src/blackbox.rs`), and the line a harvested report goes under.
-const BLACKBOX_HEAD: &str = "Black box:";
-const PREVIOUS_PANIC: &str = "Previous boot's panic:";
-
-/// The loader's last line on a pass that reads the page and boots no kernel
-/// (`bootloader/src/loaderlog.rs`), which is also this test's drain predicate.
-const ENDS_THE_CHAIN: &str =
-    "Loader log: the last boot is accounted for, so this pass resets the machine";
-
-/// The loader's last line on a pass that *does* boot one, which is what tells
-/// a chain that ended from one that went round again.
-const HANDS_OFF: &str = "Loader log: the kernel handoff begins, so this file ends here";
-
 /// A line of the first boot's own report, which has to come back out of DRAM on
 /// the boot after it: the panic's message, so what is recovered is the crash
 /// and not merely a page that checksummed.
@@ -613,7 +607,7 @@ const SERIAL_IS_UP: &str = "serial: 16550 loopback read";
 
 /// The page armed and its address handed to the kernel, as the two sides say it.
 fn armed_line() -> String {
-    format!("{BLACKBOX_HEAD} {PHYS:#x} armed")
+    format!("{} {PHYS:#x} armed", bootlog::BLACKBOX_HEAD)
 }
 
 fn kernel_took_it() -> String {
@@ -623,7 +617,7 @@ fn kernel_took_it() -> String {
 /// What the loader writes about a page that still read ARMED, which is a kernel
 /// that reached neither of the two paths that write one.
 fn armed_and_nothing_else() -> String {
-    format!("{PREVIOUS_PANIC} the page still reads {}", State::Armed.named())
+    format!("{} the page still reads {}", bootlog::PREVIOUS_PANIC, State::Armed.named())
 }
 
 /// What it writes about a kernel that handed the machine back on purpose.
@@ -639,7 +633,7 @@ fn chained(params: &'static [&'static str]) -> BootOptions {
         qmp: true,
         kernel_params: params,
         takes_the_reset: true,
-        ready_marker: HANDS_OFF,
+        ready_marker: bootlog::LOADER_LAST_LINE,
         ..Default::default()
     }
 }
@@ -661,7 +655,10 @@ fn ended_in_a_reset(resets: &mut qemu::QmpResets) -> Result<(), String> {
     let seen = resets.seen(CHAIN_RESETS);
     if seen < CHAIN_RESETS {
         return Err(format!(
-            "QEMU reported {seen} guest reset(s) and this chain is {CHAIN_RESETS}: the pass that              read the page returned to the boot manager instead of resetting, which leaves this              image's exit-boot-services callback registered for the next operating system to              call into"
+            "QEMU reported {seen} guest reset(s) and this chain is {CHAIN_RESETS}: the pass \
+             that read the page returned to the boot manager instead of resetting, which leaves \
+             this image's exit-boot-services callback registered for the next operating system \
+             to call into"
         ));
     }
     Ok(())
@@ -709,39 +706,36 @@ pub fn blackbox_panic_chain(
     first.must_say(&armed_line())?;
     // Nothing was harvested on a machine whose RAM QEMU zeroed, so the pass
     // below is reading this boot's page and not a claim about every boot.
-    if let Some(line) = first.text().lines().find(|l| l.contains(PREVIOUS_PANIC)) {
+    if let Some(line) = first.text().lines().find(|l| l.contains(bootlog::PREVIOUS_PANIC)) {
         return Err(format!(
-            "the first pass of a machine with zeroed RAM reported a previous boot ({line:?}), so              the pass after the reset would say nothing\n{}",
+            "the first pass of a machine with zeroed RAM reported a previous boot ({line:?}), \
+             so the pass after the reset would say nothing\n{}",
             first.text()
         ));
     }
 
-    let second = after_the_reset(&mut qemu, ENDS_THE_CHAIN);
-    second.must_say(PREVIOUS_PANIC)?;
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    second.must_say(bootlog::PREVIOUS_PANIC)?;
     // **After the harvest line, and that is the whole of the assertion.** This
     // capture begins at the first boot's handoff, so it carries that boot's own
     // panic on the console too — and a whole-capture scan for the witness was
     // satisfied by it, which let a kernel that sealed nothing pass. Only the
     // loader's `| ` lines come after the harvest line.
-    second.must_say_after(PREVIOUS_PANIC, BLACKBOX_WITNESS)?;
+    second.must_say_after(bootlog::PREVIOUS_PANIC, BLACKBOX_WITNESS)?;
     // The page read PANIC and not the state the loader itself put there, which
     // is what tells a report that crossed the reset from a kernel that vanished.
     second.must_not_say(&armed_and_nothing_else())?;
-    second.must_say(ENDS_THE_CHAIN)?;
+    second.must_say(bootlog::CHAIN_ENDS_LINE)?;
     // The chain ends rather than going round: a pass that booted a kernel would
     // have said so, and this one must not have.
-    second.must_not_say(HANDS_OFF)?;
+    second.must_not_say(bootlog::LOADER_LAST_LINE)?;
     ended_in_a_reset(&mut resets)?;
 
-    // **The third pass, and it is the judge of the clear.** Run 13 flashed a
-    // fresh stick and read run 12's panic back off it: the second pass had
-    // reported the record and cleared it, the clear stayed in that CPU's cache,
-    // and the boot after it found the same crash and reported it again instead
-    // of booting a kernel. So the pass after the report must hand off, and must
-    // not report anything.
-    let third = after_the_reset(&mut qemu, HANDS_OFF);
-    third.must_say(HANDS_OFF)?;
-    if let Some(line) = third.text().lines().find(|l| l.contains(PREVIOUS_PANIC)) {
+    // The judge of the clear: a page still holding the record is reported again
+    // by the pass after this one, and that machine reports one crash for ever.
+    let third = after_the_reset(&mut qemu, bootlog::LOADER_LAST_LINE);
+    third.must_say(bootlog::LOADER_LAST_LINE)?;
+    if let Some(line) = third.text().lines().find(|l| l.contains(bootlog::PREVIOUS_PANIC)) {
         return Err(format!(
             "the pass after the report found a record and reported it again ({line:?}), so the \
              clear did not reach the page and this machine reports one crash for ever\n{}",
@@ -773,13 +767,13 @@ pub fn blackbox_done_chain(
     let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
 
-    let second = after_the_reset(&mut qemu, ENDS_THE_CHAIN);
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
     second.must_say(&done_line())?;
     // The distinction the whole state machine exists for: a deliberate stop is
     // not a panic and not a kernel that vanished.
     second.must_not_say(&armed_and_nothing_else())?;
     second.must_not_say(BLACKBOX_WITNESS)?;
-    second.must_not_say(HANDS_OFF)?;
+    second.must_not_say(bootlog::LOADER_LAST_LINE)?;
     ended_in_a_reset(&mut resets)?;
     drop(qemu);
 
@@ -879,11 +873,9 @@ pub fn blackbox_early_panic_sealed(
         ));
     }
     let text = String::from_utf8_lossy(&text);
-    // **The first line, not somewhere in it.** Run 14's report was 4,072 bytes
-    // of the tail of the log and the crash's own message was off the top of it:
-    // what a panel carries after a panic is the register dump, the page walk and
-    // the backtrace, so a report cut to its tail is a report with the crash
-    // missing. The composed head is what fixes that and this is what holds it.
+    // The first line, not somewhere in it: what a panel carries after a panic is
+    // the register dump, the page walk and the backtrace, so a report cut to its
+    // tail is a report with the crash missing.
     let first = text.lines().next().unwrap_or_default();
     if !first.starts_with("PANIC (apic ") || !first.contains(EARLY_WITNESS) {
         return Err(format!(
@@ -965,10 +957,19 @@ pub fn blackbox_fault_sealed(
             fault.vector
         ));
     }
-    // A `rip` of zero is a record that was never filled in, and one outside
-    // both halves is a frame that was not read where the stub pushed it.
-    if fault.rip == 0 || fault.cr3 == 0 {
-        return Err(format!("the sealed record has an empty rip or cr3: {fault:?}"));
+    // **Canonical, and asserted rather than claimed.** A `rip` outside both
+    // halves of the address space is a frame read at the wrong offset, which is
+    // the one way a fixed-layout record can be wrong while still checksumming.
+    if !canonical(fault.rip) || fault.cr3 == 0 {
+        return Err(format!("the sealed record has a non-canonical rip or an empty cr3: {fault:?}"));
+    }
+    // The same of the error code: a `#PF` defines bits 0..=5 and bit 15
+    // (SDM Vol. 3A §4.7), so anything else in it is not this frame's word.
+    if fault.error_code & !PAGE_FAULT_ERROR_BITS != 0 {
+        return Err(format!(
+            "the sealed error code is {:#x} and a page fault's bits are {PAGE_FAULT_ERROR_BITS:#x}",
+            fault.error_code
+        ));
     }
     drop(qemu);
 
@@ -982,6 +983,16 @@ pub fn blackbox_fault_sealed(
 /// `#PF`, which is the vector a boot of this shape ends its exceptions on:
 /// demand paging is what a running machine faults for.
 const PAGE_FAULT_VECTOR: u64 = 14;
+
+/// The bits a `#PF` error code defines: P, W/R, U/S, RSVD, I/D, PK and SGX
+/// (SDM Vol. 3A §4.7). Anything else set is not a page fault's word.
+const PAGE_FAULT_ERROR_BITS: u64 = 0x803F;
+
+/// Whether `at` is an address this machine can hold: 48-bit canonical, so
+/// either half and nothing between them.
+fn canonical(at: u64) -> bool {
+    !(0x0000_8000_0000_0000..0xFFFF_8000_0000_0000).contains(&at)
+}
 
 /// The same early panic on a machine with no serial port at all: the panel and
 /// the page are the only two channels there are, and both must carry it.
@@ -1079,9 +1090,6 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
         match toyos_blackbox::recover(page) {
             Some((State::Panic, _, text)) => return Ok((State::Panic, text.to_vec())),
             Some((state, _, text)) => last = Some((state, text.to_vec())),
-            None if last.is_none() => {
-                last = None;
-            }
             None => {}
         }
         if std::time::Instant::now() >= deadline {

@@ -137,6 +137,12 @@ fn entry_number(name: &CStr16) -> Option<u16> {
 }
 
 /// Whether an `EFI_LOAD_OPTION`'s device path carries `ours`.
+///
+/// **Walked as bytes, bounded by the slice, and never handed to a pointer
+/// iterator.** These bytes are whatever a vendor's NVRAM holds: a node claiming
+/// a length of zero is an endless walk and one claiming a length past the
+/// variable is a read off the end of it, so both are refused here rather than
+/// trusted to a walker that follows the lengths it is given.
 fn load_option_names(option: &[u8], ours: &[u8; 16]) -> bool {
     let Some(head) = option.get(..LOAD_OPTION_HEAD) else { return false };
     let path_len = u16::from_le_bytes([head[4], head[5]]) as usize;
@@ -150,11 +156,37 @@ fn load_option_names(option: &[u8], ours: &[u8; 16]) -> bool {
             break;
         }
     }
-    let Some(path) = option.get(at..at.saturating_add(path_len)) else { return false };
-    // SAFETY: `DevicePath::from_ffi_ptr` needs a well-formed path; the bytes
-    // come out of firmware's own `Boot####` variable, whose declared length the
-    // slice above is bounded by, and the iterator below reads no node header it
-    // has not first bounded against that slice.
-    let path = unsafe { DevicePath::from_ffi_ptr(path.as_ptr().cast()) };
-    hard_drive_guid(path.node_iter()).is_some_and(|guid| guid == *ours)
+    let Some(mut path) = option.get(at..at.saturating_add(path_len)) else { return false };
+    while let Some(node) = path.get(..NODE_HEADER) {
+        let len = u16::from_le_bytes([node[2], node[3]]) as usize;
+        // A node shorter than its own header, or longer than what is left, ends
+        // the walk: neither can be stepped over.
+        let Some(this) = path.get(..len).filter(|_| len >= NODE_HEADER) else { return false };
+        if this[0] == MEDIA_HARD_DRIVE.0 && this[1] == MEDIA_HARD_DRIVE.1 {
+            if let Some(guid) = gpt_signature(this) {
+                return guid == *ours;
+            }
+        }
+        path = path.get(len..).unwrap_or(&[]);
+    }
+    false
+}
+
+/// A device path node's type, subtype and length (UEFI 2.10 §10.2).
+const NODE_HEADER: usize = 4;
+
+/// The MEDIA/HARD_DRIVE node this looks for, as the two bytes it is on the wire.
+const MEDIA_HARD_DRIVE: (u8, u8) = (4, 1);
+
+/// A HARD_DRIVE node's GPT signature, or `None` where it names an MBR one or
+/// the node is short (UEFI 2.10 §10.3.6: the signature is sixteen bytes at
+/// offset 24, and `SignatureType` 2 is the GPT one).
+fn gpt_signature(node: &[u8]) -> Option<[u8; 16]> {
+    const SIGNATURE: usize = 24;
+    const SIGNATURE_TYPE: usize = 41;
+    const GPT: u8 = 2;
+    if node.get(SIGNATURE_TYPE) != Some(&GPT) {
+        return None;
+    }
+    node.get(SIGNATURE..SIGNATURE + 16)?.try_into().ok()
 }

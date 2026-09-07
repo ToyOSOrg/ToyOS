@@ -62,15 +62,15 @@ unsafe impl Sync for Sink {}
 
 static SINK: Sink = Sink(UnsafeCell::new(None));
 
-/// Open `loader.log` on the partition `guid` names, discarding what an earlier
-/// boot left there.
 /// What a pass that appends writes before its own first line, so the boot being
 /// reported on and the pass reporting on it are never read as one.
 pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
 
-/// `truncate` replaces what the last boot left; a pass that appends is one that
-/// has a *report about* that boot, and the boot's own account has to stay
-/// readable under it. One file for now: per-pass names are their own change.
+/// Open `loader.log` on the partition `guid` names.
+///
+/// `truncate` replaces what the last boot left; a pass that appends has a
+/// *report about* that boot, and the boot's own account has to stay readable
+/// under it. One file for now: per-pass names are their own change.
 pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
     let bs = system_table.boot_services();
     let Ok(handles) = bs.locate_handle_buffer(SearchType::from_proto::<SimpleFileSystem>()) else {

@@ -2721,11 +2721,6 @@ impl QemuInstance {
         )
     }
 
-    /// Capture the guest's scanout through QMP and return the decoded PPM.
-    ///
-    /// After a halt the guest is stopped, so the dump is stable. QEMU writes
-    /// the file itself, so the only synchronization needed is the command's
-    /// own reply.
     /// A span of the guest's *physical* memory, as QEMU reads it.
     ///
     /// **The oracle for anything a guest leaves in DRAM for a later boot.** The
@@ -2734,7 +2729,7 @@ impl QemuInstance {
     /// command that answers, so what a test judges is memory QEMU dumped and not
     /// a report the guest wrote about itself.
     pub fn guest_memory(&mut self, phys: u64, bytes: usize) -> Result<Vec<u8>, String> {
-        let socket = self.qmp_socket.clone().expect("guest_page needs BootOptions { qmp: true }");
+        let socket = self.qmp_socket.clone().expect("guest_memory needs BootOptions { qmp: true }");
         // Beside the screendump, which is this instance's own scratch path.
         let out = self.screendump.with_extension(format!("mem-{phys:#x}"));
         let _ = fs::remove_file(&out);
@@ -2755,6 +2750,11 @@ impl QemuInstance {
         Ok(read)
     }
 
+    /// Capture the guest's scanout through QMP and return the decoded PPM.
+    ///
+    /// After a halt the guest is stopped, so the dump is stable. QEMU writes
+    /// the file itself, so the only synchronization needed is the command's
+    /// own reply.
     pub fn screendump(&mut self) -> super::screen::Ppm {
         let socket = self
             .qmp_socket

@@ -118,8 +118,7 @@ pub fn harvest(page: Option<Page>) -> Option<Finding> {
     // Cleared once it has been read, so the boot after this one does not report
     // a death two boots old as its predecessor's — **and written back, and then
     // read again to see that it was**. A clear that stays in this CPU's cache is
-    // a clear a reset discards, and the boot after it reports the same crash a
-    // second time off a stick that was freshly flashed; that is what run 13 did.
+    // one a reset discards, and the boot after it reports the same crash again.
     toyos_blackbox::clear(page);
     flush(at);
     if toyos_blackbox::recover(page).is_some() {
@@ -134,8 +133,8 @@ pub fn harvest(page: Option<Page>) -> Option<Finding> {
 /// When the boot this record came from was armed, as the loader stamped it.
 ///
 /// **The first line of every report**, because a record the next boot finds is
-/// either this boot's predecessor's or a stale one nothing cleared, and until
-/// run 13 there was no way to tell those apart from the stick.
+/// either this boot's predecessor's or a stale one nothing cleared, and nothing
+/// else on the stick tells those apart.
 fn when(stamp: u64) -> String {
     if stamp == 0 {
         return alloc::format!("{HEAD} the record below carries no date, so this machine's \

@@ -32,6 +32,17 @@ pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so th
 /// kernel's own `GOP:` line does not begin with.
 pub const LOADER_GOP_LINE: &str = "GOP: mode";
 
+/// The head the loader writes every line about the black-box page under, and
+/// the line a harvested report goes under.
+pub const BLACKBOX_HEAD: &str = "Black box:";
+pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
+
+/// The loader's last line on a pass that read that page and boots no kernel,
+/// which is what tells a chain that ended from one that went round again —
+/// [`LOADER_LAST_LINE`] is the other.
+pub const CHAIN_ENDS_LINE: &str =
+    "Loader log: the last boot is accounted for, so this pass resets the machine";
+
 /// Whether `name` on the log volume is one of `logd`'s files, which is
 /// `logd`'s own allow-list and not a suffix: the loader's file ends in `.log`
 /// too, and a `toybox` run can leave anything there.
@@ -133,9 +144,23 @@ mod tests {
     ///
     /// Anchored to the declaration, so a name that appears in a message or in
     /// a longer literal is not one: the line must end `= <rhs>;`.
+    /// A declaration whose value is `rhs`, wrapped or not: rustfmt puts a value
+    /// too wide for the line under the `=`, and a scan that could not see one
+    /// would pass by finding nothing to hold.
     fn declares(source: &str, rhs: &str) -> bool {
         let tail = format!("= {rhs};");
-        source.lines().any(|line| line.trim_end().ends_with(&tail))
+        let mut joined = String::new();
+        for line in source.lines() {
+            let line = line.trim_end();
+            if joined.ends_with('=') {
+                joined.push(' ');
+                joined.push_str(line.trim_start());
+                continue;
+            }
+            joined.push('\n');
+            joined.push_str(line);
+        }
+        joined.lines().any(|line| line.trim_end().ends_with(&tail))
     }
 
     #[test]
@@ -148,23 +173,27 @@ mod tests {
         // The value under another spelling, and concatenated.
         assert!(!declares("const A: &CStr16 = cstr16!(\"x\");", "\"x\""));
         assert!(!declares("const A: &str = \"x\" \"y\";", "\"xy\""));
+        // Wrapped by rustfmt, which is how the widest of them is written.
+        assert!(declares("const A: &str =\n    \"x\";", "\"x\""));
     }
 
     /// Nothing links the two crates: the loader is `no_std` and this is the
-    /// build system, so the three names above are held to the loader's own
+    /// build system, so every name above is held to the loader's own
     /// declarations by reading its source.
     #[test]
-    fn the_loader_writes_the_file_the_host_reads() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src/loaderlog.rs");
-        let source = std::fs::read_to_string(&path).expect("the loader's log module");
+    fn the_loader_writes_the_lines_the_host_reads() {
         let wanted = [
-            format!("cstr16!(\"{LOADER_LOG}\")"),
-            format!("\"{LOADER_FIRST_LINE}\""),
-            format!("\"{LOADER_LAST_LINE}\""),
-            format!("\"{LOADER_GOP_LINE}\""),
+            ("bootloader/src/loaderlog.rs", format!("cstr16!(\"{LOADER_LOG}\")")),
+            ("bootloader/src/loaderlog.rs", format!("\"{LOADER_FIRST_LINE}\"")),
+            ("bootloader/src/loaderlog.rs", format!("\"{LOADER_LAST_LINE}\"")),
+            ("bootloader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),
+            ("bootloader/src/loaderlog.rs", format!("\"{LOADER_GOP_LINE}\"")),
+            ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
+            ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
         ];
-        for rhs in wanted {
+        for (file, rhs) in wanted {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+            let source = std::fs::read_to_string(&path).expect("a loader module");
             assert!(
                 declares(&source, &rhs),
                 "{} declares no constant equal to {rhs}",

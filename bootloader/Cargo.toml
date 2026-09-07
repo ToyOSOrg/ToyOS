@@ -15,14 +15,7 @@ toyos-acpi = { path = "../toyos-acpi" }
 # from the pointers that write it and host-tested against machines this one is
 # not.
 toyos-bootmap = { path = "../toyos-bootmap" }
-# The bands either side of `ExitBootServices`, declared where the kernel's entry
-# stub and the harness read the same three rows and colours.
-toyos-bootband = { path = "../toyos-bootband" }
-# The page this loader claims for the next boot to read, and the three states it
-# can hold; the kernel writes two of them and this loader writes the third.
 toyos-blackbox = { path = "../toyos-blackbox" }
-# The calendar the black box's records are stamped with, which is `logd`'s own:
-# a date on the stick means the same thing whoever wrote it.
 toyos-wallclock = { path = "../toyos-wallclock" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-tco = { path = "../toyos-tco" }

@@ -18,7 +18,7 @@ use core::ptr::read_volatile;
 use toyos_acpi::Phys;
 use toyos_tco::{
     Chipset, TCO1_CNT, TCO1_CNT_LOCK, TCO1_CNT_NO_REBOOT, TCO1_CNT_RUN, TCO1_STS, TCO2_STS,
-    TCO_RLD, TCO_TMR,
+    TCO1_STS_TIMEOUT, TCO_RLD, TCO_TMR,
 };
 use uefi::prelude::*;
 use uefi::table::boot::{MemoryDescriptor, PAGE_SIZE};
@@ -86,9 +86,8 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
         // Reloading is also what returns the expiry count to zero.
         outw(port + TCO_RLD, 1);
     }
-    // `TCO1_CNT` is declared whole, so it is judged whole apart from
-    // `TCO1_CNT_LOCK`, which the datasheet says no write clears. Judging one bit
-    // is what let a T14 reading back `0x1000` be reported as armed for two runs.
+    // `TCO1_CNT` is judged whole apart from `TCO1_CNT_LOCK`, which the datasheet
+    // says no write clears: one bit of it is not the register.
     let cnt = inw(port + TCO1_CNT);
     if !toyos_tco::cnt_took_the_write(cnt) {
         return refused(format_args!(
@@ -103,16 +102,11 @@ pub fn arm(system_table: &SystemTable<Boot>, rsdp_addr: u64, cmdline: &str) {
         toyos_tco::TIMER,
         toyos_tco::bound_of(toyos_tco::TIMER)
     );
-    report(system_table, port, cnt);
+    report(port, cnt);
 }
 
 /// What the block holds once it is armed, as whole words.
-///
-/// The second read of `TCO_RLD` is the question no single read answers — whether
-/// this timer counts at all — across [`TICKS_OBSERVED`] ticks. It is spent
-/// inside the bound it measures, and what remains of this loader is the page
-/// tables and the jump.
-fn report(system_table: &SystemTable<Boot>, port: u16, cnt: u16) {
+fn report(port: u16, cnt: u16) {
     let rld = inw(port + TCO_RLD);
     let tmr = inw(port + TCO_TMR);
     let sts1 = inw(port + TCO1_STS);
@@ -121,36 +115,18 @@ fn report(system_table: &SystemTable<Boot>, port: u16, cnt: u16) {
         "watchdog: read back TCO_RLD={rld:#06x} TCO_TMR={tmr:#06x} TCO1_CNT={cnt:#06x} \
          TCO1_STS={sts1:#06x} TCO2_STS={sts2:#06x}"
     );
-    // The two bits of `TCO1_CNT` that decide whether a second expiry can reset
-    // this machine at all, named rather than left for a reader to mask out.
+    // The three bits that decide whether an expiry reaches this machine at all,
+    // named rather than left for a reader to mask out. `TIMEOUT` is the first
+    // expiry's own latch, so a machine that is still up with it set expired once
+    // and did not reboot.
     println!(
-        "watchdog: no_reboot={} tco_lock={}, so a second expiry {} reset this machine",
+        "watchdog: no_reboot={} tco_lock={} timeout={}, so a second expiry {} reset this machine",
         u8::from(cnt & TCO1_CNT_NO_REBOOT != 0),
         u8::from(cnt & TCO1_CNT_LOCK != 0),
+        u8::from(sts1 & TCO1_STS_TIMEOUT != 0),
         if cnt & TCO1_CNT_NO_REBOOT != 0 { "cannot" } else { "can" },
     );
-
-    system_table.boot_services().stall(TICK_STALL_MICROS);
-    let moved = inw(port + TCO_RLD);
-    if moved == rld {
-        println!(
-            "watchdog: TCO_RLD still reads {moved:#06x} after {TICK_STALL_MS}ms, so this timer is \
-             not counting and no bound it was armed with can expire"
-        );
-    } else {
-        println!(
-            "watchdog: TCO_RLD went {rld:#06x} -> {moved:#06x} over {TICK_STALL_MS}ms, so the \
-             timer counts and a machine that still stays up owes the first expiry's SMI"
-        );
-    }
 }
-
-/// Two ticks plus a margin. One is not enough to conclude anything: the reload
-/// lands at an unknown phase inside a tick, so a running counter can still read
-/// its loaded value one tick later and the line above would call it stopped.
-const TICKS_OBSERVED: u64 = 2;
-const TICK_STALL_MS: u64 = TICKS_OBSERVED * toyos_tco::TICK_MS + toyos_tco::TICK_MS / 6;
-const TICK_STALL_MICROS: usize = (TICK_STALL_MS * 1_000) as usize;
 
 /// The first function on bus 0 a row names, with the two config words that row
 /// reads. Bus 0, because the LPC bridge and the SMBus function both live there
