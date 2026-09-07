@@ -1090,12 +1090,8 @@ pub enum Profile {
     /// on a machine whose other devices were all fine.
     VirtioNetNoMsix,
     /// [`Profile::Headless`] with an Intel `e1000e` in place of the virtio
-    /// NIC, and everything else — console, sound, disks — unchanged.
-    ///
-    /// The card is the 82574L, `8086:10d3`, whose register file is the one the
-    /// ThinkPad T14's onboard I219 has. It is the only machine in reach on
-    /// which netd's Intel driver runs at all, so it is what stands between
-    /// that driver's host tests and the laptop.
+    /// NIC, and everything else — console, sound, disks — unchanged. The only
+    /// machine in reach on which netd's Intel driver runs at all.
     E1000e,
     Gop,
     /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
@@ -1434,13 +1430,8 @@ const HDA_TWO_LIVE: &[&str] = &[
     "hda-output,bus=hda1.0,cad=0,audiodev=hdaaud",
 ];
 
-/// Whether a machine has the virtio console and sound block.
-///
-/// **Not the NIC**: which card a machine has is [`Nic`], because the two are
-/// separate dimensions on the machine this project targets — the T14 has an
-/// Intel NIC and no virtio device at all — and a profile that wanted an
-/// e1000e beside the virtio console could not say so while one field answered
-/// both.
+/// Whether a machine has the virtio console and sound block. Which NIC it has
+/// is [`Nic`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Virtio {
     Absent,
@@ -1469,13 +1460,8 @@ impl Virtio {
 
 /// The network card a machine has, and whether it can raise an interrupt.
 ///
-/// A dimension of its own and not a boolean, because a device that publishes
-/// no MSI-X capability is a device, not an absence: the driver reaches it,
-/// resets it, negotiates features with it and only then finds it has no way to
-/// be told a packet arrived. `vectors=0` is the actuator — QEMU builds a
-/// virtio-pci function's MSI-X table only for a non-zero vector count — and it
-/// is the only one, since every emulated and every real virtio function has
-/// the capability.
+/// A dimension of its own and not a field of [`Virtio`], because the machine
+/// this project targets has an Intel NIC and no virtio device at all.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Nic {
     Absent,
@@ -1483,10 +1469,16 @@ enum Nic {
     /// The virtio NIC with its MSI-X capability removed, virtio-sound's and
     /// virtio-serial's left alone — so the console still carries the refusal
     /// and audio still works while networking does not.
+    ///
+    /// A device that publishes no MSI-X capability is a device, not an absence:
+    /// the driver reaches it, resets it, negotiates features with it and only
+    /// then finds it has no way to be told a packet arrived. `vectors=0` is the
+    /// actuator, and the only one — QEMU builds a virtio-pci function's MSI-X
+    /// table only for a non-zero vector count, and every emulated and every
+    /// real virtio function has the capability.
     VirtioWithoutMsix,
     /// QEMU's `e1000e`, which is the 82574L at `8086:10d3`: the same register
-    /// file the ThinkPad T14's onboard I219 has, and therefore the only card
-    /// in reach that exercises netd's Intel driver before the laptop does.
+    /// file the ThinkPad T14's onboard I219 has.
     E1000e,
 }
 
@@ -1510,8 +1502,6 @@ struct Shape {
     gpu: Option<&'static str>,
     /// virtio-sound and the console on virtio-serial.
     virtio: Virtio,
-    /// The network card, which is a dimension of its own: the machine this
-    /// project targets has an Intel one and no virtio device at all.
     nic: Nic,
     /// The `-device` argument for each xHCI controller, port and slot counts
     /// included. A list because a machine can have more than one and the T14
@@ -4044,14 +4034,18 @@ fn qemu_command(
     // is decoded by the unit whatever it says, so it carries none.
     match shape.nic {
         Nic::Absent => {}
-        Nic::Virtio | Nic::VirtioWithoutMsix | Nic::E1000e => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(match shape.nic {
-                Nic::VirtioWithoutMsix => {
-                    format!("virtio-net-pci-non-transitional,netdev=net0,vectors=0{platform}")
-                }
-                Nic::E1000e => "e1000e,netdev=net0".to_string(),
-                _ => format!("virtio-net-pci-non-transitional,netdev=net0{platform}"),
-            });
+        Nic::Virtio => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+                "virtio-net-pci-non-transitional,netdev=net0{platform}"
+            ));
+        }
+        Nic::VirtioWithoutMsix => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+                "virtio-net-pci-non-transitional,netdev=net0,vectors=0{platform}"
+            ));
+        }
+        Nic::E1000e => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("e1000e,netdev=net0");
         }
     }
 

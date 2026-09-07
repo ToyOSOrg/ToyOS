@@ -29,30 +29,26 @@ macro_rules! say {
     }};
 }
 
+mod device;
 mod i219;
 mod virtio_net;
 
 /// The cards this program can drive, named by what identifies one rather than
-/// by the slot firmware put it in. The manifest row spells the same pair and
-/// the claim arrives under a label composed from it, so which of these exists
-/// is `/system/bin/init`'s answer and not this program's — at most one is ever
-/// endowed, and a machine with none is a machine netd leaves.
+/// by the slot firmware put it in, and each with the driver that opens it. The
+/// manifest row spells the same pair and the claim arrives under a label
+/// composed from it, so which of these exists is `/system/bin/init`'s answer
+/// and not this program's — at most one is ever endowed, and a machine with
+/// none is a machine netd leaves.
 ///
 /// `1af4:1041` is virtio's transitional device id `1000 + 1` for a network
 /// device (virtio 1.2 §5.1.1). `8086:15fc` is the ThinkPad T14's onboard I219
 /// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models, and
 /// one driver takes both because the register file is the same one.
-const CARDS: [(PciId, Kind); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, Kind::Intel),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, Kind::Intel),
-    (PciId { vendor: 0x1af4, device: 0x1041 }, Kind::Virtio),
+const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
+    (PciId { vendor: 0x8086, device: 0x15fc }, Card::intel),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, Card::intel),
+    (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
-
-#[derive(Clone, Copy)]
-enum Kind {
-    Intel,
-    Virtio,
-}
 
 use toyos::endow;
 use toyos::Pipe;
@@ -80,14 +76,28 @@ enum Card {
     Intel(i219::Nic),
 }
 
-/// One received frame, in whichever driver's own terms.
-#[derive(Clone, Copy)]
-enum RxSlot {
-    Virtio { index: usize, len: usize },
-    Intel(i219::RxSlot),
-}
-
 impl Card {
+    /// A device this driver cannot bring up is not a machine without a NIC: the
+    /// claim was minted, so something the device said is not what this driver
+    /// understands, and that is loud.
+    fn undrivable(why: impl std::fmt::Display) -> ! {
+        panic!("netd: the NIC this program was given is not one it can drive — {why}")
+    }
+
+    fn intel(claim: toyos::PciDev) -> Self {
+        match i219::Nic::open(claim) {
+            Ok(nic) => Self::Intel(nic),
+            Err(why) => Self::undrivable(why),
+        }
+    }
+
+    fn virtio(claim: toyos::PciDev) -> Self {
+        match VirtioNet::open(claim) {
+            Ok(nic) => Self::Virtio(nic),
+            Err(why) => Self::undrivable(why),
+        }
+    }
+
     fn mac(&self) -> [u8; 6] {
         match self {
             Self::Virtio(nic) => nic.mac(),
@@ -108,39 +118,20 @@ impl Card {
     /// left it would find the same one on the next `wait` and every one after
     /// it. What the message meant is in the rings, which `iface.poll` reads.
     /// This is also where a driver with a per-pass budget gets it back.
+    ///
+    /// A claim that refuses the read for anything but `WouldBlock` is the
+    /// kernel saying this function is no longer this process's: a fault at the
+    /// unit is the one that happens, and by the time it is answered the
+    /// function's bus mastering is gone. Every frame from here on is one that
+    /// silently never arrives, so this dies where it can be read — once, for
+    /// whichever driver is running.
     fn begin_pass(&self) {
-        match self {
-            Self::Virtio(nic) => {
-                nic.take_interrupt();
-            }
+        let answered = match self {
+            Self::Virtio(nic) => nic.take_interrupt().map(|_| ()),
             Self::Intel(nic) => nic.begin_pass(),
-        }
-    }
-
-    fn poll_rx(&self) -> Option<RxSlot> {
-        match self {
-            Self::Virtio(nic) => {
-                nic.poll_rx().map(|(index, len)| RxSlot::Virtio { index, len })
-            }
-            Self::Intel(nic) => nic.poll_rx().map(RxSlot::Intel),
-        }
-    }
-
-    fn rx_frame(&self, slot: RxSlot) -> &[u8] {
-        match (self, slot) {
-            (Self::Virtio(nic), RxSlot::Virtio { index, len }) => nic.rx_frame(index, len),
-            (Self::Intel(nic), RxSlot::Intel(slot)) => nic.rx_frame(slot),
-            // Unreachable by construction: a slot comes from `poll_rx` on this
-            // same card and there is one card for the life of the process.
-            _ => panic!("netd: a receive slot from another driver"),
-        }
-    }
-
-    fn rx_done(&self, slot: RxSlot) {
-        match (self, slot) {
-            (Self::Virtio(nic), RxSlot::Virtio { index, .. }) => nic.rx_done(index),
-            (Self::Intel(nic), RxSlot::Intel(slot)) => nic.rx_done(slot),
-            _ => panic!("netd: a receive slot from another driver"),
+        };
+        if let Err(why) = answered {
+            panic!("netd: this NIC's claim refused an interrupt read: {why:?}");
         }
     }
 
@@ -165,8 +156,13 @@ impl Device for DmaNic {
     type TxToken<'a> = DmaTxToken<'a>;
 
     fn receive(&mut self, _timestamp: SmoltcpInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let slot = self.nic.poll_rx()?;
-        Some((DmaRxToken { slot, nic: &self.nic }, DmaTxToken { nic: &self.nic }))
+        let token = match &self.nic {
+            Card::Virtio(nic) => {
+                nic.poll_rx().map(|(index, len)| DmaRxToken::Virtio { nic, index, len })
+            }
+            Card::Intel(nic) => nic.poll_rx().map(|frame| DmaRxToken::Intel { nic, frame }),
+        }?;
+        Some((token, DmaTxToken { nic: &self.nic }))
     }
 
     fn transmit(&mut self, _timestamp: SmoltcpInstant) -> Option<Self::TxToken<'_>> {
@@ -181,9 +177,12 @@ impl Device for DmaNic {
     }
 }
 
-struct DmaRxToken<'a> {
-    slot: RxSlot,
-    nic: &'a Card,
+/// One received frame, holding the driver it came from rather than a tag that
+/// says which — so a frame and a driver that do not go together is not a state
+/// this program can be in.
+enum DmaRxToken<'a> {
+    Virtio { nic: &'a VirtioNet, index: usize, len: usize },
+    Intel { nic: &'a i219::Nic, frame: toyos_i219::Frame },
 }
 
 impl phy::RxToken for DmaRxToken<'_> {
@@ -194,9 +193,18 @@ impl phy::RxToken for DmaRxToken<'_> {
         // The borrow ends with `f`, and the buffer goes back to the device only
         // afterwards: smoltcp's `consume` takes `FnOnce(&[u8])`, so the
         // callback cannot keep the reference past its own return.
-        let result = f(self.nic.rx_frame(self.slot));
-        self.nic.rx_done(self.slot);
-        result
+        match self {
+            Self::Virtio { nic, index, len } => {
+                let result = f(nic.rx_frame(index, len));
+                nic.rx_done(index);
+                result
+            }
+            Self::Intel { nic, frame } => {
+                let result = f(nic.rx_frame(&frame));
+                nic.rx_done(frame);
+                result
+            }
+        }
     }
 }
 
@@ -1263,32 +1271,16 @@ fn main() {
     // before either process does, a client's connection is queued on it whether
     // or not this program ever reaches `accept`, and if netd exits the queued
     // client sees `Gone` rather than silence.
-    let Some((kind, claim)) = CARDS
+    let Some((open, claim)) = CARDS
         .iter()
-        .find_map(|(id, kind)| endow::pci_function::<toyos::PciDev>(*id).map(|c| (*kind, c)))
+        .find_map(|(id, open)| endow::pci_function::<toyos::PciDev>(*id).map(|c| (*open, c)))
     else {
         say!("netd: no NIC on this machine, exiting");
         return;
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    // A device this driver cannot bring up is not a machine without a NIC: the
-    // claim was minted, so something the device said is not what this driver
-    // understands, and that is loud.
-    let nic = match kind {
-        Kind::Virtio => match VirtioNet::open(claim) {
-            Ok(nic) => Card::Virtio(nic),
-            Err(why) => {
-                panic!("netd: the NIC this program was given is not one it can drive — {why}")
-            }
-        },
-        Kind::Intel => match i219::Nic::open(claim) {
-            Ok(nic) => Card::Intel(nic),
-            Err(why) => {
-                panic!("netd: the NIC this program was given is not one it can drive — {why}")
-            }
-        },
-    };
+    let nic = open(claim);
     let mac = nic.mac();
     let mut device = DmaNic { nic };
 

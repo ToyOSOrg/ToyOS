@@ -1,9 +1,8 @@
 # The one boot that runs netd in front of an Intel NIC.
 #
 # QEMU's `e1000e` is the 82574L at `8086:10d3`, whose register file is the one
-# the ThinkPad T14's onboard I219 at `8086:15fc` has — so this config is what
-# stands between `toyos-i219`'s host tests and the laptop: the same driver, the
-# same rings and the same interrupt, over a real IOMMU domain and a real wire.
+# the ThinkPad T14's onboard I219 at `8086:15fc` has, so this config is what
+# stands between `toyos-i219`'s host tests and the laptop.
 #
 # It is a second directory rather than a second `devices` row on
 # `tests/netcase`, because a program that names a card this machine does not
@@ -12,10 +11,6 @@
 [boot]
 start = ["logd", "netd", "test-runner"]
 
-# **Every image that carries a `TOYOS-LOG` partition runs this**, and every
-# image does. The kernel keeps the record ring and writes no file at all, so a
-# boot config without `logd` is a boot whose /log is empty —
-# `every_boot_config_runs_logd` is what refuses one.
 [programs.logd]
 syscap = ["logread"]
 

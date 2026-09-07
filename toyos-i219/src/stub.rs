@@ -96,11 +96,16 @@ struct Model {
     /// Whether the modelled NVM answers, and therefore whether `RAH0.AV` is
     /// set after a reset (§10.2.5.23).
     has_nvm: bool,
-    /// Whether this part is in MSI-X mode, and so whether §10.2.4.9's `IVAR`
-    /// exists at all. True is the 82574 and QEMU's `e1000e`; false is the
-    /// I219, which has MSI and no `IVAR` — a write to it is dropped and a read
-    /// answers zero.
-    msix: bool,
+    /// One register this part does not take a write to. **A fault injector and
+    /// not a modelled behaviour**: it is how a test reaches
+    /// [`crate::Refusal::NotAccepted`].
+    refusing: Option<usize>,
+    /// Whether `CTRL.RST` never clears itself, against §10.2.2.1's "this bit is
+    /// self-clearing". A fault injector too: how a test reaches
+    /// [`crate::Refusal::ResetUnfinished`].
+    reset_sticks: bool,
+    /// Whether the claim has stopped answering its interrupt record at all.
+    claim_gone: bool,
     link_up: bool,
     /// `STATUS.SPEED`'s encoding: `10b` is 1000 Mb/s.
     speed_code: u32,
@@ -149,11 +154,13 @@ impl Model {
             rng: seed | 1,
             permits,
             file: vec![0; regs::REGISTER_BYTES / 4],
-            memory: vec![0; 16 * 1024 * 1024],
+            memory: vec![0; crate::GRANT_BYTES as usize],
             nanos: 0,
             reset_reads: 0,
             has_nvm: true,
-            msix: true,
+            refusing: None,
+            reset_sticks: false,
+            claim_gone: false,
             link_up: false,
             speed_code: 0b10,
             inbound: VecDeque::new(),
@@ -227,7 +234,7 @@ impl Model {
         );
         match reg {
             regs::CTRL => {
-                if self.reset_reads > 0 {
+                if self.reset_reads > 0 && !self.reset_sticks {
                     self.reset_reads -= 1;
                     if self.reset_reads == 0 {
                         // §10.2.2.1: "This bit is self-clearing." The reset
@@ -268,6 +275,9 @@ impl Model {
             "seed {}: a {reg:#x} register write is outside the file",
             self.seed
         );
+        if self.refusing == Some(reg) {
+            return;
+        }
         match reg {
             regs::CTRL => {
                 self.set(regs::CTRL, value);
@@ -306,14 +316,6 @@ impl Model {
             }
             // §10.2.2.2: read-only.
             regs::STATUS => {}
-            // §10.2.4.9: the register exists only in MSI-X mode. A part
-            // without it drops the write and answers zero, which is what
-            // `I219::open`'s read-back asks.
-            regs::IVAR => {
-                if self.msix {
-                    self.set(regs::IVAR, value);
-                }
-            }
             regs::RDT => {
                 self.set(regs::RDT, value);
                 if !self.held {
@@ -333,28 +335,26 @@ impl Model {
     /// Record a cause and, if it is unmasked *and* has a vector, send a
     /// message.
     ///
-    /// §10.2.4.1 gives every event two names on a part that has MSI-X: the
-    /// classic cause and the queue-or-other cause §10.2.4.9 allocates a vector
-    /// to. Both are set in `ICR`; only the second can reach a vector, and only
-    /// while `IVAR`'s enable bit for it is set. **A driver that programmed no
-    /// `IVAR` is therefore told nothing at all**, which is the part behaving as
-    /// specified and not a model being unkind.
+    /// §10.2.4.1 gives every event two names: the classic cause and the
+    /// queue-or-other cause §10.2.4.9 allocates a vector to. Both are set in
+    /// `ICR`; only the second can reach a vector, and only while `IVAR`'s
+    /// enable bit for it is set. **A driver that programmed no `IVAR` is
+    /// therefore told nothing at all**, which is the part behaving as specified
+    /// and not a model being unkind.
     fn raise(&mut self, causes: u32) {
         let held = self.get(regs::ICR);
         let mut now = held | causes;
-        if self.msix {
-            if causes & (cause::RXT0 | cause::RXDMT0) != 0 {
-                now |= cause::RXQ0;
-            }
-            if causes & cause::TXDW != 0 {
-                now |= cause::TXQ0;
-            }
-            if causes & (cause::LSC | cause::RXO) != 0 {
-                now |= cause::OTHER;
-            }
+        if causes & (cause::RXT0 | cause::RXDMT0) != 0 {
+            now |= cause::RXQ0;
+        }
+        if causes & cause::TXDW != 0 {
+            now |= cause::TXQ0;
+        }
+        if causes & (cause::LSC | cause::RXO) != 0 {
+            now |= cause::OTHER;
         }
         let unmasked = now & self.get(regs::IMS) & !cause::INT_ASSERTED;
-        let delivered = if self.msix { unmasked & self.vectored() } else { unmasked };
+        let delivered = unmasked & self.vectored();
         self.set(regs::ICR, if delivered != 0 { now | cause::INT_ASSERTED } else { now });
         if delivered != 0 {
             self.messages = self.messages.saturating_add(1);
@@ -625,13 +625,30 @@ impl Nic {
         )
     }
 
-    /// This part has MSI and no MSI-X, so §10.2.4.9's `IVAR` does not exist
-    /// and every cause drives the one message directly. The I219 is such a
-    /// part; QEMU's `e1000e` is not.
-    pub fn without_msix(&self) {
-        let mut model = self.0.borrow_mut();
-        model.msix = false;
-        model.set(regs::IVAR, 0);
+    /// This part does not take a write to `reg`, whatever is written. A fault
+    /// injector, not a clause: it is how a test reaches
+    /// [`crate::Refusal::NotAccepted`].
+    pub fn refuses_writes_to(&self, reg: usize) {
+        self.0.borrow_mut().refusing = Some(reg);
+    }
+
+    /// `CTRL.RST` on this part never clears itself, against §10.2.2.1. A fault
+    /// injector too: it is how a test reaches
+    /// [`crate::Refusal::ResetUnfinished`].
+    pub fn reset_never_clears(&self) {
+        self.0.borrow_mut().reset_sticks = true;
+    }
+
+    /// The claim stops answering its interrupt record — what the kernel does
+    /// once the function is no longer this process's.
+    pub fn claim_taken_away(&self) {
+        self.0.borrow_mut().claim_gone = true;
+    }
+
+    /// Set an interrupt cause, as §10.2.4.4's `ICS` does, without a frame or a
+    /// link change behind it.
+    pub fn cause(&self, causes: u32) {
+        self.0.borrow_mut().raise(causes);
     }
 
     /// This part has no NVM, so §10.2.5.23's "if no NVM is present" arm is
@@ -775,8 +792,27 @@ impl DmaBuffers for Grant {
 
 pub struct Line(Rc<RefCell<Model>>);
 
+/// What the modelled claim answers when it has no count to give.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unanswered {
+    /// Nothing since the last read — the kernel's `WouldBlock`.
+    Idle,
+    /// The function is no longer this driver's.
+    Gone,
+}
+
 impl Interrupts for Line {
-    fn taken(&self) -> u32 {
-        core::mem::take(&mut self.0.borrow_mut().messages)
+    type Refused = Unanswered;
+    const IDLE: Unanswered = Unanswered::Idle;
+
+    fn taken(&self) -> Result<u32, Unanswered> {
+        let mut model = self.0.borrow_mut();
+        if model.claim_gone {
+            return Err(Unanswered::Gone);
+        }
+        match core::mem::take(&mut model.messages) {
+            0 => Err(Unanswered::Idle),
+            count => Ok(count),
+        }
     }
 }

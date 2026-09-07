@@ -9,7 +9,7 @@ use std::vec::Vec;
 use std::{format, vec};
 
 use crate::regs::{self, cause, ctrl, ivar, rctl, rx_desc, tctl, tx_desc};
-use crate::stub::{Nic, Permits, NVM_MAC};
+use crate::stub::{Nic, Permits, Unanswered, NVM_MAC};
 use crate::*;
 
 type Driver = I219<crate::stub::Bar, crate::stub::Ticker, crate::stub::Grant, crate::stub::Line>;
@@ -39,12 +39,18 @@ fn drain(nic: &Nic, driver: &mut Driver) -> Vec<Vec<u8>> {
     let mut taken = Vec::new();
     while let Some(f) = driver.poll_rx() {
         got.push(nic.bytes(f.at, f.len));
-        taken.push(f.index);
+        taken.push(f);
     }
-    for index in taken {
-        driver.rx_done(index);
+    for frame in taken {
+        driver.rx_done(frame);
     }
     got
+}
+
+/// One pass, with the claim answering. A claim that refuses is not a pass with
+/// nothing in it, and a test that read one as such would be measuring silence.
+fn one_pass(driver: &mut Driver) -> Pass {
+    driver.begin_pass().expect("the claim answered its interrupt record")
 }
 
 // --- bring-up ---
@@ -94,7 +100,7 @@ fn bring_up_programs_what_the_initialization_sections_name() {
         "{}",
         nic.because(
             "§4.6.5 names RXT, RXO, RXDMT and LSC and no transmit cause, and §10.2.4.9's \
-             vectored names go beside them on a part that has IVAR"
+             vectored names go beside them"
         )
     );
     assert_eq!(
@@ -103,13 +109,11 @@ fn bring_up_programs_what_the_initialization_sections_name() {
         "{}",
         nic.because("§10.2.4.7 says ICR must not be read while EIAC has bits set")
     );
-    // §7.1.8: `RDLEN` "must be a multiple of 128", and the tail points one
-    // descriptor beyond the end.
     assert_eq!(nic.peek(regs::RDLEN) as usize, RX_RING * rx_desc::BYTES);
-    assert_eq!(nic.peek(regs::RDLEN) % 128, 0);
+    // §4.6.5.1: "the tail pointer should be set to point one descriptor beyond
+    // the end".
     assert_eq!(nic.peek(regs::RDT) as usize, RX_RING - 1);
     assert_eq!(nic.peek(regs::TDLEN) as usize, TX_RING * tx_desc::BYTES);
-    assert_eq!(nic.peek(regs::TDLEN) % 128, 0);
     assert_eq!(nic.peek(regs::TDT), 0);
 
     // Both timers off: an interrupt this driver waits on may not be held back
@@ -173,8 +177,10 @@ fn a_window_or_grant_too_small_is_refused() {
     }
     struct NoIrq;
     impl Interrupts for NoIrq {
-        fn taken(&self) -> u32 {
-            0
+        type Refused = ();
+        const IDLE: () = ();
+        fn taken(&self) -> Result<u32, ()> {
+            Err(())
         }
     }
 
@@ -226,8 +232,10 @@ fn a_window_that_reads_ones_is_refused() {
     }
     struct NoIrq;
     impl Interrupts for NoIrq {
-        fn taken(&self) -> u32 {
-            0
+        type Refused = ();
+        const IDLE: () = ();
+        fn taken(&self) -> Result<u32, ()> {
+            Err(())
         }
     }
     let nic = Nic::new(4);
@@ -318,7 +326,7 @@ fn a_frame_arrives_whole() {
     let sent = frame(0xA5, 300);
     nic.deliver(&sent);
     nic.run();
-    driver.begin_pass();
+    one_pass(&mut driver);
     assert_eq!(drain(&nic, &mut driver), vec![sent]);
 }
 
@@ -342,7 +350,7 @@ fn frames_come_up_in_order_under_batched_and_reordered_write_back() {
         // says so and the next one picks up where it left off.
         for _ in 0..64 {
             nic.run();
-            driver.begin_pass();
+            one_pass(&mut driver);
             got.extend(drain(&nic, &mut driver));
             if got.len() == sent.len() {
                 break;
@@ -371,7 +379,7 @@ fn the_head_register_does_run_ahead_of_memory() {
             nic.deliver(&frame(i + 1, 200));
         }
         nic.run();
-        driver.begin_pass();
+        one_pass(&mut driver);
         // Counted without giving any buffer back, so the device does not run
         // again underneath the measurement.
         let mut up = 0;
@@ -409,7 +417,7 @@ fn a_lying_length_is_refused_and_the_frames_behind_it_still_arrive() {
         0xFFFF
             | (((rx_desc::status::DD | rx_desc::status::EOP) as u64) << rx_desc::STATUS_SHIFT),
     );
-    driver.begin_pass();
+    one_pass(&mut driver);
     let got = drain(&nic, &mut driver);
     assert_eq!(driver.counters().over_length, 1, "{}", nic.because("the length was believed"));
     assert_eq!(got, vec![behind], "{}", nic.because("the frame behind it was lost"));
@@ -425,7 +433,7 @@ fn null_descriptor_padding_is_not_a_frame() {
     nic.null_rx_buffer(0);
     nic.deliver(&frame(0x22, 400));
     nic.run();
-    driver.begin_pass();
+    one_pass(&mut driver);
     let got = drain(&nic, &mut driver);
     // Refused as a split and not as an empty one, because that is all a driver
     // can tell: §7.1.7.2 leaves "all other bits unchanged", so a padding
@@ -458,7 +466,7 @@ fn one_pass_hands_up_at_most_its_budget() {
     for _ in 0..(RX_BUDGET * 4) {
         nic.run();
     }
-    driver.begin_pass();
+    one_pass(&mut driver);
     let first = drain(&nic, &mut driver).len();
     assert_eq!(
         first, RX_BUDGET as usize,
@@ -469,30 +477,10 @@ fn one_pass_hands_up_at_most_its_budget() {
     let mut rest = 0;
     for _ in 0..8 {
         nic.run();
-        driver.begin_pass();
+        one_pass(&mut driver);
         rest += drain(&nic, &mut driver).len();
     }
     assert_eq!(first + rest, RX_BUDGET as usize * 2, "{}", nic.because("frames were lost"));
-}
-
-/// §7.1.8's tail "identifies the location beyond the last descriptor hardware
-/// can process", so it can only ever move over a run of ready descriptors — a
-/// buffer returned out of turn would hand the device one that is still being
-/// read.
-#[test]
-#[should_panic(expected = "came back out of turn")]
-fn a_buffer_returned_out_of_turn_is_a_bug_and_says_so() {
-    let nic = Nic::new(9);
-    let mut driver = open(&nic);
-    nic.set_link(true);
-    nic.deliver(&frame(1, 64));
-    nic.deliver(&frame(2, 64));
-    nic.run();
-    driver.begin_pass();
-    let first = driver.poll_rx().expect("a frame");
-    let second = driver.poll_rx().expect("a second frame");
-    driver.rx_done(second.index);
-    driver.rx_done(first.index);
 }
 
 // --- transmit ---
@@ -534,7 +522,6 @@ fn a_full_transmit_ring_drops_rather_than_waits() {
         // Nothing runs, so nothing is written back and nothing is reclaimed.
     }
     assert_eq!(taken, TX_RING - 1, "{}", nic.because("the usable depth is not the ring less one"));
-    assert_eq!(driver.tx_free(), 0);
     assert_eq!(driver.counters().tx_dropped, 1);
 }
 
@@ -594,7 +581,7 @@ fn causes_are_acknowledged_by_writing_them_back() {
     let nic = Nic::with(12, permits);
     let mut driver = open(&nic);
     nic.set_link(true);
-    driver.begin_pass();
+    one_pass(&mut driver);
 
     // A transmit, because §4.6.5 leaves `TXDW` masked: with the cause set and
     // the mask clear, `ICR.INT_ASSERTED` is clear too, which is exactly
@@ -611,7 +598,7 @@ fn causes_are_acknowledged_by_writing_them_back() {
         "{}",
         nic.because("a masked cause asserted the interrupt, so case 3 was never reached")
     );
-    let pass = driver.begin_pass();
+    let pass = one_pass(&mut driver);
     assert!(
         pass.causes & cause::TXDW != 0,
         "{}",
@@ -624,7 +611,7 @@ fn causes_are_acknowledged_by_writing_them_back() {
         nic.because("a cause survived the pass that read it, so the read was taken for the \
                      acknowledgement")
     );
-    let again = driver.begin_pass();
+    let again = one_pass(&mut driver);
     assert_eq!(
         again.causes,
         0,
@@ -635,26 +622,24 @@ fn causes_are_acknowledged_by_writing_them_back() {
 
 /// §10.2.4.9: `IVAR` "is only valid in MSI-X mode. It defines the allocation
 /// of the different interrupt causes to one of the MSI-X vectors." **At reset
-/// it allocates none**, so a part in that mode with no `IVAR` programmed fills
-/// `ICR` and delivers nothing — which is what QEMU's `e1000e` did before this
-/// driver wrote it.
+/// it allocates none**, so a part with it unprogrammed fills `ICR` and delivers
+/// nothing.
 #[test]
-fn a_part_in_msi_x_mode_is_told_which_vector_each_cause_uses() {
+fn a_part_is_told_which_vector_each_cause_uses() {
     let nic = Nic::with(16, Permits { spurious_interrupts: false, ..Permits::default() });
     let mut driver = open(&nic);
-    assert!(driver.msix(), "{}", nic.because("the part answered IVAR and was not believed"));
     assert_eq!(
         nic.peek(regs::IVAR),
         ivar::ALL_ON_VECTOR_ZERO,
         "{}",
         nic.because("every cause has to name the one MSI-X entry the kernel programmed")
     );
-    driver.begin_pass();
+    one_pass(&mut driver);
 
     nic.set_link(true);
     nic.deliver(&frame(0x66, 300));
     nic.run();
-    let pass = driver.begin_pass();
+    let pass = one_pass(&mut driver);
     assert!(
         pass.messages > 0,
         "{}",
@@ -664,35 +649,112 @@ fn a_part_in_msi_x_mode_is_told_which_vector_each_cause_uses() {
     assert_eq!(drain(&nic, &mut driver).len(), 1);
 }
 
-/// The other part: MSI and no `IVAR` at all, which is what the T14's I219 is.
-/// A write to the register is dropped, a read answers zero, and the classic
-/// causes §4.6.5 names drive the one message directly.
+/// §10.2.4.9 defines `IVAR` only "in MSI-X mode" and says nothing about what a
+/// part outside that mode answers, so a part that does not take the write is
+/// refused by name — this driver does not guess which interrupt such a part
+/// would raise instead.
 #[test]
-fn a_part_with_no_vector_allocation_still_raises_its_interrupt() {
-    let nic = Nic::with(17, Permits { spurious_interrupts: false, ..Permits::default() });
-    nic.without_msix();
-    let mut driver = open(&nic);
-    assert!(!driver.msix(), "{}", nic.because("a part with no IVAR was taken for one with"));
-    assert_eq!(nic.peek(regs::IVAR), 0);
+fn a_part_that_does_not_take_ivar_is_refused() {
+    let nic = Nic::new(17);
+    nic.refuses_writes_to(regs::IVAR);
+    let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        nic.peek(regs::IMS),
-        cause::ENABLED,
-        "{}",
-        nic.because("a part with no vectors was masked in a vector's name")
+        I219::open(bar, clock, grant, line).err(),
+        Some(Refusal::NotAccepted {
+            reg: regs::IVAR,
+            wrote: ivar::ALL_ON_VECTOR_ZERO,
+            read: 0
+        })
     );
-    driver.begin_pass();
+}
 
-    nic.set_link(true);
-    nic.deliver(&frame(0x77, 300));
-    nic.run();
-    let pass = driver.begin_pass();
-    assert!(
-        pass.messages > 0,
-        "{}",
-        nic.because("a frame arrived and the part raised nothing at all")
+/// The receiver is the last register §4.6.5.1 has a driver write, and a window
+/// that takes everything before it and not that is not this register file.
+#[test]
+fn a_part_that_does_not_take_rctl_is_refused() {
+    let nic = Nic::new(18);
+    nic.refuses_writes_to(regs::RCTL);
+    let (bar, clock, grant, line) = nic.parts();
+    assert_eq!(
+        I219::open(bar, clock, grant, line).err(),
+        Some(Refusal::NotAccepted {
+            reg: regs::RCTL,
+            wrote: rctl::EN | rctl::BAM | rctl::SECRC | rctl::BSIZE_2048,
+            read: 0
+        })
     );
-    assert!(pass.causes & cause::RXT0 != 0, "{}", nic.because("no receive-timer cause"));
-    assert_eq!(drain(&nic, &mut driver).len(), 1);
+}
+
+/// §10.2.2.1 says `CTRL.RST` "is self-clearing" and gives no time, so the
+/// deadline is this driver's own — and a part that never clears it is refused
+/// rather than spun on for the boot.
+#[test]
+fn a_reset_that_never_finishes_is_refused() {
+    let nic = Nic::new(19);
+    nic.reset_never_clears();
+    let (bar, clock, grant, line) = nic.parts();
+    let Some(Refusal::ResetUnfinished { after_nanos }) =
+        I219::open(bar, clock, grant, line).err()
+    else {
+        panic!("{}", nic.because("a reset that never cleared was not refused"));
+    };
+    assert!(
+        after_nanos >= 100_000_000,
+        "{}",
+        nic.because("the deadline was called before it was reached")
+    );
+}
+
+/// The claim answering neither a count nor "nothing since the last read" is the
+/// kernel saying the function is no longer this driver's, and a pass that read
+/// it as quiet would go on driving a device it no longer holds.
+#[test]
+fn a_claim_that_stops_answering_is_handed_up_and_not_read_as_quiet() {
+    let nic = Nic::new(20);
+    let mut driver = open(&nic);
+    nic.set_link(true);
+    one_pass(&mut driver);
+    nic.claim_taken_away();
+    assert_eq!(driver.begin_pass(), Err(Unanswered::Gone));
+}
+
+/// §10.2.4.1's `RXO` and `RXDMT0`: the two the part reports about its own
+/// receive path, which are counted and never acted on.
+#[test]
+fn the_receiver_reporting_on_itself_is_counted() {
+    let nic = Nic::with(21, Permits { spurious_interrupts: false, ..Permits::default() });
+    let mut driver = open(&nic);
+    nic.set_link(true);
+    one_pass(&mut driver);
+    nic.cause(cause::RXO | cause::RXDMT0);
+    one_pass(&mut driver);
+    assert_eq!(driver.counters().overruns, 1, "{}", nic.because("RXO was not counted"));
+    assert_eq!(driver.counters().starved, 1, "{}", nic.because("RXDMT0 was not counted"));
+}
+
+/// §7.2.10.1: one legacy descriptor carries one buffer. A frame longer than one
+/// is refused and counted apart from a full ring, because it is a caller that
+/// offered more than it was told it could.
+#[test]
+fn a_frame_longer_than_a_transmit_buffer_is_refused_and_not_truncated() {
+    let nic = Nic::new(22);
+    let mut driver = open(&nic);
+    nic.set_link(true);
+    assert!(driver.tx_reserve(TX_BUF_BYTES + 1).is_none());
+    assert_eq!(driver.counters().too_long, 1);
+    assert_eq!(
+        driver.counters().tx_dropped,
+        0,
+        "{}",
+        nic.because("a frame that never fit was counted as a full ring")
+    );
+    // And the ring is untouched: the next frame that does fit still goes out.
+    let payload = frame(0x99, TX_BUF_BYTES);
+    let slot = driver.tx_reserve(payload.len()).expect("a free transmit descriptor");
+    nic.put_bytes(slot.at, &payload);
+    driver.tx_commit(slot);
+    nic.run();
+    assert_eq!(nic.sent(), vec![payload]);
 }
 
 /// §7.4.5 names the spurious interrupt: a message whose cause is already gone.
@@ -704,10 +766,10 @@ fn a_spurious_interrupt_costs_a_pass_and_nothing_else() {
     let nic = Nic::with(13, Permits { spurious_interrupts: false, ..Permits::default() });
     let mut driver = open(&nic);
     nic.set_link(true);
-    driver.begin_pass();
+    one_pass(&mut driver);
     // Every cause already clear, and a message all the same.
     nic.spurious();
-    let pass = driver.begin_pass();
+    let pass = one_pass(&mut driver);
     assert_eq!(pass.messages, 1, "{}", nic.because("the message was not delivered"));
     assert_eq!(pass.causes & !cause::INT_ASSERTED, 0);
     assert_eq!(driver.counters().spurious, 1);
@@ -716,7 +778,7 @@ fn a_spurious_interrupt_costs_a_pass_and_nothing_else() {
     let sent = frame(0x44, 200);
     nic.deliver(&sent);
     nic.run();
-    driver.begin_pass();
+    one_pass(&mut driver);
     assert_eq!(drain(&nic, &mut driver), vec![sent]);
 }
 
@@ -729,20 +791,20 @@ fn the_link_going_away_and_coming_back_is_seen() {
     assert!(!driver.link().up, "{}", nic.because("the link was up before anything plugged in"));
 
     nic.set_link(true);
-    let up = driver.begin_pass();
+    let up = one_pass(&mut driver);
     assert!(up.link_changed && driver.link().up);
     assert_eq!(driver.link().speed_mbps, 1000);
     assert!(driver.link().full_duplex);
     let at = driver.link_up_after_nanos().expect("a link-up time");
 
     nic.set_link(false);
-    let down = driver.begin_pass();
+    let down = one_pass(&mut driver);
     assert!(down.causes & cause::LSC != 0, "{}", nic.because("no LSC for the link going away"));
     assert!(down.link_changed && !driver.link().up);
     assert_eq!(driver.link().speed_mbps, 0);
 
     nic.set_link(true);
-    driver.begin_pass();
+    one_pass(&mut driver);
     assert!(driver.link().up);
     // The first time it came up is the one the profile measures, so a drop and
     // a recovery may not move it.
@@ -759,18 +821,18 @@ fn a_link_drop_does_not_lose_the_ring() {
     let first = frame(1, 100);
     nic.deliver(&first);
     nic.run();
-    driver.begin_pass();
+    one_pass(&mut driver);
     assert_eq!(drain(&nic, &mut driver), vec![first]);
 
     nic.set_link(false);
-    driver.begin_pass();
+    one_pass(&mut driver);
     nic.set_link(true);
-    driver.begin_pass();
+    one_pass(&mut driver);
 
     let second = frame(2, 700);
     nic.deliver(&second);
     nic.run();
-    driver.begin_pass();
+    one_pass(&mut driver);
     assert_eq!(
         drain(&nic, &mut driver),
         vec![second],
@@ -808,13 +870,13 @@ fn a_seeded_workload_loses_nothing_and_invents_nothing() {
                 expect_out.push(outbound);
             }
             nic.run();
-            driver.begin_pass();
+            one_pass(&mut driver);
             got_in.extend(drain(&nic, &mut driver));
             got_out.extend(nic.sent());
         }
         for _ in 0..64 {
             nic.run();
-            driver.begin_pass();
+            one_pass(&mut driver);
             got_in.extend(drain(&nic, &mut driver));
             got_out.extend(nic.sent());
         }

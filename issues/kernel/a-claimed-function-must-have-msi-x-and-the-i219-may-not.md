@@ -1,10 +1,10 @@
 ---
 status: open
-kind: defect
+kind: finding
 opened: 2026-09-07
 ---
 
-# A claimed PCI function must publish MSI-X, and the T14's own NIC may not
+# A claimed function must publish MSI-X, and the I219 may not
 
 `kernel/src/pcidev/mod.rs`'s `bring_up` arms exactly one interrupt mechanism:
 
@@ -35,7 +35,9 @@ capability the refusal never fires and nothing here is owed; if it shows only
 `MSI`, netd's claim on `pci:8086:15fc` is refused `NoMsix`, netd exits, and
 stage 2's metal half cannot run until this is built.
 
-The driver above it is already indifferent: `toyos-i219` writes §10.2.4.9's
-`IVAR` and reads it back, so a part that allocates vectors is masked in the
-vectored causes' names and one that does not keeps the classic ones. What it
-cannot do is get the claim in the first place.
+`toyos-i219` writes §10.2.4.9's `IVAR` and reads it back, and refuses a part
+that does not take the write by name — §10.2.4.9 defines the register only "in
+MSI-X mode" and says nothing about what a part outside it answers. So an I219
+that is an MSI part is refused twice over: by `pcidev::bring_up` before the
+driver runs, and by the driver if the claim is ever granted. Both refusals name
+what to read off the laptop.

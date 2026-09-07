@@ -14,11 +14,10 @@
 //! Four traits, named by what they do and not by what chip is behind them:
 //! [`Registers`] is one memory-mapped access, [`Clock`] is one counter read,
 //! [`DmaBuffers`] is the memory the device and this process share, and
-//! [`Interrupts`] is a message arriving. Each is a generic parameter resolved
-//! at compile time — no trait object, no dispatch — and each real
-//! implementation is one instruction's worth of meaning: a volatile load, a
-//! volatile store, a fence, a counter read, a field read. Everything with a
-//! branch is above the boundary, in this crate, where the host tests it.
+//! [`Interrupts`] is what the claim answered. Each is a generic parameter
+//! resolved at compile time — no trait object, no dispatch — and no
+//! implementation of one decides anything: every branch is above the boundary,
+//! in this crate, where the host tests it.
 //!
 //! In netd those four are the substrate's own: the mapped BAR, the monotonic
 //! clock, a `DmaRegion` in this function's IOMMU domain, and the claim's
@@ -30,9 +29,9 @@
 //! Every number in a written-back descriptor is the device's, and this driver
 //! is on the far side of an IOMMU domain from the rest of the machine but on
 //! the *same* side as its own memory. A length longer than the buffer it was
-//! given becomes the length of a slice netd hands to smoltcp, so
-//! [`parse_rx`] bounds it, and [`RxRefusal`] is every way a written-back
-//! descriptor is refused rather than believed.
+//! given becomes the length of a slice netd hands to smoltcp, so `parse_rx`
+//! bounds it, and `RxRefusal` is every way a written-back descriptor is refused
+//! rather than believed.
 //!
 //! # What the specification permits, and this driver therefore expects
 //!
@@ -53,13 +52,15 @@
 //!   written back to `ICR` explicitly rather than assumed cleared by the read.
 //! - **The link goes away.** §10.2.4.1: `LSC` "is set whenever the link status
 //!   changes (either from up to down, or from down to up)".
+//! - **`IVAR` is written and read back, and a part that does not take it is
+//!   refused.** §10.2.4.9 says the register "is only valid in MSI-X mode" and
+//!   allocates no cause to a vector at reset; what a part outside that mode
+//!   answers instead is not in the document, so it is refused by name rather
+//!   than guessed at.
 
 #![no_std]
 #![forbid(unsafe_code)]
 
-/// The test harness links `std` whatever this crate is; the stub and the tests
-/// use it for a seeded model's collections and nothing else compiles against
-/// it.
 #[cfg(test)]
 extern crate std;
 
@@ -76,10 +77,9 @@ use regs::{cause, ctrl, ivar, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl}
 ///
 /// **The offsets are this crate's own constants**, every one of them under
 /// [`regs::REGISTER_BYTES`], which [`I219::open`] refuses a smaller window
-/// than. That is the whole of what makes an implementation free to be one
-/// volatile access with no bound of its own.
+/// than.
 pub trait Registers {
-    /// Bytes the window covers. A field read.
+    /// Bytes the window covers.
     fn bytes(&self) -> usize;
     /// One volatile 32-bit load. Volatile because the device writes the same
     /// bytes, and a plain load of a status register can be hoisted out of the
@@ -106,7 +106,7 @@ pub trait Clock {
 /// when a store to DMA memory becomes visible to a device live in the
 /// implementation and nowhere above it.
 pub trait DmaBuffers {
-    /// Bytes in the grant. A field read.
+    /// Bytes in the grant.
     fn bytes(&self) -> usize;
     /// Where the device reaches byte `at`. Never a physical address once a
     /// unit translates for this function.
@@ -127,36 +127,44 @@ pub trait DmaBuffers {
     fn observe(&self);
 }
 
-/// A message arriving on this function's interrupt.
+/// What the claim answered when its interrupt record was read.
+///
+/// **The implementation hands the answer over and decides nothing about it**:
+/// which refusal means "nothing arrived" and which means the function is no
+/// longer this driver's is [`I219::begin_pass`]'s call, made once and tested on
+/// the host.
 pub trait Interrupts {
-    /// How many have arrived since the last call; zero for none. The count is
-    /// never what a message *meant* — that is in `ICR` and in the rings.
-    fn taken(&self) -> u32;
+    /// The word the substrate refuses with.
+    type Refused: PartialEq + core::fmt::Debug;
+    /// The one refusal that is ordinary: nothing since the last read.
+    const IDLE: Self::Refused;
+    /// Messages that have arrived since the last call. The count is never what
+    /// a message *meant* — that is in `ICR` and in the rings.
+    fn taken(&self) -> Result<u32, Self::Refused>;
 }
 
-/// How many receive descriptors the ring holds.
-///
-/// §7.1.8: `RDLEN` "must be a multiple of 128", so the count is a multiple of
-/// eight. Two hundred and fifty-six 2048-byte buffers is half a megabyte of
-/// grant and a millisecond of gigabit line rate — enough that a pass this
-/// driver's caller spends elsewhere does not overrun the ring.
+/// How many receive descriptors the ring holds. §7.1.8: `RDLEN` "must be a
+/// multiple of 128", so the count is a multiple of eight.
 pub const RX_RING: usize = 256;
-/// How many transmit descriptors the ring holds. Sixteen, because a frame is
-/// handed to the device the moment it is filled and reclaimed on the next
-/// send: what this bounds is how many may be in flight at once.
+/// How many transmit descriptors the ring holds. A frame is handed to the
+/// device the moment it is filled and reclaimed on the next send, so what this
+/// bounds is how many may be in flight at once.
 pub const TX_RING: usize = 16;
-/// Bytes per receive buffer — `RCTL.BSIZE = 00b` with `BSEX` clear
-/// (§10.2.5.1).
+/// Bytes per receive buffer — `RCTL.BSIZE = 00b` with `BSEX` clear (§10.2.5.1).
 pub const RX_BUF_BYTES: usize = 2048;
-/// Bytes per transmit buffer. One frame each, and `RCTL.LPE` is clear so
-/// nothing on this link is longer than 1522 bytes.
+/// Bytes per transmit buffer, and therefore the longest frame [`I219::tx_reserve`]
+/// takes.
 pub const TX_BUF_BYTES: usize = 2048;
 
-/// §7.1.8 and §7.2.4: both ring lengths are programmed in bytes and "must be
-/// a multiple of 128", so both counts are a multiple of eight.
 const _: () = {
+    // §7.1.8 and §7.2.4: both ring lengths are programmed in bytes and "must be
+    // a multiple of 128".
     assert!((RX_RING * rx_desc::BYTES).is_multiple_of(128));
     assert!((TX_RING * tx_desc::BYTES).is_multiple_of(128));
+    // §10.2.5.8 and §10.2.6.7: head and tail are sixteen-bit descriptor
+    // indices, so a ring longer than that could not be pointed at.
+    assert!(RX_RING <= u16::MAX as usize);
+    assert!(TX_RING <= u16::MAX as usize);
 };
 
 /// The grant's layout. One grant, because every byte of it is this process's
@@ -182,13 +190,11 @@ const _: () = {
 /// **A ring that never empties is a ring the specification permits**: at line
 /// rate the device refills descriptors as fast as they are returned, and a
 /// caller that loops until the ring is empty never returns to its other work.
-/// The budget is what makes "no more this pass" a thing this driver can say —
-/// [`I219::begin_pass`] is where it is given back.
 pub const RX_BUDGET: u32 = 64;
 
-/// Why the function was not brought up. Each keeps its own word: a caller
-/// asks different things of a grant that is too small and of a part with no
-/// station address.
+/// Why the function was not brought up. Each keeps its own word: a caller asks
+/// different things of a grant that is too small and of a part with no station
+/// address.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
     /// The register window is smaller than the register file this driver
@@ -245,15 +251,15 @@ impl core::fmt::Display for Refusal {
 /// each of these is a claim about this driver's own memory and the only safe
 /// answer is to drop the frame and give the buffer back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RxRefusal {
+pub(crate) enum RxRefusal {
     /// More bytes than the buffer the descriptor was given. The one that
     /// matters most: this number becomes the length of a slice.
     Length { len: u32 },
     /// §7.1.3.4's error bits, valid because `EOP` and `DD` are both set.
     Errors { errors: u8 },
-    /// `DD` without `EOP`: with `RCTL.LPE` clear no frame can span two
-    /// 2048-byte buffers, so a device that split one is not answering the
-    /// configuration it was given.
+    /// `DD` without `EOP`: no frame on this link can span two 2048-byte
+    /// buffers, so a device that split one is not answering the configuration
+    /// it was given.
     Split,
     /// Nothing in it — §7.1.7.2's null descriptor padding, or a frame shorter
     /// than an Ethernet header.
@@ -269,12 +275,19 @@ pub struct Link {
     pub full_duplex: bool,
 }
 
-/// One received frame: where its bytes are in the grant, and which descriptor
-/// has to be given back once they have been read.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// One received frame, and the receipt for the buffer it arrived in.
+///
+/// **There is no index a caller can get wrong**: the descriptor this stands for
+/// is the frame's own, [`I219::rx_done`] takes the receipt by value, and
+/// nothing outside this crate can make a second one. Receipts are given back in
+/// the order they were issued, which is what makes one `RDT` write enough
+/// (§7.1.8: the tail "identifies the location beyond the last descriptor
+/// hardware can process") — and a caller holding two at once is what netd's
+/// `&mut self` on `Device::receive` makes unrepresentable.
+#[must_use = "a frame whose buffer is never given back is a receive slot lost for the boot"]
+#[derive(PartialEq, Eq, Debug)]
 pub struct Frame {
-    /// The descriptor and buffer this frame arrived in.
-    pub index: usize,
+    index: usize,
     /// Byte offset of the frame's first byte inside the grant.
     pub at: usize,
     /// Bytes of frame, the Ethernet CRC already stripped by `RCTL.SECRC`.
@@ -325,20 +338,14 @@ pub struct Counters {
     pub overruns: u32,
     /// `ICR.RXDMT0`: free descriptors fell to the threshold.
     pub starved: u32,
+    /// Frames the caller offered that no transmit buffer holds.
+    pub too_long: u32,
     /// Frames dropped for want of a free transmit descriptor. A count and not
     /// a wait: a server never blocks, and a dropped frame's recovery is the
     /// peer's retransmit.
     pub tx_dropped: u32,
-    /// Messages that arrived with no cause set in `ICR`.
-    ///
-    /// §7.4.5's spurious interrupt — "in the time after the ICR bit is cleared
-    /// and the interrupt service routine services the cause [...] another
-    /// cause event occurs that is then serviced by this ISR call" — and, on
-    /// this substrate, the same race one step further out: the kernel counts a
-    /// message on its own, so a pass that read `ICR` before the message it
-    /// belonged to was taken leaves the next pass a message with nothing left
-    /// to do. Both cost a pass and nothing else, which is why this count is
-    /// carried in a diagnostic and never raises one.
+    /// Messages that arrived with no cause set in `ICR` — §7.4.5's spurious
+    /// interrupt. It costs a pass and nothing else.
     pub spurious: u32,
 }
 
@@ -368,9 +375,6 @@ pub struct I219<R, C, D, I> {
     irq: I,
     mac: [u8; 6],
     link: Link,
-    /// Whether this part answered §10.2.4.9's `IVAR`, and therefore whether it
-    /// is one whose causes reach a vector through it.
-    msix: bool,
     /// When [`Self::open`] returned, and when the link first came up — the two
     /// the caller subtracts to get a link-up time.
     opened_at: u64,
@@ -474,29 +478,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // every cause is acknowledged by the write-back in `begin_pass`.
         regs.write(regs::EIAC, 0);
 
-        // §10.2.4.9: `IVAR` "is only valid in MSI-X mode", and a part that has
-        // no MSI-X has no `IVAR` either — the I219 is one. **Written and read
-        // back**, so which of the two this is comes from the part rather than
-        // from a guess: a register that takes the value has the allocation,
-        // and one that answers zero has the single message the classic causes
-        // already drive.
-        //
-        // Without it a part in MSI-X mode is silent: every cause is allocated
-        // to no vector at reset, so `ICR` fills and nothing is ever delivered.
-        // QEMU's `e1000e` behaves exactly so, and netd then runs on its poll
-        // timer alone.
-        regs.write(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
-        let msix = regs.read(regs::IVAR) == ivar::ALL_ON_VECTOR_ZERO;
-
-        // No moderation on either side: §10.2.4.2's throttle and the two
-        // receive timers all hold an interrupt back, and what this driver
-        // waits on is the frame that has already arrived.
-        regs.write(regs::ITR, 0);
-        regs.write(regs::RDTR, 0);
-        regs.write(regs::RADV, 0);
-        regs.write(regs::TIDV, 0);
-        regs.write(regs::TADV, 0);
-
         let mut nic = Self {
             regs,
             clock,
@@ -504,7 +485,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             irq,
             mac,
             link: Link::default(),
-            msix,
             opened_at: 0,
             link_up_at: None,
             rx_next: 0,
@@ -514,6 +494,24 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             tx_clean: 0,
             counters: Counters::default(),
         };
+
+        // §10.2.4.9: `IVAR` allocates every cause to no vector at reset, so a
+        // part in MSI-X mode with it unprogrammed fills `ICR` and delivers
+        // nothing. Read back, because the document defines the register only
+        // "in MSI-X mode" and says nothing about what a part outside that mode
+        // answers — so a part that does not take the write is refused here
+        // rather than driven on a guess about which interrupt it would raise.
+        nic.regs.write(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
+        nic.accepted(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO)?;
+
+        // No moderation on either side: §10.2.4.2's throttle and the two
+        // receive timers all hold an interrupt back, and what this driver
+        // waits on is the frame that has already arrived.
+        nic.regs.write(regs::ITR, 0);
+        nic.regs.write(regs::RDTR, 0);
+        nic.regs.write(regs::RADV, 0);
+        nic.regs.write(regs::TIDV, 0);
+        nic.regs.write(regs::TADV, 0);
 
         nic.arm_rx_ring();
         nic.arm_tx_ring();
@@ -533,21 +531,16 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.accepted(regs::RCTL, rx)?;
 
         // §4.6.5: and only now the mask, so no cause can arrive before there
-        // is a ring to answer it with. The MSI-X names go in beside the
-        // classic ones on a part that allocates vectors, because on that part
-        // they are the only ones a vector is allocated to.
-        let mask = if nic.msix { cause::ENABLED | cause::ENABLED_MSIX } else { cause::ENABLED };
-        nic.regs.write(regs::IMS, mask);
+        // is a ring to answer it with.
+        nic.regs.write(regs::IMS, cause::ENABLED | cause::ENABLED_MSIX);
 
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
         Ok(nic)
     }
 
-    /// A register wrote what it was told. Read back rather than assumed: the
-    /// two registers this checks are the ones that decide whether the part
-    /// moves a frame at all, so a window that is not the register file is
-    /// refused here instead of looking like a dead network.
+    /// A register wrote what it was told, so a window that is not this register
+    /// file is refused here instead of looking like a dead network.
     fn accepted(&self, reg: usize, wrote: u32) -> Result<(), Refusal> {
         let read = self.regs.read(reg);
         if read & wrote == wrote {
@@ -612,12 +605,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.link
     }
 
-    /// Whether this part allocates its causes to MSI-X vectors (§10.2.4.9),
-    /// which is what it answered when `IVAR` was written and read back.
-    pub fn msix(&self) -> bool {
-        self.msix
-    }
-
     pub fn counters(&self) -> Counters {
         self.counters
     }
@@ -633,10 +620,17 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     ///
     /// **The record has to be taken, not merely noticed**: a claim reads ready
     /// while it holds an undrained interrupt, so a caller that saw the token
-    /// and left it would find the same one on every later wait.
-    pub fn begin_pass(&mut self) -> Pass {
+    /// and left it would find the same one on every later wait. A claim that
+    /// refuses to answer at all is not a pass with no messages in it — the
+    /// function is no longer this driver's, and the refusal is handed up rather
+    /// than counted as quiet.
+    pub fn begin_pass(&mut self) -> Result<Pass, I::Refused> {
         self.rx_budget = RX_BUDGET;
-        let messages = self.irq.taken();
+        let messages = match self.irq.taken() {
+            Ok(count) => count,
+            Err(why) if why == I::IDLE => 0,
+            Err(why) => return Err(why),
+        };
 
         // Once, and written back. §10.2.4.1's case 3 says a read with no
         // interrupt asserted has no side effect at all, so a driver that
@@ -667,7 +661,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         if causes & cause::LSC != 0 || !self.link.up {
             self.refresh_link();
         }
-        Pass { messages, causes, link_changed: self.link != before }
+        Ok(Pass { messages, causes, link_changed: self.link != before })
     }
 
     /// Re-read `STATUS` and take what it says about the link.
@@ -717,11 +711,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             self.rx_budget -= 1;
             match parse_rx(word) {
                 Ok(len) => {
-                    return Some(Frame {
-                        index,
-                        at: OFF_RX_BUFS + index * RX_BUF_BYTES,
-                        len,
-                    })
+                    return Some(Frame { index, at: OFF_RX_BUFS + index * RX_BUF_BYTES, len })
                 }
                 Err(why) => {
                     match why {
@@ -738,26 +728,18 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
                             self.counters.empty = self.counters.empty.saturating_add(1)
                         }
                     }
-                    self.rx_done(index);
+                    self.give_back(index);
                 }
             }
         }
     }
 
-    /// Give buffer `index` back to the device, its frame having been read.
-    ///
-    /// **Buffers come back in the order they were handed out**, which is what
-    /// makes one `RDT` write enough: §7.1.8's tail "identifies the location
-    /// beyond the last descriptor hardware can process", so it can only ever
-    /// be advanced over a run of descriptors that are all ready. A buffer
-    /// never given back is a receive slot lost for the boot.
-    pub fn rx_done(&mut self, index: usize) {
-        let expected = (self.rx_tail + 1) % RX_RING;
-        assert!(
-            index == expected,
-            "toyos-i219: buffer {index} came back out of turn; {expected} is the one the \
-             receive tail can move over"
-        );
+    /// Give a frame's buffer back to the device, its bytes having been read.
+    pub fn rx_done(&mut self, frame: Frame) {
+        self.give_back(frame.index);
+    }
+
+    fn give_back(&mut self, index: usize) {
         self.publish_rx(index);
         self.rx_tail = index;
         // §7.1.8: the device fetches on the tail write, so the descriptor has
@@ -767,15 +749,19 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     }
 
     /// Take a transmit descriptor and its buffer, or `None` where every one is
-    /// in flight.
+    /// in flight or the frame does not fit one.
     ///
     /// Non-blocking by construction. A caller with no slot drops the frame:
     /// spinning on the ring here would park its whole event loop on a device.
     pub fn tx_reserve(&mut self, len: usize) -> Option<TxSlot> {
-        assert!(
-            len <= TX_BUF_BYTES,
-            "toyos-i219: a {len}-byte frame does not fit a {TX_BUF_BYTES}-byte buffer"
-        );
+        // §7.2.10.1: one legacy descriptor carries one buffer, and this
+        // driver's is `TX_BUF_BYTES`. A longer frame is refused rather than
+        // truncated into one, and counted apart from a full ring because it is
+        // a caller that offered more than it was told it could.
+        if len > TX_BUF_BYTES {
+            self.counters.too_long = self.counters.too_long.saturating_add(1);
+            return None;
+        }
         self.reclaim_tx();
         // §7.2.4: hardware owns `[TDH..TDT)`, so a ring filled to the last
         // descriptor would wrap the tail onto the head and read as empty.
@@ -820,11 +806,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             self.tx_clean = (self.tx_clean + 1) % TX_RING;
         }
     }
-
-    /// Transmit descriptors nothing is in flight on.
-    pub fn tx_free(&self) -> usize {
-        TX_RING - 1 - (self.tx_next + TX_RING - self.tx_clean) % TX_RING
-    }
 }
 
 /// What a written-back receive descriptor must satisfy, as bit arithmetic on
@@ -833,7 +814,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
 /// Separate from the volatile reads so the tests can drive it with words no
 /// working part would write. Each arm is a way to make this driver act on a
 /// number the device chose.
-pub fn parse_rx(word: u64) -> Result<usize, RxRefusal> {
+pub(crate) fn parse_rx(word: u64) -> Result<usize, RxRefusal> {
     let len = ((word >> rx_desc::LENGTH_SHIFT) & rx_desc::LENGTH_MASK) as u32;
     let status = ((word >> rx_desc::STATUS_SHIFT) & rx_desc::BYTE_MASK) as u8;
     let errors = ((word >> rx_desc::ERRORS_SHIFT) & rx_desc::BYTE_MASK) as u8;
