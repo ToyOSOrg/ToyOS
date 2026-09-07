@@ -169,6 +169,17 @@ sleeplock-acquire-off = []
 #
 # Never on by default, and no kernel build can reach it.
 durability-settle-blind = []
+# The negative control for a claimed PCI function's interrupt record. It makes
+# `pcidev/record.rs`'s publication and observation `Relaxed`, so a reader can
+# see a count with the timestamp that belongs to it still unwritten, and
+# `device_irq.rs` must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features device-irq-relaxed \
+#     --test device_irq
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+device-irq-relaxed = []
 
 [dependencies]
 loom = "0.7"

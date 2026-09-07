@@ -2020,6 +2020,9 @@ mod tests {
             [
                 "boot-actuators",
                 "debug-wait",
+                // Costs no kernel build, for `wake-fence-off`'s reason: only
+                // `kernel-loom` turns it on, and `device_irq` must red under it.
+                "device-irq-relaxed",
                 // Does this kernel reach a pass, a trap or a syscall with the
                 // direction flag set. No gate clears `DF` and
                 // `compiler_builtins::mem::memmove` sets it across three `rep`
@@ -2605,14 +2608,18 @@ mod tests {
         assert!(one_claimant_per_device(&bad).is_err());
     }
 
-    /// A class name the ABI does not know renders fine and leaves init with a
+    /// A device name the ABI does not know renders fine and leaves init with a
     /// `devices` entry it cannot mint — a dead machine for a typo, where this is
     /// a red in milliseconds. Same for a `syscap` right.
+    ///
+    /// The ABI's own parser, not a copy of it: a `pci:<vendor>:<device>` entry
+    /// names a function and a class name names a class, and this is the same
+    /// `DeviceRequest::parse` init and the kernel read the entry with.
     fn names_only_real_capabilities(cfg: &SystemConfig) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
-            for class in &prog.devices {
-                if toyos_manifest::DeviceType::from_class_name(class).is_none() {
-                    return Err(format!("`{name}` names device class `{class}`, which is not one"));
+            for device in &prog.devices {
+                if toyos_manifest::DeviceRequest::parse(device).is_none() {
+                    return Err(format!("`{name}` names device `{device}`, which is not one"));
                 }
             }
             toyos_manifest::syscap_rights(&prog.syscap)
@@ -2629,6 +2636,11 @@ mod tests {
         let bad_class: SystemConfig =
             toml::from_str("[programs.a]\ndevices = [\"gpu\"]\n").unwrap();
         assert!(names_only_real_capabilities(&bad_class).is_err());
+        // A PCI entry that names no function is the same defect one level down,
+        // and the one a hand-written config is most likely to make.
+        let bad_function: SystemConfig =
+            toml::from_str("[programs.a]\ndevices = [\"pci:1af4\"]\n").unwrap();
+        assert!(names_only_real_capabilities(&bad_function).is_err());
         let bad_right: SystemConfig =
             toml::from_str("[programs.a]\nsyscap = [\"root\"]\n").unwrap();
         assert!(names_only_real_capabilities(&bad_right).is_err());

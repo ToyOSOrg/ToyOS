@@ -667,8 +667,11 @@ fn drain_irqs() {
     // Repaints the panel if whoever owns the screen has drawn over the report.
     crate::drivers::panic_console::hold_report();
 
-    if crate::irq_ring::take(crate::irq_ring::IrqSource::Net).is_some() {
-        crate::inbox::Source::Network.wake();
+    if crate::irq_ring::take(crate::irq_ring::IrqSource::UserDev).is_some() {
+        // Which claim it was is the per-slot flag `pcidev` keeps; the record
+        // here says only that a pass is owed, so one function's interrupt does
+        // not wake every user driver in the machine.
+        crate::pcidev::drain_pending();
     }
     if crate::irq_ring::take(crate::irq_ring::IrqSource::Audio).is_some() {
         // Both backends share one wait queue — `Source::wake` posts `AUDIO_WATCH`

@@ -8,7 +8,7 @@
 //! of the five is exactly what init endowed.
 
 use toyos_abi::handle::Rights;
-use toyos_abi::syscall::{self, DeviceType, SyscallError};
+use toyos_abi::syscall::{self, DeviceRequest, DeviceType, SyscallError};
 
 use crate::endow::FromHandle;
 use crate::{AsHandle, OwnedHandle, RawHandle};
@@ -23,7 +23,25 @@ impl SysCap {
     /// and endows nothing for — not a failure. `AlreadyExists` is another
     /// process holding the class, which is a different fact and stays loud.
     pub fn claim<T: FromHandle>(&self, class: DeviceType) -> Result<T, SyscallError> {
-        let raw = syscall::device_claim(self.0.raw(), class)?;
+        self.mint(DeviceRequest::Class(class))
+    }
+
+    /// Mint the claim for one PCI function, named by what identifies the card.
+    ///
+    /// Apart from [`Self::claim`] rather than one call taking a
+    /// [`DeviceRequest`], so there is no way to ask for
+    /// [`DeviceType::PciFunction`] with no function named: a class is the whole
+    /// of what the call above asks for, and this one cannot be asked without an
+    /// id.
+    pub fn claim_pci<T: FromHandle>(
+        &self,
+        id: toyos_abi::syscall::PciId,
+    ) -> Result<T, SyscallError> {
+        self.mint(DeviceRequest::Pci(id))
+    }
+
+    fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
+        let raw = syscall::device_claim(self.0.raw(), request)?;
         // SAFETY: the kernel installed this handle in this process's table for
         // this call and no other, so nothing else answers for it.
         Ok(unsafe { T::from_handle(raw) })

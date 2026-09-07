@@ -289,6 +289,18 @@ pub fn remap_pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Delivery<Pi
     }
 }
 
+/// Record that `bus:device.function` is driven by a process on `slot`, or is no
+/// longer driven by one.
+///
+/// What the fault handler needs it for is its *terminal* action. A stream every
+/// driver of which is in this kernel has nothing to hand a fault to, so the
+/// response is a halt; a stream a process drives has an owner to refuse, and
+/// the machine keeps running. Takes the triple rather than a [`StreamId`], like
+/// [`remap_msi`]: what a requester id is stays in this module.
+pub fn note_user_owned(bus: u8, device: u8, function: u8, slot: Option<usize>) {
+    vtd::fault::user_owned(StreamId::pci(bus, device, function), slot);
+}
+
 /// Reached from the IDT gate the unit's own `FEDATA` names.
 ///
 /// Fires when a device has been told no, so what it reports is a bug in whoever owns that device, not in the IOMMU.

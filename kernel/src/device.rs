@@ -31,12 +31,20 @@ fn taken(class: DeviceType) -> &'static Lock<bool> {
         .expect("`DeviceType::ALL` names every class")]
 }
 
-/// A move-only proof that a device class is claimed; at most one exists per class.
+/// A move-only proof that a device is claimed; at most one exists per device.
 ///
 /// The exclusivity reaches userland because `DeviceClaim` is created without
 /// `Rights::DUP`, so at most one handle to it can ever exist.
 pub struct Claim {
-    class: DeviceType,
+    what: Claimed,
+}
+
+/// What one claim holds. A class is at most one device on this machine and a
+/// per-class flag says whether it is taken; a PCI function is one of several,
+/// so what it gives back is its `pcidev` slot.
+enum Claimed {
+    Class(DeviceType),
+    PciFunction(usize),
 }
 
 impl Claim {
@@ -46,13 +54,26 @@ impl Claim {
             return Err(ClaimError::Owned);
         }
         *held = true;
-        Ok(Self { class })
+        Ok(Self { what: Claimed::Class(class) })
+    }
+
+    /// The guard for a `pcidev` slot the caller has already reserved.
+    ///
+    /// It exists from the moment the slot is taken, so a bring-up that refuses
+    /// half way through frees the slot on the way out rather than stranding it.
+    pub(crate) fn pci(slot: usize) -> Self {
+        Self { what: Claimed::PciFunction(slot) }
     }
 }
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        *taken(self.class).lock() = false;
+        match self.what {
+            Claimed::Class(class) => *taken(class).lock() = false,
+            // Bus mastering off, then the domain, then the pages: `release`
+            // owns that order, and this is where a dying process reaches it.
+            Claimed::PciFunction(slot) => crate::pcidev::release(slot),
+        }
     }
 }
 
@@ -62,20 +83,38 @@ pub fn set_framebuffer_info(screen: Screen) {
     *FB_INFO.lock() = Some(screen);
 }
 
-/// Why a claim did not succeed — distinguishes "no such device" from "already held" so callers can degrade correctly.
+/// Why a claim did not succeed. Carried apart rather than collapsed: a caller
+/// degrades on "no such device" and reports the rest, and one word for all of
+/// them sends whoever reads the line looking in the wrong place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClaimError {
     /// Another process holds the claim.
     Owned,
     /// This machine has no such device — no driver ever registered one.
     Absent,
+    /// The name matches more than one function on this machine. Refused rather
+    /// than resolved to the first: a config asking for one of two identical
+    /// cards cannot say which, and picking would be the kernel deciding.
+    Ambiguous,
+    /// A driver in this kernel already binds that function; two drivers on one
+    /// device is not something a claim may create.
+    KernelDriven,
+    /// Every slot that can carry a driven function is taken.
+    Exhausted,
+    /// The function is there and could not be handed over — no MSI-X, no
+    /// window to move a BAR into, an address it did not take. The kernel names
+    /// which at the site.
+    Unusable,
 }
 
 /// Try to claim exclusive access to a device.
 ///
 /// `Claim` lives on this stack frame until the returned object takes it, so a
-/// failure after `acquire` cannot leave a class held by nobody.
-pub fn try_claim(class: DeviceType) -> Result<Arc<DeviceClaim>, ClaimError> {
+/// failure after `acquire` cannot leave a device held by nobody.
+///
+/// `selector` says *which* device where the class alone does not — today that
+/// is a PCI function's vendor and device id, and every other class ignores it.
+pub fn try_claim(class: DeviceType, selector: u64) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
         DeviceType::Keyboard => {
@@ -103,10 +142,14 @@ pub fn try_claim(class: DeviceType) -> Result<Arc<DeviceClaim>, ClaimError> {
             crate::drivers::panic_console::screen_claimed_by_userland();
             Ok(DeviceClaim::new(class, framebuffer_info(screen), claim))
         }
-        DeviceType::Nic => {
-            let (info, dma) = crate::net::nic_info().ok_or(ClaimError::Absent)?;
-            let claim = Claim::acquire(class)?;
-            Ok(DeviceClaim::new(class, DeviceInfo::Nic(info, shm(dma)), claim))
+        DeviceType::PciFunction => {
+            let id = toyos_abi::syscall::PciId::from_wire(selector)
+                .ok_or(ClaimError::Absent)?;
+            // The slot's own guard, taken inside: a PCI claim's exclusivity is
+            // per function rather than per class, so there is no flag here to
+            // acquire first.
+            let (info, slot, claim) = crate::pcidev::claim(id)?;
+            Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info, slot), claim))
         }
         DeviceType::HdaAudio => {
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;

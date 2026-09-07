@@ -663,7 +663,7 @@ fn reset_stream(stream: Mmio) -> bool {
 /// panic, over a peripheral.
 fn arm_interrupt(pci: &PciDevice) -> bool {
     let vector = crate::arch::idt::HDA_VECTOR;
-    if pci.enable_msix(vector) || pci.enable_msi(vector) {
+    if pci.enable_msix(vector).is_some() || pci.enable_msi(vector) {
         return true;
     }
     log!(

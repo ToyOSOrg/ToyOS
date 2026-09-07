@@ -11,6 +11,8 @@ const DEVICE_ID: u64 = 0x02;
 const COMMAND: u64 = 0x04;
 /// `COMMAND` bit 2, PCI 3.0 §6.2.2: without it the function issues no transaction of its own.
 const BUS_MASTER: u16 = 0x04;
+/// `COMMAND` bit 1, PCI 3.0 §6.2.2: without it the function decodes none of its BARs.
+const MEMORY_SPACE: u16 = 0x02;
 const PROG_IF: u64 = 0x09;
 const SUBCLASS: u64 = 0x0A;
 const CLASS: u64 = 0x0B;
@@ -172,10 +174,39 @@ impl PciDevice {
         self.mmio.write_u32(offset, val)
     }
 
-    /// Enable memory space access and bus mastering in PCI command register.
-    pub fn enable_bus_master(&self) {
+    /// Memory decode, without bus mastering: the BARs answer, and the function
+    /// still issues no transaction of its own.
+    pub fn enable_memory_space(&self) {
+        self.set_memory_decode(true);
+    }
+
+    /// `COMMAND` bit 1, PCI 3.0 §6.2.2. Off across a BAR write, so nothing can
+    /// read through a register that is half-programmed.
+    pub fn set_memory_decode(&self, on: bool) {
         let cmd = self.mmio.read_u16(COMMAND);
-        self.mmio.write_u16(COMMAND, cmd | 0x06);
+        self.mmio.write_u16(COMMAND, if on { cmd | MEMORY_SPACE } else { cmd & !MEMORY_SPACE });
+    }
+
+    /// Bus mastering alone, on a function whose memory decode is already on.
+    ///
+    /// Split from [`Self::enable_bus_master`] because a function handed to a
+    /// process must not master the bus until its address space at the unit
+    /// exists, and its BARs have to answer before that.
+    pub fn start_bus_mastering(&self) {
+        let cmd = self.mmio.read_u16(COMMAND);
+        self.mmio.write_u16(COMMAND, cmd | BUS_MASTER);
+    }
+
+    /// Enable memory space access and bus mastering in PCI command register.
+    ///
+    /// **What a kernel driver calls, and nothing else does**, which is why it
+    /// is where a function is recorded as this kernel's: the set of functions
+    /// the kernel drives is exactly the set it lets reach memory, so no list
+    /// has to be kept in step by hand.
+    pub fn enable_bus_master(&self) {
+        crate::pcidev::note_kernel_driver(self);
+        self.enable_memory_space();
+        self.start_bus_mastering();
     }
 
     /// Clear bus mastering only — memory space stays, so config and BAR reads still work.
@@ -183,18 +214,21 @@ impl PciDevice {
         stop_bus_mastering(self.mmio);
     }
 
-    /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it, or return false if MSI-X cannot be armed.
-    pub fn enable_msix(&self, vector: u8) -> bool {
-        let Some(cap) = self.capabilities().find(|c| c.id() == msix::CAP_ID) else {
-            return false;
-        };
+    /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it.
+    ///
+    /// Answers the entry's own window, which stays this kernel's: masking is a
+    /// write to it, and a claimant that could reach it could aim the device's
+    /// message at any address the LAPIC decodes. `None` is MSI-X that could not
+    /// be armed.
+    pub fn enable_msix(&self, vector: u8) -> Option<Mmio> {
+        let cap = self.capabilities().find(|c| c.id() == msix::CAP_ID)?;
         let control = cap.read_u16(msix::MESSAGE_CONTROL);
         let table = match msix::Msix::decode(control, cap.read_u32(msix::TABLE)) {
             Ok(table) => table,
             Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: MSI-X not armed, {}",
                     self.bus, self.dev, self.func, why);
-                return false;
+                return None;
             }
         };
         // Decoded, not assumed memory: a device may name a BAR that is an I/O BAR.
@@ -203,7 +237,7 @@ impl PciDevice {
             Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: MSI-X not armed, its table names BAR {} and {}",
                     self.bus, self.dev, self.func, table.bir(), why);
-                return false;
+                return None;
             }
         };
         let address = match table.table_address(base) {
@@ -211,13 +245,11 @@ impl PciDevice {
             Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: MSI-X not armed, {}",
                     self.bus, self.dev, self.func, why);
-                return false;
+                return None;
             }
         };
 
-        let Some((message, data)) = self.message(vector) else {
-            return false;
-        };
+        let (message, data) = self.message(vector)?;
 
         let entry = address + MSIX_ENTRY as u64 * msix::ENTRY_BYTES;
         let table = crate::mm::paging::map_mmio(entry, 0x1000, MmioPolicy::Uncacheable);
@@ -233,7 +265,7 @@ impl PciDevice {
             table.read_u32(msix::ENTRY_ADDRESS_LO),
             table.read_u32(msix::ENTRY_DATA),
         );
-        true
+        Some(table)
     }
 
     /// The message as the device's own registers hold it, read back rather than restated.

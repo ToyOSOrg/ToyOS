@@ -16,6 +16,10 @@ use toyos::ipc::{Connection, IpcPayload, RxStep};
 /// reason. **The class is closed at the kernel now** — a `ConsoleObject` per
 /// holder buffers a line and emits it whole under one `BackendGuard` — so what
 /// this still buys is one syscall per line instead of one per fragment.
+/// Exported so the driver beside this file can speak in netd's own name: the
+/// console's speakers are derived from the manifest, and a line from a module
+/// of this program is still this program's.
+#[macro_export]
 macro_rules! say {
     ($($arg:tt)*) => {{
         use std::io::Write;
@@ -25,10 +29,18 @@ macro_rules! say {
     }};
 }
 
+mod virtio_net;
+
+/// The card this program drives, named by what identifies it rather than by the
+/// slot firmware put it in. `1041` is virtio's transitional device id `1000 +
+/// 1` for a network device (virtio 1.2 §5.1.1); the manifest row spells the
+/// same pair, and the claim arrives under a label composed from it.
+const VIRTIO_NET: PciId = PciId { vendor: 0x1af4, device: 0x1041 };
+
 use toyos::endow;
-use toyos::shm;
-use toyos_abi::syscall::DeviceType;
-use toyos::{Nic as NicDev, Pipe};
+use toyos::Pipe;
+use toyos_abi::syscall::PciId;
+use virtio_net::VirtioNet;
 
 use toyos::net::*;
 
@@ -42,48 +54,15 @@ use std::net::Ipv4Addr;
 
 // --- smoltcp Device wrapper ---
 
+/// The driver, as smoltcp's `Device`.
+///
+/// A thin adapter now: what used to be here — the DMA region a claim handed
+/// over, the offsets the kernel described it with, and three syscalls per frame
+/// — is `virtio_net`, which is the driver itself. Every token below borrows the
+/// driver rather than a claim handle, because the ring the token gives back to
+/// is this process's own.
 struct DmaNic {
-    _dma_region: shm::SharedMemory,
-    rx_base: *const u8,
-    rx_buf_size: usize,
-    tx_buf: *mut u8,
-    net_hdr_size: usize,
-    mac: [u8; 6],
-    nic: NicDev,
-}
-
-impl DmaNic {
-    /// Bring up the DMA rings behind a claim `/system/bin/init` minted and endowed.
-    ///
-    /// Whether this machine *has* a NIC is answered before netd's first
-    /// instruction — metal-sim has none, and neither does the target laptop
-    /// until its own driver exists — so the absent case is a missing endowment
-    /// label and not an error here. What is left is the kernel contradicting
-    /// its own description, which is a bug rather than a machine.
-    fn open(nic_dev: NicDev) -> Self {
-        let info = nic_dev.info().expect("netd: failed to read NicInfo");
-
-        let rx_buf_size = info.rx_buf_size as usize;
-        let dma_region = shm::SharedMemory::adopt(info.dma, 2 * 1024 * 1024)
-            .expect("the DMA region the NIC claim just handed over");
-        let dma_base = dma_region.as_ptr() as *const u8;
-        let rx_base = unsafe { dma_base.add(info.rx_buf_offset as usize) };
-        let tx_ptr = unsafe { dma_base.add(info.tx_buf_offset as usize) as *mut u8 };
-
-        Self {
-            _dma_region: dma_region,
-            rx_base,
-            rx_buf_size,
-            tx_buf: tx_ptr,
-            net_hdr_size: info.net_hdr_size as usize,
-            mac: info.mac,
-            nic: nic_dev,
-        }
-    }
-
-    fn rx_buf(&self, idx: usize) -> *const u8 {
-        unsafe { self.rx_base.add(idx * self.rx_buf_size) }
-    }
+    nic: VirtioNet,
 }
 
 impl Device for DmaNic {
@@ -91,29 +70,15 @@ impl Device for DmaNic {
     type TxToken<'a> = DmaTxToken<'a>;
 
     fn receive(&mut self, _timestamp: SmoltcpInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        // netd holds the NIC claim, so a refusal here is a kernel-side bug,
-        // not a condition to swallow.
-        let v = self.nic.rx_poll().expect("netd holds the NIC claim");
-        if v == 0 { return None; }
-        let (buf_idx, frame_len) = ((v >> 16) as usize, (v & 0xFFFF) as usize);
-        // Safety: The data slice borrows from the DMA region via the device's lifetime 'a.
-        // smoltcp's RxToken::consume takes self by value with FnOnce(&[u8]) -> R, so the
-        // callback cannot store the reference. nic_rx_done is called after the callback
-        // returns, ensuring the DMA buffer is only refilled after smoltcp is done with it.
-        let data = unsafe {
-            core::slice::from_raw_parts(
-                self.rx_buf(buf_idx).add(self.net_hdr_size),
-                frame_len,
-            )
-        };
+        let (buf_idx, frame_len) = self.nic.poll_rx()?;
         Some((
-            DmaRxToken { data, buf_idx, nic: &self.nic },
-            DmaTxToken { tx_buf: self.tx_buf, net_hdr_size: self.net_hdr_size, nic: &self.nic },
+            DmaRxToken { buf_idx, frame_len, nic: &self.nic },
+            DmaTxToken { nic: &self.nic },
         ))
     }
 
     fn transmit(&mut self, _timestamp: SmoltcpInstant) -> Option<Self::TxToken<'_>> {
-        Some(DmaTxToken { tx_buf: self.tx_buf, net_hdr_size: self.net_hdr_size, nic: &self.nic })
+        Some(DmaTxToken { nic: &self.nic })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -125,45 +90,39 @@ impl Device for DmaNic {
 }
 
 struct DmaRxToken<'a> {
-    data: &'a [u8],
     buf_idx: usize,
-    /// The claim the refill is made through — the authority, not a pid the
-    /// kernel would have had to look up.
-    nic: &'a NicDev,
+    frame_len: usize,
+    nic: &'a VirtioNet,
 }
 
-impl<'a> phy::RxToken for DmaRxToken<'a> {
+impl phy::RxToken for DmaRxToken<'_> {
     fn consume<R, F>(self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
     {
-        let result = f(self.data);
-        self.nic.rx_done(self.buf_idx as u64).expect("netd holds the NIC claim");
+        // The borrow ends with `f`, and the buffer goes back to the device only
+        // afterwards: smoltcp's `consume` takes `FnOnce(&[u8])`, so the
+        // callback cannot keep the reference past its own return.
+        let result = f(self.nic.rx_frame(self.buf_idx, self.frame_len));
+        self.nic.rx_done(self.buf_idx);
         result
     }
 }
 
 struct DmaTxToken<'a> {
-    tx_buf: *mut u8,
-    net_hdr_size: usize,
-    nic: &'a NicDev,
+    nic: &'a VirtioNet,
 }
 
-impl<'a> phy::TxToken for DmaTxToken<'a> {
+impl phy::TxToken for DmaTxToken<'_> {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        unsafe {
-            core::ptr::write_bytes(self.tx_buf, 0, self.net_hdr_size);
-            let frame = core::slice::from_raw_parts_mut(
-                self.tx_buf.add(self.net_hdr_size),
-                len,
-            );
-            let result = f(frame);
-            self.nic.tx((self.net_hdr_size + len) as u64).expect("netd holds the NIC claim");
-            result
-        }
+        let result = f(self.nic.tx_frame(len));
+        // A refused transmit is a frame dropped for want of a head, which is
+        // the peer's retransmit to recover — smoltcp's token cannot say no.
+        let _ = self.nic.tx(len);
+        result
     }
 }
 
@@ -1214,14 +1173,21 @@ fn main() {
     // before either process does, a client's connection is queued on it whether
     // or not this program ever reaches `accept`, and if netd exits the queued
     // client sees `Gone` rather than silence.
-    let Some(nic) = endow::device::<NicDev>(DeviceType::Nic) else {
+    let Some(claim) = endow::pci_function::<toyos::PciDev>(VIRTIO_NET) else {
         say!("netd: no NIC on this machine, exiting");
         return;
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    let mut device = DmaNic::open(nic);
-    let mac = device.mac;
+    // A device this driver cannot bring up is not a machine without a NIC: the
+    // claim was minted, so something the device said is not what this driver
+    // understands, and that is loud.
+    let nic = match VirtioNet::open(claim) {
+        Ok(nic) => nic,
+        Err(why) => panic!("netd: the NIC this program was given is not one it can drive — {why}"),
+    };
+    let mac = nic.mac();
+    let mut device = DmaNic { nic };
 
     say!(
         "netd: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -1305,7 +1271,7 @@ fn main() {
         };
 
         poller.watch(&acceptor, READABLE, TOKEN_LISTENER);
-        poller.watch(&device.nic, READABLE, TOKEN_NIC);
+        poller.watch(device.nic.claim(), READABLE, TOKEN_NIC);
 
         // Submit POLL_ADD for each active tx pipe (client → netd direction)
         for (i, conn) in daemon.piped_connections.iter().enumerate() {
@@ -1334,6 +1300,15 @@ fn main() {
 
         let mut ready: Vec<u64> = Vec::new();
         poller.wait(1, timeout, |token| ready.push(token));
+
+        // **The record has to be taken, not merely noticed.** A claim reads
+        // ready while it holds an undrained interrupt, so a pass that saw the
+        // token and left it would find the same one on the next `wait` and
+        // every one after it. What the message meant is in the rings, which
+        // `iface.poll` reads at the top of the loop.
+        if ready.contains(&TOKEN_NIC) {
+            device.nic.take_interrupt();
+        }
 
         // A handshake that never completes is why this deadline exists, and the
         // sweep has to happen on a pass that found nothing ready too —

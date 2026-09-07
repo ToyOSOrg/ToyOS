@@ -171,6 +171,11 @@ pub mod log_registry;
 #[path = "../../kernel/src/sched/reap_gate.rs"]
 pub mod reap_gate;
 
+/// The interrupt record a claimed PCI function's ISR writes and its holder
+/// reads. Pure `core` atomics and nothing else, so it compiles here unshimmed.
+#[path = "../../kernel/src/pcidev/record.rs"]
+pub mod device_irq;
+
 #[path = "../../kernel/src/sched/poison.rs"]
 pub mod poison;
 

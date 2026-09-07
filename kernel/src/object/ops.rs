@@ -234,7 +234,7 @@ pub fn read_source(object: &KObjectRef) -> Option<Source> {
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => Some(Source::Keyboard),
             device_registry::DeviceType::Mouse => Some(Source::Mouse),
-            device_registry::DeviceType::Nic => Some(Source::Network),
+            device_registry::DeviceType::PciFunction => d.pci_slot().map(|slot| Source::PciFunction(slot as u8)),
             device_registry::DeviceType::HdaAudio => Some(Source::Hda),
             device_registry::DeviceType::VirtioSound => Some(Source::VirtioSound),
             device_registry::DeviceType::Framebuffer => None,
@@ -331,8 +331,21 @@ pub fn read_device(
             other => panic!("a {other:?} claim answers with events"),
             }
         }
-        device_registry::DeviceType::Framebuffer | device_registry::DeviceType::Nic => {
-            Some(claim.describe(table, buf))
+        device_registry::DeviceType::Framebuffer => Some(claim.describe(table, buf)),
+        // The description first and interrupts after, the shape the HDA stub
+        // has: a driver reads what it is driving once, and everything it reads
+        // afterwards is what its device has been doing.
+        device_registry::DeviceType::PciFunction => {
+            if !claim.info_read() {
+                return Some(claim.describe(table, buf));
+            }
+            if buf.len() < toyos_abi::pci::DeviceIrqRecord::SIZE {
+                return Some(SyscallError::InvalidArgument.to_u64());
+            }
+            let slot = claim.pci_slot().expect("a PCI claim knows its slot");
+            let record = crate::pcidev::take_record(slot)?;
+            buf.write_at(0, record_bytes(&record));
+            Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
         }
         device_registry::DeviceType::HdaAudio => {
             if !claim.info_read() {
@@ -355,6 +368,23 @@ pub fn read_device(
             let n = crate::drivers::virtio_sound::drain_completed(buf);
             if n == 0 { None } else { Some(n as u64) }
         }
+    }
+}
+
+/// One interrupt record as the bytes that cross the boundary.
+///
+/// Every byte belongs to a field — the record's own `const _` in `toyos-abi`
+/// proves the layout has no gap — so nothing of this kernel's stack is
+/// published with it.
+fn record_bytes(record: &toyos_abi::pci::DeviceIrqRecord) -> &[u8] {
+    // SAFETY: `record` is a live `&DeviceIrqRecord`, readable for its own size,
+    // and the layout assertion beside its declaration proves every byte of that
+    // width is an initialised field.
+    unsafe {
+        core::slice::from_raw_parts(
+            record as *const _ as *const u8,
+            toyos_abi::pci::DeviceIrqRecord::SIZE,
+        )
     }
 }
 
@@ -510,7 +540,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             device_registry::DeviceType::Keyboard => FileType::Keyboard,
             device_registry::DeviceType::Mouse => FileType::Mouse,
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
-            device_registry::DeviceType::Nic => FileType::Nic,
+            device_registry::DeviceType::PciFunction => FileType::Unknown,
             device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound => FileType::Unknown,
         }),
@@ -628,7 +658,9 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => keyboard::has_data(),
             device_registry::DeviceType::Mouse => mouse::has_data(),
-            device_registry::DeviceType::Nic => crate::net::has_packet(),
+            device_registry::DeviceType::PciFunction => {
+                !d.info_read() || d.pci_slot().is_some_and(crate::pcidev::has_irq)
+            }
             device_registry::DeviceType::Framebuffer => true,
             device_registry::DeviceType::HdaAudio => {
                 !d.info_read() || crate::drivers::hda::has_pending()

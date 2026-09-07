@@ -103,9 +103,11 @@ const DEATHS: &[(&str, Died, Died)] = &[
     // `machine_check_handler`, the one exception a Ring 3 frame does not make
     // the process's fault. Also `-> !`.
     ("MACHINE CHECK", Died::Kernel, Died::Kernel),
-    // kernel/src/iommu/vtd/fault.rs — every stream on this machine is
-    // kernel-owned, so a DMA fault is a kernel bug and the handler halts.
-    ("iommu: DMA FAULT", Died::Kernel, Died::Kernel),
+    // kernel/src/iommu/vtd/fault.rs — a fault on a stream this kernel drives
+    // has nobody to hand it to, so the handler halts. One a *process* drives
+    // says `owner=slot<N>` and the machine goes on, which is why the needle is
+    // the owner rather than the fault.
+    ("iommu: DMA FAULT owner=kernel", Died::Kernel, Died::Kernel),
     // kernel/src/main.rs — a panic that landed on a CPU already inside a fault
     // or a report. The rest of the line is `panic::last_words`: which of the
     // four states it found, what that first crash was, and where the second
@@ -480,9 +482,18 @@ pub fn self_check() -> Result<(), String> {
         ),
         ("[kernel 0.443 cpu0] MACHINE CHECK on CPU 3", Some(Died::Kernel)),
         (
-            "[kernel 4.100 cpu0] iommu: DMA FAULT unit0 stream=00:1f.2 addr=0x1000 access=read \
-             reason=0x06 unknown",
+            "[kernel 4.100 cpu0] iommu: DMA FAULT owner=kernel unit0 stream=00:1f.2 \
+             addr=0x1000 access=read reason=0x06 unknown",
             Some(Died::Kernel),
+        ),
+        // The same fault on a stream a *process* drives. The machine is still
+        // running, so the vocabulary must not read this as a death — and the
+        // two lines differ in one field, which is what makes the case worth
+        // stating rather than assuming.
+        (
+            "[kernel 4.100 cpu0] iommu: DMA FAULT owner=slot0 unit0 stream=00:03.0 \
+             addr=0x1000 access=read reason=0x06 read-permission",
+            None,
         ),
         ("[kernel 0.001 cpu0] EARLY PANIC: nothing is up yet", Some(Died::Kernel)),
         (

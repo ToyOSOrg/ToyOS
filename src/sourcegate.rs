@@ -217,8 +217,6 @@ const BANS: &[Ban] = &[
         needle: ": u32 = 4096",
         why: "as above, in the other width",
         allowed: &[
-            // A device's RX buffer.
-            ("kernel/src/drivers/virtio_net.rs", 1),
             // The block size this driver reads a disk in.
             ("kernel/src/drivers/xhci/wait/msc.rs", 1),
         ],
@@ -395,9 +393,14 @@ fn kernel_lines() -> Vec<(String, usize, String)> {
 const LOG_PRODUCERS: &[&str] = &["log!(", "alert!(", "boot_phase!(", "log::emit("];
 
 /// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
-/// Arming DMA comes after a site's refusals (virtio parses first and disarms
-/// on refusal; virtio_net once re-armed it before the parse), and the three
-/// early-enabling MMIO drivers are `issues/isolation/`'s to fix, not a precedent.
+/// Arming DMA comes after a site's refusals — virtio parses its capability
+/// chain first and disarms on one it cannot use — and the three early-enabling
+/// MMIO drivers are `issues/isolation/`'s to fix, not a precedent.
+///
+/// A function handed to a *process* takes the other path: `pcidev` arms bus
+/// mastering with `start_bus_mastering`, after the address space that bounds it
+/// exists, so `enable_bus_master` stays what a kernel driver calls and the
+/// count below stays the census of drivers this kernel has.
 const BUS_MASTER_SITES: &[(&str, usize)] = &[
     ("kernel/src/drivers/pci.rs", 1),
     ("kernel/src/drivers/virtio.rs", 1),

@@ -22,9 +22,13 @@ start = ["logd", "netd", "test-runner"]
 [programs.logd]
 syscap = ["logread"]
 
+# netd holds the NIC's PCI function and drives it: the virtqueues, the register
+# window and the interrupt are its own, and the kernel keeps only the claim.
+# Named by vendor and device rather than by slot, so one row finds the card
+# wherever firmware put it.
 [programs.netd]
 serves = ["netd"]
-devices = ["nic"]
+devices = ["pci:1af4:1041"]
 
 # `launcher` for `launcher_refusals`, whose subject is what a client can make
 # `/system/bin/init` do — so the test estate has to be able to reach it somewhere.

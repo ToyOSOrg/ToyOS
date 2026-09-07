@@ -115,9 +115,10 @@ pub const SYS_CLOCK_EPOCH: u64 = 75;
 /// could guess, not making a duplex object out of two simplex ends.
 pub const SYS_CONNECTION_JOIN: u64 = 76;
 pub const SYS_PIPE_MAP: u64 = 77;
-pub const SYS_NIC_RX_POLL: u64 = 78;
-pub const SYS_NIC_RX_DONE: u64 = 79;
-pub const SYS_NIC_TX: u64 = 80;
+// Syscall numbers 78-80 unused (formerly SYS_NIC_RX_POLL, SYS_NIC_RX_DONE and
+// SYS_NIC_TX: a NIC driver inside the kernel answering for its claimant. A
+// claimed PCI function's driver is the claimant, and reaches its device
+// through SYS_DEVICE_BAR_MAP, SYS_DEVICE_DMA_ALLOC and its claim handle).
 pub const SYS_SYMLINK: u64 = 81;
 pub const SYS_READLINK: u64 = 82;
 pub const SYS_GPU_SET_RESOLUTION: u64 = 83;
@@ -510,7 +511,9 @@ pub enum FileType {
     Tty = 6,
     Mouse = 7,
     Socket = 8,
-    Nic = 9,
+    // 9 was `Nic`, the type a claim on the kernel's own NIC driver reported.
+    // A claim on a PCI function reports `Unknown`: what it is, is the driver's
+    // to know, and this kernel does not know it.
 }
 
 impl FileType {
@@ -525,7 +528,6 @@ impl FileType {
             6 => Some(Self::Tty),
             7 => Some(Self::Mouse),
             8 => Some(Self::Socket),
-            9 => Some(Self::Nic),
             _ => None,
         }
     }
@@ -1166,7 +1168,9 @@ device_classes! {
     Keyboard = 0 => "keyboard",
     Mouse = 1 => "mouse",
     Framebuffer = 2 => "framebuffer",
-    Nic = 3 => "nic",
+    // 3 was `Nic`: a network card the kernel drove, whose holder got rx and tx
+    // tokens. Retired rather than reused for `PciFunction`, since a caller
+    // that still names 3 wants a capability of a different shape.
     // 4 was `Audio`, a sound card the kernel drove on the claimant's behalf.
     // Retired rather than reused for the stubs below: a claim here authorizes
     // register writes and answers no submit, so a caller that still names 4 is
@@ -1179,17 +1183,21 @@ device_classes! {
     /// decision above that — the stream, the rate, the format, when a period is
     /// published — belongs to whoever holds this.
     VirtioSound = 6 => "virtio-sound",
+    /// One PCI function, driven by whoever holds the claim: the kernel binds no
+    /// driver to it, keeps config space, puts it in an address space of its own
+    /// before it lets it master the bus, and programs its interrupt vector.
+    ///
+    /// The one class whose name is not the whole of what a config writes —
+    /// `pci:<vendor>:<device>` names which function, and [`DeviceRequest`] is
+    /// the one parser of that spelling.
+    PciFunction = 7 => "pci",
 }
 
 /// A PCI function named by what identifies the *card*, not the slot firmware
-/// happened to put it in.
-///
-/// Bus/device/function would name a position: the same card is `00:03.0` on one
-/// machine and `00:1f.6` on another, and a config that named a position would
-/// hand a program whatever the firmware put there. A vendor/device pair names
-/// what the driver is a driver for. The cost is that a machine with two of one
-/// card has an ambiguous name, and the kernel refuses that by name rather than
-/// picking the first.
+/// put it in: the same card is `00:03.0` on one machine and `00:1f.6` on
+/// another, so a name that was a position would hand a program whatever was
+/// there. A machine holding two of one card has an ambiguous name, which
+/// [`device_claim`] refuses rather than resolving.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PciId {
     pub vendor: u16,
@@ -1236,18 +1244,102 @@ fn hex16(text: &str) -> Option<u16> {
     Some(value)
 }
 
-/// Mint a device claim for `class`, presenting a `SysCap` handle that carries
-/// [`Rights::DEVICE`]. `NotFound` for a class no driver registered — init
-/// endows what exists and logs what it did not.
+/// What one `devices` entry asks for: a class, and for
+/// [`DeviceType::PciFunction`] which function.
+///
+/// One parser, because four places read the same spelling — the build system's
+/// gate, `/system/bin/init`'s mint, the kernel's claim and the claimant's own
+/// lookup — and a second would be a name a config can write and a program
+/// cannot find.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeviceRequest {
+    Class(DeviceType),
+    Pci(PciId),
+}
+
+impl DeviceRequest {
+    /// The spelling that carries a function id after the class name.
+    pub const PCI_PREFIX: &'static str = "pci:";
+
+    /// The longest a `devices` entry, and so a `dev:` label's tail, can be.
+    pub const MAX_NAME: usize = 16;
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.strip_prefix(Self::PCI_PREFIX) {
+            Some(id) => PciId::parse(id).map(Self::Pci),
+            // A bare `pci` names no function, and `from_class_name` would
+            // otherwise accept it and leave the selector at zero.
+            None if name == DeviceType::PciFunction.class_name() => None,
+            None => DeviceType::from_class_name(name).map(Self::Class),
+        }
+    }
+
+    pub const fn class(self) -> DeviceType {
+        match self {
+            Self::Class(class) => class,
+            Self::Pci(_) => DeviceType::PciFunction,
+        }
+    }
+
+    pub const fn selector(self) -> u64 {
+        match self {
+            Self::Class(_) => 0,
+            Self::Pci(id) => id.wire(),
+        }
+    }
+
+    /// This request's `devices` spelling written into `buf`, which
+    /// [`Self::MAX_NAME`] bounds. The name is also the tail of the `dev:` label
+    /// the claim arrives under, and it is composed here so the two cannot drift.
+    pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> &str {
+        let id = match self {
+            Self::Class(class) => {
+                let name = class.class_name();
+                buf[..name.len()].copy_from_slice(name.as_bytes());
+                return core::str::from_utf8(&buf[..name.len()]).expect("a class name is ASCII");
+            }
+            Self::Pci(id) => id,
+        };
+        let prefix = Self::PCI_PREFIX.as_bytes();
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let mut at = prefix.len();
+        for value in [id.vendor, id.device] {
+            if at != prefix.len() {
+                buf[at] = b':';
+                at += 1;
+            }
+            for shift in [12, 8, 4, 0] {
+                buf[at] = HEX[((value >> shift) & 0xF) as usize];
+                at += 1;
+            }
+        }
+        core::str::from_utf8(&buf[..at]).expect("hex digits and colons are ASCII")
+    }
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// Mint a device claim for `request`, presenting a `SysCap` handle that carries
+/// [`Rights::DEVICE`]. `NotFound` for a class no driver registered, or a PCI
+/// function this machine does not have — init endows what exists and logs what
+/// it did not. `AlreadyExists` names one already claimed; a PCI request
+/// matching more than one function answers `InvalidArgument`, because an
+/// ambiguous name is refused rather than resolved to the first match.
 ///
 /// The claim comes back **without** [`Rights::DUP`], so it can only be moved,
 /// which is what makes endowing one to a child a provable hand-off.
 ///
 /// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
 /// [`Rights::DUP`]: crate::handle::Rights::DUP
-pub fn device_claim(syscap: RawHandle, class: DeviceType) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_DEVICE_CLAIM, syscap.0 as u64, class as u64, 0, 0))
-        .map(|v| RawHandle(v as u32))
+pub fn device_claim(syscap: RawHandle, request: DeviceRequest) -> Result<RawHandle, SyscallError> {
+    check(syscall(
+        SYS_DEVICE_CLAIM,
+        syscap.0 as u64,
+        request.class() as u64,
+        request.selector(),
+        0,
+    ))
+    .map(|v| RawHandle(v as u32))
 }
 
 /// Enter the real-time scheduling band, presenting a `SysCap` handle that
@@ -1772,76 +1864,45 @@ pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
     check(syscall(SYS_PIPE_MAP, handle.0 as u64, 0, 0, 0)).map(|v| v as *mut u8)
 }
 
-/// Poll for a received frame, presenting the NIC claim. Returns
-/// `(buf_index << 16) | frame_len`, or 0 if none.
+/// Map one memory BAR of a claimed PCI function, as an object `SYS_SHM_MAP`
+/// maps read/write and uncacheable.
 ///
-/// Fallible: the kernel refuses a handle that is not a live NIC claim. The
-/// packed success value tops out at `(255 << 16) | 4096`, far below the range
-/// `SyscallError::from_u64` claims, so nothing is ambiguous.
-pub fn nic_rx_poll(claim: RawHandle) -> Result<u64, SyscallError> {
-    check(syscall(SYS_NIC_RX_POLL, claim.0 as u64, 0, 0, 0))
-}
-
-/// Tell the kernel to refill RX buffer `buf_index` after consuming the frame.
+/// `InvalidArgument` for an index that names no memory BAR, and for the BAR
+/// holding this function's MSI-X table or PBA: masking is [`device_irq_mask`]'s,
+/// and a process that could write the table could aim the device's interrupt at
+/// any address the LAPIC decodes.
 ///
-/// A dropped refill costs an RX slot permanently: 256 of them and the NIC
-/// stops receiving.
-pub fn nic_rx_done(claim: RawHandle, buf_index: u64) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_NIC_RX_DONE, claim.0 as u64, buf_index, 0, 0))
-}
-
-/// Submit the TX DMA buffer to hardware. `total_len` includes the net header.
-///
-/// A refused submit means the frame never goes out, which must not be
-/// indistinguishable from a delivered one.
-pub fn nic_tx(claim: RawHandle, total_len: u64) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_NIC_TX, claim.0 as u64, total_len, 0, 0))
-}
-
-/// Map one memory BAR of a claimed PCI function, as a shared-memory object.
-///
-/// The answer is a handle `SYS_SHM_MAP` maps read/write and uncacheable, over
-/// the BAR the kernel enumerated for this function and nothing else. The kernel
-/// refuses an index that names no memory BAR, and refuses the BAR that holds
-/// this function's MSI-X table or PBA: masking is [`device_irq_mask`]'s, and a
-/// process that could write the table could aim the device's interrupt at any
-/// address the LAPIC decodes.
-///
-/// Mapping is idempotent per BAR — a second call answers the same object, so a
-/// caller that maps twice does not hold two handles to one window.
+/// Idempotent per BAR: a second call answers the same object.
 pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_DEVICE_BAR_MAP, claim.0 as u64, bar as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
 }
 
-/// A DMA buffer for a claimed PCI function: memory mapped into this process and
-/// into that function's own address space at the unit, and into no other.
+/// A DMA buffer for a claimed PCI function: memory in this process's address
+/// space and in that function's own at the unit, and in no other's.
 ///
-/// Both addresses come back because they are two different things — where the
-/// bytes are in this process, and what a descriptor must carry for the device
-/// to reach them. Nothing else in this ABI turns one into the other, and an
-/// address the caller invents instead is one the device's domain does not map:
-/// the unit refuses the access and records it.
-///
-/// `bytes` is rounded up to whole 2 MiB pages, which is this kernel's only
-/// translation granularity at both the CPU and the unit.
-///
-/// # Safety
-/// `out` must be a writable `DmaGrant` this thread owns for the call.
-pub unsafe fn device_dma_alloc(
-    claim: RawHandle,
-    bytes: u64,
-    out: *mut DmaGrant,
-) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_DEVICE_DMA_ALLOC, claim.0 as u64, bytes, out as u64, 0))
+/// An address the caller invents instead of the one this answers is one the
+/// function's domain does not map, and the unit refuses the access. `bytes` is
+/// rounded up to whole 2 MiB pages.
+pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
+    let mut grant =
+        DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };
+    // SAFETY: `grant` is this frame's own, live and exclusively borrowed across
+    // the call, so the kernel's write lands in a `DmaGrant` nothing else names.
+    check_unit(syscall(
+        SYS_DEVICE_DMA_ALLOC,
+        claim.0 as u64,
+        bytes,
+        &mut grant as *mut DmaGrant as u64,
+        0,
+    ))?;
+    Ok(grant)
 }
 
 /// Mask or unmask the claimed function's interrupt.
 ///
-/// Through the claim rather than through the register window, because the
-/// window a claimant maps deliberately excludes the MSI-X table: the vector in
-/// it is the kernel's, and a driver that could rewrite it could point the
-/// device's message anywhere.
+/// Through the claim rather than the register window, which deliberately
+/// excludes the MSI-X table: the vector in it is the kernel's.
 pub fn device_irq_mask(claim: RawHandle, masked: bool) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_DEVICE_IRQ_MASK, claim.0 as u64, masked as u64, 0, 0))
 }
@@ -2074,6 +2135,45 @@ mod tests {
         assert_eq!(PciId::parse("1AF4:1041"), Some(want));
         for bad in ["1af4:41", "1af4", "1af4:1041:", "", ":", "zzzz:1041", "1af4:104g"] {
             assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
+        }
+    }
+
+    /// The four readers of a `devices` entry share this parser, so what it
+    /// accepts is what a config may say.
+    #[test]
+    fn a_devices_entry_is_a_class_or_one_named_function() {
+        let want = DeviceRequest::Pci(PciId { vendor: 0x1af4, device: 0x1041 });
+        assert_eq!(DeviceRequest::parse("pci:1af4:1041"), Some(want));
+        assert_eq!(want.class(), DeviceType::PciFunction);
+        assert_eq!(want.selector(), 0x1af4_1041);
+        assert_eq!(
+            DeviceRequest::parse("framebuffer"),
+            Some(DeviceRequest::Class(DeviceType::Framebuffer))
+        );
+        assert_eq!(DeviceRequest::Class(DeviceType::Framebuffer).selector(), 0);
+        // Every one of these is a name a config could plausibly write and the
+        // kernel must not resolve to a function.
+        for bad in [
+            "pci",  // the bare class name names no function at all
+            "pci:", // nor does the prefix on its own
+            "pci:1af4",
+            "nic",  // the retired class the NIC used to be claimed as
+            "gpu",  // a class name this table has never had
+            "",
+        ] {
+            assert_eq!(DeviceRequest::parse(bad), None, "{bad:?} parsed");
+        }
+    }
+
+    /// A claim is found again by the label init wrote it under, and the label's
+    /// tail is this name: a round trip that lost a digit would be a claim its
+    /// holder cannot look up.
+    #[test]
+    fn a_request_writes_back_the_name_it_parsed() {
+        for name in ["pci:1af4:1041", "pci:8086:15fc", "pci:0000:0000", "hda-audio", "mouse"] {
+            let request = DeviceRequest::parse(name).expect("a name this table has");
+            let mut buf = [0u8; DeviceRequest::MAX_NAME];
+            assert_eq!(request.write_name(&mut buf), name);
         }
     }
 

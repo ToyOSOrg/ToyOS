@@ -87,7 +87,7 @@ mod inbox;
 mod pipe;
 
 mod device;
-mod net;
+mod pcidev;
 mod gpu;
 mod user_ptr;
 mod vma;
@@ -113,7 +113,7 @@ use crate::mm::paging::MmioPolicy;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use arch::{apic, cpu, idt, pat, percpu, smp, syscall};
-use drivers::{acpi, gop, i8042, ioapic, nvme, pci, serial, virtio_console, virtio_gpu, virtio_net, virtio_sound, xhci};
+use drivers::{acpi, gop, i8042, ioapic, nvme, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
 #[panic_handler]
@@ -411,6 +411,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
         .expect("ACPI: failed to find ECAM base address");
     let ecam = mm::paging::map_mmio(ecam_base, 256 * 32 * 8 * 4096, MmioPolicy::Uncacheable);
     let pci_devices = pci::enumerate(&ecam);
+    // Before any driver `init`: this sizes every BAR on the machine, and the
+    // spec's probe takes memory decode off the function it is sizing for the
+    // length of it. Nothing has bound yet, so nothing is mid-transfer.
+    pcidev::publish(&pci_devices);
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();
@@ -586,7 +590,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     virtio_console::init(&pci_devices);
-    virtio_net::init(&pci_devices);
 
     virtio_sound::init(&pci_devices);
     drivers::hda::init(&pci_devices);

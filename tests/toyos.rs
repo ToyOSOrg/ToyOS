@@ -384,6 +384,11 @@ const RUST_SKIP: &[&str] = &[
 /// what the host staged: the shipping build here, `sched_check_build`'s
 /// assert-carrying build there.
 const DRIVEN_AND_SHARED: &[&str] = &[
+    // Its shared run is a whole handle-lifecycle gate with its own census;
+    // `userdev_dma_fault` drives the same binary for a different reason
+    // entirely — as the proof the machine still schedules and spawns after a
+    // device was refused at the unit — and stages nothing for it.
+    "handle_basic",
     "hierarchy_paths",
     "null_sink_client_exits",
     "nvme_home_roundtrip",
@@ -1112,6 +1117,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("iommu_gpu_foreign_backing", Sched::Parallel, Tier::Fast),
     ("iommu_hda_foreign_bdl", Sched::Parallel, Tier::Fast),
     ("iommu_sound_foreign_dma", Sched::Parallel, Tier::Fast),
+    // The one arm of that family whose device is driven by a *process*, and
+    // the only one whose verdict is that the machine is still running.
+    ("userdev_dma_fault", Sched::Parallel, Tier::Fast),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -9464,6 +9472,9 @@ fn run_machine_test(
         "iommu_sound_foreign_dma" => {
             common::iommu::iommu_sound_foreign_dma(test_config, c_bins, rust_bins)
         }
+        "userdev_dma_fault" => {
+            common::iommu::userdev_dma_fault(test_config, c_bins, rust_bins)
+        }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
         "hda_client_stall" => common::hda::hda_client_stall(test_config, c_bins, rust_bins),
@@ -12365,11 +12376,20 @@ fn run_machine_test(
             // this log arrived over virtio-console, whose TX path is
             // `submit_and_wait` around the same `poll_used`. A parse that
             // refused a correct element would have produced no capture to
-            // search — but virtio-net says so in its own words, so that the
+            // search — but virtio-sound says so in its own words, so that the
             // legal case is *named* rather than inferred from the test running
-            // at all.
-            if !log.contains("VirtIO net: MAC") {
-                return Err(format!("the NIC did not come up on this boot\n{log}"));
+            // at all: the line below is the answer its control queue's used
+            // ring carried back.
+            //
+            // **It was the NIC's line until the NIC's driver moved to netd.**
+            // The witness has to be a driver still on this `Virtqueue`, which
+            // is what the self-test is about; virtio-net's parse is now
+            // `userland/netd/src/virtio_net.rs`'s and has its own tests.
+            if !log.contains("virtio-sound: configured stream") {
+                return Err(format!(
+                    "no virtio driver on this `Virtqueue` completed a legal round trip on this \
+                     boot, so the eleven refusals above are unaccompanied\n{log}"
+                ));
             }
             if let Some(bad) = log.lines().find(|l| l.contains("refused") && l.contains("RX used-ring")) {
                 return Err(format!("a correct completion was refused on the ordinary path: {bad}"));

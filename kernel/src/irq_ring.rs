@@ -13,7 +13,10 @@ use crate::scheduler::MAX_CPUS;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IrqSource {
     Audio,
-    Net,
+    /// Every vector a claimed PCI function delivers on, coalesced into one
+    /// slot: the record only says a pass is owed, and `pcidev` keeps the
+    /// per-slot flag that says whose.
+    UserDev,
     Xhci,
     I8042,
 }

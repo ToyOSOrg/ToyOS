@@ -30,6 +30,9 @@ pub const ENTRY_VECTOR_CONTROL: u64 = 0xC;
 /// Vector Control's bit 0 is the per-entry mask, and it comes out of reset
 /// set: an entry programmed and left alone delivers nothing.
 pub const ENTRY_UNMASKED: u32 = 0;
+/// The same bit put back, for a holder that asks for its interrupt to stop and
+/// for a claim being given up.
+pub const ENTRY_MASKED: u32 = 1;
 
 /// Why this function's MSI-X cannot be armed. Not a failure of the kernel: a
 /// device that publishes one of these is a device whose interrupts the driver

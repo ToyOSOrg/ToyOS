@@ -278,10 +278,22 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     // Refused by name, at a named function, and not by claiming a mode it does
     // not have: the xHCI driver's `polled mode` line is the defect this whole
     // family exists to keep out of the tree.
-    log.must_say("VirtIO net: NOT INITIALISED at PCI")?;
-    log.must_not_say("VirtIO net: MSI-X vector")?;
+    //
+    // **The refusal moved with the driver.** It used to be the kernel's own
+    // virtio-net `init` giving up; it is now the *claim* being refused, before
+    // any driver exists — a function whose interrupt cannot be armed is one
+    // whose holder would never be told anything, and handing it over anyway
+    // would be handing out a device that looks alive and never speaks.
+    log.must_say("pcidev: PCI 00:03.0 NOT HANDED OVER")?;
+    log.must_say("its MSI-X could not be armed")?;
+    log.must_not_say("[1af4:1041] handed over")?;
+    // And the refusal is the *whole* of it: no BAR moved for a function nobody
+    // can be given one.
+    log.must_not_say("pcidev: PCI 00:03.0 BAR")?;
     // All the way out to userland, rather than a kernel that logged a refusal
-    // and handed netd a NIC anyway.
+    // and handed netd a NIC anyway. init names what it could not mint, in the
+    // config's own spelling.
+    log.must_say("init: netd: no pci:1af4:1041 on this machine")?;
     if !log.text().contains(NETD_EXITS) {
         return Err(format!(
             "{}{NETD_EXITS:?} never reached the boot console:\n{}",

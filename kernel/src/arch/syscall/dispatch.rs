@@ -25,7 +25,10 @@ use toyos_untrusted::Untrusted;
 use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH, LOCK_ACROSS_SWITCH_ARMED};
-use super::device::{holds_claim, sys_device_claim, sys_device_reg, sys_gpu_reset_scanout};
+use super::device::{
+    holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc,
+    sys_device_irq_mask, sys_device_reg, sys_gpu_reset_scanout,
+};
 use super::fs::{
     sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink, sys_rename,
     sys_rmdir, sys_symlink,
@@ -85,6 +88,9 @@ retired_syscalls! {
     65 => "SYS_KILL",
     68 => "SYS_PIPE_OPEN",
     70 => "SYS_PIPE_ID",
+    78 => "SYS_NIC_RX_POLL",
+    79 => "SYS_NIC_RX_DONE",
+    80 => "SYS_NIC_TX",
     85 => "SYS_LISTEN",
     87 => "SYS_CONNECT",
     96 => "SYS_SET_RT_PRIORITY",
@@ -374,32 +380,17 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_connection_join(RawHandle(a1 as u32), RawHandle(a2 as u32))
         }
         SYS_PIPE_MAP => sys_pipe_map(RawHandle(a1 as u32)),
-        // All three drive the NIC rings: without the claim, any process could drain
-        // the used ring and exhaust all 256 RX slots by never refilling.
-        SYS_NIC_RX_POLL => {
-            if let Err(e) = holds_claim(RawHandle(a1 as u32), device::DeviceType::Nic) {
-                return e.refuse();
-            }
-            match crate::net::poll_rx() {
-                Some((buf_idx, frame_len)) => ((buf_idx as u64) << 16) | (frame_len as u64),
-                None => 0,
-            }
+        // The three a claimed PCI function's driver is built out of. Each is
+        // gated by the claim handle alone: nothing here takes a bus/device/
+        // function, so a process cannot name a device it was not given.
+        SYS_DEVICE_BAR_MAP => sys_device_bar_map(RawHandle(a1 as u32), a2),
+        SYS_DEVICE_DMA_ALLOC => {
+            let Some(out) = UserAddr::checked(a3) else { return bad_addr };
+            // ctx carries the copy-out: the grant's window is taken before the
+            // allocation, so a bad address leaves no memory nobody was told of.
+            sys_device_dma_alloc(&ctx, RawHandle(a1 as u32), a2, out)
         }
-        SYS_NIC_RX_DONE => {
-            if let Err(e) = holds_claim(RawHandle(a1 as u32), device::DeviceType::Nic) {
-                return e.refuse();
-            }
-            crate::net::refill_rx_buf(a2 as usize).map_or_else(|e| e.to_u64(), |()| 0)
-        }
-        SYS_NIC_TX => {
-            if let Err(e) = holds_claim(RawHandle(a1 as u32), device::DeviceType::Nic) {
-                return e.refuse();
-            }
-            match crate::net::submit_tx(a2 as usize) {
-                Ok(()) => 0,
-                Err(e) => e.to_u64(),
-            }
-        }
+        SYS_DEVICE_IRQ_MASK => sys_device_irq_mask(RawHandle(a1 as u32), a2),
         SYS_SYMLINK => {
             let target = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             let link = match ctx.user_str(UserAddr::new(a3), a4) { Ok(s) => s, Err(e) => return e.to_u64() };
@@ -432,7 +423,7 @@ pub(super) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
             sys_endowments(&mut buf)
         }
-        SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2),
+        SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, a3),
         SYS_RT_ENTER => sys_rt_enter(RawHandle(a1 as u32)),
         SYS_LOG_READ => {
             // checked_mul before mapping: a product that doesn't fit is a bad argument,

@@ -43,7 +43,7 @@ use toyos::port::{self, Acceptor, Connector};
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::syscall::{
-    DeviceType, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
+    DeviceRequest, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
 };
 
 /// The service init answers on. Its own, so it has no `[programs]` row and the
@@ -574,24 +574,30 @@ fn start<'a>(
         taken.push((key, acceptor));
     }
 
-    for class in &program.devices {
-        let class = DeviceType::from_class_name(class)
-            .unwrap_or_else(|| panic!("init: `{class}` is not a device class"));
-        // A class no driver registered is not endowed, and init says which:
-        // "did I get an HDA or a virtio-sound?" becomes "which claims are in
-        // my endowment table?", which is the same question with the answer
-        // already in hand.
-        match syscap.claim::<toyos::Device>(class) {
+    for name in &program.devices {
+        // The build system already refused a config this cannot parse
+        // (`names_only_real_capabilities`), so a failure here is an image built
+        // against a different ABI rather than somebody's typo.
+        let request = DeviceRequest::parse(name)
+            .unwrap_or_else(|| panic!("init: `{name}` is not a device this ABI has"));
+        // A device this machine does not have is not endowed, and init says
+        // which: "did I get an HDA or a virtio-sound?" becomes "which claims
+        // are in my endowment table?", which is the same question with the
+        // answer already in hand.
+        //
+        // The label is the manifest's own spelling, which is exactly what the
+        // claimant looks the claim up by: one string, written once.
+        let minted = match request {
+            DeviceRequest::Class(class) => syscap.claim::<toyos::Device>(class),
+            DeviceRequest::Pci(id) => syscap.claim_pci::<toyos::Device>(id),
+        };
+        match minted {
             Ok(claim) => {
                 let raw = claim.into_raw();
-                command.endow(&format!("{DEV_PREFIX}{}", class.class_name()), raw.0);
+                command.endow(&format!("{DEV_PREFIX}{name}"), raw.0);
                 held.0.push(raw);
             }
-            Err(e) => say!(
-                "init: {}: no {} on this machine ({e:?})",
-                program.name,
-                class.class_name()
-            ),
+            Err(e) => say!("init: {}: no {name} on this machine ({e:?})", program.name),
         }
     }
 
