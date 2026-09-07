@@ -11,6 +11,13 @@
 //! process name in the record is the symlink it was invoked under. The host
 //! reads both out of the log the stick came back with.
 //!
+//! **Every command's number is a span in microseconds**, and never a rate. The
+//! profile that prices them (`tests/metal-profile.toml`) holds a ceiling per
+//! number, and a ceiling is what a duration has: a rate would have to be judged
+//! from below, against a floor nothing in that file can express. What each span
+//! covers is its own module's to say, and the byte count it covers is a
+//! constant there.
+//!
 //! A command that could not measure exits with one of [`Refusal`]'s negative
 //! codes instead, so a missing number is never a small one.
 
@@ -49,8 +56,8 @@ impl Refusal {
 /// there is none.
 pub type Measured = Result<i32, Refusal>;
 
-/// Every command, beside the unit its number is in — read by the host's
-/// profile, which is the only thing that knows what a given number may be.
+/// Every command by the name its symlink gives it. The name is what the
+/// kernel's `exit:` record carries, so it is also the name the profile prices.
 macro_rules! commands {
     ($($name:literal => $run:path),+ $(,)?) => {
         const COMMANDS: &[(&str, fn() -> Measured)] = &[$(($name, $run)),+];
@@ -58,7 +65,7 @@ macro_rules! commands {
 }
 
 commands! {
-    "fbhash" => fb::hash,
+    "fbcheck" => fb::check,
     "fbfill" => fb::fill,
     "fbread" => fb::read_back,
     "usbwrite" => usb::write,
@@ -85,16 +92,16 @@ fn main() {
     }
 }
 
-/// A rate in whole units per second, saturated at [`i32::MAX`] so a number too
-/// large for the channel is still a number and not a wrap.
+/// A span in whole microseconds, saturated at [`i32::MAX`] so a span too long
+/// for the channel is still a number and not a wrap.
 ///
-/// `nanos` is the span the work took and `units` what it moved in the unit the
-/// caller reports; a span of zero has no rate and is refused rather than
-/// divided by.
-pub fn rate(units: u64, nanos: u128) -> Measured {
-    if nanos == 0 {
+/// A span the clock could not tell from zero is refused rather than reported:
+/// the profile would price it against a ceiling it can never reach, and a
+/// measurement that cannot fail is what that file exists to refuse.
+pub fn span(nanos: u128) -> Measured {
+    let micros = nanos / 1_000;
+    if micros == 0 {
         return Err(Refusal::NoDuration);
     }
-    let per_second = (u128::from(units) * 1_000_000_000) / nanos;
-    Ok(i32::try_from(per_second).unwrap_or(i32::MAX))
+    Ok(i32::try_from(micros).unwrap_or(i32::MAX))
 }

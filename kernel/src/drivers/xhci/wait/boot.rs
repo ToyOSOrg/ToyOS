@@ -20,6 +20,7 @@ use super::super::{CAP_RTSOFF, HCC_PPC, XHCI_VECTOR};
 use super::super::{IR0_ERDP, IR0_ERSTBA, IR0_ERSTSZ, IR0_IMAN, IR0_IMOD};
 use super::super::{OFF_CMD_RING, OFF_DCBAA, OFF_ERST, OFF_EVT_RING};
 use super::super::{OP_CONFIG, OP_CRCR, OP_DCBAAP, OP_PAGESIZE, OP_PORT_BASE, OP_USBCMD, OP_USBSTS};
+use super::super::{USBCMD_HCRST, USBCMD_RS, USBSTS_CNR, USBSTS_HCH};
 use super::super::{PORTSC_PP, PORT_REG_SIZE, PORT_WORK_AT, XHCI};
 use super::super::{controller_answers, PORT_DEBOUNCE_NS};
 use super::settles;
@@ -299,21 +300,21 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
     let protocols = read_protocols(&bar, bar_size, hccparams1, max_ports, pci_dev);
 
     let usbcmd = op_base.read_u32(OP_USBCMD);
-    if usbcmd & 1 != 0 {
-        op_base.write_u32(OP_USBCMD, usbcmd & !1);
+    if usbcmd & USBCMD_RS != 0 {
+        op_base.write_u32(OP_USBCMD, usbcmd & !USBCMD_RS);
     }
     let deadline_ms = USB_TIMEOUT_NS / 1_000_000;
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & 1 != 0) {
+    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & USBSTS_HCH != 0) {
         refuse(format_args!("it never halted, within {deadline_ms} ms of being asked to"));
         return None;
     }
 
-    op_base.write_u32(OP_USBCMD, 1 << 1);
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBCMD) & (1 << 1) == 0) {
+    op_base.write_u32(OP_USBCMD, USBCMD_HCRST);
+    if !settles(|| controller_answers() && op_base.read_u32(OP_USBCMD) & USBCMD_HCRST == 0) {
         refuse(format_args!("it held HCRST for {deadline_ms} ms"));
         return None;
     }
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & (1 << 11) == 0) {
+    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & USBSTS_CNR == 0) {
         refuse(format_args!("it stayed Controller Not Ready for {deadline_ms} ms after its reset"));
         return None;
     }

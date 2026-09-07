@@ -101,13 +101,78 @@ pub fn record_panic(records: &[u8]) {
     });
 }
 
+/// What a shutdown still has to say once the log volume is no longer writable.
+///
+/// **A buffer and not the log ring, for two reasons.** A record emitted after
+/// `log::wait_for_durable` either misses the file or lands after the boot's own
+/// last word, and `Rebooting.` being the last line is what a metal boot's
+/// verdict is read from. And the device that would carry it is the one being
+/// shut down. So the account is built here and sealed into the black box, where
+/// the next loader pass prints it into `loader.log`.
+pub struct Said {
+    bytes: [u8; Said::BYTES],
+    len: usize,
+}
+
+impl Said {
+    /// Room for a line per step per controller on a machine with two of them,
+    /// well under the black box's own text area.
+    const BYTES: usize = 1024;
+
+    pub const fn new() -> Self {
+        Self { bytes: [0; Self::BYTES], len: 0 }
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Written only through `write_str`, and cut only at a `char` boundary
+        // there, so what is here is UTF-8; an empty answer rather than a panic
+        // is what this path owes either way.
+        core::str::from_utf8(self.bytes.get(..self.len).unwrap_or(&[])).unwrap_or("")
+    }
+}
+
+impl Default for Said {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Write for Said {
+    /// Appends what fits and drops the rest, cut at a `char` boundary: a
+    /// shutdown may not fail because it had more to say than room to say it.
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let room = Self::BYTES.saturating_sub(self.len);
+        let mut take = room.min(text.len());
+        while take > 0 && !text.is_char_boundary(take) {
+            take -= 1;
+        }
+        let Some(from) = text.get(..take) else { return Ok(()) };
+        if let Some(slot) = self.bytes.get_mut(self.len..self.len + take) {
+            slot.copy_from_slice(from.as_bytes());
+            self.len += take;
+        }
+        Ok(())
+    }
+}
+
 /// Seal that this kernel handed the machine back on purpose, so the next
-/// loader ends the chain instead of reporting a death.
+/// loader ends the chain instead of reporting a death — and with it whatever
+/// the shutdown has to say.
 ///
 /// Called from the quiesce path before the reset, which is the last point at
-/// which this kernel is still the one running.
-pub fn record_done() {
-    seal(State::Done, &[]);
+/// which this kernel is still the one running. **The text is the one channel
+/// the end of a shutdown has**: everything after `log::wait_for_durable` is
+/// written to a log volume that is itself being taken down, so a record made
+/// there reaches no file and only the next loader pass can print it.
+pub fn record_done(said: core::fmt::Arguments) {
+    with_page(|page, stamp| {
+        let mut report = toyos_blackbox::Report::new(page);
+        // Dropped rather than answered: a shutdown that could not say what it
+        // did still handed the machine back on purpose, and the state is what
+        // the next loader reads first.
+        let _ = core::fmt::Write::write_fmt(&mut report, said);
+        report.seal(State::Done, stamp);
+    });
 }
 
 fn seal(state: State, text: &[u8]) {

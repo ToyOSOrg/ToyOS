@@ -8,6 +8,9 @@ pub mod lane;
 pub mod compile;
 #[allow(dead_code)]
 pub mod console;
+/// The device boot: what `tests/metaldevicecase` measures, and its two judges.
+#[allow(dead_code)]
+pub mod devices;
 #[allow(dead_code)]
 pub mod faults;
 #[allow(dead_code)]

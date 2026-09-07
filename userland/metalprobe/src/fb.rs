@@ -16,7 +16,7 @@ use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
 use toyos_abi::syscall::{DeviceType, SYSCAP_LABEL};
 
-use crate::{rate, Measured, Refusal};
+use crate::{span, Measured, Refusal};
 
 /// How many whole-scanout passes each rate is measured over.
 ///
@@ -37,19 +37,6 @@ const READ_PASSES: u64 = 2;
 fn pixel(x: u32, y: u32) -> u32 {
     let mixed = x.wrapping_mul(0x9E37_79B9) ^ y.wrapping_mul(0x85EB_CA6B).rotate_left(13);
     mixed ^ (mixed >> 15)
-}
-
-/// FNV-1a over the words, cut to 30 bits so the answer is a positive `i32` with
-/// room to spare above it: the exit code is the whole channel and a fold that
-/// could reach the sign bit would be read as a refusal.
-fn fold(words: &[u32]) -> i32 {
-    let mut h: u32 = 0x811C_9DC5;
-    for word in words {
-        for byte in word.to_le_bytes() {
-            h = (h ^ u32::from(byte)).wrapping_mul(0x0100_0193);
-        }
-    }
-    (h & 0x3FFF_FFFF) as i32
 }
 
 /// The scanout this process may write, and the shape the driver described it
@@ -131,43 +118,41 @@ impl Scanout {
         }
         self.fence();
     }
-
-    fn bytes(&self) -> u64 {
-        u64::from(self.width) * u64::from(self.height) * 4
-    }
 }
 
-/// The scanout's self-hash: the pattern written, fenced, and read back through
-/// the same mapping. **Exits with the fold of what came back**, which the
-/// profile holds for this machine's mode — a display that dropped a write, a
-/// driver that reported the wrong stride and a mapping whose memory type loses
-/// stores all answer with a different number rather than with silence.
-pub fn hash() -> Measured {
+/// The scanout checked against itself: the pattern written, fenced, and read
+/// back through the same mapping, **word for word**.
+///
+/// The comparison is the verdict and it is made in the guest, where the pattern
+/// is: a display that dropped a store, a driver that reported the wrong stride
+/// and a mapping of the wrong memory type each answer [`Refusal::Disagreed`]
+/// rather than a number. What the mode was is a kernel record (`GOP:`) and not
+/// this job's to carry.
+///
+/// The number is the span of the write and the read together.
+pub fn check() -> Measured {
     let fb = Scanout::claim()?;
+    let began = Instant::now();
     for y in 0..fb.height {
         fb.put(y, &fb.row(y));
     }
     fb.fence();
 
     let mut got = vec![0u32; fb.width as usize];
-    let mut h: u32 = 0x811C_9DC5;
     let mut disagreed = false;
     for y in 0..fb.height {
         fb.get(y, &mut got);
         disagreed |= got != fb.row(y);
-        // Folded per row rather than into one buffer: a whole 1080p readback
-        // held in ordinary memory is 8 MB this process has no reason to own.
-        h ^= fold(&got) as u32;
-        h = h.wrapping_mul(0x0100_0193);
     }
+    let took = began.elapsed();
     fb.clear();
     if disagreed {
         return Err(Refusal::Disagreed);
     }
-    Ok((h & 0x3FFF_FFFF) as i32)
+    span(took.as_nanos())
 }
 
-/// Fill throughput into the scanout, in KiB/s.
+/// The span of [`FILL_PASSES`] whole-scanout fills.
 pub fn fill() -> Measured {
     let fb = Scanout::claim()?;
     let rows: Vec<Vec<u32>> = (0..fb.height).map(|y| fb.row(y)).collect();
@@ -185,13 +170,13 @@ pub fn fill() -> Measured {
         }
         fb.fence();
     }
-    let span = began.elapsed();
+    let took = began.elapsed();
     fb.clear();
-    rate(FILL_PASSES * fb.bytes() / 1024, span.as_nanos())
+    span(took.as_nanos())
 }
 
-/// Readback throughput out of the scanout, in KiB/s — the direction that
-/// misses every cache.
+/// The span of [`READ_PASSES`] whole-scanout readbacks — the direction that
+/// misses every cache, and the one no emulated display can answer.
 pub fn read_back() -> Measured {
     let fb = Scanout::claim()?;
     for y in 0..fb.height {
@@ -213,10 +198,10 @@ pub fn read_back() -> Measured {
             seen ^= got[0];
         }
     }
-    let span = began.elapsed();
+    let took = began.elapsed();
     fb.clear();
     if seen == u32::MAX && got.is_empty() {
         return Err(Refusal::Disagreed);
     }
-    rate(READ_PASSES * fb.bytes() / 1024, span.as_nanos())
+    span(took.as_nanos())
 }

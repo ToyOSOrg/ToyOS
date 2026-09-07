@@ -11,6 +11,7 @@ pub use wait::boot::{init, PORT_POLL, PORT_SETTLE_CEILING};
 pub use wait::msc::{storage_flush, storage_read, storage_write};
 
 use alloc::vec::Vec;
+use core::fmt::{self, Write as _};
 use core::num::NonZeroU8;
 use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 use crate::mm::Mmio;
@@ -42,6 +43,15 @@ const OP_DCBAAP:   u64 = 0x30; // 64-bit
 const OP_CONFIG:   u64 = 0x38;
 const OP_PORT_BASE: u64 = 0x400;
 const PORT_REG_SIZE: u64 = 0x10;
+
+/// USBCMD's Run/Stop and Host Controller Reset, and USBSTS's HCHalted and
+/// Controller Not Ready (xHCI 1.2 §5.4.1, §5.4.2). Named once, because the
+/// bring-up and the shutdown drive the same two registers in opposite
+/// directions and a second spelling of either is a second answer.
+const USBCMD_RS: u32 = 1 << 0;
+const USBCMD_HCRST: u32 = 1 << 1;
+const USBSTS_HCH: u32 = 1 << 0;
+const USBSTS_CNR: u32 = 1 << 11;
 
 // Raw bits for the two paths that work on a word, not a decoded register: read_portsc's actuator injections and init_one's pre-controller port power. Every decision on these bits goes through `Portsc`, never the raw consts, outside these two paths.
 const PORTSC_CCS: u32 = 1 << 0;
@@ -1287,12 +1297,196 @@ impl XhciController {
         self.db_base.write_u32(slot as u64 * 4, dci as u32);
     }
 
+    /// Take this controller down for a reset. See [`quiesce`] for why.
+    ///
+    /// Every step says what it did rather than what it asked for: each register
+    /// is read back, because a controller that ignored a write and one that
+    /// took it are the same instruction and different machines.
+    fn quiesce(&mut self, tally: &mut Quiesced, said: &mut crate::blackbox::Said) {
+        tally.controllers += 1;
+        let (bus, dev, func) = (self.pci.bus, self.pci.dev, self.pci.func);
+        let at = format_args!("{bus:02x}:{dev:02x}.{func}");
+
+        // Run/Stop cleared: a halted controller is reading no ring and driving
+        // no endpoint, which is what makes the reset below a defined act.
+        let cmd = self.op_base.read_u32(OP_USBCMD);
+        self.op_base.write_u32(OP_USBCMD, cmd & !USBCMD_RS);
+        let halted = crate::clock::settles(USB_TIMEOUT_NS, || {
+            self.op_base.read_u32(OP_USBSTS) & USBSTS_HCH != 0
+        });
+        tally.halted += u32::from(halted);
+        let _ = writeln!(
+            said,
+            "usb-quiesce: xHCI {at} halted={halted} USBSTS={:#010x}",
+            self.op_base.read_u32(OP_USBSTS)
+        );
+
+        // The reset a device can act on: HCRST returns every root-hub port to
+        // its powered-off default and the attached devices see the link go
+        // away from a controller that is still there to do it, which is what
+        // lets one resynchronise its endpoints.
+        self.op_base.write_u32(OP_USBCMD, USBCMD_HCRST);
+        let cleared = crate::clock::settles(USB_TIMEOUT_NS, || {
+            self.op_base.read_u32(OP_USBCMD) & USBCMD_HCRST == 0
+        });
+        let ready = crate::clock::settles(USB_TIMEOUT_NS, || {
+            self.op_base.read_u32(OP_USBSTS) & USBSTS_CNR == 0
+        });
+        tally.reset += u32::from(cleared && ready);
+        let _ = writeln!(said, "usb-quiesce: xHCI {at} reset={cleared} ready={ready}");
+
+        // The device's own recovery, and whatever its firmware is still doing
+        // with what the flush handed it, before its power can go.
+        crate::clock::settles(DEVICE_RECOVERY_NS, || false);
+
+        // Port power away where this controller has switches to take it away
+        // with. A controller without Port Power Control ignores the write, and
+        // the read-back count is what says which kind this one is — the same
+        // way `init_one` learns it powering the ports up.
+        let mut down: u32 = 0;
+        for p in 0..self.max_ports {
+            let off = OP_PORT_BASE + p as u64 * PORT_REG_SIZE;
+            let portsc = Portsc::from_raw(self.op_base.read_u32(off));
+            self.op_base.write_u32(off, portsc.neutral().unpowered().raw());
+            if self.op_base.read_u32(off) & PORTSC_PP == 0 {
+                down += 1;
+            }
+        }
+        tally.ports += u32::from(self.max_ports);
+        tally.unpowered += down;
+        let _ = writeln!(said, "usb-quiesce: xHCI {at} {down}/{} port(s) unpowered", self.max_ports);
+
+        // Last, because everything above is an MMIO write this function still
+        // needed: after it the function can issue no DMA at all, so nothing
+        // stale reaches memory the next kernel owns.
+        self.pci.disable_bus_master();
+        let _ = writeln!(said, "usb-quiesce: xHCI {at} bus mastering off");
+    }
+
 }
 
 /// Every xHCI controller on the machine, in PCI enumeration order.
 ///
 /// A `Vec` and not an `Option`: the target laptop has two, and its own ports hang off the second.
 static XHCI: Lock<Vec<XhciController>> = Lock::new(Vec::new());
+
+/// How long a device gets between the bus reset that ends its transactions and
+/// the moment its power goes away.
+///
+/// **The one margin in the shutdown path rather than a derivation.** USB 2.0
+/// §7.1.7.5 gives a device 10 ms to recover from a reset (TRSTRCY) and says
+/// nothing about how long a mass-storage device's own firmware spends
+/// finishing what a SYNCHRONIZE CACHE started; this is ten times TRSTRCY, and
+/// it is spent once, at a shutdown, with nothing else left to do.
+const DEVICE_RECOVERY_NS: u64 = 100_000_000;
+
+/// Hand every USB device back before the machine resets.
+///
+/// **A reset is not a way to end a transfer.** A platform reset stops the
+/// controller mid-Bulk-Only-Transport with a device holding half a command,
+/// and leaves VBUS up so the device never sees a power cycle either — which is
+/// a mass-storage device that the next host cannot enumerate, and no amount of
+/// rebooting the machine clears it. So this empties every disk's write cache,
+/// halts the controller, resets it so its ports issue a real bus reset, and
+/// only then takes the ports' power away.
+///
+/// Called from `quiesce` after `log::wait_for_durable`, so the last thing
+/// written to the log volume is already durable; the records this makes reach
+/// the black box rather than the file, and the next boot's loader prints them.
+pub fn flush_disks() -> Quiesced {
+    let mut tally = Quiesced::NOTHING;
+    // Each flush is one block-layer operation and takes the controller lock for
+    // itself, the way every other caller does.
+    for index in 0..storage_count() {
+        let _op = crate::block::begin_operation();
+        let flushed = storage_flush(index);
+        tally.disks += 1;
+        tally.flushed += u32::from(flushed.is_ok());
+        log!("usb-quiesce: disk {index} SYNCHRONIZE CACHE {}", Flushed(flushed));
+    }
+    tally
+}
+
+/// The second half: halt every controller, reset it so its ports issue a real
+/// bus reset, take their power away, and stop its bus mastering.
+///
+/// **Nothing here logs a record.** Every line it has to say goes into `said`,
+/// because this runs after `log::wait_for_durable`: a record emitted now either
+/// misses the file or lands after the boot's own last word, and that word being
+/// the last line is what a metal boot's verdict is read from.
+pub fn hand_back(tally: &mut Quiesced, said: &mut crate::blackbox::Said) {
+    // **The lock is the barrier the reset needs.** This driver takes the
+    // controller lock per operation and never holds it across one (module
+    // header), so holding it here means no transfer is in flight and none can
+    // start while the controller is being taken down.
+    let mut guard = XHCI.lock();
+    for ctrl in guard.iter_mut() {
+        ctrl.quiesce(tally, said);
+    }
+    let _ = writeln!(said, "{tally}");
+}
+
+/// What the shutdown did to this machine's USB.
+///
+/// **A count per step and not a verdict**: a controller that halted and one
+/// that was merely asked to are the difference this whole path exists for, and
+/// the next boot's loader is the only reader — the volume that would have
+/// carried a record is one of the devices being shut down.
+#[derive(Clone, Copy)]
+pub struct Quiesced {
+    disks: u32,
+    flushed: u32,
+    controllers: u32,
+    halted: u32,
+    reset: u32,
+    ports: u32,
+    unpowered: u32,
+}
+
+impl Quiesced {
+    const NOTHING: Self = Self {
+        disks: 0,
+        flushed: 0,
+        controllers: 0,
+        halted: 0,
+        reset: 0,
+        ports: 0,
+        unpowered: 0,
+    };
+}
+
+impl fmt::Display for Quiesced {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "usb-quiesce: {}/{} disk cache(s) flushed, {}/{} controller(s) halted, {} reset, \
+             {}/{} port(s) unpowered",
+            self.flushed,
+            self.disks,
+            self.halted,
+            self.controllers,
+            self.reset,
+            self.unpowered,
+            self.ports
+        )
+    }
+}
+
+/// A flush outcome as one word, so the shutdown line reads the same whichever
+/// way the disk answered.
+struct Flushed(crate::block::BlockResult);
+
+impl fmt::Display for Flushed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Ok(()) => f.write_str("ok"),
+            Err(crate::block::BlockError::BudgetExpired) => {
+                f.write_str("ran out of its operation budget")
+            }
+            Err(crate::block::BlockError::Device) => f.write_str("failed"),
+        }
+    }
+}
 
 /// Process xHCI events if this CPU has an unserviced interrupt record, or a port's state machine is due.
 ///

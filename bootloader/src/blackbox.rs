@@ -91,11 +91,21 @@ pub fn harvest(page: Option<Page>) -> Option<Finding> {
                 }
             }
         }
-        State::Done => lines.push(alloc::format!(
-            "{HEAD} the last boot read {}, so it handed the machine back on purpose and this \
-             chain ends here",
-            state.named()
-        )),
+        State::Done => {
+            lines.push(alloc::format!(
+                "{HEAD} the last boot read {}, so it handed the machine back on purpose and this \
+                 chain ends here",
+                state.named()
+            ));
+            // What that boot's shutdown did after its log volume's last durable
+            // byte. It reaches no file — the volume is one of the devices being
+            // taken down — so this pass is its only reader.
+            for line in text.split(|byte| *byte == b'\n') {
+                if !line.is_empty() {
+                    lines.push(alloc::format!("| {}", Ascii(line)));
+                }
+            }
+        }
         // The one finding an absence makes: the loader armed it, and nothing in
         // that kernel — not even its exception entry — reached the page.
         State::Armed => lines.push(alloc::format!(
