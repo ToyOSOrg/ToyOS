@@ -116,6 +116,13 @@ pub enum Refusal {
     Silent { what: &'static str, secs: u64 },
     /// The log the boot left is not a passing boot's.
     Log(bootlog::Unfit),
+    /// **The loader reported a record and booted no kernel.** Not the same thing
+    /// as an absent boot record, and the difference is the whole diagnosis: the
+    /// pass that reads the black box ends the chain by design, so a machine that
+    /// came back with `loader.log` carrying a reporting pass and `logd` carrying
+    /// nothing did exactly what it was told — the question is why it had a
+    /// record to report at all.
+    ReportedAndBootedNothing { said: String },
     Usage(String),
 }
 
@@ -123,7 +130,13 @@ impl Refusal {
     /// Whether the machine failed rather than the loop: the boot is the subject
     /// only once the stick is written and the reboot asked for.
     pub fn about_the_boot(&self) -> bool {
-        matches!(self, Self::Silent { .. } | Self::Log(_) | Self::Fat32(_))
+        matches!(
+            self,
+            Self::Silent { .. }
+                | Self::Log(_)
+                | Self::Fat32(_)
+                | Self::ReportedAndBootedNothing { .. }
+        )
     }
 }
 
@@ -200,6 +213,13 @@ impl fmt::Display for Refusal {
                  panel and the log partition say, and neither is readable from here"
             ),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
+            Self::ReportedAndBootedNothing { said } => write!(
+                f,
+                "the loader reported a record and booted no kernel: `loader.log` carries a \
+                 pass that read the black box and ended the chain, and `logd` wrote nothing \
+                 because nothing ran. This boot measured no test. What the pass said was: \
+                 {said}"
+            ),
             Self::Usage(why) => write!(f, "{why}"),
         }
     }
@@ -603,6 +623,10 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.
     ("sched-operation-nesting", Flash::Ok),
+    // It seals this boot's own record under an identity one bit from this
+    // stick's, so the pass that finds it clears it and boots a kernel. The page
+    // is memory the loader allocated and the machine is what it was after.
+    ("blackbox-foreign-identity", Flash::Ok),
 ];
 
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
@@ -1319,6 +1343,15 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
             write_readback(dir, &loader, &log, back)?;
             println!("readback written to {}", dir.display());
         }
+        // **Named by evidence, before the boot record is missed.** A boot that
+        // never happened and a boot that failed both leave no `Boot: complete`,
+        // and `Unfit::NoBootRecord` says the second where it is often the first.
+        // The loader's own file is what tells them apart: a pass that read the
+        // black box says so and ends the chain, and this is the only way a
+        // machine can come back with a whole `loader.log` and an empty kernel one.
+        if let Some(said) = reported_and_booted_nothing(&loader, &log) {
+            return Err(Refusal::ReportedAndBootedNothing { said });
+        }
         last = Some(bootlog::verdict(&log).map_err(Refusal::Log)?);
     }
     Ok(last)
@@ -1356,6 +1389,39 @@ fn write_readback(dir: &Path, loader: &str, log: &str, back: u64) -> Result<(), 
     wrote(&dir.join(READBACK_BOOT), &format!("{BACK_SECS} {back}\n"))
 }
 
+/// Whether this boot was a loader pass that reported a record and booted no
+/// kernel, and what that pass said if so.
+///
+/// **Three things together, and no one of them alone.** `loader.log` carries a
+/// pass that ended the chain; the loader never reached its handoff line, which
+/// is what a pass that *did* boot a kernel writes; and the kernel log carries no
+/// boot record. A boot whose kernel died early has the handoff line and no
+/// chain-end; a boot that panicked has both, and a `logd` file besides.
+///
+/// It exists because `Unfit::NoBootRecord` says "this boot failed" where the
+/// answer is "this boot never happened", and the two send a reader to different
+/// places. On the T14 the first flash of a run read a record another image had
+/// left in the same DRAM, took itself for that record's reporting pass, and
+/// handed the machine back in 24 s having run nothing.
+///
+/// Pure, so the reading can be staged: text in, a name out.
+pub fn reported_and_booted_nothing(loader: &str, log: &str) -> Option<String> {
+    let ended = loader.lines().find(|line| line.contains(bootlog::CHAIN_ENDS_LINE))?;
+    if loader.contains(bootlog::LOADER_LAST_LINE) || bootlog::boot_millis(log).is_some() {
+        return None;
+    }
+    // The report rather than the line that ends the chain, and the *last* of it:
+    // the pass writes the record's date first and what it found second, and what
+    // it found is the half that identifies the record.
+    let said = loader
+        .lines()
+        .filter(|line| {
+            line.contains(bootlog::PREVIOUS_PANIC) || line.contains(bootlog::BLACKBOX_HEAD)
+        })
+        .next_back()
+        .unwrap_or(ended);
+    Some(said.trim().to_string())
+}
 /// What the host measured about a boot, out of [`READBACK_BOOT`].
 pub fn back_secs(text: &str) -> Option<u64> {
     text.lines()
@@ -1409,6 +1475,43 @@ mod tests {
         }
     }
 
+    /// **The case, off the machine that produced it.** These are the four lines
+    /// `toyos-metal` brought back from run 19's first flash, where a `DONE`
+    /// record another image had left in the same DRAM two hours and three
+    /// Ubuntu boots earlier was read as this boot's predecessor. The driver's
+    /// only word for it was "the log carries no `Boot: complete` record", which
+    /// sends a reader after a kernel that never ran.
+    #[test]
+    fn a_pass_that_reported_and_booted_nothing_is_named_as_that() {
+        let stale = "ToyOS Bootloader 1.0\n\
+             Black box: the record below is from the boot armed at 2026-09-07-045553\n\
+             Black box: the last boot read DONE, so it handed the machine back on purpose \
+             and this chain ends here\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n";
+        let said = reported_and_booted_nothing(stale, "").expect("the case, named");
+        assert!(said.contains("the last boot read DONE"), "{said}");
+        let refusal = Refusal::ReportedAndBootedNothing { said };
+        let words = refusal.to_string();
+        assert!(words.contains("booted no kernel"), "{words}");
+        assert!(words.contains("This boot measured no test."), "{words}");
+        // The machine failed, not the loop: exit 1.
+        assert!(refusal.about_the_boot());
+
+        // **The three controls, and each is a boot this must not name.** A pass
+        // that booted a kernel says so at its handoff line; a boot that got as
+        // far as its own record is a boot that ran; and a machine with no
+        // finding at all has no chain-end line to find.
+        let booted = format!("{stale}{}\n", bootlog::LOADER_LAST_LINE);
+        assert_eq!(reported_and_booted_nothing(&booted, ""), None);
+        assert_eq!(
+            reported_and_booted_nothing(stale, "[kernel 1.2 cpu0] Boot: complete (1220ms)\n"),
+            None
+        );
+        assert_eq!(
+            reported_and_booted_nothing("ToyOS Bootloader 1.0\nLoading kernel...\n", ""),
+            None
+        );
+    }
     #[test]
     fn the_host_clock_crosses_in_the_boot_file() {
         assert_eq!(back_secs("back_secs 47\n"), Some(47));

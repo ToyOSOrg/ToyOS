@@ -231,3 +231,15 @@ name = "boot.ccorpus.back_secs"
 unit = "s"
 ceiling = 360
 ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.foreignrecord.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.foreignrecord.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"

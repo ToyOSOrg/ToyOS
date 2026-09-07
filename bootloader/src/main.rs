@@ -778,10 +778,16 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // appends a report under it is what the page decides, and the boot being
     // reported on has to stay readable.
     let (page, claim_refused) = blackbox::claim(&system_table);
-    let finding = blackbox::harvest(page);
+    // The log partition's signature is what a record belongs to: `src/image.rs`
+    // mints one per image, so a record another image left in this memory is one
+    // this pass clears rather than reports.
+    let (finding, stale) = blackbox::harvest(page, log_guid);
     loaderlog::open(&system_table, &log_guid, finding.is_none());
     println!("{}", loaderlog::BEGINS_AT);
     if let Some(line) = claim_refused {
+        println!("{line}");
+    }
+    if let Some(line) = stale {
         println!("{line}");
     }
     if let Some(finding) = finding {
@@ -853,7 +859,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 
     // The page says a kernel is running, and `BootNext` says this loader gets the
     // machine again however that kernel ends.
-    blackbox::arm(page, armed_at(&system_table));
+    blackbox::arm(page, armed_at(&system_table), log_guid);
     bootnext::point_at_us(handle, &system_table);
 
     // The last act before the jump, so the smallest possible span of this loader

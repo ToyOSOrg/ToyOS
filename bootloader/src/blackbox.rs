@@ -73,13 +73,47 @@ pub struct Finding {
 
 /// Read the page, clear it, and say what it held.
 ///
-/// `None` is a page carrying nothing this tree wrote — a cold power cycle, a
-/// first boot, or DRAM a reset did not preserve, which are one answer — and the
-/// caller boots the kernel normally.
-pub fn harvest(page: Option<Page>) -> Option<Finding> {
-    let at = page?;
+/// A `None` finding is a page carrying nothing *this stick* wrote — a cold
+/// power cycle, a first boot, DRAM a reset did not preserve, or another image's
+/// record left in the same memory, which are one answer — and the caller boots
+/// the kernel normally. The second half is a line to print once the log file is
+/// open, for the last of those: it is not a finding but it is not silence
+/// either.
+pub fn harvest(
+    page: Option<Page>,
+    identity: toyos_blackbox::Identity,
+) -> (Option<Finding>, Option<String>) {
+    let Some(at) = page else { return (None, None) };
     let page = bytes(at);
-    let (state, stamp, text) = toyos_blackbox::recover(page)?;
+    let Some((state, stamp, was, text)) = toyos_blackbox::recover(page) else {
+        return (None, None);
+    };
+    // **A record belongs to the stick that wrote it, and this is not always that
+    // stick.** The page is DRAM at a fixed address and nothing between two
+    // operating systems clears it: on the T14 a `DONE` record outlived two hours
+    // of Ubuntu, and the pass after it — booting a *different* image — read that
+    // record, took itself for its reporting pass, and handed the machine back
+    // without booting a kernel at all. No stamp could have caught it: the record
+    // was written before this boot, which is exactly what a real predecessor's
+    // is.
+    //
+    // Cleared rather than reported, and then this pass goes on to boot its
+    // kernel. A record this stick did not write is one nothing here can report
+    // truthfully, and leaving it would hand the same trap to the boot after.
+    if was != identity {
+        toyos_blackbox::clear(page);
+        flush(at);
+        return (
+            None,
+            Some(alloc::format!(
+                "{HEAD} {PHYS:#x} held a {} record another image left in this memory \
+                 ({was:02x?}, and this stick is {identity:02x?}), armed at {}. It has been \
+                 cleared and this pass boots its kernel",
+                state.named(),
+                Civil::from_unix_secs(stamp).stem(),
+            )),
+        );
+    }
     let mut lines = Vec::new();
     lines.push(when(stamp));
     match state {
@@ -137,7 +171,7 @@ pub fn harvest(page: Option<Page>) -> Option<Finding> {
              the boot after this one will report the crash above a second time"
         ));
     }
-    Some(Finding { lines, ends_the_chain: true })
+    (Some(Finding { lines, ends_the_chain: true }), None)
 }
 
 /// When the boot this record came from was armed, as the loader stamped it.
@@ -220,15 +254,16 @@ fn fault_lines(fault: &toyos_blackbox::Fault) -> Vec<String> {
 
 /// Seal `ARMED` into the page, which is what makes the next boot's silence a
 /// finding, stamped with the time this pass armed it.
-pub fn arm(page: Option<Page>, stamp: u64) {
+pub fn arm(page: Option<Page>, stamp: u64, identity: toyos_blackbox::Identity) {
     let Some(page) = page else { return };
-    toyos_blackbox::seal(bytes(page), State::Armed, stamp, &[]);
+    toyos_blackbox::seal(bytes(page), State::Armed, stamp, identity, &[]);
     // Written back before the handoff: everything after this point either ends
     // in a reset or hands the machine to a kernel, and neither writes this line
     // out for us.
     flush(page);
     println!(
-        "{HEAD} {PHYS:#x} armed at {}, and the kernel is told so on its parameter line",
+        "{HEAD} {PHYS:#x} armed at {} for {identity:02x?}, and the kernel is told so on its \
+         parameter line",
         Civil::from_unix_secs(stamp).stem()
     );
 }

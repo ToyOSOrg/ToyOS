@@ -90,14 +90,14 @@ pub fn record_fault(fault: &Fault) {
 /// lock, allocate nothing and panic nowhere: one bounded copy into a page
 /// nothing else in this machine names.
 pub fn record_panic(records: &[u8]) {
-    with_page(|page, stamp| {
+    with_page(|page, stamp, identity| {
         let mut report = toyos_blackbox::Report::new(page);
         // The crash first, then as much of the tail as is left. A report cut to
         // its tail alone is a report with the crash missing: the panel's newest
         // lines are the ones written after it.
         crate::panic::first_words(&mut report);
         report.tail(records, toyos_blackbox::RECORD_OPENS_WITH);
-        report.seal(State::Panic, stamp);
+        report.seal(State::Panic, stamp, identity);
     });
 }
 
@@ -165,31 +165,31 @@ impl core::fmt::Write for Said {
 /// written to a log volume that is itself being taken down, so a record made
 /// there reaches no file and only the next loader pass can print it.
 pub fn record_done(said: core::fmt::Arguments) {
-    with_page(|page, stamp| {
+    with_page(|page, stamp, identity| {
         let mut report = toyos_blackbox::Report::new(page);
         // Dropped rather than answered: a shutdown that could not say what it
         // did still handed the machine back on purpose, and the state is what
         // the next loader reads first.
         let _ = core::fmt::Write::write_fmt(&mut report, said);
-        report.seal(State::Done, stamp);
+        report.seal(State::Done, stamp, identity);
     });
 }
 
 fn seal(state: State, text: &[u8]) {
-    with_page(|page, stamp| {
-        toyos_blackbox::seal(page, state, stamp, text);
+    with_page(|page, stamp, identity| {
+        toyos_blackbox::seal(page, state, stamp, identity, text);
     });
 }
 
-/// Hand `write` the box and the date it carries, then write it back out of the
-/// caches. Every writer in this kernel goes through here.
+/// Hand `write` the box, the date it carries and the stick it belongs to, then
+/// write it back out of the caches. Every writer in this kernel goes through here.
 ///
 /// **Refused silently where there is no page, because this is the one site that
 /// cannot speak**: two of the three callers run inside `panic_console::render`
 /// or an exception entry, which may take no lock and re-enter nothing. What a
 /// boot with no page loses is said at [`arm`], on the panel, while there is
 /// still a machine to say it on.
-fn with_page(write: impl FnOnce(&mut [u8; BYTES], u64)) {
+fn with_page(write: impl FnOnce(&mut [u8; BYTES], u64, toyos_blackbox::Identity)) {
     let at = PAGE.load(Relaxed);
     if at == 0 {
         return;
@@ -200,11 +200,26 @@ fn with_page(write: impl FnOnce(&mut [u8; BYTES], u64)) {
     // `PAINTING` and the quiesce path has stopped every other CPU, so the one
     // CPU still running is the only writer.
     let page = unsafe { &mut *(at as *mut [u8; BYTES]) };
-    // Carried forward and not verified: this runs where nothing may be checked,
-    // and the checksum the write puts down is what covers it. A box nothing
-    // armed hands back a zero, which is what an unknown date is.
+    // Both carried forward and neither verified: this runs where nothing may be
+    // checked, and the checksum the write puts down is what covers them. A box
+    // nothing armed hands back a zero and no identity, which is what an unknown
+    // date and an unknown stick are. **The identity is the loader's and never
+    // this kernel's to decide** — a kernel that minted one would be certifying
+    // its own record as belonging to the stick it is reporting about.
     let stamp = toyos_blackbox::stamp_of(page);
-    write(page, stamp);
+    let identity = toyos_blackbox::identity_of(page);
+    // The staged case: a record sealed under an identity no stick has, which is
+    // what one another image left in this memory looks like to the pass that
+    // finds it. One bit, because the check is an equality and a plausible
+    // near-miss is the input worth staging.
+    let identity = if crate::actuator::blackbox_foreign_identity() {
+        let mut foreign = identity;
+        foreign[0] ^= 0xff;
+        foreign
+    } else {
+        identity
+    };
+    write(page, stamp, identity);
     flush(at);
 }
 

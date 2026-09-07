@@ -417,7 +417,7 @@ pub fn watchdog_quiet(
 /// `must_not_say` on a channel whose liveness the caller has already
 /// established, because `Serial::alive` asks for a kernel record and the
 /// loader's own file on the stick has none.
-fn says_nothing_of(channel: &serial::Serial, needle: &str) -> Result<(), String> {
+pub fn says_nothing_of(channel: &serial::Serial, needle: &str) -> Result<(), String> {
     match channel.text().lines().find(|l| l.contains(needle)) {
         Some(line) => Err(format!(
             "{needle:?} on a channel that should not have it: {line:?}\n{}",
@@ -859,6 +859,69 @@ pub fn blackbox_done_chain(
     Ok(())
 }
 
+/// A record another image left in this memory is cleared, not reported, and the
+/// pass that finds it boots its kernel.
+///
+/// **The defect this is the control for cost a T14 run its first boot.** The
+/// black-box page is DRAM at a fixed address and nothing between two operating
+/// systems clears it: a `DONE` record from a boot two hours and three Ubuntu
+/// boots earlier was still there, and the loader — booting a different image
+/// off a freshly flashed stick — read it, took itself for that record's
+/// reporting pass, wrote `loader.log` and reset. The machine came back in 24 s
+/// with an empty kernel log and the driver's only word was "no Boot: complete
+/// record". No stamp could have caught it: the record was written *before* that
+/// boot, which is exactly what a real predecessor's is.
+///
+/// QEMU zeroes a machine's RAM between launches, so two images cannot be booted
+/// over one page here. The actuator stages the same input instead: the
+/// shutdown seals its record under an identity one bit away from this stick's,
+/// which is what a foreign record looks like to the pass that finds it. **One
+/// bit, because the check is an equality and a plausible near-miss is the input
+/// worth staging.**
+///
+/// The verdict is what the *second* pass does: it says the record was another
+/// image's, and then it boots a kernel — which is the whole difference between
+/// this and `blackbox_done_chain`, whose second pass ends the chain instead.
+pub fn blackbox_foreign_record(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu =
+        QemuInstance::boot_with_options(case, &[], &[], chained(&["blackbox-foreign-identity"]));
+    let first = serial::Serial::boot(&qemu);
+    first.must_say(&armed_line())?;
+
+    // The pass after the reset, ended at the handoff line rather than at the
+    // chain's — because a kernel booting is exactly what is under test, and the
+    // chain-end line is what must not arrive.
+    let second = after_the_reset(&mut qemu, bootlog::LOADER_LAST_LINE);
+    let said = second.must_say("record another image left in this memory")?.to_string();
+    // It named the state it found and both identities, so the line is a reading
+    // of the page rather than a guess about it.
+    for word in [State::Done.named(), "cleared and this pass boots its kernel"] {
+        if !said.contains(word) {
+            return Err(format!("the pass reported a foreign record without {word:?}: {said}"));
+        }
+    }
+    // **The two halves of the fix, and both are needed.** The chain did not end:
+    // a pass that reported this record would have reset without booting, which
+    // is the defect. And the record is gone: a pass that left it would hand the
+    // same trap to the boot after this one.
+    says_nothing_of(&second, bootlog::CHAIN_ENDS_LINE)?;
+    says_nothing_of(&second, bootlog::PREVIOUS_PANIC)?;
+    second.must_say(bootlog::LOADER_LAST_LINE)?;
+    // The kernel it booted got all the way up, which is what "boots its kernel"
+    // has to mean.
+    second.must_say(REBOOTING)?;
+    drop(qemu);
+
+    eprintln!("  [power] {}", said.trim());
+    eprintln!("  [power] the chain did not end on a record this stick did not write");
+    Ok(())
+}
 /// The loader pass after a deliberate reboot: it read DONE, said so, and ended
 /// the chain rather than booting another kernel.
 ///
@@ -1057,7 +1120,7 @@ pub fn blackbox_fault_sealed(
     let page = qemu.guest_memory(PHYS, toyos_blackbox::BYTES)?;
     let page: &[u8; toyos_blackbox::BYTES] =
         page.as_slice().try_into().map_err(|_| "pmemsave returned the wrong length".to_string())?;
-    let Some((state, _, text)) = toyos_blackbox::recover(page) else {
+    let Some((state, _, _, text)) = toyos_blackbox::recover(page) else {
         return Err(format!("the page at {PHYS:#x} carries nothing: {:02x?}", &page[..32]))
     };
     if state != State::Fault {
@@ -1211,8 +1274,8 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
             .try_into()
             .map_err(|_| "pmemsave returned the wrong length".to_string())?;
         match toyos_blackbox::recover(page) {
-            Some((State::Panic, _, text)) => return Ok((State::Panic, text.to_vec())),
-            Some((state, _, text)) => last = Some((state, text.to_vec())),
+            Some((State::Panic, _, _, text)) => return Ok((State::Panic, text.to_vec())),
+            Some((state, _, _, text)) => last = Some((state, text.to_vec())),
             None => {}
         }
         if std::time::Instant::now() >= deadline {
