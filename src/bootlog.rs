@@ -43,6 +43,37 @@ pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 pub const CHAIN_ENDS_LINE: &str =
     "Loader log: the last boot is accounted for, so this pass resets the machine";
 
+/// The head the loader writes before the pass that read what the boot above
+/// left. **One `toyos-metal` run is one kernel boot and two loader passes**,
+/// both in one `loader.log`: the loader points `BootNext` at itself before every
+/// handoff, and a pass with a finding appends under this rather than truncating.
+pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot above left";
+
+/// The kernel's record for a process that ended, in `kernel/src/process.rs`.
+///
+/// **The one channel a guest binary's verdict crosses on a machine with no
+/// serial port**: its output reaches `Backend::None`, and this is a log record,
+/// so `logd` writes it to the stick.
+pub const EXIT: &str = "exit: ";
+
+/// The AP bring-up record, in `kernel/src/arch/smp.rs`. A reader asks for the
+/// trailing ` online` as a separate word: the same head carries the failure.
+pub const AP_BRINGUP: &str = "SMP: AP cpu";
+
+/// `kernel/src/process.rs`'s `THREAD_NAME_LEN`, one byte of which is the
+/// terminator `make_name` leaves.
+const NAME_LEN: usize = 28;
+
+/// A process's name as the kernel records it: the path's last component,
+/// truncated to what [`NAME_LEN`] holds.
+///
+/// **A predicate looking for the whole name finds nothing on a good boot**:
+/// `test_rs_null_sink_client_exits` is `test_rs_null_sink_client_ex` on the wire.
+pub fn recorded_name(binary: &str) -> String {
+    let base = binary.rsplit('/').next().unwrap_or(binary);
+    base[..base.len().min(NAME_LEN - 1)].to_string()
+}
+
 /// Whether `name` on the log volume is one of `logd`'s files, which is
 /// `logd`'s own allow-list and not a suffix: the loader's file ends in `.log`
 /// too, and a `toybox` run can leave anything there.
@@ -187,6 +218,7 @@ mod tests {
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_FIRST_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_LAST_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),
+            ("bootloader/src/loaderlog.rs", format!("\"{SEPARATOR}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_GOP_LINE}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
@@ -218,6 +250,32 @@ mod tests {
         assert_eq!(split_listing(""), (None, Vec::new()));
         // Somebody else's file, which nothing here may name or delete.
         assert_eq!(split_listing("boot.log\n"), (None, Vec::new()));
+    }
+
+    /// The two kernel spellings a metal readback is judged on, and the length
+    /// it truncates a name to — held to the kernel's own source, because
+    /// nothing links this crate to it either.
+    #[test]
+    fn the_kernel_writes_the_records_the_host_reads() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for (file, needle) in [
+            ("kernel/src/process.rs", format!("log!(\"{EXIT}{{name}} pid=")),
+            ("kernel/src/arch/smp.rs", format!("log!(\"{AP_BRINGUP}")),
+            ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
+        ] {
+            let at = root.join(file);
+            let source = std::fs::read_to_string(&at).expect("a kernel module");
+            assert!(source.contains(&needle), "{} does not write {needle:?}", at.display());
+        }
+    }
+
+    /// The truncation, which is what a whole-name predicate would miss.
+    #[test]
+    fn a_long_binarys_record_is_the_prefix_the_kernel_keeps() {
+        assert_eq!(recorded_name("test_rs_mkdir_cap"), "test_rs_mkdir_cap");
+        assert_eq!(recorded_name("test_rs_null_sink_client_exits"), "test_rs_null_sink_client_ex");
+        assert_eq!(recorded_name("/system/bin/echo"), "echo");
+        assert_eq!(recorded_name("").len(), 0);
     }
 
     #[test]

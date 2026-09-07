@@ -1,0 +1,94 @@
+# Every number the metal suite measures on the T14, with the ceiling past which
+# it is a red. `src/metalprofile.rs` is the reader and the grammar; a number the
+# suite measures and this file does not price is refused, not passed.
+#
+# `ceiling_from` says where the ceiling came from. A ceiling derived from a
+# constant is the widest true bound there is before the machine has been read
+# once; `measured` beside it is what a later author tightens it against, and a
+# ceiling that had to be widened to pass is a finding rather than an edit.
+#
+# One row per number, named `<what>.<boot>.<field>`. The boot names are the ones
+# `METAL`'s arms give them in `tests/toyos.rs`: one image, one flash, one minute
+# of the machine.
+
+# --- the boot's own duration, out of the kernel's `Boot: complete (Nms)` ---
+# Nothing bounds the span before userland but the test runner's own deadline,
+# which is measured from boot and ends a boot whose job list has not finished:
+# a `Boot: complete` later than that is a boot the runner already reset.
+
+[[number]]
+name = "boot.testcases.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — the runner's deadline runs from boot, so a later `Boot: complete` is a boot already reset"
+
+[[number]]
+name = "boot.testcases-mkdir.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.testcases-readdir.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.testcases-watchdog.complete_ms"
+unit = "ms"
+ceiling = 9600
+ceiling_from = "toyos_tco::BOUND_MS — this image arms the chipset watchdog at the handoff, so the whole boot runs under it"
+
+[[number]]
+name = "boot.jobcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.metalcase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+# --- what the machine spent coming back, on the host's clock ---
+# The loop already refuses past this; the row exists so the number is read and
+# recorded rather than only bounded, and so a return that doubled is a red
+# before it is a hang.
+
+[[number]]
+name = "boot.testcases.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs — the longest watchdog a boot runs under plus what coming back costs"
+
+[[number]]
+name = "boot.testcases-mkdir.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.testcases-readdir.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.testcases-watchdog.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.jobcase.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.metalcase.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"

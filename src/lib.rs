@@ -21,6 +21,8 @@ pub mod kernelkeys;
 pub mod libc;
 pub mod mergehealth;
 pub mod metal;
+pub mod metalimage;
+pub mod metalprofile;
 pub mod pr;
 pub mod redlist;
 pub mod sdkversion;
