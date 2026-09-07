@@ -180,6 +180,41 @@ pub fn seal(
 /// one and the loader that prints it read the same shape.
 pub const RECORD_OPENS_WITH: &[u8] = b"[";
 
+/// What [`Report::tail`] writes above the records it kept when it could not
+/// keep them all, with the count of the ones it dropped after it.
+///
+/// **The count is of records and the number is last**, so a reader matches the
+/// words and reads the number, and neither a plural nor a width has to agree
+/// with anything. One declaration: the kernel writes it, the loader prints it
+/// back, and the harness judges it.
+pub const DROPPED_OPENS_WITH: &str = "older records dropped to fit this page: ";
+
+/// Room [`Report::tail`] takes out of the records to pay for that line.
+///
+/// The widest the line can be: every digit a `u64` can have, which is more than
+/// a page of records can ever hold. Reserved as a constant rather than measured
+/// against the true count, because the count depends on the cut and the cut
+/// would then depend on the count — and a few unused bytes of a page are worth
+/// less than a fixed point nobody can check.
+pub const DROPPED_LINE_BYTES: usize = DROPPED_OPENS_WITH.len() + 20 + 1;
+
+/// How many records begin in `bytes`, by the same rule [`Report::tail`] cuts on.
+fn records_in(bytes: &[u8], opens_a_record: &[u8]) -> u64 {
+    let mut count = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let Some(rest) = bytes.get(at..) else { return count };
+        if rest.starts_with(opens_a_record) && (at == 0 || bytes.get(at - 1) == Some(&b'\n')) {
+            count += 1;
+        }
+        match rest.iter().position(|byte| *byte == b'\n') {
+            Some(next) => at += next + 1,
+            None => return count,
+        }
+    }
+    count
+}
+
 /// Close the envelope over `len` bytes already in the page's text area.
 fn seal_len(page: &mut [u8; BYTES], state: State, stamp: u64, identity: Identity, len: usize) {
     let text: [u8; 0] = [];
@@ -247,19 +282,35 @@ impl<'a> Report<'a> {
     /// knowledge, not this crate's, so nothing here holds a second opinion about
     /// the log's shape. A record that renders as several lines is entered at its
     /// first, because that is the only line that carries what it is.
+    ///
+    /// **A cut says how much it cut**, on [`DROPPED_OPENS_WITH`]'s line above
+    /// what it kept: a report that ends where the page ran out and says nothing
+    /// is one a reader takes for the whole log, and the only reader is a next
+    /// boot with no other account of the last one. [`DROPPED_LINE_BYTES`] of the
+    /// room comes off the records to pay for it, so saying it can never be what
+    /// runs the page over.
     pub fn tail(&mut self, records: &[u8], opens_a_record: &[u8]) {
         let room = TEXT_BYTES.saturating_sub(self.at);
         if records.len() <= room {
             return self.write(records);
         }
-        let mut at = records.len() - room;
+        let budget = room.saturating_sub(DROPPED_LINE_BYTES);
+        let mut at = records.len().saturating_sub(budget);
         // Forward to the first record that begins at or after the cut.
         loop {
             let Some(rest) = records.get(at..) else { return };
             if rest.starts_with(opens_a_record)
                 && (at == 0 || records.get(at - 1) == Some(&b'\n'))
             {
-                return self.write(rest);
+                let dropped = records_in(records.get(..at).unwrap_or(&[]), opens_a_record);
+                // The note before the records, so the first thing under the head
+                // is what is missing from under it.
+                let _ = core::fmt::Write::write_fmt(
+                    self,
+                    format_args!("{DROPPED_OPENS_WITH}{dropped}\n"),
+                );
+                self.write(rest);
+                return;
             }
             match rest.iter().position(|byte| *byte == b'\n') {
                 Some(next) => at += next + 1,
@@ -619,11 +670,85 @@ mod tests {
         let back = std::str::from_utf8(back).expect("records are text");
         assert!(back.len() <= TEXT_BYTES);
         assert!(back.ends_with("[9.9999 cpu0] the last one\n"));
+        let kept = kept_records(back);
         // The first line kept is a whole one, which is the assertion.
-        assert!(back.starts_with('['), "the report begins mid-record: {:?}", &back[..40]);
+        assert!(kept.starts_with('['), "the report begins mid-record: {:?}", &kept[..40]);
         // Every kept line here is a whole record, so the cut is a record's edge.
-        assert!(back.lines().all(|l| l.starts_with('[')));
-        assert!(records.ends_with(back));
+        assert!(kept.lines().all(|l| l.starts_with('[')));
+        assert!(records.ends_with(kept));
+    }
+
+    /// The records under the drop line, for a test that is about the cut and
+    /// not about the line above it.
+    fn kept_records(back: &str) -> &str {
+        let (said, kept) = back.split_once('\n').expect("a cut report says what it cut");
+        assert!(said.starts_with(DROPPED_OPENS_WITH), "a cut report said {said:?}");
+        kept
+    }
+
+    /// **A cut states what it cut, and the number is exact.** A report that
+    /// ends where the page ran out and says nothing is one the next boot — the
+    /// only reader there is — takes for the whole log.
+    #[test]
+    fn a_cut_report_says_how_many_records_it_dropped() {
+        let mut records = std::string::String::new();
+        let mut n = 0usize;
+        while records.len() < TEXT_BYTES * 3 {
+            records.push_str(&format!("[0.{n:04} cpu0] a record of some width or other\n"));
+            n += 1;
+        }
+        let mut page = blank();
+        seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
+        let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
+        let back = std::str::from_utf8(back).expect("records are text");
+        let (said, kept) = back.split_once('\n').expect("a cut report says what it cut");
+        let dropped: usize = said
+            .strip_prefix(DROPPED_OPENS_WITH)
+            .expect("a cut report opens with the drop line")
+            .parse()
+            .expect("the drop line ends in a count");
+        // Exact, not a bound: dropped plus kept is every record that went in.
+        assert_eq!(dropped + kept.lines().count(), n);
+        // The newest survived, which is the half of the cut that matters.
+        assert!(kept.ends_with(&format!("[0.{:04} cpu0] a record of some width or other\n", n - 1)));
+        // What was kept is a suffix, so what was dropped is the oldest and never
+        // a window out of the middle — and the count names exactly those.
+        assert!(records.ends_with(kept));
+        assert_eq!(dropped, records[..records.len() - kept.len()].lines().count());
+    }
+
+    /// A report that fits says nothing about a cut, because there was none.
+    #[test]
+    fn a_report_that_fits_carries_no_drop_line() {
+        let records = "[0.0000 cpu0] one record\n[0.0001 cpu0] another\n";
+        let mut page = blank();
+        seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
+        let (_, _, _, back) = recover(&page).expect("a whole report is sealed");
+        assert_eq!(back, records.as_bytes());
+    }
+
+    /// **The drop line comes out of the records' room and never out of the
+    /// page.** The negative control on the reservation: a report whose records
+    /// end exactly at the page's capacity still fits after the line is added.
+    #[test]
+    fn saying_what_was_dropped_never_runs_the_page_over() {
+        // Widths around the boundary: one of them lands the cut where the line
+        // would not fit if it were not paid for first.
+        for width in 20..120usize {
+            let mut records = std::string::String::new();
+            let mut n = 0usize;
+            while records.len() < TEXT_BYTES + width * 4 {
+                records.push_str(&format!("[{n:04}] {}\n", "x".repeat(width)));
+                n += 1;
+            }
+            let mut page = blank();
+            let len = seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
+            assert!(len <= TEXT_BYTES, "a {width}-byte record ran the page to {len}");
+            let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
+            let back = std::str::from_utf8(back).expect("records are text");
+            let kept = kept_records(back);
+            assert!(records.ends_with(kept), "the cut at width {width} is not a suffix");
+        }
     }
 
     /// A head goes in before the tail and survives it: the crash's own message
@@ -673,8 +798,9 @@ mod tests {
         seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
         let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
         let back = std::str::from_utf8(back).expect("records are text");
-        assert!(back.starts_with("[0.0000 cpu0] EARLY PANIC"), "{:?}", &back[..40]);
-        assert!(records.ends_with(back));
+        let kept = kept_records(back);
+        assert!(kept.starts_with("[0.0000 cpu0] EARLY PANIC"), "{:?}", &kept[..40]);
+        assert!(records.ends_with(kept));
     }
 
 
