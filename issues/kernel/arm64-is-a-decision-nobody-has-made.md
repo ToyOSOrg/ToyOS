@@ -48,3 +48,10 @@ Constraints that cost real time to re-derive, all measured on an M4 Pro host:
 
 `issues/kernel/all-cores-are-assumed-equal-and-arm64-breaks-that.md` is the one
 piece of this the owner has since queued.
+
+The boundary the port needs is drawn by
+`issues/kernel/a-driver-is-tested-on-the-host-and-its-real-implementation-is-one-instruction-deep.md`
+(owner, 2026-09-07): drivers written against register, clock, DMA and interrupt
+traits named by function, with one-instruction-deep real implementations —
+ARM64 is one more implementation of them, and the port starts after that
+boundary exists.
