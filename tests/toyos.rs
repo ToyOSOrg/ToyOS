@@ -1667,14 +1667,7 @@ const METALDEVICECASE: &[metal::Arm] = &[metal::once(
 /// [`SHARED_METAL_DEBUG`], which is the same boot on the kernel that carries
 /// the syscall they call. The track's ruling is that the metal profile flashes
 /// test images, so that kernel may go on the stick.
-const METAL_SKIP: &[(&str, &str)] = &[(
-    // The binary refuses the machine itself, which is the strongest form a row
-    // here can take: its own `expect` message is the reason, and the day the T14
-    // grows a network device this kernel drives the row comes off because the
-    // boot stops saying it.
-    "it claims a `Nic` and says so: \"this boot's profile carries a virtio-net and no program \
-     on it claims one: NotFound\". The T14 has no network device this kernel drives",
-)];
+const METAL_SKIP: &[(&str, &str)] = &[];
 
 /// The boot the shared block's Rust binaries ride on the T14.
 ///
