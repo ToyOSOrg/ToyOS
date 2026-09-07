@@ -17,10 +17,8 @@ the shape an xHCI TRB or an NVMe submission entry fits; `Registers` is 32-bit
 dwords for the same reason. A second userland driver would either widen them or
 declare its own four, and at that point there are two answers to one question.
 
-What is not yet decided is whether there is one boundary at all: whether a
-`toyos-userdev` (or a module of the SDK) owns "a mapped register window, a
-grant, a monotonic clock and an interrupt record" for every process that drives
-a function, or whether each driver crate keeps its own and the shared part is
-only netd's `device.rs`. The call is the owner's, and nothing is owed until a
-second userland driver exists to be written against it — the virtio NIC beside
-`toyos-i219` in netd does not use these traits at all.
+What is not yet decided is whether there is one boundary at all, or whether each
+driver crate keeps its own and the shared part is only netd's `device.rs`. The
+call is the owner's, and nothing is owed until a second userland driver exists
+to be written against it — the virtio NIC beside `toyos-i219` in netd does not
+use these traits at all.

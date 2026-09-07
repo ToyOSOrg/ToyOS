@@ -279,11 +279,9 @@ pub struct Link {
 ///
 /// **There is no index a caller can get wrong**: the descriptor this stands for
 /// is the frame's own, [`I219::rx_done`] takes the receipt by value, and
-/// nothing outside this crate can make a second one. Receipts are given back in
-/// the order they were issued, which is what makes one `RDT` write enough
-/// (§7.1.8: the tail "identifies the location beyond the last descriptor
-/// hardware can process") — and a caller holding two at once is what netd's
-/// `&mut self` on `Device::receive` makes unrepresentable.
+/// nothing outside this crate can make a second one. Several may be held at
+/// once and given back in any order; what the order decides is when the tail
+/// moves, not which buffer is returned.
 #[must_use = "a frame whose buffer is never given back is a receive slot lost for the boot"]
 #[derive(PartialEq, Eq, Debug)]
 pub struct Frame {
@@ -739,13 +737,44 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         self.give_back(frame.index);
     }
 
+    /// Republish descriptor `index` and move the tail over every ready
+    /// descriptor from where it stands.
+    ///
+    /// **The tail moves over a run, never to an index.** §7.1.8's tail
+    /// "identifies the location beyond the last descriptor hardware can
+    /// process", so writing it with the descriptor that came back last would
+    /// hand the device every descriptor between — including one whose bytes
+    /// their reader still holds — and, for a buffer returned before an older
+    /// one, walk `RDT` backwards over the rest of the ring.
+    ///
+    /// **Ready is read out of the descriptor, so there is no second record of
+    /// it to disagree.** [`Self::publish_rx`] zeroes the status word, and a
+    /// descriptor still in a caller's hands holds the non-zero word the device
+    /// wrote back — `DD` is what [`Self::poll_rx`] took it on. The device
+    /// touches neither until the tail passes it.
     fn give_back(&mut self, index: usize) {
         self.publish_rx(index);
-        self.rx_tail = index;
-        // §7.1.8: the device fetches on the tail write, so the descriptor has
+        let mut tail = self.rx_tail;
+        loop {
+            let next = (tail + 1) % RX_RING;
+            // Everything from `rx_next` on is the device's or unfilled, and the
+            // ring keeps one descriptor in software's hands either way.
+            if next == self.rx_next {
+                break;
+            }
+            if self.dma.read(OFF_RX_RING + next * rx_desc::BYTES + 8) != 0 {
+                break;
+            }
+            tail = next;
+        }
+        if tail == self.rx_tail {
+            return;
+        }
+        self.rx_tail = tail;
+        // §7.1.8: the device fetches on the tail write, so the descriptors have
         // to be there before the write is.
         self.dma.publish();
-        self.regs.write(regs::RDT, index as u32);
+        self.regs.write(regs::RDT, tail as u32);
     }
 
     /// Take a transmit descriptor and its buffer, or `None` where every one is

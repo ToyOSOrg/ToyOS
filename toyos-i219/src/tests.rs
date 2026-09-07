@@ -483,6 +483,91 @@ fn one_pass_hands_up_at_most_its_budget() {
     assert_eq!(first + rest, RX_BUDGET as usize * 2, "{}", nic.because("frames were lost"));
 }
 
+/// §7.1.8's tail "identifies the location beyond the last descriptor hardware
+/// can process", so it moves over a run of ready descriptors and never to the
+/// index that came back last. A buffer given back before an older one may not
+/// carry the tail over the older one — whose bytes its holder is still reading
+/// — nor, being the lower index, walk `RDT` backwards over the rest of the
+/// ring.
+#[test]
+fn a_buffer_given_back_out_of_turn_does_not_carry_the_tail_over_an_older_one() {
+    let nic = Nic::with(
+        9,
+        Permits { batched_writeback: false, spurious_interrupts: false, ..Permits::default() },
+    );
+    let mut driver = open(&nic);
+    nic.set_link(true);
+    nic.deliver(&frame(1, 64));
+    nic.deliver(&frame(2, 64));
+    nic.run();
+    one_pass(&mut driver);
+    let first = driver.poll_rx().expect("a frame");
+    let second = driver.poll_rx().expect("a second frame");
+    let armed = nic.peek(regs::RDT);
+    assert_eq!(armed as usize, RX_RING - 1, "{}", nic.because("the ring did not arm its tail"));
+
+    driver.rx_done(second);
+    assert_eq!(
+        nic.peek(regs::RDT),
+        armed,
+        "{}",
+        nic.because("the tail moved over a descriptor whose frame was still held")
+    );
+
+    driver.rx_done(first);
+    assert_eq!(
+        nic.peek(regs::RDT),
+        1,
+        "{}",
+        nic.because("the tail did not move over both buffers once both were back")
+    );
+}
+
+/// The same rule on the driver's own path: a descriptor it refuses is given
+/// back where it stands, and that may not carry the tail over a frame the
+/// caller is still holding the receipt for.
+#[test]
+fn a_refused_descriptor_does_not_carry_the_tail_over_a_frame_still_held() {
+    let nic = Nic::with(
+        23,
+        Permits { batched_writeback: false, spurious_interrupts: false, ..Permits::default() },
+    );
+    let mut driver = open(&nic);
+    nic.set_link(true);
+    nic.deliver(&frame(1, 64));
+    nic.deliver(&frame(2, 64));
+    nic.run();
+    // The device really did fill descriptor 1; what is rewritten is the number
+    // it reported, which is the device's and not this driver's.
+    nic.poke_rx_status(
+        1,
+        0xFFFF
+            | (((rx_desc::status::DD | rx_desc::status::EOP) as u64) << rx_desc::STATUS_SHIFT),
+    );
+    one_pass(&mut driver);
+    let held = driver.poll_rx().expect("the first frame");
+    assert!(
+        driver.poll_rx().is_none(),
+        "{}",
+        nic.because("the refused descriptor was handed up as a frame")
+    );
+    assert_eq!(driver.counters().over_length, 1, "{}", nic.because("the length was believed"));
+    assert_eq!(
+        nic.peek(regs::RDT) as usize,
+        RX_RING - 1,
+        "{}",
+        nic.because("giving a refused descriptor back carried the tail over the frame behind it")
+    );
+
+    driver.rx_done(held);
+    assert_eq!(
+        nic.peek(regs::RDT),
+        1,
+        "{}",
+        nic.because("the tail did not move over both once the held frame came back")
+    );
+}
+
 // --- transmit ---
 
 #[test]
