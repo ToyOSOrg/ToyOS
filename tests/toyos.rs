@@ -111,7 +111,7 @@ impl HostSlots {
     }
 }
 
-/// Which tier the shared boot's 153 binaries are in.
+/// Which tier the shared boot's discovered members are in.
 ///
 /// [`Tier::Fast`] because every member in the effective CI profile is at or
 /// under `toyos_build::tiers::FAST_COMMIT_MS`. [`check_no_collisions`] refuses
@@ -135,10 +135,12 @@ const SHARED_TIER: Tier = Tier::Fast;
 /// `wait_for_ready`'s boot timeout has done since the phase existed, so the
 /// number each author reasoned about is still the number for one guest.
 ///
-/// What that leaves is a block of 153 tests on one boot costing about thirteen
-/// seconds between them, which is far too little to be worth a tail slot of its
-/// own: alone it is thirteen seconds nothing overlaps, and in the phase it is
-/// one task among sixty.
+/// What that leaves is one boot's worth of tests costing about thirteen seconds
+/// between them, which is far too little to be worth a tail slot of its own:
+/// alone it is thirteen seconds nothing overlaps, and in the phase it is one
+/// task among sixty. The count is deliberately not written here — discovery is
+/// what decides it and a comment restating it is wrong the next time somebody
+/// adds a file.
 const SHARED_BLOCK: Sched = Sched::Parallel;
 
 /// The shared-boot binaries that call `SYS_DEBUG`, and so cannot run on the
