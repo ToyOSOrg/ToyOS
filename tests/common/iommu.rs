@@ -787,7 +787,9 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     log.must_say("it would have no address space of its own")?;
     log.must_not_say("handed over on slot")?;
     log.must_say("init: netd: pci:1af4:1041 is on this machine and could not be handed over")?;
-    log.must_say("netd: no NIC on this machine, exiting")?;
+    // netd's own exit is not read here: it speaks after the ready marker this
+    // capture ends at. It is the same endowment-is-empty path
+    // `virtio_net_no_msix` waits for and asserts by name.
     Ok(())
 }
 
