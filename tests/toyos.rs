@@ -1672,7 +1672,6 @@ const METAL_SKIP: &[(&str, &str)] = &[(
     // here can take: its own `expect` message is the reason, and the day the T14
     // grows a network device this kernel drives the row comes off because the
     // boot stops saying it.
-    "nic_dma_isolation",
     "it claims a `Nic` and says so: \"this boot's profile carries a virtio-net and no program \
      on it claims one: NotFound\". The T14 has no network device this kernel drives",
 )];
