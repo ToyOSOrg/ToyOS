@@ -3601,6 +3601,33 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/audio/doom-sound-flood-played-full-scale-once.md",
         measured: "2026-09-03",
     },
+    // The metal track's own pre-pull-request gate on the merged shape. The
+    // name's three other rows are all retired, and this one contradicts the
+    // clause of the newest retirement: the revision it promises did not happen.
+    Red {
+        test: "i8042_undecoded_bytes",
+        instrument: Instrument::DevHostLoaded,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`the verdict was said too early — \"[kernel 1.474 cpu0] i8042: 2 interrupts and 4 \
+               bytes, nothing decoded — first seen at 1474ms\" — and never revised: no later \
+               `nothing decoded` line names the sequence`, and `ALONE: GREEN — it fails only \
+               beside other guests, so its Sched::Parallel is wrong. The run stays red on the \
+               classification`. **It is the 2026-08-28 retirement's own clause that fails**: \
+               that row retired on the verdict revising itself once, the first mute line naming \
+               nothing and the second naming the sequence, staged on every run by \
+               `i8042-split-burst`. Here the first line named four of Pause\'s six bytes and no \
+               second line came, so the revision the retirement rests on did not happen under \
+               load. Four bytes and not zero, so this is the CI row\'s producer and not the two \
+               dev-host rows the single-word tally closed. **Not about the diff**: the branch\'s \
+               driver fold is two markdown files and one doc comment, and neither the test nor \
+               the i8042 path is in it",
+        evidence: "the metal branch\'s pre-pull-request fast tier on the merged tip 8d895a15, \
+                   2026-09-07: 333 passed, 1 failed, 334 total in 188.3 s, red at 5 s and the \
+                   harness\'s own isolated re-run PASS at 2 s in the same run",
+        source: "issues/build/parallel-tests-red-under-other-suites.md",
+        measured: "2026-09-07",
+    },
 ];
 
 // ---------------------------------------------------------------------------

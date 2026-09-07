@@ -476,3 +476,34 @@ describes. `ALONE: GREEN` both times, and green again when re-run alone by hand
 is the ceiling this section corrects; what a contended host does to `/system/bin/init`'s
 handle accounting on a *refused* launch is not explained here, and nobody has a
 mechanism for it. `src/redlist.rs` carries the sighting.
+
+- **`i8042_undecoded_bytes`** — added 2026-09-07 on the metal branch's
+  pre-pull-request fast tier over the merged tip `8d895a15`, one sighting:
+  `the verdict was said too early — "[kernel 1.474 cpu0] i8042: 2 interrupts
+  and 4 bytes, nothing decoded — first seen at 1474ms" — and never revised: no
+  later ``nothing decoded`` line names the sequence`, red at 5 s in a run of
+  333/334, and the harness's own re-run `ALONE i8042_undecoded_bytes: GREEN —
+  it fails only beside other guests, so its Sched::Parallel is wrong. The run
+  stays red on the classification.` **This one is not the wall-clock-guard
+  shape the head of this file warns about**: nothing waits on a number of host
+  seconds. The test asserts an ordering of two lines, and the second line never
+  came.
+
+  **It contradicts a retirement rather than joining a class.** All three of the
+  name's earlier rows in `src/redlist.rs` are retired: the two dev-host
+  `ALONE: GREEN` rows by the single-word tally in
+  `kernel/src/drivers/i8042/tally.rs` (2026-08-17), which made `N interrupts
+  and 0 bytes` unprintable, and the CI row by "the verdict revises itself once"
+  (2026-08-28) — a mute line said while a decoder still holds the run is
+  `HEALTH_MUTE_BLIND`, the first blamed byte moves it to `HEALTH_MUTE_SAID`
+  with the line that names the bytes, and `i8042-split-burst` stages that
+  interleaving on every run. Four bytes and not zero puts this sighting on the
+  CI row's producer — the test's own Pause, reported after the first interrupt
+  delivered four of its six bytes — which is exactly what the 2026-08-28 clause
+  says is no longer waited for. Under a loaded host the second line did not
+  arrive, so the revision that retirement rests on is not unconditional.
+
+  Owner: the i8042 tally. **Exit condition**: the verdict revising itself in a
+  parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
+  first mute line names nothing and its second names the sequence, or the
+  retirement's clause narrowed to the conditions under which it holds.
