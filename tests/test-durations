@@ -142,6 +142,7 @@ audio_tone (smp=1) 8450 shards=12
 audio_tone_load (smp=1) 18139 shards=12
 blackbox_done_chain 4119 shards=12
 blackbox_foreign_record 18446744073709551615 shards=none
+hang_bounded_by_the_stick 18446744073709551615 shards=none
 blackbox_early_panic_sealed 2470 shards=12
 blackbox_early_panic_sealed_muted 3145 shards=12
 blackbox_fault_sealed 6258 shards=12

@@ -859,29 +859,104 @@ pub fn blackbox_done_chain(
     Ok(())
 }
 
-/// A record another image left in this memory is cleared, not reported, and the
-/// pass that finds it boots its kernel.
+/// A boot that hung is bounded by the stick, and the third boot is free again.
+///
+/// **The defect trapped the machine in ToyOS.** `bootnext::point_at_us` aims
+/// `BootNext` at the loader before every kernel handoff, so a kernel that hangs
+/// and an owner who cuts power get firmware, this loader, the same kernel, the
+/// same hang — for ever. The black box cannot break it: a power cut is exactly
+/// what empties the black box, so the next pass finds nothing to report and arms
+/// a fresh record. Measured on the T14, run 19 boots 2 and 3, where the owner's
+/// only ways out were the firmware's boot menu and pulling the stick.
+///
+/// Three launches of **one image file**, because what carries the count is the
+/// stick and not the memory:
+///
+/// 1. killed at the loader's handoff line — the kernel is never given the
+///    machine, which is a boot that was handed it and never reported;
+/// 2. the same image again. QEMU zeroes a machine's RAM between launches, which
+///    is the power cut exactly: the page is empty, the stick says one attempt,
+///    and this pass must boot no kernel, say so, and reset;
+/// 3. **the same image a third time, which must boot.** One hand per hang and
+///    never two: a bound that left the count standing would refuse this image
+///    for ever, which is the trap again with a different door.
+pub fn hang_bounded_by_the_stick(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    // Built to a path of its own and kept: the count this is about lives in the
+    // image file, so all three launches have to be the same one.
+    let image = super::lane::dir().join("hang-bound.img");
+    let bytes = qemu::build_boot_image(case, &[], &[], &[]);
+    std::fs::write(&image, &bytes).map_err(|e| format!("write the boot image: {e}"))?;
+    let launch = |marker: &'static str| BootOptions {
+        profile: qemu::Profile::Metal,
+        boot_image: Some(image.clone()),
+        takes_the_reset: true,
+        ready_marker: marker,
+        ..Default::default()
+    };
+
+    // 1. The hang: killed where the loader has counted this attempt and is about
+    //    to hand over, so the kernel gets the machine and reports nothing.
+    let first = QemuInstance::boot_with_options(case, &[], &[], launch(bootlog::LOADER_LAST_LINE));
+    let counted = serial::Serial::boot(&first);
+    counted.must_say("Boot attempts: this image has had the machine 0 time(s)")?;
+    drop(first);
+
+    // 2. The bound. Nothing about this machine has changed but its memory, which
+    //    is what a power cut changes.
+    let second =
+        QemuInstance::boot_with_options(case, &[], &[], launch(bootlog::CHAIN_ENDS_LINE));
+    let bounded = serial::Serial::boot(&second);
+    bounded.must_say("Boot attempts: this image has had the machine 1 time(s)")?;
+    bounded.must_say(bootlog::HUNG_WITHOUT_A_RECORD)?;
+    // It booted no kernel: the handoff line is what a pass that did writes.
+    says_nothing_of(&bounded, bootlog::LOADER_LAST_LINE)?;
+    bounded.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    drop(second);
+
+    // 3. Free again, and this is the half that makes it a bound rather than a
+    //    refusal: the count was cleared when the machine was handed back.
+    let third = QemuInstance::boot_with_options(case, &[], &[], launch(bootlog::LOADER_LAST_LINE));
+    let again = serial::Serial::boot(&third);
+    again.must_say("Boot attempts: this image has had the machine 0 time(s)")?;
+    says_nothing_of(&again, bootlog::HUNG_WITHOUT_A_RECORD)?;
+    again.must_say(bootlog::LOADER_LAST_LINE)?;
+    drop(third);
+
+    eprintln!("  [power] one hand per hang: the retry booted nothing and the boot after it booted");
+    Ok(())
+}
+/// A record another image left in this memory is cleared and never reported.
 ///
 /// **The defect this is the control for cost a T14 run its first boot.** The
 /// black-box page is DRAM at a fixed address and nothing between two operating
 /// systems clears it: a `DONE` record from a boot two hours and three Ubuntu
-/// boots earlier was still there, and the loader — booting a different image
-/// off a freshly flashed stick — read it, took itself for that record's
-/// reporting pass, wrote `loader.log` and reset. The machine came back in 24 s
-/// with an empty kernel log and the driver's only word was "no Boot: complete
-/// record". No stamp could have caught it: the record was written *before* that
-/// boot, which is exactly what a real predecessor's is.
+/// boots earlier was still there, and the loader — booting a different image off
+/// a freshly flashed stick — read it, took itself for that record's reporting
+/// pass, wrote `loader.log` and reset. The machine came back in 24 s with an
+/// empty kernel log. No stamp could have caught it: the record was written
+/// *before* that boot, which is exactly what a real predecessor's is.
 ///
-/// QEMU zeroes a machine's RAM between launches, so two images cannot be booted
-/// over one page here. The actuator stages the same input instead: the
-/// shutdown seals its record under an identity one bit away from this stick's,
-/// which is what a foreign record looks like to the pass that finds it. **One
-/// bit, because the check is an equality and a plausible near-miss is the input
-/// worth staging.**
+/// **One QEMU and three loader passes**, because the page is memory: a second
+/// launch is a machine with zeroed RAM and no record to find at all. Two images
+/// therefore cannot be booted over one page here, and the actuator stages the
+/// same input instead — the shutdown seals under an identity one bit away from
+/// this stick's, which is what a foreign record looks like to the pass that
+/// finds it. **One bit, because the check is an equality and a plausible
+/// near-miss is the input worth staging.**
 ///
-/// The verdict is what the *second* pass does: it says the record was another
-/// image's, and then it boots a kernel — which is the whole difference between
-/// this and `blackbox_done_chain`, whose second pass ends the chain instead.
+/// The third pass is what makes the clear an assertion rather than a claim: a
+/// record that survived it would be reported to the boot after, for ever.
+///
+/// **The second pass also hands the machine back, and that is right.** A record
+/// this stick did not write means the last boot of *this* image was handed the
+/// machine and reported nothing, which is what `attempt`'s bound is for; the two
+/// mechanisms agree here and `hang_bounded_by_the_stick` owns the second.
 pub fn blackbox_foreign_record(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
@@ -891,35 +966,32 @@ pub fn blackbox_foreign_record(
     let case = config.parent().expect("system.toml has a directory");
     let mut qemu =
         QemuInstance::boot_with_options(case, &[], &[], chained(&["blackbox-foreign-identity"]));
-    let first = serial::Serial::boot(&qemu);
-    first.must_say(&armed_line())?;
+    serial::Serial::boot(&qemu).must_say(&armed_line())?;
 
-    // The pass after the reset, ended at the handoff line rather than at the
-    // chain's — because a kernel booting is exactly what is under test, and the
-    // chain-end line is what must not arrive.
-    let second = after_the_reset(&mut qemu, bootlog::LOADER_LAST_LINE);
-    let said = second.must_say("record another image left in this memory")?.to_string();
-    // It named the state it found and both identities, so the line is a reading
-    // of the page rather than a guess about it.
+    // The pass that finds it: it must name it and clear it, and it must never
+    // report it as this stick's predecessor — which is the whole defect.
+    let found = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    let said = found.must_say("record another image left in this memory")?.to_string();
     for word in [State::Done.named(), "cleared and this pass boots its kernel"] {
         if !said.contains(word) {
             return Err(format!("the pass reported a foreign record without {word:?}: {said}"));
         }
     }
-    // **The two halves of the fix, and both are needed.** The chain did not end:
-    // a pass that reported this record would have reset without booting, which
-    // is the defect. And the record is gone: a pass that left it would hand the
-    // same trap to the boot after this one.
-    says_nothing_of(&second, bootlog::CHAIN_ENDS_LINE)?;
-    says_nothing_of(&second, bootlog::PREVIOUS_PANIC)?;
-    second.must_say(bootlog::LOADER_LAST_LINE)?;
-    // The kernel it booted got all the way up, which is what "boots its kernel"
-    // has to mean.
-    second.must_say(REBOOTING)?;
+    says_nothing_of(&found, bootlog::PREVIOUS_PANIC)?;
+    says_nothing_of(&found, "the last boot read")?;
+
+    // The clear stuck: nothing about a record reaches the pass after it, and
+    // that pass boots a kernel — so neither the page nor the attempt count is
+    // left holding this machine.
+    let after = after_the_reset(&mut qemu, bootlog::LOADER_LAST_LINE);
+    says_nothing_of(&after, "record another image left in this memory")?;
+    says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
+    says_nothing_of(&after, bootlog::HUNG_WITHOUT_A_RECORD)?;
+    after.must_say(bootlog::LOADER_LAST_LINE)?;
     drop(qemu);
 
     eprintln!("  [power] {}", said.trim());
-    eprintln!("  [power] the chain did not end on a record this stick did not write");
+    eprintln!("  [power] and the pass after it found nothing, so the clear reached the page");
     Ok(())
 }
 /// The loader pass after a deliberate reboot: it read DONE, said so, and ended
