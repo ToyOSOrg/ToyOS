@@ -190,15 +190,9 @@ fn expire() -> ! {
         crate::clock::nanos_since_boot() / 1_000_000,
         phase(),
     ));
-    // **After the seal and before the register.** `stop::before_reset` is
-    // registers and nothing else — written for the panic path, so it takes no
-    // lock and allocates nothing, which is the only kind of call this one may
-    // make — and it *appends* its account to the record just sealed, so a
-    // `WEDGED` page carries what the reset did to USB the way a `PANIC` one
-    // does. Sealing first and not after: the record is the diagnostic this
-    // whole mechanism exists for and may not be lost to a stop that does not
-    // return.
-    crate::drivers::xhci::stop::before_reset();
+    // The seal first, because the USB stop `reset_now` makes before it writes
+    // the register is bounded but not instant, and this record is the
+    // diagnostic the whole mechanism exists for.
     crate::drivers::acpi::reset_now()
 }
 

@@ -9,12 +9,14 @@
 //! All input is firmware-supplied and untrusted: no panic on any input path,
 //! every failure is a [`TableError`] and the caller decides what it means.
 //!
-//! **No reset this kernel performs leaves a USB device mid-command.** [`reboot`]
-//! and [`shutdown`] are the only two this kernel has, and each stops every xHCI
-//! controller ([`stop::before_reset`]) before it writes its register — which is
-//! what makes that a property of the reset rather than of whoever asked for one.
-//! Resets this kernel does not perform — a TCO or firmware watchdog, a triple
-//! fault, power loss — are outside it and always will be.
+//! **No reset this kernel performs leaves a USB device mid-command.**
+//! [`reset_now`] and [`shutdown`] are the only two places this kernel writes a
+//! register that ends the machine, and each stops every xHCI controller
+//! ([`stop::before_reset`]) before it does — which is what makes that a property
+//! of the reset rather than of whoever asked for one, and what a third caller
+//! gets without knowing it is owed. Resets this kernel does not perform — a TCO
+//! or firmware watchdog, a triple fault, power loss — are outside it and always
+//! will be.
 
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -280,8 +282,6 @@ pub fn can_reboot() -> bool {
 // No fallback: 0xCF9, the keyboard controller and anything else are written only where a table named them.
 pub fn reboot() -> ! {
     crate::drivers::serial::flush_final();
-    stop::before_reset();
-
     // Kernel-internal, so a bug rather than a machine quiesced and then left halted quietly.
     assert!(
         RESET_PORT.load(Ordering::Relaxed) != 0,
@@ -302,6 +302,15 @@ pub fn reboot() -> ! {
 /// caller has already sealed why, and holding is what such a machine has always
 /// done.
 pub fn reset_now() -> ! {
+    // **Here and not at either caller.** `stop::before_reset` is registers and
+    // nothing else — written for the panic path, so it takes no lock and
+    // allocates nothing, which is the only kind of call a wedge may make — and
+    // it *appends* its account to whatever this boot already sealed, so a
+    // `WEDGED` page carries what the reset did to USB the way a `PANIC` one
+    // does. A caller seals first and calls this second: the record is the
+    // diagnostic the seal exists for and may not be lost to a stop that does
+    // not return.
+    stop::before_reset();
     let port = RESET_PORT.load(Ordering::Relaxed);
     if port == 0 {
         crate::arch::cpu::halt();

@@ -1249,9 +1249,7 @@ impl XhciController {
     ///
     /// Ports are read only when something says they might have moved; otherwise this costs one event-ring read.
     fn poll(&mut self) -> Option<u64> {
-        while let Some(event) = self.next_event() {
-            self.dispatch_event(event);
-        }
+        let _ = self.drain_events();
         // After the drain, not inside it: an answer the drain recorded is issued where nobody else waits on this ring.
         self.advance_outstanding();
         self.recover_endpoints();
@@ -1293,6 +1291,28 @@ impl XhciController {
         self.rt_base.write_u32(IR0_IMAN, 3); // clear IP (W1C) + keep IE
     }
 
+    /// Take at most one ring's worth of events off the event ring.
+    ///
+    /// **A bound on a loop whose exit is the controller's.** `next_event`
+    /// answers for as long as the controller keeps producing, so a bare
+    /// `while let` here is a scheduler pass that does not return on a ring
+    /// being refilled — with `XHCI` held and preemption off for all of it.
+    /// One ring is what the ring could hold when the pass began; anything after
+    /// that belongs to the next pass, which the interrupt that recorded it
+    /// brings about.
+    ///
+    /// Answers whether the controller said anything, which is what a caller
+    /// bounding *silence* rather than work re-arms on.
+    fn drain_events(&mut self) -> bool {
+        let mut answered = false;
+        for _ in 0..RING_SIZE {
+            let Some(event) = self.next_event() else { return answered };
+            self.dispatch_event(event);
+            answered = true;
+        }
+        true
+    }
+
     fn ring_doorbell(&self, slot: u8, dci: u8) {
         fence(Ordering::Release);
         self.db_base.write_u32(slot as u64 * 4, dci as u32);
@@ -1310,6 +1330,18 @@ static XHCI: Lock<Vec<XhciController>> = Lock::new(Vec::new());
 /// volume that carries them is still there. What comes after — the barrier and
 /// the register stop — is [`seal_shut`] and [`stop::before_reset`], and both run
 /// below that word.
+/// Whether the machine's `index`-th disk has ever answered SYNCHRONIZE CACHE
+/// with INVALID COMMAND OPERATION CODE. `None` for an index naming no disk.
+///
+/// **`Ok(())` from a flush spells two different facts**: a cache emptied, and a
+/// device that had none to empty and said so. A shutdown line that renders both
+/// as `ok` cannot be read on a machine where only the second ever happens, and
+/// on the T14 only the second does.
+fn storage_has_no_cache(index: usize) -> bool {
+    with_disk(index, |ctrl, at| ctrl.msc[at].disk.is_some_and(|d| d.dev.refused_flush()))
+        .unwrap_or(false)
+}
+
 pub fn flush_disks() {
     // **Bounded before the first flush, because `with_disk` takes the lock
     // without a bound.** A driver that has stopped answering is one this would
@@ -1324,22 +1356,31 @@ pub fn flush_disks() {
              emptied and the reset stops the controllers regardless",
             BARRIER.millis()
         );
-        stop::flushed(0, 0);
+        stop::flushed(0, 0, 0);
         return;
     }
-    let (mut disks, mut flushed) = (0u32, 0u32);
+    let (mut disks, mut flushed, mut cacheless) = (0u32, 0u32, 0u32);
     // Each flush is one block-layer operation and takes the controller lock for
     // itself, the way every other caller does.
     for index in 0..storage_count() {
         let _op = crate::block::begin_operation();
         let outcome = storage_flush(index);
+        // Read after the flush, because the flush is what sets it on a device
+        // that had not been asked before.
+        let no_cache = outcome.is_ok() && storage_has_no_cache(index);
         disks += 1;
         flushed += u32::from(outcome.is_ok());
-        log!("usb-quiesce: disk {index} SYNCHRONIZE CACHE {}", Flushed(outcome));
+        cacheless += u32::from(no_cache);
+        match no_cache {
+            true => log!(
+                "usb-quiesce: disk {index} implements no SYNCHRONIZE CACHE, so it owed none"
+            ),
+            false => log!("usb-quiesce: disk {index} SYNCHRONIZE CACHE {}", Flushed(outcome)),
+        }
     }
     // Not logged here: the summary belongs beside what the register stop did,
     // and that is written into the black box from below the boot's last word.
-    stop::flushed(disks, flushed);
+    stop::flushed(disks, flushed, cacheless);
 }
 
 /// How long the shutdown waits for the controller lock before going on without

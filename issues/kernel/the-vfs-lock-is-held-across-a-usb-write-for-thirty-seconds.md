@@ -40,6 +40,19 @@ them reads the already-open backing directly (`read_file_range`,
 `elf::read_backing_into`) and takes no VFS lock at all. So the contention is
 upstream of the window the hangs stop in.
 
+**What rules the device out, and what it costs beside the panic distance.** The
+payload is 2,457,600 B — `userland/metalprobe/src/usb.rs`'s `BYTES`, which is
+`SLOWEST_KIB_S 512 x JOB_BOUND_MS 60_000 x SHARE_PERCENT 8 / 100 / 1_000 x 1024`
+— and `exit: usbwrite pid=7 code=22091910 cpu=32100ms` makes that 108.6 KiB/s,
+a fifth of the 512 KiB/s floor the same file calls "an order of magnitude under
+any USB 2.0 flash device". The stick is not what is slow: `flush-census: dev=16
+flushes=9 ... p50<=512us p99<=1024us max=630us of 9 flushes`, and
+`syscalls: pid=7 total=52 syscall_wall=31957ms` puts the whole cost inside 52
+syscalls. Two rows pay for it: `usbwrite.metaldevicecase.span_us` reads
+22,091,910 against its committed ceiling of 4,800,000, and one bound covers the
+whole job list — which is why run 20's list never reached its `reboot` job and
+was ended by the runner's deadline instead.
+
 **Exit condition**: the sync half of `fsync` off the global VFS lock, or a bound
 on how long that lock may be held that is under `Lock::lock`'s tripwire rather
 than within 2x of it.

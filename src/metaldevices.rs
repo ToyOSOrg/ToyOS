@@ -213,6 +213,12 @@ pub const QUIESCE_HEAD: &str = "usb-quiesce:";
 pub struct Quiesced {
     pub flushed: u32,
     pub disks: u32,
+    /// Of those disks, how many answered INVALID COMMAND OPERATION CODE to
+    /// SYNCHRONIZE CACHE. **Reported and never judged**: a device with no write
+    /// cache made nothing durable by refusing, so the flush is `ok` and means a
+    /// different thing — and on the T14 this is every disk, which is why the
+    /// count is here rather than left to the word `ok`.
+    pub cacheless: u32,
     /// Connected ports whose reset finished, of the connected ports there were.
     /// **The act an attached device sees**, and the one that ends a transfer.
     pub reset_ports: u32,
@@ -251,6 +257,8 @@ pub fn quiesced(loader: &str) -> Option<Quiesced> {
         Some((a.parse().ok()?, b.parse().ok()?))
     };
     let (flushed, disks) = pair(" disk cache(s) flushed")?;
+    let cacheless: u32 =
+        line.split(" with no cache to flush").next()?.split_whitespace().next_back()?.parse().ok()?;
     let (reset_ports, connected) = pair(" connected port(s) reset")?;
     let (halted, controllers) = pair(" controller(s) halted")?;
     let (unpowered, ports) = pair(" port(s) unpowered")?;
@@ -258,6 +266,7 @@ pub fn quiesced(loader: &str) -> Option<Quiesced> {
     Some(Quiesced {
         flushed,
         disks,
+        cacheless,
         reset_ports,
         connected,
         halted,
@@ -448,8 +457,9 @@ mod tests {
          Black box: the last boot read DONE, so it handed the machine back on purpose and this \
          chain ends here\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
-         | usb-quiesce: 2/2 disk cache(s) flushed, 5/5 connected port(s) reset, \
-         2/2 controller(s) halted, 2 reset, 12/16 port(s) unpowered\n\
+         | usb-quiesce: 2/2 disk cache(s) flushed, 1 with no cache to flush, \
+         5/5 connected port(s) reset, 2/2 controller(s) halted, 2 reset, \
+         12/16 port(s) unpowered\n\
          Loader log: the last boot is accounted for, so this pass resets the machine\n"
             .to_string()
     }
@@ -473,6 +483,7 @@ mod tests {
             Some(Quiesced {
                 flushed: 2,
                 disks: 2,
+                cacheless: 1,
                 reset_ports: 5,
                 connected: 5,
                 halted: 2,

@@ -93,11 +93,15 @@ static POINTS: [Point; SLOTS] = [Point::EMPTY, Point::EMPTY, Point::EMPTY, Point
 /// that flushed nothing — every panic — reads the zeros it was born with.
 static DISKS: AtomicU32 = AtomicU32::new(0);
 static FLUSHED: AtomicU32 = AtomicU32::new(0);
+static CACHELESS: AtomicU32 = AtomicU32::new(0);
 
-/// What [`super::flush_disks`] emptied, for the account this module writes.
-pub(super) fn flushed(disks: u32, ok: u32) {
+/// What [`super::flush_disks`] emptied, and how many of those disks had no cache
+/// to empty — which is what an `ok` from such a device means and what a line
+/// spelling both the same way cannot say.
+pub(super) fn flushed(disks: u32, ok: u32, cacheless: u32) {
     DISKS.store(disks, Ordering::Relaxed);
     FLUSHED.store(ok, Ordering::Relaxed);
+    CACHELESS.store(cacheless, Ordering::Relaxed);
 }
 
 /// Whether a transfer could still have been in flight when the registers below
@@ -329,6 +333,7 @@ fn stop_all(said: &mut dyn fmt::Write) {
     let mut tally = Stopped::NOTHING;
     tally.disks = DISKS.load(Ordering::Relaxed);
     tally.flushed = FLUSHED.load(Ordering::Relaxed);
+    tally.cacheless = CACHELESS.load(Ordering::Relaxed);
     let _ = writeln!(said, "{}", Barrier::of(BARRIER.load(Ordering::Relaxed)).said());
     for point in POINTS.iter() {
         if let Some(live) = point.live() {
@@ -375,6 +380,7 @@ impl fmt::Write for Unheard {
 struct Stopped {
     disks: u32,
     flushed: u32,
+    cacheless: u32,
     controllers: u32,
     connected: u32,
     reset_ports: u32,
@@ -388,6 +394,7 @@ impl Stopped {
     const NOTHING: Self = Self {
         disks: 0,
         flushed: 0,
+        cacheless: 0,
         controllers: 0,
         connected: 0,
         reset_ports: 0,
@@ -402,10 +409,12 @@ impl fmt::Display for Stopped {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "usb-quiesce: {}/{} disk cache(s) flushed, {}/{} connected port(s) reset, \
-             {}/{} controller(s) halted, {} reset, {}/{} port(s) unpowered",
+            "usb-quiesce: {}/{} disk cache(s) flushed, {} with no cache to flush, \
+             {}/{} connected port(s) reset, {}/{} controller(s) halted, {} reset, \
+             {}/{} port(s) unpowered",
             self.flushed,
             self.disks,
+            self.cacheless,
             self.reset_ports,
             self.connected,
             self.halted,

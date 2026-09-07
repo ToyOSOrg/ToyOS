@@ -93,6 +93,13 @@ impl MscDevice {
         !self.failed
     }
 
+    /// Whether this device has answered SYNCHRONIZE CACHE with INVALID COMMAND
+    /// OPERATION CODE, which is what makes a flush's `Ok(())` mean "there was
+    /// nothing to make durable" rather than "a cache was emptied".
+    pub(in crate::drivers::xhci) fn refused_flush(&self) -> bool {
+        self.no_write_cache
+    }
+
     /// Which slot this disk is on.
     pub fn slot_id(&self) -> u8 {
         self.slot_id
@@ -418,6 +425,15 @@ impl XhciController {
             let dev = &mut disk.dev;
             if dev.failed {
                 return Err(BlockError::Device);
+            }
+            // **The latch decides before the command is built, not after it is
+            // refused.** A device that has answered INVALID COMMAND OPERATION
+            // CODE once answers it every time, and issuing anyway costs a full
+            // Bulk-Only round trip plus a REQUEST SENSE — under `XHCI`, with
+            // preemption off, on the device the log is going to — for every
+            // `logd` batch on a stick like the T14's.
+            if dev.no_write_cache {
+                return Ok(());
             }
             // LBA 0, count 0: the whole medium — all a block-device flush can mean.
             let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
