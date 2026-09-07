@@ -67,7 +67,7 @@ pub fn read(system_table: &SystemTable<Boot>, guid: &[u8; 16]) -> Result<u8, Str
                 &buffer[..16]
             ));
         }
-        Ok(u8::from(buffer[16]))
+        Ok(buffer[16])
     })
     .and_then(|inner| inner)
 }
