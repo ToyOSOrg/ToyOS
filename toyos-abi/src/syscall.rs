@@ -1182,14 +1182,10 @@ device_classes! {
 }
 
 /// A PCI function named by what identifies the *card*, not the slot firmware
-/// happened to put it in.
-///
-/// Bus/device/function would name a position: the same card is `00:03.0` on one
-/// machine and `00:1f.6` on another, and a config that named a position would
-/// hand a program whatever the firmware put there. A vendor/device pair names
-/// what the driver is a driver for. The cost is that a machine with two of one
-/// card has an ambiguous name, and the kernel refuses that by name rather than
-/// picking the first.
+/// put it in: the same card is `00:03.0` on one machine and `00:1f.6` on
+/// another, so a name that was a position would hand a program whatever was
+/// there. A machine holding two of one card has an ambiguous name, which the
+/// kernel refuses rather than resolving.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PciId {
     pub vendor: u16,
@@ -1798,50 +1794,45 @@ pub fn nic_tx(claim: RawHandle, total_len: u64) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_NIC_TX, claim.0 as u64, total_len, 0, 0))
 }
 
-/// Map one memory BAR of a claimed PCI function, as a shared-memory object.
+/// Map one memory BAR of a claimed PCI function, as an object `SYS_SHM_MAP`
+/// maps read/write and uncacheable.
 ///
-/// The answer is a handle `SYS_SHM_MAP` maps read/write and uncacheable, over
-/// the BAR the kernel enumerated for this function and nothing else. The kernel
-/// refuses an index that names no memory BAR, and refuses the BAR that holds
-/// this function's MSI-X table or PBA: masking is [`device_irq_mask`]'s, and a
-/// process that could write the table could aim the device's interrupt at any
-/// address the LAPIC decodes.
+/// `InvalidArgument` for an index that names no memory BAR, and for the BAR
+/// holding this function's MSI-X table or PBA: masking is [`device_irq_mask`]'s,
+/// and a process that could write the table could aim the device's interrupt at
+/// any address the LAPIC decodes.
 ///
-/// Mapping is idempotent per BAR — a second call answers the same object, so a
-/// caller that maps twice does not hold two handles to one window.
+/// Idempotent per BAR: a second call answers the same object.
 pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_DEVICE_BAR_MAP, claim.0 as u64, bar as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
 }
 
-/// A DMA buffer for a claimed PCI function: memory mapped into this process and
-/// into that function's own address space at the unit, and into no other.
+/// A DMA buffer for a claimed PCI function: memory in this process's address
+/// space and in that function's own at the unit, and in no other's.
 ///
-/// Both addresses come back because they are two different things — where the
-/// bytes are in this process, and what a descriptor must carry for the device
-/// to reach them. Nothing else in this ABI turns one into the other, and an
-/// address the caller invents instead is one the device's domain does not map:
-/// the unit refuses the access and records it.
-///
-/// `bytes` is rounded up to whole 2 MiB pages, which is this kernel's only
-/// translation granularity at both the CPU and the unit.
-///
-/// # Safety
-/// `out` must be a writable `DmaGrant` this thread owns for the call.
-pub unsafe fn device_dma_alloc(
-    claim: RawHandle,
-    bytes: u64,
-    out: *mut DmaGrant,
-) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_DEVICE_DMA_ALLOC, claim.0 as u64, bytes, out as u64, 0))
+/// An address the caller invents instead of the one this answers is one the
+/// function's domain does not map, and the unit refuses the access. `bytes` is
+/// rounded up to whole 2 MiB pages.
+pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
+    let mut grant =
+        DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };
+    // SAFETY: `grant` is this frame's own, live and exclusively borrowed across
+    // the call, so the kernel's write lands in a `DmaGrant` nothing else names.
+    check_unit(syscall(
+        SYS_DEVICE_DMA_ALLOC,
+        claim.0 as u64,
+        bytes,
+        &mut grant as *mut DmaGrant as u64,
+        0,
+    ))?;
+    Ok(grant)
 }
 
 /// Mask or unmask the claimed function's interrupt.
 ///
-/// Through the claim rather than through the register window, because the
-/// window a claimant maps deliberately excludes the MSI-X table: the vector in
-/// it is the kernel's, and a driver that could rewrite it could point the
-/// device's message anywhere.
+/// Through the claim rather than the register window, which deliberately
+/// excludes the MSI-X table: the vector in it is the kernel's.
 pub fn device_irq_mask(claim: RawHandle, masked: bool) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_DEVICE_IRQ_MASK, claim.0 as u64, masked as u64, 0, 0))
 }

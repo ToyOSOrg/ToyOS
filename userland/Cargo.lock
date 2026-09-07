@@ -478,7 +478,7 @@ version = "0.1.0"
 dependencies = [
  "sprite",
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
  "toyos-desktop",
  "toyos-font 0.1.0",
  "toyos-manifest",
@@ -500,7 +500,7 @@ version = "0.1.0"
 dependencies = [
  "terminal",
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
  "toyos-font 0.1.0",
  "toyos-window 0.3.0",
 ]
@@ -1527,7 +1527,7 @@ name = "init"
 version = "0.1.0"
 dependencies = [
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
  "toyos-manifest",
 ]
 
@@ -1800,7 +1800,7 @@ name = "logd"
 version = "0.1.0"
 dependencies = [
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
  "toyos-wallclock",
 ]
 
@@ -1910,7 +1910,7 @@ version = "0.0.0"
 dependencies = [
  "smoltcp",
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
 ]
 
 [[package]]
@@ -3406,7 +3406,7 @@ version = "0.0.0"
 dependencies = [
  "rubato",
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
  "toyos-hda",
  "toyos-mixer",
 ]
@@ -3555,7 +3555,7 @@ name = "test-runner"
 version = "0.1.0"
 dependencies = [
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
  "toyos-tco",
 ]
 
@@ -3686,7 +3686,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
  "toyos-keymap 0.1.0",
  "toyos-window 0.3.0",
 ]
@@ -3713,7 +3713,7 @@ dependencies = [
 name = "toyos"
 version = "0.3.0"
 dependencies = [
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
 ]
 
 [[package]]
@@ -3730,13 +3730,13 @@ checksum = "ec119a115b619cec7ca5e56858e98db6558658d6cc9b400906187e62f2877f48"
 
 [[package]]
 name = "toyos-abi"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "toyos-desktop"
 version = "0.1.0"
 dependencies = [
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
 ]
 
 [[package]]
@@ -3767,7 +3767,7 @@ checksum = "06db3c1cb438056c9b9a766c8f0dbbfdf3331e723a5bc7f287badc0cfb2f7f78"
 name = "toyos-manifest"
 version = "0.1.0"
 dependencies = [
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
 ]
 
 [[package]]
@@ -3799,7 +3799,7 @@ name = "toyos-window"
 version = "0.3.0"
 dependencies = [
  "toyos 0.3.0",
- "toyos-abi 0.3.0",
+ "toyos-abi 0.4.0",
  "toyos-font 0.1.0",
  "toyos-keymap 0.1.0",
 ]

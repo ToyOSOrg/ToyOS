@@ -1,27 +1,24 @@
 //! What a claim on one PCI function hands the process that drives it.
 //!
-//! The line through the device is **who can name an address**: the kernel keeps
-//! config space, programs the interrupt vector into the MSI-X table and hands
-//! out every device address a descriptor may carry
-//! ([`syscall::device_dma_alloc`]); the holder gets a register window, buffers
-//! it can reach through both, and the interrupt as records on its own claim
-//! handle. Nothing here is a physical address, and nothing here is specific to
-//! what the function *is* — the same three calls carry a NIC, a controller or a
-//! card nobody has written a driver for yet.
+//! The kernel keeps config space, programs the interrupt vector into the
+//! function's MSI-X table, and hands out every device address a descriptor may
+//! carry ([`syscall::device_dma_alloc`]); the holder gets a register window,
+//! buffers it can reach through both, and the interrupt as records on its own
+//! claim handle. Nothing here is a physical address, and nothing here is
+//! specific to what the function *is*.
 //!
 //! [`syscall::device_dma_alloc`]: crate::syscall::device_dma_alloc
 
-/// The six BAR slots a Type 0 PCI header has. Not a taste: PCI 3.0 §6.1's
-/// header layout, and the bound every index in this module is checked against.
+/// The six BAR slots a Type 0 PCI header has (PCI 3.0 §6.1), and the bound
+/// every index in this module is checked against.
 pub const BARS: usize = 6;
 
 /// The function the claim names, as its driver needs to see it before it has
 /// mapped anything.
 ///
-/// The addresses are deliberately absent. A BAR's *size* is what a driver
-/// bounds its own accesses with; where the window sits is
-/// [`syscall::device_bar_map`]'s answer and the kernel's choice, so a driver
-/// cannot depend on one and the kernel can move a BAR to a boundary it can map.
+/// No addresses: a BAR's *size* is what a driver bounds its own accesses with,
+/// and where the window sits is [`syscall::device_bar_map`]'s answer, so the
+/// kernel stays free to move a BAR to a boundary it can map.
 ///
 /// [`syscall::device_bar_map`]: crate::syscall::device_bar_map
 #[repr(C)]
@@ -29,21 +26,18 @@ pub const BARS: usize = 6;
 pub struct PciFunctionInfo {
     /// Byte size of each memory BAR; 0 where the function has none in that
     /// slot, or where it is one the kernel will not map — the BAR holding this
-    /// function's MSI-X table or PBA reads 0 here, so a driver never asks for a
-    /// window the kernel would refuse.
+    /// function's MSI-X table or PBA reads 0 here.
     pub bar_bytes: [u64; BARS],
     pub vendor: u16,
     pub device: u16,
-    /// Where the firmware put it. Identity for a log line, never a name the
-    /// claim is looked up by: nothing in this ABI takes a bus/device/function.
+    /// Where firmware put it. Identity for a log line, never a name a claim is
+    /// looked up by: nothing in this ABI takes a bus/device/function.
     pub bus: u8,
     pub dev: u8,
     pub func: u8,
     /// 1 when the kernel armed an interrupt for this function, 0 when it has
     /// none. A claim is never minted for a function whose interrupt could not
-    /// be armed, so this is 1 in every claim a driver holds today; it is here
-    /// because a polled function is a shape the substrate could grow and a
-    /// driver must not have to guess which one it got.
+    /// be armed.
     pub irq: u8,
 }
 
@@ -71,43 +65,39 @@ impl PciFunctionInfo {
 
 /// One DMA buffer, in the two address spaces it exists in.
 ///
-/// Both are here because neither can be derived from the other: `at` is where
-/// this process's loads and stores reach the bytes, `device_addr` is what a
+/// Both, because neither can be derived from the other: `shm` maps where this
+/// process's loads and stores reach the bytes, and `device_addr` is what a
 /// descriptor must carry for the function to reach the same bytes through the
-/// unit, and the two are equal only on a machine where nothing translates.
+/// unit.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DmaGrant {
     /// The memory, as an object to map; the caller owns this handle.
     pub shm: crate::RawHandle,
     pub _pad: u32,
-    /// The address to program the device with. Never a physical address once a
-    /// unit translates for this function.
+    /// Never a physical address once a unit translates for this function.
     pub device_addr: u64,
-    /// What was actually granted: the request rounded up to whole 2 MiB pages.
+    /// The request rounded up to whole 2 MiB pages.
     pub bytes: u64,
 }
 
 const _: () = assert!(core::mem::size_of::<DmaGrant>() == 4 + 4 + 8 + 8);
 
-/// What a read of a claim answers once its description has been read: the
-/// interrupts that landed since the last read.
+/// The interrupts that landed since the last read of a claim.
 ///
-/// **One record and not a queue**, like the HDA stub's completions: the kernel
-/// accumulates, so a driver that slept through several interrupts is told about
-/// all of them at once and there is no ring for a slow reader to overflow. A
-/// driver that has read this must go and look at its device — the count says
-/// how many messages arrived, never what any of them meant.
+/// One record and not a queue: the kernel accumulates, so a driver that slept
+/// through several is told about all of them at once and there is no ring for a
+/// slow reader to overflow. The count says how many messages arrived, never
+/// what any of them meant.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DeviceIrqRecord {
-    /// Interrupts since the previous read; never 0 in a record that was
-    /// answered, since an empty count is `WouldBlock` instead.
+    /// Never 0 in a record that was answered; an empty count is `WouldBlock`.
     pub count: u32,
     pub _pad: u32,
-    /// When the *first* of them was taken, by the same clock `SYS_CLOCK`
-    /// answers — the earliest of the coalesced set, so a driver measuring its
-    /// own latency measures the worst of what it slept through.
+    /// When the most recent of them was taken, by the same clock `SYS_CLOCK`
+    /// answers. The most recent and not the first, because a field the kernel
+    /// overwrites per message is set for every count a reader can observe.
     pub timestamp_nanos: u64,
 }
 
