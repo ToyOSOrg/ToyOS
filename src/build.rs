@@ -2467,6 +2467,7 @@ mod tests {
         "tests/desktopaudiocase/system.toml",
         "tests/doomcase/system.toml",
         "tests/doommusiccase/system.toml",
+        "tests/e1000case/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
         "tests/logrotatecase/system.toml",

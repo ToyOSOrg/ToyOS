@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
+toyos-i219 = { path = "../../toyos-i219" }
 
 [dependencies.smoltcp]
 version = "0.12"

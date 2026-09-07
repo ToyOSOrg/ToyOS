@@ -1911,6 +1911,7 @@ dependencies = [
  "smoltcp",
  "toyos 0.6.0",
  "toyos-abi 0.5.0",
+ "toyos-i219",
 ]
 
 [[package]]
@@ -3751,6 +3752,10 @@ checksum = "812cbf2f1cfd97efddd55a1ebebc4a3cc3bffc8b449bf113410e1487b52efcc8"
 
 [[package]]
 name = "toyos-hda"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-i219"
 version = "0.1.0"
 
 [[package]]

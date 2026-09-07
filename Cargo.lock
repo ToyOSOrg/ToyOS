@@ -1191,6 +1191,10 @@ name = "toyos-hda"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-i219"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-keymap"
 version = "0.1.0"
 

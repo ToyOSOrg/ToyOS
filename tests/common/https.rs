@@ -36,7 +36,41 @@ const REFUSALS: &[(&str, &str)] = &[
     ("redirect", "https_fetch: refused plain-http"),
 ];
 
-pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+/// Which machine the judge runs on.
+///
+/// **Two of them, and the driver is the difference.** The same body is fetched
+/// over the same slirp to the same host server, so a NIC driver that
+/// truncates, reorders or duplicates a frame is a disagreement with the host's
+/// own std rather than a smaller number nobody reads.
+#[derive(Clone, Copy)]
+pub struct Bench {
+    pub profile: qemu::Profile,
+    /// The boot config whose netd claims this machine's card.
+    pub config: &'static str,
+    /// The `-device` this profile must actually carry. Asked of the argv
+    /// rather than assumed: a harness field that can be silently inert is this
+    /// suite's worst defect class, and a profile with no NIC would make every
+    /// refusal below pass for the wrong reason.
+    pub device: &'static str,
+}
+
+/// The virtio NIC, which is the card every other network test uses.
+pub const VIRTIO: Bench = Bench {
+    profile: qemu::Profile::Headless,
+    config: "tests/netcase",
+    device: "virtio-net",
+};
+
+/// QEMU's `e1000e` — the 82574L, whose register file is the one the ThinkPad
+/// T14's onboard I219 has. The only machine in reach that runs netd's Intel
+/// driver at all.
+pub const E1000E: Bench = Bench {
+    profile: qemu::Profile::E1000e,
+    config: "tests/e1000case",
+    device: "e1000e",
+};
+
+pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), String> {
     let bins: Vec<(String, Vec<u8>)> = rust_bins
         .iter()
         .filter(|(name, _)| name == "https_fetch")
@@ -50,17 +84,18 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let ca = std::fs::read(&server.ca)
         .map_err(|e| format!("read the minted CA {}: {e}", server.ca.display()))?;
 
-    // Headless is the profile with virtio-net, and tests/netcase the only
-    // config that puts netd in front of one.
     let options = BootOptions {
-        profile: qemu::Profile::Headless,
+        profile: bench.profile,
         extra_root_files: vec![(CA_ON_ROOT.to_string(), ca)],
         ..Default::default()
     };
-    if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
-        return Err("this test needs a NIC and the profile has none".to_string());
+    if !qemu::profile_argv(&options).iter().any(|a| a.contains(bench.device)) {
+        return Err(format!(
+            "this test needs a {} and the profile carries none",
+            bench.device
+        ));
     }
-    let config = compile::repo_root().join("tests/netcase");
+    let config = compile::repo_root().join(bench.config);
     let mut guest = QemuInstance::boot_with_options(&config, &[], &bins, options);
     let mut console = guest.boot_log().to_string();
     super::qemu::await_marker(
@@ -122,9 +157,9 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
 
     for line in &lines {
-        eprintln!("  [https] {line}");
+        eprintln!("  [https:{}] {line}", bench.device);
     }
-    eprintln!("  [https] host arm agreed byte for byte: {host_ok}");
+    eprintln!("  [https:{}] host arm agreed byte for byte: {host_ok}", bench.device);
     Ok(())
 }
 

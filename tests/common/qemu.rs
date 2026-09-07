@@ -1089,6 +1089,10 @@ pub enum Profile {
     /// driver does without it — and what it used to do was panic the kernel,
     /// on a machine whose other devices were all fine.
     VirtioNetNoMsix,
+    /// [`Profile::Headless`] with an Intel `e1000e` in place of the virtio
+    /// NIC, and everything else — console, sound, disks — unchanged. The only
+    /// machine in reach on which netd's Intel driver runs at all.
+    E1000e,
     Gop,
     /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
     /// machine where a mode change can succeed rather than answering
@@ -1426,26 +1430,14 @@ const HDA_TWO_LIVE: &[&str] = &[
     "hda-output,bus=hda1.0,cad=0,audiodev=hdaaud",
 ];
 
-/// Whether a machine has the virtio block, and whether its NIC can raise an
-/// interrupt.
-///
-/// Two shape dimensions and not one, because a device that publishes no MSI-X
-/// capability is a device, not an absence: the driver reaches it, resets it,
-/// negotiates features with it and only then finds it has no way to be told a
-/// packet arrived. `vectors=0` is the actuator — QEMU builds a virtio-pci
-/// function's MSI-X table only for a non-zero vector count — and it is the
-/// only one, since every emulated and every real virtio function has the
-/// capability.
+/// Whether a machine has the virtio console and sound block. Which NIC it has
+/// is [`Nic`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Virtio {
     Absent,
     Present,
-    /// The whole block, with the NIC's MSI-X capability removed and
-    /// virtio-sound's and virtio-serial's left alone — so the console still
-    /// carries the refusal and audio still works while networking does not.
-    NicWithoutMsix,
-    /// The whole block **without virtio-sound**, so the machine's only audio
-    /// device is the one in `hda`.
+    /// The block **without virtio-sound**, so the machine's only audio device
+    /// is the one in `hda`.
     ///
     /// Not a lesser [`Virtio::Present`]: soundd claims a kernel-driven card
     /// before it looks for a controller to drive itself, so a machine carrying
@@ -1462,8 +1454,32 @@ impl Virtio {
     }
 
     fn sound(self) -> bool {
-        matches!(self, Self::Present | Self::NicWithoutMsix)
+        self == Self::Present
     }
+}
+
+/// The network card a machine has, and whether it can raise an interrupt.
+///
+/// A dimension of its own and not a field of [`Virtio`], because the machine
+/// this project targets has an Intel NIC and no virtio device at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nic {
+    Absent,
+    Virtio,
+    /// The virtio NIC with its MSI-X capability removed, virtio-sound's and
+    /// virtio-serial's left alone — so the console still carries the refusal
+    /// and audio still works while networking does not.
+    ///
+    /// A device that publishes no MSI-X capability is a device, not an absence:
+    /// the driver reaches it, resets it, negotiates features with it and only
+    /// then finds it has no way to be told a packet arrived. `vectors=0` is the
+    /// actuator, and the only one — QEMU builds a virtio-pci function's MSI-X
+    /// table only for a non-zero vector count, and every emulated and every
+    /// real virtio function has the capability.
+    VirtioWithoutMsix,
+    /// QEMU's `e1000e`, which is the 82574L at `8086:10d3`: the same register
+    /// file the ThinkPad T14's onboard I219 has.
+    E1000e,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1484,8 +1500,9 @@ struct Shape {
     /// `SYS_GPU_SET_RESOLUTION` answers `NotSupported` and everything past the
     /// refusal is unexecuted.
     gpu: Option<&'static str>,
-    /// virtio-net, virtio-sound, and the console on virtio-serial.
+    /// virtio-sound and the console on virtio-serial.
     virtio: Virtio,
+    nic: Nic,
     /// The `-device` argument for each xHCI controller, port and slot counts
     /// included. A list because a machine can have more than one and the T14
     /// does — its keyboard is on the second.
@@ -1634,6 +1651,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Present,
+                nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &["usb-kbd,bus=xhci.0"],
@@ -1644,11 +1662,13 @@ impl Profile {
                 iommu: Some(IOMMU_DEFAULT),
             },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
+            Self::E1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::VirtioNetNoMsix => Shape {
                 vga: "none",
                 panel: None,
                 gpu: None,
-                virtio: Virtio::NicWithoutMsix,
+                virtio: Virtio::Present,
+                nic: Nic::VirtioWithoutMsix,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &["usb-kbd,bus=xhci.0"],
@@ -1663,6 +1683,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Present,
+                nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &["usb-kbd,bus=xhci.0"],
@@ -1679,6 +1700,7 @@ impl Profile {
                 panel: None,
                 gpu: Some("virtio-gpu-pci"),
                 virtio: Virtio::Present,
+                nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &["usb-kbd,bus=xhci.0"],
@@ -1693,6 +1715,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1713,6 +1736,7 @@ impl Profile {
                 panel: Some((1920, 1080)),
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1727,6 +1751,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[],
                 storage_bus: "",
                 usb: &[],
@@ -1742,6 +1767,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[],
                 storage_bus: "",
                 usb: &[],
@@ -1760,6 +1786,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_WIDE],
                 storage_bus: "xhci.0",
                 usb: &[
@@ -1780,6 +1807,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1794,6 +1822,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1808,6 +1837,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1822,6 +1852,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1836,6 +1867,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1850,6 +1882,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1864,6 +1897,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1878,6 +1912,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -1898,6 +1933,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &["usb-wacom-tablet,bus=xhci.0", "usb-ccid,bus=xhci.0"],
@@ -1912,6 +1948,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
                 storage_bus: "xhci1.0",
                 usb: &["usb-kbd,bus=xhci1.0", "usb-mouse,bus=xhci1.0"],
@@ -1932,6 +1969,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
                 storage_bus: "xhci.0",
                 usb: &[
@@ -1963,6 +2001,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_NO_IRQ_FIRST, XHCI_MSI_ONLY],
                 storage_bus: "",
                 usb: &["usb-kbd,bus=xhci1.0", "usb-mouse,bus=xhci1.0"],
@@ -1980,6 +2019,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_NO_IRQ_SECOND],
                 storage_bus: "xhci.0",
                 usb: &["usb-kbd,bus=xhci1.0", "usb-mouse,bus=xhci1.0"],
@@ -1994,6 +2034,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "",
                 usb: &["usb-kbd,bus=xhci.0"],
@@ -2008,6 +2049,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT, XHCI_SECOND],
                 storage_bus: "xhci.0",
                 usb: &["usb-tablet,bus=xhci.0"],
@@ -2025,6 +2067,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -2039,6 +2082,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -2053,6 +2097,7 @@ impl Profile {
                 panel: None,
                 gpu: None,
                 virtio: Virtio::Absent,
+                nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
                 storage_bus: "xhci.0",
                 usb: &[],
@@ -2068,11 +2113,13 @@ impl Profile {
             },
             Self::Hda => Shape {
                 virtio: Virtio::WithoutSound,
+                nic: Nic::Virtio,
                 hda: HDA_ONE,
                 ..Self::Headless.shape()
             },
             Self::HdaTwoLive => Shape {
                 virtio: Virtio::WithoutSound,
+                nic: Nic::Virtio,
                 hda: HDA_TWO_LIVE,
                 ..Self::Headless.shape()
             },
@@ -3981,16 +4028,28 @@ fn qemu_command(
         }
     }
 
+    // The NIC before the virtio block, so a profile that has one and not the
+    // other still creates it after the unit and before everything else.
+    // `iommu_platform` is virtio's own way of asking to be decoded; an e1000e
+    // is decoded by the unit whatever it says, so it carries none.
+    match shape.nic {
+        Nic::Absent => {}
+        Nic::Virtio => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+                "virtio-net-pci-non-transitional,netdev=net0{platform}"
+            ));
+        }
+        Nic::VirtioWithoutMsix => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+                "virtio-net-pci-non-transitional,netdev=net0,vectors=0{platform}"
+            ));
+        }
+        Nic::E1000e => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("e1000e,netdev=net0");
+        }
+    }
+
     if shape.virtio.present() {
-        qemu.arg("-netdev")
-            .arg("user,id=net0")
-            .arg("-device")
-            .arg(match shape.virtio {
-                Virtio::NicWithoutMsix => {
-                    format!("virtio-net-pci-non-transitional,netdev=net0,vectors=0{platform}")
-                }
-                _ => format!("virtio-net-pci-non-transitional,netdev=net0{platform}"),
-            });
         if shape.virtio.sound() {
             // virtio-sound records everything the guest plays into a per-boot
             // wav for glitch analysis; timer-period matches the interactive

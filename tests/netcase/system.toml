@@ -1,10 +1,7 @@
-# The one boot that runs netd with a NIC in front of it.
+# The one boot that runs netd with a virtio NIC in front of it.
 #
 # netd's `main` opens the NIC before anything else and returns on `NotFound`,
-# so metal-sim — which has no NIC by design — never reaches a line of the
-# daemon proper, and `tests/testcases` does not build netd at all. Between them
-# the whole daemon was unreached by `cargo test`: zero `netd:` lines in a full
-# run. This config exists so its bound has evidence behind it.
+# so a config with no NIC never reaches a line of the daemon proper.
 #
 # test-runner is here for the same reason it is in metalcase: it makes the boot
 # announce itself and lets an in-guest binary be driven over the
@@ -13,12 +10,10 @@
 [boot]
 start = ["logd", "netd", "test-runner"]
 
-# **Every image that carries a `TOYOS-LOG` partition runs this**, and every
-# image does. The kernel keeps the record ring and writes no file at all, so a
-# boot config without `logd` is a boot whose `/log` is empty —
-# `every_boot_config_runs_logd` is what refuses one.
-# It claims no device and serves no port: its whole authority
-# is `logread`, which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate.
+# `every_boot_config_runs_logd` is what refuses a boot config without it: the
+# kernel keeps the record ring and writes no file, so such a boot's `/log` is
+# empty. It claims no device and serves no port; its whole authority is
+# `logread`, which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate.
 [programs.logd]
 syscap = ["logread"]
 
