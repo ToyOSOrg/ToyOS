@@ -25,6 +25,8 @@ pub mod irqcensus;
 #[allow(dead_code)]
 pub mod logread;
 #[allow(dead_code)]
+pub mod metal;
+#[allow(dead_code)]
 pub mod passcost;
 #[allow(dead_code)]
 pub mod pkg;

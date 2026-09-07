@@ -92,6 +92,9 @@ pub enum Refusal {
     Table(String),
     /// The table does not hold exactly one partition of a type the loop needs.
     Partitions { what: &'static str, matched: u32 },
+    /// The image is armed with a parameter [`FLASHABLE`] does not clear for
+    /// this machine, or does not clear at all.
+    Armed { name: String, why: &'static str },
     /// The image puts a partition somewhere the installed rule does not name.
     PartitionIndex { what: &'static str, want: u32, got: u32 },
     /// What landed on the disk is not what the image says.
@@ -147,6 +150,12 @@ impl fmt::Display for Refusal {
             Self::Partitions { what, matched } => {
                 write!(f, "the image carries {matched} {what} partitions and this loop needs one")
             }
+            Self::Armed { name, why } => write!(
+                f,
+                "the image is armed with {name:?}, and {why}. Every parameter a flashed image \
+                 carries needs a row in `toyos_build::metal::FLASHABLE` saying whether this \
+                 machine survives it"
+            ),
             Self::PartitionIndex { what, want, got } => write!(
                 f,
                 "the image puts {what} at partition {got} where the installed rule names {want}"
@@ -519,6 +528,66 @@ struct Flashable {
     bytes: u64,
     esp: Part,
     log: Part,
+}
+
+/// Whether a boot parameter may reach the machine, and why that was decided.
+///
+/// **The metal profile flashes test images**, so an actuator is admissible here
+/// where `build::flashable_params` refuses it for the owner's own flash path.
+/// What is not admissible is an arm that would leave the machine changed: the
+/// internal NVMe is never written, and firmware state a reboot does not undo is
+/// a machine somebody has to open a lid to repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flash {
+    /// The T14 survives it: the boot ends and the machine is what it was.
+    Ok,
+    /// It does not ship in any image, for the reason given.
+    Never(&'static str),
+}
+
+/// Every parameter this loop has ruled on, and nothing else reaches the stick.
+///
+/// **A deny-list fails open on the next actuator**, so this is the whole
+/// judgement: an image armed with a name that has no row here is refused by
+/// that name rather than flashed on the assumption it is harmless.
+pub const FLASHABLE: &[(&str, Flash)] = &[
+    // The kernel's own boot parameters. Both are what a shipped image carries,
+    // and `build::flashable_params` already lets the owner flash them.
+    ("watchdog", Flash::Ok),
+    ("early-panel", Flash::Ok),
+];
+
+/// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
+pub fn flash_ruling(name: &str) -> Option<Flash> {
+    // The black-box page's address carries a value and is not a name: every
+    // image the harness builds has one, and it arms no instrument.
+    if name.starts_with(toyos_blackbox::PARAM) {
+        return Some(Flash::Ok);
+    }
+    FLASHABLE.iter().find(|(row, _)| *row == name).map(|(_, verdict)| *verdict)
+}
+
+/// The pre-flash gate: what the image is armed with, judged before it is
+/// written. Read off the image's own ESP, so it answers about the artifact
+/// rather than about whoever built it.
+fn arms_are_admissible(path: &Path) -> Result<Vec<String>, Refusal> {
+    let armed = crate::image::params_of(path)
+        .map_err(|why| Refusal::File { path: path.display().to_string(), why })?;
+    for name in &armed {
+        match flash_ruling(name) {
+            Some(Flash::Ok) => {}
+            Some(Flash::Never(why)) => {
+                return Err(Refusal::Armed { name: name.clone(), why })
+            }
+            None => {
+                return Err(Refusal::Armed {
+                    name: name.clone(),
+                    why: "nothing in this tree has ruled on whether the machine survives it",
+                })
+            }
+        }
+    }
+    Ok(armed)
 }
 
 /// Whole sectors, `EFI PART` in the *final* one, and exactly one partition of
@@ -907,6 +976,10 @@ pub struct Args {
     /// Where the account's password is read from, once, to install the rule.
     install_sudoers: Option<PathBuf>,
     wait_secs: u64,
+    /// Where the stick's two files and this boot's own facts are written, for a
+    /// judge that is not this process. Absent leaves the run's only account its
+    /// standard output, which no per-test predicate can be held to.
+    readback: Option<PathBuf>,
 }
 
 impl Args {
@@ -917,6 +990,7 @@ impl Args {
             dry_run: false,
             install_sudoers: None,
             wait_secs: return_secs(),
+            readback: None,
         };
         let mut at = 0;
         while at < args.len() {
@@ -955,6 +1029,10 @@ impl Args {
                 }
                 "--install-sudoers" => {
                     out.install_sudoers = Some(PathBuf::from(value()?));
+                    2
+                }
+                "--readback" => {
+                    out.readback = Some(PathBuf::from(value()?));
                     2
                 }
                 "--wait-secs" => {
@@ -1061,6 +1139,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         image.log.start,
         image.log.sectors
     );
+    // The pre-flash gate, before the disk is even asked what it is: what this
+    // image will arm, judged against the only table that has ruled on any of it.
+    let armed = arms_are_admissible(&args.image)?;
+    println!("image {}: armed with {armed:?}", image.path.display());
 
     driver.require_sudo()?;
     let policy =
@@ -1091,7 +1173,46 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     println!("the machine answered ssh again after {back} s");
     let (loader, log) = driver.read_log()?;
     print!("{loader}{log}");
+    if let Some(dir) = &args.readback {
+        write_readback(dir, &loader, &log, back)?;
+        println!("readback written to {}", dir.display());
+    }
     bootlog::verdict(&log).map(Some).map_err(Refusal::Log)
+}
+
+/// What the two files and this boot's own facts are called under `--readback`.
+///
+/// **Written here rather than parsed back out of this program's output**: a
+/// judge that split one stream into a loader half and a kernel half would be
+/// guessing where one ended, and the guess is wrong on the boot that says
+/// something unusual — which is every boot a per-test predicate is for.
+pub const READBACK_LOADER: &str = "loader.log";
+pub const READBACK_KERNEL: &str = "kernel.log";
+pub const READBACK_BOOT: &str = "boot.txt";
+
+/// The two keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
+pub const BACK_SECS: &str = "back_secs";
+
+fn write_readback(dir: &Path, loader: &str, log: &str, back: u64) -> Result<(), Refusal> {
+    let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
+        std::fs::write(path, text)
+            .map_err(|e| Refusal::File { path: path.display().to_string(), why: e.to_string() })
+    };
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Refusal::File { path: dir.display().to_string(), why: e.to_string() })?;
+    wrote(&dir.join(READBACK_LOADER), loader)?;
+    wrote(&dir.join(READBACK_KERNEL), log)?;
+    // The boot's own millisecond count is in the kernel log and read from
+    // there; this file carries only what the *host* clock measured, which no
+    // log can.
+    wrote(&dir.join(READBACK_BOOT), &format!("{BACK_SECS} {back}\n"))
+}
+
+/// What the host measured about a boot, out of [`READBACK_BOOT`].
+pub fn back_secs(text: &str) -> Option<u64> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(BACK_SECS))
+        .and_then(|rest| rest.trim().parse().ok())
 }
 
 #[cfg(test)]
@@ -1103,6 +1224,49 @@ mod tests {
             key: PathBuf::from("/home/dev/.ssh/id_ed25519_toyos_runner"),
             ..Target::t14().expect("a test run has HOME")
         }
+    }
+
+    /// The gate fails closed: a name nobody has ruled on is refused, and it is
+    /// refused *by that name* rather than by a count.
+    #[test]
+    fn an_arm_with_no_ruling_never_reaches_the_stick() {
+        assert_eq!(flash_ruling("watchdog"), Some(Flash::Ok));
+        assert_eq!(flash_ruling("blackbox=0x8000000"), Some(Flash::Ok));
+        assert_eq!(flash_ruling("nvme-write-selftest"), None);
+        let refusal = Refusal::Armed {
+            name: "nvme-write-selftest".to_string(),
+            why: "nothing in this tree has ruled on whether the machine survives it",
+        };
+        let said = refusal.to_string();
+        assert!(said.contains("nvme-write-selftest"), "{said}");
+        assert!(said.contains("FLASHABLE"), "{said}");
+        // A refusal about the image is the loop's, never the machine's: exit 2.
+        assert!(!refusal.about_the_boot());
+    }
+
+    /// A row for a name the kernel no longer declares is a ruling about
+    /// nothing, and it would keep an image admissible after the arm it cleared
+    /// was deleted. Read off the kernel's own two declarations.
+    #[test]
+    fn every_ruling_names_a_parameter_the_kernel_declares() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut declared = crate::build::declared_actuators(root);
+        declared.extend(crate::build::declared_params(root));
+        for (name, _) in FLASHABLE {
+            assert!(
+                declared.iter().any(|d| d == name),
+                "`FLASHABLE` rules on {name:?}, which the kernel declares as neither an \
+                 actuator nor a boot parameter: {declared:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_host_clock_crosses_in_the_boot_file() {
+        assert_eq!(back_secs("back_secs 47\n"), Some(47));
+        assert_eq!(back_secs("back_secs 47"), Some(47));
+        assert_eq!(back_secs(""), None);
+        assert_eq!(back_secs("back_secs later\n"), None);
     }
 
     #[test]

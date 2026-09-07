@@ -68,8 +68,18 @@ fn main() {
             }
             *RUNNING.lock().expect("the deadline thread does not panic holding this") =
                 job.clone();
-            if !run_one(job, &[], cap.as_ref()) {
-                fatal(&format!("job {job:?} did not run"));
+            match run_one(job, &[], cap.as_ref()) {
+                Ran::No => fatal(&format!("job {job:?} did not run")),
+                // **A builtin's exit code reaches no kernel record.** A spawned
+                // job's does — `process::exit_process` logs one — so a host
+                // reading a stick can judge it; a builtin runs inside this
+                // process and its code is console text, which on a machine with
+                // no serial port is nothing at all. So a failing builtin ends
+                // the boot: the missing `Rebooting.` is the only channel it has.
+                Ran::Builtin(code) if code != 0 => {
+                    fatal(&format!("the builtin {job:?} exited {code}"))
+                }
+                Ran::Builtin(_) | Ran::Spawned => {}
             }
         }
         FINISHED.store(true, Ordering::Release);
@@ -154,8 +164,18 @@ fn command(line: &str, cap: Option<&SysCap>) {
     run_one(name, &args, cap);
 }
 
-/// Run `/system/bin/<name>` or that name's builtin, between the host's markers; `false` is a job that never started.
-fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> bool {
+/// What became of one job. The two ways it can have run are told apart because
+/// only one of them leaves the kernel a record: a spawned binary's exit is
+/// `exit: <name> pid=… code=…`, and a builtin's is a line on this console.
+enum Ran {
+    /// It never started.
+    No,
+    Spawned,
+    Builtin(i32),
+}
+
+/// Run `/system/bin/<name>` or that name's builtin, between the host's markers.
+fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     let path = format!("/system/bin/{name}");
 
     println!("===TEST_START {name}===");
@@ -165,7 +185,7 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> bool {
         let code = builtin(cap);
         println!("===TEST_END {name} exit={code}===");
         let _ = io::stdout().flush();
-        return true;
+        return Ran::Builtin(code);
     }
 
     // Piped stdin so the child does not consume the serial commands.
@@ -193,7 +213,7 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> bool {
         Some(Err(e)) => {
             println!("===TEST_END {name} error=the capability would not duplicate: {e:?}===");
             let _ = io::stdout().flush();
-            return false;
+            return Ran::No;
         }
     }
     let ran = match command.spawn() {
@@ -203,17 +223,17 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> bool {
                 Ok(status) => {
                     let code = status.code().unwrap_or(-1);
                     println!("===TEST_END {name} exit={code}===");
-                    true
+                    Ran::Spawned
                 }
                 Err(e) => {
                     println!("===TEST_END {name} error={e}===");
-                    false
+                    Ran::No
                 }
             }
         }
         Err(e) => {
             println!("===TEST_END {name} error={e}===");
-            false
+            Ran::No
         }
     };
     let _ = io::stdout().flush();

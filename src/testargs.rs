@@ -191,6 +191,13 @@ pub const FLAGS: &[Flag] = &[
     flag("--shard", Value::Required),
     flag("--slow-usb", Value::None),
     flag("--nightly", Value::None),
+    // The metal profile: the registrations that run on the T14, batched into
+    // images and judged off the log the stick came back with.
+    flag("--metal", Value::None),
+    // Where those images and their readbacks live. **Naming it means the
+    // machine is not touched**: the run builds the images and writes down what
+    // to run on them, or judges readbacks a driver already left there.
+    flag("--metal-readback", Value::Required),
 ];
 
 fn accepted() -> String {
@@ -249,6 +256,20 @@ pub fn parse(args: &[String]) -> Result<Option<&str>, String> {
     let has = |want: &str| {
         args.iter().any(|arg| arg == want || arg.strip_prefix(want).is_some_and(|v| v.starts_with('=')))
     };
+    if has("--metal-readback") && !has("--metal") {
+        return Err(
+            "--metal-readback says where the metal profile's images and readbacks live and \
+             decides nothing on its own; add --metal"
+                .to_string(),
+        );
+    }
+    if has("--metal") && has("--audio-gate") {
+        return Err(
+            "--metal and --audio-gate are separate tiers on separate machines and cannot be \
+             combined; run one at a time"
+                .to_string(),
+        );
+    }
     if has("--nightly") && has("--audio-gate") {
         return Err(
             "--nightly and --audio-gate are separate tiers and cannot be combined; run one \
@@ -476,8 +497,22 @@ mod tests {
             vec!["--shard", "2/4"],
             vec!["--nightly"],
             vec!["--debug"],
+            vec!["--metal"],
+            vec!["--metal", "--metal-readback", "target/metal"],
+            vec!["--metal", "--nightly"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
         }
+    }
+
+    /// A readback directory with no `--metal` beside it selects no tier at all,
+    /// so the run it describes would be an ordinary suite that wrote images
+    /// nobody looked at.
+    #[test]
+    fn a_readback_directory_alone_selects_no_tier() {
+        let refusal = parse_owned(&["--metal-readback", "target/metal"]).unwrap_err();
+        assert!(refusal.contains("add --metal"), "{refusal}");
+        let refusal = parse_owned(&["--metal", "--audio-gate", "30"]).unwrap_err();
+        assert!(refusal.contains("cannot be combined"), "{refusal}");
     }
 }

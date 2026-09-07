@@ -166,7 +166,7 @@ pub fn param_conflict(path: &Path, asked: &[&str]) -> Option<String> {
 /// `root=` is not an actuator and is on every image: this answers what a boot
 /// would *arm*, which is the other reading of the same string
 /// (`toyos_abi::boot::actuators`).
-fn params_of(path: &Path) -> Result<Vec<String>, String> {
+pub fn params_of(path: &Path) -> Result<Vec<String>, String> {
     let text = cmdline_of(path)?;
     Ok(toyos_abi::boot::actuators(&text).map(str::to_string).collect())
 }

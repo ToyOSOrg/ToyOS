@@ -334,30 +334,10 @@ pub fn loader_watchdog_arms(
     let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, armed);
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    let line = boot.must_say(&loader_armed())?.to_string();
-    // The words, not the line: a read-back that printed a register the loader
-    // never wrote would satisfy the line and is the failure worth catching.
-    let read_back = boot.must_say("watchdog: read back TCO_RLD=")?.to_string();
-    let tmr = hex_field(&read_back, "TCO_TMR=")?;
-    if tmr != u64::from(toyos_tco::TIMER) {
-        return Err(format!(
-            "the loader read TCO_TMR={tmr} back from the chipset and wrote {}\n{read_back}",
-            toyos_tco::TIMER
-        ));
-    }
-    // The reset gate is inside this block on the generations the table names, so
-    // a guest whose armed timer could not reset it is one the bound is a lie on.
-    let gates = boot.must_say("so a second expiry can reset this machine")?.to_string();
-    // The words of it, not the line: this is the register block's own account of
-    // whether an expiry reaches the machine, and a guest that has just armed the
-    // timer has not expired once.
-    for (field, want) in [("no_reboot=", 0), ("tco_lock=", 0), ("timeout=", 0)] {
-        let seen = decimal_field(&gates, field)?;
-        if seen != want {
-            return Err(format!("the loader read {field}{seen} back and this guest is {want}\n{gates}"));
-        }
-    }
-    boot.must_say(&armed_on_arrival())?;
+    // One console carries both writers here; on the T14 the loader's lines are
+    // in `loader.log` and the kernel's are records, so the predicate takes them
+    // apart even where they arrive together.
+    watchdog_armed(&boot, &boot)?;
     drop(qemu);
 
     let idle = QemuInstance::boot_with_options(
@@ -368,14 +348,83 @@ pub fn loader_watchdog_arms(
     );
     let quiet = serial::Serial::boot(&idle);
     quiet.must_be_clean()?;
-    quiet.must_not_say(&loader_armed())?;
-    quiet.must_not_say(ARMED_ON_ARRIVAL)?;
-    quiet.must_not_say(UNARMED_ON_ARRIVAL)?;
+    watchdog_quiet(&quiet, &quiet)?;
     drop(idle);
+    Ok(())
+}
+
+/// The armed boot's half: the loader wrote the register block and the kernel
+/// found the timer already running.
+///
+/// **`TCO1_CNT.TCO_LOCK` is not judged.** `toyos_tco`'s own header names it as
+/// the one bit a read-back may not be held to — firmware that set it leaves it
+/// set through every write this tree makes, and what it gates is `SMI_EN.TCO_EN`
+/// rather than the countdown or the reboot. It is reported and passed over.
+pub fn watchdog_armed(
+    loader: &serial::Serial,
+    kernel: &serial::Serial,
+) -> Result<(), String> {
+    let line = loader.must_say(&loader_armed())?.to_string();
+    // The words, not the line: a read-back that printed a register the loader
+    // never wrote would satisfy the line and is the failure worth catching.
+    let read_back = loader.must_say("watchdog: read back TCO_RLD=")?.to_string();
+    let tmr = hex_field(&read_back, "TCO_TMR=")?;
+    if tmr != u64::from(toyos_tco::TIMER) {
+        return Err(format!(
+            "the loader read TCO_TMR={tmr} back from the chipset and wrote {}\n{read_back}",
+            toyos_tco::TIMER
+        ));
+    }
+    // The reset gate is inside this block on the generations the table names, so
+    // a machine whose armed timer could not reset it is one the bound is a lie on.
+    let gates = loader.must_say("so a second expiry can reset this machine")?.to_string();
+    // The words of it, not the line: this is the register block's own account of
+    // whether an expiry reaches the machine, and a machine that has just armed
+    // the timer has not expired once.
+    for (field, want) in [("no_reboot=", 0), ("timeout=", 0)] {
+        let seen = decimal_field(&gates, field)?;
+        if seen != want {
+            return Err(format!(
+                "the loader read {field}{seen} back and this machine is {want}\n{gates}"
+            ));
+        }
+    }
+    kernel.must_say(&armed_on_arrival())?;
 
     eprintln!("  [power] the loader armed it and the kernel found it running: {}", line.trim());
     eprintln!("  [power] {}", gates.trim());
+    eprintln!("  [power] tco_lock={}, which no read-back is judged on", decimal_field(&gates, "tco_lock=")?);
     Ok(())
+}
+
+/// The control: a boot that did not name the parameter arms nothing, and the
+/// kernel says nothing about a timer either way.
+pub fn watchdog_quiet(
+    loader: &serial::Serial,
+    kernel: &serial::Serial,
+) -> Result<(), String> {
+    // The loader's channel said *something*, which is what makes the absence
+    // below mean anything. Asked of the loader's own first line rather than
+    // through `must_not_say`: on the stick `loader.log` is a file of its own and
+    // carries no kernel record for `Serial::alive` to find.
+    loader.must_say(bootlog::LOADER_FIRST_LINE)?;
+    says_nothing_of(loader, &loader_armed())?;
+    kernel.must_not_say(ARMED_ON_ARRIVAL)?;
+    kernel.must_not_say(UNARMED_ON_ARRIVAL)?;
+    Ok(())
+}
+
+/// `must_not_say` on a channel whose liveness the caller has already
+/// established, because `Serial::alive` asks for a kernel record and the
+/// loader's own file on the stick has none.
+fn says_nothing_of(channel: &serial::Serial, needle: &str) -> Result<(), String> {
+    match channel.text().lines().find(|l| l.contains(needle)) {
+        Some(line) => Err(format!(
+            "{needle:?} on a channel that should not have it: {line:?}\n{}",
+            channel.text()
+        )),
+        None => Ok(()),
+    }
 }
 
 fn starved() -> BootOptions {
@@ -804,15 +853,42 @@ pub fn blackbox_done_chain(
 
     let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
     second.must_say(&done_line())?;
-    // The distinction the whole state machine exists for: a deliberate stop is
-    // not a panic and not a kernel that vanished.
-    second.must_not_say(&armed_and_nothing_else())?;
-    second.must_not_say(BLACKBOX_WITNESS)?;
-    second.must_not_say(bootlog::LOADER_LAST_LINE)?;
+    done_chain(&second)?;
     ended_in_a_reset(&mut resets)?;
     drop(qemu);
+    Ok(())
+}
 
+/// The loader pass after a deliberate reboot: it read DONE, said so, and ended
+/// the chain rather than booting another kernel.
+///
+/// On the T14 this pass is already what every metal boot does — the loader
+/// points `BootNext` at itself before each handoff and a pass with a finding
+/// appends to the same `loader.log` — so the argument is that file's tail.
+pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
+    after.must_say(&done_line())?;
+    // The distinction the whole state machine exists for: a deliberate stop is
+    // not a panic and not a kernel that vanished.
+    says_nothing_of(after, &armed_and_nothing_else())?;
+    says_nothing_of(after, BLACKBOX_WITNESS)?;
+    // The chain ends rather than going round: a pass that booted a kernel would
+    // have said so, and this one must not have.
+    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
+    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
+    Ok(())
+}
+
+/// The kernel decoded a reset register out of this machine's FADT and wrote it.
+///
+/// **The port is the machine's, not q35's.** What a boot on real hardware can
+/// be held to is that the decode happened and named a register the kernel
+/// writes — `ACPI: no reset register this kernel writes` is the other branch and
+/// is a machine that cannot return itself to firmware at all.
+pub fn reset_register_decoded(kernel: &serial::Serial) -> Result<(), String> {
+    says_nothing_of(kernel, "ACPI: no reset register this kernel writes")?;
+    let line = kernel.must_say("ACPI: reset register ")?;
+    eprintln!("  [power] {}", line.trim());
     Ok(())
 }
 
@@ -836,12 +912,25 @@ pub fn blackbox_unclaimed_page(
     );
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
-    // The loader claimed one on this guest, so what is judged here is the
+    // One console carries both writers here; on the T14 the loader's two lines
+    // are in `loader.log` and the kernel's are records on the stick.
+    blackbox_unclaimed(&boot, &boot)?;
+    drop(qemu);
+    Ok(())
+}
+
+/// The loader named a page, the kernel took *that* page, and it took it before
+/// the console existed.
+pub fn blackbox_unclaimed(
+    loader: &serial::Serial,
+    kernel: &serial::Serial,
+) -> Result<(), String> {
+    // The loader claimed one on this machine, so what is judged here is the
     // *kernel's* reading of its own parameter line: the address it was given is
     // the address the loader printed, and nothing else in the line is a page.
-    let claimed = boot.must_say(&armed_line())?.to_string();
-    boot.must_say(&kernel_took_it())?;
-    boot.must_say(&format!("blackbox={PHYS:#x}"))?;
+    let claimed = loader.must_say(&armed_line())?.to_string();
+    loader.must_say(&format!("blackbox={PHYS:#x}"))?;
+    kernel.must_say(&kernel_took_it())?;
     // **Before `serial::init`, and that ordering is the assertion.** The page
     // used to be taken after the console, the parameter line's UTF-8 check and
     // `params::init`, and the owner's laptop panicked before all three: it
@@ -849,8 +938,7 @@ pub fn blackbox_unclaimed_page(
     // `ARMED`. No staged panic can land in that window — arming one needs the
     // line parsed first — so what is judged is where the kernel says it took
     // the page, which moves the moment the reading moves.
-    boot.must_say_after(&kernel_took_it(), SERIAL_IS_UP)?;
-    drop(qemu);
+    kernel.must_say_after(&kernel_took_it(), SERIAL_IS_UP)?;
 
     eprintln!("  [power] the loader named the page and the kernel took it: {}", claimed.trim());
     Ok(())
