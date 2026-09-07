@@ -31,6 +31,7 @@ macro_rules! println {
     }};
 }
 
+mod attempt;
 mod blackbox;
 mod bootnext;
 mod loaderlog;
@@ -285,6 +286,18 @@ fn rtc_utc_offset(system_table: &SystemTable<Boot>) -> Option<i32> {
 
 /// [`toyos_tco::FIRMWARE_BOUND_MS`] in the seconds `set_watchdog_timer` takes.
 const FIRMWARE_WATCHDOG_SECS: usize = (toyos_tco::FIRMWARE_BOUND_MS / 1_000) as usize;
+
+/// The head of every line about the attempt count this image has on its stick.
+const ATTEMPTS: &str = "Boot attempts:";
+
+/// **What a boot that never reported looks like from the next one**, and the
+/// line the T14 driver reads as its own verdict.
+///
+/// Written where this pass refuses to boot a kernel because the last one was
+/// handed the machine and said nothing back. Held to the host's spelling by
+/// `toyos_build::bootlog`'s own gate.
+const HUNG_WITHOUT_A_RECORD: &str =
+    "Boot attempts: the previous boot of this image never reported; the machine is handed back";
 
 /// What firmware logs if that countdown expires. Codes to `0xffff` are reserved
 /// for firmware's own use and this is the first one an application may take;
@@ -782,13 +795,46 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // mints one per image, so a record another image left in this memory is one
     // this pass clears rather than reports.
     let (finding, stale) = blackbox::harvest(page, log_guid);
-    loaderlog::open(&system_table, &log_guid, finding.is_none());
+    // **The bound on a hang, and it is read before anything is opened**: the
+    // count lives on the same volume `loader.log` is about to take exclusively,
+    // so this is the one window there is to read and write it.
+    let previous = attempt::read(&system_table, &log_guid);
+    let retry = match &previous {
+        Ok(previous) => attempt::is_the_retry(page.is_some(), finding.is_some(), *previous),
+        Err(_) => false,
+    };
+    // Cleared where the last boot is accounted for, and where this pass is
+    // about to hand the machine back: both leave the next boot of this image a
+    // first attempt, which is what one hand per hang means.
+    let next = if finding.is_some() || retry {
+        0
+    } else {
+        attempt::next(previous.clone().unwrap_or(0))
+    };
+    let wrote = attempt::write(&system_table, &log_guid, next);
+    loaderlog::open(&system_table, &log_guid, finding.is_none() && !retry);
     println!("{}", loaderlog::BEGINS_AT);
     if let Some(line) = claim_refused {
         println!("{line}");
     }
     if let Some(line) = stale {
         println!("{line}");
+    }
+    // Said either way, because the bound is only as good as what a reader can
+    // see of it: a stick this could not count on is a machine with no bound.
+    match (&previous, &wrote) {
+        (Err(why), _) | (_, Err(why)) => println!("{ATTEMPTS} {why}, so this boot is not counted and a hang here needs a hand"),
+        (Ok(previous), Ok(())) => println!("{ATTEMPTS} this image has had the machine {previous} time(s) without reporting; now {next}"),
+    }
+    if retry {
+        // **The hang, and the only bound there is on one.** The last boot of
+        // this image was handed the machine and never reported — no panic, no
+        // fault, no deliberate handover — and the black box is empty, which is
+        // what a power cut leaves. Booting the same kernel again is the loop the
+        // owner is already in, so this pass boots none: `BootNext` is left alone
+        // and the firmware's own boot order takes the machine.
+        println!("{HUNG_WITHOUT_A_RECORD}");
+        end_this_pass(&system_table, exit_event);
     }
     if let Some(finding) = finding {
         for line in &finding.lines {

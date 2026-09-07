@@ -125,6 +125,12 @@ pub enum Refusal {
     /// nothing did exactly what it was told — the question is why it had a
     /// record to report at all.
     ReportedAndBootedNothing { said: String },
+    /// **The last boot of this image was handed the machine and hung.** The
+    /// loader counts attempts on the stick, and this pass is the second of an
+    /// image whose first never reported — so it booted no kernel and handed the
+    /// machine back rather than starting the same hang again. What is owed is a
+    /// look at why that kernel stopped, and the boot before this one is where.
+    HungWithoutARecord,
     Usage(String),
 }
 
@@ -138,6 +144,7 @@ impl Refusal {
                 | Self::Log(_)
                 | Self::Fat32(_)
                 | Self::ReportedAndBootedNothing { .. }
+                | Self::HungWithoutARecord
         )
     }
 }
@@ -215,6 +222,14 @@ impl fmt::Display for Refusal {
                  panel and the log partition say, and neither is readable from here"
             ),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
+            Self::HungWithoutARecord => write!(
+                f,
+                "the last boot of this image was handed the machine and never reported: no panic, \
+                 no fault and no deliberate handover, which is a hang. This pass refused to \
+                 boot the same kernel again and gave the machine back, so the machine is free \
+                 and nothing needs a hand — but this boot measured no test, and why that kernel \
+                 stopped is the boot before it"
+            ),
             Self::ReportedAndBootedNothing { said } => write!(
                 f,
                 "the loader reported a record and booted no kernel: `loader.log` carries a \
@@ -1375,6 +1390,13 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         // The loader's own file is what tells them apart: a pass that read the
         // black box says so and ends the chain, and this is the only way a
         // machine can come back with a whole `loader.log` and an empty kernel one.
+        // **First, because it is the one refusal that is not a machine needing a
+        // hand.** The loader bounded a hang and gave the machine back; every
+        // other reading of an empty kernel log would send a reader to the wrong
+        // place, and `NoBootRecord` would send them to a kernel that never ran.
+        if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) {
+            return Err(Refusal::HungWithoutARecord);
+        }
         if let Some(said) = reported_and_booted_nothing(&loader, &log) {
             return Err(Refusal::ReportedAndBootedNothing { said });
         }
