@@ -8,7 +8,7 @@
 use std::vec::Vec;
 use std::{format, vec};
 
-use crate::regs::{self, cause, ctrl, rctl, rx_desc, tctl, tx_desc};
+use crate::regs::{self, cause, ctrl, ivar, rctl, rx_desc, tctl, tx_desc};
 use crate::stub::{Nic, Permits, NVM_MAC};
 use crate::*;
 
@@ -90,9 +90,18 @@ fn bring_up_programs_what_the_initialization_sections_name() {
     assert_eq!(nic.peek(regs::TXDCTL), regs::txdctl::SUGGESTED);
     assert_eq!(
         nic.peek(regs::IMS),
-        cause::ENABLED,
+        cause::ENABLED | cause::ENABLED_MSIX,
         "{}",
-        nic.because("§4.6.5 names RXT, RXO, RXDMT and LSC and no transmit cause")
+        nic.because(
+            "§4.6.5 names RXT, RXO, RXDMT and LSC and no transmit cause, and §10.2.4.9's \
+             vectored names go beside them on a part that has IVAR"
+        )
+    );
+    assert_eq!(
+        nic.peek(regs::EIAC),
+        0,
+        "{}",
+        nic.because("§10.2.4.7 says ICR must not be read while EIAC has bits set")
     );
     // §7.1.8: `RDLEN` "must be a multiple of 128", and the tail points one
     // descriptor beyond the end.
@@ -622,6 +631,68 @@ fn causes_are_acknowledged_by_writing_them_back() {
         "{}",
         nic.because("the same causes came back on the next pass")
     );
+}
+
+/// §10.2.4.9: `IVAR` "is only valid in MSI-X mode. It defines the allocation
+/// of the different interrupt causes to one of the MSI-X vectors." **At reset
+/// it allocates none**, so a part in that mode with no `IVAR` programmed fills
+/// `ICR` and delivers nothing — which is what QEMU's `e1000e` did before this
+/// driver wrote it.
+#[test]
+fn a_part_in_msi_x_mode_is_told_which_vector_each_cause_uses() {
+    let nic = Nic::with(16, Permits { spurious_interrupts: false, ..Permits::default() });
+    let mut driver = open(&nic);
+    assert!(driver.msix(), "{}", nic.because("the part answered IVAR and was not believed"));
+    assert_eq!(
+        nic.peek(regs::IVAR),
+        ivar::ALL_ON_VECTOR_ZERO,
+        "{}",
+        nic.because("every cause has to name the one MSI-X entry the kernel programmed")
+    );
+    driver.begin_pass();
+
+    nic.set_link(true);
+    nic.deliver(&frame(0x66, 300));
+    nic.run();
+    let pass = driver.begin_pass();
+    assert!(
+        pass.messages > 0,
+        "{}",
+        nic.because("a frame arrived and the part raised nothing at all")
+    );
+    assert!(pass.causes & cause::RXQ0 != 0, "{}", nic.because("no receive-queue cause"));
+    assert_eq!(drain(&nic, &mut driver).len(), 1);
+}
+
+/// The other part: MSI and no `IVAR` at all, which is what the T14's I219 is.
+/// A write to the register is dropped, a read answers zero, and the classic
+/// causes §4.6.5 names drive the one message directly.
+#[test]
+fn a_part_with_no_vector_allocation_still_raises_its_interrupt() {
+    let nic = Nic::with(17, Permits { spurious_interrupts: false, ..Permits::default() });
+    nic.without_msix();
+    let mut driver = open(&nic);
+    assert!(!driver.msix(), "{}", nic.because("a part with no IVAR was taken for one with"));
+    assert_eq!(nic.peek(regs::IVAR), 0);
+    assert_eq!(
+        nic.peek(regs::IMS),
+        cause::ENABLED,
+        "{}",
+        nic.because("a part with no vectors was masked in a vector's name")
+    );
+    driver.begin_pass();
+
+    nic.set_link(true);
+    nic.deliver(&frame(0x77, 300));
+    nic.run();
+    let pass = driver.begin_pass();
+    assert!(
+        pass.messages > 0,
+        "{}",
+        nic.because("a frame arrived and the part raised nothing at all")
+    );
+    assert!(pass.causes & cause::RXT0 != 0, "{}", nic.because("no receive-timer cause"));
+    assert_eq!(drain(&nic, &mut driver).len(), 1);
 }
 
 /// §7.4.5 names the spurious interrupt: a message whose cause is already gone.

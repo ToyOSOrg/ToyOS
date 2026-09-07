@@ -572,6 +572,10 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // only clock is `run_test`'s ceiling. Fast with the UNMEASURED bootstrap
     // marker until CI prices it.
     ("https_tls13", Sched::Parallel, Tier::Fast),
+    // The same judge over netd's Intel driver instead of the virtio one: the
+    // 82574L QEMU models has the register file the T14's I219 has, so this is
+    // where that driver moves real frames before the laptop does.
+    ("https_tls13_e1000e", Sched::Parallel, Tier::Fast),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -13263,7 +13267,8 @@ fn run_machine_test(
             );
             Ok(())
         }
-        "https_tls13" => common::https::tls13_judge(rust_bins),
+        "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO),
+        "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E),
         "netd_connection_caps" => {
             // The only boot that runs netd at all. Its `main` opens the NIC
             // first and returns on `NotFound`, so metal-sim never reaches a

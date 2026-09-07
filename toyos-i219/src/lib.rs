@@ -70,7 +70,7 @@ mod stub;
 #[cfg(test)]
 mod tests;
 
-use regs::{cause, ctrl, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl};
+use regs::{cause, ctrl, ivar, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl};
 
 /// One memory-mapped register access.
 ///
@@ -328,9 +328,27 @@ pub struct Counters {
     /// a wait: a server never blocks, and a dropped frame's recovery is the
     /// peer's retransmit.
     pub tx_dropped: u32,
-    /// Messages that arrived with no cause set in `ICR` — §7.4.5's spurious
-    /// interrupt, which costs a pass and nothing else.
+    /// Messages that arrived with no cause set in `ICR`.
+    ///
+    /// §7.4.5's spurious interrupt — "in the time after the ICR bit is cleared
+    /// and the interrupt service routine services the cause [...] another
+    /// cause event occurs that is then serviced by this ISR call" — and, on
+    /// this substrate, the same race one step further out: the kernel counts a
+    /// message on its own, so a pass that read `ICR` before the message it
+    /// belonged to was taken leaves the next pass a message with nothing left
+    /// to do. Both cost a pass and nothing else, which is why this count is
+    /// carried in a diagnostic and never raises one.
     pub spurious: u32,
+}
+
+impl Counters {
+    /// The counts that are worth a line, which is every one but [`Self::spurious`].
+    ///
+    /// A spurious message is ordinary and its count moves on its own, so a
+    /// diagnostic keyed on it would print on nothing having happened.
+    pub fn anomalies(&self) -> Self {
+        Self { spurious: 0, ..*self }
+    }
 }
 
 /// How long [`I219::open`] waits for `CTRL.RST` to clear itself.
@@ -349,6 +367,9 @@ pub struct I219<R, C, D, I> {
     irq: I,
     mac: [u8; 6],
     link: Link,
+    /// Whether this part answered §10.2.4.9's `IVAR`, and therefore whether it
+    /// is one whose causes reach a vector through it.
+    msix: bool,
     /// When [`Self::open`] returned, and when the link first came up — the two
     /// the caller subtracts to get a link-up time.
     opened_at: u64,
@@ -447,6 +468,25 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             | ctrl::SLU;
         regs.write(regs::CTRL, wanted);
 
+        // §10.2.4.7: "If any bits are set in EIAC, the ICR register should not
+        // be read" — and this driver reads it, so auto-clear stays off and
+        // every cause is acknowledged by the write-back in `begin_pass`.
+        regs.write(regs::EIAC, 0);
+
+        // §10.2.4.9: `IVAR` "is only valid in MSI-X mode", and a part that has
+        // no MSI-X has no `IVAR` either — the I219 is one. **Written and read
+        // back**, so which of the two this is comes from the part rather than
+        // from a guess: a register that takes the value has the allocation,
+        // and one that answers zero has the single message the classic causes
+        // already drive.
+        //
+        // Without it a part in MSI-X mode is silent: every cause is allocated
+        // to no vector at reset, so `ICR` fills and nothing is ever delivered.
+        // QEMU's `e1000e` behaves exactly so, and netd then runs on its poll
+        // timer alone.
+        regs.write(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
+        let msix = regs.read(regs::IVAR) == ivar::ALL_ON_VECTOR_ZERO;
+
         // No moderation on either side: §10.2.4.2's throttle and the two
         // receive timers all hold an interrupt back, and what this driver
         // waits on is the frame that has already arrived.
@@ -463,6 +503,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             irq,
             mac,
             link: Link::default(),
+            msix,
             opened_at: 0,
             link_up_at: None,
             rx_next: 0,
@@ -491,8 +532,11 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.accepted(regs::RCTL, rx)?;
 
         // §4.6.5: and only now the mask, so no cause can arrive before there
-        // is a ring to answer it with.
-        nic.regs.write(regs::IMS, cause::ENABLED);
+        // is a ring to answer it with. The MSI-X names go in beside the
+        // classic ones on a part that allocates vectors, because on that part
+        // they are the only ones a vector is allocated to.
+        let mask = if nic.msix { cause::ENABLED | cause::ENABLED_MSIX } else { cause::ENABLED };
+        nic.regs.write(regs::IMS, mask);
 
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
@@ -565,6 +609,12 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
 
     pub fn link(&self) -> Link {
         self.link
+    }
+
+    /// Whether this part allocates its causes to MSI-X vectors (§10.2.4.9),
+    /// which is what it answered when `IVAR` was written and read back.
+    pub fn msix(&self) -> bool {
+        self.msix
     }
 
     pub fn counters(&self) -> Counters {

@@ -24,6 +24,13 @@ pub const ICS: usize = 0x000C8;
 pub const IMS: usize = 0x000D0;
 /// Interrupt Mask Clear (§10.2.4.6, `0x000D8`), write-only.
 pub const IMC: usize = 0x000D8;
+/// Interrupt Auto Clear (§10.2.4.7, `0x000DC`). Written zero and kept there:
+/// "If any bits are set in EIAC, the ICR register should not be read", and
+/// this driver reads it.
+pub const EIAC: usize = 0x000DC;
+/// Interrupt Vector Allocation (§10.2.4.9, `0x000E4`), which "is only valid in
+/// MSI-X mode".
+pub const IVAR: usize = 0x000E4;
 /// Receive Control (§10.2.5.1, `0x00100`).
 pub const RCTL: usize = 0x00100;
 /// Receive descriptor ring, queue 0 (§10.2.5.5-§10.2.5.9).
@@ -131,6 +138,20 @@ pub mod cause {
     pub const RXO: u32 = 1 << 6;
     /// Receiver Timer Interrupt (bit 7): with `RDTR` zero, one per packet.
     pub const RXT0: u32 = 1 << 7;
+    /// The five causes §10.2.4.9's `IVAR` allocates a vector to, and therefore
+    /// the only ones that reach one on a part in MSI-X mode.
+    ///
+    /// Not separate events: §10.2.4.1 says `RxQ0` "indicates Receive queue 0
+    /// write back or receive queue 0 descriptor minimum threshold hit", `TxQ0`
+    /// "indicates transmit queue 0 write back", and `Other` is set for any of
+    /// link status change, receiver overrun, MDIO access complete, small
+    /// receive packet detected, receive ACK frame detected and manageability
+    /// event — so each is a second name for causes this driver already reads.
+    pub const RXQ0: u32 = 1 << 20;
+    pub const RXQ1: u32 = 1 << 21;
+    pub const TXQ0: u32 = 1 << 22;
+    pub const TXQ1: u32 = 1 << 23;
+    pub const OTHER: u32 = 1 << 24;
     /// Interrupt Asserted (bit 31). §10.2.4.1 notes it is not writable and
     /// clears only when every cause has.
     pub const INT_ASSERTED: u32 = 1 << 31;
@@ -140,6 +161,30 @@ pub mod cause {
     /// Transmit completions are reclaimed on the next send, so nothing waits
     /// on one.
     pub const ENABLED: u32 = RXT0 | RXO | RXDMT0 | LSC;
+
+    /// The same set said in MSI-X mode's own names. **A part in that mode
+    /// raises nothing for the four above**: §10.2.4.9 gives a vector to these
+    /// five causes and to no others, so a driver that unmasked only `ENABLED`
+    /// would be told about nothing at all — which is exactly what QEMU's
+    /// `e1000e` does. `RxQ1` and `TxQ1` are here because the mapping below
+    /// enables all five; this driver has one queue each way and never sees
+    /// them.
+    pub const ENABLED_MSIX: u32 = RXQ0 | OTHER;
+}
+
+/// Interrupt Vector Allocation fields (§10.2.4.9). Five three-bit vector
+/// indices, each with an enable bit above it.
+pub mod ivar {
+    /// Every cause on vector 0, every entry valid.
+    ///
+    /// **Vector 0 because that is the only one there is**: the kernel programs
+    /// one MSI-X table entry for a claimed function, so a cause allocated to
+    /// any other index would name a table entry nothing filled in. §10.2.4.9's
+    /// "If invalid values are written to the INT_Alloc fields the result is
+    /// unexpected" is why all five are written rather than the two this driver
+    /// reads.
+    pub const ALL_ON_VECTOR_ZERO: u32 =
+        (1 << 3) | (1 << 7) | (1 << 11) | (1 << 15) | (1 << 19);
 }
 
 /// Receive Control bits (§10.2.5.1).

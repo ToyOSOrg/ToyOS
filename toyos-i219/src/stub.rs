@@ -96,6 +96,11 @@ struct Model {
     /// Whether the modelled NVM answers, and therefore whether `RAH0.AV` is
     /// set after a reset (§10.2.5.23).
     has_nvm: bool,
+    /// Whether this part is in MSI-X mode, and so whether §10.2.4.9's `IVAR`
+    /// exists at all. True is the 82574 and QEMU's `e1000e`; false is the
+    /// I219, which has MSI and no `IVAR` — a write to it is dropped and a read
+    /// answers zero.
+    msix: bool,
     link_up: bool,
     /// `STATUS.SPEED`'s encoding: `10b` is 1000 Mb/s.
     speed_code: u32,
@@ -148,6 +153,7 @@ impl Model {
             nanos: 0,
             reset_reads: 0,
             has_nvm: true,
+            msix: true,
             link_up: false,
             speed_code: 0b10,
             inbound: VecDeque::new(),
@@ -300,6 +306,14 @@ impl Model {
             }
             // §10.2.2.2: read-only.
             regs::STATUS => {}
+            // §10.2.4.9: the register exists only in MSI-X mode. A part
+            // without it drops the write and answers zero, which is what
+            // `I219::open`'s read-back asks.
+            regs::IVAR => {
+                if self.msix {
+                    self.set(regs::IVAR, value);
+                }
+            }
             regs::RDT => {
                 self.set(regs::RDT, value);
                 if !self.held {
@@ -316,15 +330,54 @@ impl Model {
         }
     }
 
-    /// Record a cause and, if it is unmasked, send a message.
+    /// Record a cause and, if it is unmasked *and* has a vector, send a
+    /// message.
+    ///
+    /// §10.2.4.1 gives every event two names on a part that has MSI-X: the
+    /// classic cause and the queue-or-other cause §10.2.4.9 allocates a vector
+    /// to. Both are set in `ICR`; only the second can reach a vector, and only
+    /// while `IVAR`'s enable bit for it is set. **A driver that programmed no
+    /// `IVAR` is therefore told nothing at all**, which is the part behaving as
+    /// specified and not a model being unkind.
     fn raise(&mut self, causes: u32) {
         let held = self.get(regs::ICR);
-        let now = held | causes;
+        let mut now = held | causes;
+        if self.msix {
+            if causes & (cause::RXT0 | cause::RXDMT0) != 0 {
+                now |= cause::RXQ0;
+            }
+            if causes & cause::TXDW != 0 {
+                now |= cause::TXQ0;
+            }
+            if causes & (cause::LSC | cause::RXO) != 0 {
+                now |= cause::OTHER;
+            }
+        }
         let unmasked = now & self.get(regs::IMS) & !cause::INT_ASSERTED;
-        self.set(regs::ICR, if unmasked != 0 { now | cause::INT_ASSERTED } else { now });
-        if unmasked != 0 {
+        let delivered = if self.msix { unmasked & self.vectored() } else { unmasked };
+        self.set(regs::ICR, if delivered != 0 { now | cause::INT_ASSERTED } else { now });
+        if delivered != 0 {
             self.messages = self.messages.saturating_add(1);
         }
+    }
+
+    /// The causes `IVAR` has a valid entry for, and therefore the only ones
+    /// that reach a vector (§10.2.4.9).
+    fn vectored(&self) -> u32 {
+        let allocation = self.get(regs::IVAR);
+        let mut causes = 0;
+        for (valid, which) in [
+            (3, cause::RXQ0),
+            (7, cause::RXQ1),
+            (11, cause::TXQ0),
+            (15, cause::TXQ1),
+            (19, cause::OTHER),
+        ] {
+            if allocation & (1 << valid) != 0 {
+                causes |= which;
+            }
+        }
+        causes
     }
 
     /// Turn a device address in a descriptor into a grant offset, the way the
@@ -570,6 +623,15 @@ impl Nic {
             Grant(Rc::clone(&self.0)),
             Line(Rc::clone(&self.0)),
         )
+    }
+
+    /// This part has MSI and no MSI-X, so §10.2.4.9's `IVAR` does not exist
+    /// and every cause drives the one message directly. The I219 is such a
+    /// part; QEMU's `e1000e` is not.
+    pub fn without_msix(&self) {
+        let mut model = self.0.borrow_mut();
+        model.msix = false;
+        model.set(regs::IVAR, 0);
     }
 
     /// This part has no NVM, so §10.2.5.23's "if no NVM is present" arm is
