@@ -1376,7 +1376,11 @@ const METALDEVICECASE: &[metal::Arm] = &[metal::Arm {
     boot: devices::BOOT,
     config: devices::CONFIG,
     params: &[],
-    jobs: &[],
+    // The same list the committed config carries, so the image the driver
+    // flashes and the one the QEMU arm boots run the same jobs in the same
+    // order — `devices::the_config_runs_exactly_these_jobs` is what holds the
+    // two together.
+    jobs: devices::JOBS,
 }];
 
 const METALCASE: &[metal::Arm] =
