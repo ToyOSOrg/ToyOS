@@ -579,6 +579,30 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // reaches no device, writes no register outside `CR3`, and leaves nothing
     // behind: the boot goes on to userland and ends the way an unarmed one does.
     ("tlb-shootdown-bench", Flash::Ok),
+    // **The in-kernel self-tests.** Each stages inputs the hardware cannot
+    // produce — a crafted PCI capability list, a malformed USB descriptor, a
+    // vector nothing claims — runs a check over them in memory and prints a
+    // count. None reaches a device register, none writes firmware state, and
+    // the boot goes on to userland and ends the way an unarmed one does; what
+    // an armed image leaves behind is a longer log.
+    ("pci-cap-selftest", Flash::Ok),
+    ("process-reopen-selftest", Flash::Ok),
+    ("revoked-backing-selftest", Flash::Ok),
+    ("pc-unbind-selftest", Flash::Ok),
+    ("leak-rollback-selftest", Flash::Ok),
+    ("lapic-spurious-selftest", Flash::Ok),
+    ("unclaimed-vector-selftest", Flash::Ok),
+    ("xhci-xecp-selftest", Flash::Ok),
+    ("xhci-descriptor-selftest", Flash::Ok),
+    // Two probes rather than staged inputs, and both are reads: the SS-reload
+    // one runs inside `iod`'s own context switch, and the input-core one merges
+    // events it made up itself.
+    ("sysret-ss-probe", Flash::Ok),
+    ("test-input-merge", Flash::Ok),
+    // Three nested `scheduler::Operation`s with known deadlines, in both homes,
+    // each printing what it asked for and what it observed. It establishes and
+    // drops them and reaches nothing else.
+    ("sched-operation-nesting", Flash::Ok),
 ];
 
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.

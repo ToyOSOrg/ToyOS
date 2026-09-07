@@ -1405,6 +1405,75 @@ const METAL: &[(&str, metal::Metal)] = &[
         "metal_sim_scanout_wc",
         metal::Metal::Runs { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
+    // ---- one image, eleven actuators, ten tests ----
+    // The cheapest cluster there is: every one of these arms a check that runs
+    // at init, logs its verdict and does nothing else, so they cost one flash
+    // between them. **Nothing had to be promoted into `kernel/src/params.rs`**
+    // — the metal profile flashes test images (the track's ruling), so an
+    // actuator is armed the way the QEMU registration arms it and the
+    // pre-flash gate is what says the machine survives each one.
+    (
+        "pci_capability_walk",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| pci_cap_selftest(b[0].kernel().text()) },
+    ),
+    (
+        "process_reopen_selftest",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| process_reopen(b[0].kernel().text()) },
+    ),
+    (
+        // **Two of its three probes pass here and the third cannot run.**
+        // Measured on a metal-shaped guest: the two `revoke-selftest` probes
+        // both PASS, and `pc-unbind-selftest` prints `FAIL (this boot has no
+        // metadata page cache)` — the slot it needs is one the virtio machine's
+        // NVMe home has and the T14's USB-only volumes do not. Judging the two
+        // that do run would be a different test under the same name, so the
+        // whole registration stays where it can answer for all three.
+        "read_fault_selftests",
+        metal::Metal::QemuOnly(
+            "`pc-unbind-selftest` reports `FAIL (this boot has no metadata page cache)` on a \
+             machine whose volumes are all on the boot stick; the two `revoke-selftest` probes \
+             beside it pass, and splitting them into a name of their own is what would put that \
+             half on the machine",
+        ),
+    ),
+    (
+        "leak_rollback_selftest",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| leak_rollback(b[0].kernel().text()) },
+    ),
+    (
+        "lapic_spurious_vector",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
+    ),
+    (
+        // The T14's own controller publishes a real capability list, which is
+        // the half of this QEMU cannot give: q35's nec-usb-xhci has no USB
+        // Legacy Support capability in it at all.
+        "xhci_xecp_walk",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| xhci_xecp(b[0].kernel().text()) },
+    ),
+    (
+        // Same: the crafted nine are the point, and beside them the parser
+        // binds a boot stick off a descriptor a real controller delivered.
+        "xhci_descriptor_walk",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| xhci_descriptors(b[0].kernel().text()) },
+    ),
+    (
+        // No drain on this side: the whole boot's records are on the stick, so
+        // the probe's line is either in them or it never ran.
+        "sysret_ss_reload",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
+    ),
+    (
+        "input_merge",
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| input_merge_ok(b[0].kernel().text()) },
+    ),
+    (
+        "operation_nesting",
+        metal::Metal::Runs {
+            arms: SELFTESTS,
+            judge: |b| operation_nesting_log(b[0].kernel().text()),
+        },
+    ),
     // ---- named, looked at, and not run there ----
     (
         "metal_sim_null_audio",
@@ -1444,6 +1513,39 @@ const TESTCASES_READDIR: &[metal::Arm] =
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
+
+/// One boot for every in-kernel self-test that logs its verdict at init and
+/// does nothing else.
+///
+/// **Eleven actuators in one image.** They cost the machine one flash between
+/// them because none of them changes what the machine *is*: each stages inputs
+/// the hardware cannot produce — a crafted capability list, a malformed
+/// descriptor, a vector nothing claims — runs a check over them and prints a
+/// count. The three that do change the machine are not here:
+/// `no-ap-control-regs` leaves an AP without them, `smp-skip-ap` leaves one
+/// out and `test-tiny-va` shrinks the address space, and each would be
+/// answering for the boot every other row on it read.
+const SELFTESTS: &[metal::Arm] = &[metal::once(
+    "selftests",
+    "tests/testcases",
+    &[
+        "pci-cap-selftest",
+        "process-reopen-selftest",
+        // `revoked-backing-selftest` and `pc-unbind-selftest` are deliberately
+        // absent: `read_fault_selftests` is the only rider they had and it is
+        // declared QEMU-only above, so arming them here would put a `FAIL` line
+        // on the stick that no verdict claims.
+        "leak-rollback-selftest",
+        "lapic-spurious-selftest",
+        "unclaimed-vector-selftest",
+        "xhci-xecp-selftest",
+        "xhci-descriptor-selftest",
+        "sysret-ss-probe",
+        "test-input-merge",
+        "sched-operation-nesting",
+    ],
+    &[],
+)];
 
 /// The device boot: the whole `metalprobe` job list on the T14's own devices.
 /// Its own image, because every job in it either claims the display or moves
@@ -1489,7 +1591,10 @@ const METAL_SKIP: &[(&str, &str)] = &[(
 /// this boot rather than a fact about it. It is settled by booting them: what
 /// [`METAL_SKIP`] holds is what the machine refused, and nothing is excluded for
 /// a shape it was never tried on.
-fn shared_metal(rust_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
+fn shared_metal(
+    rust_bins: &[(String, Vec<u8>)],
+    keep: impl Fn(&str) -> bool,
+) -> Vec<metal::SharedBoot> {
     let skipped: BTreeSet<&str> = METAL_SKIP.iter().map(|(name, _)| *name).collect();
     let discovered = discover_rust_tests(rust_bins);
     for (name, _) in METAL_SKIP {
@@ -1509,7 +1614,11 @@ fn shared_metal(rust_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
             config: "tests/testcases",
             params: &[],
             features: &[],
-            jobs: shipping.iter().map(|n| format!("test_rs_{n}")).collect(),
+            jobs: shipping
+                .iter()
+                .filter(|n| keep(n))
+                .map(|n| format!("test_rs_{n}"))
+                .collect(),
         },
         // The same list's other half, on the kernel that carries `SYS_DEBUG`.
         // A second boot rather than a second image for the whole set: what
@@ -1521,7 +1630,7 @@ fn shared_metal(rust_bins: &[(String, Vec<u8>)]) -> Vec<metal::SharedBoot> {
             config: "tests/testcases",
             params: &[],
             features: toyos_build::build::TEST_KERNEL,
-            jobs: debug.iter().map(|n| format!("test_rs_{n}")).collect(),
+            jobs: debug.iter().filter(|n| keep(n)).map(|n| format!("test_rs_{n}")).collect(),
         },
     ]
 }
@@ -9400,23 +9509,13 @@ fn run_machine_test(
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             // A liveness ceiling, not a pace: a loaded shard once took past a
             // fixed 500 ms drain to run iod's probe (run 33246638742, alone-green).
+            // The T14's readback needs no drain at all — the whole boot's records
+            // are on the stick — so the wait is here and the predicate is shared.
             let log = qemu.boot_log().to_string()
                 + &qemu.drain_until(Duration::from_secs(10), |l| {
                     l.contains("sysret-ss: reloaded") || l.contains("sysret-ss: NOT reloaded")
                 });
-            if log.contains("sysret-ss: NOT reloaded") {
-                return Err(format!(
-                    "the switch did not reload SS — a sysretq here would hand userland an \
-                     unusable one:\n{log}"
-                ));
-            }
-            if !log.contains("sysret-ss: reloaded") {
-                return Err(format!(
-                    "the SS-reload probe never reported — iod may not have run it:\n{log}"
-                ));
-            }
-            eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
-            Ok(())
+            sysret_ss(&log)
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
@@ -11998,11 +12097,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log();
-            if !log.contains("input-merge: ok") {
-                return Err(format!("the input core check never reported:\n{log}"));
-            }
-            Ok(())
+            input_merge_ok(qemu.boot_log())
         }
         "i8042_health_cadence" => {
             // The T14 lost keyboard, TrackPoint and touchpad — all three behind
@@ -12261,111 +12356,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-
-            /// One `key=value` off a gate line, as a number.
-            fn number(line: &str, key: &str) -> Result<u64, String> {
-                line.split_whitespace()
-                    .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
-                    .ok_or_else(|| format!("no numeric {key} in {line:?}"))
-            }
-            /// One `key=value` off a gate line, as a flag.
-            fn flag(line: &str, key: &str) -> Result<bool, String> {
-                line.split_whitespace()
-                    .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
-                    .ok_or_else(|| format!("no boolean {key} in {line:?}"))
-            }
-
-            // Both homes. A task's word is on its `TaskHandle` and a context
-            // with no task uses one slot per CPU, and the two are reached by
-            // different arms of `operation_slot` — so a gate that ran in one
-            // place would leave the other arm unexecuted by any test at all.
-            for site in ["boot", "iod"] {
-                let say = |what: &str| -> Result<String, String> {
-                    let needle = format!("sched-op: {site} {what}");
-                    log.lines()
-                        .find(|line| line.contains(&needle))
-                        .map(str::to_string)
-                        .ok_or_else(|| format!("no {needle:?} line on this boot:\n{log}"))
-                };
-
-                let outside = say("outside")?;
-                if flag(&outside, "established")? {
-                    return Err(format!(
-                        "{site}: an operation was already established before the gate began, \
-                         so nothing below is about the nesting it made: {outside}"
-                    ));
-                }
-
-                // Every level: what it asked for, and what the depth below it
-                // recovered. The bound is the running minimum — an inner
-                // establishment takes the earlier of its own deadline and its
-                // parent's, and only that.
-                let mut asked = Vec::new();
-                let mut narrowest = u64::MAX;
-                for level in 1..=3 {
-                    let line = say(&format!("begin level={level}"))?;
-                    let want = number(&line, "asked")?;
-                    let saw = number(&line, "observed")?;
-                    narrowest = narrowest.min(want);
-                    if saw != narrowest {
-                        return Err(format!(
-                            "{site}: level {level} asked for {want} ns and the depth inside it \
-                             recovered {saw} ns, against the {narrowest} ns that is the \
-                             earliest of it and every level above it. An establishment that \
-                             observes more than its parent allowed is a caller buying itself \
-                             device time by nesting: {line}"
-                        ));
-                    }
-                    asked.push(want);
-                }
-                // The widening attempt has to have been a real one, or the line
-                // above is satisfied by a scenario in which nothing was asked.
-                if asked[2] <= asked[1] {
-                    return Err(format!(
-                        "{site}: level 3 asked for {} ns inside a level 2 of {} ns, so the \
-                         gate never attempted to widen and the narrowing it reports is vacuous",
-                        asked[2], asked[1],
-                    ));
-                }
-
-                // And the restore: each drop puts back what that establishment
-                // displaced rather than clearing the slot, so the operation
-                // above it survives the one below ending.
-                for (level, restored) in [(3, asked[1].min(asked[0])), (2, asked[0])] {
-                    let line = say(&format!("end level={level}"))?;
-                    let saw = number(&line, "observed")?;
-                    if saw != restored {
-                        return Err(format!(
-                            "{site}: with level {level} dropped the depth recovered {saw} ns \
-                             and the frame above it established {restored} ns — a guard that \
-                             restores something else has ended an operation its caller is \
-                             still inside: {line}"
-                        ));
-                    }
-                    if !flag(&line, "established")? {
-                        return Err(format!(
-                            "{site}: dropping level {level} left no operation established at \
-                             all, and its caller is still inside one: {line}"
-                        ));
-                    }
-                }
-
-                let last = say("end level=1")?;
-                if flag(&last, "established")? {
-                    return Err(format!(
-                        "{site}: the outermost guard dropped and an operation is still \
-                         established — the slot was restored rather than cleared, so the next \
-                         depth to ask would be answered a deadline nobody set: {last}"
-                    ));
-                }
-                eprintln!(
-                    "  [operation] {site}: {} ns narrowed to {} ns, a {} ns request changed \
-                     nothing, and both drops restored",
-                    asked[0], asked[1], asked[2],
-                );
-            }
-            Ok(())
+            operation_nesting_log(qemu.boot_log())
         }
         "leak_rollback_selftest" => {
             // Two "acquire before a fallible step" controls run in the kernel at
@@ -12380,17 +12371,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            for probe in ["leak-selftest: device-mint", "leak-selftest: fat-reopen"] {
-                let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-                    return Err(format!("{probe} never ran:\n{log}"));
-                };
-                if !verdict.contains("PASS") {
-                    return Err(format!("{}\n{log}", verdict.trim()));
-                }
-                eprintln!("  [leak] {}", verdict.trim());
-            }
-            Ok(())
+            leak_rollback(qemu.boot_log())
         }
         "process_reopen_selftest" => {
             // The kernel reopens init by pid after the only handle to it has gone; on
@@ -12405,15 +12386,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
-                return Err(format!("the reopen control never ran:\n{log}"));
-            };
-            if !verdict.contains("PASS") {
-                return Err(format!("{}\n{log}", verdict.trim()));
-            }
-            eprintln!("  [process] {}", verdict.trim());
-            Ok(())
+            process_reopen(qemu.boot_log())
         }
         "driver_wait_refused" => {
             // The actuators blind CSTS.RDY and DEVICE_STATUS, staging a
@@ -12462,21 +12435,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            for probe in [
-                "revoke-selftest: /tmp/revoke_probe",
-                "revoke-selftest: /home/revoke_probe",
-                "pc-unbind-selftest:",
-            ] {
-                let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-                    return Err(format!("{probe} never ran:\n{log}"));
-                };
-                if !verdict.contains("PASS") {
-                    return Err(format!("{}\n{log}", verdict.trim()));
-                }
-                eprintln!("  [read-fault] {}", verdict.trim());
-            }
-            Ok(())
+            read_fault_probes(qemu.boot_log())
         }
         "lapic_spurious_vector" => {
             // `apic::enable_x2apic` writes 0xFF into the SVR, a vector the IDT
@@ -12494,35 +12453,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            for kind in ["spurious", "unclaimed"] {
-                if let Some(bad) =
-                    log.lines().find(|l| l.contains(&format!("{kind} selftest FAILED")))
-                {
-                    return Err(format!("{bad}\n{log}"));
-                }
-                let Some(verdict) =
-                    log.lines().find(|l| l.contains(&format!("{kind} selftest")))
-                else {
-                    return Err(format!("the {kind} vector was never raised:\n{log}"));
-                };
-                // `3/3`, not the absence of a FAILED line: a self-test that never
-                // ran satisfies that absence just as well.
-                if !verdict.contains("3/3") {
-                    return Err(format!("the self-test did not reach its verdict: {verdict}"));
-                }
-                // The two numbers are the interrupt census's own column — the
-                // handler may not log, so that column is the only report a
-                // delivery has — and both are asserted: nothing raised this
-                // vector before the staged one, and exactly one arrived.
-                if !verdict.contains("(0 -> 1)") {
-                    return Err(format!(
-                        "the census did not count exactly the staged delivery: {verdict}"
-                    ));
-                }
-                eprintln!("  [lapic] {}", verdict.trim());
-            }
-            Ok(())
+            lapic_vectors(qemu.boot_log())
         }
         "virtio_used_ring" => {
             // Both fields of a virtqueue used-ring element are written by the
@@ -12594,28 +12525,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            if let Some(bad) = log.lines().find(|l| l.contains("pci cap selftest FAILED")) {
-                return Err(format!("{bad}\n{log}"));
-            }
-            let Some(verdict) = log.lines().find(|l| l.contains("pci cap selftest")) else {
-                return Err(format!("the walk's self-test never ran:\n{log}"));
-            };
-            // `14/14`, not the absence of a FAILED line, which zero cases satisfy too.
-            if !verdict.contains("14/14") {
-                return Err(format!("not every crafted capability layout was answered: {verdict}"));
-            }
-            // Once for the machine: it reads no real device.
-            let ran = log.matches("pci cap selftest").count();
-            if ran != 1 {
-                return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
-            }
-            // And the ordinary walk beside it: QEMU's real functions were enumerated.
-            if !log.contains("PCI: Enumeration complete") {
-                return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
-            }
-            eprintln!("  [pci] {}", verdict.trim());
-            Ok(())
+            pci_cap_selftest(qemu.boot_log())
         }
         "shipped_config_boots" => {
             // The config the project ships, booted rather than read: `cargo
@@ -12746,31 +12656,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            if let Some(bad) = log.lines().find(|l| l.contains("descriptor selftest FAILED")) {
-                return Err(format!("{bad}\n{log}"));
-            }
-            let Some(verdict) = log.lines().find(|l| l.contains("descriptor selftest")) else {
-                return Err(format!("the parser's self-test never ran:\n{log}"));
-            };
-            // `9/9`, not "no failures": a self-test that ran zero cases would
-            // satisfy the absence of a FAILED line.
-            if !verdict.contains("9/9") {
-                return Err(format!("not every descriptor was parsed as required: {verdict}"));
-            }
-            // Once for the machine. It reads no register, so a per-controller
-            // run would be two verdicts about the same nine byte arrays.
-            let ran = log.matches("descriptor selftest").count();
-            if ran != 1 {
-                return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
-            }
-            // And the ordinary boot beside it: the same parser bound the boot
-            // stick off a descriptor a real controller delivered.
-            if !log.contains("usb-storage: 1 device(s)") {
-                return Err(format!("the boot stick did not bind on this boot\n{log}"));
-            }
-            eprintln!("  [xhci] {}", verdict.trim());
-            Ok(())
+            xhci_descriptors(qemu.boot_log())
         }
         "xhci_xecp_walk" => {
             // The xHCI extended-capability list is firmware's, and firmware is
@@ -12792,43 +12678,7 @@ fn run_machine_test(
                     ..Default::default()
                 },
             );
-            let log = qemu.boot_log().to_string();
-            if let Some(bad) = log.lines().find(|l| l.contains("xecp selftest FAILED")) {
-                return Err(format!("{bad}\n{log}"));
-            }
-            let Some(verdict) = log.lines().find(|l| l.contains("xecp selftest")) else {
-                return Err(format!("the walk's self-test never ran:\n{log}"));
-            };
-            // `8/8`, not "no failures": a self-test that ran zero cases would
-            // satisfy the absence of a FAILED line.
-            if !verdict.contains("8/8") {
-                return Err(format!("not every malformed list was refused: {verdict}"));
-            }
-            // And the walk on the controller QEMU does provide.
-            let Some(real) = log
-                .lines()
-                .find(|l| l.contains("USB Legacy Support") || l.contains("ownership"))
-            else {
-                return Err(format!("no line about the handoff at all:\n{log}"));
-            };
-            // The handoff must precede the reset — a reset that already
-            // happened is what the whole capability exists to avoid.
-            let reset = log
-                .find("xHCI: controller reset")
-                .ok_or_else(|| format!("the controller was never reset:\n{log}"))?;
-            let handoff = log.find(real).expect("just found");
-            if handoff > reset {
-                return Err(format!(
-                    "the ownership handoff runs after HCRST, which is no handoff at all:\n{log}"
-                ));
-            }
-            // A controller that still enumerates its bus afterwards.
-            if !log.contains("xHCI: controller started") {
-                return Err(format!("the controller did not come up:\n{log}"));
-            }
-            eprintln!("  [xhci] {}", verdict.trim());
-            eprintln!("  [xhci] {}", real.trim());
-            Ok(())
+            xhci_xecp(qemu.boot_log())
         }
         "i8042_budget_expiry" => {
             // The arithmetic defect this feature stages: stage budgets summing
@@ -14288,6 +14138,338 @@ fn irq_census(capture: &str) -> Result<(), String> {
         newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
     );
     Ok(())
+}
+
+/// Fourteen crafted PCI capability layouts, answered at init.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn pci_cap_selftest(log: &str) -> Result<(), String> {
+        if let Some(bad) = log.lines().find(|l| l.contains("pci cap selftest FAILED")) {
+            return Err(format!("{bad}\n{log}"));
+        }
+        let Some(verdict) = log.lines().find(|l| l.contains("pci cap selftest")) else {
+            return Err(format!("the walk's self-test never ran:\n{log}"));
+        };
+        // `14/14`, not the absence of a FAILED line, which zero cases satisfy too.
+        if !verdict.contains("14/14") {
+            return Err(format!("not every crafted capability layout was answered: {verdict}"));
+        }
+        // Once for the machine: it reads no real device.
+        let ran = log.matches("pci cap selftest").count();
+        if ran != 1 {
+            return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
+        }
+        // And the ordinary walk beside it: QEMU's real functions were enumerated.
+        if !log.contains("PCI: Enumeration complete") {
+            return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
+        }
+        eprintln!("  [pci] {}", verdict.trim());
+        Ok(())
+}
+
+/// The kernel reopens init by pid after the last handle to it has gone.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn process_reopen(log: &str) -> Result<(), String> {
+        let Some(verdict) = log.lines().find(|l| l.contains("process-reopen:")) else {
+            return Err(format!("the reopen control never ran:\n{log}"));
+        };
+        if !verdict.contains("PASS") {
+            return Err(format!("{}\n{log}", verdict.trim()));
+        }
+        eprintln!("  [process] {}", verdict.trim());
+        Ok(())
+}
+
+/// A backing read after deletion is refused on both writable mounts, and a page-cache slot whose fill the device refused is unbound.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn read_fault_probes(log: &str) -> Result<(), String> {
+        for probe in [
+            "revoke-selftest: /tmp/revoke_probe",
+            "revoke-selftest: /home/revoke_probe",
+            "pc-unbind-selftest:",
+        ] {
+            let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+                return Err(format!("{probe} never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [read-fault] {}", verdict.trim());
+        }
+        Ok(())
+}
+
+/// Two "acquire before a fallible step" controls: each count returned to its baseline after a refused call.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn leak_rollback(log: &str) -> Result<(), String> {
+        for probe in ["leak-selftest: device-mint", "leak-selftest: fat-reopen"] {
+            let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+                return Err(format!("{probe} never ran:\n{log}"));
+            };
+            if !verdict.contains("PASS") {
+                return Err(format!("{}\n{log}", verdict.trim()));
+            }
+            eprintln!("  [leak] {}", verdict.trim());
+        }
+        Ok(())
+}
+
+/// The spurious vector and an unclaimed one are both gated rather than escalated to #DF.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn lapic_vectors(log: &str) -> Result<(), String> {
+        for kind in ["spurious", "unclaimed"] {
+            if let Some(bad) =
+                log.lines().find(|l| l.contains(&format!("{kind} selftest FAILED")))
+            {
+                return Err(format!("{bad}\n{log}"));
+            }
+            let Some(verdict) =
+                log.lines().find(|l| l.contains(&format!("{kind} selftest")))
+            else {
+                return Err(format!("the {kind} vector was never raised:\n{log}"));
+            };
+            // `3/3`, not the absence of a FAILED line: a self-test that never
+            // ran satisfies that absence just as well.
+            if !verdict.contains("3/3") {
+                return Err(format!("the self-test did not reach its verdict: {verdict}"));
+            }
+            // The two numbers are the interrupt census's own column — the
+            // handler may not log, so that column is the only report a
+            // delivery has — and both are asserted: nothing raised this
+            // vector before the staged one, and exactly one arrived.
+            if !verdict.contains("(0 -> 1)") {
+                return Err(format!(
+                    "the census did not count exactly the staged delivery: {verdict}"
+                ));
+            }
+            eprintln!("  [lapic] {}", verdict.trim());
+        }
+        Ok(())
+}
+
+/// Nine crafted USB configuration descriptors, parsed at init.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn xhci_descriptors(log: &str) -> Result<(), String> {
+        if let Some(bad) = log.lines().find(|l| l.contains("descriptor selftest FAILED")) {
+            return Err(format!("{bad}\n{log}"));
+        }
+        let Some(verdict) = log.lines().find(|l| l.contains("descriptor selftest")) else {
+            return Err(format!("the parser's self-test never ran:\n{log}"));
+        };
+        // `9/9`, not "no failures": a self-test that ran zero cases would
+        // satisfy the absence of a FAILED line.
+        if !verdict.contains("9/9") {
+            return Err(format!("not every descriptor was parsed as required: {verdict}"));
+        }
+        // Once for the machine. It reads no register, so a per-controller
+        // run would be two verdicts about the same nine byte arrays.
+        let ran = log.matches("descriptor selftest").count();
+        if ran != 1 {
+            return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
+        }
+        // And the ordinary boot beside it: the same parser bound the boot
+        // stick off a descriptor a real controller delivered.
+        if !log.contains("usb-storage: 1 device(s)") {
+            return Err(format!("the boot stick did not bind on this boot\n{log}"));
+        }
+        eprintln!("  [xhci] {}", verdict.trim());
+        Ok(())
+}
+
+/// Eight malformed extended-capability lists refused, and the handoff on the real controller.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn xhci_xecp(log: &str) -> Result<(), String> {
+        if let Some(bad) = log.lines().find(|l| l.contains("xecp selftest FAILED")) {
+            return Err(format!("{bad}\n{log}"));
+        }
+        let Some(verdict) = log.lines().find(|l| l.contains("xecp selftest")) else {
+            return Err(format!("the walk's self-test never ran:\n{log}"));
+        };
+        // `8/8`, not "no failures": a self-test that ran zero cases would
+        // satisfy the absence of a FAILED line.
+        if !verdict.contains("8/8") {
+            return Err(format!("not every malformed list was refused: {verdict}"));
+        }
+        // And the walk on the controller QEMU does provide.
+        let Some(real) = log
+            .lines()
+            .find(|l| l.contains("USB Legacy Support") || l.contains("ownership"))
+        else {
+            return Err(format!("no line about the handoff at all:\n{log}"));
+        };
+        // The handoff must precede the reset — a reset that already
+        // happened is what the whole capability exists to avoid.
+        let reset = log
+            .find("xHCI: controller reset")
+            .ok_or_else(|| format!("the controller was never reset:\n{log}"))?;
+        let handoff = log.find(real).expect("just found");
+        if handoff > reset {
+            return Err(format!(
+                "the ownership handoff runs after HCRST, which is no handoff at all:\n{log}"
+            ));
+        }
+        // A controller that still enumerates its bus afterwards.
+        if !log.contains("xHCI: controller started") {
+            return Err(format!("the controller did not come up:\n{log}"));
+        }
+        eprintln!("  [xhci] {}", verdict.trim());
+        eprintln!("  [xhci] {}", real.trim());
+        Ok(())
+}
+
+/// The context switch reloads SS from null before a `sysretq` can see it.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn sysret_ss(log: &str) -> Result<(), String> {
+        if log.contains("sysret-ss: NOT reloaded") {
+            return Err(format!(
+                "the switch did not reload SS — a sysretq here would hand userland an \
+                 unusable one:\n{log}"
+            ));
+        }
+        if !log.contains("sysret-ss: reloaded") {
+            return Err(format!(
+                "the SS-reload probe never reported — iod may not have run it:\n{log}"
+            ));
+        }
+        eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
+        Ok(())
+}
+
+/// The input core merged what it was handed.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn input_merge_ok(log: &str) -> Result<(), String> {
+        if !log.contains("input-merge: ok") {
+            return Err(format!("the input core check never reported:\n{log}"));
+        }
+        Ok(())
+}
+
+/// An inner `scheduler::Operation` may only narrow, and its drop restores what it displaced.
+///
+/// Text in, a verdict out: every line it reads is a kernel record, so the
+/// T14's readback and a QEMU boot log are judged by this one predicate.
+fn operation_nesting_log(log: &str) -> Result<(), String> {
+
+        /// One `key=value` off a gate line, as a number.
+        fn number(line: &str, key: &str) -> Result<u64, String> {
+            line.split_whitespace()
+                .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+                .ok_or_else(|| format!("no numeric {key} in {line:?}"))
+        }
+        /// One `key=value` off a gate line, as a flag.
+        fn flag(line: &str, key: &str) -> Result<bool, String> {
+            line.split_whitespace()
+                .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+                .ok_or_else(|| format!("no boolean {key} in {line:?}"))
+        }
+
+        // Both homes. A task's word is on its `TaskHandle` and a context
+        // with no task uses one slot per CPU, and the two are reached by
+        // different arms of `operation_slot` — so a gate that ran in one
+        // place would leave the other arm unexecuted by any test at all.
+        for site in ["boot", "iod"] {
+            let say = |what: &str| -> Result<String, String> {
+                let needle = format!("sched-op: {site} {what}");
+                log.lines()
+                    .find(|line| line.contains(&needle))
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("no {needle:?} line on this boot:\n{log}"))
+            };
+
+            let outside = say("outside")?;
+            if flag(&outside, "established")? {
+                return Err(format!(
+                    "{site}: an operation was already established before the gate began, \
+                     so nothing below is about the nesting it made: {outside}"
+                ));
+            }
+
+            // Every level: what it asked for, and what the depth below it
+            // recovered. The bound is the running minimum — an inner
+            // establishment takes the earlier of its own deadline and its
+            // parent's, and only that.
+            let mut asked = Vec::new();
+            let mut narrowest = u64::MAX;
+            for level in 1..=3 {
+                let line = say(&format!("begin level={level}"))?;
+                let want = number(&line, "asked")?;
+                let saw = number(&line, "observed")?;
+                narrowest = narrowest.min(want);
+                if saw != narrowest {
+                    return Err(format!(
+                        "{site}: level {level} asked for {want} ns and the depth inside it \
+                         recovered {saw} ns, against the {narrowest} ns that is the \
+                         earliest of it and every level above it. An establishment that \
+                         observes more than its parent allowed is a caller buying itself \
+                         device time by nesting: {line}"
+                    ));
+                }
+                asked.push(want);
+            }
+            // The widening attempt has to have been a real one, or the line
+            // above is satisfied by a scenario in which nothing was asked.
+            if asked[2] <= asked[1] {
+                return Err(format!(
+                    "{site}: level 3 asked for {} ns inside a level 2 of {} ns, so the \
+                     gate never attempted to widen and the narrowing it reports is vacuous",
+                    asked[2], asked[1],
+                ));
+            }
+
+            // And the restore: each drop puts back what that establishment
+            // displaced rather than clearing the slot, so the operation
+            // above it survives the one below ending.
+            for (level, restored) in [(3, asked[1].min(asked[0])), (2, asked[0])] {
+                let line = say(&format!("end level={level}"))?;
+                let saw = number(&line, "observed")?;
+                if saw != restored {
+                    return Err(format!(
+                        "{site}: with level {level} dropped the depth recovered {saw} ns \
+                         and the frame above it established {restored} ns — a guard that \
+                         restores something else has ended an operation its caller is \
+                         still inside: {line}"
+                    ));
+                }
+                if !flag(&line, "established")? {
+                    return Err(format!(
+                        "{site}: dropping level {level} left no operation established at \
+                         all, and its caller is still inside one: {line}"
+                    ));
+                }
+            }
+
+            let last = say("end level=1")?;
+            if flag(&last, "established")? {
+                return Err(format!(
+                    "{site}: the outermost guard dropped and an operation is still \
+                     established — the slot was restored rather than cleared, so the next \
+                     depth to ask would be answered a deadline nobody set: {last}"
+                ));
+            }
+            eprintln!(
+                "  [operation] {site}: {} ns narrowed to {} ns, a {} ns request changed \
+                 nothing, and both drops restored",
+                asked[0], asked[1], asked[2],
+            );
+        }
+        Ok(())
 }
 
 /// The machine's three kernel threads are hosted, and each claims the panic row
@@ -18030,7 +18212,7 @@ fn main() {
                 mode,
                 &dir,
                 &selected,
-                &shared_metal(&rust_bins),
+                &shared_metal(&rust_bins, |n| filter.is_none_or(|f| n.contains(f))),
                 &rust_bins,
                 RUST_SKIP,
                 !nocapture && !debug_mode,

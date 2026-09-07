@@ -320,6 +320,10 @@ fn batches<'a>(
     // First, so a registration naming a shared boot rides it rather than
     // minting a second one under the same name with a different list.
     for boot in shared {
+        // A boot nothing selected is a boot nothing has to flash.
+        if boot.jobs.is_empty() {
+            continue;
+        }
         let was = out.insert(
             boot.boot.to_string(),
             Batch {

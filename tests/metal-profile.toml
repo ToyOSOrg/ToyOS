@@ -181,3 +181,41 @@ name = "fbread.metaldevicecase.span_us"
 unit = "us"
 ceiling = 4800000
 ceiling_from = "as usbwrite.metaldevicecase.span_us — metalprobe's READ_PASSES whole-scanout readbacks, the direction that misses every cache"
+
+# --- the self-test boot, and the shared block's two ---
+
+[[number]]
+name = "boot.selftests.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.selftests.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.shared.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.shared.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "boot.shared-debug.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.shared-debug.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
