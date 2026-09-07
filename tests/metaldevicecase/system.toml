@@ -26,13 +26,15 @@ syscap = ["rt"]
 # can name what a spawned job holds; `dup` because the capability is handed down
 # to each job in turn; `power` because the last job hands the machine back.
 #
-# **The order is by what a stalled job would cost.** One bound covers the whole
-# list (`toyos_tco::JOB_BOUND_MS`), so a job that overruns takes every job after
-# it with it — and the two that move megabytes across a device this project has
-# never measured are the two that could. They go last, behind the three whose
-# span is a memory copy.
+# **The order is by where the bound's expiry may land.** One bound covers the
+# whole list (`toyos_tco::JOB_BOUND_MS`, measured from boot) and its expiry is a
+# machine reset, so the question is not which job would be lost but which job
+# the reset would land inside. A reset inside a transfer is what a mass-storage
+# device does not survive, so the two that move bytes across one run first,
+# where the bound has its whole span left, and the three whose span is a memory
+# copy run after them.
 [programs.test-runner]
-args = ["fbhash", "fbfill", "fbread", "usbwrite", "usbread", "reboot"]
+args = ["usbwrite", "usbread", "fbcheck", "fbfill", "fbread", "reboot"]
 receives = ["soundd"]
 syscap = ["device", "dup", "power"]
 
@@ -41,7 +43,7 @@ syscap = ["device", "dup", "power"]
 [programs.toybox]
 
 [symlinks]
-"bin/fbhash" = "/system/bin/metalprobe"
+"bin/fbcheck" = "/system/bin/metalprobe"
 "bin/fbfill" = "/system/bin/metalprobe"
 "bin/fbread" = "/system/bin/metalprobe"
 "bin/usbwrite" = "/system/bin/metalprobe"

@@ -1,52 +1,22 @@
-//! The device suite's profile: what the T14's own devices must say about
-//! themselves on every boot, and what every number that boot measured may be.
+//! The grammar of what a device boot says about itself: the exit codes
+//! `userland/metalprobe` refuses with, the inventory records every metal boot
+//! owes, and the account the shutdown seals into the black box.
 //!
-//! **Text in, verdicts out.** Everything here reads the two strings
-//! `src/metal.rs` brings back off the stick — the loader's file and `logd`'s —
-//! and nothing here touches a machine. `tests/metaldevicecase` is the boot that
-//! produces them: `userland/metalprobe`'s jobs measure, exit with their numbers,
-//! and the kernel's own `exit:` record carries each one off the machine.
-//!
-//! A number that has never been taken on the machine is [`Bound::Unmeasured`]
-//! and is reported rather than judged; the first boot's number becomes its
-//! bound, with [`MARGIN_PERCENT`] of room, and a boot that then falls outside
-//! it is a red. That is the whole ceiling discipline: nothing here is a
-//! datasheet figure and nothing here was widened to pass.
+//! **Readers only.** What a number may be lives in `tests/metal-profile.toml`
+//! and what a boot's verdict is lives in the harness's judge; this is the one
+//! place the *shape* of both is written down, so a host and a guest that must
+//! agree about a word agree about it here.
 
 #![forbid(unsafe_code)]
 
 use std::fmt;
 
-/// How far a measured rate may fall below the number that first stood for it
-/// before the profile calls it a regression.
-///
-/// **Wide, because one boot is one sample.** These are single measurements on
-/// one machine with no distribution behind them; a bound tight enough to catch
-/// a 10% drift would red on the first boot that scheduled its jobs differently.
-/// It narrows when a rate has been measured often enough to have a spread.
-pub const MARGIN_PERCENT: i64 = 40;
-
-/// The floor a first measurement stands for.
-pub fn floor_from(first: i64) -> i64 {
-    first * (100 - MARGIN_PERCENT) / 100
-}
-
-/// What a job's number is held to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bound {
-    /// Never taken on the machine. Reported with the number it measured and
-    /// judged on nothing but the job having produced one at all.
-    Unmeasured,
-    /// A rate, which may not fall below this.
-    AtLeast(i64),
-    /// A value the machine has no freedom about, given its mode.
-    Exactly(i64),
-}
-
 /// Why a `metalprobe` job has no number, mirroring `Refusal` in
-/// `userland/metalprobe/src/main.rs`. Held to that file by
-/// [`tests::the_probe_declares_the_refusals_this_names`], because nothing links
-/// the two crates.
+/// `userland/metalprobe/src/main.rs`.
+///
+/// Held to that file by [`tests::the_probe_declares_the_refusals_this_names`],
+/// because nothing links the two crates: the probe is built for the guest
+/// triple and never for the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
     NoCapability = -1,
@@ -58,7 +28,7 @@ pub enum Refused {
 }
 
 impl Refused {
-    const ALL: &'static [Self] = &[
+    pub const ALL: &'static [Self] = &[
         Self::NoCapability,
         Self::NoDevice,
         Self::NoScanout,
@@ -80,8 +50,9 @@ impl Refused {
         }
     }
 
-    fn of(code: i64) -> Option<Self> {
-        Self::ALL.iter().copied().find(|r| i64::from(*r as i32) == code)
+    /// What an exit code names, or `None` where it is a measurement.
+    pub fn of(code: i32) -> Option<Self> {
+        Self::ALL.iter().copied().find(|r| *r as i32 == code)
     }
 }
 
@@ -93,36 +64,11 @@ impl fmt::Display for Refused {
             Self::NoScanout => "the claim described a display this job cannot measure",
             Self::NoVolume => "a filesystem call the measurement rests on was refused",
             Self::Disagreed => "what was read back is not what was written",
-            Self::NoDuration => "the measurement took no measurable time",
+            Self::NoDuration => "the measurement took no time the clock could tell from zero",
         };
         write!(f, "{} ({why})", self.spelling())
     }
 }
-
-/// One measurement the boot is asked for, by the name its symlink — and so the
-/// kernel's `exit:` record — spells it.
-#[derive(Debug, Clone, Copy)]
-pub struct Job {
-    pub name: &'static str,
-    /// The unit its exit code is in, for the reader; nothing computes with it.
-    pub unit: &'static str,
-    pub bound: Bound,
-}
-
-/// Every job `tests/metaldevicecase`'s runner list names, in that order.
-///
-/// **The order is the config's**, because the framebuffer jobs repaint the
-/// panel and the storage jobs share one 34 MiB volume with `logd`.
-pub const JOBS: &[Job] = &[
-    Job { name: "usbwrite", unit: "KiB/s", bound: Bound::Unmeasured },
-    Job { name: "usbread", unit: "KiB/s", bound: Bound::Unmeasured },
-    // Not a rate: the fold of what the scanout read back, which is a function
-    // of the mode alone. It moves when the display's mode moves and at no
-    // other time, so it is `Exactly` once taken.
-    Job { name: "fbhash", unit: "fold", bound: Bound::Unmeasured },
-    Job { name: "fbfill", unit: "KiB/s", bound: Bound::Unmeasured },
-    Job { name: "fbread", unit: "KiB/s", bound: Bound::Unmeasured },
-];
 
 /// Whether a record must be there or must not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,16 +88,16 @@ pub struct Record {
 
 use Presence::{NeverSays, Says};
 
-/// The device inventory, asserted on every boot.
+/// The device inventory, asserted on every device boot out of `logd`'s file.
 ///
 /// **Every needle is a prefix of a record the shipping kernel writes**, so
-/// nothing here needs an actuator and nothing here is about a number. The
-/// counts and identities that *are* about this machine — how many controllers,
-/// which silicon, which mode — are read out and reported by [`inventory`], and
-/// become bounds once the machine has answered once.
+/// nothing here needs an actuator and nothing here is about a number. What is
+/// about *this* machine — how many controllers, which silicon, which mode — is
+/// read out by [`inventory`] and reported, because a count nobody has taken is
+/// not a bound.
 pub const RECORDS: &[Record] = &[
-    // The framebuffer's memory type, which is what makes `fbfill` and `fbread`
-    // two different numbers rather than one.
+    // The framebuffer's memory type, which is what makes a fill and a readback
+    // two different measurements rather than one.
     Record { about: "PAT", needle: "PAT: IA32_PAT=", presence: Says },
     Record { about: "scanout", needle: "GOP: scanout memory type WC ", presence: Says },
     // The stick this boot came off, through the controller that carries it.
@@ -161,188 +107,163 @@ pub const RECORDS: &[Record] = &[
     // The keyboard controller, with no key pressed all boot.
     Record { about: "i8042", needle: "i8042: ok selftest=0x55", presence: Says },
     Record { about: "i8042-quarantine", needle: "i8042: quarantined", presence: NeverSays },
-    Record { about: "i8042-lost-edge", needle: "i8042: bytes with no IRQ record", presence: NeverSays },
+    Record {
+        about: "i8042-lost-edge",
+        needle: "i8042: bytes with no IRQ record",
+        presence: NeverSays,
+    },
     // The internal disk: identified, and — the whole safety argument for
-    // running on this machine at all — never written.
+    // running on the bench at all — never written.
     Record { about: "nvme", needle: "NVMe: NS1 size=", presence: Says },
     Record { about: "nvme-refused", needle: "NVMe: NOT INITIALISED", presence: NeverSays },
-    Record { about: "nvme-offline", needle: "NVMe: this controller is offline", presence: NeverSays },
-    Record { about: "nvme-census", needle: "nvme: commands ", presence: Says },
-    // The boot ended the way the loop's verdict needs it to.
-    Record { about: "boot", needle: "Boot: complete (", presence: Says },
+    Record {
+        about: "nvme-offline",
+        needle: "NVMe: this controller is offline",
+        presence: NeverSays,
+    },
+    Record { about: "nvme-census", needle: NVME_CENSUS, presence: Says },
+    // Every disk's write cache, emptied before anything was taken down. This
+    // one *is* a log record: it is made above the boot's last word, while the
+    // volume that carries it is still there.
+    Record { about: "usb-flush", needle: "usb-quiesce: disk ", presence: Says },
 ];
 
-/// The one census field a boot may not have moved: a write to a disk this
-/// project never writes.
+/// What `loader.log` must carry, which is a different file and a different
+/// reader.
+///
+/// **The end of the shutdown is here and nowhere else.** Everything the kernel
+/// does after `log::wait_for_durable` is done to the volume that would have
+/// carried the record, so it reaches no file: it is sealed into the black box
+/// and printed by the next loader pass under that pass's `|` prefix.
+pub const LOADER_RECORDS: &[Record] = &[
+    Record { about: "chain", needle: "the last boot read DONE", presence: Says },
+    Record { about: "usb-quiesce", needle: QUIESCE_HEAD, presence: Says },
+    // A kernel that died on the way to the reset seals ARMED, not DONE.
+    Record { about: "no-death", needle: "died without reaching", presence: NeverSays },
+];
+
+/// The NVMe command census, and the one field a boot may not have moved: a
+/// write to the disk this project never writes.
 pub const NVME_CENSUS: &str = "nvme: commands ";
 pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
 
-/// The loader lines that say the black-box chain closed — the boot before this
-/// one was accounted for and this pass reset rather than booting again.
-pub const CHAIN_LINES: &[&str] = &[crate::bootlog::BLACKBOX_HEAD, crate::bootlog::PREVIOUS_PANIC];
+/// The head of the shutdown's own account, as `kernel/src/drivers/xhci/mod.rs`
+/// spells it.
+pub const QUIESCE_HEAD: &str = "usb-quiesce:";
 
-/// What one job's `exit:` record said.
+/// What the shutdown did, out of its summary line.
+///
+/// **Read as pairs and never as totals**, because "one controller halted" and
+/// "one of two controllers halted" are the difference the whole path exists
+/// for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exit {
-    pub code: i64,
-    pub cpu_ms: u64,
+pub struct Quiesced {
+    pub flushed: u32,
+    pub disks: u32,
+    pub halted: u32,
+    pub controllers: u32,
+    pub reset: u32,
+    pub unpowered: u32,
+    pub ports: u32,
 }
 
-/// The `exit: <name> pid=N code=N cpu=Nms` record for `name`, or `None` where
-/// the boot has none — which is a job that never ran, never returned, or was
-/// still running when the machine reset.
-///
-/// The **last** such record, because a name could in principle run twice and
-/// the boot's answer is the one it ended with.
-pub fn exit_of(log: &str, name: &str) -> Option<Exit> {
-    let head = format!("exit: {name} pid=");
-    log.lines().rev().find_map(|line| {
-        let rest = line.split(&head).nth(1)?;
-        let code = field(rest, "code=")?.parse().ok()?;
-        let cpu = field(rest, "cpu=")?;
-        let cpu_ms = cpu.strip_suffix("ms")?.parse().ok()?;
-        Some(Exit { code, cpu_ms })
+impl Quiesced {
+    /// Whether every device the boot had was handed back: every disk's cache
+    /// emptied, every controller halted and reset.
+    ///
+    /// Ports are reported and not judged: `PORTSC.PP` is writable only on a
+    /// controller with Port Power Control, so a count under the total is a fact
+    /// about the silicon and not about the shutdown.
+    pub fn complete(&self) -> bool {
+        self.flushed == self.disks
+            && self.halted == self.controllers
+            && self.reset == self.controllers
+            && self.controllers > 0
+    }
+}
+
+/// The shutdown's summary out of `loader.log`, or `None` where the pass carries
+/// none.
+pub fn quiesced(loader: &str) -> Option<Quiesced> {
+    let line = loader.lines().find(|l| l.contains(" disk cache(s) flushed"))?;
+    let pair = |what: &str| -> Option<(u32, u32)> {
+        let (a, b) = line.split(what).next()?.split_whitespace().next_back()?.split_once('/')?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    };
+    let (flushed, disks) = pair(" disk cache(s) flushed")?;
+    let (halted, controllers) = pair(" controller(s) halted")?;
+    let (unpowered, ports) = pair(" port(s) unpowered")?;
+    let reset = line.split(" controller(s) halted, ").nth(1)?.split_whitespace().next()?;
+    Some(Quiesced {
+        flushed,
+        disks,
+        halted,
+        controllers,
+        reset: reset.parse().ok()?,
+        unpowered,
+        ports,
     })
 }
 
-/// The word after `key` in `rest`, up to the next space.
-fn field<'a>(rest: &'a str, key: &str) -> Option<&'a str> {
-    rest.split(key).nth(1)?.split_whitespace().next()
-}
-
-/// One line of a boot's own report about itself, in the order a reader wants
-/// them: what the devices said, then what each job measured.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Verdict {
-    pub about: String,
-    pub outcome: Outcome,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// The record was where it had to be, or absent where it had to be.
-    Held(String),
-    /// A number with no bound yet: this is what the machine answered.
-    Measured { value: i64, unit: &'static str },
-    Failed(String),
-}
-
-impl Outcome {
-    pub fn is_failure(&self) -> bool {
-        matches!(self, Self::Failed(_))
-    }
-}
-
-impl fmt::Display for Verdict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.outcome {
-            Outcome::Held(what) => write!(f, "  ok    {:<16} {what}", self.about),
-            Outcome::Measured { value, unit } => {
-                write!(f, "  first {:<16} {value} {unit} — unmeasured, this is its number", self.about)
+/// Every record that had to be there and was not, and every one that had to be
+/// absent and was not — the loader's file and `logd`'s judged by their own
+/// tables. Each line opens with the `about` it failed, so a caller can name
+/// them without reading the prose.
+pub fn unmet(loader: &str, log: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (record, text) in
+        RECORDS.iter().map(|r| (r, log)).chain(LOADER_RECORDS.iter().map(|r| (r, loader)))
+    {
+        match (record.presence, text.contains(record.needle)) {
+            (Says, false) => {
+                out.push(format!("{}: no record carries {:?}", record.about, record.needle))
             }
-            Outcome::Failed(why) => write!(f, "  RED   {:<16} {why}", self.about),
+            (NeverSays, true) => out.push(format!(
+                "{}: a record carries {:?}: {}",
+                record.about,
+                record.needle,
+                quoted(text, record.needle)
+            )),
+            _ => {}
         }
     }
-}
-
-/// Every value a boot reported that a profile entry would hold, whether or not
-/// this profile holds one yet: the lines a reader needs to write the next
-/// version of this file.
-pub fn inventory(log: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for needle in [
-        "xHCI: found at PCI ",
-        "xHCI: max_slots=",
-        "xHCI: USB ",
-        "xHCI: ",
-        "usb-storage: ",
-        "i8042: ",
-        "hda: ",
-        "NVMe: ",
-        "nvme: commands ",
-        "GOP: ",
-        "PAT: ",
-    ] {
-        for line in log.lines().filter(|l| l.contains(needle)) {
-            let line = line.to_string();
-            if !out.contains(&line) {
-                out.push(line);
-            }
-        }
-    }
-    out
-}
-
-/// Judge one boot's log against this profile.
-pub fn judge(log: &str) -> Vec<Verdict> {
-    let mut out = Vec::new();
-    for record in RECORDS {
-        let saw = log.contains(record.needle);
-        let outcome = match (record.presence, saw) {
-            (Says, true) => Outcome::Held(quoted(log, record.needle)),
-            (Says, false) => Outcome::Failed(format!("no record carries {:?}", record.needle)),
-            (NeverSays, false) => Outcome::Held(format!("nothing said {:?}", record.needle)),
-            (NeverSays, true) => {
-                Outcome::Failed(format!("a record carries {:?}: {}", record.needle, quoted(log, record.needle)))
-            }
-        };
-        out.push(Verdict { about: record.about.to_string(), outcome });
-    }
-
-    // The census is the one record whose *content* is the assertion.
     if let Some(census) = log.lines().find(|l| l.contains(NVME_CENSUS)) {
         for want in NVME_NO_WRITES {
-            let outcome = if census.contains(want) {
-                Outcome::Held((*want).to_string())
-            } else {
-                Outcome::Failed(format!("the census says {census:?}, and this boot owed {want}"))
-            };
-            out.push(Verdict { about: format!("nvme-{want}"), outcome });
+            if !census.contains(want) {
+                out.push(format!("nvme-census: {census:?}, and this boot owed {want}"));
+            }
         }
     }
-
-    for job in JOBS {
-        out.push(Verdict { about: job.name.to_string(), outcome: judged(log, job) });
+    match quiesced(loader) {
+        Some(said) if !said.complete() => out.push(format!(
+            "usb-quiesce: the shutdown left a device behind: {said:?}. A reset with a transfer \
+             in flight is what a mass-storage device does not survive"
+        )),
+        Some(_) => {}
+        None => out.push(format!("usb-quiesce: no {QUIESCE_HEAD} summary in loader.log")),
     }
     out
 }
 
-fn judged(log: &str, job: &Job) -> Outcome {
-    let Some(exit) = exit_of(log, job.name) else {
-        return Outcome::Failed(format!(
-            "the boot carries no `exit: {} pid=…` record, so the job never ended",
-            job.name
-        ));
-    };
-    if let Some(refused) = Refused::of(exit.code) {
-        return Outcome::Failed(format!("the job refused: {refused}"));
-    }
-    if exit.code < 0 {
-        return Outcome::Failed(format!("the job exited {}, which names no refusal", exit.code));
-    }
-    match job.bound {
-        Bound::Unmeasured => Outcome::Measured { value: exit.code, unit: job.unit },
-        Bound::AtLeast(floor) if exit.code < floor => Outcome::Failed(format!(
-            "{} {} is under this profile's floor of {floor} {}",
-            exit.code, job.unit, job.unit
-        )),
-        Bound::AtLeast(floor) => {
-            Outcome::Held(format!("{} {} (floor {floor}, cpu {}ms)", exit.code, job.unit, exit.cpu_ms))
+/// Every value a boot reported that a later profile row would hold: the lines a
+/// reader needs to write the next version of `tests/metal-profile.toml`.
+pub fn inventory(log: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for needle in
+        ["xHCI: ", "usb-storage: ", "i8042: ", "hda: ", "NVMe: ", NVME_CENSUS, "GOP: ", "PAT: "]
+    {
+        for line in log.lines().filter(|l| l.contains(needle)) {
+            if !out.iter().any(|seen| seen == line) {
+                out.push(line.to_string());
+            }
         }
-        Bound::Exactly(want) if exit.code != want => Outcome::Failed(format!(
-            "{} {} where this profile holds {want}",
-            exit.code, job.unit
-        )),
-        Bound::Exactly(want) => Outcome::Held(format!("{want} {}", job.unit)),
     }
+    out
 }
 
 /// The first line carrying `needle`, trimmed, for a verdict to quote.
-fn quoted(log: &str, needle: &str) -> String {
-    log.lines()
-        .find(|line| line.contains(needle))
-        .map(|line| line.trim().to_string())
-        .unwrap_or_default()
+fn quoted(text: &str, needle: &str) -> String {
+    text.lines().find(|line| line.contains(needle)).map(str::trim).unwrap_or_default().to_string()
 }
 
 #[cfg(test)]
@@ -359,103 +280,119 @@ mod tests {
         [
             line("0.000", "PAT: IA32_PAT=0x0007040100070406, entry 4 = WC"),
             line("0.087", "xHCI: found at PCI 00:14.0 8086:a36d"),
-            line("0.090", "xHCI: max_slots=32 max_ports=16 ctx_size=64 pagesize=0x1"),
             line("0.140", "usb-storage: 1 device(s)"),
             line("0.150", "i8042: ok selftest=0x55 cfg=0x45->0x44 port1=ok port2=ok"),
             line("0.200", "NVMe: NS1 size=1000215216 sectors, sector_size=512"),
             line("0.319", "GOP: scanout memory type WC (MTRR WB, PAT entry 4)"),
             line("0.368", "Boot: complete (368ms)"),
-            line("1.100", "exit: usbwrite pid=6 code=11200 cpu=140ms"),
-            line("2.100", "exit: usbread pid=7 code=30500 cpu=90ms"),
-            line("2.500", "exit: fbhash pid=8 code=209270153 cpu=44ms"),
-            line("2.600", "exit: fbfill pid=9 code=3440663 cpu=70ms"),
-            line("3.900", "exit: fbread pid=10 code=41000 cpu=33ms"),
+            line("1.100", "exit: usbwrite pid=6 code=402000 cpu=140ms"),
             line("3.950", "nvme: commands identify=2 admin-other=2 read=1 write=0 io-other=0"),
+            line("3.955", "usb-quiesce: disk 0 SYNCHRONIZE CACHE ok"),
             line("3.960", "Rebooting."),
         ]
         .concat()
     }
 
-    #[test]
-    fn an_exit_record_is_read_as_its_number() {
-        let log = a_good_boot();
-        assert_eq!(exit_of(&log, "usbwrite"), Some(Exit { code: 11200, cpu_ms: 140 }));
-        assert_eq!(exit_of(&log, "fbhash"), Some(Exit { code: 209_270_153, cpu_ms: 44 }));
-        assert_eq!(exit_of(&log, "never_ran"), None);
-        // A name that is a prefix of another's is not that other one.
-        assert_eq!(exit_of(&log, "usb"), None);
-        // The last of two, because that is the answer the boot ended with.
-        let twice = format!("{log}{}", line("4.0", "exit: usbread pid=11 code=99 cpu=1ms"));
-        assert_eq!(exit_of(&twice, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
+    /// `loader.log`'s pass after the reset, with the shutdown's own account
+    /// under the `|` the loader prefixes a report's lines with.
+    fn a_good_loader() -> String {
+        "ToyOS Bootloader 1.0\n\
+         Black box: the last boot read DONE, so it handed the machine back on purpose and this \
+         chain ends here\n\
+         | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
+         | usb-quiesce: 2/2 disk cache(s) flushed, 2/2 controller(s) halted, 2 reset, \
+         12/16 port(s) unpowered\n\
+         Loader log: the last boot is accounted for, so this pass resets the machine\n"
+            .to_string()
     }
 
     #[test]
-    fn a_good_boot_reds_on_nothing_and_reports_every_number() {
-        let verdicts = judge(&a_good_boot());
-        let red: Vec<&Verdict> = verdicts.iter().filter(|v| v.outcome.is_failure()).collect();
-        assert!(red.is_empty(), "{red:#?}");
-        let measured: Vec<&Verdict> = verdicts
-            .iter()
-            .filter(|v| matches!(v.outcome, Outcome::Measured { .. }))
-            .collect();
-        assert_eq!(measured.len(), JOBS.len(), "{measured:#?}");
+    fn the_shutdowns_own_account_is_read_out_of_the_loaders_file() {
+        assert_eq!(
+            quiesced(&a_good_loader()),
+            Some(Quiesced {
+                flushed: 2,
+                disks: 2,
+                halted: 2,
+                controllers: 2,
+                reset: 2,
+                unpowered: 12,
+                ports: 16,
+            })
+        );
+        assert!(quiesced(&a_good_loader()).unwrap().complete());
+        // Ports are reported, not judged: a controller with no Port Power
+        // Control ignores the write and 0/16 is the silicon's answer.
+        assert!(quiesced(&a_good_loader().replace("12/16 port", "0/16 port")).unwrap().complete());
+        // Each of the three that *are* judged, failing on its own.
+        for (from, to) in [
+            ("2/2 disk", "1/2 disk"),
+            ("2/2 controller(s) halted", "1/2 controller(s) halted"),
+            ("halted, 2 reset", "halted, 1 reset"),
+            // A shutdown that found no controller is not one that handed
+            // everything back; it is a machine this table is not about.
+            ("2/2 controller(s) halted, 2 reset", "0/0 controller(s) halted, 0 reset"),
+        ] {
+            let moved = a_good_loader().replace(from, to);
+            assert!(!quiesced(&moved).unwrap().complete(), "{from} -> {to}");
+        }
+        assert_eq!(quiesced("ToyOS Bootloader 1.0\n"), None);
     }
 
     /// The negative control for every predicate: a boot that fails each one
-    /// exactly, so nothing above is a spelling of `true`.
+    /// exactly, so nothing in the tables is a spelling of `true`.
     #[test]
-    fn each_predicate_has_teeth() {
-        let failures = |log: &str| -> Vec<String> {
-            judge(log)
-                .into_iter()
-                .filter(|v| v.outcome.is_failure())
-                .map(|v| v.about)
-                .collect()
+    fn each_record_has_teeth() {
+        assert!(unmet(&a_good_loader(), &a_good_boot()).is_empty());
+        let about = |unmet: Vec<String>| -> Vec<String> {
+            unmet.iter().map(|why| why.split(':').next().unwrap_or_default().to_string()).collect()
         };
-        assert!(failures(&a_good_boot()).is_empty());
 
         // A record that must be there, taken away.
         let no_pat = a_good_boot().replace("PAT: IA32_PAT=", "PAT: nothing at all ");
-        assert_eq!(failures(&no_pat), ["PAT"]);
-
+        assert_eq!(about(unmet(&a_good_loader(), &no_pat)), ["PAT"]);
         // A record that must not be there, put in.
-        let quarantined = format!("{}{}", a_good_boot(), line("1.0", "i8042: quarantined — ..."));
-        assert_eq!(failures(&quarantined), ["i8042-quarantine"]);
-
+        let quarantined = format!("{}{}", a_good_boot(), line("1.0", "i8042: quarantined - x"));
+        assert_eq!(about(unmet(&a_good_loader(), &quarantined)), ["i8042-quarantine"]);
         // The scanout mapped as something other than write-combining.
-        let uncached =
-            a_good_boot().replace("scanout memory type WC ", "scanout memory type UC ");
-        assert_eq!(failures(&uncached), ["scanout"]);
-
+        let uncached = a_good_boot().replace("memory type WC ", "memory type UC ");
+        assert_eq!(about(unmet(&a_good_loader(), &uncached)), ["scanout"]);
         // One write to the disk this project never writes.
         let wrote = a_good_boot().replace("write=0 io-other=0", "write=1 io-other=0");
-        assert_eq!(failures(&wrote), ["nvme-write=0"]);
+        assert_eq!(about(unmet(&a_good_loader(), &wrote)), ["nvme-census"]);
+        // A shutdown that never emptied a cache.
+        let unflushed = a_good_boot()
+            .lines()
+            .filter(|l| !l.contains("SYNCHRONIZE"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(about(unmet(&a_good_loader(), &unflushed)), ["usb-flush"]);
 
-        // A job that refused rather than measured, named rather than numbered.
-        let refused = a_good_boot().replace("exit: fbhash pid=8 code=209270153", "exit: fbhash pid=8 code=-5");
-        assert_eq!(failures(&refused), ["fbhash"]);
-        let said = judge(&refused).into_iter().find(|v| v.about == "fbhash").unwrap();
-        assert!(format!("{said}").contains("Disagreed"), "{said}");
-
-        // A job that never ended: the record it owes is simply not there.
-        let gone = a_good_boot().replace("exit: usbread pid=7 code=30500 cpu=90ms", "");
-        assert_eq!(failures(&gone), ["usbread"]);
+        // And the loader's file, which carries what no log record can.
+        let no_quiesce = a_good_loader()
+            .lines()
+            .filter(|l| !l.contains(QUIESCE_HEAD))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(about(unmet(&no_quiesce, &a_good_boot())), ["usb-quiesce", "usb-quiesce"]);
+        let left = a_good_loader().replace("2/2 disk", "1/2 disk");
+        assert_eq!(about(unmet(&left, &a_good_boot())), ["usb-quiesce"]);
+        let died = a_good_loader().replace(
+            "the last boot read DONE",
+            "the page still reads ARMED, so that kernel died without reaching",
+        );
+        assert_eq!(about(unmet(&died, &a_good_boot())), ["chain", "no-death"]);
     }
 
     #[test]
-    fn a_bound_is_judged_once_it_is_taken() {
-        let log = a_good_boot();
-        let floor = Job { name: "usbread", unit: "KiB/s", bound: Bound::AtLeast(20_000) };
-        assert!(matches!(judged(&log, &floor), Outcome::Held(_)));
-        let steep = Job { bound: Bound::AtLeast(40_000), ..floor };
-        assert!(judged(&log, &steep).is_failure());
-
-        let exact = Job { name: "fbhash", unit: "fold", bound: Bound::Exactly(209_270_153) };
-        assert!(matches!(judged(&log, &exact), Outcome::Held(_)));
-        let moved = Job { bound: Bound::Exactly(1), ..exact };
-        assert!(judged(&log, &moved).is_failure());
-
-        assert_eq!(floor_from(10_000), 6_000);
+    fn a_negative_exit_code_names_its_refusal() {
+        assert_eq!(Refused::of(-5), Some(Refused::Disagreed));
+        assert_eq!(Refused::of(-1), Some(Refused::NoCapability));
+        // A measurement, and a negative that names nothing, are both `None`:
+        // the caller says which of the two it is.
+        assert_eq!(Refused::of(402_000), None);
+        assert_eq!(Refused::of(-7), None);
+        assert!(format!("{}", Refused::Disagreed).contains("read back"));
     }
 
     /// Nothing links this crate to `userland/metalprobe`: it is built for
@@ -469,11 +406,7 @@ mod tests {
         let source = std::fs::read_to_string(&path).expect("the probe's own source");
         for refusal in Refused::ALL {
             let declared = format!("{} = {},", refusal.spelling(), *refusal as i32);
-            assert!(
-                source.contains(&declared),
-                "{} declares no `{declared}`",
-                path.display()
-            );
+            assert!(source.contains(&declared), "{} declares no `{declared}`", path.display());
         }
         // And the other way: a refusal the probe grew and this file has not.
         let arms = source
@@ -482,36 +415,5 @@ mod tests {
             .filter(|line| line.contains(" = -"))
             .count();
         assert_eq!(arms, Refused::ALL.len(), "{} declares {arms} refusals", path.display());
-    }
-
-    /// Every job this profile holds is a job the boot config actually runs,
-    /// under the name the kernel's record will spell.
-    #[test]
-    fn the_boot_config_runs_exactly_these_jobs() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/metaldevicecase/system.toml");
-        let config = std::fs::read_to_string(&path).expect("the device case's config");
-        let args = config
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("args = ["))
-            .expect("the runner's job list");
-        let named: Vec<&str> = args
-            .trim_end_matches([']'])
-            .split(',')
-            .map(|word| word.trim().trim_matches('"'))
-            .filter(|word| !word.is_empty())
-            .collect();
-        // The list ends with the job that hands the machine back, which
-        // measures nothing.
-        assert_eq!(named.last(), Some(&"reboot"), "{named:?}");
-        let measured: Vec<&str> = named[..named.len() - 1].to_vec();
-        let held: Vec<&str> = JOBS.iter().map(|j| j.name).collect();
-        assert_eq!(measured, held);
-        for name in &held {
-            assert!(
-                config.contains(&format!("\"bin/{name}\" = \"/system/bin/metalprobe\"")),
-                "{name} has no symlink, so the runner would spawn nothing"
-            );
-        }
     }
 }

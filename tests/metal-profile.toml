@@ -92,3 +92,57 @@ name = "boot.metalcase.back_secs"
 unit = "s"
 ceiling = 360
 ceiling_from = "toyos_build::metal::return_secs"
+
+# --- the device boot, and every span `userland/metalprobe` measures on it ---
+# Each job exits with its span in microseconds and the kernel's `exit:` record
+# carries it; `src/metaldevices.rs` names the negative codes that are refusals
+# rather than numbers. A span and not a rate, because a ceiling is what this
+# file can express and a rate would have to be judged from below.
+#
+# Every ceiling here is the same derivation and none has been read on the
+# machine yet: `metalprobe`'s own `SHARE_PERCENT` of `toyos_tco::JOB_BOUND_MS`
+# is what its payload is sized against, and one job may not outlast its share
+# without putting the runner's reset inside a transfer — which is what wedged
+# the bench's stick on run 18. The first T14 reading tightens each of them.
+
+[[number]]
+name = "boot.metaldevicecase.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
+name = "boot.metaldevicecase.back_secs"
+unit = "s"
+ceiling = 360
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
+name = "usbwrite.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "metalprobe's SHARE_PERCENT of toyos_tco::JOB_BOUND_MS — the share its payload is sized against, and the widest true bound before the machine has answered once"
+
+[[number]]
+name = "usbread.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "as usbwrite.metaldevicecase.span_us"
+
+[[number]]
+name = "fbcheck.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "as usbwrite.metaldevicecase.span_us — one whole-scanout write and one whole-scanout readback"
+
+[[number]]
+name = "fbfill.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "as usbwrite.metaldevicecase.span_us — metalprobe's FILL_PASSES whole-scanout fills"
+
+[[number]]
+name = "fbread.metaldevicecase.span_us"
+unit = "us"
+ceiling = 4800000
+ceiling_from = "as usbwrite.metaldevicecase.span_us — metalprobe's READ_PASSES whole-scanout readbacks, the direction that misses every cache"

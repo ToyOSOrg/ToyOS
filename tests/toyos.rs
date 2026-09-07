@@ -12,7 +12,8 @@ use common::qemu::{
     STALLED,
 };
 use common::{
-    audio, compile, faults, hostload, metal, pkg, power, screen, serial, stats, storage, usb,
+    audio, compile, devices, faults, hostload, metal, pkg, power, screen, serial, stats, storage,
+    usb,
 };
 use toyos_build::day::Day;
 use toyos_build::bootlog::{self, boot_millis};
@@ -612,6 +613,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("machine_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
+    // Its own boot, and the one whose numbers are the T14's: what it judges
+    // here is the plumbing, since every span on an emulated device is a fact
+    // about TCG. Registered UNMEASURED, so the run that prices it is the one
+    // that decides its tier.
+    ("metal_device_probe", Sched::Parallel, Tier::Fast),
     // Its verdict waits out a staged window.
     ("job_deadline_reboots", Sched::Parallel, Tier::Fast),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
@@ -1170,6 +1176,13 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
 /// `===TEST_END <name> exit=N===` does not exist on the T14: a job's verdict
 /// crosses as the kernel's own `exit: <name> pid=N code=N cpu=Nms`.
 const METAL: &[(&str, metal::Metal)] = &[
+    (
+        // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer
+        // and NVMe, asserted from the records the shipping kernel writes, with
+        // every span `metalprobe` measured priced in `tests/metal-profile.toml`.
+        "metal_device_probe",
+        metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
+    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1355,6 +1368,16 @@ const TESTCASES_READDIR: &[metal::Arm] = &[metal::Arm {
 
 const JOBCASE: &[metal::Arm] =
     &[metal::Arm { boot: "jobcase", config: "tests/jobcase", params: &[], jobs: &[] }];
+
+/// The device boot: the whole `metalprobe` job list on the T14's own devices.
+/// Its own image, because every job in it either claims the display or moves
+/// megabytes across the boot stick, and neither shares well.
+const METALDEVICECASE: &[metal::Arm] = &[metal::Arm {
+    boot: devices::BOOT,
+    config: devices::CONFIG,
+    params: &[],
+    jobs: &[],
+}];
 
 const METALCASE: &[metal::Arm] =
     &[metal::Arm { boot: "metalcase", config: "tests/metalcase", params: &[], jobs: &[] }];
@@ -9165,6 +9188,7 @@ fn run_machine_test(
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
         "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
+        "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "watchdog_fed" => power::watchdog_fed(test_config, c_bins, rust_bins),
@@ -17095,6 +17119,7 @@ fn assert_fast_profile_label(
 /// **A row for a name nothing registers is a metal test with no QEMU one**, and
 /// its verdict would be reported under a name no other tier can answer for.
 fn check_metal_registration() {
+    devices::the_config_runs_exactly_these_jobs();
     let registered: BTreeSet<&str> = MACHINE_TESTS
         .iter()
         .chain(SCREEN_TESTS)
