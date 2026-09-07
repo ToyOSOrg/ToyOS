@@ -57,23 +57,24 @@ fn quiesce(last: &str) {
     // Above the boot's last word, because these are ordinary records and the
     // volume that carries them is still there: every USB disk's write cache is
     // emptied and waited for before anything is taken down.
-    let mut usb = crate::drivers::xhci::flush_disks();
+    crate::drivers::xhci::flush_disks();
     log!("{last}");
     // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
     crate::log::wait_for_durable();
-    // **A reset is not a way to end a transfer.** Below the log volume's last
-    // durable byte, because this is what takes that volume's device away: the
-    // controller is halted, reset so its ports issue a real bus reset, and its
-    // ports' power removed. Nothing here logs a record — one made now would
-    // land after the boot's last word — so what it did is sealed instead.
-    let mut said = crate::blackbox::Said::new();
-    crate::drivers::xhci::hand_back(&mut usb, &mut said);
     crate::log::console::drain_inline();
-    // Last, and after the log is durable: the next boot's loader reads this
-    // page to learn how the last one ended, and a machine that was asked to
-    // stop is the one answer that is not a death. Without it the loader would
-    // find the loader's own `ARMED` and report a kernel that vanished.
-    crate::blackbox::record_done(format_args!("{}", said.as_str()));
+    // After the log is durable: the next boot's loader reads this page to learn
+    // how the last one ended, and a machine that was asked to stop is the one
+    // answer that is not a death. Without it the loader would find the loader's
+    // own `ARMED` and report a kernel that vanished. The reset's own account is
+    // appended under it.
+    crate::blackbox::record_done();
+    // **The barrier, and last of all.** Below the log volume's last durable
+    // byte, because before it `logd` still has that volume to write and this
+    // takes the controller away from it; and after everything else here,
+    // because nothing may run between it and the register stop
+    // `acpi::reboot`/`acpi::shutdown` do — which every reset this kernel
+    // performs goes through. It is bounded, and the reset follows either way.
+    crate::drivers::xhci::seal_shut();
 }
 
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Does not return.

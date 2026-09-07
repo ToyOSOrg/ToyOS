@@ -110,6 +110,16 @@ impl Portsc {
         self.0 & CSC != 0
     }
 
+    /// Whether reset signalling is still on the wire.
+    ///
+    /// **PR is RW1S and the xHC is what clears it** (§4.19.5), so a port reading
+    /// it set has not finished the reset software asked for — which is the only
+    /// way to tell a controller that drove one from a controller that took the
+    /// write and did nothing.
+    pub const fn in_reset(self) -> bool {
+        self.0 & PR != 0
+    }
+
     /// Whether a reset of either kind has finished. A warm reset sets WRC and a
     /// conformant controller sets PRC with it; one flag is enough to act on and
     /// both are cleared together.

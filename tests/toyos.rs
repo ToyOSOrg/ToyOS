@@ -681,6 +681,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the bound the first boot counts down.
     ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
+    // Three chained boots, one per way this kernel reaches a reset, each
+    // anchored to the bound its own first boot counts down.
+    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
     // Its own boot, and every verdict is a line: no host clock in any of it.
     ("blackbox_unclaimed_page", Sched::Parallel, Tier::Fast),
     // The seal read off the page's own bytes by QEMU, after a panic earlier than
@@ -1384,6 +1387,18 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     // ---- one image: tests/jobcase ----
     (
+        // **The owner's ruling, on the machine whose stick it cost.** Two boots
+        // it already flashes: the device boot writes and fsyncs megabytes before
+        // its reset — run 18's exact shape — and `jobcase` is the same reset
+        // with nothing moved across the bus. Neither costs the machine a minute
+        // it was not already spending.
+        "usb_reset_hands_devices_back",
+        metal::Metal::Runs {
+            arms: USB_RESET_BOOTS,
+            judge: power::usb_reset_on_metal,
+        },
+    ),
+    (
         // Already precisely this boot: `args = ["reboot"]`. On the T14 the
         // chain is what every metal boot does — the loader points `BootNext` at
         // itself before each handoff, so the pass that reads the page appends
@@ -1516,6 +1531,19 @@ const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
 
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
+
+/// The two boots the reset ruling is judged on, and both are boots this suite
+/// already flashes: the device boot for a reset with megabytes behind it, and
+/// `jobcase` for one with nothing.
+const USB_RESET_BOOTS: &[metal::Arm] = &[
+    metal::once(
+        devices::BOOT,
+        devices::CONFIG,
+        &[],
+        devices::JOBS,
+    ),
+    metal::once("jobcase", "tests/jobcase", &[], &[]),
+];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
@@ -9583,6 +9611,9 @@ fn run_machine_test(
         "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
         "blackbox_panic_chain" => power::blackbox_panic_chain(test_config, c_bins, rust_bins),
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
+        "usb_reset_hands_devices_back" => {
+            power::usb_reset_hands_devices_back(test_config, c_bins, rust_bins)
+        }
         "blackbox_unclaimed_page" => {
             power::blackbox_unclaimed_page(test_config, c_bins, rust_bins)
         }

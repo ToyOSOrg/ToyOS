@@ -150,6 +150,19 @@ pub fn init(devices: &[PciDevice]) {
     // Hot-plug can put either input class on any bound controller.
     crate::keyboard::declare_source();
     crate::mouse::declare_source();
+    // Before the lock takes them: from here every reset this kernel performs
+    // stops these controllers, and it reads them out of `stop`'s atomics rather
+    // than out of `XHCI`, because a panicked CPU may take no lock.
+    for ctrl in &controllers {
+        super::super::stop::publish(
+            ctrl.op_base,
+            ctrl.pci.config_window(),
+            ctrl.pci.bus,
+            ctrl.pci.dev,
+            ctrl.pci.func,
+            ctrl.max_ports,
+        );
+    }
     *XHCI.lock() = controllers;
 }
 

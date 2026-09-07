@@ -8,11 +8,19 @@
 //!
 //! All input is firmware-supplied and untrusted: no panic on any input path,
 //! every failure is a [`TableError`] and the caller decides what it means.
+//!
+//! **No reset this kernel performs leaves a USB device mid-command.** [`reboot`]
+//! and [`shutdown`] are the only two this kernel has, and each stops every xHCI
+//! controller ([`stop::before_reset`]) before it writes its register — which is
+//! what makes that a property of the reset rather than of whoever asked for one.
+//! Resets this kernel does not perform — a TCO or firmware watchdog, a triple
+//! fault, power loss — are outside it and always will be.
 
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile};
 use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
+use crate::drivers::xhci::stop;
 use crate::log;
 use crate::DirectMap;
 use toyos_acpi::{
@@ -272,6 +280,7 @@ pub fn can_reboot() -> bool {
 // No fallback: 0xCF9, the keyboard controller and anything else are written only where a table named them.
 pub fn reboot() -> ! {
     crate::drivers::serial::flush_final();
+    stop::before_reset();
 
     let port = RESET_PORT.load(Ordering::Relaxed);
     // Kernel-internal, so a bug rather than a machine quiesced and then left halted quietly.
@@ -287,6 +296,10 @@ pub fn reboot() -> ! {
 pub fn shutdown() -> ! {
     // Last chance: nothing drains the log ring after this point.
     crate::drivers::serial::flush_final();
+    // S5 takes VBUS with it on a machine whose ports are not always-on and
+    // takes nothing on one whose are, so the devices are handed back here for
+    // the same reason as at a reboot.
+    stop::before_reset();
 
     let pm1a = PM1A_CNT_PORT.load(Ordering::Relaxed);
     let slp_typ = SLP_TYPA.load(Ordering::Relaxed);

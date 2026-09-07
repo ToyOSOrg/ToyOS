@@ -3,13 +3,14 @@ mod log_close;
 mod log_gate;
 
 use std::io::{self, BufRead, Write};
-use std::os::toyos::process::CommandExt;
+use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::process::Process;
 use toyos::syscap::SysCap;
 
 /// Tests that run **inside** this process rather than in a binary it spawns.
@@ -35,6 +36,26 @@ const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
 /// the loop, read by the deadline watching it.
 static RUNNING: Mutex<String> = Mutex::new(String::new());
 static FINISHED: AtomicBool = AtomicBool::new(false);
+
+/// A second handle to the job now running, for the deadline to end it with, or
+/// zero between jobs.
+///
+/// **Taken out with a swap, by whichever of the two gets there first**, so the
+/// handle has exactly one owner and the loop closing it cannot leave the
+/// deadline killing whatever the slot was handed to next. A duplicate and not
+/// the `Child`'s own handle, because a `Child` has one owner and the loop is
+/// blocked inside its `wait`.
+static JOB: AtomicU32 = AtomicU32::new(0);
+
+/// Take the running job, if it is still this thread's to take.
+fn claim_the_job() -> Option<Process> {
+    match JOB.swap(0, Ordering::AcqRel) {
+        0 => None,
+        // SAFETY: the swap is what makes this the only holder of the duplicate
+        // `run_one` made; nothing else answers for it after this.
+        raw => Some(unsafe { Process::from_raw(toyos::RawHandle(raw)) }),
+    }
+}
 
 fn main() {
     // **The test estate's authority, and the one place least authority is not
@@ -131,6 +152,15 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
              ({bound_ms} ms)"
         );
         let _ = io::stdout().flush();
+        // **The job goes before the reboot.** `SYS_REBOOT` syncs the machine
+        // and then resets it, and a job still running is a process that can
+        // start a device transfer after that sync. Killing it and waiting for
+        // it to be gone leaves the driver to finish or abandon what it had in
+        // flight; the kernel's own stop then covers what the kill left.
+        if let Some(job) = claim_the_job() {
+            let _ = job.kill();
+            let _ = job.wait();
+        }
         fatal(&format!("the reboot was refused: {:?}", power.reboot()));
     });
 }
@@ -247,7 +277,15 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     let ran = match command.spawn() {
         Ok(mut child) => {
             drop(child.stdin.take());
-            match child.wait() {
+            // Published before the wait below blocks this thread: from here the
+            // deadline can end this job rather than resetting around it.
+            if let Ok(watch) = toyos_abi::syscall::dup(toyos_abi::RawHandle(child.as_raw_handle()))
+            {
+                JOB.store(watch.0, Ordering::Release);
+            }
+            let outcome = child.wait();
+            drop(claim_the_job());
+            match outcome {
                 Ok(status) => {
                     let code = status.code().unwrap_or(-1);
                     println!("===TEST_END {name} exit={code}===");

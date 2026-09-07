@@ -200,7 +200,7 @@ pub const LOADER_RECORDS: &[Record] = &[
     Record { about: "no-death", needle: "died without reaching", presence: NeverSays },
 ];
 
-/// The head of the shutdown's own account, as `kernel/src/drivers/xhci/mod.rs`
+/// The head of the reset's own account, as `kernel/src/drivers/xhci/stop.rs`
 /// spells it.
 pub const QUIESCE_HEAD: &str = "usb-quiesce:";
 
@@ -213,6 +213,10 @@ pub const QUIESCE_HEAD: &str = "usb-quiesce:";
 pub struct Quiesced {
     pub flushed: u32,
     pub disks: u32,
+    /// Connected ports whose reset finished, of the connected ports there were.
+    /// **The act an attached device sees**, and the one that ends a transfer.
+    pub reset_ports: u32,
+    pub connected: u32,
     pub halted: u32,
     pub controllers: u32,
     pub reset: u32,
@@ -222,13 +226,16 @@ pub struct Quiesced {
 
 impl Quiesced {
     /// Whether every device the boot had was handed back: every disk's cache
-    /// emptied, every controller halted and reset.
+    /// emptied, every connected port reset, every controller halted and reset.
     ///
-    /// Ports are reported and not judged: `PORTSC.PP` is writable only on a
-    /// controller with Port Power Control, so a count under the total is a fact
-    /// about the silicon and not about the shutdown.
+    /// Port *power* is reported and not judged: `PORTSC.PP` is writable only on
+    /// a controller with Port Power Control, so a count under the total is a
+    /// fact about the silicon and not about the shutdown. The port *reset* is
+    /// judged, because it is the one act an attached device sees and no
+    /// controller may decline it.
     pub fn complete(&self) -> bool {
         self.flushed == self.disks
+            && self.reset_ports == self.connected
             && self.halted == self.controllers
             && self.reset == self.controllers
             && self.controllers > 0
@@ -244,12 +251,15 @@ pub fn quiesced(loader: &str) -> Option<Quiesced> {
         Some((a.parse().ok()?, b.parse().ok()?))
     };
     let (flushed, disks) = pair(" disk cache(s) flushed")?;
+    let (reset_ports, connected) = pair(" connected port(s) reset")?;
     let (halted, controllers) = pair(" controller(s) halted")?;
     let (unpowered, ports) = pair(" port(s) unpowered")?;
     let reset = line.split(" controller(s) halted, ").nth(1)?.split_whitespace().next()?;
     Some(Quiesced {
         flushed,
         disks,
+        reset_ports,
+        connected,
         halted,
         controllers,
         reset: reset.parse().ok()?,
@@ -438,8 +448,8 @@ mod tests {
          Black box: the last boot read DONE, so it handed the machine back on purpose and this \
          chain ends here\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
-         | usb-quiesce: 2/2 disk cache(s) flushed, 2/2 controller(s) halted, 2 reset, \
-         12/16 port(s) unpowered\n\
+         | usb-quiesce: 2/2 disk cache(s) flushed, 5/5 connected port(s) reset, \
+         2/2 controller(s) halted, 2 reset, 12/16 port(s) unpowered\n\
          Loader log: the last boot is accounted for, so this pass resets the machine\n"
             .to_string()
     }
@@ -463,6 +473,8 @@ mod tests {
             Some(Quiesced {
                 flushed: 2,
                 disks: 2,
+                reset_ports: 5,
+                connected: 5,
                 halted: 2,
                 controllers: 2,
                 reset: 2,
@@ -474,9 +486,10 @@ mod tests {
         // Ports are reported, not judged: a controller with no Port Power
         // Control ignores the write and 0/16 is the silicon's answer.
         assert!(quiesced(&a_good_loader().replace("12/16 port", "0/16 port")).unwrap().complete());
-        // Each of the three that *are* judged, failing on its own.
+        // Each of the four that *are* judged, failing on its own.
         for (from, to) in [
             ("2/2 disk", "1/2 disk"),
+            ("5/5 connected", "4/5 connected"),
             ("2/2 controller(s) halted", "1/2 controller(s) halted"),
             ("halted, 2 reset", "halted, 1 reset"),
             // A shutdown that found no controller is not one that handed

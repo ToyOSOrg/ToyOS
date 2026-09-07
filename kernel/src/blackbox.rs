@@ -101,78 +101,42 @@ pub fn record_panic(records: &[u8]) {
     });
 }
 
-/// What a shutdown still has to say once the log volume is no longer writable.
-///
-/// **A buffer and not the log ring, for two reasons.** A record emitted after
-/// `log::wait_for_durable` either misses the file or lands after the boot's own
-/// last word, and `Rebooting.` being the last line is what a metal boot's
-/// verdict is read from. And the device that would carry it is the one being
-/// shut down. So the account is built here and sealed into the black box, where
-/// the next loader pass prints it into `loader.log`.
-pub struct Said {
-    bytes: [u8; Said::BYTES],
-    len: usize,
-}
-
-impl Said {
-    /// Room for a line per step per controller on a machine with two of them,
-    /// well under the black box's own text area.
-    const BYTES: usize = 1024;
-
-    pub const fn new() -> Self {
-        Self { bytes: [0; Self::BYTES], len: 0 }
-    }
-
-    pub fn as_str(&self) -> &str {
-        // Written only through `write_str`, and cut only at a `char` boundary
-        // there, so what is here is UTF-8; an empty answer rather than a panic
-        // is what this path owes either way.
-        core::str::from_utf8(self.bytes.get(..self.len).unwrap_or(&[])).unwrap_or("")
-    }
-}
-
-impl Default for Said {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl core::fmt::Write for Said {
-    /// Appends what fits and drops the rest, cut at a `char` boundary: a
-    /// shutdown may not fail because it had more to say than room to say it.
-    fn write_str(&mut self, text: &str) -> core::fmt::Result {
-        let room = Self::BYTES.saturating_sub(self.len);
-        let mut take = room.min(text.len());
-        while take > 0 && !text.is_char_boundary(take) {
-            take -= 1;
-        }
-        let Some(from) = text.get(..take) else { return Ok(()) };
-        if let Some(slot) = self.bytes.get_mut(self.len..self.len + take) {
-            slot.copy_from_slice(from.as_bytes());
-            self.len += take;
-        }
-        Ok(())
-    }
-}
-
 /// Seal that this kernel handed the machine back on purpose, so the next
-/// loader ends the chain instead of reporting a death — and with it whatever
-/// the shutdown has to say.
+/// loader ends the chain instead of reporting a death.
 ///
 /// Called from the quiesce path before the reset, which is the last point at
-/// which this kernel is still the one running. **The text is the one channel
-/// the end of a shutdown has**: everything after `log::wait_for_durable` is
-/// written to a log volume that is itself being taken down, so a record made
-/// there reaches no file and only the next loader pass can print it.
-pub fn record_done(said: core::fmt::Arguments) {
+/// which this kernel is still the one running.
+pub fn record_done() {
+    seal(State::Done, &[]);
+}
+
+/// Append to what this boot already sealed, keeping its state.
+///
+/// **The one channel a reset's own account has.** Everything written after
+/// `log::wait_for_durable` goes to a log volume whose device is itself being
+/// taken down, so a record made there reaches no file — and on a panic there was
+/// never a file. The next loader pass prints these lines under its report of how
+/// the last boot ended.
+///
+/// `false` where the account has nowhere to go, and the caller does its work
+/// regardless: a boot whose loader claimed no page, and a page holding a
+/// [`State::Fault`], whose text is a fixed-layout register dump and not text —
+/// a crash is worth more than the account of the reset that followed it.
+pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
+    let mut appended = false;
     with_page(|page, stamp| {
-        let mut report = toyos_blackbox::Report::new(page);
-        // Dropped rather than answered: a shutdown that could not say what it
-        // did still handed the machine back on purpose, and the state is what
-        // the next loader reads first.
-        let _ = core::fmt::Write::write_fmt(&mut report, said);
-        report.seal(State::Done, stamp);
+        let opened = match toyos_blackbox::recover(page) {
+            Some((State::Panic, _, text)) => Some((State::Panic, text.len())),
+            Some((State::Done, _, text)) => Some((State::Done, text.len())),
+            Some((State::Armed | State::Fault, _, _)) | None => None,
+        };
+        let Some((state, at)) = opened else { return };
+        let mut report = toyos_blackbox::Report::reopened(page, at);
+        account(&mut report);
+        report.seal(state, stamp);
+        appended = true;
     });
+    appended
 }
 
 fn seal(state: State, text: &[u8]) {

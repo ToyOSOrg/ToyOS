@@ -228,6 +228,12 @@ actuators! {
     /// Build a hash container before `hasher::seed()`, so the refusal that stops a seedless container from being silent is executed.
     test_hash_before_seed = "test-hash-before-seed";
 
+    /// Make the shutdown's bounded acquisitions of the xHCI controller lock
+    /// find it busy for their whole bound — the negative control on "no
+    /// shutdown path may fail to reset". A boot armed with it must still hand
+    /// the machine back, with its account saying the barrier was refused.
+    xhci_lock_wedged = "xhci-lock-wedged";
+
     /// Panic once boot phases are done, with no thread current.
     test_late_panic = "test-late-panic";
 

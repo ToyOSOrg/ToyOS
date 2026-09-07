@@ -255,6 +255,21 @@ pub const RELEGATED: &[Relegated] = &[
                  bytes with no clock in them; the chain across a reset has no other gate.",
     },
     Relegated {
+        test: "usb_reset_hands_devices_back",
+        ci_ms: 44_000,
+        why: Why::TimerAnchored,
+        guards: "The owner's ruling after run 18 of the metal loop: no reset this kernel \
+                 performs may leave a USB device in a state its next host cannot enumerate. \
+                 Four chained boots — a job list's `reboot`, the runner's job deadline, the \
+                 panic console's bound, and a controller lock staged never to come free — each \
+                 watched to take its own two resets against the bound the first boot counts \
+                 down, and each judged on the account the reset sealed into the black box. The \
+                 fourth is the control on every bound in that path: a shutdown that cannot take \
+                 its barrier must still reach its reset. What still runs per pull request: \
+                 nothing else reads that account at all; `metal_device_probe` judges the flush \
+                 that precedes it, and the T14 is the only judge of the device itself.",
+    },
+    Relegated {
         test: "watchdog_fed",
         ci_ms: 23_405,
         why: Why::TimerAnchored,

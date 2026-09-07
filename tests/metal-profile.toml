@@ -231,3 +231,81 @@ name = "boot.ccorpus.back_secs"
 unit = "s"
 ceiling = 360
 ceiling_from = "toyos_build::metal::return_secs"
+
+# --- the boot stick, after the boot ---
+# **The ruling's own row, and the only judge of the device there is.** QEMU
+# cannot wedge a stick; this machine's run 18 did, and the way it showed was the
+# log partition's device node missing after the machine came back. So the loop
+# waits for that node by name and records what it waited, per boot.
+
+[[number]]
+name = "boot.testcases.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "toyos_build::metal::STICK_SECS — ten times the three seconds Ubuntu's own enumeration spends giving up on a wedged stick (run 18's journal)"
+
+[[number]]
+name = "boot.testcases-mkdir.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.testcases-readdir.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.testcases-watchdog.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.jobcase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.metalcase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.latencycase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.metaldevicecase.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.selftests.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.shared.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.shared-debug.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.ccorpus.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"

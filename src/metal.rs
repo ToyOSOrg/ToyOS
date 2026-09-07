@@ -56,6 +56,18 @@ fn return_secs() -> u64 {
 
 const POLL_SECS: u64 = 5;
 
+/// How long the boot stick gets to be there again once Ubuntu is up.
+///
+/// **The bench's own device is the judge of the ruling that no reset this
+/// project performs may wedge a USB device.** Run 18 left the stick answering
+/// `device descriptor read/64, error -71`, and Ubuntu's whole enumeration —
+/// four addressing attempts and a port power cycle — gave up inside three
+/// seconds of journal time (`usb 3-1: new high-speed USB device number 18` at
+/// 07:33:20 to `unable to enumerate USB device` at 07:33:23). This is ten times
+/// that, so a stick this wait does not find is one the host has already
+/// finished refusing.
+const STICK_SECS: u64 = 30;
+
 /// The absolute paths `which` answered on the machine; sudo matches a path and
 /// not a name, so nothing here is spelled relatively.
 const DD: &str = "/usr/bin/dd";
@@ -114,6 +126,9 @@ pub enum Refusal {
     Remote { what: String, status: String, stderr: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
+    /// The machine came back and the boot stick did not: the boot before this
+    /// left a USB device its next host cannot enumerate.
+    Stick { node: String, secs: u64 },
     /// The log the boot left is not a passing boot's.
     Log(bootlog::Unfit),
     Usage(String),
@@ -123,7 +138,7 @@ impl Refusal {
     /// Whether the machine failed rather than the loop: the boot is the subject
     /// only once the stick is written and the reboot asked for.
     pub fn about_the_boot(&self) -> bool {
-        matches!(self, Self::Silent { .. } | Self::Log(_) | Self::Fat32(_))
+        matches!(self, Self::Silent { .. } | Self::Stick { .. } | Self::Log(_) | Self::Fat32(_))
     }
 }
 
@@ -198,6 +213,13 @@ impl fmt::Display for Refusal {
                 "the machine did not {what} within {secs} s, which is longer than every watchdog \
                  a boot runs under plus the time coming back costs; why it did not is what the \
                  panel and the log partition say, and neither is readable from here"
+            ),
+            Self::Stick { node, secs } => write!(
+                f,
+                "the machine came back and {node} did not, within {secs} s: the boot that just \
+                 ran left this USB device in a state its next host cannot enumerate, and a \
+                 physical replug is what clears one — see `usb 3-1: device descriptor read/64, \
+                 error -71` on the machine's own journal"
             ),
             Self::Log(unfit) => write!(f, "the log partition came back and {unfit}"),
             Self::Usage(why) => write!(f, "{why}"),
@@ -603,6 +625,13 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.
     ("sched-operation-nesting", Flash::Ok),
+    (
+        "xhci-lock-wedged",
+        Flash::Never(
+            "it makes the shutdown skip the disk-cache flush, so the boot's own log may never \
+             reach the media it is read off — and a stick is the one channel out of this machine",
+        ),
+    ),
 ];
 
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
@@ -934,6 +963,28 @@ impl Driver {
     fn ride_the_reboot(&self, secs: u64) -> Result<u64, Refusal> {
         self.wait(GOING_DOWN_SECS, "go down", false)?;
         self.wait(secs, "come back", true)
+    }
+
+    /// Wait for the log partition's device node, and say how long it took.
+    ///
+    /// **A number and not an implication.** Whether the stick came back is what
+    /// the T14 alone can say about the ruling, and before this it was only ever
+    /// visible as `mount: special device /dev/sda3 does not exist` — a mount
+    /// that fails for a dozen other reasons too. Waited for by name, priced in
+    /// `tests/metal-profile.toml`, and refused as its own kind.
+    fn wait_for_the_stick(&self) -> Result<u64, Refusal> {
+        let node = self.target.node.partition(self.target.log_part);
+        let probe = format!("test -b {}", shell_word(&node));
+        let began = std::time::Instant::now();
+        loop {
+            if self.ssh("probing for the stick", &probe).is_ok() {
+                return Ok(began.elapsed().as_secs());
+            }
+            if began.elapsed().as_secs() >= STICK_SECS {
+                return Err(Refusal::Stick { node, secs: STICK_SECS });
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 
     fn wait(&self, secs: u64, what: &'static str, answering: bool) -> Result<u64, Refusal> {
@@ -1291,6 +1342,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
 
         let back = driver.ride_the_reboot(args.wait_secs)?;
         println!("the machine answered ssh again after {back} s");
+        // Before the mount, so the stick's own answer is a number rather than
+        // the reason a mount failed.
+        let stick = driver.wait_for_the_stick()?;
+        println!("the boot stick enumerated {stick} s after the machine answered");
         let (loader, log) = driver.read_log()?;
         print!("{loader}{log}");
         // The outside judge, and it runs before the verdict: a volume this
@@ -1316,7 +1371,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
             );
         }
         if let Some(dir) = &args.readback {
-            write_readback(dir, &loader, &log, back)?;
+            write_readback(dir, &loader, &log, back, stick)?;
             println!("readback written to {}", dir.display());
         }
         last = Some(bootlog::verdict(&log).map_err(Refusal::Log)?);
@@ -1340,8 +1395,15 @@ pub const READBACK_VOLUME: &str = "log-partition.img";
 
 /// The two keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
 pub const BACK_SECS: &str = "back_secs";
+pub const STICK_SECS_KEY: &str = "stick_secs";
 
-fn write_readback(dir: &Path, loader: &str, log: &str, back: u64) -> Result<(), Refusal> {
+fn write_readback(
+    dir: &Path,
+    loader: &str,
+    log: &str,
+    back: u64,
+    stick: u64,
+) -> Result<(), Refusal> {
     let wrote = |path: &Path, text: &str| -> Result<(), Refusal> {
         std::fs::write(path, text)
             .map_err(|e| Refusal::File { path: path.display().to_string(), why: e.to_string() })
@@ -1353,13 +1415,24 @@ fn write_readback(dir: &Path, loader: &str, log: &str, back: u64) -> Result<(), 
     // The boot's own millisecond count is in the kernel log and read from
     // there; this file carries only what the *host* clock measured, which no
     // log can.
-    wrote(&dir.join(READBACK_BOOT), &format!("{BACK_SECS} {back}\n"))
+    wrote(&dir.join(READBACK_BOOT), &format!("{BACK_SECS} {back}\n{STICK_SECS_KEY} {stick}\n"))
 }
 
 /// What the host measured about a boot, out of [`READBACK_BOOT`].
 pub fn back_secs(text: &str) -> Option<u64> {
+    key(text, BACK_SECS)
+}
+
+/// How long after the machine answered the boot stick was there again — the
+/// one thing only this machine can say about the ruling that no reset this
+/// kernel performs may leave a USB device its next host cannot enumerate.
+pub fn stick_secs(text: &str) -> Option<u64> {
+    key(text, STICK_SECS_KEY)
+}
+
+fn key(text: &str, name: &str) -> Option<u64> {
     text.lines()
-        .find_map(|line| line.strip_prefix(BACK_SECS))
+        .find_map(|line| line.strip_prefix(name))
         .and_then(|rest| rest.trim().parse().ok())
 }
 
