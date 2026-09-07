@@ -19,8 +19,10 @@ pub enum Source {
     Timer,
     /// Vector 0x21, xHCI MSI-X (or MSI).
     Xhci,
-    /// Vector 0x22, virtio-net MSI-X.
-    Net,
+    /// Vectors 0x28-0x2B, the MSI-X of a PCI function a process drives. One
+    /// count for all four: which claim a message belonged to is the claim's own
+    /// record, and the census is about this machine's interrupt routing.
+    UserDev,
     /// Vector 0x23, virtio-sound MSI-X.
     Sound,
     /// Vector 0x24, the i8042's I/O APIC pin — both PS/2 lines.
@@ -46,8 +48,8 @@ impl Source {
 
     /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
     pub const NAMES: [&'static str; Self::COUNT] = [
-        "timer", "xhci", "net", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
-        "unclaimed",
+        "timer", "xhci", "userdev", "sound", "i8042", "dmafault", "hda", "tlb", "nmi",
+        "spurious", "unclaimed",
     ];
 }
 

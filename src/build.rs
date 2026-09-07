@@ -2020,6 +2020,9 @@ mod tests {
             [
                 "boot-actuators",
                 "debug-wait",
+                // Costs no kernel build, for `wake-fence-off`'s reason: only
+                // `kernel-loom` turns it on, and `device_irq` must red under it.
+                "device-irq-lossy",
                 // Does this kernel reach a pass, a trap or a syscall with the
                 // direction flag set. No gate clears `DF` and
                 // `compiler_builtins::mem::memmove` sets it across three `rep`
@@ -2575,16 +2578,33 @@ mod tests {
         assert!(provides_disjoint_from_serves(&bad).is_err());
     }
 
-    /// A device class init can mint exactly one claim for, so two programs
-    /// naming the same class is a config init cannot satisfy — a runtime
-    /// first-come race today.
-    fn one_claimant_per_device(cfg: &SystemConfig) -> Result<(), String> {
+    /// The one `devices` entry in the tree that is a deliberate second claim:
+    /// config, program, device. `pci_function_is_exclusive` boots it and reads
+    /// the kernel refusing it.
+    const STAGED_COLLISION: (&str, &str, &str) =
+        ("tests/netcase/system.toml", "test-runner", "pci:1af4:1041");
+
+    /// Init mints one claim per device, so a shipping config naming one twice
+    /// starts a program with a hole where its claim should be.
+    ///
+    /// `excused` is one `(program, device)` and never a whole config: every
+    /// other collision in the config that stages one is still refused.
+    fn one_claimant_per_device(
+        cfg: &SystemConfig,
+        excused: Option<(&str, &str)>,
+    ) -> Result<(), String> {
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
         for (name, prog) in &cfg.programs {
             for d in &prog.devices {
+                if excused == Some((name.as_str(), d.as_str())) {
+                    continue;
+                }
                 if let Some(prev) = seen.insert(d, name) {
                     return Err(format!(
-                        "device class `{d}` is claimed by both `{prev}` and `{name}`"
+                        "device `{d}` is claimed by both `{prev}` and `{name}`; the second \
+                         claim is refused at boot, and `{}`'s `{}` is the one entry allowed \
+                         to stage that",
+                        STAGED_COLLISION.0, STAGED_COLLISION.1
                     ));
                 }
             }
@@ -2592,27 +2612,40 @@ mod tests {
         Ok(())
     }
 
+    /// Not the capability boundary — `kernel/src/pcidev`'s slot reservation is,
+    /// and this compares `system.toml` strings. The excused entry is asserted to
+    /// still be a collision on the device it names, so the exception cannot rot
+    /// into a pass and cannot cover a second one added to the same config.
     #[test]
     fn every_device_class_has_at_most_one_claimant() {
         for cfg in ALL_CONFIGS {
-            one_claimant_per_device(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+            let excused =
+                (*cfg == STAGED_COLLISION.0).then_some((STAGED_COLLISION.1, STAGED_COLLISION.2));
+            one_claimant_per_device(&load(cfg), excused).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
+        let staged = one_claimant_per_device(&load(STAGED_COLLISION.0), None)
+            .expect_err("the excused entry no longer collides with anything");
+        assert!(staged.contains(STAGED_COLLISION.2), "{staged}");
         let bad: SystemConfig = toml::from_str(
             "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",
         )
         .unwrap();
-        assert!(one_claimant_per_device(&bad).is_err());
+        assert!(one_claimant_per_device(&bad, None).is_err());
     }
 
-    /// A class name the ABI does not know renders fine and leaves init with a
+    /// A device name the ABI does not know renders fine and leaves init with a
     /// `devices` entry it cannot mint — a dead machine for a typo, where this is
     /// a red in milliseconds. Same for a `syscap` right.
+    ///
+    /// The ABI's own parser, not a copy of it: a `pci:<vendor>:<device>` entry
+    /// names a function and a class name names a class, and this is the same
+    /// `DeviceRequest::parse` init and the kernel read the entry with.
     fn names_only_real_capabilities(cfg: &SystemConfig) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
-            for class in &prog.devices {
-                if toyos_manifest::DeviceType::from_class_name(class).is_none() {
-                    return Err(format!("`{name}` names device class `{class}`, which is not one"));
+            for device in &prog.devices {
+                if toyos_manifest::DeviceRequest::parse(device).is_none() {
+                    return Err(format!("`{name}` names device `{device}`, which is not one"));
                 }
             }
             toyos_manifest::syscap_rights(&prog.syscap)
@@ -2629,6 +2662,11 @@ mod tests {
         let bad_class: SystemConfig =
             toml::from_str("[programs.a]\ndevices = [\"gpu\"]\n").unwrap();
         assert!(names_only_real_capabilities(&bad_class).is_err());
+        // A PCI entry that names no function is the same defect one level down,
+        // and the one a hand-written config is most likely to make.
+        let bad_function: SystemConfig =
+            toml::from_str("[programs.a]\ndevices = [\"pci:1af4\"]\n").unwrap();
+        assert!(names_only_real_capabilities(&bad_function).is_err());
         let bad_right: SystemConfig =
             toml::from_str("[programs.a]\nsyscap = [\"root\"]\n").unwrap();
         assert!(names_only_real_capabilities(&bad_right).is_err());

@@ -10,7 +10,7 @@ pub(crate) mod spurious;
 mod timer;
 mod tlb;
 pub(crate) mod unclaimed;
-mod virtio_net;
+mod user_dev;
 mod virtio_sound;
 mod xhci;
 
@@ -256,11 +256,18 @@ idt_vectors! {
         ring0 Nmi          = 0x02, nmi::nmi_entry, ist 2;
         ring3 Timer        = 0x20, timer::timer_entry;
         ring3 Xhci         = 0x21, xhci::xhci_entry;
-        ring3 VirtioNet    = 0x22, virtio_net::virtio_net_entry;
+        // 0x22 was the kernel's own virtio-net driver, which now lives in netd.
         ring3 VirtioSound  = 0x23, virtio_sound::virtio_sound_entry;
         ring3 I8042        = 0x24, i8042::i8042_entry;
         ring3 DmaFault     = 0x25, dma_fault::dma_fault_entry;
         ring3 Hda          = 0x26, hda::hda_entry;
+        // 0x27 is the actuator gate's (`log_nest`), which is why these start at
+        // 0x28. One per `pcidev` claim slot: the vector is how the kernel knows
+        // which claim a message belongs to.
+        ring3 UserDev0     = 0x28, user_dev::user_dev0_entry;
+        ring3 UserDev1     = 0x29, user_dev::user_dev1_entry;
+        ring3 UserDev2     = 0x2A, user_dev::user_dev2_entry;
+        ring3 UserDev3     = 0x2B, user_dev::user_dev3_entry;
         // Ring 0 because it never returns: `cli; hlt` forever.
         ring0 HaltAll      = 0xFD, stub_halt_all;
         ring3 TlbFlush     = 0xFE, tlb::tlb_flush_entry;

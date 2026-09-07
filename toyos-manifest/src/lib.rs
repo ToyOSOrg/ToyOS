@@ -43,7 +43,7 @@ pub const GUEST_PATH: &str = "/system/etc/system.manifest";
 pub const MAX_PROGRAM_NAME: usize = 32;
 
 pub use toyos_abi::handle::Rights;
-pub use toyos_abi::syscall::DeviceType;
+pub use toyos_abi::syscall::{DeviceRequest, DeviceType};
 
 /// The rights a `syscap` record may name.
 ///

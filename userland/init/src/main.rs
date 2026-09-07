@@ -43,7 +43,8 @@ use toyos::port::{self, Acceptor, Connector};
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::syscall::{
-    DeviceType, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
+    DeviceRequest, SyscallError, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL,
+    SYSCAP_LABEL,
 };
 
 /// The service init answers on. Its own, so it has no `[programs]` row and the
@@ -516,6 +517,31 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
 /// a terminal's `surface`. They are added *to* the manifest's row rather than
 /// replacing it, and a caller could only transfer what it already held, so a
 /// launch confers the row and nothing beyond it.
+/// What init says about a device it could not mint a claim for.
+///
+/// One arm per refusal the kernel distinguishes (`kernel/src/device.rs`'s
+/// `ClaimError`, through the codes `sys_device_claim` answers with). The last
+/// arm is not a default: it is the answer for a code this call does not
+/// produce, and it prints the code rather than inventing a reason.
+fn refused(name: &str, why: SyscallError) -> String {
+    match why {
+        SyscallError::NotFound => format!("no {name} on this machine"),
+        SyscallError::AlreadyExists => format!("{name} is already claimed"),
+        SyscallError::InvalidArgument => {
+            format!("{name} names more than one function on this machine")
+        }
+        SyscallError::PermissionDenied => {
+            format!("{name} is driven by the kernel and cannot be claimed")
+        }
+        SyscallError::ResourceExhausted => format!("no claim slot is free for {name}"),
+        SyscallError::NotSupported => {
+            format!("{name} is on this machine and could not be handed over; the kernel's \
+                     `pcidev:` line says why")
+        }
+        other => format!("{name} was refused with {other:?}"),
+    }
+}
+
 fn start<'a>(
     mut command: Command,
     program: &Program,
@@ -574,24 +600,34 @@ fn start<'a>(
         taken.push((key, acceptor));
     }
 
-    for class in &program.devices {
-        let class = DeviceType::from_class_name(class)
-            .unwrap_or_else(|| panic!("init: `{class}` is not a device class"));
-        // A class no driver registered is not endowed, and init says which:
-        // "did I get an HDA or a virtio-sound?" becomes "which claims are in
-        // my endowment table?", which is the same question with the answer
-        // already in hand.
-        match syscap.claim::<toyos::Device>(class) {
+    for name in &program.devices {
+        // The build system already refused a config this cannot parse
+        // (`names_only_real_capabilities`), so a failure here is an image built
+        // against a different ABI rather than somebody's typo.
+        let request = DeviceRequest::parse(name)
+            .unwrap_or_else(|| panic!("init: `{name}` is not a device this ABI has"));
+        // A device this machine does not have is not endowed, and init says
+        // which: "did I get an HDA or a virtio-sound?" becomes "which claims
+        // are in my endowment table?", which is the same question with the
+        // answer already in hand.
+        //
+        // The label is the manifest's own spelling, which is exactly what the
+        // claimant looks the claim up by: one string, written once.
+        let minted = match request {
+            DeviceRequest::Class(class) => syscap.claim::<toyos::Device>(class),
+            DeviceRequest::Pci(id) => syscap.claim_pci::<toyos::Device>(id),
+        };
+        match minted {
             Ok(claim) => {
                 let raw = claim.into_raw();
-                command.endow(&format!("{DEV_PREFIX}{}", class.class_name()), raw.0);
+                command.endow(&format!("{DEV_PREFIX}{name}"), raw.0);
                 held.0.push(raw);
             }
-            Err(e) => say!(
-                "init: {}: no {} on this machine ({e:?})",
-                program.name,
-                class.class_name()
-            ),
+            // Each refusal keeps the word the kernel gave it. "This machine
+            // has none" is a configuration and every other answer is a fault,
+            // and one sentence for all six sends whoever reads the line looking
+            // in the wrong place.
+            Err(e) => say!("init: {}: {}", program.name, refused(name, e)),
         }
     }
 

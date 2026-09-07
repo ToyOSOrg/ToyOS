@@ -138,7 +138,10 @@ impl WatchFlags {
 pub enum Source {
     Keyboard,
     Mouse,
-    Network,
+    /// One claimed PCI function's interrupt, by the slot `pcidev` bound it to.
+    /// Per slot and not per class: two processes each driving a function must
+    /// not learn when the other's device is busy.
+    PciFunction(u8),
     /// Source::Port holds the shared `PortShared`, never either endpoint, because a server's Acceptor poll and a client's Connector completion agree on only that object.
     Port(Arc<crate::object::port::PortShared>),
     PipeReadable(PipeId),
@@ -160,7 +163,7 @@ impl Source {
             Self::Log => crate::actuator::log_close_cancels_any_syscap(),
             Self::Keyboard => crate::actuator::keyboard_close_cancels_every_console(),
             Self::Mouse
-            | Self::Network
+            | Self::PciFunction(_)
             | Self::VirtioSound
             | Self::Hda
             | Self::Port(_)
@@ -176,10 +179,11 @@ impl PartialEq for Source {
         match (self, other) {
             (Self::Keyboard, Self::Keyboard)
             | (Self::Mouse, Self::Mouse)
-            | (Self::Network, Self::Network)
             | (Self::VirtioSound, Self::VirtioSound)
             | (Self::Log, Self::Log)
             | (Self::Hda, Self::Hda) => true,
+            // Two claims are one source only where they are one slot.
+            (Self::PciFunction(a), Self::PciFunction(b)) => a == b,
             (Self::Port(a), Self::Port(b)) => Arc::ptr_eq(a, b),
             (Self::PipeReadable(a), Self::PipeReadable(b)) => a == b,
             (Self::PipeWritable(a), Self::PipeWritable(b)) => a == b,
@@ -821,7 +825,7 @@ impl Source {
             Self::Port(p) => p.has_pending(),
             Self::Keyboard => crate::keyboard::has_data(),
             Self::Mouse => crate::mouse::has_data(),
-            Self::Network => crate::net::has_packet(),
+            Self::PciFunction(slot) => crate::pcidev::has_irq(*slot as usize),
             Self::VirtioSound => crate::drivers::virtio_sound::has_pending(),
             Self::Hda => crate::drivers::hda::has_pending(),
             // Always false: the kernel holds no reader cursor to answer readiness with.
@@ -836,7 +840,7 @@ impl Source {
             }
             Self::Keyboard => crate::keyboard::add_inbox_watcher(inbox_id),
             Self::Mouse => crate::mouse::add_inbox_watcher(inbox_id),
-            Self::Network => crate::net::add_inbox_watcher(inbox_id),
+            Self::PciFunction(slot) => crate::pcidev::add_inbox_watcher(*slot as usize, inbox_id),
             Self::VirtioSound => crate::drivers::virtio_sound::add_inbox_watcher(inbox_id),
             Self::Hda => crate::drivers::hda::add_inbox_watcher(inbox_id),
             Self::Log => crate::log::user::add_inbox_watcher(inbox_id),
@@ -851,7 +855,7 @@ impl Source {
             }
             Self::Keyboard => crate::keyboard::remove_inbox_watcher(inbox_id),
             Self::Mouse => crate::mouse::remove_inbox_watcher(inbox_id),
-            Self::Network => crate::net::remove_inbox_watcher(inbox_id),
+            Self::PciFunction(slot) => crate::pcidev::remove_inbox_watcher(*slot as usize, inbox_id),
             Self::VirtioSound => crate::drivers::virtio_sound::remove_inbox_watcher(inbox_id),
             Self::Hda => crate::drivers::hda::remove_inbox_watcher(inbox_id),
             Self::Log => crate::log::user::remove_inbox_watcher(inbox_id),
@@ -866,7 +870,7 @@ impl Source {
             }
             Self::Keyboard => crate::keyboard::inbox_watchers(),
             Self::Mouse => crate::mouse::inbox_watchers(),
-            Self::Network => crate::net::inbox_watchers(),
+            Self::PciFunction(slot) => crate::pcidev::inbox_watchers(*slot as usize),
             Self::VirtioSound => crate::drivers::virtio_sound::inbox_watchers(),
             Self::Hda => crate::drivers::hda::inbox_watchers(),
             Self::Log => crate::log::user::inbox_watchers(),
@@ -888,9 +892,10 @@ impl Source {
             Self::Port(p) => {
                 completion::post(completion::Subject::of(p.watch()), completion::Outcome::Ready)
             }
-            // No blocking-syscall queue: mouse/network reads answer `NotFound`,
-            // the log is edge-triggered on the reader's own cursor.
-            Self::Mouse | Self::Network | Self::Log => {}
+            // No blocking-syscall queue: a mouse read answers `NotFound` and a
+            // claim's record read answers `WouldBlock`, and the log is
+            // edge-triggered on the reader's own cursor.
+            Self::Mouse | Self::PciFunction(_) | Self::Log => {}
         }
     }
 

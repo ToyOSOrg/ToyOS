@@ -19,7 +19,10 @@ pub enum DeviceInfo {
     // Keyboard and mouse answer with events, not a description.
     Events,
     Framebuffer(FramebufferInfo, FramebufferBuffers),
-    Nic(crate::net::NicInfo, Arc<SharedMemObject>),
+    /// The function, and the `pcidev` slot every call on this claim reaches it
+    /// through. No buffer handle beside it: a PCI claimant asks for its own
+    /// memory, so this mint installs nothing.
+    PciFunction(toyos_abi::pci::PciFunctionInfo, u8),
     Hda(toyos_abi::hda::HdaInfo, Arc<SharedMemObject>),
     VirtioSound(toyos_abi::virtio_sound::VirtioSoundInfo, Arc<SharedMemObject>),
 }
@@ -61,11 +64,9 @@ impl DeviceInfo {
                 info.cursor = h[2];
                 info.as_bytes().into()
             }
-            Self::Nic(info, dma) => {
-                let mut info = *info;
-                info.dma = install_buffers(table, &[dma])?[0];
-                info.as_bytes().into()
-            }
+            // Nothing to install: every address in it is a size, and the memory
+            // is what `SYS_DEVICE_DMA_ALLOC` answers later.
+            Self::PciFunction(info, _) => info.as_bytes().into(),
             Self::Hda(info, pcm) => {
                 let mut info = *info;
                 info.pcm = install_buffers(table, &[pcm])?[0];
@@ -80,10 +81,14 @@ impl DeviceInfo {
     }
 }
 
-/// One process's exclusive hold on a device class.
+/// One process's exclusive hold on a device.
 pub struct DeviceClaim {
     pub(super) core: ObjectCore,
     class: DeviceType,
+    /// The `pcidev` slot for a claim on one, read without the `described` lock:
+    /// a poll's readiness check and a `close` are both places that must not
+    /// take it.
+    pci_slot: Option<u8>,
     // No Rights::DUP: at most one handle exists, so info_read needs no per-handle state.
     info_read: AtomicBool,
     described: crate::sync::Lock<Described>,
@@ -99,9 +104,14 @@ struct Described {
 
 impl DeviceClaim {
     pub fn new(class: DeviceType, info: DeviceInfo, claim: Claim) -> Arc<Self> {
+        let pci_slot = match &info {
+            DeviceInfo::PciFunction(_, slot) => Some(*slot),
+            _ => None,
+        };
         Arc::new(Self {
             core: Self::new_core(),
             class,
+            pci_slot,
             info_read: AtomicBool::new(false),
             described: crate::sync::Lock::new(Described { info, bytes: None }),
             reference: Held::new(claim),
@@ -110,6 +120,14 @@ impl DeviceClaim {
 
     pub fn class(&self) -> DeviceType {
         self.class
+    }
+
+    /// Which `pcidev` slot this claim drives, for a claim on a PCI function.
+    ///
+    /// Every call the substrate answers goes through this: the handle is the
+    /// authority and the slot is what it names.
+    pub fn pci_slot(&self) -> Option<usize> {
+        self.pci_slot.map(usize::from)
     }
 
     pub fn info_read(&self) -> bool {

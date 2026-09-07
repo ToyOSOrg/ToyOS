@@ -21,7 +21,6 @@ macro_rules! device_info {
 }
 device_info!(
     toyos_abi::FramebufferInfo,
-    toyos_abi::net::NicInfo,
     toyos_abi::pci::PciFunctionInfo,
     toyos_abi::virtio_sound::VirtioSoundInfo,
     toyos_abi::hda::HdaInfo,
@@ -99,34 +98,6 @@ impl FramebufferDev {
 }
 
 impl AsHandle for FramebufferDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
-}
-
-pub struct Nic(pub(crate) Device);
-
-impl Nic {
-    pub fn info(&self) -> Result<toyos_abi::net::NicInfo, SyscallError> {
-        read_info(&self.0)
-    }
-
-    /// The next received frame as `(buf_index << 16) | frame_len`, or 0.
-    pub fn rx_poll(&self) -> Result<u64, SyscallError> {
-        syscall::nic_rx_poll(self.0.as_handle())
-    }
-
-    /// Give buffer `buf_index` back to the RX ring. A dropped refill costs an
-    /// RX slot permanently: 256 of them and the NIC stops receiving.
-    pub fn rx_done(&self, buf_index: u64) -> Result<(), SyscallError> {
-        syscall::nic_rx_done(self.0.as_handle(), buf_index)
-    }
-
-    /// Submit the TX DMA buffer. `total_len` includes the net header.
-    pub fn tx(&self, total_len: u64) -> Result<(), SyscallError> {
-        syscall::nic_tx(self.0.as_handle(), total_len)
-    }
-}
-
-impl AsHandle for Nic {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 

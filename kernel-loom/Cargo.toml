@@ -169,6 +169,17 @@ sleeplock-acquire-off = []
 #
 # Never on by default, and no kernel build can reach it.
 durability-settle-blind = []
+# The negative control for a claimed PCI function's interrupt record. Its two
+# read-modify-writes — the reader's `swap` of the count and the scheduler pass's
+# `swap` of the wake flag — become a load and a store, which is the whole of
+# what this record's design is, and `device_irq.rs` must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features device-irq-lossy \
+#     --test device_irq
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+device-irq-lossy = []
 
 [dependencies]
 loom = "0.7"

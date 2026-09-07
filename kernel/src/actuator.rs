@@ -290,8 +290,8 @@ actuators! {
     /// Give it a present context entry naming an empty second-level table, distinct from an absent context: passthrough would fault identically to the row above.
     iommu_empty_domain = "iommu-empty-domain";
 
-    /// Point the NIC's first RX buffer at the physical bytes NVMe's admin completion queue page ends with — an address in another driver's pool, which the NIC's own domain does not map.
-    iommu_nic_foreign_dma = "iommu-nic-foreign-dma";
+    /// Answer a claimed function's first DMA grant with the physical bytes NVMe's admin completion queue page ends with — an address in another driver's pool, which the claimed function's own domain does not map.
+    iommu_userdev_foreign_dma = "iommu-userdev-foreign-dma";
 
     /// Point a scanout backing at that same page, which the display's own domain does not map.
     iommu_gpu_foreign_backing = "iommu-gpu-foreign-backing";

@@ -2,14 +2,18 @@
 //!
 //! The handler is bounded, allocates nothing and takes no lock; unit and
 //! function state lives in fixed arrays of atomics, written once before the
-//! mask comes off. Every stream is kernel-owned, so the terminal action is a
-//! halt — but it is the last thing that happens rather than the first. Before
-//! it: Bus Master Enable cleared on the function that faulted, the first record
-//! latched whole, and a count kept per unit and per function. Clearing `BME` is
-//! also the ceiling on a storm, since a function that cannot master the bus
-//! cannot raise a second fault (PCI 3.0 §6.2.2, bit 2 of `COMMAND`). The
-//! reschedule handoff has nothing to hand to while the terminal action is a
-//! halt, and lands with the process-kill arm that gives it one.
+//! mask comes off. Whatever the stream, the same things happen first: Bus
+//! Master Enable cleared on the function that faulted, the first record latched
+//! whole, and a count kept per unit and per function. Clearing `BME` is also
+//! the ceiling on a storm, since a function that cannot master the bus cannot
+//! raise a second fault (PCI 3.0 §6.2.2, bit 2 of `COMMAND`).
+//!
+//! **What differs is who the fault is handed to.** A stream every driver of
+//! which is in this kernel has nobody, so the terminal action is a halt — the
+//! last thing that happens rather than the first. A stream a process drives has
+//! an owner: `pcidev` is told, that claim refuses every later call, and the
+//! machine goes on, because one process's bug taking the machine down is the
+//! thing moving a driver out of the kernel was for.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -69,6 +73,9 @@ const MAX_FUNCTIONS: usize = 64;
 /// A requester id no `StreamId::pci` produces: bus/device/function is sixteen bits.
 const NO_FUNCTION: u32 = u32::MAX;
 
+/// A `pcidev` slot number no claim has: this function is not driven by one.
+const NO_SLOT: u32 = u32::MAX;
+
 /// One enumerated function, published before any unit is armed.
 struct Function {
     // `NO_FUNCTION` while the slot is free; a requester id once taken.
@@ -77,6 +84,9 @@ struct Function {
     domain: AtomicU32,
     // Faults the unit has reported against it; non-zero is the per-domain flag.
     faults: AtomicU32,
+    /// The `pcidev` slot a process drives this function on, or [`NO_SLOT`].
+    /// What decides whether a fault on it is terminal for the machine.
+    user_slot: AtomicU32,
 }
 
 impl Function {
@@ -86,6 +96,7 @@ impl Function {
         config: AtomicU64::new(0),
         domain: AtomicU32::new(0),
         faults: AtomicU32::new(0),
+        user_slot: AtomicU32::new(NO_SLOT),
     };
 }
 
@@ -133,6 +144,20 @@ pub fn describe(devices: &[PciDevice]) {
 pub fn attached(stream: StreamId, domain: u16) {
     if let Some(slot) = find(u32::from(stream.requester())) {
         slot.domain.store(u32::from(domain), Ordering::Relaxed);
+    }
+}
+
+/// Record that a process drives this function on `slot`, or no longer does.
+///
+/// The handler reads it to decide what a fault on this stream is *terminal
+/// for*: a kernel-driven function has nothing to hand a fault to and the
+/// response is the halt below; one a process drives has an owner, so the record
+/// goes to that owner's claim and the machine stays up.
+pub fn user_owned(stream: StreamId, slot: Option<usize>) {
+    if let Some(function) = find(u32::from(stream.requester())) {
+        function
+            .user_slot
+            .store(slot.map_or(NO_SLOT, |slot| slot as u32), Ordering::Release);
     }
 }
 
@@ -194,13 +219,13 @@ fn window_of(phys: u64, size: u64) -> Mmio {
 
 /// The unit raised its fault event.
 pub fn service() {
-    let mut faults = 0usize;
+    let mut kernel_owned = 0usize;
     for (index, unit) in UNITS.iter().enumerate() {
         let phys = unit.regs.load(Ordering::Acquire);
         if phys == 0 {
             continue;
         }
-        faults += drain(
+        kernel_owned += drain(
             index,
             window(phys),
             unit.records.load(Ordering::Relaxed),
@@ -208,7 +233,7 @@ pub fn service() {
         );
     }
 
-    if faults > 0 {
+    if kernel_owned > 0 {
         // capture() puts the fault on the panel before the halt takes the
         // machine down.
         //
@@ -217,12 +242,21 @@ pub fn service() {
         // it, and nothing here can know what else it already did. **So this
         // path halts and never panics** — a report of one carries the fault
         // record and `panic_reboot`'s arm line, and no `panicked at` line.
+        //
+        // **Only for a stream this kernel drives.** A function a process drives
+        // has an owner to refuse: its bus mastering is already gone by the time
+        // this is reached, its claim answers every later call `Io`, and the
+        // machine — whose other drivers are untouched — goes on. Halting for
+        // that would be one process's bug taking the whole machine down, which
+        // is the thing moving a driver out was for.
         crate::drivers::panic_console::capture();
         crate::arch::apic::halt_all_cpus();
     }
     crate::arch::apic::eoi();
 }
 
+/// Records drained, of which the answer counts only the ones on a stream this
+/// kernel drives — the ones with nobody to hand the fault to.
 fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
     let status = regs.read_u32(FSTS_REG);
     if status & FSTS_OVERFLOW != 0 {
@@ -253,12 +287,25 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
         let stopped = stop(stream);
         let seen_here = note(stream);
         latch(index, stream, address, reason);
+        // Before the line, so `owner=` in it is what was actually told.
+        let owner = owner_of(stream);
+        if let Some(slot) = owner {
+            crate::pcidev::note_fault(slot);
+        }
         let count = UNITS[index].faults.fetch_add(1, Ordering::Relaxed) + 1;
         log!(
-            // The reason's name is the last word: every gate takes it from there.
-            "iommu: DMA FAULT unit{index} stream={stream} addr={address:#018x} access={} \
-             reason={reason:#04x} domain={} bme={} unitfaults={count} streamfaults={seen_here} \
-             first={} {}",
+            // `owner=` first, because it is the only field that decides whether
+            // this machine is still running: `tests/common/serial.rs` reads
+            // `iommu: DMA FAULT owner=kernel` as a death and the other form as
+            // a record. The reason's name is the last word: every gate takes it
+            // from there.
+            "iommu: DMA FAULT owner={} unit{index} stream={stream} addr={address:#018x} \
+             access={} reason={reason:#04x} domain={} bme={} unitfaults={count} \
+             streamfaults={seen_here} first={} {}",
+            match owner {
+                Some(slot) => Owner::Process(slot),
+                None => Owner::Kernel,
+            },
             if high & (1u64 << 62) != 0 { "read" } else { "write" },
             blamed(stream),
             if stopped { "cleared" } else { "unknown-function" },
@@ -266,7 +313,9 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
             reason_name(reason),
         );
         clear_record(regs, record);
-        seen += 1;
+        if owner.is_none() {
+            seen += 1;
+        }
     }
     regs.write_u32(FSTS_REG, status & FSTS_WRITE_ONE_TO_CLEAR);
     seen
@@ -274,6 +323,32 @@ fn drain(index: usize, regs: Mmio, records: u64, count: u32) -> usize {
 
 fn clear_record(regs: Mmio, record: u64) {
     regs.write_u32(record + 12, RECORD_FAULT);
+}
+
+/// The `pcidev` slot a process drives this stream on, or `None` for a stream
+/// this kernel drives — including one it never enumerated, which nothing can be
+/// handed to either.
+fn owner_of(stream: StreamId) -> Option<usize> {
+    match find(u32::from(stream.requester()))?.user_slot.load(Ordering::Acquire) {
+        NO_SLOT => None,
+        slot => Some(slot as usize),
+    }
+}
+
+/// Who a fault was handed to, in the line. A word rather than a number, because
+/// which of the two it is decides whether this machine is still running.
+enum Owner {
+    Kernel,
+    Process(usize),
+}
+
+impl core::fmt::Display for Owner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Kernel => write!(f, "kernel"),
+            Self::Process(slot) => write!(f, "slot{slot}"),
+        }
+    }
 }
 
 /// Clear Bus Master Enable on whoever faulted; `false` where this machine

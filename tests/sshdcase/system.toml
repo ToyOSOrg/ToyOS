@@ -22,9 +22,11 @@ start = ["logd", "netd", "sshd", "test-runner"]
 [programs.logd]
 syscap = ["logread"]
 
+# netd holds the NIC's PCI function and drives it: the virtqueues, the register
+# window and the interrupt are its own, and the kernel keeps only the claim.
 [programs.netd]
 serves = ["netd"]
-devices = ["nic"]
+devices = ["pci:1af4:1041"]
 
 [programs.sshd]
 receives = ["netd", "launcher"]

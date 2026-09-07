@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use toyos_abi::handle::HANDLE_INVALID;
 use toyos_abi::syscall::{
-    self, DeviceType, SyscallError, MAX_ENDOWMENTS, MAX_LABELS_LEN,
+    self, DeviceRequest, DeviceType, SyscallError, MAX_ENDOWMENTS, MAX_LABELS_LEN,
 };
 
 use crate::ipc::Connection;
@@ -71,7 +71,6 @@ from_handle! {
     crate::Keyboard => |h| crate::Keyboard(Device(h)),
     crate::Mouse => |h| crate::Mouse(Device(h)),
     crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),
-    crate::Nic => |h| crate::Nic(Device(h)),
     crate::PciDev => |h| crate::PciDev(Device(h)),
     crate::HdaDev => |h| crate::HdaDev(Device(h)),
     crate::VirtioSoundDev => |h| crate::VirtioSoundDev(Device(h)),
@@ -196,6 +195,17 @@ pub fn provided(labels: &mut [Option<(&'static str, Connector)>]) -> usize {
 /// with the answer already in hand.
 pub fn device<T: FromHandle>(class: DeviceType) -> Option<T> {
     with_prefixed(DEV_PREFIX, class.class_name(), |label| Endowments::get().take::<T>(label))
+}
+
+/// The claim for one PCI function the manifest says this program gets.
+///
+/// The label is the `devices` entry's own spelling, written by the one
+/// [`DeviceRequest`] that also parsed it: a program looking up `pci:1af4:1041`
+/// and a config declaring it cannot disagree about what the name is.
+pub fn pci_function<T: FromHandle>(id: toyos_abi::syscall::PciId) -> Option<T> {
+    let mut buf = [0u8; DeviceRequest::MAX_NAME];
+    let name = DeviceRequest::Pci(id).write_name(&mut buf);
+    with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
 }
 
 /// Compose `<prefix><name>` on the stack. Nothing in the SDK allocates, and a
