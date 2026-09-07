@@ -268,6 +268,15 @@ impl PciDevice {
         Some(table)
     }
 
+    /// Put MSI-X back off, for a hand-over that armed a vector and was then
+    /// refused: a function left enabled at a vector nobody holds delivers into
+    /// a slot with no reader.
+    pub fn disable_msix(&self) {
+        let Some(cap) = self.capabilities().find(|c| c.id() == msix::CAP_ID) else { return };
+        let control = cap.read_u16(msix::MESSAGE_CONTROL);
+        cap.write_u16(msix::MESSAGE_CONTROL, msix::Msix::disabled(control));
+    }
+
     /// The message as the device's own registers hold it, read back rather than restated.
     fn report_message(&self, kind: &str, address: u32, data: u32) {
         log!("PCI {:02x}:{:02x}.{}: {kind} address={address:#010x} data={data:#010x}",

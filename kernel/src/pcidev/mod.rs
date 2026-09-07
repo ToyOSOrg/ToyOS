@@ -33,8 +33,8 @@
 //!
 //! Nothing here is specific to what a function *is*.
 
-/// No `crate::` reference, so `kernel-loom` compiles it and models the edge
-/// x86's TSO hides.
+/// No `crate::` reference, so `kernel-loom` compiles it and models the
+/// interleaving no guest test lands on.
 mod record;
 
 use alloc::sync::Arc;
@@ -157,6 +157,22 @@ struct Machine {
     /// cannot hold an address a 64-bit one can.
     narrow: (u64, u64),
     wide: (u64, u64),
+    /// Where each of those two started, before any of it was cut.
+    ///
+    /// The whole of what "above everything firmware described" means: every
+    /// UEFI region and every firmware-assigned BAR is below it by construction,
+    /// so [`alone_in_its_page`] asserts against one address rather than
+    /// re-walking the map it came from.
+    floor: (u64, u64),
+    /// Windows this module has cut, as `(requester, BAR index, at, span)`.
+    ///
+    /// **A window belongs to the BAR it was cut for, not to the claim that
+    /// asked for it.** The BAR keeps the address across a release, so a window
+    /// returned to a free list would let a later claim put a second function on
+    /// top of a live one; and one cut per claim would let a process spawn and
+    /// die its way through the whole span. Taken once and reused, which is
+    /// [`SPACE`]'s treatment for the same reason.
+    windows: Vec<(u16, u8, u64, u64)>,
     /// Functions this module has reset, and when each may be touched again
     /// (PCIe §6.6.2). One entry per function ever released, so a re-claim
     /// cannot start reading a register the reset has not finished with.
@@ -169,8 +185,34 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
     kernel_driven: Vec::new(),
     narrow: (0, 0),
     wide: (0, 0),
+    floor: (0, 0),
+    windows: Vec::new(),
     resetting: Vec::new(),
 });
+
+/// Which requester holds each slot.
+///
+/// **One lock over the whole array, because this is where a function's
+/// exclusivity is decided.** `Claim::acquire`'s per-class flag does not answer
+/// for a class that names several devices, and `src/build.rs`'s
+/// `one_claimant_per_device` compares `system.toml` strings — a host-side gate
+/// is not the capability boundary, and `pci:1af4:1041` and `pci:1AF4:1041` are
+/// two strings naming one function.
+static SLOTS: Lock<[Option<u16>; MAX_FUNCTIONS]> = Lock::new([None; MAX_FUNCTIONS]);
+
+/// Take a slot for `who`, or say why not.
+///
+/// The scan and the take are one critical section: two claims arriving together
+/// must not both find the function unheld.
+fn reserve(who: u16) -> Result<usize, ClaimError> {
+    let mut slots = SLOTS.lock();
+    if slots.contains(&Some(who)) {
+        return Err(ClaimError::Owned);
+    }
+    let slot = slots.iter().position(Option::is_none).ok_or(ClaimError::Exhausted)?;
+    slots[slot] = Some(who);
+    Ok(slot)
+}
 
 fn requester(pci: &PciDevice) -> u16 {
     ((pci.bus as u16) << 8) | ((pci.dev as u16) << 3) | pci.func as u16
@@ -243,6 +285,7 @@ pub fn publish(devices: &[PciDevice], maps: &[MemoryMapEntry]) {
     machine.decoded = decoded;
     machine.narrow = window(narrow_end, PLATFORM_MMIO);
     machine.wide = window(wide_end, u64::MAX);
+    machine.floor = (machine.narrow.0, machine.wide.0);
     log!(
         "pcidev: {} functions; a 32-bit window comes from {:#x}..{:#x}, a 64-bit one from \
          {:#x}..{:#x}",
@@ -345,10 +388,10 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
         return Err(ClaimError::KernelDriven);
     }
 
-    let slot = (0..MAX_FUNCTIONS)
-        .find(|slot| BOUND[*slot].lock().is_none())
-        .ok_or(ClaimError::Exhausted)?;
-    // The guard exists from here on, so every refusal below frees the slot.
+    // `Owned` before `Exhausted`: a second claim on a function somebody holds
+    // is a different fact from a machine with no slot left.
+    let slot = reserve(requester(&pci))?;
+    // Dropped by every refusal below, and `release` is what gives the slot back.
     let claim = Claim::pci(slot);
 
     match bring_up(pci, id, slot) {
@@ -397,19 +440,59 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // Whatever is left of a reset [`release`] started on this function, before
     // a register of it is read (PCIe §6.6.2).
     settle_after_reset(&pci);
+
+    // **Every refusal that can be taken without touching the function is taken
+    // first.** An address space holding this function's grants and nothing else
+    // — and a refusal where this machine has none to give, because the
+    // alternative is handing a process physical addresses to write into
+    // descriptors. It is asked for here rather than after the BARs because a
+    // refusal that had already armed a vector and moved a function's BARs would
+    // leave the machine changed by a hand-over that did not happen.
+    let space = slot_space(slot).map_err(Refusal::Untranslated)?;
+
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.
     let table_bar = msix_bar(&pci);
     // Decode must be on for a BAR to answer, and off across each move.
     pci.enable_memory_space();
 
-    // **The interrupt first, before a window is spent.** A function whose
-    // MSI-X cannot be armed is one no holder could ever be told anything
-    // about, so it is refused here — and the 2 MiB of address space each of
-    // its BARs would take stays unspent, which is what `virtio_net_no_msix`
-    // reads back off the console.
+    // Then the interrupt, still before a window is cut: a function whose MSI-X
+    // cannot be armed is one no holder could ever be told anything about, and
+    // `virtio_net_no_msix` reads that refusal off the console *and* the absence
+    // of any BAR line after it.
     let entry = pci.enable_msix(VECTORS[slot]).ok_or(Refusal::NoMsix)?;
 
+    // From here a refusal has to undo: a vector is armed, and the arms below
+    // move the function's BARs.
+    match place_bars(&pci, table_bar) {
+        Ok((bar_at, bar_bytes)) => {
+            space.attach(pci.bus, pci.dev, pci.func);
+            Ok(Bound {
+                pci,
+                space,
+                entry,
+                id,
+                bar_at,
+                bar_bytes,
+                bars: [const { None }; BARS],
+                grants: Vec::new(),
+                mastering: false,
+            })
+        }
+        Err(why) => {
+            pci.disable_msix();
+            Err(why)
+        }
+    }
+}
+
+/// Move every BAR this claim may map, and answer where each one went.
+///
+/// A BAR that was moved before this refusal keeps its address: the window is
+/// that BAR's for the life of the boot ([`Machine::windows`]), so a later claim
+/// on the same function takes the same one back rather than putting a second
+/// function on top of it.
+fn place_bars(pci: &PciDevice, table_bar: Option<u8>) -> Result<([u64; BARS], [u64; BARS]), Refusal> {
     let mut bar_at = [0u64; BARS];
     let mut bar_bytes = [0u64; BARS];
     let mut index = 0u8;
@@ -422,7 +505,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             continue;
         }
         let size = pci.bar_size(index).map_err(|_| Refusal::BarUnsizable(index))?;
-        let at = place_bar(&pci, index, size)?;
+        let at = place_bar(pci, index, size)?;
         bar_at[index as usize] = at;
         bar_bytes[index as usize] = size;
         index += step;
@@ -430,31 +513,7 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     if bar_bytes.iter().all(|bytes| *bytes == 0) {
         return Err(Refusal::NoWindow);
     }
-
-    // An address space holding this function's grants and nothing else,
-    // attached before it can issue a transaction of its own — and a *refusal*
-    // where this machine has none to give, because the alternative is handing
-    // a process physical addresses to write into descriptors.
-    let space = slot_space(slot).map_err(Refusal::Untranslated)?;
-    space.attach(pci.bus, pci.dev, pci.func);
-
-    // **Bus mastering is deliberately not started here.** A function this
-    // kernel handed out before may still hold the queue addresses its last
-    // holder programmed, and this machine's devices advertise no reset to
-    // clear them with; a function that cannot master the bus cannot act on
-    // them. It starts on the first grant, which is the first moment there is
-    // anything it may legally reach.
-    Ok(Bound {
-        pci,
-        space,
-        entry,
-        id,
-        bar_at,
-        bar_bytes,
-        bars: [const { None }; BARS],
-        grants: Vec::new(),
-        mastering: false,
-    })
+    Ok((bar_at, bar_bytes))
 }
 
 /// This slot's address space, made on its first claim.
@@ -525,7 +584,7 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
     let low = pci.read_config_u32(offset);
     let wide = matches!(bar::decode(index, low), Ok(bar::Width::Wide(_)));
     let span = align_2m(size as usize) as u64;
-    let at = take_window(wide, span).ok_or(Refusal::NoWindow)?;
+    let at = take_window(pci, index, wide, span).ok_or(Refusal::NoWindow)?;
     let placed =
         bar::placement(index, low, at, size).map_err(|_| Refusal::BarUnplaceable(index))?;
 
@@ -540,7 +599,7 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
         Ok(memory) if memory.address() == at => {}
         _ => return Err(Refusal::BarUnplaceable(index)),
     }
-    alone_in_its_page(pci, at, span);
+    alone_in_its_page(pci, index, wide, at, span);
 
     // The one read of the function's registers this kernel does: evidence that
     // the address the BAR was moved to is one the bridge actually routes. A
@@ -559,43 +618,72 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
     Ok(at)
 }
 
-/// The next window of `span` bytes, or `None` where this machine has no room.
+/// The window this BAR decodes in: cut on its first claim, and answered again
+/// on every later one. `None` where this machine has no room left.
 ///
 /// Aligned to `span` and not merely to a page: a BAR's low address bits are
 /// hardwired to zero, so a window wider than 2 MiB has to start on its own
 /// size or the device decodes somewhere else (PCIe §7.5.1.2.1).
-fn take_window(wide: bool, span: u64) -> Option<u64> {
+fn take_window(pci: &PciDevice, index: u8, wide: bool, span: u64) -> Option<u64> {
+    let who = requester(pci);
     let mut machine = MACHINE.lock();
-    let (next, top) = if wide { &mut machine.wide } else { &mut machine.narrow };
-    if *next == 0 {
-        return None;
+    if let Some(&(_, _, at, cut)) =
+        machine.windows.iter().find(|(w, i, _, _)| *w == who && *i == index)
+    {
+        // A BAR that answers a different size than it did on its first claim is
+        // a function that changed under this kernel, not a window to re-cut.
+        return (cut == span).then_some(at);
     }
-    let at = next.checked_next_multiple_of(span)?;
-    let end = at.checked_add(span)?;
-    if end > *top {
-        return None;
-    }
-    *next = end;
+    let at = {
+        let (next, top) = if wide { &mut machine.wide } else { &mut machine.narrow };
+        if *next == 0 {
+            return None;
+        }
+        let at = next.checked_next_multiple_of(span)?;
+        let end = at.checked_add(span)?;
+        if end > *top {
+            return None;
+        }
+        *next = end;
+        at
+    };
+    machine.windows.push((who, index, at, span));
     Some(at)
 }
 
-/// Nothing else this machine enumerated decodes inside the page that is about
-/// to be mapped into a process.
+/// Nothing else on this machine decodes inside the page that is about to be
+/// mapped into a process.
 ///
-/// The assertion that [`take_window`] worked, never the mechanism: the window
-/// is taken above every address firmware assigned, so an overlap here is this
-/// module handing out an address it did not own.
-fn alone_in_its_page(claimed: &PciDevice, at: u64, span: u64) {
+/// The assertion that [`take_window`] worked, never the mechanism. All three
+/// things this module says are below a window: what firmware assigned to some
+/// other function, everything the UEFI map described (through
+/// [`Machine::floor`], which every region is under), and the windows this
+/// module has itself cut — an overlap between two of those is one process
+/// given another's registers.
+fn alone_in_its_page(claimed: &PciDevice, index: u8, wide: bool, at: u64, span: u64) {
     let machine = MACHINE.lock();
     let mine = requester(claimed);
-    for (who, address, end) in machine.decoded.iter() {
-        if *who == mine {
-            continue;
-        }
+    let floor = if wide { machine.floor.1 } else { machine.floor.0 };
+    assert!(
+        floor != 0 && at >= floor,
+        "pcidev: the {span:#x}-byte window at {at:#x} is below {floor:#x}, and everything \
+         firmware described is under that address",
+    );
+    let firmware = machine
+        .decoded
+        .iter()
+        .filter(|(who, _, _)| *who != mine)
+        .map(|(who, address, end)| (*who, *address, *end));
+    let cut = machine
+        .windows
+        .iter()
+        .filter(|(who, i, _, _)| (*who, *i) != (mine, index))
+        .map(|(who, _, address, span)| (*who, *address, *address + *span));
+    for (who, address, end) in firmware.chain(cut) {
         // The whole extent, not the base: a BAR that starts below the window
         // and reaches into it is the overlap this is for.
         assert!(
-            *end <= at || *address >= at + span,
+            end <= at || address >= at + span,
             "pcidev: the {span:#x}-byte window at {at:#x} holds requester {who:#06x}'s \
              {address:#x}..{end:#x} as well, and its holder would be given that \
              function's registers",
@@ -610,7 +698,16 @@ fn alone_in_its_page(claimed: &PciDevice, at: u64, span: u64) {
 /// could still reach it is a device writing into memory the allocator has
 /// already handed to somebody else.
 pub fn release(slot: usize) {
-    let Some(bound) = BOUND[slot].lock().take() else { return };
+    if let Some(bound) = BOUND[slot].lock().take() {
+        tear_down(slot, bound);
+    }
+    // Unconditional and last: a hand-over refused inside [`bring_up`] bound
+    // nothing and still holds its reservation, and the slot comes back only
+    // once the function that was in it can no longer reach memory.
+    SLOTS.lock()[slot] = None;
+}
+
+fn tear_down(slot: usize, bound: Bound) {
     bound.pci.disable_bus_master();
     bound.entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED);
     crate::iommu::note_user_owned(bound.pci.bus, bound.pci.dev, bound.pci.func, None);

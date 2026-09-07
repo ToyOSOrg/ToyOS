@@ -377,17 +377,15 @@ impl std::fmt::Display for Refusal {
 /// — the capability pointer and every `next` link in the chain — and it is safe
 /// only because a claim answers its own function's 4 KiB and nothing else. That
 /// is the kernel's contract, so this is where the driver that depends on it
-/// checks it: a read past the end, one that straddles the end, and one not
-/// aligned for its own width are all refused, and the first byte is not.
-///
-/// The offset that *wraps* its own width is not asked here because it cannot be
-/// expressed: `PciDev::config_read` takes a `u32`. It is answered where the
-/// arithmetic lives, in `toyos-dma`'s host tests.
+/// checks it: a read past the end and one not aligned for its own width are
+/// both refused, and the first byte is not. An aligned read that straddles the
+/// end cannot be written — 4096 is a multiple of every width — and one whose
+/// offset wraps cannot be expressed, `PciDev::config_read` taking a `u32`; both
+/// are answered where the arithmetic lives, in `toyos-dma`'s host tests.
 fn config_space_is_bounded(dev: &PciDev) -> Result<(), Refusal> {
     const CONFIG_BYTES: u32 = 4096;
     for (what, at, width) in [
         ("read past its configuration space", CONFIG_BYTES, RegWidth::U8),
-        ("read straddling the end of it", CONFIG_BYTES - 2, RegWidth::U32),
         ("misaligned read", 1, RegWidth::U16),
     ] {
         if dev.config_read(at, width).is_ok() {

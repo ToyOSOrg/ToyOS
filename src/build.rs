@@ -2578,16 +2578,21 @@ mod tests {
         assert!(provides_disjoint_from_serves(&bad).is_err());
     }
 
-    /// A device class init can mint exactly one claim for, so two programs
-    /// naming the same class is a config init cannot satisfy — a runtime
-    /// first-come race today.
+    /// The one config that names a device twice on purpose, so that a boot
+    /// exists in which the kernel has to refuse the second claim.
+    const STAGES_A_COLLISION: &str = "tests/netcase/system.toml";
+
+    /// Init mints one claim per device, so a shipping config naming one twice
+    /// starts a program with a hole where its claim should be.
     fn one_claimant_per_device(cfg: &SystemConfig) -> Result<(), String> {
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
         for (name, prog) in &cfg.programs {
             for d in &prog.devices {
                 if let Some(prev) = seen.insert(d, name) {
                     return Err(format!(
-                        "device class `{d}` is claimed by both `{prev}` and `{name}`"
+                        "device `{d}` is claimed by both `{prev}` and `{name}`; the second \
+                         claim is refused at boot, and `{STAGES_A_COLLISION}` is the one \
+                         config allowed to stage that"
                     ));
                 }
             }
@@ -2595,11 +2600,15 @@ mod tests {
         Ok(())
     }
 
+    /// Not the capability boundary — `kernel/src/pcidev`'s slot reservation is,
+    /// and this compares `system.toml` strings. The exception is asserted to
+    /// still collide rather than skipped, so it cannot rot into a pass.
     #[test]
     fn every_device_class_has_at_most_one_claimant() {
-        for cfg in ALL_CONFIGS {
+        for cfg in ALL_CONFIGS.iter().filter(|cfg| **cfg != STAGES_A_COLLISION) {
             one_claimant_per_device(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
+        assert!(one_claimant_per_device(&load(STAGES_A_COLLISION)).is_err());
         let bad: SystemConfig = toml::from_str(
             "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",

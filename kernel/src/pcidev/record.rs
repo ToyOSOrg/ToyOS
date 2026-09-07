@@ -2,8 +2,8 @@
 //! holder reads back.
 //!
 //! No `crate::` references: `kernel-loom` compiles this file directly under
-//! `feature = "loom"`, because x86's TSO hides a missing acquire edge from
-//! every guest test this suite runs.
+//! `feature = "loom"`, because what these words prevent is an interleaving and
+//! not an ordering, and no guest test in this suite lands on it.
 //!
 //! **Two parties race**: the ISR, on whichever CPU the unit routed the message
 //! to, and the holder reading its record through a syscall on any CPU. The

@@ -577,6 +577,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
     // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
     ("netd_listener_forgery", Sched::Parallel, Tier::Fast),
+    // The netcase boot with two programs naming one PCI function: the verdict
+    // is which of them the kernel let have it. Console lines only, no clock.
+    ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
@@ -12362,7 +12365,9 @@ fn run_machine_test(
                 return Err(format!("the parse's self-test never ran:\n{log}"));
             };
             // `11/11`, not "no failures": a self-test that ran zero cases would
-            // satisfy the absence of a FAILED line just as well.
+            // satisfy the absence of a FAILED line just as well. Four of the
+            // eleven are elements `poll_used` must *accept*, and the eleventh
+            // is `refused == 7`, so this one number pins both directions.
             if !verdict.contains("11/11") {
                 return Err(format!("not every used-ring element was parsed as required: {verdict}"));
             }
@@ -12371,19 +12376,6 @@ fn run_machine_test(
             let ran = log.matches("used-ring selftest").count();
             if ran != 1 {
                 return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
-            }
-            // And the legal direction, on the same boot: this capture arrived
-            // over virtio-console, whose TX path is `submit_and_wait` around
-            // the same `poll_used`, so every chunk of it is one legal used-ring
-            // round trip a driver still on this `Virtqueue` completed. A parse
-            // that refused correct elements would never reclaim a transmit slot
-            // and the boot would stop mid-line, so the *last* line is the
-            // witness and the eleven refusals above are not unaccompanied.
-            if !log.contains("Boot: complete") {
-                return Err(format!(
-                    "no driver on this `Virtqueue` carried a boot to its last line, so nothing \
-                     here says a correct used-ring element is still accepted\n{log}"
-                ));
             }
             eprintln!("  [virtio] {}", verdict.trim());
             Ok(())
@@ -13352,6 +13344,49 @@ fn run_machine_test(
                 ));
             }
             eprintln!("  [netcase] netd cap {declared} piped connections, {granted} accepted then refused");
+            Ok(())
+        }
+        "pci_function_is_exclusive" => {
+            // `tests/netcase` declares `pci:1af4:1041` on netd *and* on
+            // test-runner. A device a second process could claim is one whose
+            // register window, MSI-X table and DMA grants two processes hold at
+            // once, so the kernel is what has to refuse it: `src/build.rs`'s
+            // config check names this config as its one exception, and this is
+            // the boot that says the refusal exists.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+            let options = BootOptions {
+                profile: qemu::Profile::Headless,
+                ..Default::default()
+            };
+            if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+                return Err("this test needs a NIC and the profile has none".to_string());
+            }
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+            let mut console = qemu.boot_log().to_string();
+            // netd holds the claim only once it has come up on it; waiting for
+            // that is what makes the count below the settled one.
+            let _ = await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
+            console.push_str(&qemu.drain_serial(Duration::from_millis(500)));
+            let log = serial::Serial::named("boot console", console.as_str());
+
+            // Exactly one hand-over of that function. Two would be the defect
+            // itself, and zero a boot that says nothing about exclusivity.
+            let handovers =
+                log.text().lines().filter(|l| l.contains("[1af4:1041] handed over on slot")).count();
+            if handovers != 1 {
+                return Err(format!(
+                    "the NIC's function was handed over {handovers} times, and a second holder \
+                     would drive the same registers, MSI-X entry and grants as the first:\n{}",
+                    log.text()
+                ));
+            }
+            // And the loser was told why, in the kernel's own word rather than
+            // "no NIC": init prints the `AlreadyExists` arm of `refused`.
+            log.must_say("init: test-runner: pci:1af4:1041 is already claimed")?;
+            // netd is the one that got it, not merely the one that ran.
+            log.must_say("netd: ready, at most ")?;
+            log.must_be_clean()?;
+            eprintln!("  [netcase] one PCI function, two claimants, one holder");
             Ok(())
         }
         "netd_listener_forgery" => {
