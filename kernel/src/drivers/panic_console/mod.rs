@@ -536,7 +536,9 @@ pub fn discard_capture() {
 
 /// Re-freeze the captured report so a line written *after* [`capture`] is
 /// painted; only refreshes a capture that already exists — [`live_tail`] already reads live otherwise.
-/// One caller: `apic::wait_for_log_file` logs this after `capture` already ran, on the machine with no serial fallback.
+/// Both callers are in `apic`, and both are the machine with no serial
+/// fallback: `wait_for_log_file` when its drain budget expires, and
+/// `halt_all_cpus` for the arm line, each after `capture` already ran.
 pub fn refresh_capture() {
     capture_into(true);
 }
@@ -635,9 +637,10 @@ pub fn hold_the_panel(mut bound: Bound) -> ! {
     crate::arch::cpu::halt()
 }
 
-/// One byte off the controller, folded into `keys`; any key transition retires
-/// `bound`, since a key is how the person reading the panel says he is there.
-/// `None` is a poll that found nothing, which is not the decoder's `Pending`.
+/// One byte off the controller, folded into `keys`; a key **press** retires
+/// `bound`, since pressing one is how the person reading the panel says he is
+/// there. `None` is a poll that found nothing, which is not the decoder's
+/// `Pending`.
 ///
 /// The pointer shares the port; its packet bytes look like scancodes to
 /// anything that does not skip them. [`i8042::poll_byte`] is an `inb` — no
@@ -649,7 +652,11 @@ fn read_key(keys: &mut KeyDecoder, bound: &mut Bound) -> Option<KeyOutcome> {
         return None;
     };
     let outcome = keys.feed(byte);
-    if matches!(outcome, KeyOutcome::Key { .. }) {
+    // A make code and nothing else. A break code is the release of a key
+    // pressed before this panel existed, and a controller's own byte — an ACK,
+    // a self-test result — is the hardware answering itself; neither is a
+    // person saying he is here to read it.
+    if matches!(outcome, KeyOutcome::Key { pressed: true, .. }) {
         bound.retire();
     }
     Some(outcome)

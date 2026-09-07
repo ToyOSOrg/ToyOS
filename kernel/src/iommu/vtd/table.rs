@@ -192,8 +192,7 @@ impl Domain {
     /// than it is) is the maximum DMA virtual addressability it has. A unit
     /// reporting a 48-bit `SAGAW` and a 39-bit `MGAW` walks four levels and
     /// still faults `address-beyond-mgaw` on anything from `1 << 39` up, so a
-    /// window placed by table depth alone is unreachable on exactly the
-    /// hardware that reports both — which is every unit in a Tiger Lake.
+    /// window placed by table depth alone is unreachable on it.
     const fn translatable_bits(width: AddressWidth, mgaw: u8) -> u8 {
         if mgaw < width.bits() { mgaw } else { width.bits() }
     }
@@ -372,24 +371,21 @@ fn write_context(
     context.write_pair(stream.devfn() as usize, lo, hi);
 }
 
-/// A Tiger Lake reports `SAGAW` 48 and `MGAW` 39 on every unit, and the window
-/// has to sit under the smaller one.
+/// A unit whose `MGAW` is narrower than its `SAGAW` gets its window under the
+/// smaller of the two.
 ///
-/// **This combination is the reason the check is here rather than in a guest.**
-/// QEMU's `intel-iommu` derives both fields from one `aw-bits` property, so its
-/// model cannot express a `SAGAW` wider than its `MGAW` at all — the shape that
-/// took run 14's NVMe to `address-beyond-mgaw` is one no boot on this tree can
-/// stage. The arithmetic is the whole of the fix, so the arithmetic is what is
-/// judged, at compile time.
+/// Asserted here rather than in a guest because no guest holds the shape: QEMU's
+/// `intel-iommu` derives both fields from one `aw-bits` property, so its model
+/// cannot report a `SAGAW` wider than its `MGAW` at all.
 const _: () = {
     assert!(Domain::translatable_bits(AddressWidth::Bits48, 39) == 39);
     assert!(Domain::first_address(39) < 1 << 39);
-    // Run 14's own numbers: the window the old derivation placed, against the
-    // ceiling the hardware reported.
+    // What a window placed by the table depth alone would be, against the
+    // ceiling such a unit reports.
     assert!(Domain::first_address(48) >= 1 << 39);
     // A unit whose two limits agree is unchanged by any of this.
     assert!(Domain::translatable_bits(AddressWidth::Bits48, 48) == 48);
     assert!(Domain::translatable_bits(AddressWidth::Bits39, 39) == 39);
-    // And a narrower `MGAW` than the tables still binds the other way round.
+    // And tables shallower than `MGAW` bind it the other way round.
     assert!(Domain::translatable_bits(AddressWidth::Bits39, 48) == 39);
 };

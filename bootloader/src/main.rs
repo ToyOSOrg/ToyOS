@@ -584,19 +584,25 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     );
     assert!(kernel_fits, "the kernel image does not fit the boot map");
 
-    // A line and not a refusal: a parameter the kernel cannot read before
-    // `mm::init` costs it the parameter, never the boot. An empty cmdline's
-    // pointer names nothing and is not reported as reachable.
+    // A refusal, like the scanout's: a buffer the kernel cannot read before
+    // `mm::init` is not one parameter lost, it is every one of them — the
+    // watchdog, the black box's address, the root — with the boot going on as
+    // though none had been asked for. An empty cmdline's pointer names nothing
+    // and is not reported as reachable.
     let parameters = (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64));
     match parameters {
         None => println!("Parameter buffer: none"),
-        Some((at, len)) if at.checked_add(len).is_some_and(|end| end <= BOOT_MAP_BYTES) => {
-            println!("Parameter buffer: {at:#x}+{len:#x} is inside the {BOOT_MAP_BYTES:#x}-byte boot map")
+        Some((at, len)) => {
+            let inside = at.checked_add(len).is_some_and(|end| end <= BOOT_MAP_BYTES);
+            assert!(
+                inside,
+                "the boot map cannot hold the parameter buffer: {at:#x}+{len:#x} is outside its \
+                 {BOOT_MAP_BYTES:#x} bytes, so the kernel would read none of this boot's parameters"
+            );
+            println!(
+                "Parameter buffer: {at:#x}+{len:#x} is inside the {BOOT_MAP_BYTES:#x}-byte boot map"
+            );
         }
-        Some((at, len)) => println!(
-            "Parameter buffer: {at:#x}+{len:#x} is outside the {BOOT_MAP_BYTES:#x}-byte boot map, \
-             so the kernel cannot reach it before mm::init"
-        ),
     }
 
     // Last, and after every line above: a console write, a FAT write and a

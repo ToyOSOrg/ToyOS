@@ -16,6 +16,9 @@ use crate::log;
 use crate::time::Duration;
 
 const FAST_BOUND: Duration = Duration::from_secs(3);
+/// Four, so the shipped 9.6 s bound is fed every 2.4 s. What makes a cadence
+/// that long sound is `kernel/CLAUDE.md`'s rule that no disk wait in this kernel
+/// can park: a CPU is always on its way back to a scheduler pass.
 const FEEDS_PER_BOUND: u64 = 4;
 
 /// The fast bound is not a value this kernel can fail to have either.

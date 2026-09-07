@@ -194,3 +194,20 @@ pub fn log_state(cpu_id: u32) {
         d1a,
     );
 }
+
+/// [`DEFINED`] stays inside the image and stays a partition of it: ascending,
+/// non-overlapping, and every field whole. `first_difference` reads each field
+/// by offset and width without bounds-checking either, and a table that grew a
+/// typo would read another field's bytes or run off the end.
+const _: () = {
+    let mut i = 0;
+    let mut end = 0;
+    while i < DEFINED.len() {
+        let (_, at, width) = DEFINED[i];
+        assert!(at >= end, "DEFINED is not ascending and non-overlapping");
+        assert!(width > 0 && width <= 8, "a field wider than the u64 it is read into");
+        end = at + width;
+        assert!(end <= 512, "a field outside the FXSAVE64 image");
+        i += 1;
+    }
+};

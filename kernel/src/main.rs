@@ -253,10 +253,8 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     drivers::panic_console::arm(&kernel_args, maps);
     // Beside it, and out of the raw buffer: a panic between here and
     // `params::init` — inside `serial::init`, or on the parameter line's own
-    // UTF-8 check — is one this machine renders and then resets on, and the page
-    // is what carries it past the reset. The owner's laptop did exactly that
-    // with the page still reading the loader's `ARMED`, because this used to run
-    // after all three.
+    // UTF-8 check — is one the page has to carry past the reset, and neither
+    // the console nor that line has been decided yet.
     blackbox::arm(if kernel_args.cmdline_len == 0 {
         &[]
     } else {
@@ -383,11 +381,6 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     percpu::init_bsp(apic::id());
     ioapic::init(&madt);
     idt::enable_interrupts();
-    // Read back, because `sti` is the first instruction at which this machine's
-    // own devices can reach the kernel: a CPU not holding `IF` here took
-    // something that cleared it again before this record was stamped.
-    let flags = cpu::rflags();
-    log!("interrupts: cpu0 rflags={:#x} if={}", flags, u8::from(flags & cpu::RFLAGS_IF != 0));
     syscall::init();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     if !kernel_elf.is_empty() {

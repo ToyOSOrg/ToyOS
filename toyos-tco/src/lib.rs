@@ -96,10 +96,12 @@ pub const fn timer_for(bound_ms: u64) -> Option<u16> {
 /// admits: the two differ, and a bound derived for hardware answers to this one.
 pub const TMR_MIN_HARDWARE: u16 = 0x04;
 
-/// The TCO bound, in milliseconds: the bootloader arms it before it jumps and
-/// the kernel keeps feeding that same timer, so it is the bound from the
-/// handoff onward. The largest the tick and the double expiry make exact at or
-/// under ten seconds: eight ticks of 600 ms, twice.
+/// The TCO bound, in milliseconds, for the loader **and** the kernel: the
+/// bootloader arms it before it jumps and the kernel keeps feeding that same
+/// timer, so it is the whole machine's bound from the handoff onward and not a
+/// handoff window the kernel widens afterwards. The largest the tick and the
+/// double expiry make exact at or under ten seconds: eight ticks of 600 ms,
+/// twice, fed four times a bound.
 pub const BOUND_MS: u64 = 9_600;
 
 /// The bound the firmware's own watchdog is set to, in milliseconds. It covers
@@ -123,10 +125,10 @@ pub const PANIC_BOUND_MS: u64 = 60_000;
 /// nor one the hardware would ignore.
 pub const TIMER: u16 = match timer_for(BOUND_MS) {
     Some(timer) => {
-        assert!(timer >= TMR_MIN_HARDWARE, "the loader's bound derives a TCO_TMR the PCH ignores");
+        assert!(timer >= TMR_MIN_HARDWARE, "the TCO bound derives a TCO_TMR the PCH ignores");
         timer
     }
-    None => panic!("the loader's bound reaches no TCO timer"),
+    None => panic!("the TCO bound reaches no TCO timer"),
 };
 
 /// The boot parameter that arms it: the bootloader reads it off
