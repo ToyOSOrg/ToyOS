@@ -3628,6 +3628,29 @@ pub const KNOWN_RED: &[Red] = &[
         source: "issues/build/parallel-tests-red-under-other-suites.md",
         measured: "2026-09-07",
     },
+    // Met on the metal branch's own `durations` job, and not this branch's to
+    // fix: the price is unenforced at this base and the nightly renders it.
+    Red {
+        test: "sysret_ss_reload",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "not the test — its **price**: `sysret_ss_reload measured 26927 ms in CI, over the \
+               10000 ms line, but sysret_ss_reload remains Fast`, against a committed 6,453 ms. \
+               Four times the committed value on a name this branch does not touch, and the \
+               same direction the 2026-09-03 nightly already measured at 23,838 ms. The \
+               mechanism is this name\'s own 2026-08-29 fix: the probe line is waited for on a \
+               10 s liveness ceiling instead of a fixed 500 ms drain, so a loaded shard now \
+               spends patience where it used to spend the verdict — the red became a price. \
+               **Left committed at 6,453**: replacing the whole measured profile would have \
+               re-tiered a name whose owner is not this branch, so only the thirteen \
+               `UNMEASURED` markers this change registered were replaced",
+        evidence: "pull request #431, `ci` run 34070261856\'s `durations` job 101589256298, \
+                   2026-09-07, printed as a `::warning::` and unenforced at base 67cb15be \
+                   because this change neither registered nor re-tiered the name",
+        source: "issues/build/the-committed-profile-disagrees-with-the-nightly-on-28-names.md",
+        measured: "2026-09-07",
+    },
 ];
 
 // ---------------------------------------------------------------------------

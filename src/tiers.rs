@@ -212,6 +212,49 @@ pub const RELEGATED: &[Relegated] = &[
                  gets the T14 back to firmware without a hand on the button.",
     },
     Relegated {
+        test: "loader_watchdog_arms",
+        ci_ms: 10_064,
+        why: Why::TimerAnchored,
+        guards: "The loader arms the chipset timer as its last act before the jump and reads the \
+                 block back: `TCO_TMR` is the value it wrote, the gate bits say an expiry can \
+                 reach the machine, and `TCO_RLD` moved between two reads a stall apart. That \
+                 last one is the verdict a slower machine changes, and it is the only thing in \
+                 the tree that asks whether an armed timer counts at all — the question the \
+                 owner's T14 answers the other way \
+                 (`issues/hardware/an-armed-tco-has-never-reset-the-t14.md`).",
+    },
+    Relegated {
+        test: "panic_reboots",
+        ci_ms: 9_768,
+        why: Why::TimerAnchored,
+        guards: "A panicked kernel ends its own boot: the panel is held for the bound the guest \
+                 printed and then the machine resets itself, judged by QEMU's stop reason \
+                 arriving inside it. On a machine whose chipset timer does not count this is the \
+                 only thing that gets a crashed boot back to firmware, so nothing else asks \
+                 whether an unattended run ends.",
+    },
+    Relegated {
+        test: "panic_key_holds",
+        ci_ms: 42_033,
+        why: Why::TimerAnchored,
+        guards: "The control on the name above, and its verdict is that nothing happened for a \
+                 span of host clock: a key pressed inside the bound must stop the reset and \
+                 leave the report on the panel. Without it a green `panic_reboots` says only \
+                 that a panicked kernel resets, never that a hand on the keyboard is what holds \
+                 it — which is the whole reason a person in the room can read the panel.",
+    },
+    Relegated {
+        test: "blackbox_panic_chain",
+        ci_ms: 11_407,
+        why: Why::TimerAnchored,
+        guards: "The boot chain end to end: a kernel panics, seals the report into the black-box \
+                 page, resets itself, and the pass after the reset reads that page and reports \
+                 the previous boot. The judge watches a guest take two of its own resets against \
+                 a bound the first boot counted down. What still runs per pull request: \
+                 `blackbox_unclaimed_page` and the three seal names, which are lines and page \
+                 bytes with no clock in them; the chain across a reset has no other gate.",
+    },
+    Relegated {
         test: "watchdog_fed",
         ci_ms: 23_405,
         why: Why::TimerAnchored,

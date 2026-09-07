@@ -610,29 +610,28 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("machine_reboot", Sched::Parallel, Tier::Fast),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
     ("metal_job_reboot", Sched::Parallel, Tier::Fast),
-    // Its verdict waits out a staged window, so it is destined for
-    // `Why::TimerAnchored` and Nightly once its one CI price is measured.
+    // Its verdict waits out a staged window.
     ("job_deadline_reboots", Sched::Parallel, Tier::Fast),
-    ("loader_watchdog_arms", Sched::Parallel, Tier::Fast),
+    // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
+    // changes the verdict; `RELEGATED` says what leaves the per-PR tier with it.
+    ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
     // Its own boot, and the verdict is QEMU's stop reason inside the bound.
     ("watchdog_resets", Sched::Parallel, Tier::Nightly),
     // Serial: its verdict is that nothing happened for a span of host clock.
     ("watchdog_fed", Sched::Serial, Tier::Nightly),
     // The panicked kernel's own bound, which is what ends a boot on a machine
     // whose chipset timer does not count. Both verdicts are QEMU's stop reason
-    // against a bound the guest printed, so both are destined for
-    // `Why::TimerAnchored` and Nightly once their one CI price is measured.
-    ("panic_reboots", Sched::Parallel, Tier::Fast),
+    // against a bound the guest printed, so a slower machine moves both.
+    ("panic_reboots", Sched::Parallel, Tier::Nightly),
     // The same verdict from inside `percpu::init_bsp`: the earliest point a
     // panic is reportable, and the window the owner's T14 stops in.
     ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Fast),
     // Serial like `watchdog_fed`: its verdict is that nothing happened for a span of host clock.
-    ("panic_key_holds", Sched::Serial, Tier::Fast),
+    ("panic_key_holds", Sched::Serial, Tier::Nightly),
     // The boot chain's three answers. The two chain names each watch a guest
     // take its own reset and read the pass after it, so both are anchored to
-    // the bound the first boot counts down and are destined for
-    // `Why::TimerAnchored` once their one CI price is measured.
-    ("blackbox_panic_chain", Sched::Parallel, Tier::Fast),
+    // the bound the first boot counts down.
+    ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
     // Its own boot, and every verdict is a line: no host clock in any of it.
     ("blackbox_unclaimed_page", Sched::Parallel, Tier::Fast),
