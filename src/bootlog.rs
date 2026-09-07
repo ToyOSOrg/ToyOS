@@ -43,6 +43,18 @@ pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
 pub const CHAIN_ENDS_LINE: &str =
     "Loader log: the last boot is accounted for, so this pass resets the machine";
 
+/// **What a boot that hung looks like from the next one.**
+///
+/// `bootnext` aims `BootNext` at the loader before every kernel handoff, so a
+/// kernel that hangs and an owner who cuts power boot the same kernel again for
+/// ever — the power cut is exactly what empties the black box, so the next pass
+/// has nothing to report and arms a fresh record. The loader counts attempts on
+/// the stick instead, and the second attempt of an image whose first never
+/// reported boots no kernel at all: it writes this and hands the machine back to
+/// the firmware's own boot order.
+pub const HUNG_WITHOUT_A_RECORD: &str =
+    "Boot attempts: the previous boot of this image never reported; the machine is handed back";
+
 /// The head the loader writes before the pass that read what the boot above
 /// left. **One `toyos-metal` run is one kernel boot and two loader passes**,
 /// both in one `loader.log`: the loader points `BootNext` at itself before every
@@ -219,6 +231,7 @@ mod tests {
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_LAST_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{SEPARATOR}\"")),
+            ("bootloader/src/main.rs", format!("\"{HUNG_WITHOUT_A_RECORD}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{LOADER_GOP_LINE}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),

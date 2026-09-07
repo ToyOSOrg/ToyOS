@@ -681,9 +681,16 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the bound the first boot counts down.
     ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
-    // Three chained boots, one per way this kernel reaches a reset, each
+    // Four chained boots, one per way this kernel reaches a reset, each
     // anchored to the bound its own first boot counts down.
     ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
+    // The control on the chain: a record another image left in the same memory
+    // is cleared and its pass boots a kernel, where a real predecessor's ends
+    // the chain. One boot, one actuator.
+    ("blackbox_foreign_record", Sched::Parallel, Tier::Fast),
+    // Three launches of one image file, and the third is the one that makes it
+    // a bound: a hang costs the machine one boot and never traps it.
+    ("hang_bounded_by_the_stick", Sched::Parallel, Tier::Fast),
     // Its own boot, and every verdict is a line: no host clock in any of it.
     ("blackbox_unclaimed_page", Sched::Parallel, Tier::Fast),
     // The seal read off the page's own bytes by QEMU, after a panic earlier than
@@ -1405,6 +1412,33 @@ const METAL: &[(&str, metal::Metal)] = &[
         // its report to the same `loader.log` the driver hands back.
         "blackbox_done_chain",
         metal::Metal::Runs { arms: JOBCASE, judge: |b| power::done_chain(&b[0].after_the_reset()?) },
+    ),
+    (
+        // Its own boot, and it must not share one: it deliberately leaves the
+        // page holding a record no stick owns, and a boot that then read it as
+        // a predecessor's is exactly what the arm above judges.
+        // Its own boot: it deliberately leaves the page holding a record no
+        // stick owns, and a boot that then read it as a predecessor's is the
+        // defect. The T14 runs the same three passes QEMU does — the loader
+        // points `BootNext` at itself, so they are one flash.
+        "blackbox_foreign_record",
+        metal::Metal::Runs {
+            arms: &[metal::once(
+                "foreignrecord",
+                "tests/jobcase",
+                &["blackbox-foreign-identity"],
+                &[],
+            )],
+            judge: |b| {
+                let after = b[0].after_the_reset()?;
+                let said = after.must_say("record another image left in this memory")?.to_string();
+                // Named and cleared, and never reported as this stick's own.
+                power::says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
+                power::says_nothing_of(&after, "the last boot read")?;
+                eprintln!("  [power] {}", said.trim());
+                Ok(())
+            },
+        },
     ),
     (
         // The machine came back to `sshd`, which is what tells a reset from the
@@ -9613,6 +9647,12 @@ fn run_machine_test(
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
         "usb_reset_hands_devices_back" => {
             power::usb_reset_hands_devices_back(test_config, c_bins, rust_bins)
+        }
+        "blackbox_foreign_record" => {
+            power::blackbox_foreign_record(test_config, c_bins, rust_bins)
+        }
+        "hang_bounded_by_the_stick" => {
+            power::hang_bounded_by_the_stick(test_config, c_bins, rust_bins)
         }
         "blackbox_unclaimed_page" => {
             power::blackbox_unclaimed_page(test_config, c_bins, rust_bins)

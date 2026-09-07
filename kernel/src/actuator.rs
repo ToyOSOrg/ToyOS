@@ -237,6 +237,12 @@ actuators! {
     /// Panic once boot phases are done, with no thread current.
     test_late_panic = "test-late-panic";
 
+    /// Seal the black box under an identity that is not this stick's, which is
+    /// what a record another image left in the same memory looks like. The
+    /// loader pass after it must clear the record and boot its kernel, not
+    /// report it and end the chain.
+    blackbox_foreign_identity = "blackbox-foreign-identity";
+
     /// Take a Ring 0 `#UD` once boot phases are done, with no thread current.
     test_kernel_fault = "test-kernel-fault";
 
