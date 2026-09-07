@@ -30,6 +30,7 @@ members = [
     "toyos-fat32-check",
     "toyos-gpt",
     "toyos-hda",
+    "toyos-i219",
     "toyos-keymap",
     "toyos-ld",
     "toyos-manifest",
