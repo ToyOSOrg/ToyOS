@@ -427,20 +427,45 @@ fn build(
         extra.push((format!("bin/{job}"), data.clone()));
     }
     extra.extend(batch.files.iter().cloned());
-    // **What a job spawns comes with it, and it is not optional.** A binary
-    // that cannot find its `.so` or its helper does not fail an assertion — it
-    // fails to *spawn*. Measured on a metal-shaped guest: `std_tls` did
-    // not run at all and took the rest of the job list with it, and
-    // `disk_backtrace`, `fault_gates` and `panic_recovery` each panicked on
-    // `entity not found` looking for a child that was never staged. Which job
-    // needs which is the job's business and not this function's, so both sets
-    // go on whole the moment a boot has any job at all — including a job reached
-    // through a symlink, whose name says nothing about the binary behind it.
+    // **What a job spawns comes with it, and it is not optional.** A binary that
+    // cannot find its `.so` or its helper child does not fail an assertion — it
+    // fails to *spawn*. Measured on a metal-shaped guest: `std_tls` did not run
+    // at all and took the rest of the job list with it, and `disk_backtrace`,
+    // `fault_gates` and `panic_recovery` each panicked on `entity not found`
+    // looking for a child nothing had staged.
+    //
+    // **Which helper, though, is read rather than assumed.** Staging all of them
+    // on every image cost 150 MB a boot, and a stick is written over `ssh`. A
+    // driver reaches a binary as the literal `test_rs_<name>` — the same
+    // spelling `suite_split` reads the harness for — so the text a boot could
+    // possibly name it in is its job list, its symlink targets, and the source
+    // of every Rust job on it. A helper named nowhere in that is a helper this
+    // boot cannot reach.
     if !batch.jobs.is_empty() {
+        let bin = root.join("tests/toyos-rust-tests/src/bin");
+        let mut reachable = batch.jobs.join(" ");
+        for (from, to) in &batch.links {
+            reachable.push(' ');
+            reachable.push_str(from);
+            reachable.push(' ');
+            reachable.push_str(to);
+        }
+        for job in &batch.jobs {
+            let Some(name) = job.strip_prefix("test_rs_") else { continue };
+            if let Ok(source) = std::fs::read_to_string(bin.join(format!("{name}.rs"))) {
+                reachable.push('\n');
+                reachable.push_str(&source);
+            }
+        }
         for (name, data) in rust_bins {
+            // The shared libraries go on whole: a `dlopen` names a path and
+            // never a `test_rs_` literal, so nothing above could find one — and
+            // all of them together are a fraction of one helper binary.
             if name.ends_with(".so") {
                 extra.push((format!("lib/{name}"), data.clone()));
-            } else if helpers.contains(&name.as_str()) {
+            } else if helpers.contains(&name.as_str())
+                && reachable.contains(&format!("test_rs_{name}"))
+            {
                 extra.push((format!("bin/test_rs_{name}"), data.clone()));
             }
         }
