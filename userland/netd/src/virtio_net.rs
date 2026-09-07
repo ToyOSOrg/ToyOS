@@ -560,10 +560,15 @@ impl VirtioNet {
     ///
     /// The count is not acted on — what a message meant is in the rings — but
     /// it has to be consumed, or the poller reports the same interrupt for ever.
-    /// The kernel's answer is handed over as it came: what a refusal means is
+    /// `WouldBlock` is the ordinary "nothing since the last read". Any other
+    /// refusal is handed up as the kernel worded it: what it means is
     /// `Card::begin_pass`'s call, made once for both drivers.
     pub fn take_interrupt(&self) -> Result<u32, SyscallError> {
-        self.dev.irq().map(|record| record.count)
+        match self.dev.irq() {
+            Ok(record) => Ok(record.count),
+            Err(SyscallError::WouldBlock) => Ok(0),
+            Err(why) => Err(why),
+        }
     }
 
     /// Post receive buffer `index` on its own head.
