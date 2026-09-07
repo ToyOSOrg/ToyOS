@@ -496,6 +496,16 @@ fn build(
     // button. Armed after the kernel build is decided above, because a
     // parameter carrying a value is not an actuator and must not pull the test
     // kernel in behind it.
+    if let Some(own) = batch.params.iter().find(|p| p.starts_with(toyos_tco::DEADLINE_PARAM))
+    {
+        // Stated as a refusal rather than as a comment: two tokens leave the
+        // kernel taking the first and a reader taking whichever they saw.
+        return Err(format!(
+            "{label} arms {own:?} of its own, and every metal image is armed with one \
+             already — a boot that wants a different bound is a change here and not a \
+             field on an arm"
+        ));
+    }
     let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);

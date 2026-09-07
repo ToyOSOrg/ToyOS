@@ -109,6 +109,12 @@ pub enum Refusal {
     /// The image is armed with a parameter [`FLASHABLE`] does not clear for
     /// this machine, or does not clear at all.
     Armed { name: String, why: &'static str },
+    /// **The image carries no bound on its own boot.** Every metal image is
+    /// built with `boot-deadline=<ms>`; one without it is not a metal-staged
+    /// image, and flashing it puts the machine somewhere only a hand gets it out
+    /// of. `staged_a_wedge` is the sharpest form: an image that stops every CPU
+    /// on purpose and has nothing to end the boot it stopped.
+    NoBound { staged_a_wedge: bool },
     /// **The outside judge's verdict on the volume the boot left.** What
     /// `toyos-fat32-check` said about the log partition read straight off the
     /// stick — the bytes, not a driver's opinion of them, and not the FAT32
@@ -193,6 +199,20 @@ impl fmt::Display for Refusal {
             Self::Partitions { what, matched } => {
                 write!(f, "the image carries {matched} {what} partitions and this loop needs one")
             }
+            Self::NoBound { staged_a_wedge } => write!(
+                f,
+                "the image carries no `{}<ms>` on its parameter line{}. Every image the \
+                 metal profile builds carries one, so this is not one of them — and a \
+                 flashed boot with no bound on itself is what this loop exists to prevent: \
+                 a kernel that stops making progress without panicking is bounded by \
+                 nothing else, and the machine has no power switch",
+                toyos_tco::DEADLINE_PARAM,
+                if *staged_a_wedge {
+                    ", and it stages a wedge that stops every CPU on purpose"
+                } else {
+                    ""
+                }
+            ),
             Self::Fat32(said) => write!(
                 f,
                 "the log partition the boot left does not check out: {said}. This is \
@@ -711,19 +731,26 @@ pub fn flash_ruling(name: &str) -> Option<Flash> {
 fn arms_are_admissible(path: &Path) -> Result<Vec<String>, Refusal> {
     let armed = crate::image::params_of(path)
         .map_err(|why| Refusal::File { path: path.display().to_string(), why })?;
-    // **The pairing, and it is the whole reason the wedge arm is admissible.**
-    // An image that stages a wedge and carries no bound to end the boot it
-    // stops is a machine waiting for a hand on a power button nobody is beside.
-    if armed.iter().any(|name| name == WEDGE_ARM)
-        && !armed.iter().any(|name| name.starts_with(toyos_tco::DEADLINE_PARAM))
-    {
-        return Err(Refusal::Armed {
-            name: WEDGE_ARM.to_string(),
-            why: "it stops every CPU on purpose, and this image carries no `boot-deadline=` \
-                  to end the boot it stops",
-        });
+    judge_arms(&armed)?;
+    Ok(armed)
+}
+
+/// The gate's decision, over the list alone — so it can be staged without an
+/// image, which is the only way the refusals below get a test at all.
+pub fn judge_arms(armed: &[String]) -> Result<(), Refusal> {
+    // **Every flashed image carries a bound on its own boot, and this is the
+    // gate.** The bound was first asked for only of the image that stages a
+    // wedge, which is the sharpest case and not the only one: a kernel that
+    // stops making progress without panicking is bounded by nothing else, and a
+    // flashed boot with no bound is precisely what this loop exists to prevent —
+    // measured twice on the T14, once as a hang after the job list and once as
+    // a `--install-sudoers` that fell through into flashing an ordinary
+    // `target/bootable.img`, which has no job list and no deadline at all.
+    if !armed.iter().any(|name| name.starts_with(toyos_tco::DEADLINE_PARAM)) {
+        let staged = armed.iter().any(|name| name == WEDGE_ARM);
+        return Err(Refusal::NoBound { staged_a_wedge: staged });
     }
-    for name in &armed {
+    for name in armed {
         match flash_ruling(name) {
             Some(Flash::Ok) => {}
             Some(Flash::Never(why)) => {
@@ -737,7 +764,7 @@ fn arms_are_admissible(path: &Path) -> Result<Vec<String>, Refusal> {
             }
         }
     }
-    Ok(armed)
+    Ok(())
 }
 
 /// Whole sectors, `EFI PART` in the *final* one, and exactly one partition of
@@ -1169,11 +1196,27 @@ fn answer(what: &str, out: Output) -> Result<Output, Refusal> {
 /// What the binary was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
-    image: PathBuf,
+    /// **No default, and that is the second half of the fix.** A default was
+    /// something to fall through *to*: `--install-sudoers` installed the rule
+    /// and carried on into the ordinary loop with `target/bootable.img`, which
+    /// in one worktree was a 184 MB image with no job list and no bound. There
+    /// is nothing to fall through to now, and the gate below would refuse that
+    /// image anyway — the loop flashes metal-staged images and nothing else.
+    image: Option<PathBuf>,
     target: Target,
     dry_run: bool,
     /// Where the account's password is read from, once, to install the rule.
+    ///
+    /// **An action of its own, and it touches no disk.** It installs, checks
+    /// with `visudo`, says so and exits; every flag that describes a boot is a
+    /// usage refusal beside it. It used to fall through into the ordinary loop
+    /// with whatever `--image` defaulted to, and a reinstall in a worktree whose
+    /// `target/bootable.img` was a 184 MB image with no job list flashed that
+    /// image and booted the T14 into a boot that never ends.
     install_sudoers: Option<PathBuf>,
+    /// The boot-describing flags this command line named, in the order given —
+    /// so a refusal can say which ones rather than that there were some.
+    about_a_boot: Vec<&'static str>,
     wait_secs: u64,
     /// Where the stick's two files and this boot's own facts are written, for a
     /// judge that is not this process. Absent leaves the run's only account its
@@ -1192,10 +1235,11 @@ pub struct Args {
 impl Args {
     pub fn parse(args: &[String]) -> Result<Self, Refusal> {
         let mut out = Args {
-            image: PathBuf::from("target/bootable.img"),
+            image: None,
             target: Target::t14()?,
             dry_run: false,
             install_sudoers: None,
+            about_a_boot: Vec::new(),
             wait_secs: return_secs(),
             readback: None,
             fat32_check: false,
@@ -1211,11 +1255,13 @@ impl Args {
             };
             let took = match flag {
                 "--dry-run" => {
+                    out.about_a_boot.push("--dry-run");
                     out.dry_run = true;
                     1
                 }
                 "--image" => {
-                    out.image = PathBuf::from(value()?);
+                    out.about_a_boot.push("--image");
+                    out.image = Some(PathBuf::from(value()?));
                     2
                 }
                 "--host" => {
@@ -1241,14 +1287,17 @@ impl Args {
                     2
                 }
                 "--readback" => {
+                    out.about_a_boot.push("--readback");
                     out.readback = Some(PathBuf::from(value()?));
                     2
                 }
                 "--fat32-check" => {
+                    out.about_a_boot.push("--fat32-check");
                     out.fat32_check = true;
                     1
                 }
                 "--boots" => {
+                    out.about_a_boot.push("--boots");
                     let n = value()?;
                     out.boots = n
                         .parse()
@@ -1258,6 +1307,7 @@ impl Args {
                     2
                 }
                 "--wait-secs" => {
+                    out.about_a_boot.push("--wait-secs");
                     let secs = value()?;
                     out.wait_secs = secs
                         .parse()
@@ -1267,6 +1317,18 @@ impl Args {
                 other => return Err(Refusal::Usage(format!("unknown argument {other:?}"))),
             };
             at += took;
+        }
+        // **`--install-sudoers` is an action, not a mode.** It installs the
+        // rule and exits; a command line that also describes a boot is asking
+        // for two things and would get both, which is how a reinstall came to
+        // flash whatever `--image` defaulted to.
+        if out.install_sudoers.is_some() && !out.about_a_boot.is_empty() {
+            return Err(Refusal::Usage(format!(
+                "--install-sudoers installs the rule and exits; it writes no disk and boots \
+                 nothing, so {} describes a boot it will not make. Run it alone, then run \
+                 the boot.",
+                out.about_a_boot.join(" and ")
+            )));
         }
         Ok(out)
     }
@@ -1357,12 +1419,23 @@ fn stage_and_install(
 /// boot's — the earlier ones are printed and not kept, because nothing yet
 /// judges them apart.
 pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
+    // **First and last**: the rule is installed and this returns. Nothing below
+    // runs, no disk is touched and no machine is rebooted — which is what
+    // `Args::parse` refuses a boot-describing flag beside this one for.
     if let Some(password) = &args.install_sudoers {
         install_sudoers(&args.target, password)?;
+        return Ok(None);
     }
     let driver = Driver { target: args.target.clone(), dry_run: args.dry_run };
 
-    let image = admit(&args.image, &args.target)?;
+    let Some(asked) = &args.image else {
+        return Err(Refusal::Usage(String::from(
+            "--image names the image to flash, and there is no default: the loop flashes \
+             what the metal profile staged, and a default was something an action that \
+             boots nothing could fall through to",
+        )));
+    };
+    let image = admit(asked, &args.target)?;
     println!(
         "image {}: {} bytes, ESP p{} at {}+{}, log p{} at {}+{}",
         image.path.display(),
@@ -1376,7 +1449,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     );
     // The pre-flash gate, before the disk is even asked what it is: what this
     // image will arm, judged against the only table that has ruled on any of it.
-    let armed = arms_are_admissible(&args.image)?;
+    let armed = arms_are_admissible(asked)?;
     println!("image {}: armed with {armed:?}", image.path.display());
 
     driver.require_sudo()?;
@@ -1566,6 +1639,120 @@ mod tests {
             key: PathBuf::from("/home/dev/.ssh/id_ed25519_toyos_runner"),
             ..Target::t14().expect("a test run has HOME")
         }
+    }
+
+    /// **An image with no bound on its own boot never reaches the stick.**
+    ///
+    /// The case, measured twice: a kernel that hung after its job list, and a
+    /// `--install-sudoers` that fell through into flashing an ordinary
+    /// `target/bootable.img` — 184 MB, no job list, no deadline — which booted
+    /// the T14 into a boot that never ends and cost the owner a power cut. Every
+    /// image the metal profile builds carries `boot-deadline=`; one that does
+    /// not is not one of them.
+    #[test]
+    fn an_image_with_no_bound_on_its_own_boot_is_refused() {
+        let armed = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|n| (*n).to_string()).collect()
+        };
+        let bound = alloc_deadline();
+
+        // The shape a stray `target/bootable.img` has: nothing armed at all.
+        let refusal = judge_arms(&armed(&[])).unwrap_err();
+        assert_eq!(refusal, Refusal::NoBound { staged_a_wedge: false });
+        let said = refusal.to_string();
+        assert!(said.contains(toyos_tco::DEADLINE_PARAM), "{said}");
+        assert!(said.contains("no power switch"), "{said}");
+        // A build fault and not the machine's, so exit 2 rather than 1.
+        assert!(!refusal.about_the_boot());
+
+        // The sharpest form, and it says so: an image that stops every CPU on
+        // purpose with nothing to end the boot it stopped.
+        let refusal = judge_arms(&armed(&[WEDGE_ARM])).unwrap_err();
+        assert_eq!(refusal, Refusal::NoBound { staged_a_wedge: true });
+        assert!(refusal.to_string().contains("stops every CPU on purpose"), "{refusal}");
+
+        // And with the bound, both go through — the wedge because it is paired.
+        assert_eq!(judge_arms(&armed(&[&bound])), Ok(()));
+        assert_eq!(judge_arms(&armed(&[WEDGE_ARM, &bound])), Ok(()));
+        // The bound does not excuse an arm nobody ruled on.
+        assert!(matches!(
+            judge_arms(&armed(&["nvme-write-selftest", &bound])),
+            Err(Refusal::Armed { .. })
+        ));
+    }
+
+    /// **The gate refuses an image with no bound and clears the bound itself.**
+    /// Two rules meeting on one token: `judge_arms` asks for a `boot-deadline=`
+    /// and then asks `flash_ruling` about every arm including that one, so a
+    /// bound the ruling table did not clear would make every metal image
+    /// unflashable. It is cleared as one of `build::VALUED_PARAMS`, and this is
+    /// what holds the two together.
+    #[test]
+    fn the_bound_the_gate_demands_is_a_bound_the_gate_clears() {
+        let bound = alloc_deadline();
+        assert!(crate::build::is_valued_param(&bound), "{bound}");
+        assert_eq!(flash_ruling(&bound), Some(Flash::Ok));
+        // And it is exactly what `tests/common/metal.rs` arms every image with:
+        // the same two constants, so a change to either moves both.
+        assert!(bound.starts_with(toyos_tco::DEADLINE_PARAM));
+        assert_eq!(judge_arms(&[bound]), Ok(()));
+    }
+    /// What every metal image is armed with, spelled the way `tests/common/metal.rs`
+    /// spells it.
+    fn alloc_deadline() -> String {
+        format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS)
+    }
+
+    /// **`--install-sudoers` is an action and not a mode.** It installed the
+    /// rule and then fell through into the ordinary loop with whatever
+    /// `--image` defaulted to; in a worktree where that file existed, the
+    /// orchestrator's reinstall flashed it and rebooted the T14 into a boot
+    /// with no job list and no bound.
+    #[test]
+    fn installing_the_rule_is_not_also_a_boot() {
+        let alone = ["--install-sudoers", "/tmp/pw"].map(String::from);
+        let args = Args::parse(&alone).expect("installing the rule alone");
+        assert!(args.install_sudoers.is_some());
+        assert!(args.about_a_boot.is_empty());
+
+        for flag in [
+            vec!["--image", "target/bootable.img"],
+            vec!["--readback", "target/metal/x"],
+            vec!["--fat32-check"],
+            vec!["--boots", "2"],
+            vec!["--dry-run"],
+            vec!["--wait-secs", "60"],
+        ] {
+            let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
+            words.extend(flag.iter().map(|w| (*w).to_string()));
+            let refusal = Args::parse(&words).unwrap_err();
+            let said = refusal.to_string();
+            assert!(said.contains(flag[0]), "{flag:?}: {said}");
+            assert!(said.contains("describes a boot it will not make"), "{said}");
+            // A command line and not a machine: exit 2.
+            assert!(!refusal.about_the_boot(), "{flag:?}");
+        }
+
+        // The flags that say *which machine* are not a boot, and the rule needs
+        // them: an install against another host or key is still an install.
+        let hosted = ["--install-sudoers", "/tmp/pw", "--host", "dev@t14", "--key", "/tmp/k"]
+            .map(String::from);
+        assert!(Args::parse(&hosted).is_ok());
+    }
+
+    /// **There is nothing to fall through to.** A default image was what let the
+    /// fall-through reach a disk at all; a command line that names none is
+    /// refused by name rather than given one.
+    #[test]
+    fn a_command_line_that_names_no_image_flashes_none() {
+        let bare: [String; 0] = [];
+        let args = Args::parse(&bare).expect("an empty command line parses");
+        assert_eq!(args.image, None);
+        let refusal = run(&args).unwrap_err();
+        let said = refusal.to_string();
+        assert!(said.contains("there is no default"), "{said}");
+        // A command line and not a machine: exit 2.
+        assert!(!refusal.about_the_boot());
     }
 
     /// The gate fails closed: a name nobody has ruled on is refused, and it is
