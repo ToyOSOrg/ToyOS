@@ -859,6 +859,75 @@ pub fn blackbox_done_chain(
     Ok(())
 }
 
+/// The boot deadline ends a machine nothing else in this tree can, and the next
+/// pass says what it ended.
+///
+/// **The negative control is most of the test.** `wedge-before-reset` stops
+/// every CPU taking scheduler passes at the shutdown syscall — after the job
+/// list has run, with preemption disabled and `IF` set. No watchdog counts that
+/// state: the chipset's is fed by any CPU and is disarmed one statement later,
+/// the runner's own bound reboots *through* this same syscall, and no panic
+/// path is reached because nothing failed. Without `boot-deadline` that boot
+/// runs until somebody presses the power button, which is the two T14 hangs
+/// this exists for.
+///
+/// The mutation that fails if the implementation is wrong is the arm: drop the
+/// `boot-deadline=` parameter and the same image wedges for ever, which is what
+/// `CHAIN_WAIT` then reports.
+pub fn boot_deadline_ends_a_wedge(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        chained(&["wedge-before-reset", WEDGE_DEADLINE]),
+    );
+    let first = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    first.must_say(&armed_line())?;
+
+    // One capture from the first boot's handoff to the pass that reports it, so
+    // the wedge's own line and the record read back off the page are both here.
+    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    // The control on the control, both halves: the machine reached the wedge,
+    // and then it did *not* reach the reset it was on its way to. A deadline
+    // that fired on a boot merely slower than its bound would satisfy the first
+    // and not the second, and `Rebooting.` is quiesce's own last word.
+    second.must_say(bootlog::WEDGE_STAGED)?;
+    second.must_not_say(bootlog::REBOOTING)?;
+    second.must_say(bootlog::PREVIOUS_PANIC)?;
+    // **After the harvest line.** This capture also carries the first boot's own
+    // console, where both of these were written live; only the loader's `| `
+    // lines come after the harvest line, so this is the page and not the wire.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
+    // And the tail of a ring nothing was draining crossed the reset with it,
+    // which is the whole reason the record carries one.
+    second.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
+    second.must_not_say(&armed_and_nothing_else())?;
+    second.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    second.must_not_say(bootlog::LOADER_LAST_LINE)?;
+    ended_in_a_reset(&mut resets)?;
+    drop(qemu);
+
+    eprintln!("  [power] a wedge with every CPU stopped ended itself and said so off the page");
+    Ok(())
+}
+
+/// The bound this test arms, as the parameter spells it.
+///
+/// **Short, and short on purpose.** `toyos_tco::WEDGE_BOUND_MS` is the bound a
+/// T14 boot runs under and is derived from the runner's own; what is under test
+/// here is the poll, the seal and the reset, and the bound is the one thing
+/// about the mechanism a boot may legitimately differ on. Wide enough that a
+/// `jobcase` boot reaches its shutdown syscall under TCG first, which
+/// [`bootlog::WEDGE_STAGED`] above is the assertion about.
+const WEDGE_DEADLINE: &str = "boot-deadline=15000";
+
 /// A boot that hung is bounded by the stick, and the third boot is free again.
 ///
 /// **The defect trapped the machine in ToyOS.** `bootnext::point_at_us` aims
@@ -1011,6 +1080,34 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
+    Ok(())
+}
+
+/// The metal half of [`boot_deadline_ends_a_wedge`]: a T14 boot that wedged on
+/// purpose ended itself, and the pass after the reset read why off the page.
+///
+/// **The only evidence a wedge can leave on this machine.** `logd` writes the
+/// kernel log to the stick, and a wedged boot's `logd` never runs again — so
+/// everything after the wedge exists only in the record ring, and the black box
+/// is the one channel that carries a copy of it across the reset.
+pub fn deadline_wedge_chain(
+    kernel: &serial::Serial,
+    after: &serial::Serial,
+) -> Result<(), String> {
+    // The control: the machine reached the staged wedge, and then never reached
+    // the reset it was one statement away from.
+    kernel.must_say(bootlog::WEDGE_STAGED)?;
+    says_nothing_of(kernel, bootlog::REBOOTING)?;
+
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?.to_string();
+    // The tail crossed with it, which is what makes the record an instrument
+    // and not just a verdict.
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
+    says_nothing_of(after, &armed_and_nothing_else())?;
+    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
+    says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
+    eprintln!("  [power] {}", said.trim());
     Ok(())
 }
 

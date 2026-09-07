@@ -71,6 +71,10 @@ struct Point {
 }
 
 impl Point {
+    // The lint's case is a `const` *read* through, which copies the atomics
+    // instead of sharing them. This one is only ever the initialiser of the
+    // `static` below, which is the array's own storage.
+    #[allow(clippy::declare_interior_mutable_const)]
     const EMPTY: Self = Self {
         op: AtomicU64::new(0),
         op_bytes: AtomicU64::new(0),

@@ -131,7 +131,7 @@ pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
     // staged identity must still read back under it.
     with_page(|page, _stamp, _identity| {
         let opened = match toyos_blackbox::recover(page) {
-            Some((state @ (State::Panic | State::Done), stamp, identity, text)) => {
+            Some((state @ (State::Panic | State::Done | State::Wedged), stamp, identity, text)) => {
                 Some((state, stamp, identity, text.len()))
             }
             Some((State::Armed | State::Fault, ..)) | None => None,
@@ -143,6 +143,24 @@ pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
         appended = true;
     });
     appended
+}
+
+/// Seal why the boot deadline ended this machine, and the tail of the log ring
+/// nobody was draining.
+///
+/// Called from `crate::deadline`'s expiry, which runs inside an interrupt entry
+/// on whichever CPU noticed the bound pass: the same no-lock, no-allocation,
+/// nothing-may-panic region [`record_panic`] runs in, for the stronger reason
+/// that every lock in this kernel is one the wedge may be holding.
+pub fn record_wedge(said: core::fmt::Arguments, records: &[u8]) {
+    with_page(|page, stamp, identity| {
+        let mut report = toyos_blackbox::Report::new(page);
+        // Why first, then as much of the tail as is left: a report cut to its
+        // tail alone does not say what ended the machine.
+        let _ = core::fmt::Write::write_fmt(&mut report, said);
+        report.tail(records, toyos_blackbox::RECORD_OPENS_WITH);
+        report.seal(State::Wedged, stamp, identity);
+    });
 }
 
 fn seal(state: State, text: &[u8]) {

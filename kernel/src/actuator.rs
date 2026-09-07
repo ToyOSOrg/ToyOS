@@ -34,6 +34,11 @@ macro_rules! actuators {
 }
 
 actuators! {
+    /// Wedge the machine at the shutdown syscall — after the job list has run
+    /// and before anything is torn down — instead of resetting. The negative
+    /// control on `crate::deadline`: nothing else in this kernel ends it.
+    wedge_before_reset = "wedge-before-reset";
+
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 

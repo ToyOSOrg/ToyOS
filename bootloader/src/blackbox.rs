@@ -140,6 +140,21 @@ pub fn harvest(
                 }
             }
         }
+        // The kernel ended itself on its own bound: nothing failed an assertion,
+        // so the text is why and the tail of a log ring nobody was draining —
+        // which is the whole point of it, and is printed the same way a panel is.
+        State::Wedged => {
+            lines.push(alloc::format!(
+                "{PREVIOUS_PANIC} the last boot read {}, so its own deadline ended it and this \
+                 chain ends here",
+                state.named()
+            ));
+            for line in text.split(|byte| *byte == b'\n') {
+                if !line.is_empty() {
+                    lines.push(alloc::format!("| {}", Ascii(line)));
+                }
+            }
+        }
         // The one finding an absence makes: the loader armed it, and nothing in
         // that kernel — not even its exception entry — reached the page.
         State::Armed => lines.push(alloc::format!(

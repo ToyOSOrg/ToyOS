@@ -45,6 +45,13 @@ pub(super) fn sys_log_read(
 }
 
 fn quiesce(last: &str) {
+    // Before the watchdog is disarmed and before a byte is synced: what the
+    // control stages is a boot that ran its job list and then stopped, which is
+    // the shape the T14 hangs in.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::wedge_before_reset() {
+        crate::deadline::stage_a_wedge();
+    }
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::drivers::watchdog::disarm();
     log!("Syncing filesystems...");

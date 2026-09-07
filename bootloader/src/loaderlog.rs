@@ -81,7 +81,7 @@ pub fn volume_handle(
     guid: &[u8; 16],
 ) -> Result<Handle, alloc::string::String> {
     let Ok(handles) = bs.locate_handle_buffer(SearchType::from_proto::<SimpleFileSystem>()) else {
-        return Err(alloc::format!("this machine publishes no filesystem at all"));
+        return Err("this machine publishes no filesystem at all".into());
     };
     let mut on_gpt = 0usize;
     let found = handles.iter().find(|handle| match unique_guid(bs, **handle) {
@@ -94,7 +94,7 @@ pub fn volume_handle(
     match found {
         Some(&handle) => Ok(handle),
         None => Err(match on_gpt {
-            0 => alloc::format!("no filesystem here sits on a GPT partition"),
+            0 => "no filesystem here sits on a GPT partition".into(),
             n => alloc::format!("none of this machine's {n} GPT filesystems is {guid:02x?}"),
         }),
     }

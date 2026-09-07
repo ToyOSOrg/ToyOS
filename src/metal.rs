@@ -33,14 +33,16 @@ const RETURN_ALLOWANCE_SECS: u64 = 300;
 /// Every bound a metal boot runs under, by the constant that arms it: the
 /// firmware's over the span before the handoff, the TCO the loader arms there
 /// and the kernel keeps feeding, the runner's own over its job list — which no
-/// watchdog covers, because a kernel with an unfinished job is alive — and the
-/// panicked kernel's own over its panel, which is what ends a boot on a machine
-/// whose chipset watchdog does not count.
+/// watchdog covers, because a kernel with an unfinished job is alive — the
+/// panicked kernel's own over its panel, and the kernel's own over the whole
+/// boot, which is the only one that reaches a machine still executing and
+/// making no progress.
 const WATCHDOG_BOUNDS_MS: &[u64] = &[
     toyos_tco::FIRMWARE_BOUND_MS,
     toyos_tco::BOUND_MS,
     toyos_tco::JOB_BOUND_MS,
     toyos_tco::PANIC_BOUND_MS,
+    toyos_tco::WEDGE_BOUND_MS,
 ];
 
 /// How long the machine has to answer `ssh` again after `reboot`.
@@ -665,6 +667,12 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // stick's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.
     ("blackbox-foreign-identity", Flash::Ok),
+    // **The one arm that deliberately stops this machine.** At the shutdown
+    // syscall, after the job list, every CPU stops taking scheduler passes.
+    // Admissible only because `kernel/src/deadline.rs` is what ends it, which
+    // [`arms_are_admissible`] refuses an image without: it reaches no device
+    // register, writes no firmware state, and the boot after it is ordinary.
+    (WEDGE_ARM, Flash::Ok),
     (
         "quiesce-late-word",
         Flash::Never(
@@ -681,11 +689,17 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     ),
 ];
 
+/// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
+/// [`arms_are_admissible`] refuses an image carrying it with no bound to end it.
+pub const WEDGE_ARM: &str = "wedge-before-reset";
+
 /// [`FLASHABLE`]'s ruling on `name`, or `None` where nobody has made one.
 pub fn flash_ruling(name: &str) -> Option<Flash> {
-    // The black-box page's address carries a value and is not a name: every
-    // image the harness builds has one, and it arms no instrument.
-    if name.starts_with(toyos_blackbox::PARAM) {
+    // The two parameters that carry a value are not names: the black-box page's
+    // address, which every image the harness builds has, and the boot
+    // deadline's bound. Neither arms an instrument, and the second is what ends
+    // a boot this loop would otherwise wait 360 s for and then need a hand on.
+    if crate::build::is_valued_param(name) {
         return Some(Flash::Ok);
     }
     FLASHABLE.iter().find(|(row, _)| *row == name).map(|(_, verdict)| *verdict)
@@ -697,6 +711,18 @@ pub fn flash_ruling(name: &str) -> Option<Flash> {
 fn arms_are_admissible(path: &Path) -> Result<Vec<String>, Refusal> {
     let armed = crate::image::params_of(path)
         .map_err(|why| Refusal::File { path: path.display().to_string(), why })?;
+    // **The pairing, and it is the whole reason the wedge arm is admissible.**
+    // An image that stages a wedge and carries no bound to end the boot it
+    // stops is a machine waiting for a hand on a power button nobody is beside.
+    if armed.iter().any(|name| name == WEDGE_ARM)
+        && !armed.iter().any(|name| name.starts_with(toyos_tco::DEADLINE_PARAM))
+    {
+        return Err(Refusal::Armed {
+            name: WEDGE_ARM.to_string(),
+            why: "it stops every CPU on purpose, and this image carries no `boot-deadline=` \
+                  to end the boot it stops",
+        });
+    }
     for name in &armed {
         match flash_ruling(name) {
             Some(Flash::Ok) => {}
@@ -1507,10 +1533,9 @@ pub fn reported_and_booted_nothing(loader: &str, log: &str) -> Option<String> {
     // it found is the half that identifies the record.
     let said = loader
         .lines()
-        .filter(|line| {
+        .rfind(|line| {
             line.contains(bootlog::PREVIOUS_PANIC) || line.contains(bootlog::BLACKBOX_HEAD)
         })
-        .next_back()
         .unwrap_or(ended);
     Some(said.trim().to_string())
 }
@@ -1879,7 +1904,7 @@ mod tests {
         assert_eq!(toyos_tco::JOB_BOUND_MS, 60_000);
         assert_eq!(toyos_tco::PANIC_BOUND_MS, 60_000);
         assert_eq!(RETURN_ALLOWANCE_SECS, 300);
-        assert_eq!(return_secs(), 360);
+        assert_eq!(return_secs(), 420);
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::FIRMWARE_BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::BOUND_MS));
         assert!(WATCHDOG_BOUNDS_MS.contains(&toyos_tco::JOB_BOUND_MS));

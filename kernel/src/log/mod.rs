@@ -249,5 +249,8 @@ macro_rules! boot_phase {
             ),
         );
         $crate::drivers::panic_console::boot_checkpoint();
+        // The deadline seals where the machine was, and this is the only word
+        // for it: a phase not in `deadline::PHASES` does not compile.
+        $crate::deadline::reached($crate::deadline::index_of($name));
     }};
 }

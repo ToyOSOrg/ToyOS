@@ -681,6 +681,11 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // the bound the first boot counts down.
     ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
+    // The one bound in this tree that ends a machine nothing else can: a boot
+    // whose every CPU has stopped taking scheduler passes, which is what the
+    // T14 hung in twice. Two boots and a 25 s bound counted down in the guest,
+    // so it is priced rather than free, and no host clock is in the verdict.
+    ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
     // Four chained boots, one per way this kernel reaches a reset, each
     // anchored to the bound its own first boot counts down.
     ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
@@ -1414,6 +1419,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs { arms: JOBCASE, judge: |b| power::done_chain(&b[0].after_the_reset()?) },
     ),
     (
+        // Its own boot, and it must not share one: it is the only arm in this
+        // profile that deliberately leaves the machine unable to end its own
+        // boot, and what it judges is that the machine ended it anyway.
+        "boot_deadline_ends_a_wedge",
+        metal::Metal::Runs {
+            arms: &[metal::once("deadlinewedge", "tests/jobcase", &["wedge-before-reset"], &[])],
+            judge: |b| power::deadline_wedge_chain(&b[0].kernel(), &b[0].after_the_reset()?),
+        },
+    ),
+    (
         // Its own boot, and it must not share one: it deliberately leaves the
         // page holding a record no stick owns, and a boot that then read it as
         // a predecessor's is exactly what the arm above judges.
@@ -1740,7 +1755,7 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
 /// writers' lines out before comparing; this reads one pipe only the case can
 /// write to, so there is nothing to filter and no line that can be attributed
 /// to the wrong writer.
-
+///
 /// The C cases that do **not** go on the T14, and what each one's boot said.
 ///
 /// Measured, like `METAL_SKIP`: the whole corpus was staged onto one
@@ -9645,6 +9660,9 @@ fn run_machine_test(
         "panic_key_holds" => power::panic_key_holds(test_config, c_bins, rust_bins),
         "blackbox_panic_chain" => power::blackbox_panic_chain(test_config, c_bins, rust_bins),
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
+        "boot_deadline_ends_a_wedge" => {
+            power::boot_deadline_ends_a_wedge(test_config, c_bins, rust_bins)
+        }
         "usb_reset_hands_devices_back" => {
             power::usb_reset_hands_devices_back(test_config, c_bins, rust_bins)
         }
