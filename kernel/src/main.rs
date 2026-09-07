@@ -369,6 +369,10 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     mm::init(maps, &reserved);
     drivers::panic_console::remap();
 
+    // Before the first table is decoded for its contents: what a machine owner
+    // reads off a refusal below is which tables the firmware published at all.
+    acpi::inventory(kernel_args.rsdp_addr);
+
     // `init_bsp` loads the IDT partway through, as early as this CPU's `gs:`
     // allows: a fault in any later phase then diagnoses instead of stopping in
     // a handler the firmware left behind.
@@ -653,6 +657,15 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     iod::start();
 
     smp::set_ready();
+
+    // After the release, because a shootdown waits on CPUs that are not
+    // answering until it; before the idle loop, because nothing else may be
+    // running while the distribution is measured.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::tlb_shootdown_bench() {
+        arch::tlb::bench();
+    }
+
     crate::scheduler::enter_idle_loop();
 }
 

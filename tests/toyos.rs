@@ -190,6 +190,11 @@ const MAX_SHARED_REBOOTS: usize = 3;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // **Its exit code is a measurement, not a verdict**, and the shared block
+    // judges every member on `exit=0` alone — so it would red on every boot
+    // that measured anything. It also needs the real-time band, which only
+    // `tests/latencycase` endows. `latency_wake` runs it there.
+    "cyclictest",
     // Its verdict is a property of the *console capture*, which only a boot of
     // its own can hold: in the shared boot every other binary's output is in the
     // same stream. `console_line_atomicity` runs it.
@@ -511,6 +516,25 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("irq_census_conservation", Sched::Parallel, Tier::Fast),
     ("control_regs", Sched::Parallel, Tier::Fast),
     ("control_regs_negative", Sched::Parallel, Tier::Fast),
+    // The boot facts the metal suite reads off a machine's own records: every
+    // CPU the firmware named came up and none of their timestamp counters
+    // trails the BSP's; the physical memory manager's accounting against the
+    // firmware map balances to the byte; every ACPI table this kernel goes on
+    // to decode checksummed; the TSC the whole machine is timed by agrees with
+    // the frequency the part itself states; the PCI inventory's function count
+    // matches its rows; and one machine-wide TLB shootdown's cost is a
+    // distribution rather than one boot's average. Every verdict is arithmetic
+    // over records, with no clock in the judging, so all six are Parallel.
+    ("smp_roster_and_tsc_trail", Sched::Parallel, Tier::Fast),
+    ("pmm_accounting", Sched::Parallel, Tier::Fast),
+    ("acpi_table_inventory", Sched::Parallel, Tier::Fast),
+    ("timer_calibration", Sched::Parallel, Tier::Fast),
+    ("pci_inventory", Sched::Parallel, Tier::Fast),
+    ("tlb_shootdown_cost", Sched::Parallel, Tier::Fast),
+    // What a waiter in the real-time band pays to be woken, as a distribution.
+    // Serial: it is the one registration here whose verdict is a *time*, and a
+    // wake latency measured beside eleven other guests is the host's schedule.
+    ("latency_wake", Sched::Serial, Tier::Nightly),
     ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Fast),
     ("input_merge", Sched::Parallel, Tier::Fast),
     ("metal_sim_input", Sched::Parallel, Tier::Fast),
@@ -11781,6 +11805,48 @@ fn run_machine_test(
             control_regs(qemu.boot_log(), CPUS)
         }
         "control_regs_negative" => control_regs_negative(test_config, c_bins, rust_bins),
+        "smp_roster_and_tsc_trail" => {
+            // Eight, which is the T14's own count and this suite's ceiling.
+            const CPUS: u32 = 8;
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { smp: CPUS, ..Default::default() },
+            );
+            smp_roster_and_tsc_trail(qemu.boot_log(), CPUS)
+        }
+        "pmm_accounting" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            pmm_accounting(qemu.boot_log())
+        }
+        "acpi_table_inventory" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            acpi_table_inventory(qemu.boot_log())
+        }
+        "timer_calibration" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            timer_calibration(qemu.boot_log())
+        }
+        "pci_inventory" => {
+            let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
+            pci_inventory(qemu.boot_log())
+        }
+        "tlb_shootdown_cost" => {
+            const CPUS: u32 = 8;
+            let qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions {
+                    smp: CPUS,
+                    kernel_params: &["tlb-shootdown-bench"],
+                    ..Default::default()
+                },
+            );
+            tlb_shootdown_cost(qemu.boot_log(), CPUS)
+        }
+        "latency_wake" => latency_wake(),
         "smp_failed_ap_leaves_no_hole" => {
             smp_failed_ap_leaves_no_hole(test_config, c_bins, rust_bins)
         }
@@ -14039,6 +14105,344 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     }
 
     eprintln!("  [control_regs] {cpus} CPUs, cr0={cr0:#010x} cr4={cr4:#010x}");
+    Ok(())
+}
+
+/// The word between `head` and `tail` on the first line of `log` carrying
+/// **both**, which is how every judge below reads a field out of a record.
+///
+/// Both, not just the head: a boot log has many lines that begin a field name
+/// and do not carry the field, and a reader that took the first of those would
+/// answer about the wrong record rather than say it found none.
+fn field_between<'a>(log: &'a str, head: &str, tail: &str) -> Result<&'a str, String> {
+    log.lines()
+        .find_map(|line| {
+            let (_, rest) = line.split_once(head)?;
+            let (found, _) = rest.split_once(tail)?;
+            Some(found)
+        })
+        .ok_or_else(|| format!("no record carrying {head:?} and then {tail:?}"))
+}
+
+/// The same, parsed.
+fn number_between(log: &str, head: &str, tail: &str) -> Result<u64, String> {
+    let word = field_between(log, head, tail)?;
+    word.trim().parse().map_err(|_| format!("{head:?} is followed by {word:?}, not a number"))
+}
+
+/// Every CPU the firmware named is scheduling, every one of them holds the
+/// control-register declaration, and none of their timestamp counters trails
+/// the BSP's.
+///
+/// **The third is the one nothing in this tree ever asked.**
+/// `clock::nanos_since_boot` subtracts a single BSP-sampled origin whatever CPU
+/// reads it, so a CPU whose TSC starts behind that origin saturates to zero and
+/// stamps every record it writes as the oldest thing the machine has
+/// (`issues/kernel/ap-tsc-trail-is-assumed-and-never-checked.md`). The kernel
+/// brackets each AP's first `rdtsc` between two of the BSP's, taken either side
+/// of a bring-up that is serialised — so "inside" is what a synchronised
+/// counter gives and nothing else does. **QEMU cannot refute it**: every guest
+/// TSC is synthesised from one host clock, which is exactly why the assertion
+/// is here to be run on metal.
+fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
+    let online = number_between(log, "SMP: ", " of ")?;
+    let named = number_between(log, " of ", " MADT cpus online")?;
+    if online != u64::from(cpus) || named != u64::from(cpus) {
+        return Err(format!(
+            "the machine was given {cpus} CPUs, its MADT named {named} and {online} came up"
+        ));
+    }
+    let bracketed = number_between(log, "MADT cpus online, ", " of ")?;
+    let aps = u64::from(cpus) - 1;
+    if bracketed != aps {
+        let outside: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains(" the BSP's ") && !l.contains("inside"))
+            .collect();
+        return Err(format!(
+            "{bracketed} of {aps} APs read a TSC inside the BSP's bracket; the rest: {outside:#?}"
+        ));
+    }
+    let checked = number_between(log, "control_regs: ", " of ")?;
+    if checked != u64::from(cpus) {
+        return Err(format!("{checked} of {cpus} CPUs were checked against the declaration"));
+    }
+    let widest = log
+        .lines()
+        .filter_map(|l| l.split(" (").nth(1)?.split(" cycles wide)").next()?.parse::<u64>().ok())
+        .max()
+        .unwrap_or_default();
+    eprintln!(
+        "  [smp] {online} CPUs online, {bracketed} AP TSCs inside a BSP bracket at most \
+         {widest} cycles wide"
+    );
+    Ok(())
+}
+
+/// The physical memory manager's accounting against the firmware map, to the
+/// byte.
+///
+/// Every byte UEFI called usable becomes exactly one of three things: a whole
+/// 2 MiB frame the bitmap manages, a frame withheld because a reserved region
+/// touches it, or a fragment lost to an entry that does not begin and end on a
+/// 2 MiB boundary. The kernel prints all four numbers; this re-adds them, so
+/// the sum is checked against the firmware's total and not against itself.
+fn pmm_accounting(log: &str) -> Result<(), String> {
+    let firmware = number_between(log, "the firmware map calls ", " bytes usable")?;
+    let managed = number_between(log, " managed=", " ")?;
+    let withheld = number_between(log, " withheld=", " ")?;
+    let lost = number_between(log, " unaligned=", ",")?;
+    if managed + withheld + lost != firmware {
+        return Err(format!(
+            "the firmware map calls {firmware} bytes usable and the PMM accounts for \
+             {managed} + {withheld} + {lost} = {}",
+            managed + withheld + lost
+        ));
+    }
+    if managed == 0 {
+        return Err("the PMM manages no memory at all".to_string());
+    }
+    eprintln!(
+        "  [pmm] {} MiB managed, {withheld} B withheld, {lost} B lost to alignment, of \
+         {} MiB the firmware called usable",
+        managed / (1024 * 1024),
+        firmware / (1024 * 1024),
+    );
+    Ok(())
+}
+
+/// Every ACPI table this kernel goes on to decode was reached through a
+/// checksummed RSDP and XSDT and checksummed itself.
+///
+/// The DMAR is not required: a guest with no `intel-iommu` publishes none, and
+/// this host boots one. What is required is that a table the kernel *does* read
+/// is never one it skipped the validation of, which is what the count says.
+fn acpi_table_inventory(log: &str) -> Result<(), String> {
+    const NEEDED: &[&str] = &["APIC", "FACP", "HPET", "MCFG"];
+    for signature in NEEDED {
+        if !log.lines().any(|l| l.contains(&format!("ACPI: {signature} at ")) && l.contains("checksummed"))
+        {
+            return Err(format!(
+                "no checksummed {signature} in the boot log; the inventory said: {:#?}",
+                log.lines().filter(|l| l.starts_with("[") && l.contains("ACPI: ")).collect::<Vec<_>>()
+            ));
+        }
+    }
+    let validated = number_between(log, "ACPI: ", " of ")
+        .map_err(|why| format!("no inventory summary: {why}"))?;
+    if validated < NEEDED.len() as u64 {
+        return Err(format!("{validated} tables checksummed and this kernel decodes {NEEDED:?}"));
+    }
+    let rows: Vec<&str> = log
+        .lines()
+        .filter_map(|l| l.split("ACPI: ").nth(1))
+        .filter(|l| l.contains("checksummed"))
+        .collect();
+    eprintln!("  [acpi] {validated} tables checksummed: {rows:#?}");
+    Ok(())
+}
+
+/// The TSC the whole machine is timed by, against the frequency the part itself
+/// states.
+///
+/// **The one cross-source check a boot has.** Everything else the kernel times
+/// is derived from the HPET calibration, so it can only agree with itself;
+/// CPUID leaf 15H's crystal ratio and leaf 16H's base frequency are the CPU's
+/// own statement, arrived at by neither the HPET nor the counting loop. A part
+/// that states neither is a fact about the part, not a failure — `qemu64`, this
+/// host's guest CPU, is one — so the ppm bound is asserted only where a
+/// statement exists.
+fn timer_calibration(log: &str) -> Result<(), String> {
+    /// A crystal-derived TSC and a 50 ms HPET calibration disagree by the
+    /// calibration's own quantisation, not by a part per thousand. Anything
+    /// wider is a machine whose two timebases are not counting the same second.
+    const CEILING_PPM: u64 = 10_000;
+
+    let lapic_hz = number_between(log, "ticks/10ms, so ", "Hz")?;
+    if lapic_hz == 0 {
+        return Err("the LAPIC timer calibrated to no frequency at all".to_string());
+    }
+    let measured = number_between(log, "clock: TSC measured ", "Hz against the HPET")?;
+    if measured == 0 {
+        return Err("the TSC calibrated to no frequency at all".to_string());
+    }
+    let Ok(stated) = number_between(log, "CPUID states ", "Hz,") else {
+        let why = log
+            .lines()
+            .find(|l| l.contains("CPUID leaves 15H and 16H"))
+            .ok_or("neither a stated frequency nor the record saying there is none")?;
+        eprintln!("  [timer] TSC {measured}Hz, LAPIC {lapic_hz}Hz — {}", why.trim());
+        return Ok(());
+    };
+    let ppm = number_between(log, "Hz, ", "ppm apart")?;
+    if ppm > CEILING_PPM {
+        return Err(format!(
+            "the TSC measures {measured}Hz against the HPET and CPUID states {stated}Hz — \
+             {ppm}ppm apart, over the {CEILING_PPM}ppm this bound allows"
+        ));
+    }
+    eprintln!(
+        "  [timer] TSC {measured}Hz measured, {stated}Hz stated, {ppm}ppm apart; LAPIC {lapic_hz}Hz"
+    );
+    Ok(())
+}
+
+/// Every PCI function the kernel enumerated is in the log with its identity and
+/// the memory windows firmware assigned it, and the count it announced is the
+/// number of rows it wrote.
+///
+/// The rows are what a metal profile pins a machine's inventory against; what
+/// is checkable without one is that the two halves agree, which is what fails
+/// when enumeration stops early or a row goes unwritten.
+fn pci_inventory(log: &str) -> Result<(), String> {
+    let announced = number_between(log, "PCI: Enumeration complete, ", " functions")?;
+    let rows: Vec<&str> = log.lines().filter_map(|l| l.split("  PCI ").nth(1)).collect();
+    if rows.len() as u64 != announced {
+        return Err(format!(
+            "the kernel announced {announced} functions and wrote {} rows",
+            rows.len()
+        ));
+    }
+    if announced == 0 {
+        return Err("the kernel enumerated no PCI function at all".to_string());
+    }
+    let mut with_windows = 0;
+    for row in &rows {
+        // Identity and window list on one line, so an inventory is one row per
+        // function rather than a join the reader has to make.
+        if !row.contains("vendor=") || !row.contains("device=") || !row.contains(" bars=[") {
+            return Err(format!("a PCI row is not an inventory row: {row:?}"));
+        }
+        if !row.contains(" bars=[]") {
+            with_windows += 1;
+        }
+    }
+    eprintln!("  [pci] {announced} functions, {with_windows} of them with assigned windows");
+    Ok(())
+}
+
+/// What one machine-wide TLB shootdown costs its initiator, as a distribution
+/// over a fixed count against every CPU the machine brought up.
+///
+/// The `tlb:` census is a sum and a maximum over whatever the boot happened to
+/// unmap, so its average moves with the workload and its tail is one sample.
+/// This is the same path measured under a stated stimulus, which is what makes
+/// two boots comparable. **The number itself is a metal number**: this host's
+/// guests are TCG, which prices an IPI and an uncontended atomic unlike
+/// hardware, so what is asserted here is the shape — sorted, non-zero, and the
+/// CPUs it was measured across.
+fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(), String> {
+    // Scoped to the bench's own line: the `tlb:` census carries a `max=` too,
+    // in microseconds, and a reader over the whole log would take whichever
+    // came first.
+    let line = log
+        .lines()
+        .find(|l| l.contains("tlb: bench "))
+        .ok_or("no `tlb: bench` record — the actuator armed nothing")?;
+    let across = number_between(line, "tlb: bench 256 shootdowns across ", " cpus")?;
+    if across != u64::from(cpus) {
+        return Err(format!("the bench ran across {across} CPUs and the machine was given {cpus}"));
+    }
+    let read = |head: &str| number_between(line, head, "ns");
+    let (min, p50, p90, p99, max) =
+        (read("min=")?, read("p50=")?, read("p90=")?, read("p99=")?, read("max=")?);
+    if min == 0 {
+        return Err("the fastest of 256 machine-wide shootdowns took no time at all".to_string());
+    }
+    if !(min <= p50 && p50 <= p90 && p90 <= p99 && p99 <= max) {
+        return Err(format!(
+            "the distribution is not sorted: min={min} p50={p50} p90={p90} p99={p99} max={max}"
+        ));
+    }
+    eprintln!(
+        "  [tlb] 256 shootdowns across {across} CPUs: min={min}ns p50={p50}ns p90={p90}ns \
+         p99={p99}ns max={max}ns"
+    );
+    Ok(())
+}
+
+/// What a waiter in the real-time band pays to be woken, and — the half this
+/// suite exists for — that the number reaches a machine with no console.
+///
+/// `tests/latencycase` is a job-list boot: no host types at it, the runner runs
+/// `cyclictest` and then the scheduler stress suite, and the last job hands the
+/// machine back to firmware. That is the T14's own shape, so both channels are
+/// read here: the console, which the T14 does not have, and the kernel's
+/// `exit: <name> pid=N code=N` record on the log volume, which is the only word
+/// a program gets off that machine. **They must carry the same number**, or the
+/// metal readback is reporting something the guest did not measure.
+fn latency_wake() -> Result<(), String> {
+    /// The p99 a guest of this host may take. TCG under a twelve-wide suite is
+    /// not a latency instrument, so this is a liveness bound and not the
+    /// number: the number is the T14's, held in the metal profile.
+    const HOST_CEILING_US: u64 = 200;
+    const WAIT: Duration = Duration::from_secs(60);
+
+    let config = compile::repo_root().join("tests/latencycase/system.toml");
+    let case = config.parent().expect("system.toml has a directory");
+
+    // Built here and written out, because the boot deletes the image it built
+    // and the log volume is read after the guest is gone.
+    let image_path = common::lane::dir().join("latencycase-boot.img");
+    let image = common::qemu::build_boot_image(case, &[], &[], &[]);
+    fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
+    let (start, len) = common::volumes::log_extent(&image, &image_path)?;
+
+    let mut qemu = QemuInstance::boot_with_options(
+        case,
+        &[],
+        &[],
+        BootOptions { qmp: true, boot_image: Some(image_path.clone()), ..Default::default() },
+    );
+    let mut stop = common::qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let reason = stop.reason();
+    let console = qemu.drain_serial(WAIT);
+    drop(qemu);
+
+    if reason.as_deref() != Some("guest-reset") {
+        return Err(format!(
+            "the job list did not hand the machine back to firmware ({reason:?})\n{console}"
+        ));
+    }
+
+    // The console's copy: the marker the runner writes around every job.
+    let printed = number_between(&console, "===TEST_END test_rs_cyclictest exit=", "===")?;
+    let distribution = console
+        .lines()
+        .find(|l| l.contains("cyclictest: "))
+        .ok_or("cyclictest printed no distribution")?;
+    if printed == 255 {
+        return Err(format!("cyclictest did not measure anything: {distribution}"));
+    }
+    if !console.contains("===TEST_END test_rs_sched_stress exit=0===") {
+        return Err(format!("the scheduler stress suite did not pass:\n{console}"));
+    }
+
+    // The volume's copy, which is the whole of what a machine with no serial
+    // port gives back.
+    let (name, log) = common::volumes::newest_log(&image_path, start, len)?;
+    let text = String::from_utf8_lossy(&log);
+    let record = text
+        .lines()
+        .find(|l| l.contains("exit: test_rs_cyclictest pid="))
+        .ok_or_else(|| format!("{name} carries no `exit: test_rs_cyclictest` record\n{text}"))?;
+    let recorded = number_between(record, " code=", " ")?;
+    if recorded != printed {
+        return Err(format!(
+            "the console says cyclictest exited {printed} and {name}'s kernel record says \
+             {recorded} — the metal channel and the QEMU one disagree"
+        ));
+    }
+    bootlog::verdict(&text).map_err(|unfit| format!("{name}: {unfit}\n{text}"))?;
+
+    if printed > HOST_CEILING_US {
+        return Err(format!(
+            "a real-time waiter's p99 wake lateness is {printed}us on this host, over the \
+             {HOST_CEILING_US}us liveness bound: {distribution}"
+        ));
+    }
+    eprintln!("  [latency] {}", distribution.trim());
+    eprintln!("  [latency] p99 {printed}us, off the stick's own `exit: cyclictest` record too");
     Ok(())
 }
 

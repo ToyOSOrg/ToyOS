@@ -76,6 +76,28 @@ pub fn init(hpet_base: u64) {
 
     let tsc_freq_mhz = 1_000_000_000_000_000u64 / tsc_period_fs / 1_000_000;
     log!("TSC: {}MHz (period={}fs, calibrated over {}ms)", tsc_freq_mhz, tsc_period_fs, calibration_ns / 1_000_000);
+
+    // **The one cross-source check this machine offers.** Everything else the
+    // kernel times is derived from the measurement just taken, so it could only
+    // agree with itself; CPUID 15H/16H is the part's own statement of the same
+    // frequency, arrived at by neither the HPET nor this counting loop, and the
+    // parts-per-million between the two is what a metal profile can hold a
+    // ceiling against.
+    let measured_hz = 1_000_000_000_000_000u64 / tsc_period_fs;
+    match cpuid_tsc_hz() {
+        Some(stated) => {
+            let apart = measured_hz.abs_diff(stated);
+            log!(
+                "clock: TSC measured {measured_hz}Hz against the HPET, CPUID states {stated}Hz, \
+                 {}ppm apart",
+                apart * 1_000_000 / stated,
+            );
+        }
+        None => log!(
+            "clock: TSC measured {measured_hz}Hz against the HPET; CPUID leaves 15H and 16H \
+             stating no frequency, so nothing independent confirms it"
+        ),
+    }
 }
 
 /// Whether [`nanos_since_boot`] measures anything yet; false before [`init`].

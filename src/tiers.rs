@@ -203,6 +203,19 @@ pub struct Relegated {
 /// Every test the fast tier does not run.
 pub const RELEGATED: &[Relegated] = &[
     Relegated {
+        test: "latency_wake",
+        ci_ms: UNMEASURED_MS,
+        why: Why::TimerAnchored,
+        guards: "What a waiter in the real-time band pays to be woken, as a distribution over \
+                 ten thousand programmed wakes — and, beside it, that the number reaches a \
+                 machine with no serial port at all, through the kernel's own `exit:` record on \
+                 the log volume. Nothing else in the tree measures wake latency against a \
+                 programmed timer: soundd's figure is a maximum over a window, taken against a \
+                 DLL's prediction of a DMA completion and needing a sound card to exist at all, \
+                 and `toyos-sched`'s bound on the same quantity runs in a simulator where no IPI \
+                 is ever delivered (`issues/diagnostics/no-cyclictest.md`).",
+    },
+    Relegated {
         test: "watchdog_resets",
         ci_ms: 9_393,
         why: Why::TimerAnchored,
