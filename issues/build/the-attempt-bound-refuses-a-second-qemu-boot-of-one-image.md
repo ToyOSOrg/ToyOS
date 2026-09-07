@@ -43,3 +43,15 @@ relaunches one image.
 **Exit condition**: `cargo test boot_partition_identity` green with the bound
 still refusing the second boot of a genuinely hung image, which
 `hang_bounded_by_the_stick` is the assertion for.
+
+## And it is the only *hard* red the fast tier carries
+
+Two full `cargo test` runs in one session, one on `origin/metal-suite` and one
+on the branch merging it, each red on exactly two names: this one, `red again`
+both times on both arms — and one `ALONE: GREEN — it fails only beside other
+guests` name that is **a different name each run** (`screen_loader_lines` on the
+base, `metal_device_probe` on the arm). So the second red is a rotating
+parallel-classification symptom of a loaded host and not a name's own defect;
+`tests/CLAUDE.md` says that verdict is a hypothesis and not a finding. What is
+worth writing down is that the fast tier has room for exactly one such name per
+run at this host's load, and nothing has priced that.
