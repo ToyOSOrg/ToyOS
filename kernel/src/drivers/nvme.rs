@@ -318,7 +318,7 @@ const _: () = assert!(QUEUE_DEPTH * core::mem::size_of::<CqEntry>() <= PROBE_OFF
 /// Physical, not what this controller is programmed with: the actuator has to
 /// hand another device an address that device's own domain does not map.
 #[cfg(feature = "boot-actuators")]
-pub(super) static FOREIGN_PROBE: core::sync::atomic::AtomicU64 =
+pub static FOREIGN_PROBE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
 /// Fills the PRP list with every data page's address after the first

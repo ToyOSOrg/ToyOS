@@ -98,7 +98,7 @@ fn await_connect_settle(controllers: &[XhciController]) {
 // `None` must stay a refusal, never a degradation: there is no polled mode, and
 // every event-ring read depends on `irq_ring`, which only the ISR sets.
 fn arm_interrupt(pci_dev: &PciDevice) -> Option<&'static str> {
-    if pci_dev.enable_msix(XHCI_VECTOR) {
+    if pci_dev.enable_msix(XHCI_VECTOR).is_some() {
         return Some("MSI-X");
     }
     pci_dev.enable_msi(XHCI_VECTOR).then_some("MSI")

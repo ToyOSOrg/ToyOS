@@ -265,9 +265,9 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     // netd is spawned before the ready marker and speaks after it, so its line
     // is drained for rather than read out of the boot capture. **What is waited
     // for is the whole line and not a prefix naming the program**: init reports
-    // the claim it could not make as `init: netd: no nic on this machine
-    // (NotFound)`, and that is already in the boot capture before netd has run
-    // at all, so a `"netd: "` predicate is satisfied by the wrong speaker.
+    // the claim it could not make as `init: netd: ...`, and that is already in
+    // the boot capture before netd has run at all, so a `"netd: "` predicate is
+    // satisfied by the wrong speaker.
     const NETD_EXITS: &str = "netd: no NIC on this machine, exiting";
     let mut text = qemu.boot_log().to_string();
     let stalled =
@@ -278,10 +278,25 @@ pub fn virtio_net_no_msix() -> Result<(), String> {
     // Refused by name, at a named function, and not by claiming a mode it does
     // not have: the xHCI driver's `polled mode` line is the defect this whole
     // family exists to keep out of the tree.
-    log.must_say("VirtIO net: NOT INITIALISED at PCI")?;
-    log.must_not_say("VirtIO net: MSI-X vector")?;
+    //
+    // **The refusal moved with the driver.** It used to be the kernel's own
+    // virtio-net `init` giving up; it is now the *claim* being refused, before
+    // any driver exists — a function whose interrupt cannot be armed is one
+    // whose holder would never be told anything, and handing it over anyway
+    // would be handing out a device that looks alive and never speaks.
+    log.must_say("pcidev: PCI 00:03.0 NOT HANDED OVER")?;
+    log.must_say("its MSI-X could not be armed")?;
+    log.must_not_say("[1af4:1041] handed over")?;
+    // And the refusal is the *whole* of it: no BAR moved for a function nobody
+    // can be given one.
+    log.must_not_say("pcidev: PCI 00:03.0 BAR")?;
     // All the way out to userland, rather than a kernel that logged a refusal
-    // and handed netd a NIC anyway.
+    // and handed netd a NIC anyway. init names what it could not mint in the
+    // config's own spelling, and **with this refusal's own word**: the machine
+    // has the function, so "no such device on this machine" would be false.
+    log.must_say(
+        "init: netd: pci:1af4:1041 is on this machine and could not be handed over",
+    )?;
     if !log.text().contains(NETD_EXITS) {
         return Err(format!(
             "{}{NETD_EXITS:?} never reached the boot console:\n{}",

@@ -582,6 +582,29 @@ jobs:
             exit 1
           fi
 
+      # The interrupt record a process's PCI driver reads. Its two
+      # read-modify-writes are its whole design, and both models that depend on
+      # them must red when the control turns them into a load and a store.
+      - name: kernel-loom device interrupt record has teeth
+        run: |
+          set -o pipefail
+          echo "=== kernel-loom --features device-irq-lossy --test device_irq (must red)" \
+            | tee -a /tmp/host.log
+          if cargo test --manifest-path kernel-loom/Cargo.toml \
+               --features device-irq-lossy --test device_irq 2>&1 \
+               | tee /tmp/device-irq-lossy.log | tee -a /tmp/host.log; then
+            echo "device_irq passed with its read-modify-writes taken apart: the model has no teeth" \
+              | tee -a /tmp/host.log
+            exit 1
+          fi
+          for model in every_message_is_counted_once one_message_is_one_wake; do
+            if ! grep -q "$model \.\.\. FAILED" /tmp/device-irq-lossy.log; then
+              echo "the device-irq-lossy build failed without $model reaching a verdict: this step proved nothing" \
+                | tee -a /tmp/host.log
+              exit 1
+            fi
+          done
+
       # **`toyos-sched-loom`'s own controls, wired for the first time
       # 2026-08-17.** The mandatory preempt-disabled push has
       # carried `no-preempt-guard` since before this file existed, and it was

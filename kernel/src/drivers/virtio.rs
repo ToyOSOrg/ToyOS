@@ -76,13 +76,6 @@ pub const fn used_bytes(queue_size: u16) -> usize {
     USED_RING_OFF + queue_size as usize * USED_ELEM_SIZE
 }
 
-/// Byte size [`VirtqueueRegions::from_contiguous`] lays a queue of `queue_size` out in: the three rings plus padding.
-pub const fn contiguous_bytes(queue_size: u16) -> usize {
-    let avail_off = (queue_size as usize * DESC_BYTES + 1) & !1;
-    let used_off = (avail_off + avail_bytes(queue_size) + 3) & !3;
-    used_off + used_bytes(queue_size)
-}
-
 // Avail ring layout: flags(u16) + idx(u16) + ring[size](u16 each)
 const AVAIL_IDX_OFF: usize = 2;
 const AVAIL_RING_OFF: usize = 4;
@@ -416,6 +409,13 @@ pub struct Virtqueue<'pool> {
     used_split: bool,
     /// Bytes each chain's descriptor was given; the one bound a device-reported `len` is compared against. 0 means no chain.
     chain_bytes: alloc::vec::Vec<u32>,
+    /// Used-ring elements this queue refused, for the life of the boot.
+    ///
+    /// Counted always; the only thing that *reads it out* is
+    /// [`used_selftest`], in the actuator kernel. The drivers still on this
+    /// type — console, sound, GPU — answer a refusal where they are rather than
+    /// by reading a total, and the one that did read it took its driver to
+    /// userland with it.
     refused: u32,
 }
 
@@ -474,8 +474,6 @@ impl<'pool> Virtqueue<'pool> {
     pub fn descs_addr(&self) -> u64 { self.desc.device_addr() }
     pub fn avail_addr(&self) -> u64 { self.avail.device_addr() }
     pub fn used_addr(&self) -> u64 { self.used.device_addr() }
-
-    pub fn rings(&self) -> [Dma<'pool>; 3] { [self.desc, self.avail, self.used] }
 
     /// Where in the notification region this queue's doorbell sits; meaningless before `setup_queue` runs.
     pub fn notify_bytes(&self, multiplier: u32) -> u64 {
@@ -620,7 +618,14 @@ impl<'pool> Virtqueue<'pool> {
         Ok((DescSlot(id), written as u32))
     }
 
-    /// How many used-ring elements this queue has refused, for the life of the boot.
+    /// How many used-ring elements this queue has refused, for [`used_selftest`]
+    /// alone: every case it stages would pass against a `poll_used` that
+    /// refused right and counted nothing.
+    ///
+    /// Only the actuator kernel has a reader. A shipping kernel's drivers each
+    /// report their own refusals where they can log — the counter is here, and
+    /// what is done about it is theirs.
+    #[cfg(feature = "boot-actuators")]
     pub fn refused(&self) -> u32 {
         self.refused
     }

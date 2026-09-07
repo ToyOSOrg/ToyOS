@@ -30,7 +30,9 @@ pub mod syscap;
 pub mod system;
 
 pub use ipc::Connection;
-pub use device::{Keyboard, Mouse, FramebufferDev, Nic, VirtioSoundDev, HdaDev};
+pub use device::{
+    DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PciDev, VirtioSoundDev,
+};
 
 pub use toyos_abi::RawHandle;
 

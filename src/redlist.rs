@@ -302,6 +302,29 @@ const NIGHTLIES: &str = "a later measurement on the same instrument. The last th
 /// always allowed and is what an unmaintainable row should get.
 pub const KNOWN_RED: &[Red] = &[
     // ---------------------------------------------------------------------
+    // First occurrences: one CI red apiece, with no second run of the same
+    // thing behind them. `Finding::Seen` is the shape until one has a rate.
+    // ---------------------------------------------------------------------
+    Red {
+        test: "root_named_but_absent",
+        instrument: Instrument::Ci,
+        finding: Finding::Seen,
+        standing: Standing::Stands,
+        what: "`the kernel did not refuse this ROOT set`, and the capture it judged ends at \
+               `gpt: device 16 carries the boot partition` — the refusal `rootfs::mount` writes \
+               never arrived inside `boot_expecting_root_refusal`'s five seconds of UART \
+               polling. `Sched::Serial`, so `ALONE: GREEN, and it was alone both times`: \
+               nothing the harness controls differed and it failed once and passed once. \
+               Between the last line the capture carried and the one it wanted is \
+               `smp::boot_aps`, which brings up every vCPU and is the step on that path a \
+               loaded runner lengthens most",
+        evidence: "run 34156449074 job 101849198160, guest shard 9, on PR 437's head; every \
+                   other shard green in the same run, and 8 of 8 green on the dev host alone \
+                   on that branch",
+        source: "tests/common/volumes.rs boot_expecting_root_refusal",
+        measured: "2026-09-07",
+    },
+    // ---------------------------------------------------------------------
     // `probe-rate.yml` run 31258202923, tree f8f73e1, 2026-08-08: five reps of
     // the exact twelve-shard configuration `ci.yml` runs, sixty jobs, 292 tests
     // each, 1460 outcomes. 281 of the 292 names were green in all five.

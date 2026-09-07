@@ -15,7 +15,6 @@ pub mod usb_storage;
 pub mod virtio;
 pub mod virtio_console;
 pub mod virtio_gpu;
-pub mod virtio_net;
 pub mod virtio_sound;
 pub mod gop;
 pub mod hda;

@@ -688,10 +688,43 @@ pub fn iommu_virtio_platform(
             }
         }
 
-        let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+        // `netcase`: the NIC's driver is a process, and this is the one config
+        // that runs it.
+        let qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
         let log = Serial::boot(&qemu);
         log.must_be_clean()?;
         log.must_say("Boot: complete")?;
+        log.must_say("init: started netd")?;
+
+        // **Whether the NIC's function is handed to a process at all is the
+        // machine's answer, not a choice.** A process driving a device writes
+        // addresses into descriptors, so the substrate refuses a claim on a
+        // function this machine cannot give an address space of its own — and
+        // on a machine with no unit that is every function. So the arm with a
+        // unit has three negotiators, one of them across the boundary, and the
+        // arm without one has two and a refusal.
+        let expected = if behind_unit {
+            // And the claim netd was given is bounded to its own function's
+            // configuration space, which is what makes its capability walk —
+            // an index by numbers the *device* wrote — safe to run at all.
+            // netd asks the kernel for a read past the end, one straddling it
+            // and one misaligned, and refuses to drive a claim that answers any
+            // of them.
+            log.must_say(
+                "netd: this claim answers 4096 bytes of configuration space and refuses every \
+                 access outside them",
+            )?;
+            // The two things a hand-over spends, on the same function and the
+            // same machine the arm below requires to be unspent. Without this
+            // pair those `must_not_say`s would pass against a kernel that had
+            // stopped writing either line.
+            log.must_say(BAR_MOVED)?;
+            log.must_say(MSIX_ARMED)?;
+            created.len()
+        } else {
+            no_unit_is_no_claim(&log)?;
+            created.len() - 1
+        };
 
         let mut negotiated = Vec::new();
         for line in log.text().lines() {
@@ -703,10 +736,11 @@ pub fn iommu_virtio_platform(
             let Some(accepted) = fields.get("access_platform") else { continue };
             negotiated.push((who.to_string(), accepted == "y"));
         }
-        if negotiated.len() != created.len() {
+        if negotiated.len() != expected {
             return Err(format!(
-                "{name}: QEMU created {} virtio function(s) and the guest negotiated features \
-                 with {} — {negotiated:?} against {created:?}",
+                "{name}: QEMU created {} virtio function(s), {expected} of them for a driver \
+                 this machine can bring up, and the guest negotiated features with {} — \
+                 {negotiated:?} against {created:?}",
                 created.len(),
                 negotiated.len()
             ));
@@ -736,12 +770,50 @@ pub fn iommu_virtio_platform(
         }
         eprintln!(
             "  [iommu] {name}: {} virtio function(s) behind a unit = {behind_unit}, the audio \
-             function {sound} among them",
-            negotiated.len()
+             function {sound} among them{}",
+            negotiated.len(),
+            if behind_unit { "" } else { "; the NIC's claim refused for want of a domain" }
         );
     }
     declining_is_not_free(test_config, c_bins, rust_bins)
 }
+
+/// **A machine with no unit hands no function to a process**, and says so
+/// three times over.
+///
+/// The ordering ruling this whole stage stands on
+/// (`issues/kernel/every-driver-is-still-in-the-kernel.md`) is that moving a
+/// driver out without translation costs security: a descriptor holding a
+/// physical address is an arbitrary read and write over all of memory. So the
+/// kernel refuses the claim by name, init says which device it could not mint,
+/// and netd exits rather than driving anything — and the machine finishes
+/// booting, which is the half a refusal that panicked would fail.
+fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
+    log.must_say("NOT HANDED OVER")?;
+    log.must_say("it would have no address space of its own")?;
+    log.must_not_say("handed over on slot")?;
+    // **And the refusal spent nothing on the way out.** No BAR was moved, so
+    // this function's BARs are still where firmware put them, and no vector was
+    // programmed into its MSI-X table — which is what says `bring_up` asks for
+    // the address space *before* it touches the function. `slot_space` put back
+    // below `place_bars` reds here.
+    log.must_not_say(BAR_MOVED)?;
+    log.must_not_say(MSIX_ARMED)?;
+    log.must_say("init: netd: pci:1af4:1041 is on this machine and could not be handed over")?;
+    // netd's own exit is not read here: it speaks after the ready marker this
+    // capture ends at. It is the same endowment-is-empty path
+    // `virtio_net_no_msix` waits for and asserts by name.
+    Ok(())
+}
+
+/// The two lines a hand-over spends, on the function `netcase` claims.
+///
+/// Named once because both arms of `iommu_virtio_platform` read them, in
+/// opposite directions: the arm with a unit requires them and the arm without
+/// one requires their absence. An absence nothing ever produces would pass
+/// against a kernel that had stopped writing the line at all.
+const BAR_MOVED: &str = "pcidev: PCI 00:03.0 BAR";
+const MSIX_ARMED: &str = "PCI 00:03.0: msix address=";
 
 /// The control that makes the two arms above mean something: a guest that
 /// declines the feature its host offered gets no device, not a bypassing one.
@@ -936,15 +1008,52 @@ struct ForeignArm {
     class: &'static str,
     access: &'static str,
     name: &'static str,
+    /// How far past the page it was aimed at the block may be: one page where
+    /// the arm aims a single buffer, a whole 2 MiB block where it aims a grant
+    /// whose first touched byte is wherever the driver's own layout put it.
+    blocked_within: u64,
+    /// Where the aimed device's driver lives; an arm boots a config that runs
+    /// it, or it aims a device nobody drives.
+    driver: Driver,
 }
 
-/// The NIC's first RX buffer, moved onto that page.
-const NIC_FOREIGN: ForeignArm = ForeignArm {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Driver {
+    Kernel,
+    Netd,
+}
+
+impl Driver {
+    /// The config a boot for this arm uses.
+    fn config(self, kernel: &Path) -> std::path::PathBuf {
+        match self {
+            Self::Kernel => kernel.to_path_buf(),
+            Self::Netd => netcase(),
+        }
+    }
+}
+
+/// The one shipped boot config that runs `netd`, and so the only one where the
+/// NIC's PCI function is claimed and driven at all.
+fn netcase() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase")
+}
+
+/// The claimed NIC's first DMA grant, answered with that page's address.
+///
+/// Staged at the grant and not in the driver: what a driver does with an
+/// address it was handed is what it does with a correct one, so the descriptor
+/// is wrong while netd is unmodified. The access is a **read**, because the
+/// grant holds the virtqueues and the device's first touch of it is the
+/// descriptor fetch a doorbell alone provokes.
+const USERDEV_FOREIGN: ForeignArm = ForeignArm {
     profile: Profile::Headless,
-    params: &["iommu-nic-foreign-dma"],
+    params: &["iommu-userdev-foreign-dma"],
     class: "0200",
-    access: "write",
+    access: "read",
     name: "isolation",
+    blocked_within: PAGE_2M,
+    driver: Driver::Netd,
 };
 
 /// Oracle: VT-d Rev. 4.0 Section 9.8, which [`translate`] implements
@@ -957,17 +1066,23 @@ pub fn iommu_domain_isolation(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let qemu = foreign_fault(test_config, c_bins, rust_bins, &NIC_FOREIGN)?;
+    // No guest binary: every assertion below is read off the boot log and out
+    // of the unit's own tables over QMP, so the image needs nothing but the
+    // config's own programs.
+    let _ = (c_bins, rust_bins);
+    let qemu = foreign_fault(test_config, &[], &[], &USERDEV_FOREIGN)?;
     // Each guest ends before the next boots: QEMU holds an exclusive lock on the NVMe image.
     let _ = qemu.shutdown();
     let mut classes: BTreeSet<String> = BTreeSet::new();
+    // `netcase`: the seventh domain is the NIC's, made when its claim is
+    // minted, and only a config that declares the function mints one.
     for (profile, name) in
         [(Profile::Headless, "headless"), (Profile::Hda, "hda"), (Profile::VirtioGpu, "virtio-gpu")]
     {
         let clean = QemuInstance::boot_with_options(
-            test_config,
-            c_bins,
-            rust_bins,
+            &netcase(),
+            &[],
+            &[],
             BootOptions { profile, qmp: true, ..Default::default() },
         );
         classes.extend(clean_walk(&clean, name)?);
@@ -1000,6 +1115,8 @@ pub fn iommu_gpu_foreign_backing(
         class: "0380",
         access: "read",
         name: "gpu",
+        blocked_within: 0x1000,
+        driver: Driver::Kernel,
     };
     foreign_fault(test_config, c_bins, rust_bins, &arm).map(drop)
 }
@@ -1019,6 +1136,8 @@ pub fn iommu_hda_foreign_bdl(
         class: "0403",
         access: "read",
         name: "hda",
+        blocked_within: 0x1000,
+        driver: Driver::Kernel,
     };
     foreign_fault(test_config, c_bins, rust_bins, &arm).map(drop)
 }
@@ -1038,6 +1157,8 @@ pub fn iommu_sound_foreign_dma(
         class: "0401",
         access: "write",
         name: "sound",
+        blocked_within: 0x1000,
+        driver: Driver::Kernel,
     };
     foreign_fault(test_config, c_bins, rust_bins, &arm).map(drop)
 }
@@ -1056,7 +1177,9 @@ fn foreign_fault(
         ..Default::default()
     };
     unit_is_first(&qemu::profile_argv(&options), arm.name)?;
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+    // An arm whose device is driven by a process boots that process's config.
+    let config = arm.driver.config(test_config);
+    let mut qemu = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
     let mut log = Serial::boot(&qemu);
     log.push(&qemu.drain_serial(Duration::from_secs(2)));
     let socket = qemu.qmp_socket();
@@ -1092,13 +1215,19 @@ fn foreign_fault(
     let victim = translate(socket, window, &nvme, acq)?;
     let at = u64::from_str_radix(blocked.address.trim_start_matches("0x"), 16)
         .map_err(|_| format!("unreadable faulting address {:?}", blocked.address))?;
-    if at != victim & !0xFFF {
+    // The window and not the page, for the arm that aims a whole grant: the
+    // first access the device makes into it is at whatever offset the driver's
+    // own layout put first, and pinning that offset would assert netd's layout
+    // rather than the unit's refusal.
+    let aimed_at = victim & !0xFFF;
+    if !(aimed_at..aimed_at + arm.blocked_within).contains(&at) {
         return Err(format!(
-            "the unit blocked an access to {}, and the page NVMe's ACQ names — through the \
-             tables the unit walks — is {:#x}. The kernel is not reporting the address the \
-             device was aimed at",
+            "the unit blocked an access to {}, and what the actuator aimed {aimed} at is \
+             {:#x}..{:#x} — the page NVMe's ACQ names, through the tables the unit walks. The \
+             kernel is not reporting the address the device was aimed at",
             blocked.address,
-            victim & !0xFFF
+            aimed_at,
+            aimed_at + arm.blocked_within,
         ));
     }
 
@@ -1151,6 +1280,9 @@ fn clean_walk(clean: &QemuInstance, name: &str) -> Result<BTreeSet<String>, Stri
     let log = Serial::boot(clean);
     log.must_be_clean()?;
     log.must_say("Boot: complete")?;
+    // The NIC's domain is made when its claim is minted, which is after
+    // `Boot: complete`: the walk has to be after the line that says so.
+    log.must_say("init: started netd")?;
     let socket = clean.qmp_socket();
     let window = register_window(socket, &log, name)?;
     let nvme = class_function(&log, "0108")
@@ -1880,5 +2012,85 @@ fn argv_check(profile: Profile, argv: &[String]) -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+/// **The machine survives a driver that aimed its device at memory it was not
+/// given**, which is the thing moving a driver into userland is for.
+///
+/// Every arm above this one is about a stream the *kernel* drives, and for
+/// those the response is a halt: nothing can know what a device that reached an
+/// address the kernel never gave it has already done, and there is nobody to
+/// hand the fault to. A function a process drives has an owner. So the same
+/// stimulus has to produce the same record and a machine that is still running,
+/// and both halves are asserted here — a kernel that halted would fail the
+/// second, and one that ignored the fault would fail the first.
+///
+/// The stimulus is `iommu-userdev-foreign-dma`: the kernel answers netd's first
+/// DMA grant with an address inside NVMe's pool, which the NIC's own domain
+/// does not map. netd is unmodified and does with that address exactly what it
+/// does with a correct one, so what the device is pointed at is a real
+/// descriptor holding a wrong address rather than a driver written to misbehave.
+pub fn userdev_dma_fault(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let _ = c_bins;
+    // One guest binary, for the half of this test the fault line cannot say:
+    // that the machine still schedules, spawns, and answers. `handle_basic`
+    // makes and closes an object of every kind and counts the census, so a
+    // kernel limping after the fault fails it rather than passing vacuously.
+    let bins: Vec<(String, Vec<u8>)> = rust_bins
+        .iter()
+        .filter(|(name, _)| name == "handle_basic")
+        .cloned()
+        .collect();
+    if bins.is_empty() {
+        return Err("handle_basic was not built".to_string());
+    }
+    let mut qemu = foreign_fault(test_config, &[], &bins, &USERDEV_FOREIGN)?;
+    let log = Serial::named("boot console", qemu.boot_log().to_string());
+
+    // The fault was handed to the process that drives the stream, and the line
+    // says so: `owner=kernel` here would be a machine that halted, or was about
+    // to. `slot0` is the first `pcidev` slot, which is netd's — the only claim
+    // this config mints.
+    let handled = log.must_say(FAULT)?;
+    if !handled.contains("owner=slot0") {
+        return Err(format!(
+            "the unit's fault was recorded against {handled:?}, and the function that faulted \
+             is one a process drives. A fault the kernel takes as its own is one it halts for"
+        ));
+    }
+
+    // And the machine is running. This is the assertion the whole stage is
+    // for: a guest that answers here is one whose scheduler, spawn path and
+    // IPC all survived a device being refused mid-flight.
+    let result = qemu.run_test("test_rs_handle_basic", Duration::from_secs(60));
+    if let Some(err) = &result.error {
+        return Err(format!(
+            "the guest stopped answering after the fault: {err}\n{}\n{}",
+            result.stdout,
+            log.text()
+        ));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!(
+            "the guest ran after the fault and failed: exit {:?}\n{}",
+            result.exit_code, result.stdout
+        ));
+    }
+    // Nothing panicked on the way, and the staged fault happened **once**:
+    // clearing the function's Bus Master Enable is what bounds a storm, and a
+    // second line would say it did not. Every other boot in the estate reds on
+    // this line through `must_be_clean`; this is the one that staged it.
+    let mut after = log;
+    after.push(&result.serial);
+    after.push(&qemu.drain_serial(Duration::from_millis(500)));
+    after.must_be_clean_apart_from("iommu: DMA FAULT owner=slot", 1)?;
+    eprintln!(
+        "  [iommu] the NIC's driver was refused an address it was handed, and the machine ran on"
+    );
     Ok(())
 }

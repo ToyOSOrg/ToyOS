@@ -397,6 +397,11 @@ const RUST_SKIP: &[&str] = &[
 /// what the host staged: the shipping build here, `sched_check_build`'s
 /// assert-carrying build there.
 const DRIVEN_AND_SHARED: &[&str] = &[
+    // Its shared run is a whole handle-lifecycle gate with its own census;
+    // `userdev_dma_fault` drives the same binary for a different reason
+    // entirely — as the proof the machine still schedules and spawns after a
+    // device was refused at the unit — and stages nothing for it.
+    "handle_basic",
     "hierarchy_paths",
     "null_sink_client_exits",
     "nvme_home_roundtrip",
@@ -615,6 +620,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
     // no clock in it. Fast with the UNMEASURED bootstrap marker until priced.
     ("netd_listener_forgery", Sched::Parallel, Tier::Fast),
+    // The netcase boot with two programs naming one PCI function: the verdict
+    // is which of them the kernel let have it. Console lines only, no clock.
+    ("pci_function_is_exclusive", Sched::Parallel, Tier::Fast),
     // Its own boot with a NIC under it, because sshd leaves at the bind on
     // every other config. Every verdict is a line of text; no clock in any.
     ("sshd_fail_closed", Sched::Parallel, Tier::Fast),
@@ -1175,6 +1183,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("iommu_gpu_foreign_backing", Sched::Parallel, Tier::Fast),
     ("iommu_hda_foreign_bdl", Sched::Parallel, Tier::Fast),
     ("iommu_sound_foreign_dma", Sched::Parallel, Tier::Fast),
+    // The one arm of that family whose device is driven by a *process*, and
+    // the only one whose verdict is that the machine is still running.
+    ("userdev_dma_fault", Sched::Parallel, Tier::Fast),
     // H4: soundd driving an Intel HDA controller itself, read back off the
     // device. Serial — its verdict is a wav capture, and one taken while eleven
     // other guests contend for the host measures the host.
@@ -10193,6 +10204,9 @@ fn run_machine_test(
         "iommu_sound_foreign_dma" => {
             common::iommu::iommu_sound_foreign_dma(test_config, c_bins, rust_bins)
         }
+        "userdev_dma_fault" => {
+            common::iommu::userdev_dma_fault(test_config, c_bins, rust_bins)
+        }
         // Body in `tests/common/hda.rs`, same reason.
         "hda_tone" => common::hda::hda_tone(test_config, c_bins, rust_bins),
         "hda_client_stall" => common::hda::hda_client_stall(test_config, c_bins, rust_bins),
@@ -12689,7 +12703,9 @@ fn run_machine_test(
                 return Err(format!("the parse's self-test never ran:\n{log}"));
             };
             // `11/11`, not "no failures": a self-test that ran zero cases would
-            // satisfy the absence of a FAILED line just as well.
+            // satisfy the absence of a FAILED line just as well. Four of the
+            // eleven are elements `poll_used` must *accept*, and the eleventh
+            // is `refused == 7`, so this one number pins both directions.
             if !verdict.contains("11/11") {
                 return Err(format!("not every used-ring element was parsed as required: {verdict}"));
             }
@@ -12698,19 +12714,6 @@ fn run_machine_test(
             let ran = log.matches("used-ring selftest").count();
             if ran != 1 {
                 return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
-            }
-            // And the legal direction, on the same boot and not by assertion:
-            // this log arrived over virtio-console, whose TX path is
-            // `submit_and_wait` around the same `poll_used`. A parse that
-            // refused a correct element would have produced no capture to
-            // search — but virtio-net says so in its own words, so that the
-            // legal case is *named* rather than inferred from the test running
-            // at all.
-            if !log.contains("VirtIO net: MAC") {
-                return Err(format!("the NIC did not come up on this boot\n{log}"));
-            }
-            if let Some(bad) = log.lines().find(|l| l.contains("refused") && l.contains("RX used-ring")) {
-                return Err(format!("a correct completion was refused on the ordinary path: {bad}"));
             }
             eprintln!("  [virtio] {}", verdict.trim());
             Ok(())
@@ -13598,6 +13601,49 @@ fn run_machine_test(
                 ));
             }
             eprintln!("  [netcase] netd cap {declared} piped connections, {granted} accepted then refused");
+            Ok(())
+        }
+        "pci_function_is_exclusive" => {
+            // `tests/netcase` declares `pci:1af4:1041` on netd *and* on
+            // test-runner. A device a second process could claim is one whose
+            // register window, MSI-X table and DMA grants two processes hold at
+            // once, so the kernel is what has to refuse it: `src/build.rs`'s
+            // config check names this config as its one exception, and this is
+            // the boot that says the refusal exists.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
+            let options = BootOptions {
+                profile: qemu::Profile::Headless,
+                ..Default::default()
+            };
+            if !qemu::profile_argv(&options).iter().any(|a| a.contains("virtio-net")) {
+                return Err("this test needs a NIC and the profile has none".to_string());
+            }
+            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+            let mut console = qemu.boot_log().to_string();
+            // netd holds the claim only once it has come up on it; waiting for
+            // that is what makes the count below the settled one.
+            let _ = await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
+            console.push_str(&qemu.drain_serial(Duration::from_millis(500)));
+            let log = serial::Serial::named("boot console", console.as_str());
+
+            // Exactly one hand-over of that function. Two would be the defect
+            // itself, and zero a boot that says nothing about exclusivity.
+            let handovers =
+                log.text().lines().filter(|l| l.contains("[1af4:1041] handed over on slot")).count();
+            if handovers != 1 {
+                return Err(format!(
+                    "the NIC's function was handed over {handovers} times, and a second holder \
+                     would drive the same registers, MSI-X entry and grants as the first:\n{}",
+                    log.text()
+                ));
+            }
+            // And the loser was told why, in the kernel's own word rather than
+            // "no NIC": init prints the `AlreadyExists` arm of `refused`.
+            log.must_say("init: test-runner: pci:1af4:1041 is already claimed")?;
+            // netd is the one that got it, not merely the one that ran.
+            log.must_say("netd: ready, at most ")?;
+            log.must_be_clean()?;
+            eprintln!("  [netcase] one PCI function, two claimants, one holder");
             Ok(())
         }
         "netd_listener_forgery" => {

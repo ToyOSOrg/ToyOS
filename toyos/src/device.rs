@@ -21,7 +21,7 @@ macro_rules! device_info {
 }
 device_info!(
     toyos_abi::FramebufferInfo,
-    toyos_abi::net::NicInfo,
+    toyos_abi::pci::PciFunctionInfo,
     toyos_abi::virtio_sound::VirtioSoundInfo,
     toyos_abi::hda::HdaInfo,
 );
@@ -101,31 +101,83 @@ impl AsHandle for FramebufferDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 
-pub struct Nic(pub(crate) Device);
+/// One PCI function, driven by this process: the kernel keeps config space and
+/// the interrupt vector, and the holder gets the register window, buffers the
+/// function can reach and nothing else can, and the interrupt as records read
+/// off this handle.
+///
+/// **A claim is read once as a description and afterwards as interrupts.**
+/// [`Self::describe`] must be called exactly once, before [`Self::irq`]. The
+/// kernel keeps the flag, so nothing here can enforce it.
+pub struct PciDev(pub(crate) Device);
 
-impl Nic {
-    pub fn info(&self) -> Result<toyos_abi::net::NicInfo, SyscallError> {
+/// A DMA buffer, in this process and at the device.
+pub struct DmaRegion {
+    pub memory: crate::shm::SharedMemory,
+    /// What a descriptor must carry for the device to reach `memory`. Never a
+    /// physical address once a unit translates for this function.
+    pub device_addr: u64,
+}
+
+impl PciDev {
+    /// This function's description; see the type's note — exactly once.
+    pub fn describe(&self) -> Result<toyos_abi::pci::PciFunctionInfo, SyscallError> {
         read_info(&self.0)
     }
 
-    /// The next received frame as `(buf_index << 16) | frame_len`, or 0.
-    pub fn rx_poll(&self) -> Result<u64, SyscallError> {
-        syscall::nic_rx_poll(self.0.as_handle())
+    /// One dword, word or byte of this function's own config space.
+    ///
+    /// **Read-only, and there is no writing counterpart**: a driver cannot find
+    /// its own registers without its capability chain, while every write config
+    /// space takes — bus mastering, the BARs, the MSI-X control word — is a
+    /// decision the kernel keeps.
+    pub fn config_read(
+        &self,
+        offset: u32,
+        width: toyos_abi::syscall::RegWidth,
+    ) -> Result<u32, SyscallError> {
+        syscall::device_reg_read(self.0.as_handle(), offset, width)
     }
 
-    /// Give buffer `buf_index` back to the RX ring. A dropped refill costs an
-    /// RX slot permanently: 256 of them and the NIC stops receiving.
-    pub fn rx_done(&self, buf_index: u64) -> Result<(), SyscallError> {
-        syscall::nic_rx_done(self.0.as_handle(), buf_index)
+    /// Map memory BAR `bar`, bounded to the `bar_bytes` the description gave.
+    ///
+    /// The kernel's window is whole 2 MiB pages and so is wider than the BAR;
+    /// the length here is the BAR's, because the bytes past it belong to no
+    /// device and answer every read with ones.
+    pub fn map_bar(&self, bar: u32, bytes: u64) -> Result<crate::shm::SharedMemory, SyscallError> {
+        let handle = syscall::device_bar_map(self.0.as_handle(), bar)?;
+        crate::shm::SharedMemory::adopt(handle, bytes as usize)
     }
 
-    /// Submit the TX DMA buffer. `total_len` includes the net header.
-    pub fn tx(&self, total_len: u64) -> Result<(), SyscallError> {
-        syscall::nic_tx(self.0.as_handle(), total_len)
+    /// `bytes` of memory this function can reach and nothing else can.
+    pub fn dma_alloc(&self, bytes: u64) -> Result<DmaRegion, SyscallError> {
+        let grant = syscall::device_dma_alloc(self.0.as_handle(), bytes)?;
+        let memory = crate::shm::SharedMemory::adopt(grant.shm, grant.bytes as usize)?;
+        Ok(DmaRegion { memory, device_addr: grant.device_addr })
+    }
+
+    /// The interrupts since the last read, or `Err(WouldBlock)` for none.
+    pub fn irq(&self) -> Result<toyos_abi::pci::DeviceIrqRecord, SyscallError> {
+        let mut record = toyos_abi::pci::DeviceIrqRecord { count: 0 };
+        // SAFETY: the slice covers exactly the record being filled, and every
+        // bit pattern of its one integer field is a valid one.
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(
+                &mut record as *mut _ as *mut u8,
+                toyos_abi::pci::DeviceIrqRecord::SIZE,
+            )
+        };
+        let n = syscall::read_nonblock(self.0.0.0, buf)?;
+        assert_eq!(
+            n,
+            toyos_abi::pci::DeviceIrqRecord::SIZE,
+            "partial device interrupt record ({n} bytes)"
+        );
+        Ok(record)
     }
 }
 
-impl AsHandle for Nic {
+impl AsHandle for PciDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 
