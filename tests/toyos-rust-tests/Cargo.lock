@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "toyos"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "toyos-abi 0.4.0",
 ]
@@ -1481,7 +1481,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-rustcrypto",
  "sha2",
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-window",
  "ureq",
@@ -1490,9 +1490,9 @@ dependencies = [
 
 [[package]]
 name = "toyos-window"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
- "toyos 0.4.0",
+ "toyos 0.5.0",
  "toyos-abi 0.4.0",
  "toyos-font",
  "toyos-keymap",
