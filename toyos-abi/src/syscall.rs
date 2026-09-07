@@ -287,9 +287,6 @@ pub const SYS_DEVICE_BAR_MAP: u64 = 117;
 /// [`device_dma_alloc`].
 pub const SYS_DEVICE_DMA_ALLOC: u64 = 118;
 
-/// Mask or unmask a claimed function's interrupt. See [`device_irq_mask`].
-pub const SYS_DEVICE_IRQ_MASK: u64 = 119;
-
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -302,7 +299,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_DEVICE_IRQ_MASK < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_DMA_ALLOC < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -1798,9 +1795,9 @@ pub fn nic_tx(claim: RawHandle, total_len: u64) -> Result<(), SyscallError> {
 /// maps read/write and uncacheable.
 ///
 /// `InvalidArgument` for an index that names no memory BAR, and for the BAR
-/// holding this function's MSI-X table or PBA: masking is [`device_irq_mask`]'s,
-/// and a process that could write the table could aim the device's interrupt at
-/// any address the LAPIC decodes.
+/// holding this function's MSI-X table or PBA: the vector in that table is the
+/// kernel's, and a process that could write it could aim the device's interrupt
+/// at any address the LAPIC decodes.
 ///
 /// Idempotent per BAR: a second call answers the same object.
 pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {
@@ -1817,8 +1814,6 @@ pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallEr
 pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
     let mut grant =
         DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };
-    // SAFETY: `grant` is this frame's own, live and exclusively borrowed across
-    // the call, so the kernel's write lands in a `DmaGrant` nothing else names.
     check_unit(syscall(
         SYS_DEVICE_DMA_ALLOC,
         claim.0 as u64,
@@ -1827,14 +1822,6 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
         0,
     ))?;
     Ok(grant)
-}
-
-/// Mask or unmask the claimed function's interrupt.
-///
-/// Through the claim rather than the register window, which deliberately
-/// excludes the MSI-X table: the vector in it is the kernel's.
-pub fn device_irq_mask(claim: RawHandle, masked: bool) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_DEVICE_IRQ_MASK, claim.0 as u64, masked as u64, 0, 0))
 }
 
 /// Allocate a TLS block for a dlopen'd module on the current thread.

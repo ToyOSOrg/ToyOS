@@ -28,23 +28,19 @@ pub struct PciFunctionInfo {
     /// slot, or where it is one the kernel will not map — the BAR holding this
     /// function's MSI-X table or PBA reads 0 here.
     pub bar_bytes: [u64; BARS],
-    pub vendor: u16,
-    pub device: u16,
     /// Where firmware put it. Identity for a log line, never a name a claim is
     /// looked up by: nothing in this ABI takes a bus/device/function.
     pub bus: u8,
     pub dev: u8,
     pub func: u8,
-    /// 1 when the kernel armed an interrupt for this function, 0 when it has
-    /// none. A claim is never minted for a function whose interrupt could not
-    /// be armed.
-    pub irq: u8,
+    /// Written, never read: the tail `repr(C)` would otherwise leave as a gap.
+    pub _pad: [u8; 5],
 }
 
 /// Every byte belongs to a field: this crosses the boundary through
 /// `as_bytes`, so a gap would publish whatever the kernel stack held.
 const _: () = {
-    let named = BARS * 8 + 2 + 2 + 1 + 1 + 1 + 1;
+    let named = BARS * 8 + 1 + 1 + 1 + 5;
     assert!(core::mem::size_of::<PciFunctionInfo>() == named);
 };
 
@@ -88,21 +84,18 @@ const _: () = assert!(core::mem::size_of::<DmaGrant>() == 4 + 4 + 8 + 8);
 /// One record and not a queue: the kernel accumulates, so a driver that slept
 /// through several is told about all of them at once and there is no ring for a
 /// slow reader to overflow. The count says how many messages arrived, never
-/// what any of them meant.
+/// what any of them meant — and it is the whole record, because what a message
+/// meant is in the device's own rings and a driver that wanted a time has
+/// `SYS_CLOCK`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DeviceIrqRecord {
     /// Never 0 in a record that was answered; an empty count is `WouldBlock`.
     pub count: u32,
-    pub _pad: u32,
-    /// When the most recent of them was taken, by the same clock `SYS_CLOCK`
-    /// answers. The most recent and not the first, because a field the kernel
-    /// overwrites per message is set for every count a reader can observe.
-    pub timestamp_nanos: u64,
 }
 
 impl DeviceIrqRecord {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
-const _: () = assert!(DeviceIrqRecord::SIZE == 4 + 4 + 8);
+const _: () = assert!(DeviceIrqRecord::SIZE == 4);
