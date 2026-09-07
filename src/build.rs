@@ -1540,7 +1540,7 @@ pub fn build_test_image(
     // different actuators from sharing one disk.
     let own = declared_params(root);
     assert!(
-        kernel_params.iter().all(|p| own.contains(p))
+        kernel_params.iter().all(|p| own.contains(p) || is_valued_param(p))
             || kernel_features.iter().eq(TEST_KERNEL.iter().copied()),
         "a boot asking for {kernel_params:?} must boot the test kernel, not {kernel_features:?}"
     );
