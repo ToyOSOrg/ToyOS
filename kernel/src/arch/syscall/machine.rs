@@ -59,6 +59,15 @@ fn quiesce(last: &str) {
     // emptied and waited for before anything is taken down.
     crate::drivers::xhci::flush_disks();
     log!("{last}");
+    // Widens the window every shutdown has here, and nothing else: see the
+    // actuator's own declaration.
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::quiesce_late_word() {
+        let until = crate::clock::nanos_since_boot().saturating_add(100_000_000);
+        while crate::clock::nanos_since_boot() < until {
+            crate::scheduler::yield_now();
+        }
+    }
     // Order is load-bearing: wait_for_durable, then drain_inline, then the caller's non-returning call.
     crate::log::wait_for_durable();
     crate::log::console::drain_inline();

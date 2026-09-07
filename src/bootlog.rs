@@ -68,6 +68,12 @@ pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot
 /// so `logd` writes it to the stick.
 pub const EXIT: &str = "exit: ";
 
+/// The kernel's record for a process that started, in `kernel/src/process.rs`.
+///
+/// Read for where it must *not* be: after the boot's own last word, where it
+/// says a process still on a run queue started another one under a shutdown.
+pub const SPAWN: &str = "spawn: ";
+
 /// The AP bring-up record, in `kernel/src/arch/smp.rs`. A reader asks for the
 /// trailing ` online` as a separate word: the same head carries the failure.
 pub const AP_BRINGUP: &str = "SMP: AP cpu";

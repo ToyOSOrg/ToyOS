@@ -1404,10 +1404,15 @@ const RESET_PATHS: &[ResetPath] = &[
         flushes: true,
         barrier: TOOK_THE_LOCK,
     },
+    // **Armed, because QEMU has no window and the T14 does.** `quiesce` spends
+    // real time on hardware between the boot's last word and the reset — run 20
+    // spent 29 ms of it, and the runner's loop, released by the deadline's own
+    // kill, spawned another job into that gap. Without the actuator this arm is
+    // green either way and says nothing.
     ResetPath {
         what: "the runner's job deadline",
         config: "tests/jobdeadlinecase",
-        params: &[],
+        params: &["quiesce-late-word"],
         flushes: true,
         barrier: TOOK_THE_LOCK,
     },
@@ -1517,6 +1522,7 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
             arm.barrier
         ));
     }
+    nothing_after_the_last_word(after.text()).map_err(|why| format!("{path}: {why}"))?;
     ended_in_a_reset(&mut resets).map_err(|why| format!("{path}: {why}"))?;
 
     // And the machine comes back on the same device. The pass after the chain's
@@ -1527,6 +1533,39 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
     drop(qemu);
     eprintln!("  [power] {path}: {account:?}, and the stick enumerated again");
     Ok(())
+}
+
+/// **`Rebooting.` is the last record, and nothing this boot still holds may
+/// write one after it.**
+///
+/// Measured on the T14 (run 20, `tests/metaldevicecase`): the runner's deadline
+/// killed the job it was watching, which released the `wait` its own job loop
+/// was inside, and that loop spawned the next job — `spawn: TLS 1 modules` 29 ms
+/// after the kernel's `Rebooting.`. A metal boot's verdict is read off that word
+/// being the log's last line, so the boot passed on the machine and failed on
+/// the loop.
+///
+/// A boot with no such word — a panic — is not asked: it correctly writes none.
+/// The window ends at the next loader pass, because everything that pass prints
+/// is after the reset by construction.
+///
+/// **A spawn record and not every record**, because those are the two different
+/// claims. `quiesce` writes after its own last word by construction — a
+/// `wait_for_durable` that gave up says so, and an idle CPU's `sched:` report
+/// can land there — and neither reaches a file: `logd` has been asked to stop by
+/// then, so on a machine with no console they reach nothing at all. A *spawn* is
+/// a process that was still on a run queue, and run 20's did reach the file.
+fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
+    let Some(at) = text.rfind(REBOOTING) else { return Ok(()) };
+    let after = &text[at + REBOOTING.len()..];
+    let window = after.split(bootlog::LOADER_FIRST_LINE).next().unwrap_or(after);
+    match window.lines().find(|line| line.contains(bootlog::SPAWN)) {
+        None => Ok(()),
+        Some(line) => Err(format!(
+            "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
+             metal boot is judged on: {line:?}"
+        )),
+    }
 }
 
 /// The T14's judge for [`usb_reset_hands_devices_back`].

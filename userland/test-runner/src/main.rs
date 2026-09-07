@@ -47,6 +47,31 @@ static FINISHED: AtomicBool = AtomicBool::new(false);
 /// blocked inside its `wait`.
 static JOB: AtomicU32 = AtomicU32::new(0);
 
+/// Set by the deadline before it kills the job it was watching, so the loop
+/// that kill releases does not start another one.
+///
+/// **A kill releases the `wait` the loop is inside.** That is what the kill is
+/// for — the driver gets to finish or abandon the transfer it had in flight
+/// before the reset — but the loop then runs on, and the next job it spawns
+/// lands under a shutdown that has already written the boot's last word.
+/// Measured on the T14 (run 20, `tests/metaldevicecase`): `Rebooting.` at
+/// 67.343 s and this process's `spawn: TLS 1 modules` at 67.372 s, 29 ms after
+/// it, which cost the loop its verdict — `Rebooting.` being the log's last line
+/// is what a metal boot is judged on.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Nothing this process does can reach a log whose last line is already
+/// written, so the loop stops where it is.
+///
+/// **Parks rather than exits**: the runner is what `init` waits on, so an exit
+/// here would end the boot underneath the shutdown that is running on the other
+/// thread. A reboot that is refused ends this process from that thread instead.
+fn stand_down() -> ! {
+    loop {
+        std::thread::park();
+    }
+}
+
 /// Take the running job, if it is still this thread's to take.
 fn claim_the_job() -> Option<Process> {
     match JOB.swap(0, Ordering::AcqRel) {
@@ -105,6 +130,9 @@ fn main() {
                 ),
                 Ran::Builtin(_) | Ran::Spawned => {}
             }
+            if STOPPING.load(Ordering::Acquire) {
+                stand_down();
+            }
         }
         FINISHED.store(true, Ordering::Release);
         std::process::exit(0);
@@ -157,6 +185,8 @@ fn deadline(bound_ms: u64, cap: Option<&SysCap>) {
         // start a device transfer after that sync. Killing it and waiting for
         // it to be gone leaves the driver to finish or abandon what it had in
         // flight; the kernel's own stop then covers what the kill left.
+        // Before the kill, because the kill is what releases the loop.
+        STOPPING.store(true, Ordering::Release);
         if let Some(job) = claim_the_job() {
             let _ = job.kill();
             let _ = job.wait();

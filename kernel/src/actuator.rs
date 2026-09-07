@@ -228,6 +228,14 @@ actuators! {
     /// Build a hash container before `hasher::seed()`, so the refusal that stops a seedless container from being silent is executed.
     test_hash_before_seed = "test-hash-before-seed";
 
+    /// Hold the shutdown open for a tenth of a second after the boot's last
+    /// word, yielding, so a userland thread still on a run queue gets a pass
+    /// there. **The window the T14 has and QEMU does not**: on hardware
+    /// `quiesce` spends real time between `Rebooting.` and the reset, and run 20
+    /// spent 29 ms of it — enough for the test runner's loop to spawn another
+    /// job into the log after its last line.
+    quiesce_late_word = "quiesce-late-word";
+
     /// Make the shutdown's bounded acquisitions of the xHCI controller lock
     /// find it busy for their whole bound — the negative control on "no
     /// shutdown path may fail to reset". A boot armed with it must still hand

@@ -265,7 +265,10 @@ pub const RELEGATED: &[Relegated] = &[
                  watched to take its own two resets against the bound the first boot counts \
                  down, and each judged on the account the reset sealed into the black box. The \
                  fourth is the control on every bound in that path: a shutdown that cannot take \
-                 its barrier must still reach its reset. What still runs per pull request: \
+                 its barrier must still reach its reset. Each arm is also read for what must \
+                 *not* be after the boot's last word — T14 run 20 spawned a job 29 ms after \
+                 `Rebooting.`, which is what a metal boot is judged on, and `quiesce-late-word` \
+                 is what gives QEMU the window hardware has. What still runs per pull request: \
                  nothing else reads that account at all; `metal_device_probe` judges the flush \
                  that precedes it, and the T14 is the only judge of the device itself.",
     },

@@ -34,6 +34,46 @@ The bound over the runner's whole job list is one more way in: when
 running — so the reset that ends an overrunning boot lands wherever that job
 happens to be, by construction.
 
+## The hardware evidence, and the decision it forces
+
+T14 run 20 (2026-09-07, branch tip `f46f91eb`) booted `tests/metaldevicecase`
+again. **The stick came back** — `the boot stick enumerated 0 s after the
+machine answered`, both controllers halted and reset and all 21 ports unpowered
+— so the device half of this is answered. What the same boot showed is the half
+that is not:
+
+```
+[08:52:01 67.302 cpu0 tid=1] exit: usbread pid=8 code=137 cpu=32261ms
+[08:52:01 67.302 cpu0 tid=1] Syncing filesystems...
+[08:52:01 67.343 cpu0 tid=1] Rebooting.
+[08:52:01 67.372 cpu6] ELF: 2624 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
+[08:52:01 67.372 cpu6] spawn: TLS 1 modules, total_memsz=144
+```
+
+Twenty-nine milliseconds after the boot's own last word, on another CPU, a
+process spawned. `bootlog::verdict` requires `Rebooting.` to be the log's last
+line and the run's verdict was `EXIT=1` for that reason alone.
+
+**Two fixes were available and they are not alternatives.**
+
+The *proximate* one is `userland/test-runner`'s, and it landed: the deadline
+kills the job it was watching so the driver can finish what it had in flight,
+and that kill releases the `wait` the job loop is inside — so the loop was free
+to spawn the next job under a shutdown already in progress. It now stands down
+instead. That makes this one program well-behaved and nothing more.
+
+The *general* one is this issue, and the run is its evidence. `Rebooting.` being
+the last record is a claim about the machine, and no userland convention can
+make it true: any process still on a run queue can emit one after it. Only
+`quiesce` parking every other CPU can.
+
+**And the run also shows why that park is not a one-liner.** `quiesce` calls
+`log::wait_for_durable`, which waits for `logd` — a userland process — to write
+the ring to the file. A park that took every other CPU before the boot's last
+word would deadlock on the one process the last word has to reach. The park has
+to leave `logd` runnable until `wait_for_durable` returns and stop everything
+else, which is a scheduler change with a carve-out rather than a stop-the-world.
+
 ## What has been done, and what has not
 
 `kernel/src/drivers/xhci/stop.rs` closed it for the one device class it cost a
@@ -42,8 +82,8 @@ stick, and closed it at the reset rather than at the caller: `acpi::reboot` and
 connected port, halt every controller, reset it, take the ports' power away and
 stop its bus mastering before they write their register. The shutdown adds the
 disk-cache flush above the boot's last word and the controller lock below it,
-and `userland/test-runner`'s deadline kills the job it was watching and waits for
-it before it asks for the reboot.
+and `userland/test-runner`'s deadline kills the job it was watching, waits for it,
+and stands its own loop down before it asks for the reboot.
 
 That is one device's answer, not the general one. **Nothing bounds what other
 CPUs do between `sync_all` and the reset**, and the next device class given a

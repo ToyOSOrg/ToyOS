@@ -666,6 +666,13 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // is memory the loader allocated and the machine is what it was after.
     ("blackbox-foreign-identity", Flash::Ok),
     (
+        "quiesce-late-word",
+        Flash::Never(
+            "it holds the shutdown open after the boot's last word, which is the one window a \
+             metal verdict is read across — an image armed with it stages its own red",
+        ),
+    ),
+    (
         "xhci-lock-wedged",
         Flash::Never(
             "it makes the shutdown skip the disk-cache flush, so the boot's own log may never \

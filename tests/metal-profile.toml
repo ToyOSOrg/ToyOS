@@ -265,8 +265,9 @@ ceiling_from = "as boot.testcases.stick_secs"
 [[number]]
 name = "boot.jobcase.stick_secs"
 unit = "s"
-ceiling = 30
-ceiling_from = "as boot.testcases.stick_secs"
+ceiling = 5
+ceiling_from = "the machine has answered: 0 s on run 20, at the driver's 1 s poll. Five is what one round of Linux's own enumeration retries would cost — run 18's journal spent three seconds on four addressing attempts and a port power cycle before it gave up — so a reading over it is a stick that needed rescuing rather than one that was simply there"
+measured = 0
 
 [[number]]
 name = "boot.metalcase.stick_secs"
@@ -283,8 +284,9 @@ ceiling_from = "as boot.testcases.stick_secs"
 [[number]]
 name = "boot.metaldevicecase.stick_secs"
 unit = "s"
-ceiling = 30
-ceiling_from = "as boot.testcases.stick_secs"
+ceiling = 5
+ceiling_from = "as boot.jobcase.stick_secs, and this is the boot that reads it hardest: run 18 wedged the stick on exactly this shape and run 20 answered 0 s after 2.4 MiB written, fsynced and read back"
+measured = 0
 
 [[number]]
 name = "boot.selftests.stick_secs"
