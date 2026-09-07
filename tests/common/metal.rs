@@ -324,8 +324,8 @@ fn at(dir: &Path, label: &str) -> PathBuf {
 /// **Two arms naming one boot are refused where they disagree about it**: an
 /// image is one config armed one way, and a silent winner would give one of the
 /// two tests a machine it did not ask for.
-fn batches<'a>(
-    tests: &[(&'a str, &'static Metal)],
+fn batches(
+    tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
 ) -> Result<BTreeMap<String, Batch>, String> {
     let mut out: BTreeMap<String, Batch> = BTreeMap::new();
@@ -481,7 +481,18 @@ fn build(
         toyos_build::build::TEST_KERNEL
     };
     let features = if batch.features.is_empty() { implied } else { batch.features };
-    let plan = toyos_build::build::Plan::new(&config, features, &batch.params);
+    // **Every metal image, and it is not a field an arm may set.** A boot that
+    // wedges after the scheduler is up ends nothing on this machine — the
+    // chipset watchdog does not count on this PCH, the runner's own bound
+    // reboots through the shutdown syscall the wedge may be inside, and the
+    // loop then waits `metal::return_secs` and needs a hand on the power
+    // button. Armed after the kernel build is decided above, because a
+    // parameter carrying a value is not an actuator and must not pull the test
+    // kernel in behind it.
+    let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
+    let mut params: Vec<&str> = batch.params.clone();
+    params.push(&deadline);
+    let plan = toyos_build::build::Plan::new(&config, features, &params);
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;

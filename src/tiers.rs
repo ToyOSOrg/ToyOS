@@ -244,6 +244,19 @@ pub const RELEGATED: &[Relegated] = &[
                  it — which is the whole reason a person in the room can read the panel.",
     },
     Relegated {
+        test: "boot_deadline_ends_a_wedge",
+        ci_ms: 18_275,
+        why: Why::TimerAnchored,
+        guards: "The one bound in this tree that ends a machine no other bound can reach: a boot \
+                 whose every CPU has stopped taking scheduler passes, with preemption disabled \
+                 and interrupts on, which is the state the T14 hung in twice in four boots. The \
+                 control stages that wedge at the shutdown syscall and the judge watches the \
+                 guest reset itself and the next pass read a `WEDGED` page carrying both the \
+                 bound and the tail of the ring nothing drained. Timer-anchored because the \
+                 verdict is a bound counted down in the guest; without it nothing at all asks \
+                 whether a wedged unattended boot ever ends.",
+    },
+    Relegated {
         test: "blackbox_panic_chain",
         ci_ms: 11_407,
         why: Why::TimerAnchored,

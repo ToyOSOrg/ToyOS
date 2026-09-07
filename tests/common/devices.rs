@@ -111,8 +111,7 @@ pub fn metal_device_probe(
         let head = format!("exit: {job} pid=");
         let line = text
             .lines()
-            .filter(|l| l.contains(&head))
-            .next_back()
+            .rfind(|l| l.contains(&head))
             .ok_or_else(|| format!("no `{head}` record: {job} never ran, or never ended"))?;
         let code: i32 = line
             .split_once(" code=")

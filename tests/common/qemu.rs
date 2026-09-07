@@ -2481,7 +2481,8 @@ fn build_boot_image_with(
         PARAMS.get_or_init(|| toyos_build::build::declared_params(&compile::repo_root()));
     for name in kernel_params {
         assert!(
-            actuators.iter().chain(params).any(|a| a == name),
+            actuators.iter().chain(params).any(|a| a == name)
+                || toyos_build::build::is_valued_param(name),
             "{name:?} is a `kernel_params` and the kernel declares no such actuator or parameter"
         );
     }

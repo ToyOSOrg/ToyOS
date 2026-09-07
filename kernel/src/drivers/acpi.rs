@@ -273,10 +273,30 @@ pub fn can_reboot() -> bool {
 pub fn reboot() -> ! {
     crate::drivers::serial::flush_final();
 
-    let port = RESET_PORT.load(Ordering::Relaxed);
     // Kernel-internal, so a bug rather than a machine quiesced and then left halted quietly.
-    assert!(port != 0, "reboot: no reset register, and the caller did not ask can_reboot() first");
+    assert!(
+        RESET_PORT.load(Ordering::Relaxed) != 0,
+        "reboot: no reset register, and the caller did not ask can_reboot() first"
+    );
+    reset_now()
+}
 
+/// Write the reset register and nothing else.
+///
+/// **[`reboot`] is not reachable from a wedge**, which is why this exists
+/// beside it: that path opens with `serial::flush_final`, and a `BackendGuard`
+/// masks interrupts for its whole life — so a CPU stuck inside one holds what
+/// the call would wait for, on exactly the boots `crate::deadline` exists for.
+/// This takes no lock and touches nothing but the port the FADT named.
+///
+/// A machine with no reset register halts here rather than returning: the
+/// caller has already sealed why, and holding is what such a machine has always
+/// done.
+pub fn reset_now() -> ! {
+    let port = RESET_PORT.load(Ordering::Relaxed);
+    if port == 0 {
+        crate::arch::cpu::halt();
+    }
     // SAFETY: the port is non-zero only where `init_reset` decoded an 8-bit System I/O register, and the value is that register's.
     unsafe { crate::arch::cpu::outb(port, RESET_VALUE.load(Ordering::Relaxed)) };
 

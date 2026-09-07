@@ -25,13 +25,16 @@ pub fn init(cmdline: &str) {
 /// Whether this kernel handles `token` itself, which is what stops
 /// `actuator::init` refusing it as a name it does not know.
 ///
-/// **The one parameter that carries a value is not in [`PARAMS`] and is not
+/// **The two parameters that carry a value are not in [`PARAMS`] and are not
 /// read here**: the black-box page's address is read out of the raw buffer in
 /// `kernel_main`'s first statements (`crate::blackbox::arm`), because a panic
-/// before this function runs still has to be able to seal. All this does is stop
-/// the actuator table refusing a word it does not know.
+/// before this function runs still has to be able to seal, and the boot
+/// deadline's bound is read beside [`init`] (`crate::deadline::claim`). All this
+/// does is stop the actuator table refusing a word it does not know.
 pub fn claims(token: &str) -> bool {
-    PARAMS.iter().any(|(name, _)| *name == token) || token.starts_with(toyos_blackbox::PARAM)
+    PARAMS.iter().any(|(name, _)| *name == token)
+        || token.starts_with(toyos_blackbox::PARAM)
+        || token.starts_with(toyos_tco::DEADLINE_PARAM)
 }
 
 pub fn watchdog() -> bool {

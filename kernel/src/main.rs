@@ -28,6 +28,7 @@ mod log;
 mod actuator;
 mod params;
 mod blackbox;
+mod deadline;
 mod mm;
 mod panic;
 mod panic_reboot;
@@ -280,6 +281,7 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // Both readings of it here: the parameter is in no reserved region, so
     // `mm::init` may hand that memory out and neither may hold a borrow.
     params::init(cmdline);
+    deadline::claim(cmdline);
     actuator::init(cmdline);
     rootfs::init(cmdline);
 
@@ -406,6 +408,9 @@ unsafe fn kernel_main(kernel_args: &KernelArgs) -> ! {
     clock::init_wall(century_reg, kernel_args.rtc_utc_offset());
     trace::enable();
     apic::init_timer();
+    // After both halves of what it needs: a TSC period to convert its bound
+    // with, and a timer whose every tick polls it.
+    deadline::start();
 
     boot_phase!("CPU ready", 0);
 

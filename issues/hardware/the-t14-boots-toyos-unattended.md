@@ -19,7 +19,8 @@ What is left to build:
 
 - **The chipset watchdog is armed and does not count**, so nothing this tree
   arms can end a wedged boot; a panicking kernel ends one by its own bound
-  instead, and a kernel that wedges without panicking still ends nothing.
+  instead, and a kernel that wedges without panicking after `clock::init` is now
+  ended by `kernel/src/deadline.rs` (below) — before it, still nothing.
   `issues/hardware/an-armed-tco-has-never-reset-the-t14.md` carries the
   registers and the datasheet. **Exit**: a T14 boot that resets itself on an
   armed TCO.
@@ -61,6 +62,27 @@ What is left to build:
   can be started before the BSP's own LAPIC is enabled, and `acpi::init_reset`
   — which decodes the register any of this would write — runs inside it. That
   floor is inherent rather than an argument against the design.
+
+  **The half of it that does not need an AP is built** (`kernel/src/deadline.rs`):
+  a bound armed off the parameter line as `boot-deadline=<ms>` and polled from
+  the timer interrupt entry, in both rings, on every CPU — two atomics and a
+  `rdtsc`, no lock, no allocation. On expiry it seals a `WEDGED` record naming
+  the bound, the uptime, the boot phase and **the tail of the log ring** into
+  the black box, and writes the reset register. That closes findings 1 and 4
+  for everything after `clock::init`: the bound is derived rather than guessed
+  (`toyos_tco::WEDGE_BOUND_MS`, twice the runner's own, so a job the runner is
+  about to end is not a wedge), and `acpi::reset_now` is the lock-free write
+  finding 4 asked for — `reboot` now goes through it, so there is one writer of
+  that port. It ends a wedge whose every CPU has stopped taking scheduler
+  passes: measured on QEMU as `boot_deadline_ends_a_wedge`, 18 s with the arm
+  against a machine that never came back without it, twice at 66 s.
+
+  Findings 2 and 3 are untouched and are exactly what is left: they are about a
+  CPU outside the roster, and the only thing that needs one is the span this
+  cannot reach — before `clock::init`, and a machine on which no CPU takes an
+  interrupt at all. `kernel/src/deadline.rs`'s header states both as the same
+  seam. Nothing here is a second mechanism beside the sentinel; it is the
+  sentinel's seal, bound and reset, waiting for its CPU.
 - **An AP loads its IDT before its control registers**, so a fault in that span
   triple-faults the machine —
   `issues/kernel/an-ap-loads-the-idt-before-its-control-registers.md`, whose

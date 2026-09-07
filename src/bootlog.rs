@@ -21,6 +21,17 @@ pub const REBOOTING: &str = "Rebooting.";
 pub const JOB_DEADLINE_SAID: &str =
     "test-runner: the job list ran past its bound, and the job it was inside is";
 
+/// What the kernel's own boot deadline writes into the black box as it ends the
+/// machine, in `kernel/src/deadline.rs`. The loader prints it back under
+/// [`PREVIOUS_PANIC`] on the pass after the reset, and that is the only channel
+/// it has: a wedged boot's `logd` wrote nothing.
+pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
+
+/// What the `wedge-before-reset` actuator says before it stops every CPU, in
+/// `kernel/src/deadline.rs`. The witness that a deadline ended a wedge and not
+/// a boot merely slower than its bound, which is what makes that control one.
+pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
@@ -262,6 +273,8 @@ mod tests {
             ("kernel/src/process.rs", format!("log!(\"{EXIT}{{name}} pid=")),
             ("kernel/src/arch/smp.rs", format!("log!(\"{AP_BRINGUP}")),
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
+            ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
+            ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
         ] {
             let at = root.join(file);
             let source = std::fs::read_to_string(&at).expect("a kernel module");

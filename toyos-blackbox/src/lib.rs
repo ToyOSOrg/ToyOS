@@ -116,6 +116,11 @@ pub enum State {
     /// not said it yet, and a handler that dies before its own report is the
     /// case this state exists for.
     Fault = 4,
+    /// The boot deadline expired and returned the machine to firmware. Distinct
+    /// from [`State::Panic`] because nothing failed an assertion: the machine
+    /// was still executing and had stopped making progress, so the text is the
+    /// boot phase it was in and the tail of a log ring nobody was draining.
+    Wedged = 5,
 }
 
 impl State {
@@ -129,6 +134,7 @@ impl State {
             2 => Some(Self::Panic),
             3 => Some(Self::Done),
             4 => Some(Self::Fault),
+            5 => Some(Self::Wedged),
             // Not a state this tree writes: the page holds something else, or
             // something else holds the page.
             _ => None,
@@ -142,6 +148,7 @@ impl State {
             Self::Armed => "ARMED",
             Self::Panic => "PANIC",
             Self::Done => "DONE",
+            Self::Wedged => "WEDGED",
             Self::Fault => "FAULT",
         }
     }
@@ -495,7 +502,8 @@ mod tests {
     /// One image's log-partition signature, which is what a record belongs to.
     const STICK: Identity = [0xa5; 16];
 
-    const STATES: [State; 4] = [State::Armed, State::Panic, State::Done, State::Fault];
+    const STATES: [State; 5] =
+        [State::Armed, State::Panic, State::Done, State::Fault, State::Wedged];
 
     fn blank() -> [u8; BYTES] {
         [0u8; BYTES]
@@ -708,7 +716,7 @@ mod tests {
             assert_eq!(State::of(state.code()), Some(*state));
         }
         assert_eq!(State::of(0), None);
-        assert_eq!(State::of(5), None);
+        assert_eq!(State::of(STATES.len() as u32 + 1), None);
     }
 }
 

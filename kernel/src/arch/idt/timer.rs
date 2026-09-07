@@ -58,10 +58,25 @@ pub(super) extern "sysv64" fn timer_entry() {
         "mov byte ptr gs:[{need_resched}], 1",
         // No lock on the fire count: single writer, IF=0.
         "inc dword ptr gs:[{ring0_fires}]",
+        // The boot deadline, from the one branch that runs while a lock is
+        // held: a CPU spinning on a ticket still takes this interrupt, and that
+        // is the whole reason the poll is here and not only in the Rust half.
+        // The rest of the caller-saved set, then the stack realigned for a
+        // `sysv64` call — the target touches no `xmm`, since the kernel's own
+        // target has no hardware float (`src/build.rs`'s check).
+        "push rsi", "push rdi", "push r8", "push r9", "push r10", "push r11",
+        "push rbp",
+        "mov rbp, rsp",
+        "and rsp, -16",
+        "call {deadline}",
+        "mov rsp, rbp",
+        "pop rbp",
+        "pop r11", "pop r10", "pop r9", "pop r8", "pop rdi", "pop rsi",
         "pop rdx",
         "pop rcx",
         "pop rax",
         "iretq",
+        deadline = sym crate::deadline::poll,
         handler = sym timer_handler,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
         armed_ticks = const crate::arch::percpu::OFF_LAST_ARMED_TICKS,
@@ -76,6 +91,9 @@ pub(super) extern "sysv64" fn timer_entry() {
 
 extern "sysv64" fn timer_handler() {
     crate::irq_census::irq_took!(Timer);
+    // Before anything that can take a lock: a CPU running userland is the other
+    // half of the coverage the Ring 0 branch above gives a CPU holding one.
+    crate::deadline::poll();
     // Only the Ring 3 tick reaches here, so the interrupted context is user code and holds no `Lock`; the assert below checks that gate.
     assert_eq!(
         crate::preempt::count(),
