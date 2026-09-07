@@ -2578,21 +2578,33 @@ mod tests {
         assert!(provides_disjoint_from_serves(&bad).is_err());
     }
 
-    /// The one config that names a device twice on purpose, so that a boot
-    /// exists in which the kernel has to refuse the second claim.
-    const STAGES_A_COLLISION: &str = "tests/netcase/system.toml";
+    /// The one `devices` entry in the tree that is a deliberate second claim:
+    /// config, program, device. `pci_function_is_exclusive` boots it and reads
+    /// the kernel refusing it.
+    const STAGED_COLLISION: (&str, &str, &str) =
+        ("tests/netcase/system.toml", "test-runner", "pci:1af4:1041");
 
     /// Init mints one claim per device, so a shipping config naming one twice
     /// starts a program with a hole where its claim should be.
-    fn one_claimant_per_device(cfg: &SystemConfig) -> Result<(), String> {
+    ///
+    /// `excused` is one `(program, device)` and never a whole config: every
+    /// other collision in the config that stages one is still refused.
+    fn one_claimant_per_device(
+        cfg: &SystemConfig,
+        excused: Option<(&str, &str)>,
+    ) -> Result<(), String> {
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
         for (name, prog) in &cfg.programs {
             for d in &prog.devices {
+                if excused == Some((name.as_str(), d.as_str())) {
+                    continue;
+                }
                 if let Some(prev) = seen.insert(d, name) {
                     return Err(format!(
                         "device `{d}` is claimed by both `{prev}` and `{name}`; the second \
-                         claim is refused at boot, and `{STAGES_A_COLLISION}` is the one \
-                         config allowed to stage that"
+                         claim is refused at boot, and `{}`'s `{}` is the one entry allowed \
+                         to stage that",
+                        STAGED_COLLISION.0, STAGED_COLLISION.1
                     ));
                 }
             }
@@ -2601,20 +2613,26 @@ mod tests {
     }
 
     /// Not the capability boundary — `kernel/src/pcidev`'s slot reservation is,
-    /// and this compares `system.toml` strings. The exception is asserted to
-    /// still collide rather than skipped, so it cannot rot into a pass.
+    /// and this compares `system.toml` strings. The excused entry is asserted to
+    /// still be a collision *by name*, so the exception cannot rot into a pass
+    /// and cannot cover a second one added to the same config.
     #[test]
     fn every_device_class_has_at_most_one_claimant() {
-        for cfg in ALL_CONFIGS.iter().filter(|cfg| **cfg != STAGES_A_COLLISION) {
-            one_claimant_per_device(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        for cfg in ALL_CONFIGS {
+            let excused =
+                (*cfg == STAGED_COLLISION.0).then_some((STAGED_COLLISION.1, STAGED_COLLISION.2));
+            one_claimant_per_device(&load(cfg), excused).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        assert!(one_claimant_per_device(&load(STAGES_A_COLLISION)).is_err());
+        let staged = one_claimant_per_device(&load(STAGED_COLLISION.0), None)
+            .expect_err("the excused entry no longer collides with anything");
+        assert!(staged.contains(STAGED_COLLISION.2), "{staged}");
+        assert!(staged.contains(STAGED_COLLISION.1), "{staged}");
         let bad: SystemConfig = toml::from_str(
             "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",
         )
         .unwrap();
-        assert!(one_claimant_per_device(&bad).is_err());
+        assert!(one_claimant_per_device(&bad, None).is_err());
     }
 
     /// A device name the ABI does not know renders fine and leaves init with a

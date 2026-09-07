@@ -714,6 +714,12 @@ pub fn iommu_virtio_platform(
                 "netd: this claim answers 4096 bytes of configuration space and refuses every \
                  access outside them",
             )?;
+            // The two things a hand-over spends, on the same function and the
+            // same machine the arm below requires to be unspent. Without this
+            // pair those `must_not_say`s would pass against a kernel that had
+            // stopped writing either line.
+            log.must_say(BAR_MOVED)?;
+            log.must_say(MSIX_ARMED)?;
             created.len()
         } else {
             no_unit_is_no_claim(&log)?;
@@ -786,12 +792,28 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     log.must_say("NOT HANDED OVER")?;
     log.must_say("it would have no address space of its own")?;
     log.must_not_say("handed over on slot")?;
+    // **And the refusal spent nothing on the way out.** No BAR was moved, so
+    // this function's BARs are still where firmware put them, and no vector was
+    // programmed into its MSI-X table — which is what says `bring_up` asks for
+    // the address space *before* it touches the function. `slot_space` put back
+    // below `place_bars` reds here.
+    log.must_not_say(BAR_MOVED)?;
+    log.must_not_say(MSIX_ARMED)?;
     log.must_say("init: netd: pci:1af4:1041 is on this machine and could not be handed over")?;
     // netd's own exit is not read here: it speaks after the ready marker this
     // capture ends at. It is the same endowment-is-empty path
     // `virtio_net_no_msix` waits for and asserts by name.
     Ok(())
 }
+
+/// The two lines a hand-over spends, on the function `netcase` claims.
+///
+/// Named once because both arms of `iommu_virtio_platform` read them, in
+/// opposite directions: the arm with a unit requires them and the arm without
+/// one requires their absence. An absence nothing ever produces would pass
+/// against a kernel that had stopped writing the line at all.
+const BAR_MOVED: &str = "pcidev: PCI 00:03.0 BAR";
+const MSIX_ARMED: &str = "PCI 00:03.0: msix address=";
 
 /// The control that makes the two arms above mean something: a guest that
 /// declines the feature its host offered gets no device, not a bypassing one.

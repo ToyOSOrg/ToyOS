@@ -31,6 +31,15 @@
 //! advertises one (PCIe §6.6.2), which no device in reach does — so the order
 //! above is the mechanism and the reset is the belt.
 //!
+//! **What is read back, and what is not.** `Owned` is
+//! `pci_function_is_exclusive`, `NoMsix` is `virtio_net_no_msix`,
+//! `Untranslated` is `iommu_virtio_platform`'s no-unit arm, and the domain is
+//! `userdev_dma_fault`; `Ambiguous`, `KernelDriven`, `Exhausted`, every window
+//! refusal and every bound the three calls check are refused here and read by
+//! nothing, because a registration of them waits on a boot config whose own
+//! test binary holds a claimable function — netd holds this machine's only
+//! one, and netd is not a test binary.
+//!
 //! Nothing here is specific to what a function *is*.
 
 /// No `crate::` reference, so `kernel-loom` compiles it and models the
@@ -195,9 +204,12 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
 /// **One lock over the whole array, because this is where a function's
 /// exclusivity is decided.** `Claim::acquire`'s per-class flag does not answer
 /// for a class that names several devices, and `src/build.rs`'s
-/// `one_claimant_per_device` compares `system.toml` strings — a host-side gate
-/// is not the capability boundary, and `pci:1af4:1041` and `pci:1AF4:1041` are
-/// two strings naming one function.
+/// `one_claimant_per_device` compares `system.toml` strings, and a host-side
+/// gate is not the capability boundary.
+///
+/// **Taken alone**: nothing is held while this is, and it is held across
+/// nothing — `reserve` runs after `claim` has dropped `MACHINE`, and `release`
+/// takes it once the teardown is over.
 static SLOTS: Lock<[Option<u16>; MAX_FUNCTIONS]> = Lock::new([None; MAX_FUNCTIONS]);
 
 /// Take a slot for `who`, or say why not.
@@ -321,6 +333,7 @@ enum Refusal {
     NoWindow,
     BarUnsizable(u8),
     BarUnplaceable(u8),
+    BarResized(u8),
     Dead(u64),
 }
 
@@ -344,6 +357,11 @@ impl core::fmt::Display for Refusal {
             ),
             Self::BarUnsizable(i) => write!(f, "BAR {i} answers no size to bound a window by"),
             Self::BarUnplaceable(i) => write!(f, "BAR {i} did not take the address it was given"),
+            Self::BarResized(i) => write!(
+                f,
+                "BAR {i} answers a different size than the window it already holds was cut for, \
+                 so the function changed under this kernel"
+            ),
             Self::Dead(at) => write!(
                 f,
                 "the window it was moved to at {at:#x} reads ones, so nothing routes it"
@@ -584,7 +602,7 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
     let low = pci.read_config_u32(offset);
     let wide = matches!(bar::decode(index, low), Ok(bar::Width::Wide(_)));
     let span = align_2m(size as usize) as u64;
-    let at = take_window(pci, index, wide, span).ok_or(Refusal::NoWindow)?;
+    let at = take_window(pci, index, wide, span)?;
     let placed =
         bar::placement(index, low, at, size).map_err(|_| Refusal::BarUnplaceable(index))?;
 
@@ -619,36 +637,36 @@ fn place_bar(pci: &PciDevice, index: u8, size: u64) -> Result<u64, Refusal> {
 }
 
 /// The window this BAR decodes in: cut on its first claim, and answered again
-/// on every later one. `None` where this machine has no room left.
+/// on every later one.
 ///
 /// Aligned to `span` and not merely to a page: a BAR's low address bits are
 /// hardwired to zero, so a window wider than 2 MiB has to start on its own
 /// size or the device decodes somewhere else (PCIe §7.5.1.2.1).
-fn take_window(pci: &PciDevice, index: u8, wide: bool, span: u64) -> Option<u64> {
+fn take_window(pci: &PciDevice, index: u8, wide: bool, span: u64) -> Result<u64, Refusal> {
     let who = requester(pci);
     let mut machine = MACHINE.lock();
     if let Some(&(_, _, at, cut)) =
         machine.windows.iter().find(|(w, i, _, _)| *w == who && *i == index)
     {
-        // A BAR that answers a different size than it did on its first claim is
-        // a function that changed under this kernel, not a window to re-cut.
-        return (cut == span).then_some(at);
+        // Refused by its own name and not as `NoWindow`: this machine has the
+        // room, and what changed is the BAR.
+        return if cut == span { Ok(at) } else { Err(Refusal::BarResized(index)) };
     }
     let at = {
         let (next, top) = if wide { &mut machine.wide } else { &mut machine.narrow };
         if *next == 0 {
-            return None;
+            return Err(Refusal::NoWindow);
         }
-        let at = next.checked_next_multiple_of(span)?;
-        let end = at.checked_add(span)?;
+        let at = next.checked_next_multiple_of(span).ok_or(Refusal::NoWindow)?;
+        let end = at.checked_add(span).ok_or(Refusal::NoWindow)?;
         if end > *top {
-            return None;
+            return Err(Refusal::NoWindow);
         }
         *next = end;
         at
     };
     machine.windows.push((who, index, at, span));
-    Some(at)
+    Ok(at)
 }
 
 /// Nothing else on this machine decodes inside the page that is about to be
@@ -698,7 +716,11 @@ fn alone_in_its_page(claimed: &PciDevice, index: u8, wide: bool, at: u64, span: 
 /// could still reach it is a device writing into memory the allocator has
 /// already handed to somebody else.
 pub fn release(slot: usize) {
-    if let Some(bound) = BOUND[slot].lock().take() {
+    // Two statements, because edition 2021 keeps an `if let`'s scrutinee
+    // temporaries alive to the end of its block: `BOUND[slot]`'s guard would be
+    // held across the unmaps, the reset and `WATCHERS`.
+    let bound = BOUND[slot].lock().take();
+    if let Some(bound) = bound {
         tear_down(slot, bound);
     }
     // Unconditional and last: a hand-over refused inside [`bring_up`] bound
