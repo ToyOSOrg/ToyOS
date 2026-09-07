@@ -1202,7 +1202,8 @@ pub struct PciId {
 }
 
 impl PciId {
-    /// `"<vendor>:<device>"`, four lowercase hex digits each.
+    /// `"<vendor>:<device>"`, four lowercase hex digits each; one spelling per
+    /// function, so that comparing the strings compares the functions.
     pub fn parse(text: &str) -> Option<Self> {
         let (vendor, device) = text.split_once(':')?;
         Some(Self { vendor: hex16(vendor)?, device: hex16(device)? })
@@ -1222,8 +1223,11 @@ impl PciId {
     }
 }
 
-/// Exactly four hex digits, lowercase or upper, and nothing else: a shorter
-/// field would make `1af4:41` and `1af4:0041` two spellings of one card.
+/// Exactly four lowercase hex digits and nothing else.
+///
+/// One spelling per function, because every reader of a `devices` entry
+/// compares the string: `1af4:41` and `1af4:0041`, or `1af4:1041` and
+/// `1AF4:1041`, would otherwise be two names for one card.
 fn hex16(text: &str) -> Option<u16> {
     if text.len() != 4 {
         return None;
@@ -1233,7 +1237,6 @@ fn hex16(text: &str) -> Option<u16> {
         let digit = match byte {
             b'0'..=b'9' => byte - b'0',
             b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
             _ => return None,
         };
         value = (value << 4) | digit as u16;
@@ -1870,6 +1873,9 @@ pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
 /// at any address the LAPIC decodes.
 ///
 /// Idempotent per BAR: a second call answers the same object.
+///
+/// A window alone drives nothing: the function masters the bus from its first
+/// [`device_dma_alloc`] and not before.
 pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_DEVICE_BAR_MAP, claim.0 as u64, bar as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
@@ -1881,6 +1887,14 @@ pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallEr
 /// An address the caller invents instead of the one this answers is one the
 /// function's domain does not map, and the unit refuses the access. `bytes` is
 /// rounded up to whole 2 MiB pages.
+///
+/// **The function issues no bus transaction at all until this call returns
+/// once.** A claim is handed over with Bus Master Enable clear, because what
+/// comes back from a dead holder still holds device addresses of a domain that
+/// no longer maps them; the first grant is what starts it, after that grant is
+/// in the function's domain. An MSI-X message is a memory write, so a driver
+/// that maps its BAR and waits on its claim without ever calling this is never
+/// interrupted.
 pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
     let mut grant =
         DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };
@@ -2112,15 +2126,17 @@ mod tests {
         assert_eq!(u32::from_ne_bytes(b[36..40].try_into().unwrap()), info.path_len);
     }
 
-    /// Four hex digits each and nothing else: a shorter field would make
-    /// `1af4:41` and `1af4:0041` two spellings of one card, and two spellings
-    /// are two claims on one function.
+    /// Four lowercase hex digits each and nothing else, because two spellings
+    /// are two claims on one function: `1af4:41` beside `1af4:0041`, and
+    /// `1AF4:1041` beside `1af4:1041`.
     #[test]
-    fn a_pci_id_is_four_hex_digits_each_and_nothing_else() {
+    fn a_pci_id_is_four_lowercase_hex_digits_each_and_nothing_else() {
         let want = PciId { vendor: 0x1af4, device: 0x1041 };
         assert_eq!(PciId::parse("1af4:1041"), Some(want));
-        assert_eq!(PciId::parse("1AF4:1041"), Some(want));
-        for bad in ["1af4:41", "1af4", "1af4:1041:", "", ":", "zzzz:1041", "1af4:104g"] {
+        for bad in [
+            "1AF4:1041", "1Af4:1041", "1af4:41", "1af4", "1af4:1041:", "", ":", "zzzz:1041",
+            "1af4:104g",
+        ] {
             assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
         }
     }

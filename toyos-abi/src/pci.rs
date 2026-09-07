@@ -7,6 +7,10 @@
 //! claim handle. Nothing here is a physical address, and nothing here is
 //! specific to what the function *is*.
 //!
+//! **The function masters the bus from its first grant and not from the
+//! hand-over**, so a driver takes its window and its first grant before the
+//! device can do anything at all, an interrupt included.
+//!
 //! [`syscall::device_dma_alloc`]: crate::syscall::device_dma_alloc
 
 /// The six BAR slots a Type 0 PCI header has (PCI 3.0 §6.1), and the bound
