@@ -72,6 +72,12 @@ pub fn stop_bus_mastering(config: Mmio) {
     config.write_u16(COMMAND, cmd & !BUS_MASTER);
 }
 
+/// One function's ECAM window: PCIe extended config space, PCI 3.0 §7.2.2.
+///
+/// Declared once because two readers deal in it — `PciDevice::new` carves it and
+/// the reset-time xHCI stop rebuilds one from a bare address.
+pub const CONFIG_BYTES: u64 = 4096;
+
 /// PCI device identified by ECAM base + Bus/Device/Function.
 #[derive(Clone, Copy)]
 pub struct PciDevice {
@@ -86,7 +92,7 @@ impl PciDevice {
         let offset = ((bus as u64) << 20)
             | ((dev as u64) << 15)
             | ((func as u64) << 12);
-        Self { mmio: ecam.subregion(offset, 4096), bus, dev, func }
+        Self { mmio: ecam.subregion(offset, CONFIG_BYTES), bus, dev, func }
     }
 
     /// A function over a caller-owned config-space window, for the cap self-test to drive the real walk over lists no hardware in reach produces.

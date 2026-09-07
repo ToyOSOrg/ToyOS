@@ -57,6 +57,26 @@ file shows:
 Nothing on the stick can separate them, and the black-box page was lost to the
 power cut each time — a warm reset preserves it, a cold one does not.
 
+## Two eliminations, both measured rather than argued
+
+**The runner's own deadline reaches `SYS_SHUTDOWN` on this hardware.** Run 20
+killed `usbread` at 67.3 s (`exit: usbread pid=8 code=137`) and the deadline
+thread carried the boot through `Syncing filesystems...` and `Rebooting.` from
+`cpu0 tid=1`; the machine reset and came back. So the shutdown path itself is
+not what these boots died in — what is left is what happens when the job list
+*completes* and the reboot binary is spawned, or a deadline thread that never
+ran.
+
+**The VFS lock is not in the window.** Run 20 also shows `vfs::lock()` held
+across a 32 s stick write with other CPUs at 200M spins
+(`issues/kernel/the-vfs-lock-is-held-across-a-usb-write-for-thirty-seconds.md`),
+which is within 2x of `Lock::lock`'s deadlock panic, and a spawn does take that
+lock. But it takes it at `loader/mod.rs:370` and in `load_needed_libs`, both
+*before* the `ELF: … relocations indexed` and `spawn: TLS … modules` records
+that every hung boot wrote; everything after them reads the already-open backing
+and takes no VFS lock. So it is a real hazard one step from a panic and it is
+not this.
+
 ## What now exists to answer it
 
 `kernel/src/deadline.rs`: a bound armed off the parameter line and polled from

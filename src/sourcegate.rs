@@ -125,6 +125,11 @@ const BANS: &[Ban] = &[
             // leaked the same pages by never being cleared, where nothing said
             // so at all.
             ("kernel/src/mm/dma.rs", 1),
+            // `xhci::seal_shut`, and here the forget *is* the barrier: the
+            // shutdown takes the controller lock so no transfer is in flight
+            // and never gives it back so none can start, which is what the
+            // reset that follows stands on.
+            ("kernel/src/drivers/xhci/mod.rs", 1),
             // Both in `cpu.rs`'s test module, and both are the drop bomb
             // rather than a leak: `Task`'s "the only legal death is
             // `DeadTask::finalize`" is a scheduler invariant, so a test that
@@ -211,6 +216,9 @@ const BANS: &[Ban] = &[
             ("kernel/src/iommu/vtd/mod.rs", 1),
             // The export itself, and the one place the literal lives.
             ("kernel/src/mm/mod.rs", 1),
+            // One PCIe function's extended config space, by PCI 3.0 §7.2.2 and
+            // not by this kernel.
+            ("kernel/src/drivers/pci.rs", 1),
         ],
     },
     Ban {

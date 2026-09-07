@@ -686,6 +686,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // T14 hung in twice. Two boots and a 25 s bound counted down in the guest,
     // so it is priced rather than free, and no host clock is in the verdict.
     ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
+    // Four chained boots, one per way this kernel reaches a reset, each
+    // anchored to the bound its own first boot counts down.
+    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
     // The control on the chain: a record another image left in the same memory
     // is cleared and its pass boots a kernel, where a real predecessor's ends
     // the chain. One boot, one actuator.
@@ -1396,6 +1399,18 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     // ---- one image: tests/jobcase ----
     (
+        // **The owner's ruling, on the machine whose stick it cost.** Two boots
+        // it already flashes: the device boot writes and fsyncs megabytes before
+        // its reset — run 18's exact shape — and `jobcase` is the same reset
+        // with nothing moved across the bus. Neither costs the machine a minute
+        // it was not already spending.
+        "usb_reset_hands_devices_back",
+        metal::Metal::Runs {
+            arms: USB_RESET_BOOTS,
+            judge: power::usb_reset_on_metal,
+        },
+    ),
+    (
         // Already precisely this boot: `args = ["reboot"]`. On the T14 the
         // chain is what every metal boot does — the loader points `BootNext` at
         // itself before each handoff, so the pass that reads the page appends
@@ -1565,6 +1580,19 @@ const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
 
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
+
+/// The two boots the reset ruling is judged on, and both are boots this suite
+/// already flashes: the device boot for a reset with megabytes behind it, and
+/// `jobcase` for one with nothing.
+const USB_RESET_BOOTS: &[metal::Arm] = &[
+    metal::once(
+        devices::BOOT,
+        devices::CONFIG,
+        &[],
+        devices::JOBS,
+    ),
+    metal::once("jobcase", "tests/jobcase", &[], &[]),
+];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
@@ -9634,6 +9662,9 @@ fn run_machine_test(
         "blackbox_done_chain" => power::blackbox_done_chain(test_config, c_bins, rust_bins),
         "boot_deadline_ends_a_wedge" => {
             power::boot_deadline_ends_a_wedge(test_config, c_bins, rust_bins)
+        }
+        "usb_reset_hands_devices_back" => {
+            power::usb_reset_hands_devices_back(test_config, c_bins, rust_bins)
         }
         "blackbox_foreign_record" => {
             power::blackbox_foreign_record(test_config, c_bins, rust_bins)

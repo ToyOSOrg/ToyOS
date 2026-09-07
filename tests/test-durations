@@ -392,6 +392,7 @@ usb_disk_index_stable 6267 shards=12
 usb_flush_optional 18056 shards=12
 usb_pool_exhausted 5237 shards=12
 usb_refused_disk_first 7260 shards=12
+usb_reset_hands_devices_back 44000 shards=12
 usb_short_read 8150 shards=12
 usb_storage_gate 14200 shards=12
 usb_storage_shapes 10215 shards=12

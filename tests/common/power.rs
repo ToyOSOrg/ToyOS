@@ -1459,3 +1459,214 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// The kernel record that says this boot's controller found the boot stick.
+///
+/// **The re-enumeration, taken off the boot after the reset.** Under QEMU it is
+/// weak on purpose: an emulated stick cannot be wedged, so this arm judges that
+/// the account is produced and that the machine still comes up on the same
+/// device. The T14 is the judge of the device itself, and `tests/metal-profile`
+/// carries its row.
+const STICK_ENUMERATED: &str = "usb-storage: 1 device(s)";
+
+/// Every way this kernel resets a machine, and the account each one leaves.
+///
+/// `acpi::reboot` and `acpi::shutdown` are the two resets this kernel performs,
+/// and three different things reach them: a job list's last `reboot`, the test
+/// runner's own job deadline, and the panic console's bound. Each arm is a
+/// chained boot, so the pass after the reset can be read.
+/// One way this kernel reaches a reset, and what its account must then say.
+struct ResetPath {
+    what: &'static str,
+    config: &'static str,
+    params: &'static [&'static str],
+    /// Whether that path reaches the shutdown's disk flush: a panic does not,
+    /// and a wedged controller lock refuses it, so `0/0` is the right answer
+    /// for both rather than a miss.
+    flushes: bool,
+    /// The clause `kernel/src/drivers/xhci/stop.rs` writes for this path's own
+    /// answer to "could a transfer still have been in flight".
+    barrier: &'static str,
+}
+
+const TOOK_THE_LOCK: &str = "the controller lock was held from before the log volume's";
+const NO_BARRIER: &str = "no barrier was taken, so this reset is not the shutdown's";
+const LOCK_REFUSED: &str = "the controller lock was not free inside its bound";
+
+const RESET_PATHS: &[ResetPath] = &[
+    ResetPath {
+        what: "the orderly reboot",
+        config: "tests/metaldevicecase",
+        params: &[],
+        flushes: true,
+        barrier: TOOK_THE_LOCK,
+    },
+    ResetPath {
+        what: "the runner's job deadline",
+        config: "tests/jobdeadlinecase",
+        params: &[],
+        flushes: true,
+        barrier: TOOK_THE_LOCK,
+    },
+    ResetPath {
+        what: "the panic console's bound",
+        config: "tests/testcases",
+        params: &["test-late-panic", "panic-reboot-fast"],
+        flushes: false,
+        barrier: NO_BARRIER,
+    },
+    // **The control on every bound in the shutdown path.** Run 19 of the metal
+    // loop hung three boots between the last job's exit and the reset, with
+    // nothing ending them; this stages the one wait this change owns — the
+    // barrier — never coming free, and requires the machine to hand itself back
+    // anyway, with the account naming what it did without.
+    ResetPath {
+        what: "a controller lock that never comes free",
+        config: "tests/jobcase",
+        params: &["xhci-lock-wedged"],
+        flushes: false,
+        barrier: LOCK_REFUSED,
+    },
+];
+
+/// **No reset this kernel performs leaves a USB device mid-command.**
+///
+/// The owner's ruling after run 18 of the metal loop, where a ToyOS boot wrote
+/// six megabytes to the boot stick and reset, and the stick answered
+/// `device descriptor read/64, error -71` to Ubuntu through two reboots and a
+/// sysfs port power cycle until it was physically replugged. That failure is the
+/// negative control and is not repeated.
+///
+/// **What this can and cannot judge.** QEMU's emulated stick cannot be wedged,
+/// so what is judged here is the *account*: for each of the three paths, that
+/// the reset reset every connected port, halted and reset every controller and
+/// emptied every disk cache before it wrote the reset register — and that the
+/// boot after it still finds the stick. `metaldevices::Quiesced::complete` is
+/// the same predicate the T14 judge applies to the same line, and reverting the
+/// stop leaves the line absent, which fails every arm here by name.
+pub fn usb_reset_hands_devices_back(
+    _test_config: &Path,
+    _c_bins: &[(String, Vec<u8>)],
+    _rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let root = super::compile::repo_root();
+    // Every arm is run and every finding reported: a mutation that reverts the
+    // stop breaks all three, and stopping at the first would say so about one.
+    let mut bad = Vec::new();
+    for path in RESET_PATHS {
+        if let Err(why) = one_reset_path(&root.join(path.config), path) {
+            bad.push(why);
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!("{} of {} reset path(s) unmet:\n  {}", bad.len(), RESET_PATHS.len(), bad.join("\n  ")))
+}
+
+/// One chained boot: reach the reset, read the account the pass after it prints,
+/// and see the machine come back on the same stick.
+fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
+    let (path, flushes) = (arm.what, arm.flushes);
+    let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(arm.params));
+    let _ = serial::Serial::boot(&qemu);
+    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+
+    let after = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
+    let head = toyos_build::metaldevices::QUIESCE_HEAD;
+    let account = toyos_build::metaldevices::quiesced(after.text()).ok_or_else(|| {
+        let said: Vec<&str> = after.text().lines().filter(|l| l.contains(head)).collect();
+        match said.is_empty() {
+            true => format!(
+                "{path}: the pass after the reset carries no {head:?} line at all, so nothing \
+                 stopped this machine's USB before it reset"
+            ),
+            false => format!(
+                "{path}: the pass after the reset carries no readable {head:?} summary — what \
+                 it did carry is {said:?}"
+            ),
+        }
+    })?;
+    if !account.complete() {
+        return Err(format!("{path}: the reset did not hand every device back: {account:?}"));
+    }
+    // The flush is the half a panic cannot reach, and a zero there on a path
+    // that does reach it would be a boot with no USB disk at all — under which
+    // the port-reset count above would be about nothing.
+    if flushes && account.disks == 0 {
+        return Err(format!(
+            "{path}: this boot emptied no disk cache, so it had no USB disk and the account \
+             above is about a machine this ruling is not about: {account:?}"
+        ));
+    }
+    if !flushes && account.disks != 0 {
+        return Err(format!(
+            "{path}: a panic never reaches the shutdown's flush, so this account was not \
+             written by the path it claims: {account:?}"
+        ));
+    }
+    // Which of the three answers this path has to the one question no register
+    // can be read for: whether a transfer could still have been in flight.
+    if !after.text().contains(arm.barrier) {
+        return Err(format!(
+            "{path}: the account does not say {:?}, so the barrier this path owes was not the \
+             one it took",
+            arm.barrier
+        ));
+    }
+    ended_in_a_reset(&mut resets).map_err(|why| format!("{path}: {why}"))?;
+
+    // And the machine comes back on the same device. The pass after the chain's
+    // end boots a kernel again, and that kernel's own controller is what says
+    // whether the stick answered.
+    let again = after_the_reset(&mut qemu, STICK_ENUMERATED);
+    again.must_say(STICK_ENUMERATED).map_err(|why| format!("{path}: {why}"))?;
+    drop(qemu);
+    eprintln!("  [power] {path}: {account:?}, and the stick enumerated again");
+    Ok(())
+}
+
+/// The T14's judge for [`usb_reset_hands_devices_back`].
+///
+/// **The machine is the judge of the device, and nothing else is.** QEMU cannot
+/// wedge a stick; run 18 of the metal loop did, and what says the boot before
+/// this one left the bench's own device enumerable is the driver's
+/// `boot.<boot>.stick_secs` row — recorded before the mount, so it is a number
+/// and not the reason a mount happened to work. What is left for this to read is
+/// the reset's own account, which on this machine is in `loader.log`'s pass
+/// after the reset rather than in any file the kernel wrote.
+///
+/// Both arms are orderly reboots, so both owe the barrier. The panic path's
+/// account is judged under QEMU only: on this machine a kernel that panics
+/// before `logd` runs writes no log file at all, and one that panics after it
+/// leaves no `Rebooting.` for the loop's own verdict —
+/// `issues/build/the-metal-loop-cannot-judge-a-boot-that-panics.md`.
+pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String> {
+    let mut bad = Vec::new();
+    for back in arms {
+        let text = back.loader();
+        let head = toyos_build::metaldevices::QUIESCE_HEAD;
+        let Some(account) = toyos_build::metaldevices::quiesced(text.text()) else {
+            bad.push(format!(
+                "{}: loader.log carries no readable {head:?} summary, so nothing stopped this \
+                 machine's USB before it reset",
+                back.label
+            ));
+            continue;
+        };
+        if !account.complete() {
+            bad.push(format!("{}: {account:?}", back.label));
+        }
+        if !text.text().contains(TOOK_THE_LOCK) {
+            bad.push(format!(
+                "{}: this is an orderly reboot and its account does not say {TOOK_THE_LOCK:?}",
+                back.label
+            ));
+        }
+        eprintln!("  [power] {}: {account:?}", back.label);
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
+}

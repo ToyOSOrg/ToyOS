@@ -145,6 +145,13 @@ pub struct Readback {
     pub boot_ms: Option<u64>,
     /// What the machine spent getting back to `sshd`.
     pub back_secs: u64,
+    /// How long after that the boot stick's own partition was there again.
+    ///
+    /// **The one judge of the device there is.** QEMU cannot wedge a stick, so
+    /// whether a reset left the bench's own device enumerable is a fact only
+    /// this machine holds, and it is a row rather than the reason a mount
+    /// happened to work.
+    pub stick_secs: u64,
 }
 
 impl Readback {
@@ -544,12 +551,15 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     let boot = read(toyos_build::metal::READBACK_BOOT)?;
     let back_secs = toyos_build::metal::back_secs(&boot)
         .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
+    let stick_secs = toyos_build::metal::stick_secs(&boot)
+        .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
     Ok(Readback {
         label: label.to_string(),
         boot_ms: bootlog::boot_millis(&kernel),
         loader,
         kernel,
         back_secs,
+        stick_secs,
     })
 }
 
@@ -712,10 +722,15 @@ pub fn run(
             }
             Ok(back) => {
                 let ms = back.boot_ms.map_or_else(|| "-".to_string(), |ms| ms.to_string());
-                eprintln!("  {label}: Boot: complete {ms} ms, back in {} s", back.back_secs);
+                eprintln!(
+                    "  {label}: Boot: complete {ms} ms, back in {} s, the stick enumerated {} s \
+                     after that",
+                    back.back_secs, back.stick_secs
+                );
                 for (field, value) in [
                     ("complete_ms", back.boot_ms),
                     ("back_secs", Some(back.back_secs)),
+                    ("stick_secs", Some(back.stick_secs)),
                 ] {
                     let Some(value) = value else {
                         eprintln!("    FAIL boot.{label}.complete_ms: this boot recorded none");

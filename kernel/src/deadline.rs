@@ -23,6 +23,11 @@
 //! - **A machine on which no CPU takes an interrupt at all** — every core
 //!   halted below the interrupt layer, or spinning with `IF` clear at once.
 //!   Nothing polled from a running CPU can cover that.
+//! - **A panic racing the seal.** [`expire`] loses the `PAINTING` latch to a
+//!   CPU already inside the panel's fatal painter, and that CPU's own
+//!   `record_panic` then replaces this record. That is the right outcome and
+//!   not a gap: a panic report says more than a deadline does, and the panic
+//!   path has a bound of its own.
 //!
 //! Both are the *same* seam, and it has a name: the sentinel CPU designed and
 //! postponed in `issues/hardware/the-t14-boots-toyos-unattended.md`, a CPU
@@ -178,7 +183,6 @@ fn expire() -> ! {
         // add and must not race it into the page.
         crate::arch::cpu::halt();
     }
-    stop_dma();
     crate::drivers::panic_console::seal_wedge(format_args!(
         "{EXPIRED}: a bound of {} ms, reached at {} ms, with this machine in `{}`. \
          The tail of the log ring follows — which is what nothing was draining.\n",
@@ -186,6 +190,15 @@ fn expire() -> ! {
         crate::clock::nanos_since_boot() / 1_000_000,
         phase(),
     ));
+    // **After the seal and before the register.** `stop::before_reset` is
+    // registers and nothing else — written for the panic path, so it takes no
+    // lock and allocates nothing, which is the only kind of call this one may
+    // make — and it *appends* its account to the record just sealed, so a
+    // `WEDGED` page carries what the reset did to USB the way a `PANIC` one
+    // does. Sealing first and not after: the record is the diagnostic this
+    // whole mechanism exists for and may not be lost to a stop that does not
+    // return.
+    crate::drivers::xhci::stop::before_reset();
     crate::drivers::acpi::reset_now()
 }
 
@@ -240,15 +253,3 @@ fn this_cpu() -> ! {
     }
 }
 
-/// Stop every controller that is doing DMA, before the reset register is
-/// written.
-///
-/// **A seam, and it is empty on purpose.** The only stop this kernel has is
-/// `xhci::hand_back`, which opens by taking `XHCI` — a ticket spinlock, and so
-/// exactly the thing a wedge inside the driver is holding; calling it here
-/// would hang the one path that exists because something else hung. The
-/// register-only stop that takes nothing is `metal-suite-usbreset`'s, and this
-/// is where it goes. Until it lands, a deadline reset leaves the controllers
-/// running into a reset that stops them, which is what an unexpected reset has
-/// always done and is weaker than the quiesce a shutdown gives.
-fn stop_dma() {}

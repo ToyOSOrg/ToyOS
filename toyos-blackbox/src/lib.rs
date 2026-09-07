@@ -214,6 +214,18 @@ impl<'a> Report<'a> {
         Self { page, at: 0 }
     }
 
+    /// Carry on writing a report already sealed into this page, `kept` bytes long.
+    ///
+    /// **For what a boot learns after it has already said how it ended.** The
+    /// reset that follows a panic or a deliberate shutdown has an account of its
+    /// own — what it did to the machine's devices — and it is made where nothing
+    /// written reaches a file, so it goes *under* the report already here rather
+    /// than over it. `kept` is [`recover`]'s own answer for this page; a longer
+    /// one is cut to what the text area holds, so nothing here indexes past it.
+    pub fn reopened(page: &'a mut [u8; BYTES], kept: usize) -> Self {
+        Self { page, at: kept.min(TEXT_BYTES) }
+    }
+
     /// Append, dropping whatever does not fit. Nothing here indexes or unwraps:
     /// the caller may not panic.
     pub fn write(&mut self, bytes: &[u8]) {

@@ -36,23 +36,28 @@ happens to be, by construction.
 
 ## What has been done, and what has not
 
-`kernel/src/drivers/xhci`'s `flush_disks`/`hand_back` close the hole for the one
-device class this cost a stick: the shutdown now empties every USB disk's write
-cache above the boot's last word, and below it takes the controller lock — which
-this driver never holds across a transfer — before halting the controller,
-resetting it and taking the ports' power away. Holding that lock is what makes
-"no transfer is in flight" true rather than likely.
+`kernel/src/drivers/xhci/stop.rs` closed it for the one device class it cost a
+stick, and closed it at the reset rather than at the caller: `acpi::reboot` and
+`acpi::shutdown` — the only two resets this kernel performs — reset every
+connected port, halt every controller, reset it, take the ports' power away and
+stop its bus mastering before they write their register. The shutdown adds the
+disk-cache flush above the boot's last word and the controller lock below it,
+and `userland/test-runner`'s deadline kills the job it was watching and waits for
+it before it asks for the reboot.
 
 That is one device's answer, not the general one. **Nothing bounds what other
-CPUs do between `sync_all` and the reset**, and the next device class to be
-given a real workload on this machine will need its own version of the same
-argument. The general fix is for `quiesce` to stop the machine before it claims
-anything about it — every CPU but the caller parked, and userland off the run
-queue — and that is a scheduler change, not a driver one.
+CPUs do between `sync_all` and the reset**, and the next device class given a
+real workload on this machine will need its own version of the same argument.
+For USB the argument is the controller lock plus a port reset that ends a
+transfer whatever state it was in; NVMe, HDA and the GPU have neither. The
+general fix is for `quiesce` to stop the machine before it claims anything about
+it — every CPU but the caller parked, and userland off the run queue — and that
+is a scheduler change, not a driver one.
 
 ## What would show it
 
 A guest whose job list writes continuously while a second thread reboots, with
 the block layer counting operations that were in flight at the reset. The count
 is zero if the machine was stopped first and non-zero if it was not, and no
-existing test asks.
+existing test asks. `usb_reset_hands_devices_back` asks the narrower question —
+whether the reset left a device mid-command — and answers it for USB only.
