@@ -2199,6 +2199,7 @@ mod tests {
             vec!["--fat32-check"],
             vec!["--dry-run"],
             vec!["--wait-secs", "60"],
+            vec!["--nic", "0000:00:1f.6"],
         ] {
             let mut words = vec!["--install-sudoers".to_string(), "/tmp/pw".to_string()];
             words.extend(flag.iter().map(|w| (*w).to_string()));
