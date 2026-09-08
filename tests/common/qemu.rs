@@ -2169,9 +2169,10 @@ pub const DEFAULT_PANEL: (u32, u32) = (1280, 800);
 /// There is no default, because the author is the only one who knows whether the
 /// bytes the guest leaves behind are the verdict or the contamination.
 pub enum Staged {
-    /// **Boot a copy of this file; what the guest writes dies with the guest.**
-    /// The named file is never written, so a test may boot it as many times as
-    /// it likes and each boot starts where the one before it did.
+    /// **Boot this file under a throwaway overlay; what the guest writes dies
+    /// with the guest.** The named file is never written, so a test may boot it
+    /// as many times as it likes and each boot starts where the one before it
+    /// did.
     Pristine(PathBuf),
     /// **Boot this file itself, because what the guest wrote to it is what the
     /// test reads back.** One boot per file: nothing here clears what the last
@@ -2760,14 +2761,10 @@ impl QemuInstance {
             )
         };
         let (boot_image, own_boot_image) = match &options.boot_image {
-            Some(Staged::Written(staged)) => (staged.clone(), None),
-            Some(Staged::Pristine(staged)) => {
-                let path = test_dir.join(format!("boot-{seq}.img"));
-                fs::copy(staged, &path).unwrap_or_else(|e| {
-                    panic!("[qemu] copy {} to {}: {e}", staged.display(), path.display())
-                });
-                (path.clone(), Some(path))
-            }
+            // Both boot the file the test staged; what tells them apart is the
+            // `snapshot=on` `qemu_command` puts on the drive for a `Pristine`
+            // one, which is where that guest's writes go and die.
+            Some(Staged::Written(staged) | Staged::Pristine(staged)) => (staged.clone(), None),
             Some(Staged::Carried(name)) => {
                 let path = test_dir.join(format!("carried-{name}.img"));
                 if !path.exists() {
@@ -3962,8 +3959,17 @@ fn qemu_command(
         ))
         .arg("-drive")
         .arg(format!(
-            "if=none,id=stick,format=raw,file={}",
-            boot_image.display()
+            "if=none,id=stick,format=raw,file={}{}",
+            boot_image.display(),
+            // **What a `Staged::Pristine` boot is made of.** QEMU keeps this
+            // drive's writes in a temporary file and drops it when the guest
+            // exits, so the staged image is never written and the boot after it
+            // starts where this one did. A copy of the image would do the same
+            // and costs 180 MB of disk per boot; this costs nothing.
+            match &options.boot_image {
+                Some(Staged::Pristine(_)) => ",snapshot=on",
+                _ => "",
+            }
         ));
     assert!(
         !shape.xhci.is_empty() || (shape.usb.is_empty() && shape.usb_disks.is_empty()),

@@ -719,26 +719,21 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
     ("blackbox_done_chain", Sched::Parallel, Tier::Fast),
     // The one bound in this tree that ends a machine nothing else can: a boot
-    // whose every CPU has stopped taking scheduler passes, which is what the
-    // T14 hung in twice. Its verdict is a bound counted down in the guest, so
-    // its tier is `Why::TimerAnchored` — **Fast here only as the bootstrap
-    // `src/tiers.rs` requires**, because a name carrying the UNMEASURED marker
-    // has to be one the fast tier executes before anything can price it.
-    ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Fast),
+    // whose every CPU has stopped taking scheduler passes. Its verdict is a
+    // bound counted down in the guest, so `src/tiers.rs` carries it
+    // `Why::TimerAnchored` and says what leaves the per-PR tier with it.
+    ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
-    // boots and a bound counted down in the guest, so it is timer-anchored and
-    // belongs beside the row above, and Fast for the same bootstrap reason.
-    ("hard_lockup_ends_a_deaf_cpu", Sched::Parallel, Tier::Fast),
-    // The control on the same bound standing down: a panic whose panel is still
-    // up when the deadline expires must cross the reset as a panic report and
-    // never as a `WEDGED` page. Two boots and two bounds counted down in the
-    // guest, so it is timer-anchored, and Fast for the same bootstrap reason.
-    ("panic_outlives_the_deadline", Sched::Parallel, Tier::Fast),
+    // bounds counted down in the guest, so it belongs beside the row above.
+    ("hard_lockup_ends_a_deaf_cpu", Sched::Parallel, Tier::Nightly),
+    // The control on both of those bounds standing down: a panic whose panel is
+    // still up when the deadline expires must cross the reset as a panic report
+    // and never as a `WEDGED` page.
+    ("panic_outlives_the_deadline", Sched::Parallel, Tier::Nightly),
     // Four chained boots, one per way this kernel reaches a reset, each
-    // anchored to the bound its own first boot counts down; Fast for the same
-    // bootstrap reason as the two above.
-    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Fast),
+    // anchored to the bound its own first boot counts down.
+    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Nightly),
     // The control on the chain: a record another image left in the same memory
     // is cleared and its pass boots a kernel, where a real predecessor's ends
     // the chain. One boot, one actuator.
