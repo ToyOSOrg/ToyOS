@@ -45,6 +45,7 @@ dependencies = [
  "toyos-fat32",
  "toyos-gpt",
  "toyos-hda",
+ "toyos-logstream",
  "toyos-pci",
  "toyos-pcid",
  "toyos-proclife",
@@ -107,6 +108,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-hda"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-logstream"
 version = "0.1.0"
 
 [[package]]

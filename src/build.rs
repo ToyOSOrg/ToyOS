@@ -903,13 +903,21 @@ impl Boot {
 /// the test kernel, and what goes on a stick is the shipping kernel — so an
 /// actuator name is refused here by name rather than reaching
 /// [`build_test_image`]'s assert, which would answer about kernel features.
+///
+/// **Every valued parameter is cleared here by name**, because a flashed stick
+/// is exactly where one is asked for: `logstream=` is how a boot on the bench's
+/// ThinkPad reaches a listener on the development Mac while it is still
+/// booting, and a gate that knew only [`declared_params`] would make every such
+/// image unflashable.
 pub fn flashable_params(root: &Path, asked: &[String]) -> Result<(), String> {
     let own = declared_params(root);
     for name in asked {
-        if !own.contains(name) {
+        if !own.contains(name) && !is_valued_param(name) {
             return Err(format!(
                 "--kernel-param {name} beside --boot-config: {name} is not one of the kernel's \
-                 boot parameters {own:?}, and a flashed image carries no actuator"
+                 boot parameters {own:?} or one carrying a value ({}), and a flashed image \
+                 carries no actuator",
+                VALUED_PARAMS.join(", ")
             ));
         }
     }
@@ -944,7 +952,7 @@ fn kernel_features(
     // A parameter names an actuator or one of the kernel's own boot parameters,
     // and only the first needs a kernel compiled with them.
     let own = declared_params(root);
-    if params.iter().any(|p| !own.contains(p)) {
+    if params.iter().any(|p| !own.contains(p) && !is_valued_param(p)) {
         features.push("boot-actuators");
     }
     if !requested.is_empty() {
@@ -979,14 +987,33 @@ fn check_params(root: &Path, params: &[String]) {
     let own = declared_params(root);
     for name in params {
         assert!(
-            declared.contains(name) || own.contains(name),
+            declared.contains(name) || own.contains(name) || is_valued_param(name),
             "--kernel-param {name}: the kernel declares no such actuator or boot parameter.\n\
              Actuators it declares: {}.\n\
-             Boot parameters it declares: {}.",
+             Boot parameters it declares: {}.\n\
+             Boot parameters carrying a value: {}.",
             declared.join(", "),
             own.join(", "),
+            VALUED_PARAMS.join(", "),
         );
     }
+}
+
+/// The boot parameters that carry a value after their name.
+///
+/// **Not read out of `kernel/src/params.rs`, because they are not in `PARAMS`**:
+/// a flag is a name the kernel matches whole, and these are prefixes it matches
+/// with `starts_with` in `params::claims`. Named by the constants the kernel
+/// reads them out of, so there is still one spelling of each in the tree.
+///
+/// `blackbox=` is the loader's, appended to whatever it read off the ESP;
+/// `logstream=` is the owner's, and is the whole of how a boot is told where to
+/// send its log while it is running.
+pub const VALUED_PARAMS: &[&str] = &[toyos_blackbox::PARAM, toyos_logstream::PARAM];
+
+/// Whether `param` is one of [`VALUED_PARAMS`] with its value after it.
+pub fn is_valued_param(param: &str) -> bool {
+    VALUED_PARAMS.iter().any(|prefix| param.starts_with(prefix))
 }
 
 /// The boot parameters the kernel itself answers to, off `kernel/src/params.rs`.
@@ -1524,7 +1551,7 @@ pub fn build_test_image(
     // different actuators from sharing one disk.
     let own = declared_params(root);
     assert!(
-        kernel_params.iter().all(|p| own.contains(p))
+        kernel_params.iter().all(|p| own.contains(p) || is_valued_param(p))
             || kernel_features.iter().eq(TEST_KERNEL.iter().copied()),
         "a boot asking for {kernel_params:?} must boot the test kernel, not {kernel_features:?}"
     );

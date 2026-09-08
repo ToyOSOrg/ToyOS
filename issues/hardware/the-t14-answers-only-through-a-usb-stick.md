@@ -47,5 +47,22 @@ Constraints a reader would otherwise pay to re-derive:
   hand-over, so a function still holding its last holder's queue addresses can
   act on none of them. `release` asks for a reset where the function advertises
   one; the I219 does, so on the T14 both hold.
+- **The record stream is `logstream=<a.b.c.d>:<port>` on the parameter line**,
+  copied by the kernel into `/system/bin/init`'s environment and read from there
+  by `logd` (`toyos-logstream`'s `PARAM` and `ENV`). The kernel command line
+  reaches no process, so an inherited environment is the channel; the address is
+  ambient information and the `netd` connector on `logd`'s manifest row is the
+  authority. The metal half is what is left: `src/metal.rs` arms the flashed
+  image with the Mac's LAN address — `flashable_params` already clears a valued
+  parameter by name — runs a listener while the T14 boots, and hands the
+  streamed text to `src/bootlog.rs`, which needs nothing new because it is the
+  same text the stick carries. What the stream cannot replace is a boot that
+  dies before `logd` runs; for those the stick is still the answer.
+- **A stalled peer's backpressure does not reach `logd`'s queue.** Between them
+  stand a 2 MiB kernel pipe (`kernel/src/pipe.rs`'s `PIPE_SIZE`) and netd's
+  64 KiB send buffer, and a `log-storm` at `--smp 8` produces 4,213 lines /
+  674 KiB — measured — which they absorb entirely. A guest arm for the drop path
+  therefore stages a peer that answers *nothing* rather than one that reads
+  slowly (`tests/common/logstream.rs`'s `unreachable`).
 - The metal loop is `toyos-metal` (`src/metal.rs`), and the T14 is run by the
   orchestrator alone.

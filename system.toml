@@ -50,6 +50,10 @@ toyos-cc = { path = "toyos-cc" }
 # `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate.
 [programs.logd]
 syscap = ["logread"]
+# The record stream, and the whole of what stands between the address on the
+# boot parameter line and a listener: the address is ambient information every
+# program inherits, and this row is the authority to act on it.
+receives = ["netd"]
 
 [programs.compositor]
 serves = ["compositor"]

@@ -15,9 +15,8 @@ use std::time::Duration;
 use super::compile;
 use super::qemu::{self, BootOptions, QemuInstance};
 
-/// Where the guest sees the host under QEMU's user-mode networking, and where
-/// the host arm sees the same servers. The judge's certificate carries both.
-const GUEST_VIEW_OF_HOST: &str = "10.0.2.2";
+/// Where the host arm sees the servers the guest reaches at
+/// [`qemu::GUEST_VIEW_OF_HOST`]. The judge's certificate carries both.
 const HOST_VIEW_OF_HOST: &str = "127.0.0.1";
 
 /// Where the minted CA lands on ROOT, which mounts at `/system`.
@@ -113,7 +112,7 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
     let good = server.port("ok")?;
     let mut lines = Vec::new();
 
-    let guest_ok = fetch_in_guest(&mut guest, GUEST_VIEW_OF_HOST, good, true)?;
+    let guest_ok = fetch_in_guest(&mut guest, qemu::GUEST_VIEW_OF_HOST, good, true)?;
     if guest_ok != ok_line {
         return Err(format!("the guest fetched {guest_ok:?}, and the server served {ok_line:?}"));
     }
@@ -121,7 +120,7 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
 
     for (role, expected) in REFUSALS {
         let port = server.port(role)?;
-        let got = fetch_in_guest(&mut guest, GUEST_VIEW_OF_HOST, port, true)?;
+        let got = fetch_in_guest(&mut guest, qemu::GUEST_VIEW_OF_HOST, port, true)?;
         if got != *expected {
             return Err(format!("the {role} arm answered {got:?}, not {expected:?}"));
         }
@@ -130,7 +129,7 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
 
     // The CA is what makes the judge's own roots trusted, so withholding it is
     // the unknown-authority arm rather than a separate server.
-    let unknown = fetch_in_guest(&mut guest, GUEST_VIEW_OF_HOST, good, false)?;
+    let unknown = fetch_in_guest(&mut guest, qemu::GUEST_VIEW_OF_HOST, good, false)?;
     if unknown != "https_fetch: refused unknown-authority" {
         return Err(format!("a fetch with no extra root answered {unknown:?}"));
     }
@@ -139,7 +138,10 @@ pub fn tls13_judge(rust_bins: &[(String, Vec<u8>)], bench: Bench) -> Result<(), 
     let cleartext = server.port("plain")?;
     let plain = run_guest(
         &mut guest,
-        &format!("test_rs_https_fetch http://{GUEST_VIEW_OF_HOST}:{cleartext}/ --ca {CA_IN_GUEST}"),
+        &format!(
+            "test_rs_https_fetch http://{}:{cleartext}/ --ca {CA_IN_GUEST}",
+            qemu::GUEST_VIEW_OF_HOST
+        ),
     )?;
     if plain != "https_fetch: refused plain-http" {
         return Err(format!("a plain http:// fetch answered {plain:?}"));

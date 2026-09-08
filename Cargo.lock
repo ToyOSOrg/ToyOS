@@ -1131,6 +1131,7 @@ dependencies = [
  "toyos-gpt",
  "toyos-keymap",
  "toyos-ld",
+ "toyos-logstream",
  "toyos-manifest",
  "toyos-sched",
  "toyos-tco",
@@ -1207,6 +1208,10 @@ dependencies = [
  "thiserror",
  "zerocopy",
 ]
+
+[[package]]
+name = "toyos-logstream"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-manifest"

@@ -384,6 +384,13 @@ const RUST_SKIP: &[&str] = &[
 /// what the host staged: the shipping build here, `sched_check_build`'s
 /// assert-carrying build there.
 const DRIVEN_AND_SHARED: &[&str] = &[
+    // Its shared run is the empty-directory `fstat` gate it was written to be.
+    // The log-stream tests drive it for something that has nothing to do with
+    // filesystems: it is the cheapest process this tree can start and stop, and
+    // what they assert on is the *kernel's* `exit:` record for it reaching a
+    // host over the wire. Any binary would do, and one that stages nothing is
+    // the one to pick.
+    "empty_dir_stat",
     // Its shared run is a whole handle-lifecycle gate with its own census;
     // `userdev_dma_fault` drives the same binary for a different reason
     // entirely — as the proof the machine still schedules and spawns after a
@@ -576,6 +583,23 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // 82574L QEMU models has the register file the T14's I219 has, so this is
     // where that driver moves real frames before the laptop does.
     ("https_tls13_e1000e", Sched::Parallel, Tier::Fast),
+    // `logd`'s second sink: a host listener, the boot's address on the
+    // parameter line, and the guest's own `/log` as the oracle the wire is
+    // compared with. The verdicts are a line's arrival and a line-for-line
+    // comparison; the clocks in it are liveness guards on a guest that stopped
+    // talking. Fast with the UNMEASURED bootstrap marker until CI prices it.
+    ("log_stream", Sched::Parallel, Tier::Fast),
+    // The same stream over netd's Intel driver, for the same reason
+    // `https_tls13_e1000e` exists: the T14's NIC is an I219 and this is the
+    // only machine in reach that runs that driver.
+    ("log_stream_e1000e", Sched::Parallel, Tier::Fast),
+    // A boot told to stream to a port nothing answers on. The verdict is the
+    // one line the file carries about it and the file being whole regardless.
+    ("log_stream_no_listener", Sched::Parallel, Tier::Fast),
+    // A `log-storm` offered to a stream whose address answers nothing: the
+    // bounded queue refuses what it cannot hold, counts it, says so in the log,
+    // and `/log` still carries every record. The control on the accounting.
+    ("log_stream_unreachable", Sched::Parallel, Tier::Fast),
     ("netd_connection_caps", Sched::Parallel, Tier::Fast),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
@@ -13269,6 +13293,12 @@ fn run_machine_test(
         }
         "https_tls13" => common::https::tls13_judge(rust_bins, common::https::VIRTIO),
         "https_tls13_e1000e" => common::https::tls13_judge(rust_bins, common::https::E1000E),
+        "log_stream" => common::logstream::stream(common::logstream::VIRTIO, c_bins, rust_bins),
+        "log_stream_e1000e" => {
+            common::logstream::stream(common::logstream::E1000E, c_bins, rust_bins)
+        }
+        "log_stream_no_listener" => common::logstream::no_listener(c_bins, rust_bins),
+        "log_stream_unreachable" => common::logstream::unreachable(c_bins, rust_bins),
         "netd_connection_caps" => {
             // The only boot that runs netd at all. Its `main` opens the NIC
             // first and returns on `NotFound`, so metal-sim never reaches a
