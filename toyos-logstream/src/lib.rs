@@ -126,12 +126,13 @@ pub const BATCH: usize = 64;
 
 /// What `toyos_abi::log::Tagged` renders around a record's message — the
 /// brackets, the wall-clock stamp `logd` tags it with, the monotonic
-/// `{secs}.{mmm} cpuN`, and the `boot` and `tid=` fields a record may carry —
-/// plus the newline `logd` ends the line with.
+/// `{secs}.{mmm} cpuN`, and the `boot`, `tid=` and elided-byte fields a record
+/// may carry — plus the newline `logd` ends the line with.
 ///
-/// Above every one of those at its widest. A number short here is a bound that
-/// does not hold what it says it holds, which is a listener losing lines on a
-/// round nobody thought could overflow.
+/// Above every one of those at its widest, which is a claim about what `Tagged`
+/// prints and is checked by rendering it: a number short here is a bound that
+/// does not hold what it says it holds, and a listener losing lines on a round
+/// nobody thought could overflow.
 const AROUND_A_MESSAGE: usize = 128;
 
 /// The widest line one record renders to.
@@ -146,10 +147,6 @@ const WIDEST_LINE: usize = MAX_RECORD_MESSAGE + AROUND_A_MESSAGE;
 /// absorbs a stall before this is reached at all, so a line that reaches this
 /// bound is a peer that is gone rather than one that is behind.
 pub const MAX_BACKLOG_BYTES: usize = BATCH * WIDEST_LINE;
-
-/// The bound holds a whole batch of the widest lines, checked by the compiler
-/// rather than asserted in a doc comment.
-const _: () = assert!(MAX_BACKLOG_BYTES >= BATCH * (MAX_RECORD_MESSAGE + AROUND_A_MESSAGE));
 
 /// Whether this round may put a line in the log about what the queue refused.
 ///
@@ -404,15 +401,41 @@ mod tests {
         assert_eq!(q.round(NOTHING, Due::Now), None);
     }
 
-    /// The bound holds one whole batch of the widest lines a record renders to,
-    /// which is what makes "a listener that misses one round loses nothing"
-    /// arithmetic rather than a hope.
+    /// The widest line `logd` can put in front of this queue: every field
+    /// `toyos_abi::log::Tagged` renders at the maximum its type allows, tagged
+    /// with the widest stamp, ended with the newline `logd` writes.
+    fn widest_line() -> String {
+        let mut record = toyos_abi::log::LogRecord::EMPTY;
+        record.at_ns = u64::MAX;
+        record.tid = u32::MAX;
+        record.cpu = u16::MAX;
+        record.elided = u16::MAX;
+        record.len = MAX_RECORD_MESSAGE as u16;
+        record.msg = [b'm'; MAX_RECORD_MESSAGE];
+        record.flags = toyos_abi::log::FLAG_EARLY;
+        // The stamp `logd` tags a record with: `Civil`'s `YYYY-MM-DD HH:MM:SS`,
+        // or the same width in dashes on a boot with no clock.
+        alloc::format!("{}\n", record.tagged("9999-12-31 23:59:59"))
+    }
+
+    /// **The bound holds one whole batch of the widest lines a record renders
+    /// to**, which is what makes "a listener that misses one round loses
+    /// nothing" arithmetic rather than a hope.
+    ///
+    /// The width is rendered rather than assumed: the claim
+    /// [`AROUND_A_MESSAGE`] makes is about what `Tagged` prints, so a number
+    /// short of it fails here and not on a boot.
     #[test]
-    fn the_bound_holds_a_whole_batch_of_the_widest_lines() {
-        let widest = "w".repeat(MAX_RECORD_MESSAGE + AROUND_A_MESSAGE);
+    fn the_bound_holds_a_whole_batch_of_the_widest_lines_a_record_renders_to() {
+        let line = widest_line();
+        assert!(
+            line.len() <= WIDEST_LINE,
+            "a record renders to {} bytes and the bound allows {WIDEST_LINE}",
+            line.len()
+        );
         let mut q = Backlog::new();
         for _ in 0..BATCH {
-            assert!(q.admit(&widest));
+            assert!(q.admit(&line), "the bound refused a line inside one batch");
         }
         assert_eq!(q.round(NOTHING, Due::Now), None, "a whole batch was refused a line");
     }
