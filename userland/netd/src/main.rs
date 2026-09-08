@@ -1314,9 +1314,6 @@ fn main() {
     let now = SmoltcpInstant::from_millis(0);
     let mut iface = Interface::new(config, &mut device, now);
 
-    // **The interface starts with no address at all.** What it gets is a lease,
-    // and `dhcp::Dhcp` is what writes one into the address list, the route table
-    // and the resolvers together.
     let mut socket_set = SocketSet::new(vec![]);
 
     // Empty, because the lease names the resolvers and nothing else may: a
@@ -1358,11 +1355,9 @@ fn main() {
         // on no network.
         let change = dhcp::Change::of(socket_set.get_mut::<dhcpv4::Socket>(dhcp_handle));
         if dhcp.pass(change, &mut iface, socket_set.get_mut::<dns::Socket>(dns_handle)) {
-            // **The line says netd is serving, and it is said once this machine
-            // has an address to serve on** — or once it has been told it will
-            // not get one. Every arm that waits for netd waits for this, so
-            // moving it earlier would put those arms in front of a stack with no
-            // address.
+            // Every arm that waits for netd waits for this line, so it is said
+            // once this machine has an address to serve on — or has been told
+            // it will not get one.
             say!(
                 "netd: ready, at most {max_piped} piped connections \
                  ({} MiB each of {} MiB total)",
@@ -1426,13 +1421,6 @@ fn main() {
             timeout
         } else {
             timeout.min(HANDSHAKE_TIMEOUT.as_nanos() as u64)
-        };
-        // The same argument for the lease: a machine whose network answers
-        // nothing produces neither a frame nor a socket timer, so the report
-        // that says so has to be a wake of its own.
-        let timeout = match dhcp.report_within() {
-            Some(left) => timeout.min(left.as_nanos() as u64),
-            None => timeout,
         };
 
         let mut ready: Vec<u64> = Vec::new();

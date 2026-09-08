@@ -255,6 +255,7 @@ kill_while_blocked 44 shards=12
 klogd_hosted 5674 shards=12
 klogd_panic_halts 16658 shards=12
 lan_dhcp_lease 18446744073709551615 shards=none
+lan_no_lease 18446744073709551615 shards=none
 lapic_spurious_vector 6829 shards=12
 late_storage_connect 6455 shards=12
 latency_wake 8790 shards=12
