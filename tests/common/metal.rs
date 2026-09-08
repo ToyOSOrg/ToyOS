@@ -697,8 +697,6 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>) -> Vec<String> {
         // that wrote them.
         "--fat32-check".to_string(),
     ];
-    // Only where the boot's own judges read a cable: the reads are three `ssh`
-    // round trips before the flash and the probe is a host binary.
     if let Some(nic) = nic {
         words.push("--nic".to_string());
         words.push(nic.to_string());

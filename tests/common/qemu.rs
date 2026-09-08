@@ -4229,8 +4229,6 @@ fn qemu_command(
                 .arg("e1000e,netdev=net0");
         }
     }
-    // The frames the guest put on that wire, so a test can read what its client
-    // asked for and not only what a server chose to answer.
     if let Some(at) = &options.wire_dump {
         qemu.arg("-object")
             .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));

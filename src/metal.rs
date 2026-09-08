@@ -2338,13 +2338,10 @@ mod tests {
     fn half_a_cable_is_refused_rather_than_read_as_none() {
         let whole = "ping_addr 192.168.1.46\nwire_mac 8c:8c:aa:bb:cc:dd\n\
                      window_from 1757347650\nwindow_to 1757347711\n";
-        // Half a reply. The seconds without their wall clock are the one that
-        // would otherwise read as no answer at all.
         for text in [format!("{whole}ping_secs 57\n"), format!("{whole}ping_at 1757347715\n")] {
             let why = cable(&text).expect_err("half a reply is not a reply");
             assert!(why.contains("place it in neither operating system"), "{why}");
         }
-        // Half a cable.
         for text in [
             "ping_addr 1.2.3.4\nwire_mac aa:bb\nwindow_from 1\n",
             "ping_addr 1.2.3.4\nwindow_from 1\nwindow_to 2\n",
